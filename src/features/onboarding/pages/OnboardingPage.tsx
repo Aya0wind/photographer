@@ -191,9 +191,10 @@ export default function OnboardingPage() {
       {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
       <TitleBar />
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-6">
-        <div className="flex w-full max-w-xl flex-col gap-6">
-        {/* 标题与步骤指示 */}
-        <div className="flex flex-col gap-3">
+        {/* 固定尺寸框架：不同步骤高度/标题位置一致；内容超高在卡内滚动 */}
+        <div className="flex h-[560px] w-full max-w-xl flex-col">
+        {/* 标题与步骤指示（钉在顶部，不随步骤内容移动） */}
+        <div className="flex shrink-0 flex-col gap-3 pb-4">
           <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
           <div className="flex items-center gap-2" role="tablist" aria-label="onboarding steps">
             {STEP_TITLES.map((titleKey, i) => {
@@ -234,8 +235,8 @@ export default function OnboardingPage() {
           </div>
         </div>
 
-        {/* 步骤内容 */}
-        <div className="rounded-xl border border-edge bg-surface p-6">
+        {/* 步骤内容：固定框架内的滚动区 */}
+        <div className="sp-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge bg-surface p-6">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={step}
@@ -252,8 +253,8 @@ export default function OnboardingPage() {
           </AnimatePresence>
         </div>
 
-        {/* 底部操作条：[取消] …… [上一步] [下一步/开始使用]（取消=退出新建库流） */}
-        <div className="flex items-center justify-between">
+        {/* 底部操作条（钉在底部）：[取消] …… [上一步] [下一步/开始使用] */}
+        <div className="flex shrink-0 items-center justify-between pt-4">
           <button
             type="button"
             onClick={() => void cancel()}
