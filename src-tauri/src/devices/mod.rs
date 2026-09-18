@@ -181,6 +181,44 @@ pub fn normalize_rel_path(path: &str) -> String {
     p.trim_start_matches('/').to_string()
 }
 
+/// 设备 id 规范化（注册表 key 的单一事实源，2026-09-18 相机链路修复）：
+/// 同一 WPD 设备在启动枚举（WPD GetDevices 产出小写）与热插 DBT/WPD
+/// 到达（dbcc_name 常为大写）出现**大小写不同的 id**——Windows 设备路径
+/// 大小写不敏感，PnP 形态统一转 ASCII 小写后，注册/查找/移除全链路命中
+/// 同一 key（重复到达幂等、移除不漏）。
+///
+/// 仅归一 PnP 设备路径（`\\?\usb#...` / `\\?\swd#...` 等非文件系统形态）；
+/// **文件系统路径必须原样**：卷盘符（"E:"）、`FOLDER:` 源（NTFS 大小写
+/// 敏感，路径含 `#` 也不可小写化）、`\\?\C:\` verbatim 盘符与 `\\?\UNC\`
+/// 网络路径均直接返回。
+pub fn normalize_device_id(id: &str) -> String {
+    if is_pnp_device_path(id) {
+        id.to_ascii_lowercase()
+    } else {
+        id.to_string()
+    }
+}
+
+/// PnP 设备路径判定：`\\?\` 前缀且后随非文件系统形态
+///（排除 `\\?\C:\` 盘符与 `\\?\UNC\` 两类 verbatim 文件系统路径）。
+fn is_pnp_device_path(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix(r"\\?\") else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    if let Some(first) = chars.next() {
+        // `\\?\C:\...`：verbatim 盘符路径，大小写敏感
+        if first.is_ascii_alphabetic() && chars.next() == Some(':') {
+            return false;
+        }
+    }
+    // `\\?\UNC\server\share`：verbatim 网络路径
+    if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case("UNC\\") {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,11 +9,57 @@ pub use common::{db, devices, events, import, ipc, metadata, settings};
 use std::time::Duration;
 
 use common::{build_many, ipc_plan, state_with_library, wait_done};
+use devices::normalize_device_id;
 use events::FileState;
 use ipc::{
-    active_library_db, cancel_import, files_by_id, jobs_page, logs_page, retry_failed,
-    set_import_paused, start_import,
+    active_library_db, cancel_import, device_registered, files_by_id, jobs_page, logs_page,
+    retry_failed, set_import_paused, start_import,
 };
+
+#[test]
+fn device_registered_is_case_insensitive_for_wpd_ids() {
+    // 重复到达幂等的判定基座：注册表 key 与查找都过 normalize——
+    // 同一相机的大小写两种到达形式必须命中同一条目
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    build_many(src.path(), 2);
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+
+    let upper = r"\\?\USB#VID_054C&PID_0E0B#SRL#{6AC27878-A6FA-4155-BA85-F98F491D4F33}";
+    let lower = normalize_device_id(upper);
+    assert_eq!(lower, upper.to_ascii_lowercase());
+
+    // 以（规范化后的）小写注册——启动枚举路径
+    let source: std::sync::Arc<dyn devices::DeviceSource> =
+        std::sync::Arc::new(devices::volume::VolumeSource::new(src.path()));
+    let snapshot = devices::orchestrator::DeviceSnapshot {
+        id: lower.clone(),
+        name: "ILCE-7RM5".into(),
+        kind: devices::SourceKind::Mtp,
+        files_by_kind: Default::default(),
+        bytes_total: 0,
+        new_files: 0,
+    };
+    state
+        .devices
+        .lock()
+        .unwrap()
+        .insert(lower.clone(), ipc::DeviceEntry { source, snapshot });
+
+    // 大写到达形式的幂等判定命中（枚举空窗期不误报"未找到"）
+    assert!(device_registered(&state, &lower));
+    assert!(
+        device_registered(&state, upper),
+        "大小写变体必须命中同一注册条目"
+    );
+    assert!(!device_registered(
+        &state,
+        r"\\?\USB#VID_054C&PID_0E0B#OTHER#X"
+    ));
+
+    // 卷/文件夹 id 不受影响（未注册的盘符不命中）
+    assert!(!device_registered(&state, "Z:"));
+}
 
 #[test]
 fn start_pause_resume_cancel_state_machine() {

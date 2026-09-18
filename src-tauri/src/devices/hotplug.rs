@@ -248,16 +248,25 @@ mod win {
         // 判别的 DEV_BROADCAST_* 载荷，在本消息处理期内有效；先读公共头
         // 判别类型，再按对应结构解读
         let hdr = unsafe { &*(lparam as *const DEV_BROADCAST_HDR) };
+        let ev_name = if arrival {
+            "DBT_DEVICEARRIVAL"
+        } else {
+            "DBT_DEVICEREMOVECOMPLETE"
+        };
         match hdr.dbch_devicetype {
             DBT_DEVTYP_VOLUME => {
                 // SAFETY: dbch_devicetype 已确认为 DEV_BROADCAST_VOLUME
                 let vol = unsafe { &*(lparam as *const DEV_BROADCAST_VOLUME) };
-                if vol.dbcv_flags.0 & DBTF_NET != 0 {
+                let drives = unitmask_to_drives(vol.dbcv_unitmask);
+                let is_net = vol.dbcv_flags.0 & DBTF_NET != 0;
+                // 每个 DBT 事件一行日志（真机排查到达/移除倒置问题）
+                eprintln!("DBT 事件: {ev_name} 卷 {drives:?}（net={is_net}）");
+                if is_net {
                     return; // 网络卷忽略
                 }
-                for drive in unitmask_to_drives(vol.dbcv_unitmask) {
+                for drive in drives {
                     // 「设备」语义过滤（与启动枚举共用 present::probe_volume）：
-                    // 仅注册有媒体的可移动介质。映射网络盘在会话/网络恢复时
+                    // 仅注册有媒体的可移动介质。映射盘在会话/网络恢复时
                     // 也会触发卷到达（DBTF_NET 不总是置位），本地固定盘同排。
                     // 只滤到达不滤移除——拔盘瞬间 GetDriveTypeW 已失效，
                     // 移除事件必须照发才能清注册表。
@@ -286,6 +295,8 @@ mod win {
                 if path.is_empty() {
                     return;
                 }
+                // 每个 DBT 事件一行日志（真机排查到达/移除倒置问题）
+                eprintln!("DBT 事件: {ev_name} WPD 接口 {path}");
                 let name = pnp_display_name(&path);
                 publish(event, SourceKind::Mtp, path, name);
             }

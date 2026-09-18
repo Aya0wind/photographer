@@ -100,8 +100,10 @@ pub fn run() {
         // Tauri 同步命令跑在主线程（tao 事件循环），任何磁盘 IO / WPD COM /
         // 网络(SMB/NAS) / 大结果集 DB 查询 / 哈希计算都会冻结窗口——
         // 新命令**默认 async + spawn_blocking**（ipc::run_blocking 壳），
-        // 除非能证明纯内存/原子操作（现存豁免：settings_get、device_list、
-        // import_pause、import_cancel）。此清单是新命令评审的准入模板。
+        // 除非能证明纯内存/原子操作（现存豁免：settings_get、settings_set
+        // 【用户规定：设置需同步生效确认，本地小文件写不值得异步】、
+        // device_list、import_pause、import_cancel）。此清单是新命令评审的
+        // 准入模板。
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::settings::settings_set,
@@ -171,11 +173,13 @@ fn spawn_device_orchestrator(app: AppHandle) {
                         handle_device_arrived(&app, id, kind, name);
                     }
                     AppEvent::DeviceRemoved { id } => {
+                        // 移除与注册同一规范化 key（WPD 大小写变体不漏删）
+                        let key = devices::normalize_device_id(&id);
                         app.state::<ipc::SharedState>()
                             .devices
                             .lock()
                             .expect("devices mutex poisoned")
-                            .remove(&id);
+                            .remove(&key);
                     }
                     _ => {}
                 }
@@ -185,8 +189,11 @@ fn spawn_device_orchestrator(app: AppHandle) {
 }
 
 fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: String) {
-    // 失败日志必须带 id/kind 上下文（2026-09-18 排查教训：静默吞错全靠猜）
+    // 失败日志必须带 id/kind 上下文（2026-09-18 排查教训：静默吞错全靠猜）。
+    // id 一律先规范化（WPD 大小写变体收敛为注册表单一 key；卷/FOLDER 原样）
+    let id = devices::normalize_device_id(&id);
     let kind_tag = format!("{kind:?}");
+    let state = app.state::<ipc::SharedState>();
     let source: Arc<dyn DeviceSource> = match kind {
         // 卷事件 id 形如 "E:"，根路径必须补尾反斜杠（"E:" 是该盘当前目录）
         SourceKind::Volume => Arc::new(VolumeSource::new(format!("{id}\\"))),
@@ -195,25 +202,37 @@ fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: St
             return;
         }
         SourceKind::Mtp => match devices::wpd::enumerate_mtp_devices() {
-            Ok(list) => match list.into_iter().find(|(pnp, _)| *pnp == id) {
+            Ok(list) => match list
+                .into_iter()
+                .find(|(pnp, _)| devices::normalize_device_id(pnp) == id)
+            {
                 Some((pnp, friendly)) => Arc::new(WpdSource::new(pnp, friendly)),
                 None => {
-                    eprintln!(
-                        "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举未找到该设备，忽略"
-                    );
+                    // 枚举空窗期（接口重枚举/会话互斥）可能暂时列不出设备：
+                    // 已注册的同设备重复到达按幂等忽略，不动既有条目、不报错
+                    if ipc::device_registered(&state, &id) {
+                        eprintln!("WPD 设备重复到达（已在库，接口重枚举），忽略: {name} ({id})");
+                    } else {
+                        eprintln!(
+                            "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举未找到该设备，忽略"
+                        );
+                    }
                     return;
                 }
             },
             Err(err) => {
-                eprintln!(
-                    "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举失败（相机未切 PC 模式？）: {err}"
-                );
+                if ipc::device_registered(&state, &id) {
+                    eprintln!("WPD 设备重复到达（已在库，枚举暂失败），忽略: {name} ({id}): {err}");
+                } else {
+                    eprintln!(
+                        "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举失败（相机未切 PC 模式？）: {err}"
+                    );
+                }
                 return;
             }
         },
     };
 
-    let state = app.state::<ipc::SharedState>();
     let skip_imported = state
         .settings
         .lock()

@@ -11,7 +11,9 @@
 //! COM 接口指针全部使用 windows crate 封装，禁止手写 AddRef/Release。
 //!
 //! 降级点（真机 ILCE-7RM5 验证通过 list/open_head/stream）：
-//! - 单对象属性读取失败（受限目录等）跳过该对象，不中断整卷枚举；
+//! - list「要么完整要么报错」：仅受限对象/子树（AccessDenied）跳过并计数
+//!   （收尾日志可见）；其余枚举中途错误整体上抛，绝不出半份清单
+//!   （2026-09-18 真机：曾静默吞错导致清单随机截断 562/1161/2349）；
 //! - 设备缺失 ORIGINAL_FILE_NAME 时回退 WPD_OBJECT_NAME，再回退对象 ID；
 //! - PERSISTENT_UNIQUE_ID 缺失时以会话对象 ID 充当（跨会话可能变化，
 //!   影响“已导入”识别的稳定性）；
@@ -118,8 +120,11 @@ impl WpdSource {
 }
 
 impl DeviceSource for WpdSource {
+    /// 规范化（小写）的 PnP id：启动枚举（小写）与热插到达（大写）两种
+    /// 形式收敛为同一标识（注册表 key / jobs.device_id 单一事实源）。
+    /// COM 调用仍用原始 `pnp_id` 串（Windows 设备路径大小写不敏感）。
     fn id(&self) -> String {
-        self.pnp_id.clone()
+        super::normalize_device_id(&self.pnp_id)
     }
 
     fn kind(&self) -> SourceKind {
@@ -392,7 +397,20 @@ mod com {
         let content = unsafe { device.Content() }.map_err(win_error)?;
         let keys = build_property_keys()?;
         let mut out = Vec::new();
-        walk_folder(&content, &keys, WPD_DEVICE_OBJECT_ID, "", 0, &mut out)?;
+        let mut skipped = 0u32;
+        walk_folder(
+            &content,
+            &keys,
+            WPD_DEVICE_OBJECT_ID,
+            "",
+            0,
+            &mut out,
+            &mut skipped,
+        )?;
+        // 「要么完整要么报错」：中途错误已整体上抛；此处只剩受限对象计数
+        if skipped > 0 {
+            eprintln!("WPD 枚举跳过 {skipped} 个受限对象/子树（访问被拒），其余完整返回");
+        }
         out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
         Ok(out)
     }
@@ -457,6 +475,7 @@ mod com {
 
     /// 递归枚举目录：folder 为对象 ID（WPD_DEVICE_OBJECT_ID 起），
     /// prefix 为已积累的 `/` 分隔相对路径。
+    #[allow(clippy::too_many_arguments)]
     fn walk_folder(
         content: &IPortableDeviceContent,
         keys: &IPortableDeviceKeyCollection,
@@ -464,8 +483,10 @@ mod com {
         prefix: &str,
         depth: u32,
         out: &mut Vec<FileEntry>,
+        skipped: &mut u32,
     ) -> DeviceResult<()> {
         if depth > MAX_DEPTH {
+            eprintln!("WPD 枚举达到深度上限 {MAX_DEPTH}，截断该子树（防御异常设备）");
             return Ok(());
         }
         // SAFETY: folder 为有效对象 ID；无过滤条件（None = 全部子对象）
@@ -490,8 +511,20 @@ mod com {
                 if obj_id.is_empty() {
                     continue;
                 }
-                // 单对象属性失败（受限目录等）跳过，不中断整卷枚举
-                let _ = process_object(content, keys, &obj_id, prefix, depth, out);
+                // 「要么完整要么报错」（2026-09-18 真机：清单随机截断 562/1161/2349
+                // 的根因——此处曾把一切对象级错误静默吞掉，枚举中途失败即返回
+                // 部分结果）。现在：仅受限对象/子树（AccessDenied，如相机受保护
+                // 目录、并发会话被拒）跳过并计数（收尾日志可见）；其余错误
+                // （传输中断/会话失效等）整体上抛，绝不出半份清单。
+                if let Err(err) =
+                    process_object(content, keys, &obj_id, prefix, depth, out, skipped)
+                {
+                    if matches!(err, DeviceError::AccessDenied) {
+                        *skipped += 1;
+                    } else {
+                        return Err(err);
+                    }
+                }
             }
             if fetched < BATCH as u32 {
                 break; // S_FALSE：本次不足一批，枚举已尽
@@ -508,6 +541,7 @@ mod com {
         prefix: &str,
         depth: u32,
         out: &mut Vec<FileEntry>,
+        skipped: &mut u32,
     ) -> DeviceResult<()> {
         // SAFETY: 设备已 Open
         let properties = unsafe { content.Properties() }.map_err(win_error)?;
@@ -534,6 +568,7 @@ mod com {
                 prefix,
                 depth + 1,
                 out,
+                skipped,
             )?;
         } else if content_type == WPD_CONTENT_TYPE_FOLDER {
             let name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)
@@ -549,6 +584,7 @@ mod com {
                 &child_prefix,
                 depth + 1,
                 out,
+                skipped,
             )?;
         } else {
             let file_name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)

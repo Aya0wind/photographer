@@ -88,10 +88,15 @@ pub fn enumerate_present_devices() -> Vec<(String, SourceKind, String)> {
     out
 }
 
-/// 存量 WPD/MTP 设备：`(pnp_id, friendly_name)`。
+/// 存量 WPD/MTP 设备：`(规范化 id, friendly_name)`。id 过
+/// [`super::normalize_device_id`]（与热插到达/移除同一事实源，大小写
+/// 变体收敛为同一注册 key）。
 pub fn enumerate_present_mtp() -> Vec<(String, String)> {
     match super::wpd::enumerate_mtp_devices() {
-        Ok(list) => list,
+        Ok(list) => list
+            .into_iter()
+            .map(|(pnp, friendly)| (super::normalize_device_id(&pnp), friendly))
+            .collect(),
         Err(err) => {
             eprintln!("启动 WPD 存量枚举失败（相机未切 PC 模式？）: {err}");
             Vec::new()

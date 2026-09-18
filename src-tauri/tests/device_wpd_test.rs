@@ -10,8 +10,49 @@ use std::io::Read;
 use common::utc;
 use devices::wpd::{
     com_apartment_owned, filetime_to_utc, join_rel_path, ole_date_to_utc, parse_wpd_date_string,
+    WpdSource,
 };
-use devices::{DeviceSource, SourceKind};
+use devices::{normalize_device_id, DeviceSource, SourceKind};
+
+#[test]
+fn normalize_device_id_collapses_wpd_case_variants() {
+    // 同一相机的三种大小写形式 → 同一规范化 key（注册/查找/移除单一事实源）
+    let upper =
+        r"\\?\USB#VID_054C&PID_0E0B#002166OKDGN00AYZR#{6AC27878-A6FA-4155-BA85-F98F491D4F33}";
+    let lower = upper.to_ascii_lowercase();
+    let mixed =
+        r"\\?\usb#vid_054c&pid_0e0b#002166okdgn00ayzr#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+    assert_eq!(normalize_device_id(upper), normalize_device_id(&lower));
+    assert_eq!(normalize_device_id(upper), normalize_device_id(mixed));
+    assert_eq!(normalize_device_id(upper), lower);
+
+    // 非 PnP 形态原样保留：盘符（卷 id）、FOLDER: 源、文件系统 verbatim 路径
+    //（NTFS 路径大小写敏感，文件夹路径含 # 也不得小写化）
+    assert_eq!(normalize_device_id("E:"), "E:");
+    assert_eq!(
+        normalize_device_id(r"FOLDER:C:\Photos#a"),
+        r"FOLDER:C:\Photos#a"
+    );
+    assert_eq!(
+        normalize_device_id(r"\\?\C:\Path#With#Hash"),
+        r"\\?\C:\Path#With#Hash"
+    );
+    assert_eq!(
+        normalize_device_id(r"\\?\UNC\srv\Share#S"),
+        r"\\?\UNC\srv\Share#S"
+    );
+}
+
+#[test]
+fn wpd_source_id_is_normalized() {
+    // 以热插 DBT 的大写 pnp 构建 → id() 仍产出规范化（小写）形式，
+    // 与启动枚举注册的 key 一致（COM 调用保留原串，仅标识归一）
+    let upper = r"\\?\USB#VID_054C&PID_0E0B#SERIAL#{GUID}";
+    let src = WpdSource::new(upper, "ILCE-7RM5");
+    assert_eq!(src.id(), upper.to_ascii_lowercase());
+    assert_eq!(src.kind(), SourceKind::Mtp);
+    assert_eq!(src.name(), "ILCE-7RM5");
+}
 
 #[test]
 fn com_apartment_guard_three_state_semantics() {

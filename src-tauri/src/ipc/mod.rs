@@ -216,13 +216,28 @@ impl From<&crate::devices::FileEntry> for FileEntryDto {
 
 /// 列出指定设备的全部媒体文件（透传 DeviceSource::list；MTP 源较慢属预期）。
 pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, String> {
+    let key = crate::devices::normalize_device_id(id);
     let devices = state.devices.lock().expect("devices mutex poisoned");
-    let entry = devices.get(id).ok_or_else(|| format!("设备 {id} 不在线"))?;
+    let entry = devices
+        .get(&key)
+        .ok_or_else(|| format!("设备 {id} 不在线"))?;
     let files = entry
         .source
         .list()
         .map_err(|e| format!("枚举设备文件失败: {e}"))?;
     Ok(files.iter().map(FileEntryDto::from).collect())
+}
+
+/// 设备是否已注册（到达幂等判定：id 过规范化后查注册表——同一 WPD 设备
+/// 大小写两种到达形式命中同一条目；枚举空窗期的重复到达按"已在库"忽略，
+/// 不误报"未找到"也不动既有条目）。
+pub fn device_registered(state: &AppState, id: &str) -> bool {
+    let key = crate::devices::normalize_device_id(id);
+    state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .contains_key(&key)
 }
 
 /// `Arc<dyn DeviceSource>` → `Box<dyn DeviceSource>` 适配（引擎签名收 Box）。
@@ -276,9 +291,12 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
         .import
         .skip_imported;
     let db = active_library_db(state)?;
+    let key = crate::devices::normalize_device_id(id);
     let snapshot = {
         let devices = state.devices.lock().expect("devices mutex poisoned");
-        let entry = devices.get(id).ok_or_else(|| format!("设备 {id} 不在线"))?;
+        let entry = devices
+            .get(&key)
+            .ok_or_else(|| format!("设备 {id} 不在线"))?;
         orchestrator::scan_device(&*entry.source, &db, skip_imported)
             .map_err(|e| format!("扫描设备失败: {e}"))?
     };
