@@ -88,8 +88,15 @@ pub struct CleanStats {
 // ---------------------------------------------------------------------------
 
 /// 领域事件。字段 camelCase 序列化；`type` 为判别字段。
+/// 注意：枚举级 rename_all 只作用于变体名（tag 值）；变体字段必须用
+/// rename_all_fields（serde ≥1.0.184）。曾因丢失后者导致 job_id 等
+/// snake_case 字段直达前端（真机：进度卡全程空白）——下方有回归测试钉死。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AppEvent {
     // 设备
     DeviceArrived {

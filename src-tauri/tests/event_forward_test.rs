@@ -117,3 +117,57 @@ fn event_ping_roundtrip_via_bus_and_probe_contract() {
     assert_eq!(value["type"], "probe");
     assert_eq!(value["ts"], "t1");
 }
+
+/// 回归（真机：进度卡全程空白）：带多词字段的变体必须输出 camelCase 键——
+/// 枚举级 rename_all 只管变体名（tag），字段依赖 rename_all_fields，
+/// 曾在重构中丢失导致 job_id/total_files 直达前端（store 读 jobId 全 undefined）。
+#[test]
+fn app_event_fields_serialize_camel_case() {
+    let v = serde_json::to_value(AppEvent::ImportSessionStarted {
+        job_id: 7,
+        total_files: 3,
+        total_bytes: 123,
+    })
+    .unwrap();
+    assert_eq!(v["type"], "importSessionStarted");
+    assert!(v.get("jobId").is_some(), "字段必须 camelCase: {v}");
+    assert!(v.get("totalFiles").is_some(), "字段必须 camelCase: {v}");
+    assert!(v.get("totalBytes").is_some(), "字段必须 camelCase: {v}");
+    assert!(v.get("job_id").is_none(), "不得残留 snake_case: {v}");
+
+    let p = serde_json::to_value(AppEvent::ImportFileProgress {
+        job_id: 7,
+        done_files: 1,
+        done_bytes: 2,
+        current_file: "a.jpg".into(),
+        bytes_per_sec: 3.0,
+    })
+    .unwrap();
+    assert!(
+        p.get("doneFiles").is_some() && p.get("bytesPerSec").is_some(),
+        "progress 字段: {p}"
+    );
+
+    let d = serde_json::to_value(AppEvent::DeviceScanned {
+        id: "E:".into(),
+        name: "SD".into(),
+        kind: crate::devices::SourceKind::Volume,
+        snapshot: crate::devices::orchestrator::DeviceSnapshot {
+            id: "E:".into(),
+            name: "SD".into(),
+            kind: crate::devices::SourceKind::Volume,
+            files_by_kind: Default::default(),
+            bytes_total: 0,
+            new_files: 0,
+        },
+    })
+    .unwrap();
+    assert!(
+        d["snapshot"].get("filesByKind").is_some(),
+        "嵌套 DTO 同 camelCase: {d}"
+    );
+    assert!(
+        d.get("newFiles").is_none() || d["snapshot"].get("newFiles").is_some(),
+        "变体字段与嵌套 DTO 一致: {d}"
+    );
+}
