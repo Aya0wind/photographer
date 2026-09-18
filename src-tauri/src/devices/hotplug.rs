@@ -38,6 +38,7 @@ pub fn spawn_hotplug_thread(bus: EventBus) -> JoinHandle<()> {
 
 /// 请求线程退出（向消息窗口投递 WM_QUIT）并等待收尾。
 #[cfg(windows)]
+#[allow(dead_code)] // 预留给应用退出收尾
 pub fn stop(handle: JoinHandle<()>) {
     win::stop(handle)
 }
@@ -91,6 +92,7 @@ mod win {
 
     /// 停止热插拔线程：向消息窗口投递 WM_QUIT 使 GetMessageW 返回 0，再 join。
     /// 窗口尚未创建时（启动初期）仅 join——该窗口在 spawn 后毫秒级完成创建。
+    #[allow(dead_code)] // 预留给应用退出收尾（外层 stop 转发）
     pub fn stop(handle: JoinHandle<()>) {
         let hwnd = WINDOW.swap(0, Ordering::SeqCst);
         if hwnd != 0 {

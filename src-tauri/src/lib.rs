@@ -7,12 +7,18 @@ mod metadata;
 pub mod settings;
 mod tray;
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::ipc::AppState;
-use crate::settings::{Settings, SettingsManager};
+use crate::devices::hotplug;
+use crate::devices::orchestrator::scan_device;
+use crate::devices::volume::VolumeSource;
+use crate::devices::wpd::WpdSource;
+use crate::devices::{DeviceSource, SourceKind};
+use crate::events::{AppEvent, EventBus};
+use crate::ipc::{active_library_db, AppState, DeviceEntry};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -46,10 +52,23 @@ pub fn run() {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
+            let bus = EventBus::new();
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
+                bus: bus.clone(),
+                devices: Mutex::new(HashMap::new()),
+                active_import: Mutex::new(None),
             });
+
+            // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
+            spawn_event_forwarder(app.handle().clone(), bus.clone());
+            // 后台线程 2：设备编排（热插拔 → 建源 → 扫描 → 注册表 + DeviceScanned）
+            spawn_device_orchestrator(app.handle().clone());
+            // 后台线程 3：系统通知（会话开始/结束 + 里程碑）
+            spawn_notification_subscriber(app.handle().clone());
+            // 后台线程 4：热插拔检测（message-only 窗口泵）
+            let _hotplug = hotplug::spawn_hotplug_thread(bus);
 
             // 主窗口关闭行为：close_to_tray=true 时隐藏到托盘，否则放行正常退出。
             if let Some(main_window) = app.get_webview_window("main") {
@@ -78,7 +97,177 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::settings::settings_set,
+            ipc::device::device_list,
+            ipc::device::device_scan,
+            ipc::device::device_files,
+            ipc::import::import_start,
+            ipc::import::import_pause,
+            ipc::import::import_resume,
+            ipc::import::import_cancel,
+            ipc::import::import_jobs_page,
+            ipc::import::import_logs_page,
+            ipc::import::import_retry_failed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+/// 事件转发：EventBus → 前端 `app://event`（唯一的前端事件通道）。
+fn spawn_event_forwarder(app: AppHandle, bus: EventBus) {
+    std::thread::Builder::new()
+        .name("event-forwarder".into())
+        .spawn(move || {
+            let mut rx = bus.subscribe();
+            loop {
+                match rx.blocking_recv() {
+                    Ok(event) => {
+                        let _ = app.emit("app://event", &event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+        .expect("spawn event forwarder");
+}
+
+/// 设备编排：DeviceArrived → 建源 → 扫描 → 注册表 + DeviceScanned；
+/// DeviceRemoved → 注销。
+fn spawn_device_orchestrator(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("device-orchestrator".into())
+        .spawn(move || {
+            let bus = app.state::<AppState>().bus.clone();
+            let mut rx = bus.subscribe();
+            loop {
+                let Ok(event) = rx.blocking_recv() else {
+                    continue;
+                };
+                match event {
+                    AppEvent::DeviceArrived { id, kind, name } => {
+                        handle_device_arrived(&app, id, kind, name);
+                    }
+                    AppEvent::DeviceRemoved { id } => {
+                        app.state::<AppState>()
+                            .devices
+                            .lock()
+                            .expect("devices mutex poisoned")
+                            .remove(&id);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("spawn device orchestrator");
+}
+
+fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: String) {
+    let source: Arc<dyn DeviceSource> = match kind {
+        // 卷事件 id 形如 "E:"，根路径必须补尾反斜杠（"E:" 是该盘当前目录）
+        SourceKind::Volume => Arc::new(VolumeSource::new(format!("{id}\\"))),
+        SourceKind::Mtp => match devices::wpd::enumerate_mtp_devices() {
+            Ok(list) => match list.into_iter().find(|(pnp, _)| *pnp == id) {
+                Some((pnp, friendly)) => Arc::new(WpdSource::new(pnp, friendly)),
+                None => {
+                    eprintln!("WPD 设备枚举未找到 {id}，忽略");
+                    return;
+                }
+            },
+            Err(err) => {
+                eprintln!("WPD 设备枚举失败（相机未切 PC 模式？）: {err}");
+                return;
+            }
+        },
+    };
+
+    let state = app.state::<AppState>();
+    let skip_imported = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .import
+        .skip_imported;
+    let Ok(db) = active_library_db(&state) else {
+        eprintln!("设备 {id} 到达但尚未创建库，跳过扫描");
+        return;
+    };
+    let snapshot = match scan_device(&*source, &db, skip_imported) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("扫描设备 {id} 失败: {err}");
+            return;
+        }
+    };
+    state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .insert(
+            id.clone(),
+            DeviceEntry {
+                source,
+                snapshot: snapshot.clone(),
+            },
+        );
+    state.bus.publish(AppEvent::DeviceScanned {
+        id,
+        name,
+        kind,
+        snapshot,
+    });
+}
+
+/// 系统通知：会话开始/结束 + 里程碑（读 settings.import.notify_milestones）。
+fn spawn_notification_subscriber(app: AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+
+    fn notify_enabled(app: &AppHandle) -> bool {
+        app.state::<AppState>()
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .import
+            .notify_milestones
+    }
+    fn notify(app: &AppHandle, title: &str, body: &str) {
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
+
+    std::thread::Builder::new()
+        .name("notify-subscriber".into())
+        .spawn(move || {
+            let bus = app.state::<AppState>().bus.clone();
+            let mut rx = bus.subscribe();
+            loop {
+                let Ok(event) = rx.blocking_recv() else {
+                    continue;
+                };
+                let message = match event {
+                    AppEvent::ImportSessionStarted { total_files, .. } => {
+                        Some(("导入已开始", format!("共 {total_files} 个文件")))
+                    }
+                    AppEvent::ImportMilestoneReached { percent, .. } => {
+                        Some(("导入进度", format!("已完成 {percent}%")))
+                    }
+                    AppEvent::ImportSessionFinished { stats, .. } => Some((
+                        "导入完成",
+                        format!(
+                            "成功 {} · 跳过 {} · 失败 {}",
+                            stats.done_files, stats.skipped_duplicates, stats.failed_files
+                        ),
+                    )),
+                    _ => None,
+                };
+                let Some((title, body)) = message else {
+                    continue;
+                };
+                if !notify_enabled(&app) {
+                    continue;
+                }
+                notify(&app, title, &body);
+            }
+        })
+        .expect("spawn notify subscriber");
+}
+
+use crate::settings::{Settings, SettingsManager};

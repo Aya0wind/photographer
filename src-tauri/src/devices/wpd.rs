@@ -91,14 +91,6 @@ impl WpdSource {
             friendly_name: friendly_name.into(),
         }
     }
-
-    pub fn pnp_id(&self) -> &str {
-        &self.pnp_id
-    }
-
-    pub fn friendly_name(&self) -> &str {
-        &self.friendly_name
-    }
 }
 
 impl DeviceSource for WpdSource {

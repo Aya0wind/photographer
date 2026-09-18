@@ -4,8 +4,6 @@
 //! `TEMPLATE_TOKENS` 保持一致（含 MM-DD）。
 
 // lib 侧 `mod import;` 为私有模块且导入流水线（T7）尚未接线，库内暂无调用方
-// （集成测试经 #[path] 直接编译本文件）；T7 落地后删除此属性。
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 

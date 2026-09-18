@@ -3,9 +3,14 @@
 //! devices 模块尚未在 lib.rs 对外公开（M1 骨架），集成测试用 `#[path]`
 //! 直接纳入源码模块树；模块内部 `crate::events` 引用在测试 crate 同样成立。
 
+#[path = "../src/db/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树（orchestrator 依赖）
+mod db;
 #[path = "../src/devices/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树
 mod devices;
 #[path = "../src/events/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树
 mod events;
 
 use std::fs;

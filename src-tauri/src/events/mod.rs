@@ -5,9 +5,6 @@
 //! Rust 内部用 tokio::sync::broadcast 分发；tauri 启动后由转发任务
 //! 把 `AppEvent` 序列化 emit 给前端（`app://event`），IPC 层负责接线。
 
-// M1 骨架：消费者（db/import/devices 实现与 IPC 转发任务）落地后移除此 allow。
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -30,8 +27,8 @@ pub enum SourceKind {
     Mtp,
 }
 
-/// 资产类型（classify 的产出，assets.kind）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 资产类型（classify 的产出，assets.kind）。`Ord` 供 BTreeMap 统计键使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AssetKind {
     Photo,
@@ -86,6 +83,13 @@ pub enum AppEvent {
     DeviceUnavailable {
         id: String,
     },
+    /// 设备扫描完成（热插拔触发或 device_scan 命令）：携带统计快照
+    DeviceScanned {
+        id: String,
+        name: String,
+        kind: SourceKind,
+        snapshot: crate::devices::orchestrator::DeviceSnapshot,
+    },
 
     // 导入
     ImportSessionStarted {
@@ -100,6 +104,11 @@ pub enum AppEvent {
         done_bytes: u64,
         current_file: String,
         bytes_per_sec: f64,
+    },
+    /// 进度里程碑（25/50/75/100%）：系统通知订阅者据此发桌面通知
+    ImportMilestoneReached {
+        job_id: i64,
+        percent: u32,
     },
     ImportPaused {
         job_id: i64,

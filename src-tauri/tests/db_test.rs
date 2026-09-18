@@ -8,10 +8,15 @@
 //! `#[path]` 把 `src/db` 及其依赖的 `src/events` 直接编译进测试 crate，
 //! 保证被测代码就是生产源码本体（events 自带的单测会随本目标重复执行一次）。
 
+#[path = "../src/devices/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树（events::DeviceScanned 引用）
+mod devices;
 #[path = "../src/events/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树
 mod events;
 
 #[path = "../src/db/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树
 mod db;
 
 use chrono::DateTime;
@@ -86,15 +91,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 1);
+        assert_eq!(user_version(&db), 2);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 1, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 2, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 1);
+    assert_eq!(user_version(&db), 2);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -111,7 +116,10 @@ fn migration_is_idempotent_and_version_stable() {
             |row| row.get(0),
         )
         .expect("count indexes");
-    assert_eq!(indexes, 5, "assets 3 + job_files 1 + logs 1");
+    assert_eq!(
+        indexes, 6,
+        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1"
+    );
 }
 
 #[test]

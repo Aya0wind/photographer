@@ -7,8 +7,6 @@
 //! [`FileState`]/[`AssetKind`] 复用 events 模块的领域枚举，列存储格式与其
 //! serde camelCase 字符串严格一致（手写 rusqlite To/FromSql 映射，不引 derive 扩展 crate）。
 
-#![allow(dead_code)] // M1 骨架：消费者（import 引擎 / IPC）落地后移除，同 events/mod.rs。
-
 mod migrations;
 
 use std::path::Path;
@@ -17,6 +15,7 @@ use std::time::Duration;
 use chrono::Utc;
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
 use rusqlite::{params, Connection, Error, Result, Row, ToSql};
+use serde::{Deserialize, Serialize};
 
 use crate::events::{AssetKind, FileState};
 
@@ -59,7 +58,8 @@ impl Db {
 // ---------------------------------------------------------------------------
 
 /// jobs 行（任务中心列表 / 断点恢复入口）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobRow {
     pub id: i64,
     pub kind: String,
@@ -74,7 +74,8 @@ pub struct JobRow {
 }
 
 /// job_files 行（journal：每文件一条，PK(job_id, src) 覆盖更新）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobFileRow {
     pub job_id: i64,
     pub src: String,
@@ -87,7 +88,8 @@ pub struct JobFileRow {
 }
 
 /// logs 行。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LogRow {
     pub id: i64,
     pub ts: String,
@@ -97,7 +99,8 @@ pub struct LogRow {
 }
 
 /// assets 行（查重索引与库内资产表）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssetRow {
     pub path: String,
     pub filename: String,
@@ -202,6 +205,8 @@ impl FromSql for AssetKind {
 
 impl Db {
     /// 建导入任务（status='running'，started_at=now），返回 job_id。
+    /// （引擎走 [`Db::create_job_with_plan`]；本方法保留为仓储基元，测试覆盖。）
+    #[allow(dead_code)]
     pub fn create_job(
         &self,
         kind: &str,
@@ -223,6 +228,56 @@ impl Db {
             ],
         )?;
         Ok(self.0.last_insert_rowid())
+    }
+
+    /// 建导入任务并保存 ImportPlan JSON（断点恢复/失败重试时重建引擎）。
+    pub fn create_job_with_plan(
+        &self,
+        kind: &str,
+        device_id: &str,
+        device_name: &str,
+        total_files: u64,
+        total_bytes: u64,
+        plan_json: &str,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO jobs (kind, device_id, device_name, status, total_files, total_bytes, \
+             plan_json, started_at) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7)",
+            params![
+                kind,
+                device_id,
+                device_name,
+                total_files as i64,
+                total_bytes as i64,
+                plan_json,
+                now_rfc3339()
+            ],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// 读取任务的 ImportPlan JSON（无则 None）。
+    pub fn job_plan_json(&self, job_id: i64) -> Result<Option<String>> {
+        let mut stmt = self.0.prepare("SELECT plan_json FROM jobs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![job_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Err(Error::QueryReturnedNoRows),
+        }
+    }
+
+    /// 任务的设备标识（resume 校验源一致性）。
+    pub fn job_device(&self, job_id: i64) -> Result<Option<(String, String)>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT device_id, device_name FROM jobs WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![job_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
     }
 
     /// 收尾任务：写终态（受 status CHECK 约束）、stats_json、finished_at。
@@ -258,6 +313,8 @@ impl Db {
     }
 
     /// 断点恢复：取 pending / failed 的文件（按 src 有序）。
+    /// （引擎用 [`Db::all_job_files`] 自行分流；保留为仓储基元，测试覆盖。）
+    #[allow(dead_code)]
     pub fn pending_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
         let mut stmt = self.0.prepare(
             "SELECT job_id, src, dst, size, state, error, xxhash, sha256 FROM job_files \
@@ -270,7 +327,18 @@ impl Db {
         rows.collect()
     }
 
+    /// 任务全部 journal 行（resume 重建统计基线；按 src 有序）。
+    pub fn all_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT job_id, src, dst, size, state, error, xxhash, sha256 FROM job_files \
+             WHERE job_id = ?1 ORDER BY src",
+        )?;
+        let rows = stmt.query_map(params![job_id], map_job_file)?;
+        rows.collect()
+    }
+
     /// 按状态分组计数（总结弹窗 / 进度统计）。
+    #[allow(dead_code)]
     pub fn job_file_counts(&self, job_id: i64) -> Result<Vec<(FileState, u64)>> {
         let mut stmt = self.0.prepare(
             "SELECT state, COUNT(*) FROM job_files WHERE job_id = ?1 GROUP BY state ORDER BY state",
@@ -340,13 +408,65 @@ impl Db {
         }
     }
 
-    /// 路径是否已在库中（同路径同名查重层）。
+    /// 宽松查重键（T7 §查重① / T8 new_files 预判）：size + filename + mtime ±2s。
+    /// RFC3339 定宽字符串按字典序比较即时间序。
+    pub fn find_asset_loose(
+        &self,
+        size: u64,
+        filename: &str,
+        mtime_from: &str,
+        mtime_to: &str,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id FROM assets WHERE size = ?1 AND filename = ?2 \
+             AND mtime >= ?3 AND mtime <= ?4 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![size as i64, filename, mtime_from, mtime_to])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 路径是否已在库中（同路径同名查重层；引擎现用文件系统直查）。
+    #[allow(dead_code)]
     pub fn asset_path_exists(&self, path: &str) -> Result<bool> {
         let mut stmt = self
             .0
             .prepare("SELECT 1 FROM assets WHERE path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![path])?;
         Ok(rows.next()?.is_some())
+    }
+
+    /// 失败重试：把 old 任务中 failed 的文件复制为 new 任务的 pending 行
+    /// （沿用 kind/device/plan），返回 new job_id；无 failed 行返回 None。
+    pub fn retry_failed_into_new_job(&self, old_job_id: i64) -> Result<Option<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM job_files \
+             WHERE job_id = ?1 AND state = 'failed'",
+        )?;
+        let (count, bytes): (i64, i64) =
+            stmt.query_row(params![old_job_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if count == 0 {
+            return Ok(None);
+        }
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO jobs (kind, device_id, device_name, status, total_files, total_bytes, \
+             plan_json, started_at) \
+             SELECT kind, device_id, device_name, 'running', ?2, ?3, plan_json, ?4 \
+             FROM jobs WHERE id = ?1",
+            params![old_job_id, count, bytes, now_rfc3339()],
+        )?;
+        let new_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO job_files (job_id, src, dst, size, state) \
+             SELECT ?2, src, dst, size, 'pending' FROM job_files \
+             WHERE job_id = ?1 AND state = 'failed'",
+            params![old_job_id, new_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(new_id))
     }
 
     /// 追加日志（ts=now）。

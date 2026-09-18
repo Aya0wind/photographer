@@ -2,10 +2,8 @@
 //! 导入引擎不感知设备类型。热插拔检测在 `hotplug`（WM_DEVICECHANGE），
 //! 卷实现在 `volume`，WPD/MTP 实现在 `wpd`。
 
-// M1 骨架：消费者（volume/wpd/hotplug 实现与导入引擎）落地后移除此 allow。
-#![allow(dead_code)]
-
 pub mod hotplug;
+pub mod orchestrator;
 pub mod volume;
 pub mod wpd;
 
@@ -40,6 +38,7 @@ pub enum DeviceError {
     Disconnected,
     /// 该源不支持的操作（如 MTP 流不支持 Seek 时的尾部局部哈希）
     #[error("operation not supported by this source: {0}")]
+    #[allow(dead_code)] // 错误契约的一部分（测试桩构造；lib 内暂无触发点）
     NotSupported(String),
     #[error("device error: {0}")]
     Other(String),

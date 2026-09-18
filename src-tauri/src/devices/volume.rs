@@ -35,11 +35,6 @@ impl VolumeSource {
         Self { root, id }
     }
 
-    /// 卷根路径。
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// 打开卷内文件（顺序读标志）。
     fn open_file(&self, id: &str) -> DeviceResult<File> {
         // id 来自 list() 的 rel_path；拒绝越界路径，防目录穿越

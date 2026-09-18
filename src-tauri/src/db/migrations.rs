@@ -4,7 +4,7 @@
 //! 每条迁移在独立事务中执行（DDL 与 user_version 推进原子提交）。
 
 /// 迁移列表：索引 i 的 SQL 把库从 user_version = i 升到 i + 1。
-pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_0001_INIT];
+pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_0001_INIT, MIGRATION_0002_PLAN_AND_LOOSE];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
 /// （断点恢复 journal）、logs（任务日志），外加查询所需的索引。
@@ -64,4 +64,12 @@ CREATE TABLE logs (
 );
 
 CREATE INDEX idx_logs_job_id ON logs (job_id, id);
+"#;
+
+/// 0002：jobs 增加 plan_json（断点恢复/失败重试时重建 ImportPlan）；
+/// assets 增加 (size, filename) 复合索引支撑宽松查重键（T7 §查重①）。
+const MIGRATION_0002_PLAN_AND_LOOSE: &str = r#"
+ALTER TABLE jobs ADD COLUMN plan_json TEXT;
+
+CREATE INDEX idx_assets_size_filename ON assets (size, filename);
 "#;

@@ -4,8 +4,6 @@
 //! 任何失败（垃圾/空/截断）静默返回全 None——绝不 Err、绝不 panic。
 
 // lib 侧 `mod metadata;` 为私有模块且导入流水线（T7）尚未接线，库内暂无调用方
-// （集成测试经 #[path] 直接编译本文件）；T7 落地后删除此属性。
-#![allow(dead_code)]
 
 use std::io::Cursor;
 
