@@ -62,6 +62,10 @@ pub struct Library {
     /// 一次性迁移平滑处理（见 `SettingsManager::load`）。
     #[serde(default)]
     pub configured: bool,
+    /// 导入并发流数（库属性，用户规定 2026-09-19：向导内不可改）。
+    /// MTP 源后端仍强制单流，此处值仅作用于卷/文件夹源。
+    #[serde(default = "default_streams")]
+    pub streams: u32,
 }
 
 impl Default for Library {
@@ -74,6 +78,7 @@ impl Default for Library {
             dir_template: default_dir_template(),
             import_subdir: default_import_subdir(),
             configured: false,
+            streams: default_streams(),
         }
     }
 }
@@ -86,6 +91,11 @@ fn default_dir_template() -> String {
 /// 库级导入子目录默认值。
 fn default_import_subdir() -> String {
     "SmartPhoto".to_string()
+}
+
+/// 库级并发流数默认值（卷/文件夹源）。
+fn default_streams() -> u32 {
+    4
 }
 
 impl Default for Settings {

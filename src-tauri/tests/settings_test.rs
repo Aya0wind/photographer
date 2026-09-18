@@ -82,6 +82,7 @@ fn save_then_load_roundtrip_with_custom_values() {
             import_subdir: "卡导入区".to_string(),
             // 配置链已走完（达芬奇式启动流：库选择器跳过配置向导的依据）
             configured: true,
+            streams: 4,
         }],
         active_library_id: Some("lib-1".to_string()),
         onboarding_completed: true,
@@ -331,6 +332,7 @@ fn serialization_uses_camel_case() {
         dir_template: "{YYYY}/{相机}/{原文件名}".to_string(),
         import_subdir: "卡导入区".to_string(),
         configured: true,
+        streams: 3,
     })
     .expect("serialize library");
     assert_eq!(lib["dbDir"], serde_json::json!(r"I:\SmartPhoto\主库"));
@@ -341,6 +343,7 @@ fn serialization_uses_camel_case() {
     );
     assert_eq!(lib["importSubdir"], serde_json::json!("卡导入区"));
     assert_eq!(lib["configured"], serde_json::json!(true));
+    assert_eq!(lib["streams"], serde_json::json!(3));
     // 缺省库序列化同样带 camelCase 键与默认值
     let default_lib = serde_json::to_value(Library::default()).expect("serialize default library");
     assert_eq!(
@@ -348,6 +351,7 @@ fn serialization_uses_camel_case() {
         serde_json::json!("{YYYY}/{MM-DD}/{原文件名}")
     );
     assert_eq!(default_lib["importSubdir"], serde_json::json!("SmartPhoto"));
+    assert_eq!(default_lib["streams"], serde_json::json!(4));
 }
 
 #[test]
