@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -6,7 +6,7 @@ import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
-import ImportWizard from "./ImportWizard";
+import ImportWizard, { VIEW_MODE_STORAGE_KEY } from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { deviceFiles, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
@@ -25,11 +25,19 @@ vi.mock("@/ipc/api", async (importOriginal) => {
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
+// 覆盖全局 core mock：convertFileSrc 可控（默认返回空串=预览模式无 asset 协议）
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(undefined),
+  convertFileSrc: vi.fn(),
+}));
+import { convertFileSrc } from "@tauri-apps/api/core";
+
 const startMock = vi.mocked(importStart);
 const scanMock = vi.mocked(folderScan);
 const listMock = vi.mocked(fsListDirs);
 const openMock = vi.mocked(openDialog);
 const deviceFilesMock = vi.mocked(deviceFiles);
+const convertMock = vi.mocked(convertFileSrc);
 
 function volumeDevice() {
   return {
@@ -113,6 +121,19 @@ function renderWizard(query = "") {
   );
 }
 
+// jsdom 无布局：offsetWidth/offsetHeight 恒 0，react-virtual 视口为空会一行都不渲染。
+// 统一 mock 出非零视口（组件逻辑不依赖具体尺寸；真实布局由浏览器提供）。
+beforeAll(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get: () => 1200,
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 800,
+  });
+});
+
 beforeEach(() => {
   resetImportStoreForTests();
   startMock.mockReset().mockResolvedValue(null);
@@ -120,6 +141,8 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
+  convertMock.mockReset().mockReturnValue("");
+  localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
 });
 
 describe("ImportWizard 布局与设备", () => {
@@ -151,15 +174,16 @@ describe("ImportWizard 布局与设备", () => {
 
     renderWizard("?device=E:");
 
-    expect(await screen.findByText("IMG_0009.NEF")).toBeInTheDocument();
-    expect(screen.getByText("IMG_0010.JPG")).toBeInTheDocument();
+    const list = await screen.findByTestId("wizard-file-list");
+    expect(await within(list).findByText("IMG_0009.NEF")).toBeInTheDocument();
+    expect(within(list).getByText("IMG_0010.JPG")).toBeInTheDocument();
     expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 2");
     expect(deviceFilesMock).toHaveBeenCalledWith("E:");
   });
 });
 
-describe("源文件树与文件表", () => {
-  it("按目录分组折叠展示；表头统计默认全选", async () => {
+describe("源文件树与文件列表", () => {
+  it("按目录分组折叠展示；表头统计默认全选；默认列表视图不读缩略图", async () => {
     seedSession();
     renderWizard("?device=E:");
 
@@ -167,9 +191,13 @@ describe("源文件树与文件表", () => {
     expect(tree).toHaveTextContent("DCIM/100CANON");
     expect(tree).toHaveTextContent("DCIM/101CANON");
     expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
-    // 中栏表格：等宽文件名与类型徽标
-    expect(screen.getByText("IMG_0001.CR3")).toBeInTheDocument();
-    expect(screen.getByText("VID_0004.MP4")).toBeInTheDocument();
+    // 中栏列表（默认视图）：分组行 + 文件行 + 虚拟化滚动容器；无 img
+    const list = screen.getByTestId("wizard-file-list");
+    expect(screen.getByTestId("wizard-list-scroll")).toBeInTheDocument();
+    expect(within(list).getAllByTestId("wizard-list-group")).toHaveLength(2);
+    expect(within(list).getByText("IMG_0001.CR3")).toBeInTheDocument();
+    expect(within(list).getByText("VID_0004.MP4")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
   });
 
   it("目录组复选框整组反选；全选/反选按钮生效", async () => {
@@ -193,16 +221,17 @@ describe("源文件树与文件表", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
   });
 
-  it("折叠目录组隐藏组内文件", async () => {
+  it("折叠目录组隐藏组内文件（左树与中栏共享折叠态）", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
 
-    await screen.findByText("IMG_0001.CR3");
-    // 点击组头折叠（按钮包含目录名）
-    await user.click(screen.getByRole("button", { name: /DCIM\/100CANON/ }));
+    const list = await screen.findByTestId("wizard-file-list");
+    await within(list).findByText("IMG_0001.CR3");
+    // 点击中栏分组头折叠（按钮包含目录名）
+    await user.click(within(list).getByRole("button", { name: /DCIM\/100CANON/ }));
     expect(screen.queryByText("IMG_0001.CR3")).not.toBeInTheDocument();
-    expect(screen.getByText("IMG_0003.JPG")).toBeInTheDocument();
+    expect(within(list).getByText("IMG_0003.JPG")).toBeInTheDocument();
   });
 });
 
@@ -436,5 +465,141 @@ describe("导入模式分段条（LR 式顶部切换）", () => {
     expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(useImportStore.getState().jobModes[11]).toBe("move");
+  });
+});
+
+describe("查看方式：列表（默认）/ 缩略图网格", () => {
+  it("默认列表视图无 img；切到缩略图出现网格并持久化偏好", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-file-grid")).not.toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+
+    await user.click(screen.getByTestId("wizard-view-grid"));
+    expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-grid-scroll")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-file-list")).not.toBeInTheDocument();
+    expect(localStorage.getItem(VIEW_MODE_STORAGE_KEY)).toBe("grid");
+  });
+
+  it("缩略图网格：占位块渲染、点击块切换勾选、统计变化、全选恢复", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    const grid = await screen.findByTestId("wizard-file-grid");
+    // 预览模式（convertFileSrc 不可用）→ 全部占位
+    expect(within(grid).getAllByTestId("tile-raw")).toHaveLength(2);
+    expect(within(grid).getByTestId("tile-video")).toBeInTheDocument();
+    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+    expect(within(grid).getAllByTestId("wizard-grid-group")).toHaveLength(2);
+
+    // 点击 photo 块取消勾选
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+    const tile = within(grid)
+      .getAllByTestId("wizard-tile")
+      .find((el) => el.getAttribute("data-path") === "E:/DCIM/101CANON/IMG_0003.JPG");
+    expect(tile).toBeDefined();
+    await user.click(tile!);
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
+    expect(tile).toHaveAttribute("data-selected", "false");
+
+    // 工具栏全选恢复
+    await user.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+  });
+
+  it("切换视图不丢勾选", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    // 列表视图取消 IMG_0001
+    const list = await screen.findByTestId("wizard-file-list");
+    await user.click(within(list).getByRole("checkbox", { name: "IMG_0001.CR3" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
+
+    await user.click(screen.getByTestId("wizard-view-grid"));
+    const grid = await screen.findByTestId("wizard-file-grid");
+    const tile1 = within(grid)
+      .getAllByTestId("wizard-tile")
+      .find((el) => el.getAttribute("data-path") === "E:/DCIM/100CANON/IMG_0001.CR3");
+    const tile3 = within(grid)
+      .getAllByTestId("wizard-tile")
+      .find((el) => el.getAttribute("data-path") === "E:/DCIM/101CANON/IMG_0003.JPG");
+    expect(tile1).toHaveAttribute("data-selected", "false");
+    expect(tile3).toHaveAttribute("data-selected", "true");
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
+  });
+
+  it("volume 源 photo 走 asset 协议：src = convertFileSrc(设备id/relPath)；RAW/视频无 img", async () => {
+    seedSession();
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    const img = await screen.findByRole("img", { name: "IMG_0003.JPG" });
+    expect(img).toHaveAttribute("src", "asset://E:/DCIM/101CANON/IMG_0003.JPG");
+    expect(convertMock).toHaveBeenCalledWith("E:/DCIM/101CANON/IMG_0003.JPG");
+    expect(screen.queryByRole("img", { name: "IMG_0001.CR3" })).not.toBeInTheDocument();
+  });
+
+  it("folder 源 absPath = id 去 FOLDER: 前缀 + / + relPath", async () => {
+    useImportStore.setState({
+      devices: [folderSnapshot()],
+      sourceFiles: {
+        "FOLDER:D:\\老照片": [
+          { path: "DCIM/A.JPG", dir: "DCIM", name: "A.JPG", size: 10, kind: "photo" },
+        ],
+      },
+    });
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    expect(convertMock).toHaveBeenCalledWith("D:\\老照片/DCIM/A.JPG");
+    expect(await screen.findByRole("img", { name: "A.JPG" })).toHaveAttribute(
+      "src",
+      "asset://D:\\老照片/DCIM/A.JPG",
+    );
+  });
+
+  it("MTP 源无文件系统路径：photo 恒占位、不调 convertFileSrc", async () => {
+    useImportStore.setState({
+      devices: [mtpDevice()],
+      sourceFiles: {
+        "MTP:CAM": [{ path: "DCIM/B.JPG", dir: "DCIM", name: "B.JPG", size: 10, kind: "photo" }],
+      },
+    });
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard("?device=MTP:CAM");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    expect(convertMock).not.toHaveBeenCalled();
+    const grid = await screen.findByTestId("wizard-file-grid");
+    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("convertFileSrc 抛错时静默占位不崩溃", async () => {
+    seedSession();
+    convertMock.mockImplementation(() => {
+      throw new Error("no tauri internals");
+    });
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    const grid = await screen.findByTestId("wizard-file-grid");
+    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
   });
 });

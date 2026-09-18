@@ -296,6 +296,41 @@ fn fs_list_dirs_invalid_parent_is_empty_and_roots_listed() {
     assert!(drives.iter().all(|d| d.path.ends_with('\\')));
 }
 
+#[test]
+fn fs_list_dirs_preserves_parent_path_form() {
+    // 回归（映射盘 bug，2026-09-18）：条目 path 必须与父路径同形态原样拼接，
+    // 不得 canonicalize——否则映射盘 Y:\DCIM 被解析成 \\?\UNC\... 再剥前缀，
+    // 产出残缺的 "UNC\192.168.31.103\..."。用 verbatim 父路径本地复现
+    // “形态转换”这一类破坏：canonicalize 会把 \\?\C:\... 变回 C:\...，
+    // 修复后必须保留 verbatim 形态。
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("photos").join("2024")).unwrap();
+
+    let verbatim_parent = format!(r"\\?\{}", root.path().display());
+    let entries = list_dirs(Some(&verbatim_parent));
+    let photos = entries
+        .iter()
+        .find(|e| e.name == "photos")
+        .expect("verbatim 父路径应可枚举");
+    assert_eq!(
+        photos.path,
+        format!(r"{}\photos", verbatim_parent),
+        "条目 path 必须原样拼接父路径（不转换形态）: {:?}",
+        entries
+    );
+    // 子树探测也用同形态路径（否则 hasSubdirs 恒 false —— Y:\照片 展开为空的根因）
+    assert!(photos.has_subdirs, "探测子目录不得因形态转换失败");
+    // 绝不出现剥坏前缀的 UNC\ 残缺形态
+    assert!(!photos.path.starts_with(r"UNC\"));
+
+    // 普通形态父路径（带尾分隔符）同样原样系（幂等展开）
+    let plain_with_slash = format!(r"{}\", root.path().display());
+    let entries = list_dirs(Some(&plain_with_slash));
+    let photos = entries.iter().find(|e| e.name == "photos").unwrap();
+    assert_eq!(photos.path, format!(r"{}\photos", root.path().display()));
+    assert!(photos.has_subdirs);
+}
+
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------

@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { motion } from "motion/react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
   deviceFiles,
@@ -12,6 +14,7 @@ import {
   isIpcAvailable,
   kindFromName,
   type DeviceKind,
+  type DeviceSnapshot,
   type FileKind,
   type FsDirEntry,
   type ImportMode,
@@ -26,8 +29,13 @@ import { useImportStore, type RecentSource, type SourceFile } from "@/stores/imp
  * 导入向导（LR 式源面板 + A 密度三栏）：
  * 顶部=复制/移动分段模式条；左=设备卡列表 + 文件系统懒加载目录树
  * （点击文件夹名=选中该文件夹为源，folderScan 成 FOLDER: 源）+ 最近使用源
- * + 源文件树（按目录分组折叠，全选/反选）；中=可勾选文件表；右=方案面板
- * （目标根目录/目录模板三预设+自定义实时预览/查重策略/并发流数，MTP 强制 1）。
+ * + 源文件树；中=文件区双视图（列表默认 / 缩略图网格，右栏切换并持久化，
+ * 两视图均虚拟化、共享勾选语义与统计条）；右=方案面板（查看方式/目标根目录/
+ * 目录模板三预设+自定义实时预览/查重策略/并发流数，MTP 强制 1）。
+ *
+ * 缩略图：photo 走 asset 协议（convertFileSrc，folder=去前缀路径/volume=设备id
+ * + relPath，MTP 无文件系统路径恒占位），信号量限 6 张在途解码，onLoad 150ms
+ * 淡入，失败/超时静默保持占位；RAW/视频恒占位（M3 缩略图管线前不做内嵌提取）。
  */
 
 interface DirGroup {
@@ -123,6 +131,531 @@ function presetValue(key: string, custom: string): string {
 const inputClass =
   "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
 
+// --- 查看方式（列表默认 / 缩略图），localStorage 持久化 ---------------------------
+
+export type WizardViewMode = "list" | "grid";
+
+export const VIEW_MODE_STORAGE_KEY = "smartphoto.import.viewMode";
+
+function loadViewMode(): WizardViewMode {
+  try {
+    return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "grid" ? "grid" : "list";
+  } catch {
+    return "list";
+  }
+}
+
+function saveViewMode(mode: WizardViewMode): void {
+  try {
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+  } catch {
+    // 存储不可用时仅内存态生效
+  }
+}
+
+// --- 缩略图管线：asset 协议 + 解码并发信号量 --------------------------------------
+
+/** 源根的文件系统绝对路径（folder=去 FOLDER: 前缀；volume=设备 id；MTP 无路径） */
+function sourceBasePath(device: DeviceSnapshot | null): string | null {
+  if (!device) return null;
+  if (device.kind === "folder") return device.id.slice("FOLDER:".length);
+  if (device.kind === "volume") return device.id;
+  return null;
+}
+
+/** 源内相对路径（dir + name 统一拼接，与设备枚举的 relPath 语义一致） */
+function relPathOf(file: SourceFile): string {
+  return file.dir ? `${file.dir}/${file.name}` : file.name;
+}
+
+/** absPath → asset 协议 URL；非 Tauri 环境抛错或空结果回退 null（占位） */
+function toAssetUrl(base: string | null, relPath: string): string | null {
+  if (base === null) return null;
+  try {
+    return convertFileSrc(`${base}/${relPath}`) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 同一时刻在途解码上限：超出排队，避免大目录一次性打爆 IO/解码 */
+const IMAGE_LOAD_CONCURRENCY = 6;
+let activeImageLoads = 0;
+const imageSlotQueue: Array<() => void> = [];
+
+function acquireImageSlot(): Promise<void> {
+  if (activeImageLoads < IMAGE_LOAD_CONCURRENCY) {
+    activeImageLoads += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    imageSlotQueue.push(() => {
+      activeImageLoads += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseImageSlot(): void {
+  activeImageLoads = Math.max(0, activeImageLoads - 1);
+  const next = imageSlotQueue.shift();
+  if (next) next();
+}
+
+function extOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "";
+}
+
+/** 缩略占位块：surface 底 + kind 色点缀（RAW=扩展名大字+徽标；视频=胶片；photo=图片框） */
+function ThumbPlaceholder({ kind, name }: { kind: FileKind; name: string }) {
+  const ext = extOf(name);
+  if (kind === "raw") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-1" data-testid="tile-raw">
+        <span className="font-mono text-lg font-bold tracking-wide text-sky-400">{ext || "RAW"}</span>
+        <span className="rounded bg-bg px-1.5 py-0.5 text-[10px] font-medium text-text-secondary">RAW</span>
+      </div>
+    );
+  }
+  if (kind === "video") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-1.5" data-testid="tile-video">
+        <svg
+          viewBox="0 0 24 24"
+          width="26"
+          height="26"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="text-violet-400"
+          aria-hidden="true"
+        >
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M3 9h2M3 15h2M19 9h2M19 15h2" />
+          <path d="M10 9.5l5 2.5-5 2.5v-5z" />
+        </svg>
+        {ext && <span className="font-mono text-[10px] text-text-muted">{ext}</span>}
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-1.5" data-testid="tile-photo">
+      <svg
+        viewBox="0 0 24 24"
+        width="26"
+        height="26"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="text-accent"
+        aria-hidden="true"
+      >
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+        <circle cx="9" cy="10" r="1.8" />
+        <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
+      </svg>
+      {ext && <span className="font-mono text-[10px] text-text-muted">{ext}</span>}
+    </div>
+  );
+}
+
+/** 单个缩略图块：4:3 照片区 + 信息条；LR 式左上圆形勾选，点块任意处切换 */
+function FileTile({
+  file,
+  selected,
+  onToggle,
+  assetUrl,
+}: {
+  file: SourceFile;
+  selected: boolean;
+  onToggle: (path: string) => void;
+  assetUrl: string | null;
+}) {
+  // 解码槽位到位后才置 src；onLoad 淡入，onError/15s 超时静默保持占位（不重试）
+  const [src, setSrc] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const settledRef = useRef(false);
+  const releaseRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (assetUrl === null) return;
+    void acquireImageSlot().then(() => {
+      if (cancelled) {
+        releaseImageSlot();
+        return;
+      }
+      releaseRef.current = releaseImageSlot;
+      setSrc(assetUrl);
+    });
+    return () => {
+      cancelled = true;
+      releaseRef.current?.();
+      releaseRef.current = null;
+    };
+  }, [assetUrl]);
+
+  useEffect(() => {
+    if (src === null) return;
+    const timer = setTimeout(() => settle(false), 15_000);
+    return () => clearTimeout(timer);
+    // settle 为渲染闭包但仅触碰 ref/setState，旧闭包安全
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
+
+  function settle(ok: boolean): void {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    if (ok) setLoaded(true);
+    else setSrc(null);
+    releaseRef.current?.();
+    releaseRef.current = null;
+  }
+
+  const showImg = src !== null;
+  return (
+    <div
+      className={`group relative w-40 shrink-0 cursor-pointer select-none overflow-hidden rounded-md border-2 bg-surface transition-colors ${
+        selected ? "border-accent bg-accent/10" : "border-edge hover:border-text-muted"
+      }`}
+      onClick={() => onToggle(file.path)}
+      data-testid="wizard-tile"
+      data-path={file.path}
+      data-selected={selected}
+      data-kind={file.kind}
+    >
+      <div className="relative h-[120px] w-full overflow-hidden bg-panel/40">
+        {showImg ? (
+          <img
+            src={src ?? undefined}
+            alt={file.name}
+            loading="lazy"
+            decoding="async"
+            onLoad={() => settle(true)}
+            onError={() => settle(false)}
+            className={`h-full w-full object-cover transition-opacity duration-150 ${
+              loaded ? "opacity-100" : "opacity-0"
+            } ${selected ? "brightness-110" : ""}`}
+          />
+        ) : (
+          <ThumbPlaceholder kind={file.kind} name={file.name} />
+        )}
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={selected}
+          aria-label={file.name}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle(file.path);
+          }}
+          className={`absolute left-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full border transition-opacity ${
+            selected
+              ? "border-accent bg-accent opacity-100"
+              : "border-white/70 bg-black/50 opacity-0 group-hover:opacity-100"
+          }`}
+        >
+          {selected && (
+            <svg
+              viewBox="0 0 16 16"
+              width="11"
+              height="11"
+              fill="none"
+              stroke="#FFFFFF"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3.5 8.5l3 3 6-6.5" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <div className="flex h-[30px] items-center justify-between gap-1 px-1.5">
+        <span className="truncate font-mono text-[10px] text-text-secondary" title={file.name}>
+          {file.name}
+        </span>
+        <span className="shrink-0 font-mono text-[10px] text-text-muted tabular-nums">
+          {formatBytes(file.size)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** 分组头（两视图共用）：折叠行，风格从简 */
+function GroupHeaderRow({
+  label,
+  dir,
+  count,
+  isCollapsed,
+  onToggleCollapse,
+  testId,
+}: {
+  label: string;
+  dir: string;
+  count: number;
+  isCollapsed: boolean;
+  onToggleCollapse: (dir: string) => void;
+  testId: string;
+}) {
+  return (
+    <div className="flex h-[26px] items-center rounded bg-panel/30">
+      <button
+        type="button"
+        onClick={() => onToggleCollapse(dir)}
+        className="flex min-w-0 flex-1 items-center gap-1 px-2 py-1 text-left"
+        data-testid={testId}
+        data-dir={dir}
+      >
+        <svg
+          viewBox="0 0 16 16"
+          width="10"
+          height="10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          className={`shrink-0 text-text-muted transition-transform ${isCollapsed ? "" : "rotate-90"}`}
+          aria-hidden="true"
+        >
+          <path d="M5 3l5 5-5 5" />
+        </svg>
+        <span className="truncate font-mono text-[11px] text-text-secondary" title={dir}>
+          {label}
+        </span>
+        <span className="ml-auto shrink-0 pl-2 text-[11px] text-text-muted">{count}</span>
+      </button>
+    </div>
+  );
+}
+
+// --- 列表视图（默认）：表格形态 + 虚拟化 -------------------------------------------
+
+type ListRow =
+  | { type: "group"; group: DirGroup }
+  | { type: "file"; file: SourceFile };
+
+function FileListView({
+  groups,
+  collapsed,
+  selected,
+  onToggleFile,
+  onToggleCollapse,
+  rootDirLabel,
+}: {
+  groups: DirGroup[];
+  collapsed: Set<string>;
+  selected: Set<string>;
+  onToggleFile: (path: string) => void;
+  onToggleCollapse: (dir: string) => void;
+  rootDirLabel: string;
+}) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rows = useMemo<ListRow[]>(() => {
+    const out: ListRow[] = [];
+    for (const g of groups) {
+      out.push({ type: "group", group: g });
+      if (collapsed.has(g.dir)) continue;
+      for (const f of g.files) out.push({ type: "file", file: f });
+    }
+    return out;
+  }, [groups, collapsed]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 26,
+    overscan: 10,
+  });
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-list">
+      <div className="grid shrink-0 grid-cols-[32px_minmax(0,1fr)_80px_72px] items-center border-b border-edge px-2 text-[11px] text-text-muted">
+        <span aria-hidden="true" />
+        <span className="px-2 py-1.5">{t("wizard.columnName")}</span>
+        <span className="py-1.5 text-right">{t("wizard.columnSize")}</span>
+        <span className="py-1.5 text-right">{t("wizard.columnKind")}</span>
+      </div>
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="wizard-list-scroll">
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualizer.getVirtualItems().map((vi) => {
+            const row = rows[vi.index];
+            return (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {row.type === "group" ? (
+                  <GroupHeaderRow
+                    label={row.group.dir || rootDirLabel}
+                    dir={row.group.dir}
+                    count={row.group.files.length}
+                    isCollapsed={collapsed.has(row.group.dir)}
+                    onToggleCollapse={onToggleCollapse}
+                    testId="wizard-list-group"
+                  />
+                ) : (
+                  <label
+                    className={`grid h-[26px] cursor-pointer grid-cols-[32px_minmax(0,1fr)_80px_72px] items-center border-b border-edge/40 px-2 text-xs ${
+                      selected.has(row.file.path) ? "" : "opacity-40"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(row.file.path)}
+                      onChange={() => onToggleFile(row.file.path)}
+                      aria-label={row.file.name}
+                      className="h-3 w-3 accent-[#F0A83C]"
+                    />
+                    <span
+                      className="truncate px-2 font-mono text-[11px] text-text-primary"
+                      title={row.file.path}
+                    >
+                      {row.file.name}
+                    </span>
+                    <span className="text-right font-mono text-[11px] text-text-secondary tabular-nums">
+                      {formatBytes(row.file.size)}
+                    </span>
+                    <span className="flex justify-end pr-1">
+                      <KindBadge kind={row.file.kind} />
+                    </span>
+                  </label>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- 缩略图网格视图：响应式列数 + 虚拟化 -------------------------------------------
+
+const TILE_W = 160;
+const TILE_H = 150; // 4:3 缩略区 120 + 信息条 30
+const GRID_GAP = 8;
+const GROUP_HEADER_H = 26;
+
+type GridRow =
+  | { type: "header"; dir: string; count: number }
+  | { type: "tiles"; files: SourceFile[] };
+
+function FileGridView({
+  groups,
+  collapsed,
+  selected,
+  onToggleFile,
+  onToggleCollapse,
+  basePath,
+  rootDirLabel,
+}: {
+  groups: DirGroup[];
+  collapsed: Set<string>;
+  selected: Set<string>;
+  onToggleFile: (path: string) => void;
+  onToggleCollapse: (dir: string) => void;
+  basePath: string | null;
+  rootDirLabel: string;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(0);
+
+  // 动态列数：容器宽（滚动区）自适应；ResizeObserver 跟踪
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => setWidth(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const columns = Math.max(1, Math.floor((width - GRID_GAP) / (TILE_W + GRID_GAP)));
+
+  const rows = useMemo<GridRow[]>(() => {
+    const out: GridRow[] = [];
+    for (const g of groups) {
+      out.push({ type: "header", dir: g.dir, count: g.files.length });
+      if (collapsed.has(g.dir)) continue;
+      for (let i = 0; i < g.files.length; i += columns) {
+        out.push({ type: "tiles", files: g.files.slice(i, i + columns) });
+      }
+    }
+    return out;
+  }, [groups, collapsed, columns]);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => (rows[i].type === "header" ? GROUP_HEADER_H : TILE_H + GRID_GAP),
+    overscan: 8,
+  });
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-grid">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto p-2" data-testid="wizard-grid-scroll">
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualizer.getVirtualItems().map((vi) => {
+            const row = rows[vi.index];
+            return (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {row.type === "header" ? (
+                  <GroupHeaderRow
+                    label={row.dir || rootDirLabel}
+                    dir={row.dir}
+                    count={row.count}
+                    isCollapsed={collapsed.has(row.dir)}
+                    onToggleCollapse={onToggleCollapse}
+                    testId="wizard-grid-group"
+                  />
+                ) : (
+                  <div className="flex flex-wrap gap-2 pb-2">
+                    {row.files.map((f) => (
+                      <FileTile
+                        key={f.path}
+                        file={f}
+                        selected={selected.has(f.path)}
+                        onToggle={onToggleFile}
+                        assetUrl={f.kind === "photo" ? toAssetUrl(basePath, relPathOf(f)) : null}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ImportWizard() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -211,6 +744,8 @@ export default function ImportWizard() {
   const [startError, setStartError] = useState(false);
   // LR 式导入模式（顶部分段条）：复制保留原文件 / 移动纳管
   const [mode, setMode] = useState<ImportMode>("copy");
+  // 查看方式：列表默认 / 缩略图网格；切换不重置勾选（selected 与视图无关）
+  const [viewMode, setViewMode] = useState<WizardViewMode>(loadViewMode);
 
   // 文件系统懒加载树：根（盘符）+ 每目录子级缓存 + 展开集合
   const [fsRoots, setFsRoots] = useState<FsDirEntry[] | null>(null);
@@ -629,16 +1164,8 @@ export default function ImportWizard() {
 
           {/* 源文件树 */}
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex shrink-0 items-center justify-between px-3 py-2">
+            <div className="flex shrink-0 items-center px-3 py-2">
               <span className="text-xs font-medium text-text-secondary">{t("wizard.sourceTree")}</span>
-              <div className="flex gap-1.5">
-                <button type="button" onClick={selectAll} className="text-[11px] text-text-muted transition-colors hover:text-accent">
-                  {t("wizard.selectAll")}
-                </button>
-                <button type="button" onClick={invertSelection} className="text-[11px] text-text-muted transition-colors hover:text-accent">
-                  {t("wizard.invert")}
-                </button>
-              </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" data-testid="wizard-tree">
               {groups.length === 0 ? (
@@ -713,7 +1240,7 @@ export default function ImportWizard() {
           </div>
         </section>
 
-        {/* 中栏：可勾选文件表 */}
+        {/* 中栏：文件区（列表/缩略图双视图，共享勾选与统计；工具栏=统计+全选/反选） */}
         <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.fileTable")}>
           <div
             className="flex h-9 shrink-0 items-center justify-between border-b border-edge px-3 text-xs"
@@ -726,65 +1253,92 @@ export default function ImportWizard() {
                 size: formatBytes(selectedBytes),
               })}
             </span>
-            <span className="text-text-muted">{t("wizard.fileColumns")}</span>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={selectAll}
+                className="text-[11px] text-text-muted transition-colors hover:text-accent"
+              >
+                {t("wizard.selectAll")}
+              </button>
+              <button
+                type="button"
+                onClick={invertSelection}
+                className="text-[11px] text-text-muted transition-colors hover:text-accent"
+              >
+                {t("wizard.invert")}
+              </button>
+            </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {files.length === 0 ? (
-              <p className="px-6 py-10 text-center text-xs leading-relaxed text-text-muted">
+          {files.length === 0 ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center">
+              <p className="text-xs leading-relaxed text-text-muted">
                 {filesLoading && device
                   ? t("wizard.tableLoading")
                   : device
                     ? t("wizard.tableEmpty")
                     : t("wizard.treeEmpty")}
               </p>
-            ) : (
-              <table className="w-full table-fixed border-collapse text-xs">
-                <thead>
-                  <tr className="text-left text-[11px] text-text-muted">
-                    <th className="w-8 px-2 py-1.5 font-normal" aria-label={t("wizard.columnPick")} />
-                    <th className="px-2 py-1.5 font-normal">{t("wizard.columnName")}</th>
-                    <th className="w-20 px-2 py-1.5 text-right font-normal">{t("wizard.columnSize")}</th>
-                    <th className="w-16 px-2 py-1.5 font-normal">{t("wizard.columnKind")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {files.map((f) => (
-                    <tr
-                      key={f.path}
-                      className={`border-t border-edge/60 ${selected.has(f.path) ? "" : "opacity-40"}`}
-                    >
-                      <td className="px-2 py-1">
-                        <input
-                          type="checkbox"
-                          checked={selected.has(f.path)}
-                          onChange={() => toggleFile(f.path)}
-                          aria-label={f.name}
-                          className="h-3 w-3 accent-[#F0A83C]"
-                        />
-                      </td>
-                      <td className="truncate px-2 py-1 font-mono text-[11px] text-text-primary" title={f.path}>
-                        {f.dir ? `${f.dir}/` : ""}
-                        {f.name}
-                      </td>
-                      <td className="px-2 py-1 text-right font-mono text-[11px] text-text-secondary tabular-nums">
-                        {formatBytes(f.size)}
-                      </td>
-                      <td className="px-2 py-1">
-                        <KindBadge kind={f.kind} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+            </div>
+          ) : viewMode === "list" ? (
+            <FileListView
+              groups={groups}
+              collapsed={collapsed}
+              selected={selected}
+              onToggleFile={toggleFile}
+              onToggleCollapse={toggleCollapse}
+              rootDirLabel={t("wizard.rootDir")}
+            />
+          ) : (
+            <FileGridView
+              groups={groups}
+              collapsed={collapsed}
+              selected={selected}
+              onToggleFile={toggleFile}
+              onToggleCollapse={toggleCollapse}
+              basePath={sourceBasePath(device)}
+              rootDirLabel={t("wizard.rootDir")}
+            />
+          )}
         </section>
 
         {/* 右栏：方案面板 */}
         <section className="flex min-h-0 flex-col overflow-y-auto rounded-lg border border-edge bg-surface p-3" aria-label={t("wizard.planPane")}>
           <h2 className="text-xs font-semibold text-text-primary">{t("wizard.plan")}</h2>
 
+          {/* 查看方式：列表默认 / 缩略图网格，持久化用户偏好 */}
           <div className="mt-3 flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-text-secondary">{t("wizard.view.label")}</span>
+            <div
+              className="flex rounded-md border border-edge bg-bg p-0.5"
+              role="radiogroup"
+              aria-label={t("wizard.view.label")}
+              data-testid="wizard-view"
+            >
+              {(["list", "grid"] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  role="radio"
+                  aria-checked={viewMode === option}
+                  onClick={() => {
+                    setViewMode(option);
+                    saveViewMode(option);
+                  }}
+                  className={`flex-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                    viewMode === option
+                      ? "bg-accent text-black"
+                      : "text-text-secondary hover:text-text-primary"
+                  }`}
+                  data-testid={`wizard-view-${option}`}
+                >
+                  {t(`wizard.view.${option}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-1.5">
             <label htmlFor="wizard.targetRoot" className="text-xs font-medium text-text-secondary">
               {t("wizard.targetRoot")}
             </label>

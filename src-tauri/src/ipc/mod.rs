@@ -103,8 +103,21 @@ fn drive_roots() -> Vec<DirEntryDto> {
 }
 
 /// 列一层子目录（跳过隐藏/系统属性、黑名单与点前缀名；不含文件）。
+/// 条目 path = 父路径**原样**拼接，不做 canonicalize：映射盘符（`Y:\`）
+/// 会被 canonicalize 解析成 `\\?\UNC\server\share\`，剥前缀后产出残缺的
+/// `UNC\...` 路径（2026-09-18 线上 bug），且 NAS 上逐目录 canonicalize
+/// 是每目录一次网络往返。父路径相对时仅做一次当前目录拼接。
 fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
-    let Ok(read) = std::fs::read_dir(parent) else {
+    let given = Path::new(parent);
+    let root = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return Vec::new();
+        };
+        cwd.join(given)
+    };
+    let Ok(read) = std::fs::read_dir(&root) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -116,11 +129,12 @@ fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
         if !is_browsable_dir_name(&name) || is_hidden_or_system(&entry) {
             continue;
         }
-        let path = normalized_absolute(&entry.path());
+        // entry.path() = root.join(name)：与父路径同形态的绝对路径
+        let path = entry.path();
         out.push(DirEntryDto {
-            has_subdirs: has_any_subdir(Path::new(&path)),
+            has_subdirs: has_any_subdir(&path),
             name,
-            path,
+            path: path.to_string_lossy().into_owned(),
         });
     }
     out.sort_by_key(|e| e.name.to_lowercase());
@@ -166,18 +180,6 @@ fn has_any_subdir(path: &Path) -> bool {
         return true;
     }
     false
-}
-
-/// 规范化为绝对路径（canonicalize 解析 8.3/符号链接/相对路径；
-/// 失败回退 join 当前目录的绝对化结果；剔除 `\\?\` verbatim 前缀）。
-fn normalized_absolute(path: &Path) -> String {
-    let resolved = std::fs::canonicalize(path)
-        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
-        .unwrap_or_else(|_| path.to_path_buf());
-    resolved
-        .to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .to_string()
 }
 
 impl From<&crate::devices::FileEntry> for FileEntryDto {

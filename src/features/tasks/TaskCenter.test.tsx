@@ -183,6 +183,17 @@ describe("历史任务表", () => {
     await waitFor(() => expect(jobsPageMock).toHaveBeenCalledTimes(2));
     expect(jobsPageMock).toHaveBeenLastCalledWith(1, 20);
   });
+
+  it("历史空态：引导文案 + 去导入按钮（标题不再重复空态文案）", async () => {
+    const user = userEvent.setup();
+
+    renderCenter();
+
+    const empty = await screen.findByTestId("task-history-empty");
+    expect(empty).toHaveTextContent("完成第一次导入后，历史记录会显示在这里");
+    expect(screen.queryByText("暂无历史任务")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "去导入" }));
+  });
 });
 
 describe("总结弹窗", () => {

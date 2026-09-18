@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
@@ -141,6 +142,7 @@ function CurrentJobCard({ job }: { job: ActiveJob | null }) {
 
 function HistoryTable() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const history = useImportStore((s) => s.history);
   const loadHistory = useImportStore((s) => s.loadHistory);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -149,12 +151,19 @@ function HistoryTable() {
     <section className="rounded-lg border border-edge bg-surface" data-testid="task-history">
       <div className="flex h-9 items-center justify-between border-b border-edge px-3">
         <h2 className="text-xs font-semibold text-text-secondary">{t("tasks.history")}</h2>
-        {history.rows.length === 0 && !history.loading && (
-          <span className="text-[11px] text-text-muted">{t("tasks.historyEmpty")}</span>
-        )}
       </div>
       {history.rows.length === 0 ? (
-        <p className="px-3 py-6 text-center text-xs text-text-muted">{t("tasks.historyEmpty")}</p>
+        // 空态：引导文案 + 去导入（标题处不再重复“暂无历史任务”）
+        <div className="flex flex-col items-center gap-2.5 px-3 py-8 text-center" data-testid="task-history-empty">
+          <p className="text-xs text-text-muted">{t("tasks.historyEmptyHint")}</p>
+          <button
+            type="button"
+            onClick={() => navigate("/import")}
+            className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+          >
+            {t("tasks.goImport")}
+          </button>
+        </div>
       ) : (
         <table className="w-full table-fixed border-collapse text-xs">
           <thead>
