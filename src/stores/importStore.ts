@@ -9,6 +9,7 @@ import {
   importRetryFailed,
   subscribeAppEvents,
   type AppEvent,
+  type CleanResultDto,
   type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
@@ -71,6 +72,17 @@ export interface HistoryState {
   loading: boolean;
 }
 
+/** 清卡任务态（cleanStarted/cleanFinished 事件驱动；单任务串行，M2 无并发清卡） */
+export interface CleanState {
+  jobId: number;
+  phase: "running" | "finished";
+  /** cleanStarted 的候选数/字节数 */
+  count: number;
+  bytes: number;
+  /** cleanFinished 的结果（phase=finished 时非空） */
+  stats: CleanResultDto | null;
+}
+
 export const PROGRESS_THROTTLE_MS = 150;
 export const HISTORY_PAGE_SIZE = 20;
 
@@ -108,11 +120,17 @@ interface ImportState {
   /** 每任务的导入模式（启动时由向导记录，事件不含 mode） */
   jobModes: Record<number, ImportMode>;
   /**
-   * 待归位的导入模式：向导在调用 importStart 前设置。
+   * 待归位的导入模式：向导在调用 import_start 前设置。
    * 修 E2E 竞态——sessionStarted 事件可能先于 import_start 的 invoke 返回到达，
    * 此时 jobId 未知；sessionStarted 创建任务时把 pending 归位到 jobModes。
    */
   pendingJobMode: ImportMode | null;
+  /** 每任务的源设备类型（清卡入口只对 volume/MTP 源显示；folder 源不可清） */
+  jobSources: Record<number, DeviceKind>;
+  /** 待归位源类型（与 pendingJobMode 同款竞态防护） */
+  pendingJobSource: DeviceKind | null;
+  /** 清卡任务态（cleanStarted/cleanFinished 驱动）；null=无清卡 */
+  clean: CleanState | null;
 
   /** 事件入口（initImportStore 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
@@ -128,6 +146,10 @@ interface ImportState {
   recordJobMode: (jobId: number, mode: ImportMode) => void;
   /** 设置待归位导入模式（紧贴 importStart 调用；sessionStarted 消费） */
   setPendingJobMode: (mode: ImportMode | null) => void;
+  /** 记录任务源设备类型（清卡入口判定用） */
+  recordJobSource: (jobId: number, kind: DeviceKind) => void;
+  /** 设置待归位源类型（紧贴 importStart 调用；sessionStarted 消费） */
+  setPendingJobSource: (kind: DeviceKind | null) => void;
   dismissSummary: () => void;
   /** 历史任务分页；reset=true 重置游标重新加载 */
   loadHistory: (reset?: boolean) => Promise<void>;
@@ -257,6 +279,9 @@ export const useImportStore = create<ImportState>((set, get) => ({
   recentSources: loadRecentSources(),
   jobModes: {},
   pendingJobMode: null,
+  jobSources: {},
+  pendingJobSource: null,
+  clean: null,
 
   handleAppEvent: (event) => {
     switch (event.type) {
@@ -317,7 +342,17 @@ export const useImportStore = create<ImportState>((set, get) => ({
           // 竞态修复：事件可能先于 import_start 返回到达，把待归位模式挂到本任务
           const jobModes = { ...s.jobModes };
           jobModes[event.jobId] = s.pendingJobMode ?? "copy";
-          return { activeJobs, failedFiles, currentJobId: event.jobId, jobModes, pendingJobMode: null };
+          const jobSources = { ...s.jobSources };
+          jobSources[event.jobId] = s.pendingJobSource ?? "volume";
+          return {
+            activeJobs,
+            failedFiles,
+            currentJobId: event.jobId,
+            jobModes,
+            jobSources,
+            pendingJobMode: null,
+            pendingJobSource: null,
+          };
         });
         break;
       }
@@ -394,6 +429,25 @@ export const useImportStore = create<ImportState>((set, get) => ({
         break;
       }
 
+      case "cleanStarted": {
+        set({ clean: { jobId: event.jobId, phase: "running", count: event.count, bytes: event.bytes, stats: null } });
+        break;
+      }
+
+      case "cleanFinished": {
+        set((s) => ({
+          // 保留 cleanStarted 的 count/bytes 上下文（无 running 态直接到达时兜底为结果值）
+          clean: {
+            jobId: event.jobId,
+            phase: "finished",
+            count: s.clean?.jobId === event.jobId ? s.clean.count : event.stats.deleted,
+            bytes: s.clean?.jobId === event.jobId ? s.clean.bytes : event.stats.freedBytes,
+            stats: event.stats,
+          },
+        }));
+        break;
+      }
+
       case "appError": {
         set({
           lastError: {
@@ -439,6 +493,14 @@ export const useImportStore = create<ImportState>((set, get) => ({
 
   setPendingJobMode: (mode) => {
     set({ pendingJobMode: mode });
+  },
+
+  recordJobSource: (jobId, kind) => {
+    set((s) => ({ jobSources: { ...s.jobSources, [jobId]: kind } }));
+  },
+
+  setPendingJobSource: (kind) => {
+    set({ pendingJobSource: kind });
   },
 
   dismissSummary: () => {
@@ -531,5 +593,8 @@ export function resetImportStoreForTests(): void {
     recentSources: [],
     jobModes: {},
     pendingJobMode: null,
+    jobSources: {},
+    pendingJobSource: null,
+    clean: null,
   });
 }

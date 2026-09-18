@@ -552,12 +552,14 @@ describe("导入模式分段条（LR 式顶部切换）", () => {
     expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
 
-      await user.click(screen.getByRole("button", { name: "开始导入" }));
-      expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-      expect(startMock.mock.calls[0][0].mode).toBe("move");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(useImportStore.getState().jobModes[11]).toBe("move");
     // 竞态防护：模式已预挂（sessionStarted 事件先到也能归位）
     expect(useImportStore.getState().pendingJobMode).toBe("move");
+    // 源类型同样随任务记录（清卡入口判定用；此处 E:=volume）
+    expect(useImportStore.getState().pendingJobSource).toBe("volume");
   });
 });
 
@@ -817,6 +819,90 @@ describe("缩略图档位", () => {
     expect(tile).not.toHaveTextContent("MB"); // 紧凑档只显文件名
     expect(tile).toHaveTextContent("IMG_0001.CR3");
     expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("compact");
+  });
+});
+
+describe("双目的地（M2）", () => {
+  it("默认关；开启后显示第二目录输入+浏览+必填校验拦住开始", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
+    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("wizard-second-toggle"));
+    const panel = await screen.findByTestId("wizard-second-panel");
+    expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
+    expect(panel).toHaveTextContent("目录模板与主目的地相同。");
+    // 必填校验：第二目录为空 → 开始导入禁用 + 提示
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
+    expect(panel).toHaveTextContent("请填写第二目标根目录");
+
+    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
+    expect(panel).not.toHaveTextContent("请填写第二目标根目录");
+  });
+
+  it("浏览…选择第二目标根目录（openDialog 回填）", async () => {
+    seedSession();
+    openMock.mockResolvedValue("E:\\备份盘");
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(screen.getByTestId("wizard-second-toggle"));
+    await user.click(await screen.findByTestId("wizard-second-browse"));
+
+    expect(openMock).toHaveBeenCalledWith({ directory: true });
+    expect(screen.getByTestId("wizard-second-root")).toHaveValue("E:\\备份盘");
+  });
+
+  it("开启并填写 → plan.secondTarget 携带主目录模板；默认关闭时 plan 无该字段", async () => {
+    seedSession();
+    startMock.mockResolvedValue({ ok: true, jobId: 31 });
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-second-toggle"));
+    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].secondTarget).toEqual({
+      targetRoot: "D:\\照片备份",
+      dirTemplate: "{YYYY}/{MM-DD}", // 与主目的地相同
+    });
+  });
+
+  it("移动互斥：移动模式开关禁用+灰字；开启双目的地切移动自动关且 plan 无 secondTarget", async () => {
+    seedSession();
+    startMock.mockResolvedValue({ ok: true, jobId: 32 });
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    // 复制态开启双目的地并填写
+    await user.click(await screen.findByTestId("wizard-second-toggle"));
+    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
+    expect(screen.getByTestId("wizard-second-toggle")).toBeChecked();
+
+    // 切移动 → 开关自动关、面板消失、互斥提示出现
+    await user.click(screen.getByRole("radio", { name: "移动 · 不保留" }));
+    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
+    expect(screen.getByTestId("wizard-second-toggle")).toBeDisabled();
+    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
+    expect(screen.getByText("移动模式不支持双目的地。")).toBeInTheDocument();
+
+    // 切回复制：开关恢复可用（保持关闭，需手动重开），互斥提示消失
+    await user.click(screen.getByRole("radio", { name: "复制 · 保留原文件" }));
+    expect(screen.getByTestId("wizard-second-toggle")).toBeEnabled();
+    expect(screen.queryByText("移动模式不支持双目的地。")).not.toBeInTheDocument();
+
+    // 再切移动并在该模式下启动：plan 不带 secondTarget（后端拒 move+secondTarget，前端互斥保证）
+    await user.click(screen.getByRole("radio", { name: "移动 · 不保留" }));
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].mode).toBe("move");
+    expect(startMock.mock.calls[0][0].secondTarget).toBeUndefined();
   });
 });
 

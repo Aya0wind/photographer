@@ -976,6 +976,9 @@ export default function ImportWizard() {
   const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
+  // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
+  const [secondEnabled, setSecondEnabled] = useState(false);
+  const [secondRoot, setSecondRoot] = useState("");
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
@@ -1007,8 +1010,10 @@ export default function ImportWizard() {
   const isMtp = device?.kind === "mtp";
   // 并发流数是库属性（设置页/新建库改）：向导只读合成；MTP 受协议限制恒 1
   const effectiveStreams = isMtp ? 1 : activeLibrary?.streams ?? 4;
+  // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
+  const secondReady = !secondEnabled || secondRoot.trim().length > 0;
   const canStart =
-    Boolean(device && activeLibrary && targetRoot) && !starting;
+    Boolean(device && activeLibrary && targetRoot) && secondReady && !starting;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -1106,6 +1111,16 @@ export default function ImportWizard() {
     try {
       const dir = await openDialog({ directory: true });
       if (typeof dir === "string" && dir.length > 0) await selectFolder(dir);
+    } catch {
+      // 非 Tauri 环境或用户取消：静默
+    }
+  }
+
+  /** 双目的地「浏览…」：系统目录选择器选第二目标根目录 */
+  async function browseSecondRoot(): Promise<void> {
+    try {
+      const dir = await openDialog({ directory: true });
+      if (typeof dir === "string" && dir.length > 0) setSecondRoot(dir);
     } catch {
       // 非 Tauri 环境或用户取消：静默
     }
@@ -1229,9 +1244,12 @@ export default function ImportWizard() {
       skipImported,
       streams: effectiveStreams,
       mode,
+      secondTarget:
+        secondEnabled && secondRoot.trim() ? { targetRoot: secondRoot.trim(), dirTemplate } : undefined,
     };
-    // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式
+    // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式/源类型
     useImportStore.getState().setPendingJobMode(mode);
+    useImportStore.getState().setPendingJobSource(device.kind);
     const result = await importStart(plan);
     setStarting(false);
     if (!result.ok) {
@@ -1239,8 +1257,9 @@ export default function ImportWizard() {
       setStartError(result.error ?? t("wizard.startError"));
       return;
     }
-    // 双保险：事件先到时 sessionStarted 已用 pendingJobMode 归位，这里幂等覆盖
+    // 双保险：事件先到时 sessionStarted 已用 pending 归位，这里幂等覆盖
     useImportStore.getState().recordJobMode(result.jobId, mode);
+    useImportStore.getState().recordJobSource(result.jobId, device.kind);
     // 每次导入可调项回写全局设置（作为后续新建库的默认值；库属性不再回写）
     const { update, save } = useSettingsStore.getState();
     const settings = useSettingsStore.getState().settings;
@@ -1278,7 +1297,11 @@ export default function ImportWizard() {
               type="button"
               role="radio"
               aria-checked={mode === option}
-              onClick={() => setMode(option)}
+              onClick={() => {
+                setMode(option);
+                // 互斥：切到移动时自动关掉双目的地（后端拒 move+secondTarget）
+                if (option === "move") setSecondEnabled(false);
+              }}
               className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                 mode === option
                   ? "bg-accent text-black"
@@ -1786,6 +1809,60 @@ export default function ImportWizard() {
             />
             {t("wizard.skipImported")}
           </label>
+
+          {/* 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget） */}
+          <div className="mt-4 flex flex-col gap-1.5">
+            <label
+              className={`flex items-center gap-2 text-xs ${
+                mode === "move" ? "cursor-not-allowed text-text-muted" : "cursor-pointer text-text-secondary"
+              }`}
+              title={mode === "move" ? t("wizard.second.moveUnsupported") : undefined}
+            >
+              <input
+                type="checkbox"
+                checked={secondEnabled}
+                disabled={mode === "move"}
+                onChange={(e) => setSecondEnabled(e.target.checked)}
+                className="h-3 w-3 accent-[#F0A83C] disabled:opacity-40"
+                data-testid="wizard-second-toggle"
+              />
+              {t("wizard.second.label")}
+            </label>
+            <p className="pl-5 text-[11px] leading-relaxed text-text-muted">
+              {mode === "move"
+                ? t("wizard.second.moveUnsupported")
+                : t("wizard.second.desc")}
+            </p>
+            {secondEnabled && mode !== "move" && (
+              <div className="mt-1 flex flex-col gap-1.5" data-testid="wizard-second-panel">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={secondRoot}
+                    onChange={(e) => setSecondRoot(e.target.value)}
+                    placeholder={t("wizard.second.rootPlaceholder")}
+                    aria-label={t("wizard.second.root")}
+                    className="min-w-0 flex-1 rounded-md border border-edge bg-bg px-2 py-1.5 font-mono text-[11px] text-text-primary outline-none transition-colors focus:border-accent"
+                    data-testid="wizard-second-root"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void browseSecondRoot()}
+                    className="shrink-0 rounded-md border border-edge px-2 py-1.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    data-testid="wizard-second-browse"
+                  >
+                    {t("wizard.browse")}
+                  </button>
+                </div>
+                {secondRoot.trim() === "" && (
+                  <p className="pl-0.5 text-[11px] text-yellow-300">{t("wizard.second.required")}</p>
+                )}
+                <p className="text-[11px] leading-relaxed text-text-muted">
+                  {t("wizard.second.sameTemplate")}
+                </p>
+              </div>
+            )}
+          </div>
 
           {/* 并发流数已下沉库属性（设置页/新建库对话框修改），向导不再展示控件 */}
 

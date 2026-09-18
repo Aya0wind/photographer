@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "motion/react";
 import type { JobRow, JobStatus } from "@/ipc/api";
 import { formatBytes, formatDateTime, formatDuration, formatSpeed } from "@/lib/format";
 import { useImportStore, type ActiveJob, type JobSummary } from "@/stores/importStore";
+import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
 import LogViewer from "./LogViewer";
 
 /**
@@ -140,7 +141,7 @@ function CurrentJobCard({ job }: { job: ActiveJob | null }) {
   );
 }
 
-function HistoryTable() {
+function HistoryTable({ onOpenClean }: { onOpenClean: (jobId: number) => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const history = useImportStore((s) => s.history);
@@ -174,12 +175,15 @@ function HistoryTable() {
               <th className="w-24 px-2 py-1.5 text-right font-normal">{t("tasks.columnFiles")}</th>
               <th className="w-24 px-2 py-1.5 text-right font-normal">{t("tasks.columnDuration")}</th>
               <th className="w-36 px-2 py-1.5 text-right font-normal">{t("tasks.columnStartedAt")}</th>
+              <th className="w-20 px-2 py-1.5" aria-label={t("tasks.columnActions")} />
             </tr>
           </thead>
           <tbody>
             {history.rows.map((row: JobRow) => {
               const expanded = expandedId === row.id;
               const duration = row.finishedAt !== null ? row.finishedAt - row.startedAt : null;
+              // 已完成 + volume/MTP 源（folder 源是本地纳管）才可清卡
+              const cleanable = row.status === "done" && !row.deviceId.startsWith("FOLDER:");
               return (
                 <Fragment key={row.id}>
                   <tr
@@ -216,10 +220,26 @@ function HistoryTable() {
                     <td className="px-2 py-1.5 text-right font-mono text-[11px] text-text-muted">
                       {formatDateTime(row.startedAt)}
                     </td>
+                    <td className="px-2 py-1.5 text-right">
+                      {cleanable && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenClean(row.id);
+                          }}
+                          className="text-[11px] text-text-muted transition-colors hover:text-red-400"
+                          data-testid={`history-clean-${row.id}`}
+                          title={t("clean.entry")}
+                        >
+                          {t("clean.entryShort")}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                   {expanded && (
                     <tr key={`${row.id}-logs`} className="border-t border-edge/60">
-                      <td colSpan={6} className="bg-bg/40 px-3 py-2">
+                      <td colSpan={7} className="bg-bg/40 px-3 py-2">
                         <LogViewer jobId={row.id} />
                       </td>
                     </tr>
@@ -246,13 +266,23 @@ function HistoryTable() {
   );
 }
 
-/** SessionFinished 总结弹窗：三卡片 + 耗时/平均速度 + 失败清单重试 */
-function SummaryModal({ summary }: { summary: JobSummary }) {
+/** SessionFinished 总结弹窗：三卡片 + 耗时/平均速度 + 失败清单重试 + 清卡入口 */
+function SummaryModal({
+  summary,
+  onOpenClean,
+}: {
+  summary: JobSummary;
+  onOpenClean: (jobId: number) => void;
+}) {
   const { t } = useTranslation();
   const dismissSummary = useImportStore((s) => s.dismissSummary);
   const retryFailed = useImportStore((s) => s.retryFailed);
+  const jobSources = useImportStore((s) => s.jobSources);
   const [retrying, setRetrying] = useState(false);
   const [retryResult, setRetryResult] = useState<number | null | "error">(null);
+
+  // 清卡入口只对 volume/MTP 源任务显示（folder 源是本地纳管，不可清）
+  const cleanable = jobSources[summary.jobId] !== undefined && jobSources[summary.jobId] !== "folder";
 
   async function retry(): Promise<void> {
     setRetrying(true);
@@ -376,6 +406,17 @@ function SummaryModal({ summary }: { summary: JobSummary }) {
         >
           {t("summary.close")}
         </button>
+
+        {cleanable && (
+          <button
+            type="button"
+            onClick={() => onOpenClean(summary.jobId)}
+            className="mt-2 w-full rounded-md border border-edge px-4 py-1.5 text-xs text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+            data-testid="summary-clean"
+          >
+            {t("clean.entry")}
+          </button>
+        )}
       </motion.div>
     </motion.div>
   );
@@ -387,6 +428,8 @@ export default function TaskCenter() {
   const activeJobs = useImportStore((s) => s.activeJobs);
   const summary = useImportStore((s) => s.summary);
   const loadHistory = useImportStore((s) => s.loadHistory);
+  // 清卡对话框：总结弹窗与历史行共用一个实例
+  const [cleanJobId, setCleanJobId] = useState<number | null>(null);
 
   // 进入页面时重置加载历史首页（幂等：loading 防重入）
   useEffect(() => {
@@ -407,12 +450,19 @@ export default function TaskCenter() {
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         <div className="flex flex-col gap-2">
           <CurrentJobCard job={current} />
-          <HistoryTable />
+          <HistoryTable onOpenClean={setCleanJobId} />
         </div>
       </div>
       <AnimatePresence>
-        {summary && <SummaryModal key={summary.jobId} summary={summary} />}
+        {summary && (
+          <SummaryModal key={summary.jobId} summary={summary} onOpenClean={setCleanJobId} />
+        )}
       </AnimatePresence>
+      <CleanCardDialogLayer
+        open={cleanJobId !== null}
+        jobId={cleanJobId ?? 0}
+        onClose={() => setCleanJobId(null)}
+      />
     </div>
   );
 }

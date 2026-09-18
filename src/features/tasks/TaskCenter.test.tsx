@@ -9,6 +9,7 @@ import i18n from "@/i18n";
 import TaskCenter from "./TaskCenter";
 import { resetImportStoreForTests, useImportStore, type ActiveJob } from "@/stores/importStore";
 import {
+  cleanCandidates,
   importCancel,
   importJobsPage,
   importLogsPage,
@@ -29,6 +30,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     importRetryFailed: vi.fn(),
     importJobsPage: vi.fn(),
     importLogsPage: vi.fn(),
+    cleanCandidates: vi.fn(),
+    cleanApply: vi.fn(),
   };
 });
 
@@ -38,6 +41,7 @@ const cancelMock = vi.mocked(importCancel);
 const retryMock = vi.mocked(importRetryFailed);
 const jobsPageMock = vi.mocked(importJobsPage);
 const logsPageMock = vi.mocked(importLogsPage);
+const cleanCandidatesMock = vi.mocked(cleanCandidates);
 
 function runningJob(): ActiveJob {
   return {
@@ -91,6 +95,7 @@ beforeEach(() => {
   retryMock.mockReset().mockResolvedValue(null);
   jobsPageMock.mockReset().mockResolvedValue([]);
   logsPageMock.mockReset().mockResolvedValue([]);
+  cleanCandidatesMock.mockReset().mockResolvedValue([]);
 });
 
 describe("当前任务卡", () => {
@@ -332,5 +337,88 @@ describe("总结弹窗", () => {
     renderCenter();
 
     expect(screen.getByText("移动任务 #7")).toBeInTheDocument();
+  });
+});
+
+describe("安全清卡入口（M2）", () => {
+  it("总结弹窗：volume 源任务显示「清理源文件…」并打开对话框", async () => {
+    cleanCandidatesMock.mockResolvedValue([
+      { src: "E:/A.CR3", relPath: "A.CR3", size: 1024, assetId: null },
+    ]);
+    const user = userEvent.setup();
+    renderCenter();
+    act(() => {
+      useImportStore.setState({
+        jobSources: { 7: "volume" },
+        summary: {
+          jobId: 7,
+          mode: "copy",
+          stats: {
+            totalFiles: 3,
+            doneFiles: 3,
+            skippedDuplicates: 0,
+            failedFiles: 0,
+            totalBytes: 30,
+            doneBytes: 30,
+            elapsedMs: 1000,
+            bytesPerSec: 10,
+          },
+          failures: [],
+        },
+      });
+    });
+
+    await user.click(await screen.findByTestId("summary-clean"));
+    expect(await screen.findByTestId("clean-dialog")).toBeInTheDocument();
+    expect(cleanCandidatesMock).toHaveBeenCalledWith(7);
+  });
+
+  it("总结弹窗：folder 源任务不显示清卡入口（本地纳管不可清）", async () => {
+    renderCenter();
+    act(() => {
+      useImportStore.setState({
+        jobSources: { 8: "folder" },
+        summary: {
+          jobId: 8,
+          mode: "copy",
+          stats: {
+            totalFiles: 3,
+            doneFiles: 3,
+            skippedDuplicates: 0,
+            failedFiles: 0,
+            totalBytes: 30,
+            doneBytes: 30,
+            elapsedMs: 1000,
+            bytesPerSec: 10,
+          },
+          failures: [],
+        },
+      });
+    });
+
+    expect(await screen.findByTestId("summary-modal")).toBeInTheDocument();
+    expect(screen.queryByTestId("summary-clean")).not.toBeInTheDocument();
+  });
+
+  it("历史行：已完成 volume 源行显示清卡动作并打开对话框；folder 源/未完成行不显示", async () => {
+    jobsPageMock.mockResolvedValue([
+      jobRow(3, "done"),
+      { ...jobRow(2, "done"), deviceId: "FOLDER:D:\\老照片" },
+      jobRow(1, "cancelled"),
+    ]);
+    const user = userEvent.setup();
+
+    renderCenter();
+
+    // volume 源已完成行：有动作；folder 源已完成行与未完成行：无
+    await screen.findByTestId("history-row-3");
+    expect(screen.getByTestId("history-clean-3")).toBeInTheDocument();
+    expect(screen.queryByTestId("history-clean-2")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("history-clean-1")).not.toBeInTheDocument();
+
+    // 点击动作打开对话框（不触发行展开日志）
+    await user.click(screen.getByTestId("history-clean-3"));
+    expect(await screen.findByTestId("clean-dialog")).toBeInTheDocument();
+    expect(screen.queryByTestId("log-viewer-3")).not.toBeInTheDocument();
   });
 });

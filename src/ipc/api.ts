@@ -38,8 +38,11 @@ export interface ImportPlan {
   duplicatePolicy: DuplicatePolicy;
   skipImported: boolean;
   streams: number;
-  /** 缺省 copy（Rust 侧默认）；move 时后端入库后删除源文件 */
+  /** 缺省 copy（Rust 侧默认）；move 时入库后删除源文件 */
   mode: ImportMode;
+  /** 双目的地（可选）：一次读取同时复制到第二位置；目录模板与主目的地相同。
+   *  后端约束：move + secondTarget 会被拒绝（前端互斥保证不发出）。 */
+  secondTarget?: { targetRoot: string; dirTemplate: string };
 }
 
 export type JobStatus = "running" | "paused" | "done" | "cancelled" | "failed";
@@ -106,7 +109,29 @@ export type AppEvent =
   | { type: "importCancelled"; jobId: number }
   | { type: "importSessionFinished"; jobId: number; stats: ImportStats }
   | { type: "importFileCompleted"; jobId: number; src: string; dst: string; state: string }
+  | { type: "cleanStarted"; jobId: number; count: number; bytes: number }
+  | { type: "cleanFinished"; jobId: number; stats: CleanResultDto }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
+
+// --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
+
+/** 可清理源文件（clean_candidates 返回；已入库且指纹匹配的源文件） */
+export interface CleanCandidateDto {
+  /** 源文件绝对路径 */
+  src: string;
+  /** 库内相对路径 */
+  relPath: string;
+  size: number;
+  assetId: string | null;
+}
+
+/** 清卡结果（clean_apply 返回 / cleanFinished 事件） */
+export interface CleanResultDto {
+  deleted: number;
+  failed: number;
+  freedBytes: number;
+  errors: string[];
+}
 
 // --- IPC 可用性（自愈式，唯一定义在 ./index） -----------------------------------
 export { isIpcAvailable, resetIpcAvailable } from "./index";
@@ -275,6 +300,26 @@ export async function importLogsPage(
 export async function importRetryFailed(jobId: number): Promise<number | null> {
   try {
     return await ipc<number>("import_retry_failed", { jobId });
+  } catch {
+    return null;
+  }
+}
+
+/** 清卡候选预览（该任务已入库且指纹匹配的源文件）；失败/无候选返回 [] */
+export async function cleanCandidates(jobId: number): Promise<CleanCandidateDto[]> {
+  try {
+    const list = await ipc<CleanCandidateDto[]>("clean_candidates", { jobId });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 执行清卡（后端删除前逐文件复验指纹）；进行中/完成态由 cleanStarted/cleanFinished 事件驱动。
+ *  返回值仅作兜底（命令失败返回 null），UI 状态以事件为准。 */
+export async function cleanApply(jobId: number): Promise<CleanResultDto | null> {
+  try {
+    return await ipc<CleanResultDto>("clean_apply", { jobId });
   } catch {
     return null;
   }

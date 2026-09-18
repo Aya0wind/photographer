@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { formatBytes, formatSpeed } from "@/lib/format";
 import type { ImportMode } from "@/ipc/api";
 import { useImportStore } from "@/stores/importStore";
+import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
 
 /**
  * 全局导入进度卡（LR 式后台导入）：挂在 AppShell，任何页面右下角常驻。
@@ -216,7 +217,13 @@ function ActiveCardView({ card }: { card: ActiveCard }) {
 function FinishedCardView({ card }: { card: FinishedCard }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const jobSources = useImportStore((s) => s.jobSources);
+  const [cleanOpen, setCleanOpen] = useState(false);
   const isMove = card.mode === "move";
+  // 清卡入口只对 volume/MTP 源任务显示（folder 源是本地纳管，不可清）
+  const cleanable = card.kind === "done" && jobSources[card.jobId] !== undefined
+    ? jobSources[card.jobId] !== "folder"
+    : false;
 
   return (
     <motion.div
@@ -263,6 +270,20 @@ function FinishedCardView({ card }: { card: FinishedCard }) {
         )}
         <p className="mt-1.5 text-[10px] text-text-muted">{t("importCard.viewSummary")}</p>
       </button>
+
+      {cleanable && (
+        <div className="mt-2.5 border-t border-edge/60 pt-2.5">
+          <button
+            type="button"
+            onClick={() => setCleanOpen(true)}
+            className="w-full rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+            data-testid="import-card-clean"
+          >
+            {t("clean.entry")}
+          </button>
+        </div>
+      )}
+      <CleanCardDialogLayer open={cleanOpen} jobId={card.jobId} onClose={() => setCleanOpen(false)} />
     </motion.div>
   );
 }
