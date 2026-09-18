@@ -194,14 +194,15 @@ describe("快捷按钮与导航", () => {
     expect(cancelMock).toHaveBeenCalledWith(7);
   });
 
-  it("点击卡片主体跳转任务中心", async () => {
+  it("卡片主体为纯展示不跳转（用户规定：无需点击进任务页）", async () => {
     renderCard();
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 100 });
     const user = userEvent.setup();
 
     await user.click(await screen.findByTestId("import-card-body"));
 
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    // 保持在当前路由（tasks 探针路由不出现）
+    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
   });
 });
 
@@ -323,7 +324,7 @@ describe("错误卡（appError）", () => {
     expect(screen.getByTestId("import-card")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("import-card-close"));
 
-    // 收起：活跃卡消失（导入在后台继续，无 UI 打扰）
-    expect(screen.queryByTestId("import-card")).not.toBeInTheDocument();
+    // 收起：活跃卡消失（AnimatePresence 150ms 退场，按工程约定 waitFor 断言）
+    await waitFor(() => expect(screen.queryByTestId("import-card")).not.toBeInTheDocument());
   });
 

@@ -121,7 +121,6 @@ function GlyphAlert({ size = 14 }: { size?: number }) {
 /** 活跃任务卡：进度条 + 速度/当前文件 + 暂停/继续/取消快捷键 */
 function ActiveCardView({ card, onClose }: { card: ActiveCard; onClose: () => void }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const pauseJob = useImportStore((s) => s.pauseJob);
   const resumeJob = useImportStore((s) => s.resumeJob);
   const cancelJob = useImportStore((s) => s.cancelJob);
@@ -171,12 +170,8 @@ function ActiveCardView({ card, onClose }: { card: ActiveCard; onClose: () => vo
           </button>
         </div>
       </div>
-      <button
-        type="button"
-        onClick={() => navigate("/tasks")}
-        className="mt-2 block w-full text-left"
-        data-testid="import-card-body"
-      >
+      {/* 信息区：纯展示，不跳转（用户规定：卡片无需点击进任务页，任务中心有侧栏入口） */}
+      <div data-testid="import-card-body" className="mt-2">
         <div
           className="h-1.5 w-full overflow-hidden rounded-full bg-panel"
           role="progressbar"
@@ -207,7 +202,7 @@ function ActiveCardView({ card, onClose }: { card: ActiveCard; onClose: () => vo
         >
           {card.currentFile || "—"}
         </p>
-      </button>
+      </div>
 
       <div className="mt-2.5 flex gap-1.5 border-t border-edge/60 pt-2.5">
         <button
