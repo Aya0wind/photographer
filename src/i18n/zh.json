@@ -142,6 +142,7 @@
   "common.back": "上一步",
   "common.next": "下一步",
   "common.done": "完成",
+  "common.close": "关闭",
   "common.cancel": "取消",
 
   "deviceDialog.title": "发现新设备",
@@ -243,6 +244,7 @@
   "jobStatus.cancelled": "已取消",
   "jobStatus.failed": "失败",
 
+  "importCard.dismissHint": "收起（导入继续后台执行）",
   "importCard.jobCopy": "复制任务 #{{id}}",
   "importCard.jobMove": "移动任务 #{{id}}",
   "importCard.countRow": "成功 {{done}} · 跳过 {{skipped}} · 失败 {{failed}}",

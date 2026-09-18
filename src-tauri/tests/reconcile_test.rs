@@ -146,6 +146,7 @@ fn repeated_reconcile_with_same_truth_is_idempotent() {
     state.devices.lock().unwrap().insert(
         pnp_lower.clone(),
         ipc::DeviceEntry {
+            scan: ipc::DeviceScan::Ready,
             source,
             snapshot: devices::orchestrator::DeviceSnapshot {
                 id: pnp_lower.clone(),

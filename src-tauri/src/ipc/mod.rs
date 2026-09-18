@@ -26,6 +26,21 @@ use serde::{Deserialize, Serialize};
 pub struct DeviceEntry {
     pub source: Arc<dyn DeviceSource>,
     pub snapshot: DeviceSnapshot,
+    pub scan: DeviceScan,
+}
+
+#[derive(Default)]
+pub enum DeviceScan {
+    Scanning,
+    #[default]
+    Ready,
+    Failed(String, std::time::Instant),
+}
+
+impl DeviceEntry {
+    pub fn ready(source: Arc<dyn DeviceSource>, snapshot: DeviceSnapshot) -> Self {
+        Self { source, snapshot, scan: DeviceScan::Ready }
+    }
 }
 
 /// 活跃导入（M1 约束：同时只允许一个）。
@@ -224,12 +239,11 @@ impl From<&crate::devices::FileEntry> for FileEntryDto {
 /// 列出指定设备的全部媒体文件（透传 DeviceSource::list；MTP 源较慢属预期）。
 pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, String> {
     let key = crate::devices::normalize_device_id(id);
-    let devices = state.devices.lock().expect("devices mutex poisoned");
-    let entry = devices
-        .get(&key)
-        .ok_or_else(|| format!("设备 {id} 不在线"))?;
-    let files = entry
-        .source
+    let source = {
+        let devices = state.devices.lock().expect("devices mutex poisoned");
+        Arc::clone(&devices.get(&key).ok_or_else(|| format!("设备 {id} 不在线"))?.source)
+    };
+    let files = source
         .list()
         .map_err(|e| format!("枚举设备文件失败: {e}"))?;
     Ok(files.iter().map(FileEntryDto::from).collect())
@@ -310,18 +324,20 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
         .skip_imported;
     let db = active_library_db(state)?;
     let key = crate::devices::normalize_device_id(id);
-    let snapshot = {
+    let source = {
         let devices = state.devices.lock().expect("devices mutex poisoned");
         let entry = devices
             .get(&key)
             .ok_or_else(|| format!("设备 {id} 不在线"))?;
-        orchestrator::scan_device(&*entry.source, &db, skip_imported)
-            .map_err(|e| format!("扫描设备失败: {e}"))?
+        Arc::clone(&entry.source)
     };
+    let snapshot = orchestrator::scan_device(&*source, &db, skip_imported)
+        .map_err(|e| format!("扫描设备失败: {e}"))?;
     let mut devices = state.devices.lock().expect("devices mutex poisoned");
-    if let Some(entry) = devices.get_mut(id) {
-        entry.snapshot = snapshot.clone();
-    }
+    let entry = devices.get_mut(&key).filter(|entry| Arc::ptr_eq(&entry.source, &source))
+        .ok_or_else(|| format!("设备 {id} 已断开或重新连接"))?;
+    entry.snapshot = snapshot.clone();
+    entry.scan = DeviceScan::Ready;
     Ok(snapshot)
 }
 
@@ -339,6 +355,7 @@ pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, Strin
         .insert(
             id.clone(),
             DeviceEntry {
+                scan: DeviceScan::Ready,
                 source,
                 snapshot: DeviceSnapshot {
                     id: id.clone(),

@@ -119,7 +119,7 @@ function GlyphAlert({ size = 14 }: { size?: number }) {
 }
 
 /** 活跃任务卡：进度条 + 速度/当前文件 + 暂停/继续/取消快捷键 */
-function ActiveCardView({ card }: { card: ActiveCard }) {
+function ActiveCardView({ card, onClose }: { card: ActiveCard; onClose: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const pauseJob = useImportStore((s) => s.pauseJob);
@@ -144,27 +144,41 @@ function ActiveCardView({ card }: { card: ActiveCard }) {
       data-testid="import-card"
       data-phase={isPaused ? "paused" : "running"}
     >
-      <button
-        type="button"
-        onClick={() => navigate("/tasks")}
-        className="block w-full text-left"
-        data-testid="import-card-body"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <h3 className="truncate text-xs font-semibold text-text-primary">
-            {t(card.mode === "move" ? "importCard.jobMove" : "importCard.jobCopy", { id: card.jobId })}
-          </h3>
+      {/* 标题行独立于可点击主体：关闭钮不得嵌套在 button 内（HTML 禁止嵌套交互元素） */}
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="truncate text-xs font-semibold text-text-primary">
+          {t(card.mode === "move" ? "importCard.jobMove" : "importCard.jobCopy", { id: card.jobId })}
+        </h3>
+        <div className="flex shrink-0 items-center gap-1.5">
           <span
-            className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
               isPaused ? "bg-yellow-400/15 text-yellow-300" : "bg-accent/15 text-accent"
             }`}
           >
             {t(isPaused ? "jobStatus.paused" : "jobStatus.running")}
           </span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            title={t("importCard.dismissHint")}
+            data-testid="import-card-close"
+            className="rounded p-0.5 text-text-muted transition-colors hover:text-text-primary"
+          >
+            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 4l8 8M12 4l-8 8" />
+            </svg>
+          </button>
         </div>
-
+      </div>
+      <button
+        type="button"
+        onClick={() => navigate("/tasks")}
+        className="mt-2 block w-full text-left"
+        data-testid="import-card-body"
+      >
         <div
-          className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-panel"
+          className="h-1.5 w-full overflow-hidden rounded-full bg-panel"
           role="progressbar"
           aria-valuenow={Math.round(pct)}
           aria-valuemin={0}
@@ -352,6 +366,9 @@ export default function ImportProgressCard() {
   const [finished, setFinished] = useState<FinishedCard | null>(null);
   // 已捕获过终态快照的任务 id：后续 store 变化（如用户关闭总结弹窗）不重复弹卡
   const capturedRef = useRef<number | null>(null);
+  // 用户手动收起的任务 id：导入继续后台执行，卡片不再打扰（新任务重新出现）
+  // state（非 ref）：收起即时重渲染，暂停态（无进度事件）也能立即消失
+  const [dismissedJobs, setDismissedJobs] = useState<Set<number>>(() => new Set());
 
   useEffect(() => {
     const job = currentJobId !== null ? activeJobs[currentJobId] ?? null : null;
@@ -384,7 +401,7 @@ export default function ImportProgressCard() {
 
   // v1 单任务：活跃卡优先；终态卡仅在无活跃任务时停留展示（多任务并发时改为数组堆叠）
   const cards: Array<{ type: "active"; card: ActiveCard } | { type: "finished"; card: FinishedCard }> = [];
-  if (job && (job.status === "running" || job.status === "paused")) {
+  if (job && (job.status === "running" || job.status === "paused") && !dismissedJobs.has(job.jobId)) {
     cards.push({
       type: "active",
       card: {
@@ -412,7 +429,14 @@ export default function ImportProgressCard() {
         )}
         {cards.map((entry) =>
           entry.type === "active" ? (
-            <ActiveCardView key={`active-${entry.card.jobId}`} card={entry.card} />
+            <ActiveCardView
+              key={`active-${entry.card.jobId}`}
+              card={entry.card}
+              onClose={() => {
+                setDismissedJobs((prev) => new Set(prev).add(entry.card.jobId));
+                setFinished(null);
+              }}
+            />
           ) : (
             <FinishedCardView key={`finished-${entry.card.jobId}`} card={entry.card} />
           ),

@@ -318,7 +318,7 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
         new_files: 0,
     };
     let mut devices_map = HashMap::new();
-    devices_map.insert(source.id(), DeviceEntry { source, snapshot });
+    devices_map.insert(source.id(), DeviceEntry::ready(source, snapshot));
     AppState {
         settings: Mutex::new(settings),
         config_dir: db_dir.join("config"),

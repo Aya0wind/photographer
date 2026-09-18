@@ -44,7 +44,7 @@ fn device_registered_is_case_insensitive_for_wpd_ids() {
         .devices
         .lock()
         .unwrap()
-        .insert(lower.clone(), ipc::DeviceEntry { source, snapshot });
+        .insert(lower.clone(), ipc::DeviceEntry::ready(source, snapshot));
 
     // 大写到达形式的幂等判定命中（枚举空窗期不误报"未找到"）
     assert!(device_registered(&state, &lower));

@@ -33,11 +33,12 @@ pub struct DeviceSnapshot {
 }
 
 /// 扫描设备：list → 分类统计 + 新文件预判。
-pub fn scan_device(
+pub fn scan_device<'a>(
     source: &dyn DeviceSource,
-    db: &Db,
+    db: impl Into<Option<&'a Db>>,
     skip_imported: bool,
 ) -> DeviceResult<DeviceSnapshot> {
+    let db = db.into();
     let entries = source.list()?;
     let mut snapshot = DeviceSnapshot {
         id: source.id(),
@@ -58,7 +59,7 @@ pub fn scan_device(
         *snapshot.files_by_kind.entry(kind).or_insert(0) += 1;
 
         // 新文件 = 未开启跳过导入，或宽松键未命中既有资产
-        if !skip_imported || !loose_imported(db, entry) {
+        if !skip_imported || !db.is_some_and(|db| loose_imported(db, entry)) {
             snapshot.new_files += 1;
         }
     }

@@ -98,6 +98,9 @@ pub struct CleanStats {
     rename_all_fields = "camelCase"
 )]
 pub enum AppEvent {
+    /// 内部系统通知；不转发给界面。最终在线状态由设备编排器发布。
+    DeviceTopologyChanged { id: String, arrived: bool },
+    DeviceScanFailed { id: String, message: String },
     // 设备
     DeviceArrived {
         id: String,

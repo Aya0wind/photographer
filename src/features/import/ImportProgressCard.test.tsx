@@ -315,3 +315,15 @@ describe("错误卡（appError）", () => {
     expect(screen.queryByTestId("import-card-error")).not.toBeInTheDocument();
   });
 });
+
+  it("活跃卡有关闭按钮：收起后不再打扰，导入不受影响，新任务重新出现", async () => {
+    emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
+    renderCard();
+
+    expect(screen.getByTestId("import-card")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("import-card-close"));
+
+    // 收起：活跃卡消失（导入在后台继续，无 UI 打扰）
+    expect(screen.queryByTestId("import-card")).not.toBeInTheDocument();
+  });
+

@@ -23,6 +23,8 @@ pub struct DeviceSnapshotInfo {
     pub bytes_total: u64,
     pub new_files: u64,
     pub connected: bool,
+    pub scan_status: &'static str,
+    pub scan_error: Option<String>,
 }
 
 impl From<&DeviceSnapshot> for DeviceSnapshotInfo {
@@ -35,6 +37,8 @@ impl From<&DeviceSnapshot> for DeviceSnapshotInfo {
             bytes_total: snapshot.bytes_total,
             new_files: snapshot.new_files,
             connected: true,
+            scan_status: "ready",
+            scan_error: None,
         }
     }
 }
@@ -45,7 +49,18 @@ pub fn device_list(state: State<SharedState>) -> Vec<DeviceSnapshotInfo> {
     let devices = state.devices.lock().expect("devices mutex poisoned");
     devices
         .values()
-        .map(|entry| DeviceSnapshotInfo::from(&entry.snapshot))
+        .map(|entry| {
+            let mut info = DeviceSnapshotInfo::from(&entry.snapshot);
+            match &entry.scan {
+                super::DeviceScan::Scanning => info.scan_status = "scanning",
+                super::DeviceScan::Ready => {},
+                super::DeviceScan::Failed(message, _) => {
+                    info.scan_status = "failed";
+                    info.scan_error = Some(message.clone());
+                }
+            }
+            info
+        })
         .collect()
 }
 
