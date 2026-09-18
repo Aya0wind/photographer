@@ -1055,6 +1055,14 @@ export default function ImportWizard() {
   const selectedFolderPath =
     device?.kind === "folder" ? normalizeFsPath(device.id.slice("FOLDER:".length)) : null;
 
+  // 设备区只渲染真实设备（volume/mtp）：folder 是「导入源」不是设备——
+  // 其统计在中栏统计条、选中态由文件系统树高亮表达，设备区不重复呈现。
+  // devices 数组机制不动（选中链路/jobSources 仍依赖 folder 快照在表中）。
+  const visibleDevices = useMemo(
+    () => devices.filter((d) => d.kind !== "folder"),
+    [devices],
+  );
+
   // 选择状态（路径集合）；设备切换时重置为全选（默认导入全部）
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -1456,7 +1464,7 @@ export default function ImportWizard() {
             onToggle={() => togglePanelSection("devices")}
           >
             <div className="px-3 pb-3">
-              {devices.length === 0 ? (
+              {visibleDevices.length === 0 ? (
                 <p className="py-4 text-center text-xs leading-relaxed text-text-muted">
                   {t("wizard.noDevice")}
                 </p>
@@ -1464,7 +1472,7 @@ export default function ImportWizard() {
                 <>
                   {/* 设备列表：行=图标+名称+文件数徽标；点击=选中该设备（中栏立即切换清单） */}
                   <div className="flex flex-col gap-0.5" data-testid="wizard-device-list">
-                    {devices.map((d) => {
+                    {visibleDevices.map((d) => {
                       const isSelected = d.id === selectedId;
                       return (
                         <button
@@ -1501,8 +1509,9 @@ export default function ImportWizard() {
                     })}
                   </div>
 
-                  {/* 选中设备详细信息（仅当前选中）+ 重新扫描 */}
-                  {device && (
+                  {/* 选中设备详细信息（仅当前选中的真实设备；选中文件夹时隐藏——
+                      其选中态由树高亮表达，统计在中栏，设备区不重复呈现）+ 重新扫描 */}
+                  {device && device.kind !== "folder" && (
                     <>
                       <div className="mt-2.5 flex justify-end">
                         <button

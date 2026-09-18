@@ -529,7 +529,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(listMock).toHaveBeenLastCalledWith("C:\\");
   });
 
-  it("点选文件夹：folderScan 入库+选中+高亮，信息卡显示本地文件夹", async () => {
+  it("点选文件夹：folderScan 入库并选中（树高亮），设备区不出现文件夹条目", async () => {
     seedSession();
     const user = userEvent.setup();
     listMock
@@ -543,14 +543,17 @@ describe("文件系统目录树（LR 式源面板）", () => {
 
     expect(scanMock).toHaveBeenCalledWith("D:\\照片");
     expect(useImportStore.getState().devices.some((d) => d.id === "FOLDER:D:\\照片")).toBe(true);
-    const info = await screen.findByTestId("wizard-device-info");
-    expect(info).toHaveTextContent("本地文件夹");
-    expect(info).toHaveTextContent("照片");
-    expect(info).toHaveTextContent("10.0 MB");
+    // 树节点高亮 = 文件夹选中态
     const node = screen
       .getAllByTestId("wizard-fs-node")
       .find((el) => el.getAttribute("data-path") === "D:\\照片");
     expect(node?.getAttribute("data-selected")).toBe("true");
+    // 设备区列表不含 folder 条目；无任何行高亮；信息卡隐藏（统计在中栏，不重复）
+    const rows = screen.getAllByTestId("wizard-device-item");
+    expect(rows).toHaveLength(2);
+    expect(rows.some((el) => el.getAttribute("data-device-id")?.startsWith("FOLDER:"))).toBe(false);
+    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
+    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
   });
 
   it("修复回归：设备在场 + URL device 值失效时点文件夹仍能选中（显式选中优先于回落）", async () => {
@@ -566,17 +569,12 @@ describe("文件系统目录树（LR 式源面板）", () => {
     renderWizard("?device=BROKEN"); // URL 值不在设备表 → 无显式选中时回落 devices[0]=E:
     await user.click(await screen.findByRole("button", { name: "照片" }));
 
-    // 文件夹被显式选中：列表行高亮 FOLDER 设备而非回落 E:
-    const folderRow = await waitFor(() => {
-      const row = screen
-        .getAllByTestId("wizard-device-item")
-        .find((el) => el.getAttribute("data-device-id") === "FOLDER:D:\\照片");
-      expect(row).toBeDefined();
-      return row!;
-    });
-    expect(folderRow).toHaveAttribute("data-selected", "true");
-    expect(screen.getByTestId("wizard-device-info")).toHaveTextContent("本地文件夹");
-    // 树节点同步高亮
+    // 文件夹被显式选中（而非回落 E:）：设备区无 folder 行、无任何行高亮、信息卡隐藏；
+    // 选中态由树节点高亮表达
+    const rows = screen.getAllByTestId("wizard-device-item");
+    expect(rows).toHaveLength(2);
+    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
+    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
     const node = screen
       .getAllByTestId("wizard-fs-node")
       .find((el) => el.getAttribute("data-path") === "D:\\照片");
@@ -594,17 +592,13 @@ describe("文件系统目录树（LR 式源面板）", () => {
 
     expect(openMock).toHaveBeenCalledWith({ directory: true });
     expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
-    const info = await screen.findByTestId("wizard-device-info");
-    expect(info).toHaveTextContent("本地文件夹");
-    // 选中源切到文件夹（设备列表行高亮切到 FOLDER: 设备）
-    const folderRow = screen
-      .getAllByTestId("wizard-device-item")
-      .find((el) => el.getAttribute("data-device-id") === "FOLDER:D:\\老照片");
-    expect(folderRow).toHaveAttribute("data-selected", "true");
-    const eRow = screen
-      .getAllByTestId("wizard-device-item")
-      .find((el) => el.getAttribute("data-device-id") === "E:");
-    expect(eRow).toHaveAttribute("data-selected", "false");
+    // 选中源切到文件夹：设备区无高亮行、信息卡隐藏（folder 不是设备条目）
+    const rows = await screen.findAllByTestId("wizard-device-item");
+    expect(rows).toHaveLength(2); // E: + MTP:CAM，无 FOLDER 行
+    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
+    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
+    // 中栏统计条正常呈现文件夹清单（统计不重复放设备区）
+    expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
   });
 
   it("folderScan 失败（IPC 不可用）时保持原源并给出红字提示", async () => {
