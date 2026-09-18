@@ -139,10 +139,12 @@ fn app_event_fields_serialize_camel_case() {
         job_id: 7,
         done_files: 1,
         done_bytes: 2,
+        settled_bytes: 3,
         current_file: "a.jpg".into(),
         bytes_per_sec: 3.0,
     })
     .unwrap();
+    assert!(p.get("settledBytes").is_some(), "新字段 camelCase: {p}");
     assert!(
         p.get("doneFiles").is_some() && p.get("bytesPerSec").is_some(),
         "progress 字段: {p}"
