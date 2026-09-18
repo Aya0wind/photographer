@@ -466,7 +466,7 @@ impl Engine {
                         Ok((FileState::Verified, dst)) => {
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
-                            last_completed_src = entry.id.clone();
+                            last_completed_src = entry.rel_path.clone();
                             // move：journal verified + assets 入库之后删源
                             //（删源失败≠导入失败：warn 日志 + 独立计数）
                             if self.plan.mode == ImportMode::Move {
@@ -495,7 +495,7 @@ impl Engine {
                         Ok((FileState::Skipped, dst)) => {
                             counters.skipped += 1;
                             counters.skipped_bytes += entry.size;
-                            last_completed_src = entry.id.clone();
+                            last_completed_src = entry.rel_path.clone();
                             self.bus.publish(AppEvent::ImportFileCompleted {
                                 job_id,
                                 src: entry.id.clone(),
