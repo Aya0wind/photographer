@@ -9,12 +9,6 @@ use tauri::Manager;
 use crate::ipc::AppState;
 use crate::settings::{Settings, SettingsManager};
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -35,10 +29,9 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let config_dir = app
-                .path()
-                .app_config_dir()
-                .expect("failed to resolve app config dir");
+            // 存储分离（用户规定）：应用数据（settings/DB/缓存/日志）固定在 I:\SmartPhoto，
+            // 与照片库根（如 Y:\照片）彻底分开。库根由用户在引导向导中配置。
+            let config_dir = std::path::PathBuf::from(r"I:\SmartPhoto");
             std::fs::create_dir_all(&config_dir)?;
             let settings = SettingsManager::load(&config_dir).unwrap_or_else(|err| {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
@@ -76,7 +69,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::settings::settings_set,
-            greet
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

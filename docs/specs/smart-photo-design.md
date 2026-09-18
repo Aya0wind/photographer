@@ -142,7 +142,9 @@ settings 由 settings.json 承载（带 schema_version）
 
 ### 5.5 缩略图管线
 
-内嵌预览提取（RAW 不完整解码）→ libjpeg-turbo 解码 → fast_image_resize → 三级缓存（256 网格 / 1080p / 全尺寸按需），JPEG q85 落盘 `.sp_cache/`（库根，哈希分片目录，20GB LRU），内存 LRU 2GB。看图器：内嵌全尺寸预览→GPU 纹理平铺缩放平移；"精览"按钮按需 libraw 半尺寸 demosaic。视频封面：ffmpeg 硬解定点抽帧。
+内嵌预览提取（RAW 不完整解码）→ libjpeg-turbo 解码 → fast_image_resize → 三级缓存（256 网格 / 1080p / 全尺寸按需），JPEG q85 落盘 `I:\SmartPhoto\cache\thumbs\`（哈希分片目录，20GB LRU），内存 LRU 2GB。看图器：内嵌全尺寸预览→GPU 纹理平铺缩放平移；"精览"按钮按需 libraw 半尺寸 demosaic。视频封面：ffmpeg 硬解定点抽帧。
+
+**存储分离原则（用户规定）**：应用数据与照片存储彻底分开——应用数据（SQLite/缩略图/向量/模型/日志/settings.json）全部在 I 盘固定根 `I:\SmartPhoto\`（v1 固定，含 data/cache/models/logs 子目录）；照片库根独立配置（本机默认 `Y:\照片`，纯照片，应用绝不向库根写缓存类数据）。
 
 ### 5.6 AI 索引
 
@@ -236,7 +238,7 @@ v1 明确不做：运行时插件加载（API 按可暴露标准设计）、主�
 | 双目的地 | 关 |
 | AI | 引导三选一；仅空闲；CPU 50%；GPU 开（回退 CPU） |
 | 画廊/看图 | 三档缩略图；连拍折叠开；按拍摄时间排序；EXIF 收起；视频预览自动播放关+静音；精览按需 |
-| 文件写入 | XMP 导入库开/外部库关；缓存 库根/.sp_cache 20GB；监视文件夹默认空 |
+| 文件写入 | XMP 导入库开/外部库关；缓存 I:\SmartPhoto\cache 20GB；监视文件夹默认空 |
 | 系统 | 自启关；关闭=最小化托盘；系统+应用内通知；中文；稳定更新通道 |
 | 高级 | 日志 info；性能面板可显示 |
 
@@ -268,3 +270,11 @@ smart_photo/
 │  ├─ components/ stores/ hooks/ ipc/ i18n/
 └─ docs/specs/ docs/plans/
 ```
+
+## 13. 测试策略（全期强制标准）
+
+- **测试跟上实现**：任何功能不合入无测试的实现；Rust 任务 TDD（先红后绿）；修 bug 必先写回归测试
+- **自动化**：`cargo test`（单测+tempdir 集成测试）+ 前端 vitest + @testing-library/react（store 逻辑/向导状态机/兜底合并/组件交互）；里程碑验收含"测试全绿"硬门，CI 脚本一键跑全部
+- **易错路径重点覆盖**（专项测试清单）：哈希与分层查重、断点恢复/中断续传、命名模板（令牌/非法字符/冲突后缀/无EXIF回退）、DB 迁移幂等与旧版本兼容、WPD 对象解析与错误分支、事件节流、损坏 JSON 恢复、并发流下的 journal 状态机、大库 keyset 分页边界
+- **真实素材只读测试**：Y:\照片（约 1.85 万文件，JPG/NEF/ARW/视频/XMP）可用于原地索引/EXIF/去重的只读验证；一切写入测试只用 tempdir
+- 手动验收清单随里程碑归档（热插拔/真机 WPD 等无法自动化的项）
