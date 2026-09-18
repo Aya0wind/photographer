@@ -20,19 +20,41 @@ const SETTINGS_FILE: &str = "settings.json";
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub schema_version: u32,
-    pub library_root: Option<String>,
     pub onboarding_completed: bool,
+    /// 库注册表（达芬奇式：每个库是独立数据单元，见设计文档 §5.11）。
+    pub libraries: Vec<Library>,
+    pub active_library_id: Option<String>,
     pub import: ImportSettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
+}
+
+impl Settings {
+    /// 当前激活的库（按 id 在注册表中查找；未设置或找不到返回 None）。
+    pub fn active_library(&self) -> Option<&Library> {
+        let id = self.active_library_id.as_ref()?;
+        self.libraries.iter().find(|lib| &lib.id == id)
+    }
+}
+
+/// 库 = 独立数据单元：`db_dir` 数据库目录自包含（SQLite/缩略图/向量/日志），
+/// `photo_root` 照片存储目录与之分离；两者均可迁移。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Library {
+    pub id: String,
+    pub name: String,
+    pub db_dir: String,
+    pub photo_root: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            library_root: None,
             onboarding_completed: false,
+            libraries: Vec::new(),
+            active_library_id: None,
             import: ImportSettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),

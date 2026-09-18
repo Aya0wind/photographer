@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use smart_photo_lib::settings::{
-    AiSettings, DuplicatePolicy, ImportSettings, IndexSchedule, Settings, SettingsError,
+    AiSettings, DuplicatePolicy, ImportSettings, IndexSchedule, Library, Settings, SettingsError,
     SettingsManager, SystemSettings, SCHEMA_VERSION,
 };
 
@@ -38,7 +38,8 @@ fn default_settings_match_spec() {
 
     assert_eq!(s.schema_version, 1);
     assert_eq!(s.schema_version, SCHEMA_VERSION);
-    assert_eq!(s.library_root, None);
+    assert!(s.libraries.is_empty());
+    assert_eq!(s.active_library_id, None);
     assert!(!s.onboarding_completed);
 
     assert!(s.import.prompt_on_device);
@@ -70,7 +71,13 @@ fn load_missing_file_returns_defaults() {
 fn save_then_load_roundtrip_with_custom_values() {
     let dir = temp_dir();
     let s = Settings {
-        library_root: Some("D:\\照片库".to_string()),
+        libraries: vec![Library {
+            id: "lib-1".to_string(),
+            name: "主库".to_string(),
+            db_dir: r"I:\SmartPhoto\主库".to_string(),
+            photo_root: r"Y:\照片".to_string(),
+        }],
+        active_library_id: Some("lib-1".to_string()),
         onboarding_completed: true,
         import: ImportSettings {
             dir_template: "{YYYY}/{原文件名}".to_string(),
@@ -146,13 +153,15 @@ fn old_json_with_missing_fields_is_filled_with_defaults() {
     let dir = temp_dir();
     fs::write(
         settings_path(dir.path()),
-        r#"{"schemaVersion":1,"libraryRoot":"D:/Photos","onboardingCompleted":true}"#,
+        r#"{"schemaVersion":1,"onboardingCompleted":true,"libraryRoot":"D:/Photos"}"#,
     )
     .expect("write partial settings");
 
     let s = SettingsManager::load(dir.path()).expect("load");
     assert_eq!(s.schema_version, SCHEMA_VERSION);
-    assert_eq!(s.library_root.as_deref(), Some("D:/Photos"));
+    // 旧字段 libraryRoot 被忽略（serde 默认不拒绝未知字段），库注册表回退默认。
+    assert!(s.libraries.is_empty());
+    assert_eq!(s.active_library_id, None);
     assert!(s.onboarding_completed);
     assert_eq!(s.import, ImportSettings::default());
     assert_eq!(s.ai.index_schedule, IndexSchedule::IdleOnly);
@@ -179,7 +188,8 @@ fn newer_schema_version_is_migration_error() {
 fn serialization_uses_camel_case() {
     let value = serde_json::to_value(Settings::default()).expect("serialize");
     assert_eq!(value["schemaVersion"], serde_json::json!(1));
-    assert_eq!(value["libraryRoot"], serde_json::json!(null));
+    assert_eq!(value["libraries"], serde_json::json!([]));
+    assert_eq!(value["activeLibraryId"], serde_json::json!(null));
     assert_eq!(value["onboardingCompleted"], serde_json::json!(false));
     assert_eq!(value["import"]["promptOnDevice"], serde_json::json!(true));
     assert_eq!(
@@ -198,4 +208,41 @@ fn serialization_uses_camel_case() {
     assert_eq!(value["system"]["launchAtLogin"], serde_json::json!(false));
     assert_eq!(value["system"]["closeToTray"], serde_json::json!(true));
     assert_eq!(value["system"]["language"], serde_json::json!("zh"));
+
+    // Library 结构的 camelCase 字段
+    let lib = serde_json::to_value(Library {
+        id: "a".to_string(),
+        name: "主库".to_string(),
+        db_dir: r"I:\SmartPhoto\主库".to_string(),
+        photo_root: r"Y:\照片".to_string(),
+    })
+    .expect("serialize library");
+    assert_eq!(lib["dbDir"], serde_json::json!(r"I:\SmartPhoto\主库"));
+    assert_eq!(lib["photoRoot"], serde_json::json!(r"Y:\照片"));
+}
+
+#[test]
+fn active_library_lookup_follows_active_id() {
+    let mut s = Settings::default();
+    assert!(s.active_library().is_none());
+
+    let main = Library {
+        id: "lib-main".to_string(),
+        name: "主库".to_string(),
+        db_dir: r"I:\SmartPhoto\主库".to_string(),
+        photo_root: r"Y:\照片".to_string(),
+    };
+    let backup = Library {
+        id: "lib-backup".to_string(),
+        name: "备份库".to_string(),
+        db_dir: r"I:\SmartPhoto\备份库".to_string(),
+        photo_root: r"Z:\照片".to_string(),
+    };
+    s.libraries = vec![main.clone(), backup];
+    s.active_library_id = Some("lib-main".to_string());
+    assert_eq!(s.active_library(), Some(&main));
+
+    // 指向不存在的 id -> None（注册表脏数据容错）
+    s.active_library_id = Some("lib-missing".to_string());
+    assert!(s.active_library().is_none());
 }

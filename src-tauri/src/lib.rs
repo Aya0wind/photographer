@@ -29,9 +29,13 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 存储分离（用户规定）：应用数据（settings/DB/缓存/日志）固定在 I:\SmartPhoto，
-            // 与照片库根（如 Y:\照片）彻底分开。库根由用户在引导向导中配置。
-            let config_dir = std::path::PathBuf::from(r"I:\SmartPhoto");
+            // 存储模型（达芬奇式，设计文档 §5.11）：全局配置固定在应用标准配置目录；
+            // 库（SQLite/缩略图/向量）在各自独立的 dbDir（如 I:\SmartPhoto\<库名>），
+            // 照片根（如 Y:\照片）与数据库目录分离，由引导向导写入库注册表。
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .expect("failed to resolve app config dir");
             std::fs::create_dir_all(&config_dir)?;
             let settings = SettingsManager::load(&config_dir).unwrap_or_else(|err| {
                 eprintln!("failed to load settings, falling back to defaults: {err}");

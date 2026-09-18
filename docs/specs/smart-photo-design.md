@@ -142,9 +142,9 @@ settings 由 settings.json 承载（带 schema_version）
 
 ### 5.5 缩略图管线
 
-内嵌预览提取（RAW 不完整解码）→ libjpeg-turbo 解码 → fast_image_resize → 三级缓存（256 网格 / 1080p / 全尺寸按需），JPEG q85 落盘 `I:\SmartPhoto\cache\thumbs\`（哈希分片目录，20GB LRU），内存 LRU 2GB。看图器：内嵌全尺寸预览→GPU 纹理平铺缩放平移；"精览"按钮按需 libraw 半尺寸 demosaic。视频封面：ffmpeg 硬解定点抽帧。
+内嵌预览提取（RAW 不完整解码）→ libjpeg-turbo 解码 → fast_image_resize → 三级缓存（256 网格 / 1080p / 全尺寸按需），JPEG q85 落盘 `dbDir/cache/thumbs/`（哈希分片目录，20GB LRU），内存 LRU 2GB。看图器：内嵌全尺寸预览→GPU 纹理平铺缩放平移；"精览"按钮按需 libraw 半尺寸 demosaic。视频封面：ffmpeg 硬解定点抽帧。
 
-**存储分离原则（用户规定）**：应用数据与照片存储彻底分开——应用数据（SQLite/缩略图/向量/模型/日志/settings.json）全部在 I 盘固定根 `I:\SmartPhoto\`（v1 固定，含 data/cache/models/logs 子目录）；照片库根独立配置（本机默认 `Y:\照片`，纯照片，应用绝不向库根写缓存类数据）。
+**存储模型（达芬奇式，用户规定）**：见 §5.11——全局配置固定在应用配置目录；库=独立数据单元（数据库目录 dbDir 自包含 + 照片根 photoRoot 分离，本机默认 I:\SmartPhoto\<库名> / Y:\照片），应用绝不向照片根写任何缓存类数据。
 
 ### 5.6 AI 索引
 
@@ -179,6 +179,21 @@ settings 由 settings.json 承载（带 schema_version）
 三入口（引导向导/设置页/高级折叠区）+ 两机制（上下文"记住此选择/不再询问"转配置；每设备序列号独立方案）。settings.json schema_version 迁移，热应用（SettingsChanged 事件）。三原则：默认安全、行为皆可配、危险分级（格式化永远强确认，不可配置为静默）。
 
 配置项总目录见 §10。
+
+### 5.11 存储模型与迁移（达芬奇式库管理，用户规定 2026-09-18）
+
+**层级结构**：
+1. **应用安装目录**：不可变（程序本体）
+2. **全局配置**：`settings.json` 固定于应用标准配置目录（`%APPDATA%\com.smartphoto.app\`）——只存 UI 偏好、**库注册表**、当前激活库 id 等轻量全局项；位置固定，无自举问题
+3. **库（Library）= 独立数据单元**（类似达芬奇的数据库）：`{ id, name, dbDir, photoRoot }`
+   - `dbDir` 数据库目录**自包含**：library.db（SQLite）、缩略图缓存、向量索引、日志（默认 `I:\SmartPhoto\<库名>`）
+   - `photoRoot` 照片存储目录（本机默认 `Y:\照片`），与数据库目录分离
+   - 多库：`settings.libraries[]` + `activeLibraryId`；v1 引导创建首库，库切换 UI 后续里程碑；一次激活一个库，库间数据完全隔离（assets 等表都在各库自己的 library.db 里）
+
+**迁移设计**（目录可配 + 修改后自动迁移，均为库级操作）：
+- 换 `dbDir`：整库目录自包含 → 两阶段移动（复制+逐文件校验 journal → 原子改注册表指向 → 旧目录留 `.bak`）；中断不丢数据
+- 换 `photoRoot`：模式A「仅切换」（旧照片转外部目录语义，零风险）/ 模式B「迁移照片」（复用导入引擎移动模式 + journal + 资产路径批量更新，可暂停恢复）
+- 实现：dbDir 迁移与 photoRoot 模式B 引擎侧随 M2；设置 UI 随 M4
 
 ## 6. 性能设计
 
@@ -238,7 +253,7 @@ v1 明确不做：运行时插件加载（API 按可暴露标准设计）、主�
 | 双目的地 | 关 |
 | AI | 引导三选一；仅空闲；CPU 50%；GPU 开（回退 CPU） |
 | 画廊/看图 | 三档缩略图；连拍折叠开；按拍摄时间排序；EXIF 收起；视频预览自动播放关+静音；精览按需 |
-| 文件写入 | XMP 导入库开/外部库关；缓存 I:\SmartPhoto\cache 20GB；监视文件夹默认空 |
+| 文件写入 | XMP 导入库开/外部库关；库数据库目录默认 I:\SmartPhoto\<库名>（自包含可迁移）；监视文件夹默认空 |
 | 系统 | 自启关；关闭=最小化托盘；系统+应用内通知；中文；稳定更新通道 |
 | 高级 | 日志 info；性能面板可显示 |
 

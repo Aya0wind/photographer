@@ -3,10 +3,19 @@ import { listen } from "@tauri-apps/api/event";
 
 import { ipc } from "@/ipc";
 
+/** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储 */
+export interface Library {
+  id: string;
+  name: string;
+  dbDir: string;
+  photoRoot: string;
+}
+
 export interface Settings {
   schemaVersion: number;
-  libraryRoot: string | null;
   onboardingCompleted: boolean;
+  libraries: Library[];
+  activeLibraryId: string | null;
   import: {
     promptOnDevice: boolean;
     skipImported: boolean;
@@ -35,8 +44,9 @@ export type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T
 /** 与 Rust 侧默认值保持一致（docs 设计文档 §10 默认值清单） */
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: 1,
-  libraryRoot: null,
   onboardingCompleted: false,
+  libraries: [],
+  activeLibraryId: null,
   import: {
     promptOnDevice: true,
     skipImported: true,
@@ -93,6 +103,9 @@ function mergeDeep<T>(base: T, patch: unknown): T {
   }
   return (patch !== undefined ? patch : base) as T;
 }
+
+// 供引导向导等处复用（草稿编辑 → 局部 patch 合并）
+export { clone, mergeDeep };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: clone(DEFAULT_SETTINGS),
