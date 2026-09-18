@@ -2,7 +2,12 @@
 //!
 //! 打开源流 → 循环读 8MB chunk → xxh64+sha256 同时 update → 写 `.part`
 //! （集中暂存目录）→ 首 1MB 截存 head（EXIF + 魔数识别）→ 渲染目标路径 →
-//! 完成后长度校验 → 原子 rename → journal verified → AssetRepo 入库。
+//! 完成后长度校验 → 原子 rename → journal verified → assets 入库。
+//!
+//! 模块拆分：`pipeline`（工作线程侧的单遍读写/哈希/双目的地双写）、
+//! `dedup`（宽松/精确查重键）、`fsutil`（源根推导/空目录清理/时间格式化）；
+//! 本文件是编排面：Engine 状态机（begin/run/finish）、计划契约（ImportPlan）、
+//! 控制柄与统计。
 //!
 //! 线程模型：Volume 源 `min(4, plan.streams)` 个工作线程抢文件队列，MTP 源
 //! 强制 1；工作线程只做源读取/哈希/写盘（不碰 SQLite），收集线程（调用
@@ -17,46 +22,36 @@
 //! → publish `DeviceUnavailable` + 自动暂停（job 置 paused）并返回部分
 //! stats；每文件状态实时落 journal；`.part` 残留在 resume 时清除重做。
 
+mod dedup;
+mod fsutil;
+mod pipeline;
+
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use walkdir::WalkDir;
-use xxhash_rust::xxh64::Xxh64;
 
 use crate::db::{AssetRow, Db, JobFileRow};
-use crate::devices::folder::FOLDER_ID_PREFIX;
-use crate::devices::volume::is_ignored_dir;
-use crate::devices::{classify, DeviceError, DeviceSource, FileEntry, SourceKind};
-use crate::events::{AppEvent, AssetKind, EventBus, FileState, JobStats, Throttle};
-use crate::import::templates::{
-    render_dir, render_name, resolve_captured, unique_path, RenderCtx, TemplateError,
-};
-use crate::metadata::exif_lite::{self, MetaLite};
+use crate::devices::{DeviceError, DeviceSource, FileEntry, SourceKind};
+use crate::events::{AppEvent, EventBus, FileState, JobStats, Throttle};
+use crate::import::templates::unique_path;
 use crate::settings::DuplicatePolicy;
 
-/// 单遍读取的块大小（spec §5.2：8MB 缓冲）。
-const CHUNK: usize = 8 * 1024 * 1024;
-/// 头部截存上限：EXIF-lite + 魔数识别只需文件头。
-const HEAD_MAX: usize = 1024 * 1024;
+use dedup::{exact_hit, loose_hit};
+use fsutil::{cleanup_empty_dirs, rfc3339, source_root_of};
+use pipeline::{copy_one, CopiedFile, FileOutcome};
+
 /// 进度事件最小间隔（spec：≥100ms）。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// 暂停时工作线程的轮询间隔。
 const PAUSE_POLL: Duration = Duration::from_millis(10);
-/// 宽松查重键的 mtime 容差。
-const MTIME_TOLERANCE: chrono::Duration = chrono::Duration::seconds(2);
-/// `.part` 集中暂存目录名（target_root 下，点前缀）。
+/// `.part` 集中暂存目录名（各目标根下，点前缀）。
 const PART_DIR: &str = ".smartphoto-part";
-/// {相机}/{镜头} 上下文缺失时的降级默认段。
-const FALLBACK_CAMERA: &str = "未知相机";
-const FALLBACK_LENS: &str = "未知镜头";
 
 /// 导入模式（M2“保留原文件”开关，spec §5.11）：
 /// copy=复制（默认，源不动）；move=移动（校验入册后删源，删源失败仅告警）。
@@ -66,6 +61,16 @@ pub enum ImportMode {
     #[default]
     Copy,
     Move,
+}
+
+/// F2 双目的地导入的第二目的地：单遍读取同时写第二份（独立目录模板，
+/// 同文件名模板）；第二路同样走 `.part` 暂存 + 长度校验 + journal 记录
+/// （job_files.dst2）。与 move 模式互斥（begin 时拒绝）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondTarget {
+    pub target_root: PathBuf,
+    pub dir_template: String,
 }
 
 /// 导入计划（IPC 契约，camelCase）。
@@ -82,6 +87,9 @@ pub struct ImportPlan {
     /// 缺省 copy：journal 中的历史计划（M1 无此字段）仍可反序列化恢复。
     #[serde(default)]
     pub mode: ImportMode,
+    /// F2 第二目的地；缺省 None（M1/M2 历史计划兼容）。
+    #[serde(default)]
+    pub second_target: Option<SecondTarget>,
 }
 
 /// 引擎错误（begin 阶段：设备枚举或建任务失败）。
@@ -266,11 +274,19 @@ impl Engine {
         self.controls.clone()
     }
 
-    /// 建新任务：自我嵌套守卫 → 枚举源 → 宽松查重预判 → journal 全量
-    /// pending/skipped → 发 ImportSessionStarted。run() 未 begin 时内部自动调用。
+    /// 建新任务：计划校验 → 自我嵌套守卫 → 枚举源 → 宽松查重预判 →
+    /// journal 全量 pending/skipped → 发 ImportSessionStarted。
+    /// run() 未 begin 时内部自动调用。
     pub fn begin(&mut self) -> Result<i64, EngineError> {
         if let Some(prepared) = self.prepared.as_ref() {
             return Ok(prepared.job_id);
+        }
+        if self.plan.mode == ImportMode::Move && self.plan.second_target.is_some() {
+            return Err(EngineError::InvalidPlan(
+                "move 模式与双目的地（secondTarget）不能同时使用：移动入册后源已删除，\
+                 无从写第二目的地"
+                    .into(),
+            ));
         }
         self.check_nesting()?;
         let entries = self.source.list()?;
@@ -391,6 +407,11 @@ impl Engine {
             let dir_template = self.plan.dir_template.clone();
             let name_template = self.plan.name_template.clone();
             let target_root = self.plan.target_root.clone();
+            let second = self
+                .plan
+                .second_target
+                .as_ref()
+                .map(|s| (s.target_root.clone(), s.dir_template.clone()));
             workers.push(std::thread::spawn(move || {
                 loop {
                     if controls.is_cancelled() {
@@ -416,6 +437,9 @@ impl Engine {
                         &target_root,
                         &dir_template,
                         &name_template,
+                        second
+                            .as_ref()
+                            .map(|(root, tpl)| (root.as_path(), tpl.as_str())),
                     );
                     if result_tx.send(outcome).is_err() {
                         break; // 收集端已退出
@@ -487,6 +511,7 @@ impl Engine {
                                 error: Some(error.clone()),
                                 xxhash: Some(copied.xxh),
                                 sha256: Some(copied.sha),
+                                dst2: String::new(),
                             });
                             let _ = self.db.append_log("error", Some(job_id), &error);
                             self.bus.publish(AppEvent::ImportFileCompleted {
@@ -510,6 +535,7 @@ impl Engine {
                         error: Some(error.clone()),
                         xxhash: None,
                         sha256: None,
+                        dst2: String::new(),
                     });
                     let _ = self.db.append_log("error", Some(job_id), &error);
                 }
@@ -524,6 +550,7 @@ impl Engine {
                         error: Some(error),
                         xxhash: None,
                         sha256: None,
+                        dst2: String::new(),
                     });
                     self.controls.cancelled.store(true, Ordering::SeqCst);
                     device_lost = true;
@@ -585,8 +612,11 @@ impl Engine {
             }
         }
 
-        // 收尾：清空暂存目录 + 终态 + SessionFinished
+        // 收尾：清空暂存目录（主 + 第二目的地）+ 终态 + SessionFinished
         let _ = fs::remove_dir_all(self.plan.target_root.join(PART_DIR));
+        if let Some(second) = &self.plan.second_target {
+            let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
+        }
         let status = if device_lost {
             "paused"
         } else if self.controls.is_cancelled() {
@@ -621,30 +651,39 @@ impl Engine {
         stats
     }
 
-    /// 自我嵌套守卫（spec §5.11）：文件系统源的根与 target_root 的
-    /// canonical 路径互为祖先（或相同）→ 拒绝。否则导入会把自己的产出
-    /// 再枚举进来。目标目录可能尚未创建——先建再比较；任一侧
+    /// 自我嵌套守卫（spec §5.11）：文件系统源的根与任一目标根（主/第二
+    /// 目的地）的 canonical 路径互为祖先（或相同）→ 拒绝。否则导入会把自己的
+    /// 产出再枚举进来。目标目录可能尚未创建——先建再比较；任一侧
     /// canonicalize 失败则跳过（folder 源枚举层还有排除子树防御）。
     fn check_nesting(&self) -> Result<(), EngineError> {
         let Some(source_root) = source_root_of(self.source.as_ref()) else {
             return Ok(()); // MTP 无文件系统语义
         };
+        let mut roots = vec![self.plan.target_root.clone()];
+        if let Some(second) = &self.plan.second_target {
+            roots.push(second.target_root.clone());
+        }
         let _ = fs::create_dir_all(&self.plan.target_root);
-        let (Ok(source_canon), Ok(target_canon)) = (
-            fs::canonicalize(&source_root),
-            fs::canonicalize(&self.plan.target_root),
-        ) else {
+        if let Some(second) = &self.plan.second_target {
+            let _ = fs::create_dir_all(&second.target_root);
+        }
+        let Ok(source_canon) = fs::canonicalize(&source_root) else {
             return Ok(());
         };
-        if source_canon == target_canon
-            || target_canon.starts_with(&source_canon)
-            || source_canon.starts_with(&target_canon)
-        {
-            return Err(EngineError::InvalidPlan(format!(
-                "源目录与目标目录互相嵌套（源 {}，目标 {}），已拒绝导入",
-                crate::devices::folder::strip_verbatim(&source_canon),
-                crate::devices::folder::strip_verbatim(&target_canon),
-            )));
+        for root in roots {
+            let Ok(target_canon) = fs::canonicalize(&root) else {
+                continue;
+            };
+            if source_canon == target_canon
+                || target_canon.starts_with(&source_canon)
+                || source_canon.starts_with(&target_canon)
+            {
+                return Err(EngineError::InvalidPlan(format!(
+                    "源目录与目标目录互相嵌套（源 {}，目标 {}），已拒绝导入",
+                    crate::devices::folder::strip_verbatim(&source_canon),
+                    crate::devices::folder::strip_verbatim(&target_canon),
+                )));
+            }
         }
         Ok(())
     }
@@ -667,30 +706,31 @@ impl Engine {
         }
     }
 
-    /// 清除 target_root 暂存目录的所有 `.part` 残留（重做语义）。
+    /// 清除各目标根暂存目录的所有 `.part` 残留（重做语义）。
     fn sweep_part_files(&self) {
         let _ = fs::remove_dir_all(self.plan.target_root.join(PART_DIR));
+        if let Some(second) = &self.plan.second_target {
+            let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
+        }
     }
 
     /// §查重②③：精确复核 + 路径冲突处理 + 原子 rename + 入库 + journal。
+    /// 双目的地：两路都落位才算成功（任一失败按单文件失败，主路已落位的
+    /// 撤回删除，不留半套拷贝）；journal 双记录（dst + dst2）。
     /// 返回 (终态, 最终目标路径)。
     fn finish_copy(&self, job_id: i64, copied: &CopiedFile) -> Result<(FileState, String), String> {
         let entry = &copied.entry;
 
         // ② 全量 (size, xxhash) 精确复核
         if self.plan.skip_imported
-            && self
-                .db
-                .find_asset_by_size_xxh(entry.size, copied.xxh)
-                .map_err(|e| e.to_string())?
-                .is_some()
+            && exact_hit(&self.db, entry.size, copied.xxh).map_err(|e| e.to_string())?
         {
-            let _ = fs::remove_file(&copied.part);
+            copied.discard_parts();
             self.upsert(job_id, entry, "", FileState::Skipped, copied);
             return Ok((FileState::Skipped, String::new()));
         }
 
-        // ③ 目标路径冲突
+        // ③ 目标路径冲突（主/第二目的地各自独立处理）
         let mut final_dst = copied.dst.clone();
         if final_dst.exists() {
             match self.plan.duplicate_policy {
@@ -703,20 +743,53 @@ impl Engine {
                     final_dst = unique_path(&parent, &name);
                 }
                 DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
-                    let _ = fs::remove_file(&copied.part);
+                    copied.discard_parts();
+                    self.upsert(job_id, entry, "", FileState::Skipped, copied);
+                    return Ok((FileState::Skipped, String::new()));
+                }
+            }
+        }
+        let mut final_dst2 = copied.dst2.clone();
+        if let Some(dst2) = final_dst2.clone().filter(|p| p.exists()) {
+            match self.plan.duplicate_policy {
+                DuplicatePolicy::Rename => {
+                    let parent = dst2.parent().unwrap_or(Path::new("")).to_path_buf();
+                    let name = dst2
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    final_dst2 = Some(unique_path(&parent, &name));
+                }
+                DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
+                    copied.discard_parts();
                     self.upsert(job_id, entry, "", FileState::Skipped, copied);
                     return Ok((FileState::Skipped, String::new()));
                 }
             }
         }
 
-        // 原子落位
+        // 原子落位：主路先行；第二目的地任一步失败则回滚主路（要么双落位要么全无）
         if let Some(parent) = final_dst.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
         }
         fs::rename(&copied.part, &final_dst).map_err(|e| format!("落位失败: {e}"))?;
+        if let (Some(final_dst2), Some(part2)) = (&final_dst2, &copied.part2) {
+            let second = (|| -> Result<(), String> {
+                if let Some(parent) = final_dst2.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("创建第二目的地目录失败: {e}"))?;
+                }
+                fs::rename(part2, final_dst2).map_err(|e| format!("第二目的地落位失败: {e}"))
+            })();
+            if let Err(e) = second {
+                // 回滚主路刚落位的文件（仅删本文件刚 rename 的产物，不动既有文件）
+                let _ = fs::remove_file(&final_dst);
+                let _ = fs::remove_file(part2);
+                return Err(e);
+            }
+        }
 
-        // 入库（assets 同路径覆盖）
+        // 入库（assets 同路径覆盖；第二目的地是备份拷贝，不入 assets）
         let filename = final_dst
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -733,9 +806,13 @@ impl Engine {
             camera: copied.meta.camera.clone(),
             source: "imported".into(),
             created_at: rfc3339(Utc::now()),
+            origin: "imported".into(),
         });
         let dst = final_dst.to_string_lossy().into_owned();
-        self.upsert(job_id, entry, &dst, FileState::Verified, copied);
+        let dst2 = final_dst2
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.upsert_dst2(job_id, entry, &dst, &dst2, FileState::Verified, copied);
         Ok((FileState::Verified, dst))
     }
 
@@ -744,6 +821,18 @@ impl Engine {
         job_id: i64,
         entry: &FileEntry,
         dst: &str,
+        state: FileState,
+        copied: &CopiedFile,
+    ) {
+        self.upsert_dst2(job_id, entry, dst, "", state, copied)
+    }
+
+    fn upsert_dst2(
+        &self,
+        job_id: i64,
+        entry: &FileEntry,
+        dst: &str,
+        dst2: &str,
         state: FileState,
         copied: &CopiedFile,
     ) {
@@ -756,214 +845,8 @@ impl Engine {
             error: None,
             xxhash: Some(copied.xxh),
             sha256: Some(copied.sha),
+            dst2: dst2.to_string(),
         });
-    }
-}
-
-/// 工作线程产出。
-enum FileOutcome {
-    Copied(Box<CopiedFile>),
-    Failed {
-        entry: FileEntry,
-        error: String,
-    },
-    /// 设备失联（DeviceError::Disconnected / 传输中断）：触发自动暂停。
-    Disconnected {
-        entry: FileEntry,
-        error: String,
-    },
-}
-
-struct CopiedFile {
-    entry: FileEntry,
-    kind: AssetKind,
-    meta: MetaLite,
-    xxh: u64,
-    sha: [u8; 32],
-    /// 暂存 .part 路径（已写满、长度已校验）。
-    part: PathBuf,
-    /// 渲染出的最终路径（收集端做冲突处理后 rename）。
-    dst: PathBuf,
-}
-
-/// 单文件单遍复制：流式读 → 哈希/写盘/head 截存 → 长度校验。
-/// dst = target_root + 渲染结果。
-#[allow(clippy::too_many_arguments)]
-fn copy_one(
-    source: &dyn DeviceSource,
-    part_dir: &Path,
-    seq: u64,
-    entry: &FileEntry,
-    target_root: &Path,
-    dir_template: &str,
-    name_template: &str,
-) -> FileOutcome {
-    let fail = |error: String| FileOutcome::Failed {
-        entry: entry.clone(),
-        error,
-    };
-    let disconnect = |error: String| FileOutcome::Disconnected {
-        entry: entry.clone(),
-        error,
-    };
-    let io_err = |e: std::io::Error| {
-        if e.kind() == std::io::ErrorKind::ConnectionAborted {
-            disconnect(format!("传输中断: {e}"))
-        } else {
-            fail(format!("读取失败: {e}"))
-        }
-    };
-
-    let mut reader = match source.stream(&entry.id) {
-        Ok(reader) => reader,
-        Err(DeviceError::Disconnected) => return disconnect("设备连接中断".into()),
-        Err(err) => return fail(err.to_string()),
-    };
-
-    // 首段：截存 head（≤1MB）——EXIF + 魔数识别；同时进哈希与 .part
-    let mut head: Vec<u8> = Vec::with_capacity(entry.size.min(HEAD_MAX as u64) as usize);
-    let mut first = vec![0u8; HEAD_MAX];
-    while head.len() < HEAD_MAX {
-        match reader.read(&mut first[..HEAD_MAX - head.len()]) {
-            Ok(0) => break,
-            Ok(n) => head.extend_from_slice(&first[..n]),
-            Err(e) => return io_err(e),
-        }
-    }
-
-    let kind = classify(&entry.rel_path, &head);
-    if kind == AssetKind::Other {
-        return fail("类型识别失败（扩展名与内容不符，疑似伪装文件）".into());
-    }
-    let meta = exif_lite::parse(&head);
-
-    // 渲染目标路径（{相机}/{镜头} 缺失降级默认段）
-    let (stem, ext) = split_stem_ext(&entry.rel_path);
-    let ctx = RenderCtx {
-        captured_at: resolve_captured(meta.captured_at, entry.mtime),
-        camera: meta.camera.clone(),
-        lens: None,
-        original_stem: stem,
-        ext,
-    };
-    let dst = match render_dst(&ctx, dir_template, name_template) {
-        Ok(rel) => target_root.join(rel),
-        Err(error) => return fail(error),
-    };
-
-    // 写 .part（集中暂存目录，避免同名目标并发冲突）
-    if let Err(e) = fs::create_dir_all(part_dir) {
-        return fail(format!("创建暂存目录失败: {e}"));
-    }
-    let part = part_dir.join(format!("{seq}.part"));
-    let mut out = match File::create(&part) {
-        Ok(out) => out,
-        Err(e) => return fail(format!("创建临时文件失败: {e}")),
-    };
-    let mut xxh = Xxh64::new(0);
-    let mut sha = Sha256::new();
-    if let Err(error) = write_chunk(&head, &mut out, &mut xxh, &mut sha, &part) {
-        return fail(error);
-    }
-
-    // 剩余流：8MB 块单遍读
-    let mut chunk = vec![0u8; CHUNK];
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                if let Err(error) = write_chunk(&chunk[..n], &mut out, &mut xxh, &mut sha, &part) {
-                    return fail(error);
-                }
-            }
-            Err(e) => return io_err(e),
-        }
-    }
-    if let Err(e) = out.flush() {
-        let _ = fs::remove_file(&part);
-        return fail(format!("刷盘失败: {e}"));
-    }
-    drop(out); // Windows：rename 前必须关闭句柄
-
-    // 长度校验（spec §7：任何时刻不留半文件）
-    let len = match fs::metadata(&part) {
-        Ok(meta) => meta.len(),
-        Err(e) => {
-            let _ = fs::remove_file(&part);
-            return fail(format!("临时文件丢失: {e}"));
-        }
-    };
-    if len != entry.size {
-        let _ = fs::remove_file(&part);
-        return fail(format!(
-            "长度校验失败: 期望 {} 字节，实得 {len}",
-            entry.size
-        ));
-    }
-
-    FileOutcome::Copied(Box::new(CopiedFile {
-        entry: entry.clone(),
-        kind,
-        meta,
-        xxh: xxh.digest(),
-        sha: sha.finalize().into(),
-        part,
-        dst,
-    }))
-}
-
-/// 写盘 + 双哈希单遍更新；失败时清掉半成品 .part。
-fn write_chunk(
-    buf: &[u8],
-    out: &mut File,
-    xxh: &mut Xxh64,
-    sha: &mut Sha256,
-    part: &Path,
-) -> Result<(), String> {
-    if let Err(e) = out.write_all(buf) {
-        let _ = fs::remove_file(part);
-        return Err(format!("写盘失败: {e}"));
-    }
-    xxh.update(buf);
-    sha.update(buf);
-    Ok(())
-}
-
-/// 渲染目录+文件名 → 完整目标路径；`{相机}`/`{镜头}` 缺失时用默认段重试。
-fn render_dst(ctx: &RenderCtx, dir_template: &str, name_template: &str) -> Result<PathBuf, String> {
-    let render = |ctx: &RenderCtx| -> Result<String, TemplateError> {
-        Ok(format!(
-            "{}/{}",
-            render_dir(dir_template, ctx)?,
-            render_name(name_template, ctx)?
-        ))
-    };
-    match render(ctx) {
-        Ok(path) => Ok(PathBuf::from(path)),
-        Err(TemplateError::MissingContext(_)) => {
-            // 无 EXIF 的文件（截图/转码/损坏头）：默认段降级重试
-            let fallback = RenderCtx {
-                captured_at: ctx.captured_at,
-                camera: Some(FALLBACK_CAMERA.to_string()),
-                lens: Some(FALLBACK_LENS.to_string()),
-                original_stem: ctx.original_stem.clone(),
-                ext: ctx.ext.clone(),
-            };
-            render(&fallback)
-                .map(PathBuf::from)
-                .map_err(|e| e.to_string())
-        }
-        Err(TemplateError::UnknownToken(token)) => {
-            Err(format!("命名模板含未知令牌「{token}」，请检查导入设置"))
-        }
-    }
-}
-
-fn split_stem_ext(rel_path: &str) -> (String, String) {
-    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), ext.to_string()),
-        _ => (name.to_string(), String::new()),
     }
 }
 
@@ -972,56 +855,6 @@ fn worker_count(kind: SourceKind, streams: u32) -> usize {
         SourceKind::Mtp => 1,
         SourceKind::Volume | SourceKind::Folder => 4.min(streams.max(1) as usize),
     }
-}
-
-/// 文件系统源的根目录（嵌套守卫与移动后空目录清理用）；MTP 无路径语义 → None。
-fn source_root_of(source: &dyn DeviceSource) -> Option<PathBuf> {
-    let id = source.id();
-    match source.kind() {
-        SourceKind::Mtp => None,
-        // 卷：盘符 "E:" → "E:\"；测试目录路径直接可用
-        SourceKind::Volume => {
-            if id.len() == 2 && id.ends_with(':') {
-                Some(PathBuf::from(format!("{id}\\")))
-            } else {
-                Some(PathBuf::from(id))
-            }
-        }
-        SourceKind::Folder => id.strip_prefix(FOLDER_ID_PREFIX).map(PathBuf::from),
-    }
-}
-
-/// move 后清理空的源中间子目录（best-effort）：深优先逐级 `remove_dir`
-/// （仅空目录可删），保留源根；跳过点前缀/系统目录（与枚举规则一致）。
-/// 返回删除的目录数。
-fn cleanup_empty_dirs(root: &Path) -> usize {
-    let mut dirs: Vec<PathBuf> = WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir(e))
-        .filter_map(Result::ok)
-        .filter(|e| e.depth() > 0 && e.file_type().is_dir())
-        .map(|e| e.path().to_path_buf())
-        .collect();
-    // 浅→深排序后反序遍历 = 深优先；子目录先删，父目录才可能为空
-    dirs.sort_by_key(|d| d.components().count());
-    dirs.iter()
-        .rev()
-        .filter(|d| fs::remove_dir(d).is_ok())
-        .count()
-}
-
-fn rfc3339(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-/// 宽松查重键命中判定（size + filename + mtime±2s）。
-fn loose_hit(db: &Db, entry: &FileEntry) -> rusqlite::Result<bool> {
-    let filename = entry.rel_path.rsplit('/').next().unwrap_or(&entry.rel_path);
-    let from = rfc3339(entry.mtime - MTIME_TOLERANCE);
-    let to = rfc3339(entry.mtime + MTIME_TOLERANCE);
-    Ok(db
-        .find_asset_loose(entry.size, filename, &from, &to)?
-        .is_some())
 }
 
 fn resume_has_pending(prepared: &Prepared) -> bool {

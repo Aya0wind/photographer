@@ -109,6 +109,8 @@ pub fn run() {
             ipc::import::import_jobs_page,
             ipc::import::import_logs_page,
             ipc::import::import_retry_failed,
+            ipc::import::clean_candidates,
+            ipc::import::clean_apply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

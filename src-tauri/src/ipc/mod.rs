@@ -17,6 +17,7 @@ use crate::devices::folder::{LocalFolderSource, FOLDER_ID_PREFIX};
 use crate::devices::orchestrator::{self, DeviceSnapshot};
 use crate::devices::{DeviceSource, SourceKind};
 use crate::events::EventBus;
+use crate::import::clean::{CleanCandidateDto, CleanResultDto};
 use crate::import::engine::{Engine, EngineControls, ImportPlan};
 use crate::settings::Settings;
 
@@ -526,4 +527,40 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
         handle: Some(handle),
     });
     Ok(new_id)
+}
+
+// ---------------------------------------------------------------------------
+// M2 F1：安全清卡（候选列表 / 复验删除）
+// ---------------------------------------------------------------------------
+
+/// 清卡任务的设备源（注册表直取；离线报错）。
+fn clean_source(state: &AppState, job_id: i64) -> Result<(Db, Arc<dyn DeviceSource>), String> {
+    let db = active_library_db(state)?;
+    let (device_id, _) = db
+        .job_device(job_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("任务不存在")?;
+    let source = state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .get(&device_id)
+        .map(|entry| Arc::clone(&entry.source))
+        .ok_or_else(|| format!("设备 {device_id} 不在线"))?;
+    Ok((db, source))
+}
+
+/// 清卡候选列表（已校验入册 + 源仍在设备）。
+pub fn list_clean_candidates(
+    state: &AppState,
+    job_id: i64,
+) -> Result<Vec<CleanCandidateDto>, String> {
+    let (db, source) = clean_source(state, job_id)?;
+    crate::import::clean::clean_candidates(&db, &*source, job_id)
+}
+
+/// 执行清卡：逐文件复验（size+xxh64 对比 journal 指纹）一致才删。
+pub fn apply_clean(state: &AppState, job_id: i64) -> Result<CleanResultDto, String> {
+    let (db, source) = clean_source(state, job_id)?;
+    crate::import::clean::clean_apply(&db, &state.bus, &*source, job_id)
 }

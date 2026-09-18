@@ -74,6 +74,7 @@ pub struct JobRow {
 }
 
 /// job_files 行（journal：每文件一条，PK(job_id, src) 覆盖更新）。
+/// dst2 为 F2 双目的地导入的第二目的地路径（单目的地导入恒空串）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobFileRow {
@@ -85,6 +86,8 @@ pub struct JobFileRow {
     pub error: Option<String>,
     pub xxhash: Option<u64>,
     pub sha256: Option<[u8; 32]>,
+    #[serde(default)]
+    pub dst2: String,
 }
 
 /// logs 行。
@@ -113,6 +116,15 @@ pub struct AssetRow {
     pub camera: Option<String>,
     pub source: String,
     pub created_at: String,
+    /// 资产来源（M2 迁移 0003）：'imported' 复制/移动入册；
+    /// 'external' 原地索引只读入册（文件不在库内，绝不可被清理/移动）。
+    #[serde(default = "default_origin")]
+    pub origin: String,
+}
+
+/// assets.origin 默认值（导入入册）。
+pub fn default_origin() -> String {
+    "imported".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -293,11 +305,12 @@ impl Db {
     pub fn upsert_job_file(&self, row: &JobFileRow) -> Result<()> {
         let sha256: Option<&[u8]> = row.sha256.as_ref().map(|sha| sha.as_slice());
         self.0.execute(
-            "INSERT INTO job_files (job_id, src, dst, size, state, error, xxhash, sha256) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+            "INSERT INTO job_files (job_id, src, dst, size, state, error, xxhash, sha256, dst2) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT (job_id, src) DO UPDATE SET \
              dst = excluded.dst, size = excluded.size, state = excluded.state, \
-             error = excluded.error, xxhash = excluded.xxhash, sha256 = excluded.sha256",
+             error = excluded.error, xxhash = excluded.xxhash, sha256 = excluded.sha256, \
+             dst2 = excluded.dst2",
             params![
                 row.job_id,
                 row.src,
@@ -306,7 +319,8 @@ impl Db {
                 row.state,
                 row.error,
                 row.xxhash.map(|v| v as i64),
-                sha256
+                sha256,
+                row.dst2
             ],
         )?;
         Ok(())
@@ -317,7 +331,7 @@ impl Db {
     #[allow(dead_code)]
     pub fn pending_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT job_id, src, dst, size, state, error, xxhash, sha256 FROM job_files \
+            "SELECT job_id, src, dst, size, state, error, xxhash, sha256, dst2 FROM job_files \
              WHERE job_id = ?1 AND state IN (?2, ?3) ORDER BY src",
         )?;
         let rows = stmt.query_map(
@@ -330,7 +344,7 @@ impl Db {
     /// 任务全部 journal 行（resume 重建统计基线；按 src 有序）。
     pub fn all_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT job_id, src, dst, size, state, error, xxhash, sha256 FROM job_files \
+            "SELECT job_id, src, dst, size, state, error, xxhash, sha256, dst2 FROM job_files \
              WHERE job_id = ?1 ORDER BY src",
         )?;
         let rows = stmt.query_map(params![job_id], map_job_file)?;
@@ -378,7 +392,7 @@ impl Db {
         self.0.execute(
             "INSERT OR REPLACE INTO assets \
              (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, \
-             created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             created_at, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 a.path,
                 a.filename,
@@ -390,7 +404,8 @@ impl Db {
                 a.captured_at,
                 a.camera,
                 a.source,
-                a.created_at
+                a.created_at,
+                a.origin
             ],
         )?;
         Ok(())
@@ -436,6 +451,18 @@ impl Db {
             .prepare("SELECT 1 FROM assets WHERE path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![path])?;
         Ok(rows.next()?.is_some())
+    }
+
+    /// 按路径取资产 id（F1 清卡：journal dst → 库内资产映射）；无则 None。
+    pub fn asset_id_by_path(&self, path: &str) -> Result<Option<i64>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id FROM assets WHERE path = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![path])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
     }
 
     /// 失败重试：把 old 任务中 failed 的文件复制为 new 任务的 pending 行
@@ -515,6 +542,7 @@ fn map_job_file(row: &Row<'_>) -> Result<JobFileRow> {
         error: row.get(5)?,
         xxhash: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
         sha256: blob_to_sha256(row.get(7)?)?,
+        dst2: row.get(8)?,
     })
 }
 

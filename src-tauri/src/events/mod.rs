@@ -68,6 +68,20 @@ pub struct JobStats {
     pub source_delete_failed: u64,
 }
 
+/// 安全清卡统计（M2 F1，CleanFinished 载荷）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanStats {
+    /// 成功删除的源文件数。
+    pub deleted: u64,
+    /// 复验不一致或删除失败的文件数。
+    pub failed: u64,
+    /// 释放的字节数。
+    pub freed_bytes: u64,
+    /// 逐文件失败原因（与 failed 对应）。
+    pub errors: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // 事件（扁平单枚举，serde tag=type，前端做可辨识联合处理）
 // ---------------------------------------------------------------------------
@@ -134,6 +148,18 @@ pub enum AppEvent {
         src: String,
         dst: String,
         state: FileState,
+    },
+
+    // 安全清卡（M2 F1）
+    /// 清卡开始：候选数与总字节（删前逐文件复验）。
+    CleanStarted {
+        job_id: i64,
+        count: u64,
+        bytes: u64,
+    },
+    CleanFinished {
+        job_id: i64,
+        stats: CleanStats,
     },
 
     // 错误

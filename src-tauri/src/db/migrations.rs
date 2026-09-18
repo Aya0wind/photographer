@@ -4,7 +4,11 @@
 //! 每条迁移在独立事务中执行（DDL 与 user_version 推进原子提交）。
 
 /// 迁移列表：索引 i 的 SQL 把库从 user_version = i 升到 i + 1。
-pub(crate) const MIGRATIONS: &[&str] = &[MIGRATION_0001_INIT, MIGRATION_0002_PLAN_AND_LOOSE];
+pub(crate) const MIGRATIONS: &[&str] = &[
+    MIGRATION_0001_INIT,
+    MIGRATION_0002_PLAN_AND_LOOSE,
+    MIGRATION_0003_ORIGIN_AND_DST2,
+];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
 /// （断点恢复 journal）、logs（任务日志），外加查询所需的索引。
@@ -72,4 +76,13 @@ const MIGRATION_0002_PLAN_AND_LOOSE: &str = r#"
 ALTER TABLE jobs ADD COLUMN plan_json TEXT;
 
 CREATE INDEX idx_assets_size_filename ON assets (size, filename);
+"#;
+
+/// 0003（M2）：assets 增加 origin（'imported' 导入入册 / 'external' 原地索引
+/// 只读入册，F1 清卡与 UI 据此区分资产来源）；job_files 增加 dst2
+/// （F2 双目的地导入 journal 的第二目的地记录）。
+const MIGRATION_0003_ORIGIN_AND_DST2: &str = r#"
+ALTER TABLE assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported';
+
+ALTER TABLE job_files ADD COLUMN dst2 TEXT NOT NULL DEFAULT '';
 "#;

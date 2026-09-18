@@ -1,19 +1,13 @@
 //! M1 T8 设备编排测试：扫描快照统计、宽松键 new_files 预判、惰性头读。
 
-#[path = "../src/db/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod db;
-#[path = "../src/devices/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod devices;
-#[path = "../src/events/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod events;
+mod common;
+
+pub use common::{db, devices, events, import, ipc, metadata, settings};
 
 use std::fs;
 
 use chrono::{SecondsFormat, Utc};
-use db::{AssetRow, Db};
+use db::AssetRow;
 use devices::orchestrator::scan_device;
 use devices::volume::VolumeSource;
 use devices::{DeviceResult, DeviceSource, FileEntry, SourceKind};
@@ -27,18 +21,12 @@ fn build_tree(dir: &std::path::Path) {
     fs::write(dir.join("DCIM/notes.txt"), vec![0u8; 7]).unwrap(); // 非媒体：list 层排除
 }
 
-fn open_db(dir: &std::path::Path) -> Db {
-    let db = Db::open(&dir.join("library.db")).unwrap();
-    db.migrate().unwrap();
-    db
-}
-
 #[test]
 fn snapshot_counts_by_kind_and_bytes() {
     let src = tempfile::tempdir().unwrap();
     build_tree(src.path());
     let db_dir = tempfile::tempdir().unwrap();
-    let db = open_db(db_dir.path());
+    let db = common::open_db(db_dir.path());
     let source = VolumeSource::new(src.path());
 
     let snapshot = scan_device(&source, &db, true).unwrap();
@@ -62,7 +50,7 @@ fn skip_imported_deducts_loose_matched_assets() {
     let src = tempfile::tempdir().unwrap();
     build_tree(src.path());
     let db_dir = tempfile::tempdir().unwrap();
-    let db = open_db(db_dir.path());
+    let db = common::open_db(db_dir.path());
 
     // 预置一行匹配 A.jpg 的资产（size+filename+mtime±2s 宽松键）
     let mtime: chrono::DateTime<Utc> = fs::metadata(src.path().join("DCIM/A.jpg"))
@@ -82,6 +70,7 @@ fn skip_imported_deducts_loose_matched_assets() {
         camera: None,
         source: "imported".into(),
         created_at: mtime.to_rfc3339_opts(SecondsFormat::Millis, true),
+        origin: "imported".into(),
     })
     .unwrap();
 
@@ -131,7 +120,7 @@ impl DeviceSource for StubSource {
 #[test]
 fn unknown_extension_falls_back_to_magic_head_read() {
     let db_dir = tempfile::tempdir().unwrap();
-    let db = open_db(db_dir.path());
+    let db = common::open_db(db_dir.path());
     let snapshot = scan_device(&StubSource, &db, true).unwrap();
     assert_eq!(snapshot.files_by_kind.get(&AssetKind::Photo), Some(&1));
     assert_eq!(snapshot.new_files, 1);

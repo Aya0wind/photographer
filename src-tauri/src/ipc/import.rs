@@ -1,13 +1,14 @@
-//! import 命令：启动/暂停/恢复/取消、任务与日志分页、失败重试。
+//! import 命令：启动/暂停/恢复/取消、任务与日志分页、失败重试、安全清卡。
 //! 命令层是薄包装，业务在 super 的核心函数（可测）。
 
 use tauri::State;
 
 use super::{
-    cancel_import, jobs_page, logs_page, resume_import, retry_failed, set_import_paused,
-    start_import, AppState,
+    apply_clean, cancel_import, jobs_page, list_clean_candidates, logs_page, resume_import,
+    retry_failed, set_import_paused, start_import, AppState,
 };
 use crate::db::{JobRow, LogRow};
+use crate::import::clean::{CleanCandidateDto, CleanResultDto};
 use crate::import::engine::ImportPlan;
 
 /// 启动导入，返回 job_id。同时只允许一个活跃导入（Busy 错误）。
@@ -59,4 +60,19 @@ pub fn import_logs_page(
 #[tauri::command]
 pub fn import_retry_failed(state: State<AppState>, job_id: i64) -> Result<i64, String> {
     retry_failed(&state, job_id)
+}
+
+/// M2 F1 安全清卡：列出可清理候选（已校验入册 + 源仍在设备）。
+#[tauri::command]
+pub fn clean_candidates(
+    state: State<AppState>,
+    job_id: i64,
+) -> Result<Vec<CleanCandidateDto>, String> {
+    list_clean_candidates(&state, job_id)
+}
+
+/// M2 F1 安全清卡：逐文件复验（重读源 size+xxh64 对比库中指纹）一致才删。
+#[tauri::command]
+pub fn clean_apply(state: State<AppState>, job_id: i64) -> Result<CleanResultDto, String> {
+    apply_clean(&state, job_id)
 }

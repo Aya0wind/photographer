@@ -55,6 +55,7 @@ fn job_file(job_id: i64, src: &str, state: FileState) -> JobFileRow {
         error: None,
         xxhash: None,
         sha256: None,
+        dst2: String::new(),
     }
 }
 
@@ -71,6 +72,7 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         camera: Some("Sony A7M4".to_string()),
         source: "volume:E:".to_string(),
         created_at: "2026-09-18T08:00:00.000Z".to_string(),
+        origin: "imported".to_string(),
     }
 }
 
@@ -91,15 +93,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 2);
+        assert_eq!(user_version(&db), 3);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 2, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 3, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 2);
+    assert_eq!(user_version(&db), 3);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
