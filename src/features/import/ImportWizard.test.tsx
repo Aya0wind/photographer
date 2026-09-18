@@ -9,7 +9,7 @@ import i18n from "@/i18n";
 import ImportWizard from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
+import { deviceFiles, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -18,6 +18,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     importStart: vi.fn(),
     folderScan: vi.fn(),
     fsListDirs: vi.fn(),
+    deviceFiles: vi.fn(),
   };
 });
 
@@ -28,6 +29,7 @@ const startMock = vi.mocked(importStart);
 const scanMock = vi.mocked(folderScan);
 const listMock = vi.mocked(fsListDirs);
 const openMock = vi.mocked(openDialog);
+const deviceFilesMock = vi.mocked(deviceFiles);
 
 function volumeDevice() {
   return {
@@ -117,6 +119,7 @@ beforeEach(() => {
   scanMock.mockReset().mockResolvedValue(null);
   listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
+  deviceFilesMock.mockReset().mockResolvedValue(null);
 });
 
 describe("ImportWizard 布局与设备", () => {
@@ -136,6 +139,22 @@ describe("ImportWizard 布局与设备", () => {
     expect(info).toHaveTextContent("读卡器");
     expect(info).toHaveTextContent("100 MB");
     expect(info).toHaveTextContent("4");
+  });
+
+  it("选中源后自动拉取 device_files 填充清单（无需手动 seed）", async () => {
+    // 只 seed 设备，不 seed sourceFiles：应触发 deviceFiles → setSourceFiles
+    useImportStore.setState({ devices: [volumeDevice()] });
+    deviceFilesMock.mockResolvedValue([
+      { id: "0", relPath: "DCIM/100CANON/IMG_0009.NEF", size: 3000, mtime: "2026-01-01T00:00:00Z" },
+      { id: "1", relPath: "DCIM/101CANON/IMG_0010.JPG", size: 4000, mtime: "2026-01-01T00:00:01Z" },
+    ]);
+
+    renderWizard("?device=E:");
+
+    expect(await screen.findByText("IMG_0009.NEF")).toBeInTheDocument();
+    expect(screen.getByText("IMG_0010.JPG")).toBeInTheDocument();
+    expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 2");
+    expect(deviceFilesMock).toHaveBeenCalledWith("E:");
   });
 });
 

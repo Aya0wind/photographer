@@ -5,10 +5,12 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { motion } from "motion/react";
 
 import {
+  deviceFiles,
   folderScan,
   fsListDirs,
   importStart,
   isIpcAvailable,
+  kindFromName,
   type DeviceKind,
   type FileKind,
   type FsDirEntry,
@@ -130,6 +132,7 @@ export default function ImportWizard() {
   const sourceFilesMap = useImportStore((s) => s.sourceFiles);
   const refreshDevice = useImportStore((s) => s.refreshDevice);
   const addDevice = useImportStore((s) => s.addDevice);
+  const setSourceFiles = useImportStore((s) => s.setSourceFiles);
   const recentSources = useImportStore((s) => s.recentSources);
   const recordRecentSource = useImportStore((s) => s.recordRecentSource);
 
@@ -145,6 +148,36 @@ export default function ImportWizard() {
     ? (urlDevice as string)
     : (devices[0]?.id ?? null);
   const device = devices.find((d) => d.id === selectedId) ?? null;
+
+  // 选中源变化时拉取文件清单（device_files）；已有缓存的源不重复拉取。
+  // 大目录（数千文件）枚举在后端完成后一次性返回，此处仅等待并填充。
+  const [filesLoading, setFilesLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedId) return;
+    if (sourceFilesMap[selectedId]) return;
+    let cancelled = false;
+    setFilesLoading(true);
+    void deviceFiles(selectedId).then((entries) => {
+      if (cancelled) return;
+      setFilesLoading(false);
+      if (!entries) return; // IPC 失败/不可用：保持空态（预览模式）
+      setSourceFiles(
+        selectedId,
+        entries.map((e) => {
+          const slash = e.relPath.lastIndexOf("/");
+          const dir = slash >= 0 ? e.relPath.slice(0, slash) : "";
+          const name = slash >= 0 ? e.relPath.slice(slash + 1) : e.relPath;
+          return { path: e.relPath, dir, name, size: e.size, kind: kindFromName(name) };
+        }),
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+    // sourceFilesMap[selectedId] 变为存在即触发跳过分支，无需进依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
   const files = useMemo(
     () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []),
     [selectedId, sourceFilesMap],
@@ -698,7 +731,11 @@ export default function ImportWizard() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {files.length === 0 ? (
               <p className="px-6 py-10 text-center text-xs leading-relaxed text-text-muted">
-                {t("wizard.tableEmpty")}
+                {filesLoading && device
+                  ? t("wizard.tableLoading")
+                  : device
+                    ? t("wizard.tableEmpty")
+                    : t("wizard.treeEmpty")}
               </p>
             ) : (
               <table className="w-full table-fixed border-collapse text-xs">

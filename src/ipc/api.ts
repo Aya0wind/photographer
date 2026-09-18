@@ -128,6 +128,41 @@ function markUnavailable(): void {
 
 // --- 命令封装 ----------------------------------------------------------------
 
+/** 设备文件条目 DTO（device_files 返回；relPath 为设备内相对路径，"/" 分隔） */
+export interface FileEntryDto {
+  id: string;
+  relPath: string;
+  size: number;
+  mtime: string;
+}
+
+/** 扩展名 → 文件大类（与 Rust 侧 PHOTO_EXTS/RAW_EXTS/VIDEO_EXTS 镜像） */
+const EXT_KIND_TABLE: Record<string, FileKind> = {
+  ...Object.fromEntries(
+    ["jpg", "jpeg", "png", "heic", "heif", "avif", "tif", "tiff", "bmp", "gif", "webp", "jxl"].map(
+      (e) => [e, "photo" as const],
+    ),
+  ),
+  ...Object.fromEntries(
+    ["cr2", "cr3", "nef", "arw", "raf", "dng", "orf", "rw2", "r3d", "iiq", "pef", "srw", "x3f", "nev"].map(
+      (e) => [e, "raw" as const],
+    ),
+  ),
+  ...Object.fromEntries(
+    ["mp4", "mov", "avi", "mkv", "mts", "m2ts", "wmv", "3gp", "avchd"].map((e) => [
+      e,
+      "video" as const,
+    ]),
+  ),
+};
+
+/** 按文件名判定大类（未知扩展 → other；与后端 classify 口径一致以扩展名为准） */
+export function kindFromName(name: string): FileKind {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0 || dot === name.length - 1) return "other";
+  return EXT_KIND_TABLE[name.slice(dot + 1).toLowerCase()] ?? "other";
+}
+
 /** 已连接设备列表（含各类型文件统计） */
 export async function deviceList(): Promise<DeviceSnapshot[]> {
   try {
@@ -142,6 +177,17 @@ export async function deviceList(): Promise<DeviceSnapshot[]> {
 export async function deviceScan(id: string): Promise<DeviceSnapshot | null> {
   try {
     return await ipc<DeviceSnapshot>("device_scan", { id });
+  } catch {
+    markUnavailable();
+    return null;
+  }
+}
+
+/** 列出指定源的全部媒体文件（向导中央清单区；失败返回 null，调用方保持空态） */
+export async function deviceFiles(id: string): Promise<FileEntryDto[] | null> {
+  try {
+    const files = await ipc<FileEntryDto[] | null>("device_files", { id });
+    return Array.isArray(files) ? files : null;
   } catch {
     markUnavailable();
     return null;
