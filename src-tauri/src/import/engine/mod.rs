@@ -577,6 +577,7 @@ impl Engine {
                     job_id,
                     done_files: counters.done_files,
                     done_bytes: counters.done_bytes,
+                    settled_bytes: counters.settled_bytes(),
                     current_file: last_completed_src.clone(),
                     bytes_per_sec: if secs > 0.0 {
                         counters.done_bytes as f64 / secs

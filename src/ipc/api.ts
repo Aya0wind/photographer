@@ -104,6 +104,8 @@ export type AppEvent =
       jobId: number;
       doneFiles: number;
       doneBytes: number;
+      /** 进度条口径：完成+跳过+失败的已结算字节（skip 不推进 doneBytes） */
+      settledBytes: number;
       currentFile: string;
       bytesPerSec: number;
     }

@@ -130,6 +130,9 @@ pub enum AppEvent {
         job_id: i64,
         done_files: u64,
         done_bytes: u64,
+        /// 已结算字节（完成+跳过+失败）——进度条口径：重复文件走 skip
+        /// 时不推进 done_bytes，若按 done 计算进度条会原地不动（真机坑）。
+        settled_bytes: u64,
         current_file: String,
         bytes_per_sec: f64,
     },

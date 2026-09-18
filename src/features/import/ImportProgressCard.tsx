@@ -41,6 +41,7 @@ interface ActiveCard {
   doneFiles: number;
   totalBytes: number;
   doneBytes: number;
+  settledBytes: number;
   bytesPerSec: number;
   currentFile: string;
 }
@@ -125,7 +126,11 @@ function ActiveCardView({ card }: { card: ActiveCard }) {
   const resumeJob = useImportStore((s) => s.resumeJob);
   const cancelJob = useImportStore((s) => s.cancelJob);
 
-  const pct = card.totalBytes > 0 ? Math.min(100, (card.doneBytes / card.totalBytes) * 100) : 0;
+  // 进度条用已结算口径：跳过的重复文件同样推进（真机：重复导入时条不动）
+  const pct =
+    card.totalBytes > 0
+      ? Math.min(100, ((card.settledBytes ?? card.doneBytes) / card.totalBytes) * 100)
+      : 0;
   const isPaused = card.status === "paused";
 
   return (
@@ -390,6 +395,7 @@ export default function ImportProgressCard() {
         doneFiles: job.doneFiles,
         totalBytes: job.totalBytes,
         doneBytes: job.doneBytes,
+        settledBytes: job.settledBytes ?? job.doneBytes,
         bytesPerSec: job.bytesPerSec,
         currentFile: job.currentFile,
       },

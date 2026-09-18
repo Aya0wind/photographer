@@ -53,6 +53,8 @@ export interface ActiveJob {
   totalBytes: number;
   doneFiles: number;
   doneBytes: number;
+  /** 进度条口径：完成+跳过+失败；可选（旧事件/条目缺省回落 doneBytes） */
+  settledBytes?: number;
   bytesPerSec: number;
   currentFile: string;
 }
@@ -166,7 +168,7 @@ interface ImportState {
 
 // --- 进度节流缓冲（模块级，避免进入 React 状态） -------------------------------
 
-type ProgressFields = Pick<ActiveJob, "doneFiles" | "doneBytes" | "currentFile" | "bytesPerSec">;
+type ProgressFields = Pick<ActiveJob, "doneFiles" | "doneBytes" | "settledBytes" | "currentFile" | "bytesPerSec">;
 
 const pendingProgress = new Map<number, ProgressFields>();
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -335,6 +337,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
             totalBytes: event.totalBytes,
             doneFiles: 0,
             doneBytes: 0,
+            settledBytes: 0,
             bytesPerSec: 0,
             currentFile: "",
           };
@@ -363,6 +366,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
         pendingProgress.set(event.jobId, {
           doneFiles: event.doneFiles,
           doneBytes: event.doneBytes,
+          settledBytes: event.settledBytes ?? event.doneBytes,
           currentFile: event.currentFile,
           bytesPerSec: event.bytesPerSec,
         });

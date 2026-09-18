@@ -142,6 +142,7 @@ describe("进度随事件渲染", () => {
       jobId: 7,
       doneFiles: 50,
       doneBytes: 5_000_000_000,
+      settledBytes: 5_000_000_000,
       currentFile: "DCIM/100CANON/IMG_0042.CR3",
       bytesPerSec: 50 * 1024 * 1024,
     });

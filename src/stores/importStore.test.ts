@@ -184,9 +184,9 @@ describe("进度节流（150ms）", () => {
   it("节流窗口内多个事件只落一次、且取最后一条", () => {
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 10_000 });
 
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 1, doneBytes: 100, currentFile: "A.CR3", bytesPerSec: 1 });
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 2, doneBytes: 200, currentFile: "B.CR3", bytesPerSec: 2 });
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 3, doneBytes: 300, currentFile: "C.CR3", bytesPerSec: 3 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 1, doneBytes: 100, settledBytes: 100, currentFile: "A.CR3", bytesPerSec: 1 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 2, doneBytes: 200, settledBytes: 200, currentFile: "B.CR3", bytesPerSec: 2 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 3, doneBytes: 300, settledBytes: 300, currentFile: "C.CR3", bytesPerSec: 3 });
 
     // 未到 150ms：渲染状态不更新
     expect(useImportStore.getState().activeJobs[7].doneFiles).toBe(0);
@@ -203,11 +203,11 @@ describe("进度节流（150ms）", () => {
 
   it("flush 后新事件重新开窗（第二个 150ms 周期）", () => {
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 10_000 });
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 1, doneBytes: 100, currentFile: "A", bytesPerSec: 1 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 1, doneBytes: 100, settledBytes: 100, currentFile: "A", bytesPerSec: 1 });
     vi.advanceTimersByTime(150);
     expect(useImportStore.getState().activeJobs[7].doneFiles).toBe(1);
 
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 5, doneBytes: 500, currentFile: "E", bytesPerSec: 5 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 5, doneBytes: 500, settledBytes: 500, currentFile: "E", bytesPerSec: 5 });
     expect(useImportStore.getState().activeJobs[7].doneFiles).toBe(1);
     vi.advanceTimersByTime(150);
     expect(useImportStore.getState().activeJobs[7].doneFiles).toBe(5);
@@ -215,7 +215,7 @@ describe("进度节流（150ms）", () => {
 
   it("sessionFinished 立即以 stats 定格终态并生成总结快照", () => {
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 10_000 });
-    emit({ type: "importFileProgress", jobId: 7, doneFiles: 9, doneBytes: 9_000, currentFile: "X", bytesPerSec: 50 });
+    emit({ type: "importFileProgress", jobId: 7, doneFiles: 9, doneBytes: 9_000, settledBytes: 9_000, currentFile: "X", bytesPerSec: 50 });
     // 尚未 flush 就 finished：pending 应被丢弃，以 stats 为准
     emit({
       type: "importSessionFinished",
