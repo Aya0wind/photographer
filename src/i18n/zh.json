@@ -1,0 +1,28 @@
+{
+  "nav.gallery": "画廊",
+  "nav.search": "搜索",
+  "nav.import": "导入",
+  "nav.tasks": "任务",
+  "nav.settings": "设置",
+
+  "pages.gallery.title": "照片画廊（M4 交付）",
+  "pages.gallery.desc": "缩略图虚拟网格、看图与评分浏览将在里程碑 M4 于此交付。",
+  "pages.search.title": "照片搜索（M3 交付）",
+  "pages.search.desc": "元数据多维筛选与全文检索将在里程碑 M3 于此交付。",
+  "pages.import.title": "导入（M1 交付）",
+  "pages.import.desc": "设备检测与导入向导将在里程碑 M1 于此交付。",
+  "pages.tasks.title": "任务中心（M5 交付）",
+  "pages.tasks.desc": "导入与 AI 索引的后台任务队列将在里程碑 M1–M5 逐步交付。",
+  "pages.settings.title": "设置",
+  "pages.settings.desc": "各模块配置项将随里程碑逐步补充，当前为设置框架占位。",
+  "pages.settings.libraryRoot": "库根目录",
+  "pages.settings.libraryRootUnset": "未设置",
+
+  "onboarding.title": "首次引导向导",
+  "onboarding.desc": "库位置 → 导入方案 → AI 三选一 的向导流程将在 Task 5 实现。",
+
+  "common.back": "上一步",
+  "common.next": "下一步",
+  "common.done": "完成",
+  "common.cancel": "取消"
+}
