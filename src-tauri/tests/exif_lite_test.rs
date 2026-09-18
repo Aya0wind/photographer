@@ -10,7 +10,6 @@ use std::io::Read;
 use std::path::Path;
 
 use chrono::NaiveDateTime;
-use walkdir::WalkDir;
 
 #[path = "../src/metadata/exif_lite.rs"]
 mod exif_lite;
@@ -182,30 +181,20 @@ fn garbage_empty_truncated_input_yields_all_none() {
     assert_eq!(parse(&broken), MetaLite::default());
 }
 
-/// 真实文件冒烟（只读遍历 `Y:\照片`，找第一个 .jpg 读头部 1MB）：
-/// 断言解析不 panic；camera 多半 Some（打印观察，不作硬断言）。
+/// 真实文件冒烟（直连已知样例路径，不做目录遍历——真实数据测试禁止全量扫描，
+/// 只读头部 1MB 渐进解析；样例缺失时直接跳过）。
 #[test]
 #[ignore = "依赖本机 Y:\\照片 真实照片，需 --ignored 手动运行"]
 fn real_jpeg_head_smoke() {
-    let root = Path::new(r"Y:\照片");
-    if !root.is_dir() {
-        eprintln!("skip: {} 不存在", root.display());
+    // 已知样例（2026-09-18 实测存在）；如换机后失效，更新为任一已知 jpg 全路径即可
+    const SAMPLE: &str = r"Y:\照片\20250607团建\DSC_0176.JPG";
+    let path = Path::new(SAMPLE);
+    if !path.is_file() {
+        eprintln!("skip: 样例不存在 {}", SAMPLE);
         return;
     }
-    let found = WalkDir::new(root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .find(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case("jpg"))
-        });
-    let Some(entry) = found else {
-        eprintln!("skip: {} 下未找到 .jpg", root.display());
-        return;
-    };
     let mut head = Vec::new();
-    fs::File::open(entry.path())
+    fs::File::open(path)
         .expect("failed to open photo")
         .take(1024 * 1024)
         .read_to_end(&mut head)
@@ -213,7 +202,7 @@ fn real_jpeg_head_smoke() {
     let meta = parse(&head); // 不 panic 即通过
     eprintln!(
         "{} -> captured_at={:?} camera={:?}",
-        entry.path().display(),
+        path.display(),
         meta.captured_at.map(|t| t.to_rfc3339()),
         meta.camera
     );
