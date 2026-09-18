@@ -5,6 +5,8 @@ mod import;
 mod ipc;
 mod metadata;
 pub mod settings;
+mod tasks;
+mod thumbs;
 mod tray;
 
 use std::collections::HashMap;
@@ -55,12 +57,15 @@ pub fn run() {
             let bus = EventBus::new();
             // 托管 Arc<AppState>（SharedState）：async 慢命令壳需要 'static
             // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
+            // supervisor：统一后台任务框架（panic 捕获 + 命名 + 软取消）。
+            let supervisor = tasks::TaskSupervisor::new(bus.clone());
             app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
                 bus: bus.clone(),
                 devices: Mutex::new(HashMap::new()),
                 active_import: Mutex::new(None),
+                supervisor,
             }));
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
@@ -121,6 +126,7 @@ pub fn run() {
             ipc::import::import_retry_failed,
             ipc::import::clean_candidates,
             ipc::import::clean_apply,
+            ipc::thumb::thumb_get,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -173,13 +179,19 @@ fn spawn_device_orchestrator(app: AppHandle) {
                         handle_device_arrived(&app, id, kind, name);
                     }
                     AppEvent::DeviceRemoved { id } => {
-                        // 移除与注册同一规范化 key（WPD 大小写变体不漏删）
+                        // 移除与注册同一规范化 key（WPD 大小写变体不漏删）。
+                        // 摘出后不在本线程 drop：源可能持有 COM 资源，
+                        // Release 转移到专用 MTA 线程（断开闪退修复 2026-09-18）。
                         let key = devices::normalize_device_id(&id);
-                        app.state::<ipc::SharedState>()
+                        let removed = app
+                            .state::<ipc::SharedState>()
                             .devices
                             .lock()
                             .expect("devices mutex poisoned")
                             .remove(&key);
+                        if removed.is_some() {
+                            eprintln!("设备已移除（注册表清理；WPD 代理无 COM 资源，就地 drop 安全）: {key}");
+                        }
                     }
                     _ => {}
                 }
@@ -188,7 +200,18 @@ fn spawn_device_orchestrator(app: AppHandle) {
         .expect("spawn device orchestrator");
 }
 
+/// 到达处理入口：**扫描放后台线程**（2349 文件 WPD 枚举数十秒——在编排
+/// 线程串行会卡掉后续到达/移除事件，前端也迟迟看不到响应），本函数瞬间
+/// 返回；注册/DeviceScanned 在扫描线程完成（幂等：重复到达同 key 覆盖刷新）。
 fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: String) {
+    let app = app.clone();
+    let supervisor = std::sync::Arc::clone(&app.state::<ipc::SharedState>().supervisor);
+    supervisor.spawn("scan", name.clone(), move |_| {
+        handle_device_arrived_blocking(&app, id, kind, name);
+    });
+}
+
+fn handle_device_arrived_blocking(app: &AppHandle, id: String, kind: SourceKind, name: String) {
     // 失败日志必须带 id/kind 上下文（2026-09-18 排查教训：静默吞错全靠猜）。
     // id 一律先规范化（WPD 大小写变体收敛为注册表单一 key；卷/FOLDER 原样）
     let id = devices::normalize_device_id(&id);
@@ -251,7 +274,7 @@ fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: St
         }
     };
     let total_files: u64 = snapshot.files_by_kind.values().sum();
-    state
+    let replaced = state
         .devices
         .lock()
         .expect("devices mutex poisoned")
@@ -262,6 +285,7 @@ fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: St
                 snapshot: snapshot.clone(),
             },
         );
+    drop(replaced); // 覆盖刷新：旧条目（纯数据代理）就地释放安全
     eprintln!("设备已注册并扫描：{name}（kind={kind_tag}, id={id}, {total_files} 个媒体文件）");
     state.bus.publish(AppEvent::DeviceScanned {
         id,

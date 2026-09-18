@@ -3,7 +3,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, settings};
+pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
 
 use std::io::Read;
 
@@ -12,7 +12,30 @@ use devices::wpd::{
     com_apartment_owned, filetime_to_utc, join_rel_path, ole_date_to_utc, parse_wpd_date_string,
     WpdSource,
 };
-use devices::{normalize_device_id, DeviceSource, SourceKind};
+use devices::{normalize_device_id, DeviceError, DeviceSource, SourceKind};
+
+#[test]
+fn object_level_skip_classification() {
+    use devices::wpd::is_object_level_skip;
+    // 受限对象（访问被拒）→ 跳过计数
+    assert!(is_object_level_skip(&DeviceError::AccessDenied));
+    // 无名内部对象（播放列表/系统对象，缺文件名/基本属性）→ 跳过计数
+    //（真机：ILCE-7RM5 的 o18179B 对象导致整树失败、设备注册不上）
+    assert!(is_object_level_skip(&DeviceError::Other(
+        "对象缺文件名: o18179B".into()
+    )));
+    // 会话丢失/拔线/枚举接口失败仍为致命（要么完整要么报错）
+    assert!(!is_object_level_skip(&DeviceError::Disconnected));
+    assert!(!is_object_level_skip(&DeviceError::Other(
+        "WPD error 0x800710D2".into()
+    )));
+    assert!(!is_object_level_skip(&DeviceError::Other(
+        "读取失败".into()
+    )));
+    assert!(!is_object_level_skip(&DeviceError::NotSupported(
+        "x".into()
+    )));
+}
 
 #[test]
 fn normalize_device_id_collapses_wpd_case_variants() {

@@ -4,7 +4,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, settings};
+pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
 
 use devices::hotplug::unitmask_to_drives;
 use devices::present::{

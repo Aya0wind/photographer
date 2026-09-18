@@ -22,6 +22,10 @@ pub mod ipc;
 pub mod metadata;
 #[path = "../../src/settings/mod.rs"]
 pub mod settings;
+#[path = "../../src/tasks/mod.rs"]
+pub mod tasks;
+#[path = "../../src/thumbs/mod.rs"]
+pub mod thumbs;
 
 use std::collections::HashMap;
 use std::fs;
@@ -321,6 +325,7 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
         bus: EventBus::new(),
         devices: Mutex::new(devices_map),
         active_import: Mutex::new(None),
+        supervisor: tasks::TaskSupervisor::new(EventBus::new()),
     }
 }
 

@@ -3,28 +3,20 @@
 //! 结构：跨平台纯函数（路径拼接 / OLE DATE / ISO 日期 / FILETIME 解析，
 //! 有单测）+ Windows COM 实现 + 非 Windows 桩。
 //!
-//! COM 约定：每个对外入口（list/open_head/stream/enumerate/delete）都在
-//! 调用线程经三态 guard `CoInitializeEx(COINIT_MULTITHREADED)`：S_OK 才由
-//! 本 guard 配对 `CoUninitialize`；S_FALSE（他人已初始化）与
-//! RPC_E_CHANGED_MODE（线程为 STA，如 tao 主线程/IPC 命令线程）沿用现有
-//! apartment 且绝不注销（决策纯函数 [`com_apartment_owned`] 单测覆盖）；
-//! COM 接口指针全部使用 windows crate 封装，禁止手写 AddRef/Release。
+//! 统一架构（2026-09-18）：**单一 WPD worker 线程 + 轻量代理**——所有 WPD
+//! COM 对象（Manager/Device/流）只在 worker 线程及其创建的流泵线程上创建
+//! 与释放；`WpdSource` 是无状态代理（{id, name} + 消息通道），任意线程
+//! clone/drop 自由，COM 套间类 bug（断开闪退）整类消灭。worker 每条命令
+//! `catch_unwind`：panic 转 Err 回执 + 日志，进程不死。
 //!
-//! 降级点（真机 ILCE-7RM5 验证通过 list/open_head/stream）：
-//! - list「要么完整要么报错」：仅受限对象/子树（AccessDenied）跳过并计数
-//!   （收尾日志可见）；其余枚举中途错误整体上抛，绝不出半份清单
-//!   （2026-09-18 真机：曾静默吞错导致清单随机截断 562/1161/2349）；
-//! - 设备缺失 ORIGINAL_FILE_NAME 时回退 WPD_OBJECT_NAME，再回退对象 ID；
-//! - PERSISTENT_UNIQUE_ID 缺失时以会话对象 ID 充当（跨会话可能变化，
-//!   影响“已导入”识别的稳定性）；
-//! - stream() 为满足“接口 Release 先于 CoUninitialize”的 COM 契约，
-//!   有意泄漏一次线程 COM 初始化计数（进程退出回收）；
-//! - 目录递归深度上限 32；每对象一次属性批量查询（2349 文件约 1.5s
-//!   热态，冷态约 160s——如需提速可后续改 IPortableDevicePropertiesBulk）。
+//! COM 约定：worker/流泵线程经三态 guard `CoInitializeEx(MTA)`（决策纯
+//! 函数 [`com_apartment_owned`] 单测覆盖；S_FALSE/CHANGED_MODE 沿用现有
+//! apartment 不注销）；接口指针全部 windows crate 封装，禁止手写
+//! AddRef/Release。
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
-use super::{DeviceResult, DeviceSource, FileEntry};
+use super::{DeviceError, DeviceResult, DeviceSource, FileEntry};
 use crate::events::SourceKind;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +70,17 @@ pub fn filetime_to_utc(low: u32, high: u32) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp(unix, nanos)
 }
 
+/// 枚举期可跳过的对象级错误（跳过并计数，不中断整卷枚举）：
+/// - `AccessDenied`：受限对象/子树（相机受保护目录、并发会话被拒）；
+/// - 「对象缺文件名/基本属性」：无名内部对象（播放列表/系统对象——
+///   2026-09-18 真机：ILCE-7RM5 的 o18179B 导致整树失败、设备注册不上）。
+///
+/// 仍致命：会话丢失/拔线/枚举接口失败等（「要么完整要么报错」）。
+pub fn is_object_level_skip(err: &DeviceError) -> bool {
+    matches!(err, DeviceError::AccessDenied)
+        || matches!(err, DeviceError::Other(msg) if msg.starts_with("对象缺"))
+}
+
 /// CoInitializeEx 返回码 → apartment guard 决策（三态语义，纯函数单测覆盖）。
 ///
 /// - S_OK（0）：本线程首次初始化成功 → `Ok(true)`（drop 时配对 CoUninitialize）；
@@ -103,8 +106,10 @@ pub fn com_apartment_owned(hr: i32) -> Result<bool, i32> {
 // 设备源
 // ---------------------------------------------------------------------------
 
-/// WPD/MTP 设备源：`pnp_id` 为 PnP 设备路径（enumerate_mtp_devices 的产出），
-/// `friendly_name` 为展示名。
+/// WPD/MTP 设备源——**轻量代理**（统一架构 2026-09-18）：`pnp_id` 为 PnP
+/// 设备路径（enumerate_mtp_devices 的产出），`friendly_name` 为展示名。
+/// 不持有任何 COM 资源；list/open_head/stream/delete 全部转发给全局
+/// wpd-worker 线程（见 `worker` 模块），任意线程持有/drop 均安全。
 pub struct WpdSource {
     pnp_id: String,
     friendly_name: String,
@@ -118,6 +123,45 @@ impl WpdSource {
         }
     }
 }
+
+/// 流读取适配：worker 泵线程 → 有界通道 → `std::io::Read`。reader 在任意
+/// 线程 drop 即关通道 → 泵线程退出并释放全部 COM（`WPD_RELEASE_COUNT`
+/// 递增可观测）。
+pub(crate) struct MtpChannelReader {
+    rx: tokio::sync::mpsc::Receiver<StreamChunk>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl std::io::Read for MtpChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.pos >= self.buf.len() {
+            match self.rx.blocking_recv() {
+                // 通道关闭（EOF 或泵线程结束）
+                None => return Ok(0),
+                Some(Err(e)) => return Err(e),
+                Some(Ok(chunk)) => {
+                    self.buf = chunk;
+                    self.pos = 0;
+                }
+            }
+        }
+        let n = (self.buf.len() - self.pos).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// 流分块（worker 泵线程 → reader）。
+pub type StreamChunk = Result<Vec<u8>, std::io::Error>;
+
+/// COM 释放计数（流泵线程释放会话时递增；测试/运维观测用）。
+pub static WPD_RELEASE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl DeviceSource for WpdSource {
     /// 规范化（小写）的 PnP id：启动枚举（小写）与热插到达（大写）两种
@@ -137,7 +181,7 @@ impl DeviceSource for WpdSource {
 
     #[cfg(windows)]
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        com::list(&self.pnp_id)
+        worker::list(&self.pnp_id)
     }
 
     #[cfg(not(windows))]
@@ -147,7 +191,7 @@ impl DeviceSource for WpdSource {
 
     #[cfg(windows)]
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {
-        com::open_head(&self.pnp_id, id, max)
+        worker::open_head(&self.pnp_id, id, max)
     }
 
     #[cfg(not(windows))]
@@ -157,7 +201,12 @@ impl DeviceSource for WpdSource {
 
     #[cfg(windows)]
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
-        com::stream(&self.pnp_id, id)
+        let rx = worker::stream(&self.pnp_id, id)?;
+        Ok(Box::new(MtpChannelReader {
+            rx,
+            buf: Vec::new(),
+            pos: 0,
+        }))
     }
 
     #[cfg(not(windows))]
@@ -165,11 +214,10 @@ impl DeviceSource for WpdSource {
         Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
     }
 
-    /// MTP 删源（move 模式）：经 WPD Delete。持久 ID → 会话对象 ID 翻译
-    /// 与 open_head/stream 同路径（ILCE-7RM5 真机验证过的对象解析链）。
+    /// MTP 删源（move 模式）：经 WPD Delete（worker 线程执行）。
     #[cfg(windows)]
     fn delete(&self, id: &str) -> DeviceResult<()> {
-        com::delete(&self.pnp_id, id)
+        worker::delete(&self.pnp_id, id)
     }
 
     #[cfg(not(windows))]
@@ -178,10 +226,13 @@ impl DeviceSource for WpdSource {
     }
 }
 
-/// 枚举全部 WPD/MTP 设备：`(pnp_id, friendly_name)` 列表。
+// ---------------------------------------------------------------------------
+// Windows COM 实现
+// ---------------------------------------------------------------------------
+
 #[cfg(windows)]
 pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
-    com::enumerate()
+    worker::enumerate()
 }
 
 #[cfg(not(windows))]
@@ -189,16 +240,207 @@ pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
     Ok(Vec::new())
 }
 
+/// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
+/// lib 目标内无调用点（集成测试经 #[path] 模块树引用）——豁免 dead_code。
+#[cfg(windows)]
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn panic_probe() -> DeviceResult<()> {
+    worker::panic_probe()
+}
+
+#[cfg(not(windows))]
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn panic_probe() -> DeviceResult<()> {
+    Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
+}
+
 // ---------------------------------------------------------------------------
-// Windows COM 实现
+// WPD worker：单一常驻线程，全部 COM 对象的生命周期归宿
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+mod worker {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::mpsc;
+    use std::sync::OnceLock;
+
+    use super::super::{DeviceError, DeviceResult, FileEntry};
+    use super::{com, StreamChunk};
+
+    /// worker 指令（reply 为一次性应答通道）。
+    pub(super) enum WpdCmd {
+        Enumerate {
+            reply: mpsc::Sender<DeviceResult<Vec<(String, String)>>>,
+        },
+        List {
+            pnp: String,
+            reply: mpsc::Sender<DeviceResult<Vec<FileEntry>>>,
+        },
+        OpenHead {
+            pnp: String,
+            obj: String,
+            max: u64,
+            reply: mpsc::Sender<DeviceResult<Vec<u8>>>,
+        },
+        Stream {
+            pnp: String,
+            obj: String,
+            reply: mpsc::Sender<DeviceResult<tokio::sync::mpsc::Receiver<StreamChunk>>>,
+        },
+        Delete {
+            pnp: String,
+            obj: String,
+            reply: mpsc::Sender<DeviceResult<()>>,
+        },
+        /// 测试注入：panic 捕获验证（lib 目标内不构造——集成测试引用）。
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        PanicProbe {
+            reply: mpsc::Sender<DeviceResult<()>>,
+        },
+    }
+
+    /// worker 发送端（首次使用时拉起线程，进程生命周期常驻）。
+    fn tx() -> &'static mpsc::Sender<WpdCmd> {
+        static TX: OnceLock<mpsc::Sender<WpdCmd>> = OnceLock::new();
+        TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<WpdCmd>();
+            std::thread::Builder::new()
+                .name("wpd-worker".into())
+                .spawn(move || run(rx))
+                .expect("spawn wpd worker");
+            tx
+        })
+    }
+
+    /// worker 主循环：线程生命周期内持有 COM 初始化；逐命令执行。
+    fn run(rx: mpsc::Receiver<WpdCmd>) {
+        let _com = com::ComApartment::init();
+        while let Ok(cmd) = rx.recv() {
+            handle(cmd);
+        }
+    }
+
+    fn handle(cmd: WpdCmd) {
+        match cmd {
+            WpdCmd::Enumerate { reply } => {
+                let _ = reply.send(guarded("enumerate", com::enumerate));
+            }
+            WpdCmd::List { pnp, reply } => {
+                let _ = reply.send(guarded("list", move || com::list(&pnp)));
+            }
+            WpdCmd::OpenHead {
+                pnp,
+                obj,
+                max,
+                reply,
+            } => {
+                let _ = reply.send(guarded("open_head", move || {
+                    com::open_head(&pnp, &obj, max)
+                }));
+            }
+            WpdCmd::Stream { pnp, obj, reply } => {
+                let _ = reply.send(guarded("stream", move || com::stream_channel(&pnp, &obj)));
+            }
+            WpdCmd::Delete { pnp, obj, reply } => {
+                let _ = reply.send(guarded("delete", move || com::delete(&pnp, &obj)));
+            }
+            WpdCmd::PanicProbe { reply } => {
+                let _ = reply.send(guarded("panic_probe", || panic!("注入测试 panic")));
+            }
+        }
+    }
+
+    /// 每命令 panic 捕获：转 Err 回执（reply 必达），worker 继续服务。
+    fn guarded<T>(name: &str, f: impl FnOnce() -> DeviceResult<T>) -> DeviceResult<T> {
+        catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+            let detail = panic_msg(&payload);
+            eprintln!("WPD worker 命令 panic（{name}）: {detail}");
+            Err(DeviceError::Other(format!(
+                "WPD worker {name} panic: {detail}"
+            )))
+        })
+    }
+
+    fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "未知 panic 载荷".to_string()
+        }
+    }
+
+    /// 发送指令并等待一次性回执（worker 关闭/无响应 → Err）。
+    fn call<T>(make: impl FnOnce(mpsc::Sender<DeviceResult<T>>) -> WpdCmd) -> DeviceResult<T> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        tx().send(make(reply_tx))
+            .map_err(|_| DeviceError::Other("WPD worker 不可用".into()))?;
+        reply_rx
+            .recv()
+            .map_err(|_| DeviceError::Other("WPD worker 无响应".into()))?
+    }
+
+    pub(super) fn enumerate() -> DeviceResult<Vec<(String, String)>> {
+        call(|reply| WpdCmd::Enumerate { reply })
+    }
+
+    pub(super) fn list(pnp: &str) -> DeviceResult<Vec<FileEntry>> {
+        call(|reply| WpdCmd::List {
+            pnp: pnp.into(),
+            reply,
+        })
+    }
+
+    pub(super) fn open_head(pnp: &str, obj: &str, max: u64) -> DeviceResult<Vec<u8>> {
+        call(|reply| WpdCmd::OpenHead {
+            pnp: pnp.into(),
+            obj: obj.into(),
+            max,
+            reply,
+        })
+    }
+
+    pub(super) fn stream(
+        pnp: &str,
+        obj: &str,
+    ) -> DeviceResult<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        call(|reply| WpdCmd::Stream {
+            pnp: pnp.into(),
+            obj: obj.into(),
+            reply,
+        })
+    }
+
+    pub(super) fn delete(pnp: &str, obj: &str) -> DeviceResult<()> {
+        call(|reply| WpdCmd::Delete {
+            pnp: pnp.into(),
+            obj: obj.into(),
+            reply,
+        })
+    }
+
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub(super) fn panic_probe() -> DeviceResult<()> {
+        call(|reply| WpdCmd::PanicProbe { reply })
+    }
+}
+
+#[cfg(windows)]
 mod com {
+    use std::sync::atomic::Ordering;
+
     use chrono::{DateTime, Utc};
 
     use super::super::{is_media_ext, DeviceError, DeviceResult, FileEntry};
-    use super::{filetime_to_utc, join_rel_path, ole_date_to_utc, parse_wpd_date_string};
+    use super::{
+        filetime_to_utc, is_object_level_skip, join_rel_path, ole_date_to_utc,
+        parse_wpd_date_string,
+    };
     use crate::devices::hotplug::pnp_display_name;
 
     use windows::core::{Error as WinError, GUID, HRESULT, PCWSTR, PWSTR};
@@ -254,12 +496,12 @@ mod com {
     ///   Explorer 同款用法）——沿用现有 apartment，**绝不
     ///   CoUninitialize**（不注销他人/宿主的初始化，泄漏的引用至多延长
     ///   apartment 生命周期到进程退出，无害）。
-    struct ComApartment {
+    pub(super) struct ComApartment {
         owned: bool,
     }
 
     impl ComApartment {
-        fn init() -> Result<Self, WinError> {
+        pub(super) fn init() -> Result<Self, WinError> {
             // SAFETY: 无指针参数，仅改变当前线程 COM 状态
             let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             match super::com_apartment_owned(hr.0) {
@@ -275,13 +517,6 @@ mod com {
                 // SAFETY: 仅与本 guard 自己的 S_OK CoInitializeEx 配对
                 unsafe { CoUninitialize() };
             }
-        }
-    }
-
-    impl ComApartment {
-        /// 放弃注销（见 stream() 的 COM 契约说明）。
-        fn leak(mut self) {
-            self.owned = false;
         }
     }
 
@@ -389,6 +624,10 @@ mod com {
     const MAX_DEPTH: u32 = 32;
     /// open_head 的读块大小。
     const HEAD_CHUNK: usize = 64 * 1024;
+    /// 流泵分块大小（1MB：内存可控，导入侧 8MB 读循环多次接收）。
+    const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+    /// 流泵有界通道缓冲块数（8MB 在途；背压阻塞泵线程而非 worker）。
+    const STREAM_BUFFER_CHUNKS: usize = 8;
 
     pub fn list(pnp_id: &str) -> DeviceResult<Vec<FileEntry>> {
         let _com = ComApartment::init().map_err(win_error)?;
@@ -409,7 +648,9 @@ mod com {
         )?;
         // 「要么完整要么报错」：中途错误已整体上抛；此处只剩受限对象计数
         if skipped > 0 {
-            eprintln!("WPD 枚举跳过 {skipped} 个受限对象/子树（访问被拒），其余完整返回");
+            eprintln!(
+                "WPD 枚举跳过 {skipped} 个受限/无名对象（访问被拒或缺基本属性，                 如播放列表/系统对象），其余完整返回"
+            );
         }
         out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
         Ok(out)
@@ -519,7 +760,7 @@ mod com {
                 if let Err(err) =
                     process_object(content, keys, &obj_id, prefix, depth, out, skipped)
                 {
-                    if matches!(err, DeviceError::AccessDenied) {
+                    if is_object_level_skip(&err) {
                         *skipped += 1;
                     } else {
                         return Err(err);
@@ -801,33 +1042,78 @@ mod com {
         Ok(out)
     }
 
-    pub fn stream(pnp_id: &str, obj_id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
-        let com = ComApartment::init().map_err(win_error)?;
+    pub fn stream_channel(
+        pnp_id: &str,
+        obj_id: &str,
+    ) -> DeviceResult<tokio::sync::mpsc::Receiver<super::StreamChunk>> {
+        let _com = ComApartment::init().map_err(win_error)?;
         let device = open_device(pnp_id)?;
         // SAFETY: 设备已 Open
         let content = unsafe { device.Content() }.map_err(win_error)?;
         let resolved = resolve_object_id(&content, obj_id);
         let (stream, _) = open_resource(&content, &resolved).map_err(win_error)?;
-        // COM 契约：所有接口 Release 必须先于 CoUninitialize。流会逃逸到
-        // 调用方作用域（可能存活到导入任务结束），因此本线程的 COM 初始化
-        // 有意不注销（leak 一次计数，进程退出时回收）——这是 M1 的已知
-        // 降级点，比违反 Release/CoUninitialize 顺序（实测导致进程退出时
-        // ACCESS_VIOLATION）安全。
-        com.leak();
-        // _device：保持设备会话打开——流关闭前不 Close 设备（部分设备
-        // 会随 Close 中断未完成的资源流）
-        Ok(Box::new(MtpStream {
-            stream,
-            _device: device,
-        }))
+
+        /// COM 接口跨线程移动包装（worker → 泵线程，均为 MTA 初始化）。
+        ///
+        /// SAFETY: WPD 进程内 COM 对象（非跨套间代理），移动后仅在泵线程
+        /// 上读取与 Release，不做其他调用（与 M1 期间 MtpStream 的 Send
+        /// 论证一致）。
+        struct ComMove<T>(T);
+        unsafe impl<T> Send for ComMove<T> {}
+
+        let coms = ComMove((device, stream));
+        let (tx, rx) = tokio::sync::mpsc::channel::<super::StreamChunk>(STREAM_BUFFER_CHUNKS);
+        // 泵线程：会话与流移交本线程（MTA 初始化；in-proc 对象跨 MTA 线程
+        // 合法）——分块泵入有界通道（背压：reader 消费慢/暂停时阻塞在此，
+        // 不占 worker）；reader drop → 通道关闭 → 循环退出 → 在本线程释放
+        // 全部 COM（WPD_RELEASE_COUNT 递增）。COM 生命周期永不落在调用方
+        // 线程（断开闪退整类消灭）。
+        std::thread::Builder::new()
+            .name("wpd-stream".into())
+            .spawn(move || {
+                let _com = ComApartment::init();
+                let coms = coms;
+                let (_device, stream) = coms.0; // _device 保活：流关闭前不 Close
+                let mut chunk = vec![0u8; STREAM_CHUNK_BYTES];
+                loop {
+                    let mut got = 0u32;
+                    // SAFETY: chunk 可写长度 ≥ 请求长度
+                    let hr = unsafe {
+                        stream.Read(
+                            chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                            chunk.len() as u32,
+                            Some(&mut got),
+                        )
+                    };
+                    if hr.is_err() {
+                        let _ = tx.blocking_send(Err(hr_to_io(hr)));
+                        break;
+                    }
+                    if got == 0 {
+                        break; // EOF：tx 随作用域 drop → reader 见 Ok(0)
+                    }
+                    if tx
+                        .blocking_send(Ok(chunk[..got as usize].to_vec()))
+                        .is_err()
+                    {
+                        break; // reader 已 drop（取消/完成）：就此收尾释放
+                    }
+                }
+                super::WPD_RELEASE_COUNT.fetch_add(1, Ordering::SeqCst);
+            })
+            .map_err(|e| DeviceError::Other(format!("流泵线程启动失败: {e}")))?;
+        Ok(rx)
     }
 
-    /// IStream → std::io::Read 适配。读取中断映射为 `ConnectionAborted`
-    /// （调用方据此判定设备拔线并暂停任务）。
-    struct MtpStream {
-        stream: IStream,
-        /// 设备会话保活（见 stream() 说明）。
-        _device: IPortableDevice,
+    /// HRESULT → io::Error（读取中断映射 ConnectionAborted：调用方据此
+    /// 判定拔线并暂停任务）。
+    fn hr_to_io(hr: HRESULT) -> std::io::Error {
+        let kind = match hr_error(hr) {
+            DeviceError::AccessDenied => std::io::ErrorKind::PermissionDenied,
+            DeviceError::Disconnected => std::io::ErrorKind::ConnectionAborted,
+            _ => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, format!("MTP stream error 0x{:08X}", hr.0 as u32))
     }
 
     /// 删除对象（move 模式删源）：持久 ID → 会话 ID 翻译后经
@@ -862,37 +1148,5 @@ mod com {
         // 由 HRESULT 表达）
         unsafe { content.Delete(0, &request, std::ptr::null_mut()) }.map_err(win_error)?;
         Ok(())
-    }
-
-    // SAFETY: WPD 的资源 IStream 是进程内 COM 对象（非跨套间代理），
-    // 允许在任意 CoInitializeEx(MULTITHREADED) 初始化的线程上调用；
-    // 导入引擎在读取线程按 MTA 初始化 COM 后顺序读（不并发共享）。
-    unsafe impl Send for MtpStream {}
-
-    impl std::io::Read for MtpStream {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let want = buf.len().min(u32::MAX as usize) as u32;
-            let mut got = 0u32;
-            // SAFETY: buf 可写长度 ≥ want
-            let hr = unsafe {
-                self.stream.Read(
-                    buf.as_mut_ptr() as *mut core::ffi::c_void,
-                    want,
-                    Some(&mut got),
-                )
-            };
-            if hr.is_err() {
-                let kind = match hr_error(hr) {
-                    DeviceError::AccessDenied => std::io::ErrorKind::PermissionDenied,
-                    DeviceError::Disconnected => std::io::ErrorKind::ConnectionAborted,
-                    _ => std::io::ErrorKind::Other,
-                };
-                return Err(std::io::Error::new(
-                    kind,
-                    format!("MTP stream error 0x{:08X}", hr.0 as u32),
-                ));
-            }
-            Ok(got as usize)
-        }
     }
 }

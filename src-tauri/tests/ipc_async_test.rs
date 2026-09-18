@@ -9,7 +9,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, settings};
+pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
 
 use std::sync::Arc;
 use std::time::Duration;

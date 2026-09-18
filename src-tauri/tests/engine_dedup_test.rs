@@ -3,7 +3,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, metadata, settings};
+pub use common::{db, devices, events, import, metadata, settings, tasks, thumbs};
 
 use std::fs;
 

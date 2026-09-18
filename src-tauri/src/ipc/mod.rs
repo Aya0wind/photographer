@@ -4,6 +4,7 @@
 pub mod device;
 pub mod import;
 pub mod settings;
+pub mod thumb;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,10 @@ pub struct DeviceEntry {
 pub struct ActiveImport {
     pub job_id: i64,
     pub controls: EngineControls,
-    pub handle: Option<std::thread::JoinHandle<()>>,
+    /// supervisor 任务句柄（panic 捕获/命名；软控制走 controls，同构接口）。
+    /// 持有以防提前丢弃（TaskHandle drop 不取消任务，仅保语义显式）。
+    #[allow(dead_code)]
+    pub handle: Option<crate::tasks::TaskHandle>,
 }
 
 /// 全局应用状态：内存中的设置快照 + 配置目录 + 事件总线 +
@@ -41,6 +45,8 @@ pub struct AppState {
     pub bus: EventBus,
     pub devices: Mutex<HashMap<String, DeviceEntry>>,
     pub active_import: Mutex<Option<ActiveImport>>,
+    /// 统一后台任务框架（扫描/导入等长活线程的派发/panic 捕获/命名）。
+    pub supervisor: std::sync::Arc<crate::tasks::TaskSupervisor>,
 }
 
 /// 设备文件条目 DTO（导入向导源树/勾选表数据；mtime 为 RFC3339 字符串）。
@@ -373,12 +379,8 @@ fn import_source(
 fn reap_finished(active: &mut Option<ActiveImport>) {
     if let Some(current) = active.as_ref() {
         if current.controls.is_done() {
-            let finished = active.take();
-            if let Some(job) = finished {
-                if let Some(handle) = job.handle {
-                    let _ = handle.join();
-                }
-            }
+            // TaskHandle detach（线程由 supervisor 管理；panic 已被捕获上报）
+            active.take();
         }
     }
 }
@@ -399,12 +401,11 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
     let controls = engine.controls();
-    let handle = std::thread::Builder::new()
-        .name("import-engine".into())
-        .spawn(move || {
+    let handle = state
+        .supervisor
+        .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
-        })
-        .map_err(|e| format!("启动导入线程失败: {e}"))?;
+        });
     *active = Some(ActiveImport {
         job_id,
         controls,
@@ -440,12 +441,11 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     let controls = engine.controls();
-    let handle = std::thread::Builder::new()
-        .name("import-engine".into())
-        .spawn(move || {
+    let handle = state
+        .supervisor
+        .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
-        })
-        .map_err(|e| format!("启动导入线程失败: {e}"))?;
+        });
     *active = Some(ActiveImport {
         job_id,
         controls,
@@ -553,12 +553,11 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     let controls = engine.controls();
-    let handle = std::thread::Builder::new()
-        .name("import-engine".into())
-        .spawn(move || {
+    let handle = state
+        .supervisor
+        .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
-        })
-        .map_err(|e| format!("启动导入线程失败: {e}"))?;
+        });
     *active = Some(ActiveImport {
         job_id: new_id,
         controls,
