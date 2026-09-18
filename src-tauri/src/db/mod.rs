@@ -1,2 +1,415 @@
 //! SQLite 基础 + journal（spec §5.4）：M1 T2 由核心 lane 实现。
-//! WAL、迁移（user_version 驱动，只加不改）、jobs/job_files/assets/logs 仓储。
+//!
+//! - [`Db::open`]：WAL + `foreign_keys=ON` + `busy_timeout=5s`（多连接并发）。
+//! - [`Db::migrate`]：`PRAGMA user_version` 驱动的内嵌迁移（SQL 在 [`migrations`]，只加不改）。
+//! - jobs / job_files（断点恢复 journal）/ assets / logs 的仓储方法。
+//!
+//! [`FileState`]/[`AssetKind`] 复用 events 模块的领域枚举，列存储格式与其
+//! serde camelCase 字符串严格一致（手写 rusqlite To/FromSql 映射，不引 derive 扩展 crate）。
+
+#![allow(dead_code)] // M1 骨架：消费者（import 引擎 / IPC）落地后移除，同 events/mod.rs。
+
+mod migrations;
+
+use std::path::Path;
+use std::time::Duration;
+
+use chrono::Utc;
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
+use rusqlite::{params, Connection, Error, Result, Row, ToSql};
+
+use crate::events::{AssetKind, FileState};
+
+/// 打开（必要时创建）库文件，并应用连接级 PRAGMA。
+pub struct Db(pub Connection);
+
+impl Db {
+    /// WAL（读写不互斥）+ foreign_keys + 5s busy_timeout。
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "wal")?;
+        // NORMAL 是与 WAL 配套的常规同步档位（断电最多丢最后事务，不损坏库）。
+        conn.pragma_update(None, "synchronous", "normal")?;
+        conn.pragma_update(None, "foreign_keys", "on")?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self(conn))
+    }
+
+    /// `PRAGMA user_version` 驱动的顺序迁移；每条迁移独立事务提交。
+    pub fn migrate(&self) -> Result<()> {
+        let current: i64 = self
+            .0
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        for (index, sql) in migrations::MIGRATIONS.iter().enumerate() {
+            let version = (index + 1) as i64;
+            if version <= current {
+                continue;
+            }
+            let tx = self.0.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.pragma_update(None, "user_version", version)?;
+            tx.commit()?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 行结构
+// ---------------------------------------------------------------------------
+
+/// jobs 行（任务中心列表 / 断点恢复入口）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobRow {
+    pub id: i64,
+    pub kind: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub status: String,
+    pub total_files: u64,
+    pub total_bytes: u64,
+    pub stats_json: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+/// job_files 行（journal：每文件一条，PK(job_id, src) 覆盖更新）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct JobFileRow {
+    pub job_id: i64,
+    pub src: String,
+    pub dst: String,
+    pub size: u64,
+    pub state: FileState,
+    pub error: Option<String>,
+    pub xxhash: Option<u64>,
+    pub sha256: Option<[u8; 32]>,
+}
+
+/// logs 行。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogRow {
+    pub id: i64,
+    pub ts: String,
+    pub level: String,
+    pub job_id: Option<i64>,
+    pub message: String,
+}
+
+/// assets 行（查重索引与库内资产表）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetRow {
+    pub path: String,
+    pub filename: String,
+    pub size: u64,
+    pub mtime: String,
+    pub xxhash: u64,
+    pub sha256: [u8; 32],
+    pub kind: AssetKind,
+    pub captured_at: Option<String>,
+    pub camera: Option<String>,
+    pub source: String,
+    pub created_at: String,
+}
+
+// ---------------------------------------------------------------------------
+// FileState / AssetKind 的 SQL 列映射（与 serde camelCase 输出一致）
+// ---------------------------------------------------------------------------
+
+impl FileState {
+    /// 列存储字符串（与 serde 序列化结果一致）。
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            FileState::Pending => "pending",
+            FileState::Copying => "copying",
+            FileState::Verified => "verified",
+            FileState::Skipped => "skipped",
+            FileState::Failed => "failed",
+        }
+    }
+
+    fn from_db_str(text: &str) -> Option<Self> {
+        match text {
+            "pending" => Some(FileState::Pending),
+            "copying" => Some(FileState::Copying),
+            "verified" => Some(FileState::Verified),
+            "skipped" => Some(FileState::Skipped),
+            "failed" => Some(FileState::Failed),
+            _ => None,
+        }
+    }
+}
+
+impl ToSql for FileState {
+    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(
+            self.as_db_str().as_bytes(),
+        )))
+    }
+}
+
+impl FromSql for FileState {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_db_str(text).ok_or_else(|| {
+            FromSqlError::Other(format!("unknown file state column value: {text}").into())
+        })
+    }
+}
+
+impl AssetKind {
+    /// 列存储字符串（与 serde 序列化结果一致）。
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            AssetKind::Photo => "photo",
+            AssetKind::Raw => "raw",
+            AssetKind::Video => "video",
+            AssetKind::Other => "other",
+        }
+    }
+
+    fn from_db_str(text: &str) -> Option<Self> {
+        match text {
+            "photo" => Some(AssetKind::Photo),
+            "raw" => Some(AssetKind::Raw),
+            "video" => Some(AssetKind::Video),
+            "other" => Some(AssetKind::Other),
+            _ => None,
+        }
+    }
+}
+
+impl ToSql for AssetKind {
+    fn to_sql(&self) -> Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(
+            self.as_db_str().as_bytes(),
+        )))
+    }
+}
+
+impl FromSql for AssetKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let text = value.as_str()?;
+        Self::from_db_str(text).ok_or_else(|| {
+            FromSqlError::Other(format!("unknown asset kind column value: {text}").into())
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 仓储方法
+// ---------------------------------------------------------------------------
+
+impl Db {
+    /// 建导入任务（status='running'，started_at=now），返回 job_id。
+    pub fn create_job(
+        &self,
+        kind: &str,
+        device_id: &str,
+        device_name: &str,
+        total_files: u64,
+        total_bytes: u64,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO jobs (kind, device_id, device_name, status, total_files, total_bytes, \
+             started_at) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+            params![
+                kind,
+                device_id,
+                device_name,
+                total_files as i64,
+                total_bytes as i64,
+                now_rfc3339()
+            ],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// 收尾任务：写终态（受 status CHECK 约束）、stats_json、finished_at。
+    pub fn finish_job(&self, job_id: i64, status: &str, stats_json: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE jobs SET status = ?2, stats_json = ?3, finished_at = ?4 WHERE id = ?1",
+            params![job_id, status, stats_json, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// journal 落状态：PK(job_id, src) 冲突时整行覆盖。
+    pub fn upsert_job_file(&self, row: &JobFileRow) -> Result<()> {
+        let sha256: Option<&[u8]> = row.sha256.as_ref().map(|sha| sha.as_slice());
+        self.0.execute(
+            "INSERT INTO job_files (job_id, src, dst, size, state, error, xxhash, sha256) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT (job_id, src) DO UPDATE SET \
+             dst = excluded.dst, size = excluded.size, state = excluded.state, \
+             error = excluded.error, xxhash = excluded.xxhash, sha256 = excluded.sha256",
+            params![
+                row.job_id,
+                row.src,
+                row.dst,
+                row.size as i64,
+                row.state,
+                row.error,
+                row.xxhash.map(|v| v as i64),
+                sha256
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 断点恢复：取 pending / failed 的文件（按 src 有序）。
+    pub fn pending_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT job_id, src, dst, size, state, error, xxhash, sha256 FROM job_files \
+             WHERE job_id = ?1 AND state IN (?2, ?3) ORDER BY src",
+        )?;
+        let rows = stmt.query_map(
+            params![job_id, FileState::Pending, FileState::Failed],
+            map_job_file,
+        )?;
+        rows.collect()
+    }
+
+    /// 按状态分组计数（总结弹窗 / 进度统计）。
+    pub fn job_file_counts(&self, job_id: i64) -> Result<Vec<(FileState, u64)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT state, COUNT(*) FROM job_files WHERE job_id = ?1 GROUP BY state ORDER BY state",
+        )?;
+        let rows = stmt.query_map(params![job_id], |row| {
+            Ok((row.get::<_, FileState>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect()
+    }
+
+    /// 任务列表 keyset 分页：id 严格大于 after_id，升序取 limit 条。
+    pub fn jobs_page(&self, after_id: i64, limit: u32) -> Result<Vec<JobRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, kind, device_id, device_name, status, total_files, total_bytes, \
+             stats_json, started_at, finished_at FROM jobs \
+             WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_id, limit], |row| {
+            Ok(JobRow {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                device_id: row.get(2)?,
+                device_name: row.get(3)?,
+                status: row.get(4)?,
+                total_files: row.get::<_, i64>(5)? as u64,
+                total_bytes: row.get::<_, i64>(6)? as u64,
+                stats_json: row.get(7)?,
+                started_at: row.get(8)?,
+                finished_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 资产入库：同路径重复导入整行覆盖。
+    pub fn insert_asset(&self, a: &AssetRow) -> Result<()> {
+        self.0.execute(
+            "INSERT OR REPLACE INTO assets \
+             (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, \
+             created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                a.path,
+                a.filename,
+                a.size as i64,
+                a.mtime,
+                a.xxhash as i64,
+                a.sha256.as_slice(),
+                a.kind,
+                a.captured_at,
+                a.camera,
+                a.source,
+                a.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 查重索引：同 (size, xxhash) 的既有资产 id（导入前快速预判）。
+    pub fn find_asset_by_size_xxh(&self, size: u64, xxhash: u64) -> Result<Option<i64>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id FROM assets WHERE size = ?1 AND xxhash = ?2 LIMIT 1")?;
+        let mut rows = stmt.query(params![size as i64, xxhash as i64])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 路径是否已在库中（同路径同名查重层）。
+    pub fn asset_path_exists(&self, path: &str) -> Result<bool> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT 1 FROM assets WHERE path = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![path])?;
+        Ok(rows.next()?.is_some())
+    }
+
+    /// 追加日志（ts=now）。
+    pub fn append_log(&self, level: &str, job_id: Option<i64>, msg: &str) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO logs (ts, level, job_id, message) VALUES (?1, ?2, ?3, ?4)",
+            params![now_rfc3339(), level, job_id, msg],
+        )?;
+        Ok(())
+    }
+
+    /// 日志游标分页：job 内 id 严格大于 after_id，升序取 limit 条。
+    pub fn logs_page(&self, job_id: i64, after_id: i64, limit: u32) -> Result<Vec<LogRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, ts, level, job_id, message FROM logs \
+             WHERE job_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![job_id, after_id, limit], |row| {
+            Ok(LogRow {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                level: row.get(2)?,
+                job_id: row.get(3)?,
+                message: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 内部工具
+// ---------------------------------------------------------------------------
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn map_job_file(row: &Row<'_>) -> Result<JobFileRow> {
+    Ok(JobFileRow {
+        job_id: row.get(0)?,
+        src: row.get(1)?,
+        dst: row.get(2)?,
+        size: row.get::<_, i64>(3)? as u64,
+        state: row.get(4)?,
+        error: row.get(5)?,
+        xxhash: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+        sha256: blob_to_sha256(row.get(7)?)?,
+    })
+}
+
+fn blob_to_sha256(bytes: Option<Vec<u8>>) -> Result<Option<[u8; 32]>> {
+    match bytes {
+        None => Ok(None),
+        Some(bytes) => {
+            let sha: [u8; 32] = bytes.try_into().map_err(|bad: Vec<u8>| {
+                Error::FromSqlConversionFailure(
+                    bad.len(),
+                    Type::Blob,
+                    format!("sha256 blob must be 32 bytes, got {}", bad.len()).into(),
+                )
+            })?;
+            Ok(Some(sha))
+        }
+    }
+}
