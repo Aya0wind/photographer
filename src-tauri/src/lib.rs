@@ -100,6 +100,8 @@ pub fn run() {
             ipc::device::device_list,
             ipc::device::device_scan,
             ipc::device::device_files,
+            ipc::device::folder_scan,
+            ipc::device::fs_list_dirs,
             ipc::import::import_start,
             ipc::import::import_pause,
             ipc::import::import_resume,
@@ -165,6 +167,10 @@ fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: St
     let source: Arc<dyn DeviceSource> = match kind {
         // 卷事件 id 形如 "E:"，根路径必须补尾反斜杠（"E:" 是该盘当前目录）
         SourceKind::Volume => Arc::new(VolumeSource::new(format!("{id}\\"))),
+        SourceKind::Folder => {
+            // 文件夹源不经热插拔产生（仅 folder_scan 注册），到达事件忽略
+            return;
+        }
         SourceKind::Mtp => match devices::wpd::enumerate_mtp_devices() {
             Ok(list) => match list.into_iter().find(|(pnp, _)| *pnp == id) {
                 Some((pnp, friendly)) => Arc::new(WpdSource::new(pnp, friendly)),

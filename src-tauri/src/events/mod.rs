@@ -25,6 +25,8 @@ pub enum SourceKind {
     Volume,
     /// WPD/MTP 设备（相机直连）
     Mtp,
+    /// 本地文件夹（M2“从文件夹导入”，id 为 `FOLDER:<绝对路径>`）
+    Folder,
 }
 
 /// 资产类型（classify 的产出，assets.kind）。`Ord` 供 BTreeMap 统计键使用。
@@ -60,6 +62,10 @@ pub struct JobStats {
     pub done_bytes: u64,
     pub elapsed_ms: u64,
     pub bytes_per_sec: f64,
+    /// move 模式下成功删源的文件数（copy 恒 0）。
+    pub moved: u64,
+    /// move 模式下删源失败数（不影响 done_files，仅告警）。
+    pub source_delete_failed: u64,
 }
 
 // ---------------------------------------------------------------------------

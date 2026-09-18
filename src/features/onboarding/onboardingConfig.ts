@@ -7,6 +7,24 @@ export const SUGGESTED_LIBRARY_NAME = "主库";
 export const SUGGESTED_DB_DIR = "I:\\SmartPhoto\\主库";
 export const SUGGESTED_PHOTO_ROOT = "Y:\\照片";
 
+/**
+ * 卡/相机导入的专用子目录名（spec §5.11 应用写入区）。
+ * photoRoot 归用户管理（可预存内容）；应用只写入 photoRoot\SmartPhoto，
+ * 用户也可手动把照片移入该区后触发重建索引。与 Rust 侧 ImportSettings.import_subdir 默认值一致。
+ */
+export const DEFAULT_IMPORT_SUBDIR = "SmartPhoto";
+
+/**
+ * 导入目标根 = photoRoot + 导入子目录（分隔符统一 Windows 风格）。
+ * subdir 为空或仅分隔符时退回 photoRoot 本身；两侧多余分隔符会被裁剪。
+ */
+export function importRootOf(photoRoot: string, subdir: string = DEFAULT_IMPORT_SUBDIR): string {
+  const root = photoRoot.replace(/[\\/]+$/, "");
+  const sub = subdir.replace(/^[\\/]+|[\\/]+$/g, "");
+  if (!sub) return root;
+  return `${root}\\${sub}`;
+}
+
 /** 模板令牌白名单（与 Rust 侧 import/templates.rs 保持一致，M1 落地） */
 export const TEMPLATE_TOKENS = [
   "YYYY", "YY", "MM", "DD", "MM-DD", "HH", "mm", "ss",

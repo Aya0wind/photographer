@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -9,17 +9,25 @@ import i18n from "@/i18n";
 import ImportWizard from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { importStart, type ImportPlan } from "@/ipc/api";
+import { folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
   return {
     ...actual,
     importStart: vi.fn(),
+    folderScan: vi.fn(),
+    fsListDirs: vi.fn(),
   };
 });
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+
 const startMock = vi.mocked(importStart);
+const scanMock = vi.mocked(folderScan);
+const listMock = vi.mocked(fsListDirs);
+const openMock = vi.mocked(openDialog);
 
 function volumeDevice() {
   return {
@@ -40,6 +48,17 @@ function mtpDevice() {
     filesByKind: { photo: 1, raw: 0, video: 1, other: 0 },
     bytesTotal: 1024 * 1024 * 10,
     newFiles: 2,
+  };
+}
+
+function folderSnapshot(id = "FOLDER:D:\\老照片", name = "老照片") {
+  return {
+    id,
+    name,
+    kind: "folder" as const,
+    filesByKind: { photo: 3, raw: 1, video: 0, other: 0 },
+    bytesTotal: 1024 * 1024 * 10,
+    newFiles: 4,
   };
 }
 
@@ -95,6 +114,9 @@ function renderWizard(query = "") {
 beforeEach(() => {
   resetImportStoreForTests();
   startMock.mockReset().mockResolvedValue(null);
+  scanMock.mockReset().mockResolvedValue(null);
+  listMock.mockReset().mockResolvedValue([]);
+  openMock.mockReset();
 });
 
 describe("ImportWizard 布局与设备", () => {
@@ -166,24 +188,24 @@ describe("源文件树与文件表", () => {
 });
 
 describe("方案面板", () => {
-  it("目标根目录默认取激活库 photoRoot；切换预设实时预览", async () => {
+  it("目标根目录默认取激活库 photoRoot+导入子目录；切换预设实时预览", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
 
     const rootInput = await screen.findByLabelText("目标根目录");
-    expect(rootInput).toHaveValue("Y:\\照片");
+    expect(rootInput).toHaveValue("Y:\\照片\\SmartPhoto");
 
     const preview = screen.getByTestId("wizard-preview");
     // 默认预设来自设置 {YYYY}/{MM-DD}/{原文件名} → 年/日期
-    expect(preview).toHaveTextContent("Y:\\照片\\2026\\09-18\\IMG_0001.CR3");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.CR3");
 
     await user.selectOptions(screen.getByLabelText("目录模板"), "ym");
-    expect(screen.getByTestId("wizard-preview")).toHaveTextContent("Y:\\照片\\2026\\09\\IMG_0001.CR3");
+    expect(screen.getByTestId("wizard-preview")).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09\\IMG_0001.CR3");
 
     await user.selectOptions(screen.getByLabelText("目录模板"), "orig");
     expect(screen.getByTestId("wizard-preview")).toHaveTextContent(
-      "Y:\\照片\\DCIM\\100CANON\\IMG_0001.CR3",
+      "Y:\\照片\\SmartPhoto\\DCIM\\100CANON\\IMG_0001.CR3",
     );
   });
 
@@ -210,12 +232,13 @@ describe("方案面板", () => {
     const plan: ImportPlan = startMock.mock.calls[0][0];
     expect(plan).toEqual({
       sourceId: "E:",
-      targetRoot: "Y:\\照片",
+      targetRoot: "Y:\\照片\\SmartPhoto",
       dirTemplate: "{YYYY}/{MM-DD}",
       nameTemplate: "{原文件名}",
       duplicatePolicy: "skip",
       skipImported: true,
       streams: 4,
+      mode: "copy",
     });
     // 方案回写设置
     expect(useSettingsStore.getState().settings.import.dirTemplate).toBe("{YYYY}/{MM-DD}");
@@ -242,5 +265,157 @@ describe("方案面板", () => {
     // 注意：userEvent.type 会把 {XX} 当作特殊按键语法，这里用 change 直填
     fireEvent.change(input, { target: { value: "{YYYY}/{XX}" } });
     expect(screen.getByRole("alert")).toHaveTextContent("未知令牌：{XX}");
+  });
+});
+
+describe("文件系统目录树（LR 式源面板）", () => {
+  it("渲染盘符根；hasSubdirs=false 无展开箭头", async () => {
+    seedSession();
+    listMock.mockResolvedValue([
+      { name: "C:", path: "C:\\", hasSubdirs: true },
+      { name: "D:", path: "D:\\", hasSubdirs: true },
+      { name: "E:", path: "E:\\", hasSubdirs: false },
+    ]);
+    renderWizard();
+
+    const fs = await screen.findByTestId("wizard-fs");
+    expect(fs).toHaveTextContent("C:");
+    expect(fs).toHaveTextContent("D:");
+    expect(fs).toHaveTextContent("E:");
+    expect(screen.getByRole("button", { name: "展开 C:\\" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "展开 E:\\" })).not.toBeInTheDocument();
+  });
+
+  it("展开懒加载子级；空目录显示（空）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    listMock
+      .mockResolvedValueOnce([{ name: "C:", path: "C:\\", hasSubdirs: true }])
+      .mockResolvedValueOnce([]);
+
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: "展开 C:\\" }));
+
+    expect(await screen.findByText("（空）")).toBeInTheDocument();
+    expect(listMock).toHaveBeenCalledTimes(2);
+    expect(listMock).toHaveBeenLastCalledWith("C:\\");
+  });
+
+  it("点选文件夹：folderScan 入库+选中+高亮，信息卡显示本地文件夹", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    listMock
+      .mockResolvedValueOnce([{ name: "D:", path: "D:\\", hasSubdirs: true }])
+      .mockResolvedValueOnce([{ name: "照片", path: "D:\\照片", hasSubdirs: false }]);
+    scanMock.mockResolvedValue(folderSnapshot("FOLDER:D:\\照片", "照片"));
+
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: "展开 D:\\" }));
+    await user.click(await screen.findByRole("button", { name: "照片" }));
+
+    expect(scanMock).toHaveBeenCalledWith("D:\\照片");
+    expect(useImportStore.getState().devices.some((d) => d.id === "FOLDER:D:\\照片")).toBe(true);
+    const info = await screen.findByTestId("wizard-device-info");
+    expect(info).toHaveTextContent("本地文件夹");
+    expect(info).toHaveTextContent("照片");
+    expect(info).toHaveTextContent("10.0 MB");
+    const node = screen
+      .getAllByTestId("wizard-fs-node")
+      .find((el) => el.getAttribute("data-path") === "D:\\照片");
+    expect(node?.getAttribute("data-selected")).toBe("true");
+  });
+
+  it("浏览…选目录等价于选中该文件夹（openDialog→folderScan 链路）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(folderSnapshot());
+
+    renderWizard("?device=E:");
+    await user.click(await screen.findByTestId("wizard-fs-browse"));
+
+    expect(openMock).toHaveBeenCalledWith({ directory: true });
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
+    const info = await screen.findByTestId("wizard-device-info");
+    expect(info).toHaveTextContent("本地文件夹");
+    // 选中源切到文件夹（下拉框当前值为 FOLDER: id）
+    expect(screen.getByLabelText("选择设备")).toHaveValue("FOLDER:D:\\老照片");
+  });
+
+  it("folderScan 失败（IPC 不可用）时静默保持原源", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(null);
+
+    renderWizard("?device=E:");
+    await user.click(await screen.findByTestId("wizard-fs-browse"));
+
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
+    expect(useImportStore.getState().devices).toHaveLength(2);
+    const info = screen.getByTestId("wizard-device-info");
+    expect(info).toHaveTextContent("读卡器");
+  });
+});
+
+describe("最近使用", () => {
+  it("手动选择设备后出现在最近使用，点击可重选并持久化 localStorage", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    renderWizard("?device=E:");
+
+    await user.selectOptions(await screen.findByLabelText("选择设备"), "MTP:CAM");
+
+    const recent = await screen.findByTestId("wizard-recent");
+    expect(recent).toHaveTextContent("EOS R5");
+    const stored = JSON.parse(
+      localStorage.getItem("smartphoto.import.recentSources") ?? "[]",
+    ) as Array<{ id: string }>;
+    expect(stored[0]?.id).toBe("MTP:CAM");
+
+    // 切回 E: 后，从最近使用重选相机
+    await user.selectOptions(screen.getByLabelText("选择设备"), "E:");
+    await user.click(within(recent).getByText("EOS R5"));
+    expect(await screen.findByTestId("wizard-device-info")).toHaveTextContent("相机");
+  });
+
+  it("选中文件夹也计入最近使用", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(folderSnapshot());
+
+    renderWizard("?device=E:");
+    await user.click(await screen.findByTestId("wizard-fs-browse"));
+
+    const recent = await screen.findByTestId("wizard-recent");
+    expect(recent).toHaveTextContent("老照片");
+  });
+});
+
+describe("导入模式分段条（LR 式顶部切换）", () => {
+  it("默认复制：选中态与复制说明文案", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+
+    expect(await screen.findByTestId("wizard-mode-copy")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText("复制：源文件保持不动。")).toBeInTheDocument();
+  });
+
+  it("切移动：说明切换，plan.mode=move 并记录 jobMode", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce(11);
+    renderWizard("?device=E:");
+
+    await user.click(await screen.findByRole("radio", { name: "移动 · 不保留" }));
+    expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].mode).toBe("move");
+    expect(useImportStore.getState().jobModes[11]).toBe("move");
   });
 });

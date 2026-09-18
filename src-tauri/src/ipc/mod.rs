@@ -6,13 +6,14 @@ pub mod import;
 pub mod settings;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::SecondsFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Db, JobRow, LogRow};
+use crate::devices::folder::{LocalFolderSource, FOLDER_ID_PREFIX};
 use crate::devices::orchestrator::{self, DeviceSnapshot};
 use crate::devices::{DeviceSource, SourceKind};
 use crate::events::EventBus;
@@ -50,6 +51,133 @@ pub struct FileEntryDto {
     pub rel_path: String,
     pub size: u64,
     pub mtime: String,
+}
+
+/// 目录树浏览条目（fs_list_dirs 返回；M2 导入向导源面板懒加载）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntryDto {
+    pub name: String,
+    /// 规范化的绝对路径。
+    pub path: String,
+    /// 是否含可浏览子目录（浅探测：找到第一个即 true）。
+    pub has_subdirs: bool,
+}
+
+/// 目录浏览黑名单（与设备源枚举的系统目录一致）。
+const DIR_BLACKLIST: &[&str] = &["$RECYCLE.BIN", "System Volume Information"];
+
+/// Windows 文件属性位。
+#[cfg(windows)]
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+
+/// 文件系统目录浏览（M2“从文件夹导入”向导，LR 风格树懒加载）：
+/// parent=None → 盘符根（'A'..='Z' 逐个探测 `X:\` 存在）；
+/// parent=Some → 该目录下的一层子目录。任何读取失败 → 空数组
+/// （前端按空 children 处理，不报错）。
+pub fn list_dirs(parent: Option<&str>) -> Vec<DirEntryDto> {
+    match parent {
+        None => drive_roots(),
+        Some(path) => child_dirs(path),
+    }
+}
+
+/// 盘符根列表（不引第三方依赖：26 个字母逐一探测存在性）。
+fn drive_roots() -> Vec<DirEntryDto> {
+    let mut out = Vec::new();
+    for letter in b'A'..=b'Z' {
+        let letter = letter as char;
+        let root = format!("{letter}:\\");
+        let path = PathBuf::from(&root);
+        if path.exists() {
+            out.push(DirEntryDto {
+                name: format!("{letter}:"),
+                path: root,
+                has_subdirs: has_any_subdir(&path),
+            });
+        }
+    }
+    out
+}
+
+/// 列一层子目录（跳过隐藏/系统属性、黑名单与点前缀名；不含文件）。
+fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
+    let Ok(read) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in read.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_browsable_dir_name(&name) || is_hidden_or_system(&entry) {
+            continue;
+        }
+        let path = normalized_absolute(&entry.path());
+        out.push(DirEntryDto {
+            has_subdirs: has_any_subdir(Path::new(&path)),
+            name,
+            path,
+        });
+    }
+    out.sort_by_key(|e| e.name.to_lowercase());
+    out
+}
+
+/// 目录名可浏览：非点前缀且不在黑名单。
+fn is_browsable_dir_name(name: &str) -> bool {
+    !name.starts_with('.') && !DIR_BLACKLIST.contains(&name)
+}
+
+/// 隐藏(0x2)/系统(0x4)属性目录不展示；元数据不可得按可见处理。
+#[cfg(windows)]
+fn is_hidden_or_system(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    entry
+        .metadata()
+        .map(|meta| {
+            let attrs = meta.file_attributes();
+            attrs & FILE_ATTRIBUTE_HIDDEN != 0 || attrs & FILE_ATTRIBUTE_SYSTEM != 0
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_hidden_or_system(_entry: &std::fs::DirEntry) -> bool {
+    false
+}
+
+/// 浅探测是否含可浏览子目录（权限不足/空 → false）。
+fn has_any_subdir(path: &Path) -> bool {
+    let Ok(read) = std::fs::read_dir(path) else {
+        return false;
+    };
+    for entry in read.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_browsable_dir_name(&name) || is_hidden_or_system(&entry) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// 规范化为绝对路径（canonicalize 解析 8.3/符号链接/相对路径；
+/// 失败回退 join 当前目录的绝对化结果；剔除 `\\?\` verbatim 前缀）。
+fn normalized_absolute(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
+        .unwrap_or_else(|_| path.to_path_buf());
+    resolved
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string()
 }
 
 impl From<&crate::devices::FileEntry> for FileEntryDto {
@@ -96,6 +224,9 @@ impl DeviceSource for ArcSource {
     fn stream(&self, id: &str) -> crate::devices::DeviceResult<Box<dyn std::io::Read + Send>> {
         self.0.stream(id)
     }
+    fn delete(&self, id: &str) -> crate::devices::DeviceResult<()> {
+        self.0.delete(id)
+    }
 }
 
 /// 当前激活库的 Db 连接（打开 + migrate 幂等）。无库 → Err。
@@ -135,6 +266,68 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
     Ok(snapshot)
 }
 
+/// 注册并扫描本地文件夹源（M2“从文件夹导入”，spec §5.11）：id 规范化为
+/// `FOLDER:<canonical 绝对路径>`，重复扫描同一路径幂等覆盖注册表条目。
+/// 前端随后用现有 device_files(id) / import_start(plan) 走同一管线。
+pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, String> {
+    let source: Arc<dyn DeviceSource> =
+        Arc::new(LocalFolderSource::new(path).map_err(|e| format!("文件夹不可用: {e}"))?);
+    let id = source.id();
+    state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .insert(
+            id.clone(),
+            DeviceEntry {
+                source,
+                snapshot: DeviceSnapshot {
+                    id: id.clone(),
+                    name: String::new(),
+                    kind: SourceKind::Folder,
+                    files_by_kind: Default::default(),
+                    bytes_total: 0,
+                    new_files: 0,
+                },
+            },
+        );
+    match scan_by_id(state, &id) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(err) => {
+            // 扫描失败不留死条目
+            state
+                .devices
+                .lock()
+                .expect("devices mutex poisoned")
+                .remove(&id);
+            Err(err)
+        }
+    }
+}
+
+/// 导入用源：注册表取出；FOLDER 源重建为“枚举排除 target_root 子树”的
+/// 实例（嵌套守卫已拒绝合法嵌套方案，此处是防御层——避免任何路径形态
+/// 下把自己的产出再枚举进来）。文件夹已消失时回退注册表源（由引擎报错）。
+fn import_source(
+    state: &AppState,
+    device_id: &str,
+    target_root: &std::path::Path,
+) -> Result<ArcSource, String> {
+    let registered = state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .get(device_id)
+        .map(|entry| Arc::clone(&entry.source))
+        .ok_or_else(|| format!("设备 {device_id} 不在线"))?;
+    if let Some(root) = device_id.strip_prefix(FOLDER_ID_PREFIX) {
+        if let Ok(folder_source) = LocalFolderSource::with_exclude(root, Some(target_root)) {
+            return Ok(ArcSource(Arc::new(folder_source)));
+        }
+    }
+    Ok(ArcSource(registered))
+}
+
 /// 回收已结束的活跃导入线程（Busy 判定前置步骤）。
 fn reap_finished(active: &mut Option<ActiveImport>) {
     if let Some(current) = active.as_ref() {
@@ -160,15 +353,7 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
         return Err("已有导入任务进行中（Busy）".into());
     }
 
-    let source = ArcSource(
-        state
-            .devices
-            .lock()
-            .expect("devices mutex poisoned")
-            .get(&plan.source_id)
-            .map(|entry| Arc::clone(&entry.source))
-            .ok_or_else(|| format!("设备 {} 不在线", plan.source_id))?,
-    );
+    let source = import_source(state, &plan.source_id, &plan.target_root)?;
     let db = active_library_db(state)?;
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
@@ -210,15 +395,7 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
 
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, job_id)?;
-    let source = ArcSource(
-        state
-            .devices
-            .lock()
-            .expect("devices mutex poisoned")
-            .get(&device_id)
-            .map(|entry| Arc::clone(&entry.source))
-            .ok_or_else(|| format!("设备 {device_id} 不在线，无法恢复导入"))?,
-    );
+    let source = import_source(state, &device_id, &plan.target_root)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     let controls = engine.controls();
@@ -331,15 +508,7 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
 
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, new_id)?;
-    let source = ArcSource(
-        state
-            .devices
-            .lock()
-            .expect("devices mutex poisoned")
-            .get(&device_id)
-            .map(|entry| Arc::clone(&entry.source))
-            .ok_or_else(|| format!("设备 {device_id} 不在线，无法重试"))?,
-    );
+    let source = import_source(state, &device_id, &plan.target_root)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     let controls = engine.controls();

@@ -28,9 +28,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 use xxhash_rust::xxh64::Xxh64;
 
 use crate::db::{AssetRow, Db, JobFileRow};
+use crate::devices::folder::FOLDER_ID_PREFIX;
+use crate::devices::volume::is_ignored_dir;
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry, SourceKind};
 use crate::events::{AppEvent, AssetKind, EventBus, FileState, JobStats, Throttle};
 use crate::import::templates::{
@@ -55,6 +58,16 @@ const PART_DIR: &str = ".smartphoto-part";
 const FALLBACK_CAMERA: &str = "未知相机";
 const FALLBACK_LENS: &str = "未知镜头";
 
+/// 导入模式（M2“保留原文件”开关，spec §5.11）：
+/// copy=复制（默认，源不动）；move=移动（校验入册后删源，删源失败仅告警）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportMode {
+    #[default]
+    Copy,
+    Move,
+}
+
 /// 导入计划（IPC 契约，camelCase）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +79,9 @@ pub struct ImportPlan {
     pub duplicate: DuplicatePolicy,
     pub skip_imported: bool,
     pub streams: u32,
+    /// 缺省 copy：journal 中的历史计划（M1 无此字段）仍可反序列化恢复。
+    #[serde(default)]
+    pub mode: ImportMode,
 }
 
 /// 引擎错误（begin 阶段：设备枚举或建任务失败）。
@@ -75,6 +91,8 @@ pub enum EngineError {
     Db(#[from] rusqlite::Error),
     #[error("设备错误: {0}")]
     Device(#[from] DeviceError),
+    #[error("无效的导入计划: {0}")]
+    InvalidPlan(String),
 }
 
 /// 引擎控制柄：与 `run()` 并行持有（IPC 命令 / 测试用）。
@@ -124,6 +142,8 @@ struct Counters {
     skipped_bytes: u64,
     failed: u64,
     failed_bytes: u64,
+    moved: u64,
+    source_delete_failed: u64,
 }
 
 impl Counters {
@@ -146,6 +166,8 @@ impl Counters {
             } else {
                 0.0
             },
+            moved: self.moved,
+            source_delete_failed: self.source_delete_failed,
         }
     }
 }
@@ -244,12 +266,13 @@ impl Engine {
         self.controls.clone()
     }
 
-    /// 建新任务：枚举源 → 宽松查重预判 → journal 全量 pending/skipped →
-    /// 发 ImportSessionStarted。run() 未 begin 时内部自动调用。
+    /// 建新任务：自我嵌套守卫 → 枚举源 → 宽松查重预判 → journal 全量
+    /// pending/skipped → 发 ImportSessionStarted。run() 未 begin 时内部自动调用。
     pub fn begin(&mut self) -> Result<i64, EngineError> {
         if let Some(prepared) = self.prepared.as_ref() {
             return Ok(prepared.job_id);
         }
+        self.check_nesting()?;
         let entries = self.source.list()?;
         let mut base = Counters::default();
         for e in &entries {
@@ -415,6 +438,24 @@ impl Engine {
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.id.clone();
+                            // move：journal verified + assets 入库之后删源
+                            //（删源失败≠导入失败：warn 日志 + 独立计数）
+                            if self.plan.mode == ImportMode::Move {
+                                match self.source.delete(&entry.id) {
+                                    Ok(()) => counters.moved += 1,
+                                    Err(err) => {
+                                        counters.source_delete_failed += 1;
+                                        let _ = self.db.append_log(
+                                            "warn",
+                                            Some(job_id),
+                                            &format!(
+                                                "移动后删源失败（文件已安全导入）: {}: {err}",
+                                                entry.rel_path
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
                             self.bus.publish(AppEvent::ImportFileCompleted {
                                 job_id,
                                 src: entry.id.clone(),
@@ -530,6 +571,20 @@ impl Engine {
             let _ = worker.join();
         }
 
+        // move：尽力清理空的源中间子目录（保留源根；MTP 无文件系统语义跳过）
+        if self.plan.mode == ImportMode::Move && counters.moved > 0 {
+            if let Some(root) = source_root_of(self.source.as_ref()) {
+                let removed = cleanup_empty_dirs(&root);
+                if removed > 0 {
+                    let _ = self.db.append_log(
+                        "info",
+                        Some(job_id),
+                        &format!("移动完成：已清理 {removed} 个空的源子目录"),
+                    );
+                }
+            }
+        }
+
         // 收尾：清空暂存目录 + 终态 + SessionFinished
         let _ = fs::remove_dir_all(self.plan.target_root.join(PART_DIR));
         let status = if device_lost {
@@ -549,8 +604,13 @@ impl Engine {
             "info",
             Some(job_id),
             &format!(
-                "导入会话结束：{status}（完成 {}，跳过 {}，失败 {}）",
-                stats.done_files, stats.skipped_duplicates, stats.failed_files
+                "导入会话结束：{status}（完成 {}：复制 {}，移动 {}；跳过 {}；失败 {}；删源失败 {}）",
+                stats.done_files,
+                stats.done_files - stats.moved,
+                stats.moved,
+                stats.skipped_duplicates,
+                stats.failed_files,
+                stats.source_delete_failed
             ),
         );
         self.bus.publish(AppEvent::ImportSessionFinished {
@@ -559,6 +619,34 @@ impl Engine {
         });
         self.controls.done.store(true, Ordering::SeqCst);
         stats
+    }
+
+    /// 自我嵌套守卫（spec §5.11）：文件系统源的根与 target_root 的
+    /// canonical 路径互为祖先（或相同）→ 拒绝。否则导入会把自己的产出
+    /// 再枚举进来。目标目录可能尚未创建——先建再比较；任一侧
+    /// canonicalize 失败则跳过（folder 源枚举层还有排除子树防御）。
+    fn check_nesting(&self) -> Result<(), EngineError> {
+        let Some(source_root) = source_root_of(self.source.as_ref()) else {
+            return Ok(()); // MTP 无文件系统语义
+        };
+        let _ = fs::create_dir_all(&self.plan.target_root);
+        let (Ok(source_canon), Ok(target_canon)) = (
+            fs::canonicalize(&source_root),
+            fs::canonicalize(&self.plan.target_root),
+        ) else {
+            return Ok(());
+        };
+        if source_canon == target_canon
+            || target_canon.starts_with(&source_canon)
+            || source_canon.starts_with(&target_canon)
+        {
+            return Err(EngineError::InvalidPlan(format!(
+                "源目录与目标目录互相嵌套（源 {}，目标 {}），已拒绝导入",
+                crate::devices::folder::strip_verbatim(&source_canon),
+                crate::devices::folder::strip_verbatim(&target_canon),
+            )));
+        }
+        Ok(())
     }
 
     /// resume：journal src → 源条目匹配；新任务直接用 begin 的队列。
@@ -882,8 +970,44 @@ fn split_stem_ext(rel_path: &str) -> (String, String) {
 fn worker_count(kind: SourceKind, streams: u32) -> usize {
     match kind {
         SourceKind::Mtp => 1,
-        SourceKind::Volume => 4.min(streams.max(1) as usize),
+        SourceKind::Volume | SourceKind::Folder => 4.min(streams.max(1) as usize),
     }
+}
+
+/// 文件系统源的根目录（嵌套守卫与移动后空目录清理用）；MTP 无路径语义 → None。
+fn source_root_of(source: &dyn DeviceSource) -> Option<PathBuf> {
+    let id = source.id();
+    match source.kind() {
+        SourceKind::Mtp => None,
+        // 卷：盘符 "E:" → "E:\"；测试目录路径直接可用
+        SourceKind::Volume => {
+            if id.len() == 2 && id.ends_with(':') {
+                Some(PathBuf::from(format!("{id}\\")))
+            } else {
+                Some(PathBuf::from(id))
+            }
+        }
+        SourceKind::Folder => id.strip_prefix(FOLDER_ID_PREFIX).map(PathBuf::from),
+    }
+}
+
+/// move 后清理空的源中间子目录（best-effort）：深优先逐级 `remove_dir`
+/// （仅空目录可删），保留源根；跳过点前缀/系统目录（与枚举规则一致）。
+/// 返回删除的目录数。
+fn cleanup_empty_dirs(root: &Path) -> usize {
+    let mut dirs: Vec<PathBuf> = WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_ignored_dir(e))
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() > 0 && e.file_type().is_dir())
+        .map(|e| e.path().to_path_buf())
+        .collect();
+    // 浅→深排序后反序遍历 = 深优先；子目录先删，父目录才可能为空
+    dirs.sort_by_key(|d| d.components().count());
+    dirs.iter()
+        .rev()
+        .filter(|d| fs::remove_dir(d).is_ok())
+        .count()
 }
 
 fn rfc3339(t: DateTime<Utc>) -> String {

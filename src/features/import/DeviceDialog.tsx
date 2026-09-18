@@ -19,6 +19,13 @@ const KIND_BADGE: Record<FileKind, string> = {
   other: "text-text-muted",
 };
 
+/** 设备类型 → i18n 键（folder=本地文件夹源） */
+const KIND_LABEL_KEY: Record<DeviceKind, string> = {
+  volume: "deviceDialog.kind.reader",
+  mtp: "deviceDialog.kind.camera",
+  folder: "deviceDialog.kind.folder",
+};
+
 function DeviceGlyph({ kind }: { kind: DeviceKind }) {
   const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round" } as const;
   return (
@@ -28,6 +35,10 @@ function DeviceGlyph({ kind }: { kind: DeviceKind }) {
           <rect x="3.5" y="7" width="17" height="12" rx="2" />
           <path d="M9 7l1.2-2.4h3.6L15 7" />
           <circle cx="12" cy="13" r="3.2" />
+        </g>
+      ) : kind === "folder" ? (
+        <g {...stroke}>
+          <path d="M3.5 7.5c0-1.1.9-2 2-2h4l2 2.5h7c1.1 0 2 .9 2 2v8.5c0 1.1-.9 2-2 2h-13c-1.1 0-2-.9-2-2v-11z" />
         </g>
       ) : (
         <g {...stroke}>
@@ -77,7 +88,7 @@ export default function DeviceDialog() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.18, ease: "easeOut" }}
-            className="w-[380px] rounded-xl border border-panel bg-surface p-6 shadow-2xl"
+            className="w-[380px] rounded-xl border border-edge bg-surface p-6 shadow-2xl"
             data-testid="device-dialog-card"
           >
             <div className="flex items-center gap-3">
@@ -87,7 +98,7 @@ export default function DeviceDialog() {
                   {device.name}
                 </h2>
                 <span className="mt-0.5 inline-block rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-secondary">
-                  {t(device.kind === "mtp" ? "deviceDialog.kind.camera" : "deviceDialog.kind.reader")}
+                  {t(KIND_LABEL_KEY[device.kind])}
                 </span>
               </div>
             </div>
@@ -126,7 +137,7 @@ export default function DeviceDialog() {
               <button
                 type="button"
                 onClick={() => ignoreDevice(device.id)}
-                className="rounded-md border border-panel px-4 py-2 text-sm text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
+                className="rounded-md border border-edge px-4 py-2 text-sm text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
               >
                 {t("deviceDialog.ignore")}
               </button>

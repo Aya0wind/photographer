@@ -25,7 +25,7 @@ export default function AiStep({ value, onChange }: Props) {
               className={`rounded-lg border p-4 text-left transition-colors ${
                 selected
                   ? "border-accent bg-panel/60"
-                  : "border-panel bg-surface hover:border-text-muted"
+                  : "border-edge bg-surface hover:border-text-muted"
               }`}
             >
               <span className={`text-sm font-medium ${selected ? "text-accent" : "text-text-primary"}`}>

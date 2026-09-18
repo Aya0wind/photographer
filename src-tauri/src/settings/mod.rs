@@ -91,6 +91,10 @@ pub struct ImportSettings {
     pub dir_template: String,
     pub duplicate_policy: DuplicatePolicy,
     pub notify_milestones: bool,
+    /// 卡/相机导入的专用子目录名（相对 photoRoot 的应用写入区，spec §5.11）。
+    /// photoRoot 归用户管理（可预存内容）；应用只写入 `photoRoot\import_subdir`，
+    /// 用户也可手动把照片移入该区后触发重建索引（M2）。
+    pub import_subdir: String,
 }
 
 impl Default for ImportSettings {
@@ -101,6 +105,7 @@ impl Default for ImportSettings {
             dir_template: "{YYYY}/{MM-DD}/{原文件名}".to_string(),
             duplicate_policy: DuplicatePolicy::Skip,
             notify_milestones: true,
+            import_subdir: "SmartPhoto".to_string(),
         }
     }
 }

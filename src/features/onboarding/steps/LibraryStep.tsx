@@ -32,7 +32,7 @@ function Desc({ descKey }: { descKey: string }) {
 }
 
 const inputClass =
-  "w-full rounded-md border border-panel bg-bg px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
+  "w-full rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
 
 /** 步骤 1：库设置——库名 + 数据库目录（自包含）+ 照片存储目录（达芬奇式库模型） */
 export default function LibraryStep({ draft, onChange }: Props) {
@@ -65,7 +65,7 @@ export default function LibraryStep({ draft, onChange }: Props) {
           <button
             type="button"
             onClick={() => pickDirectory(draft.dbDir, (dir) => onChange({ dbDir: dir }))}
-            className="shrink-0 rounded-md border border-panel px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="shrink-0 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
           >
             {t("onboarding.library.browse")}
           </button>
@@ -86,7 +86,7 @@ export default function LibraryStep({ draft, onChange }: Props) {
           <button
             type="button"
             onClick={() => pickDirectory(draft.photoRoot, (dir) => onChange({ photoRoot: dir }))}
-            className="shrink-0 rounded-md border border-panel px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="shrink-0 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
           >
             {t("onboarding.library.browse")}
           </button>

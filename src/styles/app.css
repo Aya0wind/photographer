@@ -4,9 +4,11 @@
   --color-bg: #0E0F12;
   --color-surface: #16181D;
   --color-panel: #1E2128;
+  /* 专用描边/分隔线色：比 panel 亮一档，保证卡片与输入框边框在暗色下可见 */
+  --color-edge: #2A2E37;
   --color-text-primary: #E8EAED;
   --color-text-secondary: #9AA0A6;
-  --color-text-muted: #5F6368;
+  --color-text-muted: #8A919E;
   --color-accent: #F0A83C;
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   --font-mono: "Cascadia Mono", Consolas, monospace;

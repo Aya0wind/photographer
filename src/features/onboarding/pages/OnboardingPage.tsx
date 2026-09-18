@@ -106,9 +106,10 @@ export default function OnboardingPage() {
           <div className="flex items-center gap-2" role="tablist" aria-label="onboarding steps">
             {STEP_TITLES.map((titleKey, i) => (
               <div key={titleKey} className="flex items-center gap-2">
+                {/* 当前步=accent 实心；已完成=accent/60 弱化；未来=panel 底 */}
                 <span
                   className={`h-1.5 w-8 rounded-full transition-colors ${
-                    i <= step ? "bg-accent" : "bg-panel"
+                    i === step ? "bg-accent" : i < step ? "bg-accent/60" : "bg-panel"
                   }`}
                 />
                 <span className={`text-xs ${i === step ? "text-accent" : "text-text-muted"}`}>
@@ -120,7 +121,7 @@ export default function OnboardingPage() {
         </div>
 
         {/* 步骤内容 */}
-        <div className="rounded-xl border border-panel bg-surface p-6">
+        <div className="rounded-xl border border-edge bg-surface p-6">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={step}

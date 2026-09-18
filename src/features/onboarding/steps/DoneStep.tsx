@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { previewTemplate } from "../onboardingConfig";
+import { importRootOf, previewTemplate } from "../onboardingConfig";
 import type { OnboardingDraft } from "../types";
 
 interface Props {
@@ -9,7 +9,7 @@ interface Props {
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-panel pt-3 text-left">
+    <div className="flex items-center justify-between gap-4 border-t border-edge pt-3 text-left">
       <span className="shrink-0 text-sm text-text-secondary">{label}</span>
       <span className="truncate font-mono text-xs text-text-primary" title={value}>
         {value}
@@ -27,7 +27,7 @@ export default function DoneStep({ draft }: Props) {
       <Row label={t("onboarding.done.library")} value={`${draft.libraryName}（${draft.photoRoot}）`} />
       <Row label={t("onboarding.done.dbDir")} value={draft.dbDir} />
       <Row label={t("onboarding.done.template")} value={draft.dirTemplate} />
-      <Row label={t("onboarding.done.preview")} value={previewTemplate(draft.dirTemplate, draft.photoRoot)} />
+      <Row label={t("onboarding.done.preview")} value={previewTemplate(draft.dirTemplate, importRootOf(draft.photoRoot))} />
       <Row label={t("onboarding.done.duplicate")} value={t(`onboarding.scheme.dup.${draft.duplicatePolicy}`)} />
       <Row label={t("onboarding.done.ai")} value={t(`onboarding.ai.choice.${draft.aiChoice}`)} />
       <p className="mt-2 text-xs text-text-muted">{t("onboarding.done.note")}</p>

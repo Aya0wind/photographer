@@ -2,7 +2,7 @@
 
 use tauri::State;
 
-use super::{scan_by_id, AppState, FileEntryDto};
+use super::{scan_by_id, AppState, DirEntryDto, FileEntryDto};
 use crate::devices::orchestrator::DeviceSnapshot;
 use crate::events::{AssetKind, SourceKind};
 use serde::Serialize;
@@ -57,8 +57,22 @@ pub fn device_scan(state: State<AppState>, id: String) -> Result<DeviceSnapshot,
     Ok(snapshot)
 }
 
+/// 注册并扫描本地文件夹源（M2“从文件夹导入”），返回快照。
+/// 前端随后用 device_files(id) / import_start(plan) 走与设备相同的管线。
+#[tauri::command]
+pub fn folder_scan(state: State<AppState>, path: String) -> Result<DeviceSnapshot, String> {
+    super::scan_folder(&state, &path)
+}
+
 /// 列出指定设备的全部媒体文件（导入向导源树/勾选表）。
 #[tauri::command]
 pub fn device_files(state: State<AppState>, id: String) -> Result<Vec<FileEntryDto>, String> {
     super::files_by_id(&state, &id)
+}
+
+/// 文件系统目录树浏览（M2 导入向导源面板，LR 风格懒加载）：
+/// parent=None → 盘符根；Some(path) → 一层子目录。读取失败返回空数组。
+#[tauri::command]
+pub fn fs_list_dirs(parent: Option<String>) -> Vec<DirEntryDto> {
+    super::list_dirs(parent.as_deref())
 }

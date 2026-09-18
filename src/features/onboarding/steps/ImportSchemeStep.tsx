@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { previewTemplate, unknownTokens } from "../onboardingConfig";
+import { importRootOf, previewTemplate, unknownTokens } from "../onboardingConfig";
 import type { OnboardingDraft } from "../types";
 
 interface Props {
@@ -14,7 +14,7 @@ const DUPLICATE_OPTIONS: OnboardingDraft["duplicatePolicy"][] = ["skip", "rename
 export default function ImportSchemeStep({ draft, onChange }: Props) {
   const { t } = useTranslation();
   const badTokens = unknownTokens(draft.dirTemplate);
-  const preview = previewTemplate(draft.dirTemplate, draft.photoRoot);
+  const preview = previewTemplate(draft.dirTemplate, importRootOf(draft.photoRoot));
 
   return (
     <div className="flex flex-col gap-6">
@@ -27,10 +27,11 @@ export default function ImportSchemeStep({ draft, onChange }: Props) {
           type="text"
           value={draft.dirTemplate}
           onChange={(e) => onChange({ dirTemplate: e.target.value })}
-          className="w-full rounded-md border border-panel bg-bg px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent"
+          className="w-full rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent"
         />
         <p className="text-xs text-text-muted">{t("onboarding.scheme.templateDesc")}</p>
-        <div className="rounded-md border border-panel bg-bg px-3 py-2 font-mono text-xs text-text-secondary">
+        <p className="text-xs text-text-muted">{t("onboarding.scheme.storageNote")}</p>
+        <div className="rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-secondary">
           <span className="mr-2 text-text-muted">{t("onboarding.scheme.preview")}</span>
           {preview}
         </div>

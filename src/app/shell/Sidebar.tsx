@@ -95,7 +95,7 @@ export default function Sidebar() {
   const { t } = useTranslation();
 
   return (
-    <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-panel bg-surface">
+    <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-edge bg-surface">
       {/* 应用标识 */}
       <div className="flex h-14 items-center gap-2.5 px-5">
         <span className="h-2.5 w-2.5 rounded-full bg-accent" aria-hidden="true" />

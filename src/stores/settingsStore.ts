@@ -22,6 +22,8 @@ export interface Settings {
     dirTemplate: string;
     duplicatePolicy: "skip" | "rename" | "ask";
     notifyMilestones: boolean;
+    /** 卡/相机导入专用子目录名（相对 photoRoot 的应用写入区，spec §5.11） */
+    importSubdir: string;
   };
   ai: {
     enableClip: boolean;
@@ -53,6 +55,7 @@ export const DEFAULT_SETTINGS: Settings = {
     dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
     duplicatePolicy: "skip",
     notifyMilestones: true,
+    importSubdir: "SmartPhoto",
   },
   ai: {
     enableClip: false,

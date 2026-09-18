@@ -5,7 +5,7 @@
 //! `FILE_FLAG_SEQUENTIAL_SCAN`（顺序预读提示，提高大文件导入吞吐）。
 //! 并发流上限由导入引擎控制，本层不设限。
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -35,13 +35,17 @@ impl VolumeSource {
         Self { root, id }
     }
 
-    /// 打开卷内文件（顺序读标志）。
-    fn open_file(&self, id: &str) -> DeviceResult<File> {
-        // id 来自 list() 的 rel_path；拒绝越界路径，防目录穿越
+    /// 拒绝越界路径（防目录穿越），返回卷内绝对路径。
+    fn resolve(&self, id: &str) -> DeviceResult<PathBuf> {
         if id.split(['/', '\\']).any(|seg| seg == "..") {
             return Err(DeviceError::Other(format!("invalid file id: {id}")));
         }
-        let path = self.root.join(id);
+        Ok(self.root.join(id))
+    }
+
+    /// 打开卷内文件（顺序读标志）。
+    fn open_file(&self, id: &str) -> DeviceResult<File> {
+        let path = self.resolve(id)?;
         let mut opts = OpenOptions::new();
         opts.read(true);
         #[cfg(windows)]
@@ -113,6 +117,11 @@ impl DeviceSource for VolumeSource {
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn Read + Send>> {
         Ok(Box::new(self.open_file(id)?))
     }
+
+    /// 删源（move 模式）：删除卷内文件。目录不随之清理（引擎负责空目录清理）。
+    fn delete(&self, id: &str) -> DeviceResult<()> {
+        Ok(fs::remove_file(self.resolve(id)?)?)
+    }
 }
 
 /// 根路径规范化为设备 ID：`E:\` → `E:`，普通目录去尾部分隔符。
@@ -127,7 +136,8 @@ fn normalize_root_id(root: &Path) -> String {
 }
 
 /// walkdir 过滤谓词：跳过系统目录与隐藏目录（根本身不跳过）。
-fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
+/// 引擎的移动后空目录清理复用同一规则。
+pub(crate) fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     if entry.depth() == 0 || !entry.file_type().is_dir() {
         return false;
     }

@@ -47,6 +47,7 @@ fn default_settings_match_spec() {
     assert_eq!(s.import.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
     assert_eq!(s.import.duplicate_policy, DuplicatePolicy::Skip);
     assert!(s.import.notify_milestones);
+    assert_eq!(s.import.import_subdir, "SmartPhoto");
 
     assert!(!s.ai.enable_clip);
     assert!(!s.ai.enable_face);
@@ -84,6 +85,7 @@ fn save_then_load_roundtrip_with_custom_values() {
             duplicate_policy: DuplicatePolicy::Rename,
             skip_imported: false,
             notify_milestones: false,
+            import_subdir: "从卡导入".to_string(),
             ..ImportSettings::default()
         },
         ai: AiSettings {
@@ -201,6 +203,10 @@ fn serialization_uses_camel_case() {
         serde_json::json!("skip")
     );
     assert_eq!(value["import"]["notifyMilestones"], serde_json::json!(true));
+    assert_eq!(
+        value["import"]["importSubdir"],
+        serde_json::json!("SmartPhoto")
+    );
     assert_eq!(value["ai"]["enableClip"], serde_json::json!(false));
     assert_eq!(value["ai"]["indexSchedule"], serde_json::json!("idleOnly"));
     assert_eq!(value["ai"]["cpuLimitPercent"], serde_json::json!(50));

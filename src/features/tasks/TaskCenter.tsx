@@ -61,10 +61,11 @@ function CurrentJobCard({ job }: { job: ActiveJob | null }) {
   const pauseJob = useImportStore((s) => s.pauseJob);
   const resumeJob = useImportStore((s) => s.resumeJob);
   const cancelJob = useImportStore((s) => s.cancelJob);
+  const jobModes = useImportStore((s) => s.jobModes);
 
   if (!job) {
     return (
-      <section className="rounded-lg border border-panel bg-surface p-6 text-center" data-testid="task-idle">
+      <section className="rounded-lg border border-edge bg-surface p-6 text-center" data-testid="task-idle">
         <p className="text-sm text-text-muted">{t("tasks.idle")}</p>
       </section>
     );
@@ -72,13 +73,14 @@ function CurrentJobCard({ job }: { job: ActiveJob | null }) {
 
   const pct = job.totalBytes > 0 ? Math.min(100, (job.doneBytes / job.totalBytes) * 100) : 0;
   const isActive = job.status === "running" || job.status === "paused";
+  const isMove = (jobModes[job.jobId] ?? "copy") === "move";
 
   return (
-    <section className="rounded-lg border border-panel bg-surface p-4" data-testid="task-current">
+    <section className="rounded-lg border border-edge bg-surface p-4" data-testid="task-current">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <h2 className="text-sm font-semibold text-text-primary">
-            {t("tasks.currentJob", { id: job.jobId })}
+            {t(isMove ? "tasks.currentJobMove" : "tasks.currentJob", { id: job.jobId })}
           </h2>
           <StatusBadge status={job.status} />
         </div>
@@ -89,14 +91,14 @@ function CurrentJobCard({ job }: { job: ActiveJob | null }) {
               onClick={() =>
                 job.status === "running" ? void pauseJob(job.jobId) : void resumeJob(job.jobId)
               }
-              className="rounded-md border border-panel px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
             >
               {job.status === "running" ? t("tasks.pause") : t("tasks.resume")}
             </button>
             <button
               type="button"
               onClick={() => void cancelJob(job.jobId)}
-              className="rounded-md border border-panel px-3 py-1 text-xs text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+              className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
             >
               {t("tasks.cancel")}
             </button>
@@ -144,8 +146,8 @@ function HistoryTable() {
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   return (
-    <section className="rounded-lg border border-panel bg-surface" data-testid="task-history">
-      <div className="flex h-9 items-center justify-between border-b border-panel px-3">
+    <section className="rounded-lg border border-edge bg-surface" data-testid="task-history">
+      <div className="flex h-9 items-center justify-between border-b border-edge px-3">
         <h2 className="text-xs font-semibold text-text-secondary">{t("tasks.history")}</h2>
         {history.rows.length === 0 && !history.loading && (
           <span className="text-[11px] text-text-muted">{t("tasks.historyEmpty")}</span>
@@ -172,7 +174,7 @@ function HistoryTable() {
               return (
                 <Fragment key={row.id}>
                   <tr
-                    className={`cursor-pointer border-t border-panel/60 hover:bg-panel/30 ${expanded ? "bg-panel/30" : ""}`}
+                    className={`cursor-pointer border-t border-edge/60 hover:bg-panel/30 ${expanded ? "bg-panel/30" : ""}`}
                     onClick={() => setExpandedId(expanded ? null : row.id)}
                     data-testid={`history-row-${row.id}`}
                   >
@@ -207,7 +209,7 @@ function HistoryTable() {
                     </td>
                   </tr>
                   {expanded && (
-                    <tr key={`${row.id}-logs`} className="border-t border-panel/60">
+                    <tr key={`${row.id}-logs`} className="border-t border-edge/60">
                       <td colSpan={6} className="bg-bg/40 px-3 py-2">
                         <LogViewer jobId={row.id} />
                       </td>
@@ -220,12 +222,12 @@ function HistoryTable() {
         </table>
       )}
       {!history.exhausted && (
-        <div className="border-t border-panel/60 p-2 text-center">
+        <div className="border-t border-edge/60 p-2 text-center">
           <button
             type="button"
             disabled={history.loading}
             onClick={() => void loadHistory()}
-            className="rounded-md border border-panel px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+            className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
           >
             {history.loading ? t("tasks.loading") : t("tasks.loadMore")}
           </button>
@@ -250,10 +252,14 @@ function SummaryModal({ summary }: { summary: JobSummary }) {
     setRetryResult(newJobId === null ? "error" : newJobId);
   }
 
+  const isMove = summary.mode === "move";
+  const movedCount = summary.stats.moved ?? summary.stats.doneFiles;
+  const sourceDeleteFailed = summary.stats.sourceDeleteFailed ?? 0;
+
   const cards = [
     {
-      key: "done",
-      value: summary.stats.doneFiles,
+      key: isMove ? "moved" : "done",
+      value: isMove ? movedCount : summary.stats.doneFiles,
       color: "text-emerald-400",
       testid: "summary-done",
     },
@@ -280,18 +286,18 @@ function SummaryModal({ summary }: { summary: JobSummary }) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       role="dialog"
       aria-modal="true"
-      aria-label={t("summary.title")}
+      aria-label={t(isMove ? "summary.titleMove" : "summary.title")}
     >
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: 8 }}
         transition={{ duration: 0.18, ease: "easeOut" }}
-        className="max-h-[80vh] w-[460px] overflow-y-auto rounded-xl border border-panel bg-surface p-6 shadow-2xl"
+        className="max-h-[80vh] w-[460px] overflow-y-auto rounded-xl border border-edge bg-surface p-6 shadow-2xl"
         data-testid="summary-modal"
       >
         <h2 className="text-base font-semibold text-text-primary">
-          {t("summary.title")}
+          {t(isMove ? "summary.titleMove" : "summary.title")}
           <span className="ml-1.5 font-mono text-xs text-text-muted">#{summary.jobId}</span>
         </h2>
 
@@ -312,15 +318,21 @@ function SummaryModal({ summary }: { summary: JobSummary }) {
           })}
         </p>
 
+        {isMove && sourceDeleteFailed > 0 && (
+          <p className="mt-1 text-center text-[11px] text-yellow-300" role="status" data-testid="summary-source-delete-failed">
+            {t("summary.sourceDeleteFailed", { count: sourceDeleteFailed })}
+          </p>
+        )}
+
         {(summary.failures.length > 0 || summary.stats.failedFiles > 0) && (
-          <div className="mt-4 rounded-lg border border-panel bg-bg p-2.5">
+          <div className="mt-4 rounded-lg border border-edge bg-bg p-2.5">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-medium text-text-secondary">{t("summary.failedList")}</h3>
               <button
                 type="button"
                 disabled={retrying || retryResult !== null}
                 onClick={() => void retry()}
-                className="rounded-md border border-panel px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
               >
                 {t("summary.retry")}
               </button>
@@ -380,7 +392,7 @@ export default function TaskCenter() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-12 shrink-0 items-center border-b border-panel px-4">
+      <header className="flex h-12 shrink-0 items-center border-b border-edge px-4">
         <h1 className="text-sm font-semibold text-text-primary">{t("tasks.title")}</h1>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">

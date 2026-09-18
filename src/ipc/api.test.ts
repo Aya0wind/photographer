@@ -7,6 +7,8 @@ import type { Event } from "@tauri-apps/api/event";
 import {
   deviceList,
   deviceScan,
+  folderScan,
+  fsListDirs,
   importCancel,
   importJobsPage,
   importLogsPage,
@@ -31,6 +33,7 @@ const PLAN: ImportPlan = {
   duplicatePolicy: "skip",
   skipImported: true,
   streams: 4,
+  mode: "copy",
 };
 
 beforeEach(() => {
@@ -61,6 +64,38 @@ describe("IPC 契约封装", () => {
     await deviceScan("E:");
 
     expect(invokeMock).toHaveBeenCalledWith("device_scan", { id: "E:" });
+  });
+
+  it("folderScan 传 path 并返回快照", async () => {
+    const snapshot = { id: "FOLDER:D:\\老照片", name: "老照片", kind: "folder", filesByKind: { photo: 3, raw: 0, video: 0, other: 0 }, bytesTotal: 100, newFiles: 3 };
+    invokeMock.mockResolvedValue(snapshot);
+
+    await expect(folderScan("D:\\老照片")).resolves.toEqual(snapshot);
+    expect(invokeMock).toHaveBeenCalledWith("folder_scan", { path: "D:\\老照片" });
+  });
+
+  it("folderScan 失败返回 null 并标记 IPC 不可用", async () => {
+    invokeMock.mockRejectedValue(new Error("no backend"));
+
+    await expect(folderScan("D:\\老照片")).resolves.toBeNull();
+    expect(isIpcAvailable()).toBe(false);
+  });
+
+  it("fsListDirs 无参=盘符根；带 parent 传参", async () => {
+    const roots = [{ name: "D:", path: "D:\\", hasSubdirs: true }];
+    invokeMock.mockResolvedValue(roots);
+
+    await expect(fsListDirs()).resolves.toEqual(roots);
+    expect(invokeMock).toHaveBeenCalledWith("fs_list_dirs", undefined);
+
+    await fsListDirs("D:\\");
+    expect(invokeMock).toHaveBeenLastCalledWith("fs_list_dirs", { parent: "D:\\" });
+  });
+
+  it("fsListDirs 失败静默返回空数组", async () => {
+    invokeMock.mockRejectedValue(new Error("no backend"));
+
+    await expect(fsListDirs("D:\\")).resolves.toEqual([]);
   });
 
   it("importStart 传 plan 参数并返回 jobId", async () => {

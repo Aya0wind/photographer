@@ -13,7 +13,7 @@ import { ipc } from "./index";
 
 // --- 契约类型 ----------------------------------------------------------------
 
-export type DeviceKind = "volume" | "mtp";
+export type DeviceKind = "volume" | "mtp" | "folder";
 export type FileKind = "photo" | "raw" | "video" | "other";
 
 export interface DeviceSnapshot {
@@ -27,6 +27,9 @@ export interface DeviceSnapshot {
 
 export type DuplicatePolicy = "skip" | "rename" | "ask";
 
+/** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
+export type ImportMode = "copy" | "move";
+
 export interface ImportPlan {
   sourceId: string;
   targetRoot: string;
@@ -35,6 +38,8 @@ export interface ImportPlan {
   duplicatePolicy: DuplicatePolicy;
   skipImported: boolean;
   streams: number;
+  /** 缺省 copy（Rust 侧默认）；move 时后端入库后删除源文件 */
+  mode: ImportMode;
 }
 
 export type JobStatus = "running" | "paused" | "done" | "cancelled" | "failed";
@@ -70,6 +75,10 @@ export interface ImportStats {
   doneBytes: number;
   elapsedMs: number;
   bytesPerSec: number;
+  /** 移动模式：成功移动（=复制后删除源）的文件数；copy 任务缺失（契约扩展中） */
+  moved?: number;
+  /** 移动模式：源文件删除失败数；copy 任务缺失（契约扩展中） */
+  sourceDeleteFailed?: number;
 }
 
 /** 唯一事件通道 `app://event` 的 payload：以 type（camelCase）辨识的联合 */
@@ -136,6 +145,35 @@ export async function deviceScan(id: string): Promise<DeviceSnapshot | null> {
   } catch {
     markUnavailable();
     return null;
+  }
+}
+
+/** 扫描本地文件夹作为导入源（kind="folder"，id="FOLDER:<绝对路径>"）；失败返回 null */
+export async function folderScan(path: string): Promise<DeviceSnapshot | null> {
+  try {
+    const snapshot = await ipc<DeviceSnapshot | null>("folder_scan", { path });
+    return snapshot ?? null;
+  } catch {
+    markUnavailable();
+    return null;
+  }
+}
+
+/** 文件系统目录树的单个节点（hasSubdirs=false 时无子目录、不显示展开箭头） */
+export interface FsDirEntry {
+  name: string;
+  path: string;
+  hasSubdirs: boolean;
+}
+
+/** 懒加载目录列表：parent 省略 = 盘符根；失败/不可用/非数组均返回 []（静默降级） */
+export async function fsListDirs(parent?: string): Promise<FsDirEntry[]> {
+  try {
+    const dirs = await ipc<FsDirEntry[] | null>("fs_list_dirs", parent ? { parent } : undefined);
+    return Array.isArray(dirs) ? dirs : [];
+  } catch {
+    markUnavailable();
+    return [];
   }
 }
 

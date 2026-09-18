@@ -2,17 +2,30 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { motion } from "motion/react";
 
-import { importStart, isIpcAvailable, type FileKind, type ImportPlan } from "@/ipc/api";
+import {
+  folderScan,
+  fsListDirs,
+  importStart,
+  isIpcAvailable,
+  type DeviceKind,
+  type FileKind,
+  type FsDirEntry,
+  type ImportMode,
+  type ImportPlan,
+} from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
-import { previewTemplate, unknownTokens } from "@/features/onboarding/onboardingConfig";
+import { previewTemplate, unknownTokens, importRootOf } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useImportStore, type SourceFile } from "@/stores/importStore";
+import { useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
 
 /**
- * 导入向导（A 密度三栏）：左=设备信息+源文件树（按目录分组折叠，全选/反选），
- * 中=可勾选文件表（等宽文件名/大小/类型徽标），右=方案面板（目标根目录/
- * 目录模板（三预设+自定义，实时预览）/查重策略/并发流数（MTP 强制 1））。
+ * 导入向导（LR 式源面板 + A 密度三栏）：
+ * 顶部=复制/移动分段模式条；左=设备卡列表 + 文件系统懒加载目录树
+ * （点击文件夹名=选中该文件夹为源，folderScan 成 FOLDER: 源）+ 最近使用源
+ * + 源文件树（按目录分组折叠，全选/反选）；中=可勾选文件表；右=方案面板
+ * （目标根目录/目录模板三预设+自定义实时预览/查重策略/并发流数，MTP 强制 1）。
  */
 
 interface DirGroup {
@@ -41,6 +54,38 @@ const KIND_LABEL_COLOR: Record<FileKind, string> = {
   video: "text-violet-400",
   other: "text-text-muted",
 };
+
+/** 设备类型 → i18n 键（folder=从本地文件夹导入） */
+const KIND_LABEL_KEY: Record<DeviceKind, string> = {
+  volume: "deviceDialog.kind.reader",
+  mtp: "deviceDialog.kind.camera",
+  folder: "deviceDialog.kind.folder",
+};
+
+/** 文件夹图标（stroke 风格与现有图标一致，16 viewBox） */
+function FolderGlyph({ size = 14, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`shrink-0 ${className}`}
+      aria-hidden="true"
+    >
+      <path d="M2 4.75C2 3.78 2.78 3 3.75 3h2.6l1.5 1.75h4.4c.97 0 1.75.78 1.75 1.75v5.75c0 .97-.78 1.75-1.75 1.75h-8.5C2.78 14 2 13.22 2 12.25v-7.5z" />
+    </svg>
+  );
+}
+
+/** Windows 路径宽松比较（大小写/分隔符/尾斜杠归一）——树节点选中高亮用 */
+function normalizeFsPath(path: string): string {
+  return path.replace(/\//g, "\\").replace(/[\\/]+$/, "").toLowerCase();
+}
 
 function KindBadge({ kind }: { kind: FileKind }) {
   const { t } = useTranslation();
@@ -74,7 +119,7 @@ function presetValue(key: string, custom: string): string {
 }
 
 const inputClass =
-  "w-full rounded-md border border-panel bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
+  "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
 
 export default function ImportWizard() {
   const { t } = useTranslation();
@@ -84,6 +129,9 @@ export default function ImportWizard() {
   const devices = useImportStore((s) => s.devices);
   const sourceFilesMap = useImportStore((s) => s.sourceFiles);
   const refreshDevice = useImportStore((s) => s.refreshDevice);
+  const addDevice = useImportStore((s) => s.addDevice);
+  const recentSources = useImportStore((s) => s.recentSources);
+  const recordRecentSource = useImportStore((s) => s.recordRecentSource);
 
   const importSettings = useSettingsStore((s) => s.settings.import);
   const photoRoot = useSettingsStore(
@@ -103,6 +151,10 @@ export default function ImportWizard() {
   );
   const groups = useMemo(() => groupByDir(files), [files]);
 
+  // 当前选中源对应的文件夹路径（树高亮）；设备源为 null
+  const selectedFolderPath =
+    device?.kind === "folder" ? normalizeFsPath(device.id.slice("FOLDER:".length)) : null;
+
   // 选择状态（路径集合）；设备切换时重置为全选（默认导入全部）
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -111,12 +163,12 @@ export default function ImportWizard() {
     setCollapsed(new Set());
   }, [selectedId, files]);
 
-  // 方案状态（初值来自设置与激活库）
-  const [targetRoot, setTargetRoot] = useState(photoRoot);
+  // 方案状态（初值来自设置与激活库）：目标根默认 = photoRoot + 导入子目录（应用写入区）
+  const [targetRoot, setTargetRoot] = useState("");
   // 激活库 photoRoot 异步就绪后回填（仅在用户未手动输入时）
   useEffect(() => {
-    if (photoRoot && !targetRoot) setTargetRoot(photoRoot);
-  }, [photoRoot, targetRoot]);
+    if (photoRoot && !targetRoot) setTargetRoot(importRootOf(photoRoot, importSettings.importSubdir));
+  }, [photoRoot, importSettings.importSubdir, targetRoot]);
   const [presetKey, setPresetKey] = useState(() => matchPreset(importSettings.dirTemplate));
   const [customTemplate, setCustomTemplate] = useState(importSettings.dirTemplate);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
@@ -124,6 +176,22 @@ export default function ImportWizard() {
   const [streams, setStreams] = useState(4);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(false);
+  // LR 式导入模式（顶部分段条）：复制保留原文件 / 移动纳管
+  const [mode, setMode] = useState<ImportMode>("copy");
+
+  // 文件系统懒加载树：根（盘符）+ 每目录子级缓存 + 展开集合
+  const [fsRoots, setFsRoots] = useState<FsDirEntry[] | null>(null);
+  const [fsChildren, setFsChildren] = useState<Record<string, FsDirEntry[]>>({});
+  const [fsExpanded, setFsExpanded] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    let cancelled = false;
+    void fsListDirs().then((roots) => {
+      if (!cancelled) setFsRoots(roots);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const dirTemplate = presetValue(presetKey, customTemplate);
   const isMtp = device?.kind === "mtp";
@@ -174,6 +242,140 @@ export default function ImportWizard() {
     setSelected((prev) => new Set(files.filter((f) => !prev.has(f.path)).map((f) => f.path)));
   }
 
+  // --- 源选择 -------------------------------------------------------------------
+
+  /** 手动从设备下拉选择：切 URL 并记入最近使用 */
+  function selectDevice(id: string): void {
+    const snapshot = devices.find((d) => d.id === id);
+    if (snapshot) recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
+    setSearchParams(id ? { device: id } : {});
+  }
+
+  /** 选中文件夹为源：folderScan 成快照则入库并选中；失败（IPC 不可用）静默保持原源 */
+  async function selectFolder(path: string): Promise<boolean> {
+    const snapshot = await folderScan(path);
+    if (!snapshot) return false;
+    addDevice(snapshot);
+    recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
+    setSearchParams({ device: snapshot.id });
+    return true;
+  }
+
+  /** 树区「浏览…」：系统目录选择器选目录，等价于在树中直接选中该目录 */
+  async function browseFolder(): Promise<void> {
+    try {
+      const dir = await openDialog({ directory: true });
+      if (typeof dir === "string" && dir.length > 0) await selectFolder(dir);
+    } catch {
+      // 非 Tauri 环境或用户取消：静默
+    }
+  }
+
+  /** 最近使用：文件夹→重扫选中；设备→仍在线则重选 */
+  function selectRecent(entry: RecentSource): void {
+    if (entry.kind === "folder") {
+      void selectFolder(entry.id.slice("FOLDER:".length));
+      return;
+    }
+    if (devices.some((d) => d.id === entry.id)) {
+      recordRecentSource(entry);
+      setSearchParams({ device: entry.id });
+    }
+  }
+
+  /** 树节点展开/折叠；首次展开懒加载子级（失败/空显示（空）） */
+  async function toggleFsNode(node: FsDirEntry): Promise<void> {
+    const path = node.path;
+    const isExpanded = fsExpanded.has(path);
+    setFsExpanded((prev) => {
+      const next = new Set(prev);
+      if (isExpanded) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    if (isExpanded) return;
+    if (!(path in fsChildren)) {
+      const children = await fsListDirs(path);
+      setFsChildren((prev) => ({ ...prev, [path]: children }));
+    }
+  }
+
+  function renderFsNode(node: FsDirEntry, depth: number) {
+    const isExpanded = fsExpanded.has(node.path);
+    const children = fsChildren[node.path];
+    const isSelected =
+      selectedFolderPath !== null && normalizeFsPath(node.path) === selectedFolderPath;
+    return (
+      <div key={node.path}>
+        <div
+          className={`flex items-center gap-1 border-l-2 py-0.5 pr-1.5 ${
+            isSelected ? "border-accent bg-accent/10" : "border-transparent hover:bg-panel/40"
+          }`}
+          style={{ paddingLeft: 4 + depth * 12 }}
+        >
+          {node.hasSubdirs ? (
+            <button
+              type="button"
+              onClick={() => void toggleFsNode(node)}
+              className="shrink-0 rounded p-0.5 text-text-muted transition-colors hover:text-accent"
+              aria-label={t(isExpanded ? "wizard.fs.collapse" : "wizard.fs.expand", {
+                dir: node.path,
+              })}
+              data-testid="wizard-fs-toggle"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="10"
+                height="10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                className={`transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                aria-hidden="true"
+              >
+                <path d="M5 3l5 5-5 5" />
+              </svg>
+            </button>
+          ) : (
+            <span className="w-3.5 shrink-0" aria-hidden="true" />
+          )}
+          <button
+            type="button"
+            onClick={() => void selectFolder(node.path)}
+            className={`flex min-w-0 flex-1 items-center gap-1 rounded py-0.5 text-left ${
+              isSelected ? "text-accent" : "text-text-secondary"
+            }`}
+            data-testid="wizard-fs-node"
+            data-path={node.path}
+            data-selected={isSelected}
+            title={node.path}
+          >
+            <FolderGlyph size={12} className={isSelected ? "text-accent" : "text-text-muted"} />
+            <span className="truncate font-mono text-[11px]">{node.name}</span>
+          </button>
+        </div>
+        {node.hasSubdirs && isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            transition={{ duration: 0.15, ease: "easeOut" }}
+            className="overflow-hidden"
+          >
+            {children === undefined ? (
+              <p className="py-0.5 pl-9 text-[11px] text-text-muted">…</p>
+            ) : children.length === 0 ? (
+              <p className="py-0.5 pl-9 text-[11px] text-text-muted">{t("wizard.fs.empty")}</p>
+            ) : (
+              children.map((child) => renderFsNode(child, depth + 1))
+            )}
+          </motion.div>
+        )}
+      </div>
+    );
+  }
+
+  // --- 方案与启动 ----------------------------------------------------------------
+
   async function pickTargetRoot(): Promise<void> {
     try {
       const dir = await openDialog({ directory: true, defaultPath: targetRoot || undefined });
@@ -195,6 +397,7 @@ export default function ImportWizard() {
       duplicatePolicy,
       skipImported,
       streams: effectiveStreams,
+      mode,
     };
     const jobId = await importStart(plan);
     setStarting(false);
@@ -202,6 +405,8 @@ export default function ImportWizard() {
       setStartError(true);
       return;
     }
+    // 模式随任务记录（事件不含 mode，总结弹窗文案用）
+    useImportStore.getState().recordJobMode(jobId, mode);
     // 方案回写设置（本地立即生效，持久化失败静默）
     const { update, save } = useSettingsStore.getState();
     const settings = useSettingsStore.getState().settings;
@@ -219,22 +424,52 @@ export default function ImportWizard() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* 页头 */}
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-panel px-4">
+      {/* 页头 + LR 式导入模式分段条 */}
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4">
         <h1 className="text-sm font-semibold text-text-primary">{t("wizard.title")}</h1>
         {!isIpcAvailable() && (
           <span className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted">
             {t("wizard.ipcUnavailable")}
           </span>
         )}
+        <div
+          className="ml-auto flex items-center rounded-md border border-edge bg-bg p-0.5"
+          role="radiogroup"
+          aria-label={t("wizard.mode.label")}
+          data-testid="wizard-mode"
+        >
+          {(["copy", "move"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="radio"
+              aria-checked={mode === option}
+              onClick={() => setMode(option)}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                mode === option
+                  ? "bg-accent text-black"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+              data-testid={`wizard-mode-${option}`}
+            >
+              {t(`wizard.mode.${option}`)}
+            </button>
+          ))}
+        </div>
       </header>
+      <div className="flex h-7 shrink-0 items-center border-b border-edge px-4">
+        <p className="truncate text-[11px] text-text-muted">
+          {t(mode === "copy" ? "wizard.mode.copyDesc" : "wizard.mode.moveDesc")}
+        </p>
+      </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-[270px_minmax(0,1fr)_320px] gap-2 p-2">
-        {/* 左栏：设备信息 + 源文件树 */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-panel bg-surface" aria-label={t("wizard.leftPane")}>
-          <div className="shrink-0 border-b border-panel p-3">
+        {/* 左栏：源面板（设备 / 文件系统树 / 最近使用）+ 源文件树 */}
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.leftPane")}>
+          {/* 设备区 */}
+          <div className="shrink-0 border-b border-edge p-3">
             {devices.length === 0 ? (
-              <p className="py-6 text-center text-xs leading-relaxed text-text-muted">
+              <p className="py-4 text-center text-xs leading-relaxed text-text-muted">
                 {t("wizard.noDevice")}
               </p>
             ) : (
@@ -242,8 +477,8 @@ export default function ImportWizard() {
                 <div className="flex items-center gap-2">
                   <select
                     value={selectedId ?? ""}
-                    onChange={(e) => setSearchParams(e.target.value ? { device: e.target.value } : {})}
-                    className="min-w-0 flex-1 rounded-md border border-panel bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
+                    onChange={(e) => selectDevice(e.target.value)}
+                    className="min-w-0 flex-1 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
                     aria-label={t("wizard.deviceSelect")}
                   >
                     {devices.map((d) => (
@@ -255,7 +490,7 @@ export default function ImportWizard() {
                   <button
                     type="button"
                     onClick={() => device && void refreshDevice(device.id)}
-                    className="shrink-0 rounded-md border border-panel px-2 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    className="shrink-0 rounded-md border border-edge px-2 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
                     title={t("wizard.rescan")}
                   >
                     {t("wizard.rescan")}
@@ -265,8 +500,9 @@ export default function ImportWizard() {
                   <dl className="mt-3 space-y-1 text-xs" data-testid="wizard-device-info">
                     <div className="flex justify-between">
                       <dt className="text-text-muted">{t("wizard.deviceKind")}</dt>
-                      <dd className="text-text-secondary">
-                        {t(device.kind === "mtp" ? "deviceDialog.kind.camera" : "deviceDialog.kind.reader")}
+                      <dd className="flex items-center gap-1 text-text-secondary">
+                        {device.kind === "folder" && <FolderGlyph className="text-text-secondary" />}
+                        {t(KIND_LABEL_KEY[device.kind])}
                       </dd>
                     </div>
                     {(Object.keys(device.filesByKind) as FileKind[]).map((kind) => (
@@ -290,6 +526,73 @@ export default function ImportWizard() {
               </>
             )}
           </div>
+
+          {/* 文件系统区：懒加载目录树 */}
+          <div className="shrink-0 border-b border-edge py-2" data-testid="wizard-fs">
+            <div className="flex items-center justify-between px-3 pb-1">
+              <span className="text-xs font-medium text-text-secondary">{t("wizard.fs.title")}</span>
+              <button
+                type="button"
+                onClick={() => void browseFolder()}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                data-testid="wizard-fs-browse"
+              >
+                <FolderGlyph size={12} />
+                {t("wizard.fs.browse")}
+              </button>
+            </div>
+            <div className="max-h-44 overflow-y-auto px-1.5 pb-1">
+              {fsRoots === null ? null : fsRoots.length === 0 ? (
+                <p className="px-2 py-1 text-[11px] leading-relaxed text-text-muted">
+                  {t("wizard.fs.unavailable")}
+                </p>
+              ) : (
+                fsRoots.map((node) => renderFsNode(node, 0))
+              )}
+            </div>
+          </div>
+
+          {/* 最近使用区：有记录才显示 */}
+          {recentSources.length > 0 && (
+            <div className="shrink-0 border-b border-edge py-2" data-testid="wizard-recent">
+              <div className="px-3 pb-1 text-xs font-medium text-text-secondary">
+                {t("wizard.recent.title")}
+              </div>
+              <div className="px-1.5">
+                {recentSources.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => selectRecent(entry)}
+                    className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left transition-colors hover:bg-panel/40 ${
+                      entry.id === selectedId ? "text-accent" : "text-text-secondary"
+                    }`}
+                    data-testid="wizard-recent-item"
+                    title={entry.id}
+                  >
+                    {entry.kind === "folder" ? (
+                      <FolderGlyph size={12} className="text-text-muted" />
+                    ) : (
+                      <svg
+                        viewBox="0 0 16 16"
+                        width="12"
+                        height="12"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.3"
+                        className="shrink-0 text-text-muted"
+                        aria-hidden="true"
+                      >
+                        <rect x="2.5" y="3" width="11" height="10" rx="1.5" />
+                        <path d="M2.5 10.5l3-3 2.5 2.5" />
+                      </svg>
+                    )}
+                    <span className="truncate text-[11px]">{entry.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* 源文件树 */}
           <div className="flex min-h-0 flex-1 flex-col">
@@ -378,9 +681,9 @@ export default function ImportWizard() {
         </section>
 
         {/* 中栏：可勾选文件表 */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-panel bg-surface" aria-label={t("wizard.fileTable")}>
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.fileTable")}>
           <div
-            className="flex h-9 shrink-0 items-center justify-between border-b border-panel px-3 text-xs"
+            className="flex h-9 shrink-0 items-center justify-between border-b border-edge px-3 text-xs"
             data-testid="wizard-table-stats"
           >
             <span className="text-text-secondary">
@@ -411,7 +714,7 @@ export default function ImportWizard() {
                   {files.map((f) => (
                     <tr
                       key={f.path}
-                      className={`border-t border-panel/60 ${selected.has(f.path) ? "" : "opacity-40"}`}
+                      className={`border-t border-edge/60 ${selected.has(f.path) ? "" : "opacity-40"}`}
                     >
                       <td className="px-2 py-1">
                         <input
@@ -441,7 +744,7 @@ export default function ImportWizard() {
         </section>
 
         {/* 右栏：方案面板 */}
-        <section className="flex min-h-0 flex-col overflow-y-auto rounded-lg border border-panel bg-surface p-3" aria-label={t("wizard.planPane")}>
+        <section className="flex min-h-0 flex-col overflow-y-auto rounded-lg border border-edge bg-surface p-3" aria-label={t("wizard.planPane")}>
           <h2 className="text-xs font-semibold text-text-primary">{t("wizard.plan")}</h2>
 
           <div className="mt-3 flex flex-col gap-1.5">
@@ -459,11 +762,12 @@ export default function ImportWizard() {
               <button
                 type="button"
                 onClick={() => void pickTargetRoot()}
-                className="shrink-0 rounded-md border border-panel px-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                className="shrink-0 rounded-md border border-edge px-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
               >
                 {t("wizard.browse")}
               </button>
             </div>
+            <p className="text-xs text-text-muted">{t("wizard.targetRootDesc")}</p>
           </div>
 
           <div className="mt-4 flex flex-col gap-1.5">
@@ -474,7 +778,7 @@ export default function ImportWizard() {
               id="wizard.dirTemplate"
               value={presetKey}
               onChange={(e) => setPresetKey(e.target.value)}
-              className="rounded-md border border-panel bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
+              className="rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
             >
               {TEMPLATE_PRESETS.map((p) => (
                 <option key={p.key} value={p.key}>
@@ -494,7 +798,7 @@ export default function ImportWizard() {
               />
             )}
             <div
-              className="truncate rounded-md border border-panel bg-bg px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
+              className="truncate rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
               title={previewTemplate(dirTemplate, targetRoot)}
               data-testid="wizard-preview"
             >

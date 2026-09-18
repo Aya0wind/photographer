@@ -5,7 +5,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 
 function InfoRow({ label, value, mono = true }: { label: string; value: string | null; mono?: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-panel pt-4 text-left">
+    <div className="flex items-center justify-between gap-4 border-t border-edge pt-4 text-left">
       <span className="shrink-0 text-sm text-text-secondary">{label}</span>
       <span
         className={`truncate text-xs ${mono ? "font-mono" : ""} ${

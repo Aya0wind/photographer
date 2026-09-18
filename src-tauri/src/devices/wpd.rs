@@ -135,6 +135,18 @@ impl DeviceSource for WpdSource {
     fn stream(&self, _id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
         Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
     }
+
+    /// MTP 删源（move 模式）：经 WPD Delete。持久 ID → 会话对象 ID 翻译
+    /// 与 open_head/stream 同路径（ILCE-7RM5 真机验证过的对象解析链）。
+    #[cfg(windows)]
+    fn delete(&self, id: &str) -> DeviceResult<()> {
+        com::delete(&self.pnp_id, id)
+    }
+
+    #[cfg(not(windows))]
+    fn delete(&self, _id: &str) -> DeviceResult<()> {
+        Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
+    }
 }
 
 /// 枚举全部 WPD/MTP 设备：`(pnp_id, friendly_name)` 列表。
@@ -750,6 +762,40 @@ mod com {
         stream: IStream,
         /// 设备会话保活（见 stream() 说明）。
         _device: IPortableDevice,
+    }
+
+    /// 删除对象（move 模式删源）：持久 ID → 会话 ID 翻译后经
+    /// `IPortableDeviceContent::Delete`（flags=0 非递归——文件对象无子层级，
+    /// 带子对象的意外删除直接报错而非连带清除）。
+    pub fn delete(pnp_id: &str, obj_id: &str) -> DeviceResult<()> {
+        let _com = ComApartment::init().map_err(win_error)?;
+        let device = open_device(pnp_id)?;
+        // SAFETY: 设备已 Open
+        let content = unsafe { device.Content() }.map_err(win_error)?;
+        let resolved = resolve_object_id(&content, obj_id);
+
+        // SAFETY: CLSID 为静态常量；无外部聚合
+        let request: IPortableDevicePropVariantCollection = unsafe {
+            CoCreateInstance(
+                &CLSID_PORTABLE_DEVICE_PROPVARIANT_COLLECTION,
+                None::<&windows::core::IUnknown>,
+                CLSCTX_INPROC_SERVER,
+            )
+        }
+        .map_err(win_error)?;
+        let mut prop = lpstr_propvariant(&resolved)
+            .ok_or_else(|| DeviceError::Other("构造删除请求失败".into()))?;
+        // SAFETY: prop 为本地合法 VT_LPWSTR PROPVARIANT；Add 拷贝值入集合
+        let added = unsafe { request.Add(&prop) }.is_ok();
+        // SAFETY: prop 持有 CoTaskMem 分配的字符串，无论 Add 成败都须清理
+        let _ = unsafe { PropVariantClear(&mut prop) };
+        if !added {
+            return Err(DeviceError::Other("构造删除请求失败".into()));
+        }
+        // SAFETY: request 已装载 1 个对象 ID；结果集合出参传空（整体成败
+        // 由 HRESULT 表达）
+        unsafe { content.Delete(0, &request, std::ptr::null_mut()) }.map_err(win_error)?;
+        Ok(())
     }
 
     // SAFETY: WPD 的资源 IStream 是进程内 COM 对象（非跨套间代理），

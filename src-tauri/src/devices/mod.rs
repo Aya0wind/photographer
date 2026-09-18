@@ -2,6 +2,7 @@
 //! 导入引擎不感知设备类型。热插拔检测在 `hotplug`（WM_DEVICECHANGE），
 //! 卷实现在 `volume`，WPD/MTP 实现在 `wpd`。
 
+pub mod folder;
 pub mod hotplug;
 pub mod orchestrator;
 pub mod volume;
@@ -59,6 +60,11 @@ pub trait DeviceSource: Send + Sync {
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>>;
     /// 全文件流（复制用）。调用方负责读完或 drop。
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn Read + Send>>;
+    /// 删除源文件（M2 move 模式：校验入册后删源）。
+    /// 默认不支持（仅实现该能力的源可参与移动导入）。
+    fn delete(&self, _id: &str) -> DeviceResult<()> {
+        Err(DeviceError::NotSupported("delete".into()))
+    }
 }
 
 // ---------------------------------------------------------------------------

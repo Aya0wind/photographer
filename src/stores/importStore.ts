@@ -12,6 +12,7 @@ import {
   type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
+  type ImportMode,
   type ImportStats,
   type JobRow,
 } from "@/ipc/api";
@@ -58,6 +59,8 @@ export interface JobSummary {
   jobId: number;
   stats: ImportStats;
   failures: FailedFileEntry[];
+  /** 导入模式快照（总结弹窗「复制/移动」文案用）；事件不含 mode，由启动方记录，未知回退 copy */
+  mode: ImportMode;
 }
 
 export interface HistoryState {
@@ -70,6 +73,16 @@ export interface HistoryState {
 
 export const PROGRESS_THROTTLE_MS = 150;
 export const HISTORY_PAGE_SIZE = 20;
+
+/** 最近使用源（LR 式源面板）：设备或文件夹，localStorage 持久化，最多 5 条 */
+export interface RecentSource {
+  id: string;
+  name: string;
+  kind: DeviceKind;
+}
+
+export const RECENT_SOURCES_MAX = 5;
+const RECENT_SOURCES_KEY = "smartphoto.import.recentSources";
 
 /** importFileCompleted 的 state 字段中表示失败的取值 */
 const FAILURE_STATES = new Set(["failed", "error"]);
@@ -90,6 +103,10 @@ interface ImportState {
   summary: JobSummary | null;
   lastError: { level: string; message: string; recoverable: boolean } | null;
   sourceFiles: Record<string, SourceFile[]>;
+  /** 最近使用的导入源（设备或文件夹），新选择的排最前 */
+  recentSources: RecentSource[];
+  /** 每任务的导入模式（启动时由向导记录，事件不含 mode） */
+  jobModes: Record<number, ImportMode>;
 
   /** 事件入口（initImportStore 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
@@ -97,6 +114,12 @@ interface ImportState {
   ignoreDevice: (id: string) => void;
   /** 手动刷新设备快照（device_scan），成功则更新列表 */
   refreshDevice: (id: string) => Promise<void>;
+  /** 注入/更新设备快照（文件夹源 folderScan 结果走这里，同 id 则覆盖） */
+  addDevice: (snapshot: DeviceSnapshot) => void;
+  /** 记录最近使用源（去重置顶，截断至 5 条，写 localStorage） */
+  recordRecentSource: (source: RecentSource) => void;
+  /** 记录任务导入模式（总结弹窗/任务中心文案用） */
+  recordJobMode: (jobId: number, mode: ImportMode) => void;
   dismissSummary: () => void;
   /** 历史任务分页；reset=true 重置游标重新加载 */
   loadHistory: (reset?: boolean) => Promise<void>;
@@ -183,6 +206,35 @@ function upsertDevice(list: DeviceSnapshot[], snapshot: DeviceSnapshot): DeviceS
   return next;
 }
 
+// --- 最近使用源持久化（localStorage，坏数据静默丢弃） ---------------------------
+
+function isRecentSource(value: unknown): value is RecentSource {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === "string" && typeof v.name === "string" && typeof v.kind === "string";
+}
+
+function loadRecentSources(): RecentSource[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SOURCES_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(isRecentSource).slice(0, RECENT_SOURCES_MAX)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentSources(list: RecentSource[]): void {
+  try {
+    localStorage.setItem(RECENT_SOURCES_KEY, JSON.stringify(list));
+  } catch {
+    // 存储不可用（隐私模式/超限）时静默，仅内存态生效
+  }
+}
+
 export const useImportStore = create<ImportState>((set, get) => ({
   devices: [],
   scanning: [],
@@ -194,6 +246,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
   summary: null,
   lastError: null,
   sourceFiles: {},
+  recentSources: loadRecentSources(),
+  jobModes: {},
 
   handleAppEvent: (event) => {
     switch (event.type) {
@@ -306,6 +360,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
               jobId: event.jobId,
               stats: event.stats,
               failures: s.failedFiles[event.jobId] ?? [],
+              mode: s.jobModes[event.jobId] ?? "copy",
             },
           };
         });
@@ -349,6 +404,25 @@ export const useImportStore = create<ImportState>((set, get) => ({
     if (snapshot) {
       set((s) => ({ devices: upsertDevice(s.devices, snapshot) }));
     }
+  },
+
+  addDevice: (snapshot) => {
+    set((s) => ({ devices: upsertDevice(s.devices, snapshot) }));
+  },
+
+  recordRecentSource: (source) => {
+    set((s) => {
+      const next = [
+        source,
+        ...s.recentSources.filter((r) => r.id !== source.id),
+      ].slice(0, RECENT_SOURCES_MAX);
+      saveRecentSources(next);
+      return { recentSources: next };
+    });
+  },
+
+  recordJobMode: (jobId, mode) => {
+    set((s) => ({ jobModes: { ...s.jobModes, [jobId]: mode } }));
   },
 
   dismissSummary: () => {
@@ -422,6 +496,11 @@ export function resetImportStoreForTests(): void {
     flushTimer = null;
   }
   promptedDevices.clear();
+  try {
+    localStorage.removeItem(RECENT_SOURCES_KEY);
+  } catch {
+    // 存储不可用时静默
+  }
   useImportStore.setState({
     devices: [],
     scanning: [],
@@ -433,5 +512,7 @@ export function resetImportStoreForTests(): void {
     summary: null,
     lastError: null,
     sourceFiles: {},
+    recentSources: [],
+    jobModes: {},
   });
 }

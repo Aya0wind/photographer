@@ -91,7 +91,7 @@ export default function LogViewer({ jobId }: { jobId: number }) {
       </div>
 
       {/* 日志行 */}
-      <div className="mt-1.5 max-h-48 overflow-y-auto rounded-md border border-panel bg-bg p-1.5">
+      <div className="mt-1.5 max-h-48 overflow-y-auto rounded-md border border-edge bg-bg p-1.5">
         {visible.length === 0 ? (
           <p className="py-3 text-center font-mono text-[11px] text-text-muted">
             {t("logs.empty")}
@@ -118,7 +118,7 @@ export default function LogViewer({ jobId }: { jobId: number }) {
             type="button"
             disabled={loading}
             onClick={() => void load(false)}
-            className="rounded border border-panel px-2.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+            className="rounded border border-edge px-2.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
           >
             {loading ? t("tasks.loading") : t("logs.loadMore")}
           </button>

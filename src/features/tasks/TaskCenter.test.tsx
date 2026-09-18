@@ -225,6 +225,7 @@ describe("总结弹窗", () => {
       useImportStore.setState({
         summary: {
           jobId: 7,
+          mode: "copy",
           stats: {
             totalFiles: 3,
             doneFiles: 1,
@@ -259,6 +260,7 @@ describe("总结弹窗", () => {
       useImportStore.setState({
         summary: {
           jobId: 8,
+          mode: "copy",
           stats: {
             totalFiles: 3,
             doneFiles: 2,
@@ -275,5 +277,49 @@ describe("总结弹窗", () => {
     });
 
     expect(await screen.findByText("失败详情请展开该任务查看日志。")).toBeInTheDocument();
+  });
+
+  it("移动模式：标题移动完成，成功卡换为已移动 N，源删除失败警示", async () => {
+    renderCenter();
+    act(() => {
+      useImportStore.setState({
+        summary: {
+          jobId: 9,
+          mode: "move",
+          stats: {
+            totalFiles: 10,
+            doneFiles: 8,
+            skippedDuplicates: 1,
+            failedFiles: 1,
+            totalBytes: 100,
+            doneBytes: 80,
+            elapsedMs: 1000,
+            bytesPerSec: 10,
+            moved: 8,
+            sourceDeleteFailed: 2,
+          },
+          failures: [],
+        },
+      });
+    });
+
+    const modal = await screen.findByTestId("summary-modal");
+    expect(modal).toHaveTextContent("移动完成");
+    const doneCard = screen.getByTestId("summary-done");
+    expect(doneCard).toHaveTextContent("已移动");
+    expect(doneCard).toHaveTextContent("8");
+    expect(screen.getByTestId("summary-source-delete-failed")).toHaveTextContent("2");
+  });
+
+  it("移动模式的当前任务卡标题为移动任务", () => {
+    useImportStore.setState({
+      activeJobs: { 7: runningJob() },
+      currentJobId: 7,
+      jobModes: { 7: "move" },
+    });
+
+    renderCenter();
+
+    expect(screen.getByText("移动任务 #7")).toBeInTheDocument();
   });
 });

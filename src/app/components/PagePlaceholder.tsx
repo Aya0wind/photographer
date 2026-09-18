@@ -22,7 +22,7 @@ export default function PagePlaceholder({
 
   return (
     <div className="flex h-full items-center justify-center p-8">
-      <div className="w-full max-w-md rounded-xl border border-panel bg-surface p-8 text-center">
+      <div className="w-full max-w-md rounded-xl border border-edge bg-surface p-8 text-center">
         <h1 className="text-lg font-semibold text-text-primary">{t(titleKey)}</h1>
         <p className="mt-2 text-sm leading-relaxed text-text-muted">{t(descKey)}</p>
         {children}
