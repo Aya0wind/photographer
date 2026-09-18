@@ -74,7 +74,7 @@ fn plan_for(target: &Path) -> ImportPlan {
         target_root: target.to_path_buf(),
         dir_template: "{YYYY}/{MM-DD}".into(),
         name_template: "{原文件名}".into(),
-        duplicate: DuplicatePolicy::Skip,
+        duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,
         mode: ImportMode::Copy,
@@ -262,7 +262,7 @@ fn rename_policy_generates_suffix() {
     fs::write(&occupied, b"occupied").unwrap();
 
     let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
-        plan.duplicate = DuplicatePolicy::Rename;
+        plan.duplicate_policy = DuplicatePolicy::Rename;
         plan.skip_imported = false;
     });
 
@@ -293,7 +293,7 @@ fn skip_policy_path_conflict_marks_skipped() {
     fs::write(&occupied, b"occupied").unwrap();
 
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
-        plan.duplicate = DuplicatePolicy::Skip;
+        plan.duplicate_policy = DuplicatePolicy::Skip;
         plan.skip_imported = false;
     });
 
@@ -570,7 +570,7 @@ fn plan_mode_defaults_to_copy_and_round_trips() {
         "targetRoot": "C:\\vault",
         "dirTemplate": "{YYYY}/{MM-DD}",
         "nameTemplate": "{原文件名}",
-        "duplicate": "skip",
+        "duplicatePolicy": "skip",
         "skipImported": true,
         "streams": 2
     }"#;

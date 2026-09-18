@@ -76,7 +76,7 @@ pub struct ImportPlan {
     pub target_root: PathBuf,
     pub dir_template: String,
     pub name_template: String,
-    pub duplicate: DuplicatePolicy,
+    pub duplicate_policy: DuplicatePolicy,
     pub skip_imported: bool,
     pub streams: u32,
     /// 缺省 copy：journal 中的历史计划（M1 无此字段）仍可反序列化恢复。
@@ -693,7 +693,7 @@ impl Engine {
         // ③ 目标路径冲突
         let mut final_dst = copied.dst.clone();
         if final_dst.exists() {
-            match self.plan.duplicate {
+            match self.plan.duplicate_policy {
                 DuplicatePolicy::Rename => {
                     let parent = final_dst.parent().unwrap_or(Path::new("")).to_path_buf();
                     let name = final_dst

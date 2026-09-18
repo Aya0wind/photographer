@@ -127,7 +127,7 @@ fn plan(state: &AppState, target: &Path) -> ImportPlan {
         target_root: target.to_path_buf(),
         dir_template: "{YYYY}/{MM-DD}".into(),
         name_template: "{原文件名}".into(),
-        duplicate: settings::DuplicatePolicy::Skip,
+        duplicate_policy: settings::DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,
         mode: ImportMode::Copy,
