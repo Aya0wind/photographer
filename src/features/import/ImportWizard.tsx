@@ -1252,6 +1252,8 @@ export default function ImportWizard() {
       mode,
       secondTarget:
         secondEnabled && secondRoot.trim() ? { targetRoot: secondRoot.trim(), dirTemplate } : undefined,
+      // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
+      include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
     };
     // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式/源类型
     useImportStore.getState().setPendingJobMode(mode);

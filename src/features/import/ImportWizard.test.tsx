@@ -260,6 +260,25 @@ describe("源文件树与文件列表", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
   });
 
+  it("勾选即导入范围：只选 1 个文件时 plan.include 只含该文件（回归：反选后导入全量的真机 bug）", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 9 });
+
+    expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+    // 反选 → 全不选；再只勾 IMG_0003.JPG
+    await user.click(screen.getByRole("button", { name: "反选" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 0 / 4");
+    await user.click(within(screen.getByTestId("wizard-file-list")).getByRole("checkbox", { name: "IMG_0003.JPG" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 4");
+
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+
+    const plan = startMock.mock.calls[0][0];
+    expect(plan.include).toEqual(["E:/DCIM/101CANON/IMG_0003.JPG"]);
+  });
+
   it("折叠目录组隐藏组内文件（左树与中栏共享折叠态）", async () => {
     seedSession();
     renderWizard("?device=E:");
@@ -393,6 +412,12 @@ describe("方案面板", () => {
       skipImported: true,
       streams: 4,
       mode: "copy",
+      include: [
+        "E:/DCIM/100CANON/IMG_0001.CR3",
+        "E:/DCIM/100CANON/IMG_0002.CR3",
+        "E:/DCIM/101CANON/IMG_0003.JPG",
+        "E:/DCIM/101CANON/VID_0004.MP4",
+      ],
     });
     // 库属性不回写全局设置（模板仍是全局默认值）
     expect(useSettingsStore.getState().settings.import.dirTemplate).toBe(
