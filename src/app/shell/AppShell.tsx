@@ -2,10 +2,12 @@ import { Outlet, useLocation } from "react-router";
 import { AnimatePresence, motion } from "motion/react";
 
 import Sidebar from "./Sidebar";
+import DeviceDialog from "@/features/import/DeviceDialog";
 
 /**
  * 应用主壳：左侧固定侧栏 + 内容区。
  * 页面切换时内容区做 opacity + 4px 位移过渡（180ms ease-out）。
+ * DeviceDialog 全局挂载：任何页面下设备扫描完成都会弹出导入提示。
  */
 export default function AppShell() {
   const location = useLocation();
@@ -27,6 +29,7 @@ export default function AppShell() {
           </motion.div>
         </AnimatePresence>
       </main>
+      <DeviceDialog />
     </div>
   );
 }

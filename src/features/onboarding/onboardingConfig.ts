@@ -10,7 +10,7 @@ export const SUGGESTED_PHOTO_ROOT = "Y:\\照片";
 /** 模板令牌白名单（与 Rust 侧 import/templates.rs 保持一致，M1 落地） */
 export const TEMPLATE_TOKENS = [
   "YYYY", "YY", "MM", "DD", "MM-DD", "HH", "mm", "ss",
-  "原文件名", "相机", "镜头",
+  "原文件名", "原目录", "相机", "镜头",
 ] as const;
 
 /** 找出模板中的未知令牌（用于向导即时校验） */
@@ -22,7 +22,7 @@ export function unknownTokens(template: string): string[] {
 
 const SAMPLE_VALUES: Record<string, string> = {
   YYYY: "2026", YY: "26", MM: "09", DD: "18", "MM-DD": "09-18", HH: "14", mm: "30", ss: "05",
-  原文件名: "IMG_0001.CR3", 相机: "EOS_R5", 镜头: "24-70",
+  原文件名: "IMG_0001.CR3", 原目录: "DCIM\\100CANON", 相机: "EOS_R5", 镜头: "24-70",
 };
 
 /** 用示例值渲染目录模板预览：photoRoot + 模板目录 + 文件名（分隔符统一为 Windows 风格） */

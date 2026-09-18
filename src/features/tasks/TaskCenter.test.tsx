@@ -1,0 +1,279 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router";
+
+import i18n from "@/i18n";
+import TaskCenter from "./TaskCenter";
+import { resetImportStoreForTests, useImportStore, type ActiveJob } from "@/stores/importStore";
+import {
+  importCancel,
+  importJobsPage,
+  importLogsPage,
+  importPause,
+  importResume,
+  importRetryFailed,
+  type JobRow,
+  type LogRow,
+} from "@/ipc/api";
+
+vi.mock("@/ipc/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/ipc/api")>();
+  return {
+    ...actual,
+    importPause: vi.fn(),
+    importResume: vi.fn(),
+    importCancel: vi.fn(),
+    importRetryFailed: vi.fn(),
+    importJobsPage: vi.fn(),
+    importLogsPage: vi.fn(),
+  };
+});
+
+const pauseMock = vi.mocked(importPause);
+const resumeMock = vi.mocked(importResume);
+const cancelMock = vi.mocked(importCancel);
+const retryMock = vi.mocked(importRetryFailed);
+const jobsPageMock = vi.mocked(importJobsPage);
+const logsPageMock = vi.mocked(importLogsPage);
+
+function runningJob(): ActiveJob {
+  return {
+    jobId: 7,
+    status: "running",
+    totalFiles: 100,
+    totalBytes: 10_000_000_000,
+    doneFiles: 50,
+    doneBytes: 5_000_000_000,
+    bytesPerSec: 50 * 1024 * 1024,
+    currentFile: "DCIM/100CANON/IMG_0042.CR3",
+  };
+}
+
+function jobRow(id: number, status: JobRow["status"]): JobRow {
+  // 本地时区构造，避免 CI/本地时区差异影响时间显示断言
+  const startedAt = new Date(2026, 8, 18, 12, 0, 0).getTime();
+  return {
+    id,
+    kind: "import",
+    deviceId: "E:",
+    deviceName: "SanDisk 64G",
+    status,
+    totalFiles: 120,
+    totalBytes: 4_000_000_000,
+    statsJson: "{}",
+    startedAt,
+    finishedAt: status === "running" || status === "paused" ? null : startedAt + 150_000,
+  };
+}
+
+function logRow(id: number, level: LogRow["level"], message: string): LogRow {
+  return { id, ts: new Date(2026, 8, 18, 12, 0, id).getTime(), level, jobId: 3, message };
+}
+
+function renderCenter() {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryRouter>
+        <TaskCenter />
+      </MemoryRouter>
+    </I18nextProvider>,
+  );
+}
+
+beforeEach(() => {
+  resetImportStoreForTests();
+  pauseMock.mockReset().mockResolvedValue(undefined);
+  resumeMock.mockReset().mockResolvedValue(undefined);
+  cancelMock.mockReset().mockResolvedValue(undefined);
+  retryMock.mockReset().mockResolvedValue(null);
+  jobsPageMock.mockReset().mockResolvedValue([]);
+  logsPageMock.mockReset().mockResolvedValue([]);
+});
+
+describe("当前任务卡", () => {
+  it("无活跃任务时显示空态", () => {
+    renderCenter();
+
+    expect(screen.getByTestId("task-idle")).toHaveTextContent("暂无进行中的任务");
+  });
+
+  it("展示进度/速度/文件数/当前文件名", () => {
+    useImportStore.setState({ activeJobs: { 7: runningJob() }, currentJobId: 7 });
+
+    renderCenter();
+
+    const progress = screen.getByTestId("task-progress");
+    expect(progress).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.getByText("50.0 MB/s")).toBeInTheDocument();
+    expect(screen.getByText("50 / 100 个文件")).toBeInTheDocument();
+    expect(screen.getByTestId("current-file")).toHaveTextContent("IMG_0042.CR3");
+    expect(screen.getByText("进行中")).toBeInTheDocument();
+  });
+
+  it("运行中可暂停/取消；暂停后变恢复", async () => {
+    useImportStore.setState({ activeJobs: { 7: runningJob() }, currentJobId: 7 });
+    const user = userEvent.setup();
+
+    renderCenter();
+    await user.click(await screen.findByRole("button", { name: "暂停" }));
+    expect(pauseMock).toHaveBeenCalledWith(7);
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(cancelMock).toHaveBeenCalledWith(7);
+
+    // 事件驱动状态：paused 后按钮变为恢复
+    act(() => {
+      useImportStore.getState().handleAppEvent({ type: "importPaused", jobId: 7 });
+    });
+    await user.click(screen.getByRole("button", { name: "恢复" }));
+    expect(resumeMock).toHaveBeenCalledWith(7);
+  });
+
+  it("已完成任务不再占据当前任务卡", () => {
+    useImportStore.setState({
+      activeJobs: { 7: { ...runningJob(), status: "done" } },
+      currentJobId: 7,
+    });
+
+    renderCenter();
+
+    expect(screen.getByTestId("task-idle")).toBeInTheDocument();
+  });
+});
+
+describe("历史任务表", () => {
+  it("渲染状态徽标/设备/文件数/耗时/开始时间", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3, "done"), jobRow(2, "cancelled")]);
+
+    renderCenter();
+
+    const row3 = await screen.findByTestId("history-row-3");
+    expect(row3).toHaveTextContent("已完成");
+    expect(row3).toHaveTextContent("SanDisk 64G");
+    expect(row3).toHaveTextContent("120");
+    expect(row3).toHaveTextContent("2分30秒");
+    expect(row3).toHaveTextContent("2026-09-18 12:00:00");
+    expect(screen.getByTestId("history-row-2")).toHaveTextContent("已取消");
+  });
+
+  it("点击行展开日志查看器", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3, "done")]);
+    logsPageMock.mockResolvedValue([logRow(1, "info", "copy ok")]);
+    const user = userEvent.setup();
+
+    renderCenter();
+    await user.click(await screen.findByTestId("history-row-3"));
+
+    expect(await screen.findByTestId("log-viewer-3")).toBeInTheDocument();
+    expect(await screen.findByText("copy ok")).toBeInTheDocument();
+  });
+
+  it("未取尽时提供加载更多", async () => {
+    // 首页满一页（20 行，id 20..1），游标 = 最后一行 id 1
+    const fullPage = Array.from({ length: 20 }, (_, i) => jobRow(20 - i, "done"));
+    jobsPageMock.mockResolvedValueOnce(fullPage).mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+
+    renderCenter();
+    await screen.findByTestId("history-row-20");
+
+    await user.click(screen.getByRole("button", { name: "加载更多" }));
+    await waitFor(() => expect(jobsPageMock).toHaveBeenCalledTimes(2));
+    expect(jobsPageMock).toHaveBeenLastCalledWith(1, 20);
+  });
+});
+
+describe("总结弹窗", () => {
+  it("sessionFinished 后自动弹出：三卡片+耗时+平均速度", async () => {
+    renderCenter();
+
+    act(() => {
+      useImportStore.getState().handleAppEvent({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
+      useImportStore.getState().handleAppEvent({
+        type: "importSessionFinished",
+        jobId: 7,
+        stats: {
+          totalFiles: 10,
+          doneFiles: 7,
+          skippedDuplicates: 2,
+          failedFiles: 1,
+          totalBytes: 1000,
+          doneBytes: 700,
+          elapsedMs: 150_000,
+          bytesPerSec: 5 * 1024 * 1024,
+        },
+      });
+    });
+
+    const modal = await screen.findByTestId("summary-modal");
+    expect(modal).toBeInTheDocument();
+    expect(screen.getByTestId("summary-done")).toHaveTextContent("7");
+    expect(screen.getByTestId("summary-skipped")).toHaveTextContent("2");
+    expect(screen.getByTestId("summary-failed")).toHaveTextContent("1");
+    expect(modal).toHaveTextContent("2分30秒");
+    expect(modal).toHaveTextContent("5.0 MB/s");
+  });
+
+  it("失败清单与重试：retry 成功显示新任务号，关闭出队弹窗", async () => {
+    retryMock.mockResolvedValueOnce(99);
+    const user = userEvent.setup();
+
+    renderCenter();
+    act(() => {
+      useImportStore.setState({
+        summary: {
+          jobId: 7,
+          stats: {
+            totalFiles: 3,
+            doneFiles: 1,
+            skippedDuplicates: 0,
+            failedFiles: 2,
+            totalBytes: 30,
+            doneBytes: 10,
+            elapsedMs: 1000,
+            bytesPerSec: 10,
+          },
+          failures: [
+            { src: "E:/A.CR3", dst: "", state: "failed" },
+            { src: "E:/B.CR3", dst: "", state: "error" },
+          ],
+        },
+      });
+    });
+
+    expect(await screen.findByTestId("summary-failures")).toHaveTextContent("E:/A.CR3");
+    await user.click(screen.getByRole("button", { name: "重试失败项" }));
+    expect(retryMock).toHaveBeenCalledWith(7);
+    expect(await screen.findByText("已创建重试任务 #99")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByTestId("summary-modal")).not.toBeInTheDocument());
+    expect(useImportStore.getState().summary).toBeNull();
+  });
+
+  it("无失败清单但有失败计数时提示查看日志", async () => {
+    renderCenter();
+    act(() => {
+      useImportStore.setState({
+        summary: {
+          jobId: 8,
+          stats: {
+            totalFiles: 3,
+            doneFiles: 2,
+            skippedDuplicates: 0,
+            failedFiles: 1,
+            totalBytes: 30,
+            doneBytes: 20,
+            elapsedMs: 1000,
+            bytesPerSec: 10,
+          },
+          failures: [],
+        },
+      });
+    });
+
+    expect(await screen.findByText("失败详情请展开该任务查看日志。")).toBeInTheDocument();
+  });
+});

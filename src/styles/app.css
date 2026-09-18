@@ -26,3 +26,20 @@ body {
   overflow: hidden;
   user-select: none;
 }
+
+/* 当前文件名跑马灯（任务中心）：仅文本溢出时由组件挂上 sp-marquee-track，
+   双份内容 + translateX(-50%) 无缝循环，纯合成层动画 */
+@keyframes sp-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.sp-marquee-track {
+  display: inline-flex;
+  animation: sp-marquee 14s linear infinite;
+  will-change: transform;
+}
