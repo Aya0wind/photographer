@@ -38,10 +38,10 @@ pub fn import_cancel(state: State<AppState>, job_id: i64) -> Result<(), String> 
 #[tauri::command]
 pub fn import_jobs_page(
     state: State<AppState>,
-    after: i64,
+    after_id: i64,
     limit: u32,
 ) -> Result<Vec<JobRow>, String> {
-    jobs_page(&state, after, limit)
+    jobs_page(&state, after_id, limit)
 }
 
 /// 任务日志（游标分页：id 严格大于 after_id，升序）。
