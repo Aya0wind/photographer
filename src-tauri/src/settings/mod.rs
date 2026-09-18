@@ -39,13 +39,53 @@ impl Settings {
 
 /// 库 = 独立数据单元：`db_dir` 数据库目录自包含（SQLite/缩略图/向量/日志），
 /// `photo_root` 照片存储目录与之分离；两者均可迁移。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// M2 起**导入目录属性是库属性**（建库时填写、导入时只读，用户规定
+/// 2026-09-18）：`dir_template` 目录模板与 `import_subdir` 导入子目录随库
+/// 保存；旧 settings.json 缺这两字段时按默认值容错填充（不升 schema）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Library {
     pub id: String,
     pub name: String,
     pub db_dir: String,
     pub photo_root: String,
+    /// 导入目录模板（库属性：导入时只读）。
+    #[serde(default = "default_dir_template")]
+    pub dir_template: String,
+    /// 卡/相机导入的专用子目录名（相对 photoRoot 的应用写入区；库属性）。
+    #[serde(default = "default_import_subdir")]
+    pub import_subdir: String,
+    /// 配置链是否走完（达芬奇式启动流，用户规定 2026-09-18：每次启动先进
+    /// 库选择器）：新建库为 false，走完库配置链置 true；选择器据此决定
+    /// 是否继续进入配置向导。旧 settings.json 缺字段 → false，由 load 的
+    /// 一次性迁移平滑处理（见 `SettingsManager::load`）。
+    #[serde(default)]
+    pub configured: bool,
+}
+
+impl Default for Library {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            db_dir: String::new(),
+            photo_root: String::new(),
+            dir_template: default_dir_template(),
+            import_subdir: default_import_subdir(),
+            configured: false,
+        }
+    }
+}
+
+/// 库级目录模板默认值（与建库默认一致，见 ImportSettings 注释）。
+fn default_dir_template() -> String {
+    "{YYYY}/{MM-DD}/{原文件名}".to_string()
+}
+
+/// 库级导入子目录默认值。
+fn default_import_subdir() -> String {
+    "SmartPhoto".to_string()
 }
 
 impl Default for Settings {
@@ -88,12 +128,14 @@ pub enum IndexSchedule {
 pub struct ImportSettings {
     pub prompt_on_device: bool,
     pub skip_imported: bool,
+    /// **已降级（M2 用户规定 2026-09-18）**：目录模板/导入子目录是库属性
+    /// （`Library.dir_template` / `Library.import_subdir`，建库时填写、导入时
+    /// 只读）。本字段保留仅作**创建新库时的默认值**，存量配置不断裂。
     pub dir_template: String,
     pub duplicate_policy: DuplicatePolicy,
     pub notify_milestones: bool,
-    /// 卡/相机导入的专用子目录名（相对 photoRoot 的应用写入区，spec §5.11）。
-    /// photoRoot 归用户管理（可预存内容）；应用只写入 `photoRoot\import_subdir`，
-    /// 用户也可手动把照片移入该区后触发重建索引（M2）。
+    /// **已降级**：语义同 `dir_template`——新库 `import_subdir` 的默认值
+    /// （spec §5.11：photoRoot 归用户管理，应用只写 `photoRoot\import_subdir`）。
     pub import_subdir: String,
 }
 
@@ -102,10 +144,10 @@ impl Default for ImportSettings {
         Self {
             prompt_on_device: true,
             skip_imported: true,
-            dir_template: "{YYYY}/{MM-DD}/{原文件名}".to_string(),
+            dir_template: default_dir_template(),
             duplicate_policy: DuplicatePolicy::Skip,
             notify_milestones: true,
-            import_subdir: "SmartPhoto".to_string(),
+            import_subdir: default_import_subdir(),
         }
     }
 }
@@ -190,6 +232,7 @@ impl SettingsManager {
                 }
                 // 缺字段已被 serde(default) 填充，这里统一升版本号完成迁移。
                 settings.schema_version = SCHEMA_VERSION;
+                migrate_legacy_libraries(&mut settings);
                 Ok(settings)
             }
             Err(_parse_error) => {
@@ -217,4 +260,20 @@ fn unix_timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// 存量库一次性迁移（达芬奇式启动流，2026-09-18）：旧模型没有
+/// `configured` 标记——已完成引导且持有库的用户视为库配置早已走完：
+/// 若 `onboarding_completed` 且库列表非空且**所有库都未 configured**，
+/// 全部标 true（部分库已 configured 说明已是新模型写入，不再迁移，
+/// 避免波及用户新建未配置的库）。迁移结果在下次 save 时落盘。
+fn migrate_legacy_libraries(settings: &mut Settings) {
+    if settings.onboarding_completed
+        && !settings.libraries.is_empty()
+        && settings.libraries.iter().all(|lib| !lib.configured)
+    {
+        for lib in &mut settings.libraries {
+            lib.configured = true;
+        }
+    }
 }

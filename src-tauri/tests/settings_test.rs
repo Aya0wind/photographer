@@ -77,6 +77,11 @@ fn save_then_load_roundtrip_with_custom_values() {
             name: "主库".to_string(),
             db_dir: r"I:\SmartPhoto\主库".to_string(),
             photo_root: r"Y:\照片".to_string(),
+            // 库属性（M2 下沉）：目录模板/导入子目录随库保存
+            dir_template: "{YYYY}/{相机}/{原文件名}".to_string(),
+            import_subdir: "卡导入区".to_string(),
+            // 配置链已走完（达芬奇式启动流：库选择器跳过配置向导的依据）
+            configured: true,
         }],
         active_library_id: Some("lib-1".to_string()),
         onboarding_completed: true,
@@ -107,6 +112,11 @@ fn save_then_load_roundtrip_with_custom_values() {
     SettingsManager::save(&s, dir.path()).expect("save should succeed");
     let loaded = SettingsManager::load(dir.path()).expect("load should succeed");
     assert_eq!(loaded, s);
+    // 库属性 roundtrip 逐字段确认（不依赖整体相等）
+    let lib = loaded.libraries.first().expect("library kept");
+    assert_eq!(lib.dir_template, "{YYYY}/{相机}/{原文件名}");
+    assert_eq!(lib.import_subdir, "卡导入区");
+    assert!(lib.configured, "configured roundtrip 保留");
 }
 
 #[test]
@@ -170,6 +180,103 @@ fn old_json_with_missing_fields_is_filled_with_defaults() {
     assert_eq!(s.system.language, "zh");
 }
 
+/// M2 库属性下沉：旧 settings.json 的 Library 无 dirTemplate/importSubdir
+/// → 加载后为默认值（serde(default) 容错，不升 schema_version）。
+#[test]
+fn library_dir_attributes_default_when_missing_in_old_settings() {
+    let dir = temp_dir();
+    fs::write(
+        settings_path(dir.path()),
+        r#"{"schemaVersion":1,"activeLibraryId":"lib-1","libraries":[
+            {"id":"lib-1","name":"主库","dbDir":"I:\\SmartPhoto\\主库","photoRoot":"Y:\\照片"}
+        ]}"#,
+    )
+    .expect("write old-style settings");
+
+    let s = SettingsManager::load(dir.path()).expect("load");
+    assert_eq!(s.schema_version, SCHEMA_VERSION, "不升 schema_version");
+    let lib = s.libraries.first().expect("library kept");
+    assert_eq!(lib.id, "lib-1");
+    assert_eq!(lib.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
+    assert_eq!(lib.import_subdir, "SmartPhoto");
+
+    // Library::default() 同源默认（serde 容错与手工构造一致）
+    let default_lib = Library::default();
+    assert_eq!(default_lib.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
+    assert_eq!(default_lib.import_subdir, "SmartPhoto");
+}
+
+/// 达芬奇式启动流（用户规定）：configured 库级标记 + 存量一次性迁移。
+#[test]
+fn legacy_onboarded_libraries_migrated_to_configured() {
+    let dir = temp_dir();
+    // 旧 JSON：Library 无 configured（也无目录属性字段），但引导已完成
+    fs::write(
+        settings_path(dir.path()),
+        r#"{"schemaVersion":1,"onboardingCompleted":true,"activeLibraryId":"lib-1","libraries":[
+            {"id":"lib-1","name":"主库","dbDir":"I:\\SmartPhoto\\主库","photoRoot":"Y:\\照片"},
+            {"id":"lib-2","name":"备份库","dbDir":"I:\\SmartPhoto\\备份库","photoRoot":"Z:\\照片"}
+        ]}"#,
+    )
+    .expect("write legacy settings");
+
+    let s = SettingsManager::load(dir.path()).expect("load");
+    assert!(
+        s.libraries.iter().all(|lib| lib.configured),
+        "已引导的存量库应全部迁移为 configured"
+    );
+
+    // 迁移结果落盘后再次加载稳定（不再依赖迁移路径）
+    SettingsManager::save(&s, dir.path()).expect("save");
+    let reloaded = SettingsManager::load(dir.path()).expect("reload");
+    assert!(reloaded.libraries.iter().all(|lib| lib.configured));
+}
+
+#[test]
+fn unonboarded_libraries_stay_unconfigured() {
+    let dir = temp_dir();
+    fs::write(
+        settings_path(dir.path()),
+        r#"{"schemaVersion":1,"onboardingCompleted":false,"activeLibraryId":null,"libraries":[
+            {"id":"lib-1","name":"主库","dbDir":"I:\\SmartPhoto\\主库","photoRoot":"Y:\\照片"}
+        ]}"#,
+    )
+    .expect("write unonboarded settings");
+
+    let s = SettingsManager::load(dir.path()).expect("load");
+    assert!(
+        s.libraries.iter().all(|lib| !lib.configured),
+        "未走完引导的库不得被迁移"
+    );
+}
+
+#[test]
+fn partial_configured_libraries_are_not_touched_by_migration() {
+    let dir = temp_dir();
+    // 已有部分库 configured（新模型写入过）→ 迁移条件不满足，剩余库保持原状
+    fs::write(
+        settings_path(dir.path()),
+        r#"{"schemaVersion":1,"onboardingCompleted":true,"activeLibraryId":"lib-1","libraries":[
+            {"id":"lib-1","name":"主库","dbDir":"I:\\a","photoRoot":"Y:\\a","configured":true},
+            {"id":"lib-2","name":"新库","dbDir":"I:\\b","photoRoot":"Y:\\b"}
+        ]}"#,
+    )
+    .expect("write mixed settings");
+
+    let s = SettingsManager::load(dir.path()).expect("load");
+    fn by_id<'a>(s: &'a Settings, id: &str) -> &'a Library {
+        s.libraries
+            .iter()
+            .find(|lib| lib.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    }
+    assert!(by_id(&s, "lib-1").configured);
+    assert!(
+        !by_id(&s, "lib-2").configured,
+        "存在已配置库时迁移不得波及未配置库（新模型语义优先）"
+    );
+}
+
 #[test]
 fn empty_json_object_yields_defaults() {
     let dir = temp_dir();
@@ -221,10 +328,26 @@ fn serialization_uses_camel_case() {
         name: "主库".to_string(),
         db_dir: r"I:\SmartPhoto\主库".to_string(),
         photo_root: r"Y:\照片".to_string(),
+        dir_template: "{YYYY}/{相机}/{原文件名}".to_string(),
+        import_subdir: "卡导入区".to_string(),
+        configured: true,
     })
     .expect("serialize library");
     assert_eq!(lib["dbDir"], serde_json::json!(r"I:\SmartPhoto\主库"));
     assert_eq!(lib["photoRoot"], serde_json::json!(r"Y:\照片"));
+    assert_eq!(
+        lib["dirTemplate"],
+        serde_json::json!("{YYYY}/{相机}/{原文件名}")
+    );
+    assert_eq!(lib["importSubdir"], serde_json::json!("卡导入区"));
+    assert_eq!(lib["configured"], serde_json::json!(true));
+    // 缺省库序列化同样带 camelCase 键与默认值
+    let default_lib = serde_json::to_value(Library::default()).expect("serialize default library");
+    assert_eq!(
+        default_lib["dirTemplate"],
+        serde_json::json!("{YYYY}/{MM-DD}/{原文件名}")
+    );
+    assert_eq!(default_lib["importSubdir"], serde_json::json!("SmartPhoto"));
 }
 
 #[test]
@@ -237,12 +360,14 @@ fn active_library_lookup_follows_active_id() {
         name: "主库".to_string(),
         db_dir: r"I:\SmartPhoto\主库".to_string(),
         photo_root: r"Y:\照片".to_string(),
+        ..Library::default()
     };
     let backup = Library {
         id: "lib-backup".to_string(),
         name: "备份库".to_string(),
         db_dir: r"I:\SmartPhoto\备份库".to_string(),
         photo_root: r"Z:\照片".to_string(),
+        ..Library::default()
     };
     s.libraries = vec![main.clone(), backup];
     s.active_library_id = Some("lib-main".to_string());
