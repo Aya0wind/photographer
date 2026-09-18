@@ -108,23 +108,8 @@ export type AppEvent =
   | { type: "importFileCompleted"; jobId: number; src: string; dst: string; state: string }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
-// --- IPC 可用性全局标志 --------------------------------------------------------
-
-let ipcAvailable = true;
-
-/** 任一命令失败后置 false；UI 用于降级提示（如“后端未连接”） */
-export function isIpcAvailable(): boolean {
-  return ipcAvailable;
-}
-
-/** 仅测试用：恢复初始“可用”状态 */
-export function resetIpcAvailable(): void {
-  ipcAvailable = true;
-}
-
-function markUnavailable(): void {
-  ipcAvailable = false;
-}
+// --- IPC 可用性（自愈式，唯一定义在 ./index） -----------------------------------
+export { isIpcAvailable, resetIpcAvailable } from "./index";
 
 // --- 命令封装 ----------------------------------------------------------------
 
@@ -168,7 +153,6 @@ export async function deviceList(): Promise<DeviceSnapshot[]> {
   try {
     return await ipc<DeviceSnapshot[]>("device_list");
   } catch {
-    markUnavailable();
     return [];
   }
 }
@@ -178,7 +162,6 @@ export async function deviceScan(id: string): Promise<DeviceSnapshot | null> {
   try {
     return await ipc<DeviceSnapshot>("device_scan", { id });
   } catch {
-    markUnavailable();
     return null;
   }
 }
@@ -189,7 +172,6 @@ export async function deviceFiles(id: string): Promise<FileEntryDto[] | null> {
     const files = await ipc<FileEntryDto[] | null>("device_files", { id });
     return Array.isArray(files) ? files : null;
   } catch {
-    markUnavailable();
     return null;
   }
 }
@@ -200,7 +182,6 @@ export async function folderScan(path: string): Promise<DeviceSnapshot | null> {
     const snapshot = await ipc<DeviceSnapshot | null>("folder_scan", { path });
     return snapshot ?? null;
   } catch {
-    markUnavailable();
     return null;
   }
 }
@@ -218,7 +199,6 @@ export async function fsListDirs(parent?: string): Promise<FsDirEntry[]> {
     const dirs = await ipc<FsDirEntry[] | null>("fs_list_dirs", parent ? { parent } : undefined);
     return Array.isArray(dirs) ? dirs : [];
   } catch {
-    markUnavailable();
     return [];
   }
 }
@@ -228,7 +208,6 @@ export async function importStart(plan: ImportPlan): Promise<number | null> {
   try {
     return await ipc<number>("import_start", { plan });
   } catch {
-    markUnavailable();
     return null;
   }
 }
@@ -238,7 +217,6 @@ export async function importPause(jobId: number): Promise<void> {
   try {
     await ipc<void>("import_pause", { jobId });
   } catch {
-    markUnavailable();
   }
 }
 
@@ -246,7 +224,6 @@ export async function importResume(jobId: number): Promise<void> {
   try {
     await ipc<void>("import_resume", { jobId });
   } catch {
-    markUnavailable();
   }
 }
 
@@ -254,7 +231,6 @@ export async function importCancel(jobId: number): Promise<void> {
   try {
     await ipc<void>("import_cancel", { jobId });
   } catch {
-    markUnavailable();
   }
 }
 
@@ -263,7 +239,6 @@ export async function importJobsPage(afterId: number, limit: number): Promise<Jo
   try {
     return await ipc<JobRow[]>("import_jobs_page", { afterId, limit });
   } catch {
-    markUnavailable();
     return [];
   }
 }
@@ -277,7 +252,6 @@ export async function importLogsPage(
   try {
     return await ipc<LogRow[]>("import_logs_page", { jobId, afterId, limit });
   } catch {
-    markUnavailable();
     return [];
   }
 }
@@ -287,7 +261,6 @@ export async function importRetryFailed(jobId: number): Promise<number | null> {
   try {
     return await ipc<number>("import_retry_failed", { jobId });
   } catch {
-    markUnavailable();
     return null;
   }
 }

@@ -198,3 +198,18 @@ describe("subscribeAppEvents", () => {
     expect(() => unsubscribe()).not.toThrow();
   });
 });
+
+describe("IPC 可用性自愈", () => {
+  it("失败置不可用后，任一成功调用即恢复可用（dev 重启竞态不再永久预览模式）", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("transient"));
+    await expect(deviceScan("E:")).resolves.toBeNull();
+    expect(isIpcAvailable()).toBe(false);
+
+    invokeMock.mockResolvedValueOnce({
+      id: "E:", name: "SD", kind: "volume",
+      filesByKind: { photo: 0, raw: 0, video: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
+    });
+    await deviceScan("E:");
+    expect(isIpcAvailable()).toBe(true);
+  });
+});
