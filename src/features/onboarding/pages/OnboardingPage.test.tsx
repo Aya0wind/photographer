@@ -190,7 +190,7 @@ describe("OnboardingPage 向导", () => {
             dirTemplate: "{YYYY}/{MM}",
             importSubdir: "Import",
             configured: false,
-          streams: 4,
+            streams: 3,
           },
         ],
         activeLibraryId: null,
@@ -220,6 +220,8 @@ describe("OnboardingPage 向导", () => {
     expect(settings.libraries).toHaveLength(1);
     expect(settings.libraries[0].id).toBe("lib-x");
     expect(settings.libraries[0].configured).toBe(true);
+    // 并发流数是库属性：补完提交保留库既有值（不被默认 4 覆盖）
+    expect(settings.libraries[0].streams).toBe(3);
     expect(settings.activeLibraryId).toBe("lib-x");
   });
 

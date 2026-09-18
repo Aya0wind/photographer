@@ -249,6 +249,14 @@ describe("新建库对话框（与设置页共用）", () => {
     expect(within(dialog).getByLabelText("库名称")).toHaveValue("主库");
     expect(within(dialog).getByTestId("new-library-submit")).toBeInTheDocument();
 
+    // 并发流数（库属性）：默认 4，可选 1-4；此处改选 2 一并提交
+    const streamsGroup = within(dialog).getByTestId("new-library-streams");
+    expect(within(streamsGroup).getByRole("radio", { name: "4" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(within(streamsGroup).getByRole("radio", { name: "2" }));
+
     await user.click(within(dialog).getByTestId("new-library-submit"));
 
     // 创建 configured=false 的库并激活，随即进入 /onboarding?library=<id> 补完
@@ -256,6 +264,7 @@ describe("新建库对话框（与设置页共用）", () => {
     const settings = useSettingsStore.getState().settings;
     expect(settings.libraries).toHaveLength(1);
     expect(settings.libraries[0].configured).toBe(false);
+    expect(settings.libraries[0].streams).toBe(2);
     expect(settings.activeLibraryId).toBe(settings.libraries[0].id);
     // 记「本次会话新建」标记：向导取消时可安全删除这个空库
     expect(sessionStorage.getItem(NEW_LIBRARY_DRAFT_KEY)).toBe(settings.libraries[0].id);
