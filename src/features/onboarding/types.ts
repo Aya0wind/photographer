@@ -1,12 +1,14 @@
 import type { Settings } from "@/stores/settingsStore";
 
-/** 向导草稿：四个步骤收集的全部输入，完成时一次性提交 */
+/** 向导草稿：四个步骤收集的全部输入，完成时一次性提交（新建库配置链） */
 export interface OnboardingDraft {
-  // 步骤 1：库设置（达芬奇式库模型，spec §5.11）
+  // 步骤 1：库位置（达芬奇式库模型，spec §5.11）
   libraryName: string;
   dbDir: string;
   photoRoot: string;
-  // 步骤 2：导入方案
+  /** 库级导入子目录（应用写入区名，默认 SmartPhoto；空=直接写 photoRoot） */
+  importSubdir: string;
+  // 步骤 2：库的整理规则（库属性）
   dirTemplate: string;
   duplicatePolicy: Settings["import"]["duplicatePolicy"];
   notifyMilestones: boolean;

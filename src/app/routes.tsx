@@ -3,24 +3,36 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
 import ImportPage from "@/features/import/pages/ImportPage";
+import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import SearchPage from "@/features/search/pages/SearchPage";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
 import TasksPage from "@/features/tasks/pages/TasksPage";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-/** 主壳守卫：设置未加载完成时空白等待；未完成首启引导则强制进入向导。 */
-function GatedShell() {
+/**
+ * 主壳守卫（达芬奇式启动流）：设置未加载完成时空白等待；本会话未选库
+ * （libraryChosen 为会话级标志，非持久——每次启动都先 /library-picker）或
+ * activeLibraryId 无效时重定向选择器；选完库才进主壳。
+ * onboardingCompleted 保留兼容（提交时仍写 true），但不再作门禁。
+ */
+export function GatedShell() {
   const loaded = useSettingsStore((s) => s.loaded);
-  const completed = useSettingsStore((s) => s.settings.onboardingCompleted);
+  const libraryChosen = useSettingsStore((s) => s.libraryChosen);
+  const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
+  const libraries = useSettingsStore((s) => s.settings.libraries);
 
   if (!loaded) return null;
-  if (!completed) return <Navigate to="/onboarding" replace />;
+  const hasActiveLibrary =
+    activeLibraryId !== null && libraries.some((lib) => lib.id === activeLibraryId);
+  if (!libraryChosen || !hasActiveLibrary) return <Navigate to="/library-picker" replace />;
   return <AppShell />;
 }
 
 export const router = createBrowserRouter([
-  // 首次引导向导：独立于主壳全屏展示
+  // 启动首屏：库选择器（达芬奇式，每次启动先选库）
+  { path: "/library-picker", element: <LibraryPickerPage /> },
+  // 新建库配置链 / 未配置库补完（?library=<id>）：独立于主壳全屏展示
   { path: "/onboarding", element: <OnboardingPage /> },
   {
     path: "/",
@@ -34,7 +46,7 @@ export const router = createBrowserRouter([
       { path: "settings", element: <SettingsPage /> },
     ],
   },
-  // 未知路径统一回落到画廊
+  // 未知路径回落画廊（仍受主壳守卫保护，未选库会被送去选择器）
   { path: "*", element: <Navigate to="/gallery" replace /> },
 ]);
 

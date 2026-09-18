@@ -21,7 +21,7 @@ import {
   type ImportPlan,
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
-import { previewTemplate, unknownTokens, importRootOf } from "@/features/onboarding/onboardingConfig";
+import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
 
@@ -109,28 +109,6 @@ function KindBadge({ kind }: { kind: FileKind }) {
   );
 }
 
-/** 目录模板预设（值即模板；custom 为自定义输入） */
-const TEMPLATE_PRESETS = [
-  { key: "ymd", value: "{YYYY}/{MM-DD}" },
-  { key: "ym", value: "{YYYY}/{MM}" },
-  { key: "orig", value: "{原目录}" },
-] as const;
-
-/** 去掉尾部 /{原文件名} 后匹配预设（设置里存的模板常带文件名令牌） */
-function matchPreset(template: string): string {
-  const dirPart = template.replace(/\/?\{原文件名\}\s*$/, "");
-  const hit = TEMPLATE_PRESETS.find((p) => p.value === dirPart);
-  return hit ? hit.key : "custom";
-}
-
-function presetValue(key: string, custom: string): string {
-  const hit = TEMPLATE_PRESETS.find((p) => p.key === key);
-  return hit ? hit.value : custom;
-}
-
-const inputClass =
-  "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
-
 // --- 查看方式（列表默认 / 缩略图），localStorage 持久化 ---------------------------
 
 export type WizardViewMode = "list" | "grid";
@@ -168,7 +146,7 @@ function clampNumber(value: number, [min, max]: [number, number]): number {
   return Math.min(max, Math.max(min, value));
 }
 
-type PanelSectionKey = "devices" | "fs" | "recent";
+type PanelSectionKey = "devices" | "fs" | "recent" | "source";
 type PanelCollapseState = Record<PanelSectionKey, boolean>;
 
 function loadPanelCollapse(): PanelCollapseState {
@@ -179,9 +157,10 @@ function loadPanelCollapse(): PanelCollapseState {
       devices: parsed.devices === true,
       fs: parsed.fs === true,
       recent: parsed.recent === true,
+      source: parsed.source === true,
     };
   } catch {
-    return { devices: false, fs: false, recent: false };
+    return { devices: false, fs: false, recent: false, source: false };
   }
 }
 
@@ -790,6 +769,7 @@ function PanelSection({
   onToggle,
   actions = null,
   testId,
+  fill = false,
   children,
 }: {
   sectionKey: PanelSectionKey;
@@ -798,14 +778,16 @@ function PanelSection({
   onToggle: () => void;
   actions?: React.ReactNode;
   testId?: string;
+  /** 填满剩余高度（源文件树用）：内容区随之外伸，内部滚动 */
+  fill?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div
-      className="shrink-0 border-b border-edge"
+      className={fill ? "flex min-h-0 flex-1 flex-col" : "shrink-0"}
       data-testid={testId ?? `wizard-section-${sectionKey}`}
     >
-      <div className="flex items-center">
+      <div className="flex shrink-0 items-center">
         <button
           type="button"
           onClick={onToggle}
@@ -831,7 +813,9 @@ function PanelSection({
         </button>
         {actions}
       </div>
-      {!collapsed && children}
+      {!collapsed && (
+        <div className={fill ? "flex min-h-0 flex-1 flex-col" : undefined}>{children}</div>
+      )}
     </div>
   );
 }
@@ -919,9 +903,11 @@ export default function ImportWizard() {
   const recordRecentSource = useImportStore((s) => s.recordRecentSource);
 
   const importSettings = useSettingsStore((s) => s.settings.import);
-  const photoRoot = useSettingsStore(
-    (s) =>
-      s.settings.libraries.find((lib) => lib.id === s.settings.activeLibraryId)?.photoRoot ?? "",
+  // 激活库（达芬奇式：导入整理规则是库属性，向导只读展示）
+  const activeLibrary = useSettingsStore((s) =>
+    s.settings.activeLibraryId
+      ? s.settings.libraries.find((lib) => lib.id === s.settings.activeLibraryId) ?? null
+      : null,
   );
 
   // 设备选择：URL ?device= 优先，回落第一台
@@ -978,19 +964,22 @@ export default function ImportWizard() {
     setCollapsed(new Set());
   }, [selectedId, files]);
 
-  // 方案状态（初值来自设置与激活库）：目标根默认 = photoRoot + 导入子目录（应用写入区）
-  const [targetRoot, setTargetRoot] = useState("");
-  // 激活库 photoRoot 异步就绪后回填（仅在用户未手动输入时）
-  useEffect(() => {
-    if (photoRoot && !targetRoot) setTargetRoot(importRootOf(photoRoot, importSettings.importSubdir));
-  }, [photoRoot, importSettings.importSubdir, targetRoot]);
-  const [presetKey, setPresetKey] = useState(() => matchPreset(importSettings.dirTemplate));
-  const [customTemplate, setCustomTemplate] = useState(importSettings.dirTemplate);
+  // 方案状态：目标根/模板从激活库合成（只读；旧库缺字段时以全局设置兜底）
+  const libraryDirTemplateFull = activeLibrary?.dirTemplate ?? importSettings.dirTemplate;
+  const libraryImportSubdir = activeLibrary?.importSubdir ?? importSettings.importSubdir;
+  const libraryPhotoRoot = activeLibrary?.photoRoot ?? "";
+  const targetRoot = libraryPhotoRoot
+    ? importRootOf(libraryPhotoRoot, libraryImportSubdir)
+    : "";
+  // plan 的目录段 = 库模板去掉尾部 {原文件名}；nameTemplate 恒为 {原文件名}
+  const dirTemplate = libraryDirTemplateFull.replace(/\/?\{原文件名\}\s*$/, "");
+  const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
   const [streams, setStreams] = useState(4);
   const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState(false);
+  // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
+  const [startError, setStartError] = useState<string | null>(null);
   // LR 式导入模式（顶部分段条）：复制保留原文件 / 移动纳管
   const [mode, setMode] = useState<ImportMode>("copy");
   // 查看方式：列表默认 / 缩略图网格；切换不重置勾选（selected 与视图无关）
@@ -1016,11 +1005,10 @@ export default function ImportWizard() {
     };
   }, []);
 
-  const dirTemplate = presetValue(presetKey, customTemplate);
   const isMtp = device?.kind === "mtp";
   const effectiveStreams = isMtp ? 1 : streams;
-  const badTokens = presetKey === "custom" ? unknownTokens(customTemplate) : [];
-  const canStart = Boolean(device && targetRoot.trim()) && badTokens.length === 0 && !starting;
+  const canStart =
+    Boolean(device && activeLibrary && targetRoot) && !starting;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -1228,22 +1216,13 @@ export default function ImportWizard() {
 
   // --- 方案与启动 ----------------------------------------------------------------
 
-  async function pickTargetRoot(): Promise<void> {
-    try {
-      const dir = await openDialog({ directory: true, defaultPath: targetRoot || undefined });
-      if (typeof dir === "string" && dir.length > 0) setTargetRoot(dir);
-    } catch {
-      // 非 Tauri 环境或用户取消：保持现状
-    }
-  }
-
   async function startImport(): Promise<void> {
     if (!device || !canStart) return;
     setStarting(true);
-    setStartError(false);
+    setStartError(null);
     const plan: ImportPlan = {
       sourceId: device.id,
-      targetRoot: targetRoot.trim(),
+      targetRoot,
       dirTemplate,
       nameTemplate: "{原文件名}",
       duplicatePolicy,
@@ -1251,21 +1230,23 @@ export default function ImportWizard() {
       streams: effectiveStreams,
       mode,
     };
-    const jobId = await importStart(plan);
+    // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式
+    useImportStore.getState().setPendingJobMode(mode);
+    const result = await importStart(plan);
     setStarting(false);
-    if (jobId === null) {
-      setStartError(true);
+    if (!result.ok) {
+      // error=null 表示 invoke 不可用：用通用文案；否则透出后端 Err 原文
+      setStartError(result.error ?? t("wizard.startError"));
       return;
     }
-    // 模式随任务记录（事件不含 mode，总结弹窗文案用）
-    useImportStore.getState().recordJobMode(jobId, mode);
-    // 方案回写设置（本地立即生效，持久化失败静默）
+    // 双保险：事件先到时 sessionStarted 已用 pendingJobMode 归位，这里幂等覆盖
+    useImportStore.getState().recordJobMode(result.jobId, mode);
+    // 每次导入可调项回写全局设置（作为后续新建库的默认值；库属性不再回写）
     const { update, save } = useSettingsStore.getState();
     const settings = useSettingsStore.getState().settings;
     update({
       import: {
         ...settings.import,
-        dirTemplate,
         duplicatePolicy,
         skipImported,
       },
@@ -1467,11 +1448,14 @@ export default function ImportWizard() {
             </PanelSection>
           )}
 
-          {/* 源文件树 */}
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex shrink-0 items-center px-3 py-2">
-              <span className="text-xs font-medium text-text-secondary">{t("wizard.sourceTree")}</span>
-            </div>
+          {/* 源文件树（可折叠，与其他分区一致） */}
+          <PanelSection
+            sectionKey="source"
+            title={t("wizard.sourceTree")}
+            collapsed={panelCollapse.source}
+            onToggle={() => togglePanelSection("source")}
+            fill
+          >
             <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" data-testid="wizard-tree">
               {groups.length === 0 ? (
                 <p className="px-2 py-4 text-xs leading-relaxed text-text-muted">
@@ -1542,7 +1526,7 @@ export default function ImportWizard() {
                 })
               )}
             </div>
-          </div>
+          </PanelSection>
         </section>
 
         {/* 左|中 列宽拖动条 */}
@@ -1705,70 +1689,64 @@ export default function ImportWizard() {
             </div>
           </div>
 
+          {/* 导入位置（库属性，只读）：目标根/模板随库走，去设置或选择器修改 */}
           <div className="mt-4 flex flex-col gap-1.5">
-            <label htmlFor="wizard.targetRoot" className="text-xs font-medium text-text-secondary">
-              {t("wizard.targetRoot")}
-            </label>
-            <div className="flex gap-1.5">
-              <input
-                id="wizard.targetRoot"
-                type="text"
-                value={targetRoot}
-                onChange={(e) => setTargetRoot(e.target.value)}
-                className={inputClass}
-              />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-text-secondary">
+                {t("wizard.location.title")}
+              </span>
               <button
                 type="button"
-                onClick={() => void pickTargetRoot()}
-                className="shrink-0 rounded-md border border-edge px-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                onClick={() => navigate("/library-picker")}
+                className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:text-accent"
+                title={t("wizard.location.badge")}
+                data-testid="wizard-location-edit"
               >
-                {t("wizard.browse")}
+                {t("wizard.location.badge")}
               </button>
             </div>
-            <p className="text-xs text-text-muted">{t("wizard.targetRootDesc")}</p>
-          </div>
-
-          <div className="mt-4 flex flex-col gap-1.5">
-            <label htmlFor="wizard.dirTemplate" className="text-xs font-medium text-text-secondary">
-              {t("wizard.dirTemplate")}
-            </label>
-            <select
-              id="wizard.dirTemplate"
-              value={presetKey}
-              onChange={(e) => setPresetKey(e.target.value)}
-              className="rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
-            >
-              {TEMPLATE_PRESETS.map((p) => (
-                <option key={p.key} value={p.key}>
-                  {t(`wizard.template.${p.key}`)}
-                </option>
-              ))}
-              <option value="custom">{t("wizard.template.custom")}</option>
-            </select>
-            {presetKey === "custom" && (
-              <input
-                type="text"
-                value={customTemplate}
-                onChange={(e) => setCustomTemplate(e.target.value)}
-                placeholder="{YYYY}/{MM}"
-                className={inputClass}
-                aria-label={t("wizard.template.custom")}
-              />
-            )}
             <div
-              className="truncate rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-[11px] text-text-secondary"
-              title={previewTemplate(dirTemplate, targetRoot)}
-              data-testid="wizard-preview"
+              className="flex flex-col gap-1.5 rounded-lg border border-edge bg-bg p-2.5"
+              data-testid="wizard-location-card"
             >
-              {previewTemplate(dirTemplate, targetRoot)}
+              {activeLibrary ? (
+                <>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="shrink-0 text-[11px] text-text-muted">
+                      {t("wizard.location.root")}
+                    </span>
+                    <span
+                      className="truncate font-mono text-[11px] text-text-primary"
+                      title={targetRoot}
+                    >
+                      {targetRoot}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="shrink-0 text-[11px] text-text-muted">
+                      {t("wizard.location.template")}
+                    </span>
+                    <span
+                      className="truncate font-mono text-[11px] text-text-secondary"
+                      title={libraryDirTemplateFull}
+                    >
+                      {libraryDirTemplateFull}
+                    </span>
+                  </div>
+                  <p
+                    className="mt-1 truncate rounded border border-edge bg-surface px-2 py-1 font-mono text-[11px] text-text-muted"
+                    title={locationPreview}
+                    data-testid="wizard-preview"
+                  >
+                    {locationPreview}
+                  </p>
+                </>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-text-muted">
+                  {t("wizard.location.noLibrary")}
+                </p>
+              )}
             </div>
-            {badTokens.length > 0 && (
-              <p className="text-[11px] text-red-400" role="alert">
-                {t("onboarding.scheme.unknownToken", {
-                  tokens: badTokens.map((token) => `{${token}}`).join(" "),
-                })}
-              </p>
-            )}
           </div>
 
           <fieldset className="mt-4 flex flex-col gap-1">
@@ -1834,7 +1812,7 @@ export default function ImportWizard() {
             </button>
             {startError && (
               <p className="mt-2 text-[11px] text-red-400" role="alert">
-                {t("wizard.startError")}
+                {startError}
               </p>
             )}
           </div>

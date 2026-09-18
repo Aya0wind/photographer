@@ -203,12 +203,27 @@ export async function fsListDirs(parent?: string): Promise<FsDirEntry[]> {
   }
 }
 
-/** 按方案启动导入会话，返回 jobId；失败返回 null */
-export async function importStart(plan: ImportPlan): Promise<number | null> {
+/** import_start 结果：ok=false 时 error 为后端 Err 文案；error=null 表示 invoke 本身不可用（调用方显示通用文案） */
+export type ImportStartResult = { ok: true; jobId: number } | { ok: false; error: string | null };
+
+/** invoke 不可用类错误（非 Tauri 环境/命令未注册）：error=null，调用方显示通用文案 */
+const INVOKE_UNAVAILABLE_PATTERN = /__TAURI_INTERNALS__|invoke is not available|command [^\s]+ not found/i;
+
+/** 按方案启动导入会话；后端逻辑错误（如目标目录嵌套守卫）透出原始 Err 文案。
+ *  可用性标志由 ipc() 统一维护（自愈式），此处不再手动置位。 */
+export async function importStart(plan: ImportPlan): Promise<ImportStartResult> {
   try {
-    return await ipc<number>("import_start", { plan });
-  } catch {
-    return null;
+    const jobId = await ipc<number>("import_start", { plan });
+    if (typeof jobId !== "number" || !Number.isFinite(jobId)) {
+      return { ok: false, error: null };
+    }
+    return { ok: true, jobId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) {
+      return { ok: false, error: null };
+    }
+    return { ok: false, error: message };
   }
 }
 

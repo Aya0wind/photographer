@@ -85,6 +85,7 @@ fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> AppS
             name: "主库".into(),
             db_dir: db_dir.to_string_lossy().into_owned(),
             photo_root: source_dir.to_string_lossy().into_owned(),
+            ..Library::default()
         }],
         active_library_id: Some("lib-1".into()),
         ..Settings::default()

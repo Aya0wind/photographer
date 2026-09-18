@@ -107,6 +107,12 @@ interface ImportState {
   recentSources: RecentSource[];
   /** 每任务的导入模式（启动时由向导记录，事件不含 mode） */
   jobModes: Record<number, ImportMode>;
+  /**
+   * 待归位的导入模式：向导在调用 importStart 前设置。
+   * 修 E2E 竞态——sessionStarted 事件可能先于 import_start 的 invoke 返回到达，
+   * 此时 jobId 未知；sessionStarted 创建任务时把 pending 归位到 jobModes。
+   */
+  pendingJobMode: ImportMode | null;
 
   /** 事件入口（initImportStore 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
@@ -120,6 +126,8 @@ interface ImportState {
   recordRecentSource: (source: RecentSource) => void;
   /** 记录任务导入模式（总结弹窗/任务中心文案用） */
   recordJobMode: (jobId: number, mode: ImportMode) => void;
+  /** 设置待归位导入模式（紧贴 importStart 调用；sessionStarted 消费） */
+  setPendingJobMode: (mode: ImportMode | null) => void;
   dismissSummary: () => void;
   /** 历史任务分页；reset=true 重置游标重新加载 */
   loadHistory: (reset?: boolean) => Promise<void>;
@@ -248,6 +256,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
   sourceFiles: {},
   recentSources: loadRecentSources(),
   jobModes: {},
+  pendingJobMode: null,
 
   handleAppEvent: (event) => {
     switch (event.type) {
@@ -305,7 +314,10 @@ export const useImportStore = create<ImportState>((set, get) => ({
           };
           const failedFiles = { ...s.failedFiles };
           delete failedFiles[event.jobId];
-          return { activeJobs, failedFiles, currentJobId: event.jobId };
+          // 竞态修复：事件可能先于 import_start 返回到达，把待归位模式挂到本任务
+          const jobModes = { ...s.jobModes };
+          jobModes[event.jobId] = s.pendingJobMode ?? "copy";
+          return { activeJobs, failedFiles, currentJobId: event.jobId, jobModes, pendingJobMode: null };
         });
         break;
       }
@@ -425,6 +437,10 @@ export const useImportStore = create<ImportState>((set, get) => ({
     set((s) => ({ jobModes: { ...s.jobModes, [jobId]: mode } }));
   },
 
+  setPendingJobMode: (mode) => {
+    set({ pendingJobMode: mode });
+  },
+
   dismissSummary: () => {
     set({ summary: null });
   },
@@ -514,5 +530,6 @@ export function resetImportStoreForTests(): void {
     sourceFiles: {},
     recentSources: [],
     jobModes: {},
+    pendingJobMode: null,
   });
 }

@@ -98,11 +98,32 @@ describe("IPC 契约封装", () => {
     await expect(fsListDirs("D:\\")).resolves.toEqual([]);
   });
 
-  it("importStart 传 plan 参数并返回 jobId", async () => {
+  it("importStart 传 plan 参数并返回 ok/jobId", async () => {
     invokeMock.mockResolvedValue(42);
 
-    await expect(importStart(PLAN)).resolves.toBe(42);
+    await expect(importStart(PLAN)).resolves.toEqual({ ok: true, jobId: 42 });
     expect(invokeMock).toHaveBeenCalledWith("import_start", { plan: PLAN });
+  });
+
+  it("importStart 后端逻辑错误透出 Err 文案（嵌套守卫等）", async () => {
+    invokeMock.mockRejectedValue("目标目录不能位于源目录内");
+
+    await expect(importStart(PLAN)).resolves.toEqual({
+      ok: false,
+      error: "目标目录不能位于源目录内",
+    });
+  });
+
+  it("importStart invoke 不可用（非 Tauri/命令未注册）返回 error=null", async () => {
+    invokeMock.mockRejectedValue(new Error("__TAURI_INTERNALS__ is undefined"));
+
+    await expect(importStart(PLAN)).resolves.toEqual({ ok: false, error: null });
+  });
+
+  it("importStart 返回非数字 jobId 视为不可用（error=null）", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await expect(importStart(PLAN)).resolves.toEqual({ ok: false, error: null });
   });
 
   it("importPause/Resume/Cancel 传 jobId", async () => {
@@ -147,7 +168,6 @@ describe("IPC 失败兜底", () => {
     invokeMock.mockRejectedValue("raw failure");
 
     await expect(deviceScan("E:")).resolves.toBe(null);
-    await expect(importStart(PLAN)).resolves.toBe(null);
     await expect(importRetryFailed(7)).resolves.toBe(null);
     expect(isIpcAvailable()).toBe(false);
   });

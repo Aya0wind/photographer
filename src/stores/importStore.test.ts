@@ -239,6 +239,27 @@ describe("进度节流（150ms）", () => {
     useImportStore.getState().dismissSummary();
     expect(useImportStore.getState().summary).toBeNull();
   });
+
+  it("pendingJobMode 竞态：sessionStarted 先于 importStart 返回也能归位移动模式", () => {
+    // 向导在调用 importStart 前预挂模式（真实场景：事件与 invoke 返回到达顺序不定）
+    useImportStore.getState().setPendingJobMode("move");
+    emit({ type: "importSessionStarted", jobId: 9, totalFiles: 2, totalBytes: 20 });
+    emit({
+      type: "importSessionFinished",
+      jobId: 9,
+      stats: { totalFiles: 2, doneFiles: 2, skippedDuplicates: 0, failedFiles: 0, totalBytes: 20, doneBytes: 20, elapsedMs: 1000, bytesPerSec: 20, moved: 2 },
+    });
+
+    const state = useImportStore.getState();
+    expect(state.jobModes[9]).toBe("move");
+    expect(state.pendingJobMode).toBeNull();
+    expect(state.summary?.mode).toBe("move");
+  });
+
+  it("无 pendingJobMode 时 sessionStarted 回退 copy 并保留 pending 供后续任务", () => {
+    emit({ type: "importSessionStarted", jobId: 10, totalFiles: 1, totalBytes: 1 });
+    expect(useImportStore.getState().jobModes[10]).toBe("copy");
+  });
 });
 
 describe("失败清单与总结", () => {

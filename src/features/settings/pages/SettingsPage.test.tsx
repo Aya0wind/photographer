@@ -1,97 +1,108 @@
-import { describe, expect, it, vi } from "vitest";
-
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import SettingsPage from "./SettingsPage";
+import {
+  DEFAULT_SETTINGS,
+  clone,
+  useSettingsStore,
+  type Library,
+} from "@/stores/settingsStore";
 
-/**
- * 整体 mock settingsStore 模块（不改 store 源码）。
- * 变量名以 mock 开头，vi.mock 提升后仍可引用。
- * 组件实际只消费 settings.activeLibraryId / settings.libraries。
- */
-interface MockLibrary {
-  id: string;
-  name: string;
-  dbDir: string;
-  photoRoot: string;
-}
-
-interface MockStoreState {
-  settings: { libraries: MockLibrary[]; activeLibraryId: string | null };
-}
-
-const mockState: MockStoreState = {
-  settings: { libraries: [], activeLibraryId: null },
-};
-
-vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: (selector: (s: MockStoreState) => unknown) => selector(mockState),
-}));
-
-const LIBRARY: MockLibrary = {
+const LIB_A: Library = {
   id: "lib-1",
   name: "主库",
   dbDir: "D:\\SmartPhoto\\db",
   photoRoot: "D:\\Photos",
+  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
+  importSubdir: "SmartPhoto",
+  configured: true,
+};
+const LIB_B: Library = {
+  id: "lib-2",
+  name: "工作库",
+  dbDir: "E:\\db2",
+  photoRoot: "E:\\照片",
+  dirTemplate: "{YYYY}/{MM}",
+  importSubdir: "",
+  configured: true,
 };
 
-function setStore(settings: MockStoreState["settings"]): void {
-  mockState.settings = settings;
+function PickerProbe() {
+  return <div data-testid="picker-probe">PICKER</div>;
 }
 
 function renderSettingsPage() {
   return render(
     <I18nextProvider i18n={i18n}>
-      <SettingsPage />
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Routes>
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/library-picker" element={<PickerProbe />} />
+        </Routes>
+      </MemoryRouter>
     </I18nextProvider>,
   );
 }
 
-/** 三行信息（当前库/照片存储目录/数据库目录）；返回每行根 div */
-function infoRows(): Record<string, HTMLElement> {
-  const labels = ["当前库", "照片存储目录", "数据库目录"] as const;
-  const rows = {} as Record<string, HTMLElement>;
-  for (const label of labels) {
-    rows[label] = screen.getByText(label).closest("div") as HTMLElement;
-  }
-  return rows;
-}
+beforeEach(() => {
+  useSettingsStore.setState({
+    settings: clone(DEFAULT_SETTINGS),
+    loaded: true,
+    libraryChosen: false,
+  });
+});
 
-describe("SettingsPage", () => {
-  it("无激活库时三行信息均渲染且值为空（未设置态）", () => {
-    setStore({ libraries: [], activeLibraryId: null });
+describe("SettingsPage 库管理区", () => {
+  it("无激活库时信息为空，仍有前往选择器入口", () => {
     renderSettingsPage();
 
     expect(screen.getByText("设置")).toBeInTheDocument();
-    const rows = infoRows();
-    // 行内仅有标签文本，值为空
-    expect(rows["当前库"].textContent).toBe("当前库");
-    expect(rows["照片存储目录"].textContent).toBe("照片存储目录");
-    expect(rows["数据库目录"].textContent).toBe("数据库目录");
     expect(screen.queryByText("主库")).not.toBeInTheDocument();
     expect(screen.queryByText("D:\\Photos")).not.toBeInTheDocument();
+    expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
   });
 
-  it("激活库存在时显示库信息（名称/照片目录/数据库目录）", () => {
-    setStore({ libraries: [LIBRARY], activeLibraryId: "lib-1" });
+  it("当前库信息只读：名称/照片目录/数据库目录/导入收纳区/模板", () => {
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
+    }));
     renderSettingsPage();
 
-    expect(screen.getByText("主库")).toBeInTheDocument();
-    expect(screen.getByText("D:\\Photos")).toBeInTheDocument();
-    expect(screen.getByText("D:\\SmartPhoto\\db")).toBeInTheDocument();
-    expect(screen.getByText("当前库")).toBeInTheDocument();
+    const current = screen.getByTestId("settings-current-library");
+    expect(within(current).getByText("主库")).toBeInTheDocument();
+    expect(within(current).getByText("D:\\Photos")).toBeInTheDocument();
+    expect(within(current).getByText("D:\\SmartPhoto\\db")).toBeInTheDocument();
+    expect(within(current).getByText("D:\\Photos\\SmartPhoto")).toBeInTheDocument();
+    expect(within(current).getByText("{YYYY}/{MM-DD}/{原文件名}")).toBeInTheDocument();
   });
 
-  it("activeLibraryId 指向不存在的库时回落为空（find ?? null 兜底路径）", () => {
-    setStore({ libraries: [LIBRARY], activeLibraryId: "missing-id" });
+  it("库列表渲染并高亮激活库（切换统一走选择器，不在原地切换）", () => {
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, libraries: [LIB_A, LIB_B], activeLibraryId: "lib-1" },
+    }));
     renderSettingsPage();
 
-    const rows = infoRows();
-    expect(rows["当前库"].textContent).toBe("当前库");
-    expect(rows["照片存储目录"].textContent).toBe("照片存储目录");
-    expect(rows["数据库目录"].textContent).toBe("数据库目录");
-    expect(screen.queryByText("主库")).not.toBeInTheDocument();
+    const items = screen.getAllByTestId("settings-library-item");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveAttribute("data-active", "true");
+    expect(items[0]).toHaveTextContent("使用中");
+    expect(items[1]).toHaveAttribute("data-active", "false");
+    expect(items[1]).toHaveTextContent("E:\\db2");
+    // 非激活项仅展示（div），不可点击切换
+    expect(items[1].tagName).not.toBe("BUTTON");
+  });
+
+  it("「前往库选择器」跳转 /library-picker", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+
+    await user.click(screen.getByTestId("settings-goto-picker"));
+
+    expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
   });
 });

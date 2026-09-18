@@ -3,12 +3,21 @@ import { listen } from "@tauri-apps/api/event";
 
 import { ipc } from "@/ipc";
 
-/** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储 */
+/** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储。
+ *  导入整理规则随库走：dirTemplate（含 {原文件名} 的完整模板）与 importSubdir（应用写入区名）；
+ *  configured=配置链（位置/整理规则/AI）是否走完——旧库由后端迁移自动置 true，前端读取兜底 ?? true。
+ *  旧配置由后端自动补默认值，前端读取时再以全局 ImportSettings 兜底。 */
 export interface Library {
   id: string;
   name: string;
   dbDir: string;
   photoRoot: string;
+  /** 库级目录模板（如 "{YYYY}/{MM-DD}/{原文件名}"） */
+  dirTemplate: string;
+  /** 库级导入子目录（应用写入区名；空串=直接写 photoRoot） */
+  importSubdir: string;
+  /** 配置链是否已完成（未完成的库打开时引导回向导补完） */
+  configured: boolean;
 }
 
 export interface Settings {
@@ -75,12 +84,19 @@ export const DEFAULT_SETTINGS: Settings = {
 interface SettingsState {
   settings: Settings;
   loaded: boolean;
+  /**
+   * 会话内是否已选定库（达芬奇式启动流：每次启动先 /library-picker，选完才进主壳）。
+   * 非持久化字段——重启应用后回到选择器。onboardingCompleted 保留兼容但不再作门禁。
+   */
+  libraryChosen: boolean;
   /** 从 Rust 侧读取设置；命令尚不存在或失败时静默落回默认值 */
   load: () => Promise<void>;
   /** 持久化设置；IPC 失败时本地状态仍保持更新 */
   save: (next: Settings) => Promise<void>;
   /** 本地局部更新（不落盘），由调用方决定何时 save */
   update: (partial: DeepPartial<Settings>) => void;
+  /** 标记本会话已选定库（选择器打开/向导完成时调用） */
+  setLibraryChosen: (chosen: boolean) => void;
 }
 
 type AnyRecord = Record<string, unknown>;
@@ -113,6 +129,7 @@ export { clone, mergeDeep };
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: clone(DEFAULT_SETTINGS),
   loaded: false,
+  libraryChosen: false,
 
   load: async () => {
     try {
@@ -138,6 +155,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   update: (partial: DeepPartial<Settings>) => {
     set({ settings: mergeDeep(clone(get().settings), partial) });
+  },
+
+  setLibraryChosen: (chosen) => {
+    set({ libraryChosen: chosen });
   },
 }));
 

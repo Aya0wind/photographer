@@ -31,6 +31,20 @@ export const TEMPLATE_TOKENS = [
   "原文件名", "原目录", "相机", "镜头",
 ] as const;
 
+/** 目录模板预设（key 供下拉/分段 UI，value 即模板目录段；{原文件名} 由调用方按需拼接） */
+export const TEMPLATE_PRESETS = [
+  { key: "ymd", value: "{YYYY}/{MM-DD}" },
+  { key: "ym", value: "{YYYY}/{MM}" },
+  { key: "orig", value: "{原目录}" },
+] as const;
+
+/** 模板是否匹配某预设（去掉尾部 /{原文件名} 后比对）；不匹配返回 "custom" */
+export function matchTemplatePreset(template: string): string {
+  const dirPart = template.replace(/\/?\{原文件名\}\s*$/, "");
+  const hit = TEMPLATE_PRESETS.find((p) => p.value === dirPart);
+  return hit ? hit.key : "custom";
+}
+
 /** 找出模板中的未知令牌（用于向导即时校验） */
 export function unknownTokens(template: string): string[] {
   const found = template.match(/\{([^{}]*)\}/g) ?? [];

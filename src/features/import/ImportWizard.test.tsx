@@ -102,7 +102,15 @@ function seedSession(): void {
     settings: {
       ...s.settings,
       libraries: [
-        { id: "lib1", name: "主库", dbDir: "I:\\SmartPhoto\\主库", photoRoot: "Y:\\照片" },
+        {
+          id: "lib1",
+          name: "主库",
+          dbDir: "I:\\SmartPhoto\\主库",
+          photoRoot: "Y:\\照片",
+          dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
+          importSubdir: "SmartPhoto",
+          configured: true,
+        },
       ],
       activeLibraryId: "lib1",
     },
@@ -141,7 +149,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   resetImportStoreForTests();
-  startMock.mockReset().mockResolvedValue(null);
+  startMock.mockReset().mockResolvedValue({ ok: false, error: null });
   scanMock.mockReset().mockResolvedValue(null);
   listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
@@ -244,25 +252,34 @@ describe("源文件树与文件列表", () => {
 });
 
 describe("方案面板", () => {
-  it("目标根目录默认取激活库 photoRoot+导入子目录；切换预设实时预览", async () => {
+  it("导入位置为只读库属性：信息卡展示目标根/模板/预览，无输入框", async () => {
     seedSession();
     renderWizard("?device=E:");
-    const user = userEvent.setup();
 
-    const rootInput = await screen.findByLabelText("目标根目录");
-    expect(rootInput).toHaveValue("Y:\\照片\\SmartPhoto");
-
-    const preview = screen.getByTestId("wizard-preview");
-    // 默认预设来自设置 {YYYY}/{MM-DD}/{原文件名} → 年/日期
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.CR3");
-
-    await user.selectOptions(screen.getByLabelText("目录模板"), "ym");
-    expect(screen.getByTestId("wizard-preview")).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09\\IMG_0001.CR3");
-
-    await user.selectOptions(screen.getByLabelText("目录模板"), "orig");
+    const card = await screen.findByTestId("wizard-location-card");
+    expect(card).toHaveTextContent("Y:\\照片\\SmartPhoto");
+    expect(card).toHaveTextContent("{YYYY}/{MM-DD}/{原文件名}");
+    // 示例预览沿用 onboarding 的示例值（库模板去掉文件名令牌后渲染）
     expect(screen.getByTestId("wizard-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\DCIM\\100CANON\\IMG_0001.CR3",
+      "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.CR3",
     );
+    // 目标根/模板均不可编辑（原输入与下拉已移除）
+    expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("目录模板")).not.toBeInTheDocument();
+    expect(screen.getByTestId("wizard-location-edit")).toBeInTheDocument();
+  });
+
+  it("无激活库时信息卡显示未选库提示，开始导入禁用", async () => {
+    useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
+    // 显式清空库（真实 store 跨用例共享，避免残留上一个 seed）
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, libraries: [], activeLibraryId: null },
+    }));
+    renderWizard("?device=E:");
+
+    const card = await screen.findByTestId("wizard-location-card");
+    expect(card).toHaveTextContent("尚未选择库");
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
   });
 
   it("MTP 源强制单流并禁用调节", async () => {
@@ -274,11 +291,11 @@ describe("方案面板", () => {
     expect(screen.getByLabelText("并发流数")).toBeDisabled();
   });
 
-  it("开始导入：按面板组装 plan、跳转任务中心，并回写设置", async () => {
+  it("开始导入：按库属性组装 plan、跳转任务中心", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
-    startMock.mockResolvedValueOnce(7);
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 7 });
 
     const startButton = await screen.findByRole("button", { name: "开始导入" });
     await user.click(startButton);
@@ -296,31 +313,27 @@ describe("方案面板", () => {
       streams: 4,
       mode: "copy",
     });
-    // 方案回写设置
-    expect(useSettingsStore.getState().settings.import.dirTemplate).toBe("{YYYY}/{MM-DD}");
+    // 库属性不回写全局设置（模板仍是全局默认值）
+    expect(useSettingsStore.getState().settings.import.dirTemplate).toBe(
+      "{YYYY}/{MM-DD}/{原文件名}",
+    );
   });
 
-  it("启动失败（后端不可用）时显示错误且不跳转", async () => {
+  it("启动失败：透出后端 Err 原文；invoke 不可用时用通用文案", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
-    startMock.mockResolvedValueOnce(null);
 
+    // 后端逻辑错误（嵌套守卫）：原文透出
+    startMock.mockResolvedValueOnce({ ok: false, error: "目标目录不能位于源目录内" });
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("启动失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("目标目录不能位于源目录内");
     expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
-  });
 
-  it("自定义模板出现输入框并可校验未知令牌", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-
-    await userEvent.selectOptions(await screen.findByLabelText("目录模板"), "custom");
-    const input = screen.getByLabelText("自定义…");
-    // 注意：userEvent.type 会把 {XX} 当作特殊按键语法，这里用 change 直填
-    fireEvent.change(input, { target: { value: "{YYYY}/{XX}" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("未知令牌：{XX}");
+    // invoke 不可用（error=null）：通用文案
+    startMock.mockResolvedValueOnce({ ok: false, error: null });
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("启动失败");
   });
 });
 
@@ -462,7 +475,7 @@ describe("导入模式分段条（LR 式顶部切换）", () => {
   it("切移动：说明切换，plan.mode=move 并记录 jobMode", async () => {
     seedSession();
     const user = userEvent.setup();
-    startMock.mockResolvedValueOnce(11);
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 11 });
     renderWizard("?device=E:");
 
     await user.click(await screen.findByRole("radio", { name: "移动 · 不保留" }));
@@ -473,6 +486,8 @@ describe("导入模式分段条（LR 式顶部切换）", () => {
     expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(useImportStore.getState().jobModes[11]).toBe("move");
+    // 竞态防护：模式已预挂（sessionStarted 事件先到也能归位）
+    expect(useImportStore.getState().pendingJobMode).toBe("move");
   });
 });
 
@@ -629,6 +644,7 @@ describe("左栏分区折叠（LR 式）", () => {
       devices: true,
       fs: false,
       recent: false,
+      source: false,
     });
 
     await user.click(toggle);

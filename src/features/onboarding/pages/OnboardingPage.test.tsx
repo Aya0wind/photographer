@@ -35,13 +35,14 @@ describe("OnboardingPage 向导", () => {
     openMock.mockReset();
   });
 
-  it("步骤1 预填本机默认值（主库 / I:\\SmartPhoto\\主库 / Y:\\照片）", () => {
+  it("步骤1 预填本机默认值（主库 / I:\\SmartPhoto\\主库 / Y:\\照片 / SmartPhoto）", () => {
     renderWizard();
     expect((screen.getByLabelText("库名称") as HTMLInputElement).value).toBe("主库");
     expect((screen.getByLabelText("数据库目录") as HTMLInputElement).value).toBe(
       "I:\\SmartPhoto\\主库",
     );
     expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("Y:\\照片");
+    expect((screen.getByLabelText("导入子目录") as HTMLInputElement).value).toBe("SmartPhoto");
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
 
@@ -100,26 +101,80 @@ describe("OnboardingPage 向导", () => {
     const settings = payload.settings;
     expect(settings["onboardingCompleted"]).toBe(true);
     expect(typeof settings["activeLibraryId"]).toBe("string");
-    const libraries = settings["libraries"] as Array<Record<string, string>>;
+    const libraries = settings["libraries"] as Array<Record<string, string | boolean>>;
     expect(libraries).toHaveLength(1);
     expect(libraries[0]["name"]).toBe("主库");
     expect(libraries[0]["dbDir"]).toBe("I:\\SmartPhoto\\主库");
     expect(libraries[0]["photoRoot"]).toBe("Y:\\照片");
+    // 库级导入整理规则（新架构：随库走）
+    expect(libraries[0]["dirTemplate"]).toBe("{YYYY}/{MM-DD}/{原文件名}");
+    expect(libraries[0]["importSubdir"]).toBe("SmartPhoto");
+    expect(libraries[0]["configured"]).toBe(true);
     const ai = settings["ai"] as Record<string, unknown>;
     expect(ai["enableClip"]).toBe(true);
     expect(ai["enableFace"]).toBe(false);
     expect(ai["enableSceneTags"]).toBe(false);
     // store 本地状态同步（守卫放行依赖它）
     expect(useSettingsStore.getState().settings.onboardingCompleted).toBe(true);
+    expect(useSettingsStore.getState().settings.activeLibraryId).toBe(
+      settings["activeLibraryId"] as string,
+    );
+    // 会话内已选库标记（达芬奇式门）
+    expect(useSettingsStore.getState().libraryChosen).toBe(true);
   });
 
-  it("已完成引导的用户访问向导页会被重定向", () => {
+  it("补完模式（?library=<id>）：预填既有库并在提交时更新而非新增", async () => {
+    useSettingsStore.setState((s) => ({
+      settings: {
+        ...s.settings,
+        libraries: [
+          {
+            id: "lib-x",
+            name: "旧库",
+            dbDir: "I:\\SmartPhoto\\旧库",
+            photoRoot: "Z:\\旧照片",
+            dirTemplate: "{YYYY}/{MM}",
+            importSubdir: "Import",
+            configured: false,
+          },
+        ],
+        activeLibraryId: null,
+      },
+    }));
+
+    render(
+      <MemoryRouter initialEntries={["/onboarding?library=lib-x"]}>
+        <OnboardingPage />
+      </MemoryRouter>,
+    );
+
+    expect((screen.getByLabelText("库名称") as HTMLInputElement).value).toBe("旧库");
+    expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("Z:\\旧照片");
+    expect((screen.getByLabelText("导入子目录") as HTMLInputElement).value).toBe("Import");
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect((await screen.findByLabelText("目录命名模板") as HTMLInputElement).value).toBe(
+      "{YYYY}/{MM}",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始使用 Smart Photo" }));
+
+    await waitFor(() => expect(ipcMock).toHaveBeenCalledWith("settings_set", expect.anything()));
+    const settings = useSettingsStore.getState().settings;
+    expect(settings.libraries).toHaveLength(1);
+    expect(settings.libraries[0].id).toBe("lib-x");
+    expect(settings.libraries[0].configured).toBe(true);
+    expect(settings.activeLibraryId).toBe("lib-x");
+  });
+
+  it("已完成引导的用户也可再次进入向导（新建库场景）", () => {
     useSettingsStore.setState({
       settings: { ...clone(DEFAULT_SETTINGS), onboardingCompleted: true },
       loaded: true,
     });
-    const { container } = renderWizard();
-    // Navigate 重定向在 MemoryRouter 内渲染 null（无向导内容）
-    expect(container.querySelector("input")).toBeNull();
+    renderWizard();
+    // 新建库配置链任何时候可进（不再按 onboardingCompleted 重定向）
+    expect(screen.getByLabelText("库名称")).toBeInTheDocument();
   });
 });
