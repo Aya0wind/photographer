@@ -14,7 +14,7 @@ import ImportWizard, {
 } from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { deviceFiles, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
+import { deviceFiles, deviceList, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -24,6 +24,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     folderScan: vi.fn(),
     fsListDirs: vi.fn(),
     deviceFiles: vi.fn(),
+    deviceList: vi.fn(),
   };
 });
 
@@ -42,6 +43,7 @@ const scanMock = vi.mocked(folderScan);
 const listMock = vi.mocked(fsListDirs);
 const openMock = vi.mocked(openDialog);
 const deviceFilesMock = vi.mocked(deviceFiles);
+const deviceListMock = vi.mocked(deviceList);
 const convertMock = vi.mocked(convertFileSrc);
 
 function volumeDevice() {
@@ -165,6 +167,7 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
+  deviceListMock.mockReset().mockResolvedValue([]);
   convertMock.mockReset().mockReturnValue("");
   localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
   localStorage.removeItem(PANEL_COLLAPSE_KEY);
@@ -177,6 +180,15 @@ describe("ImportWizard 布局与设备", () => {
     renderWizard();
 
     expect(screen.getByText(/未检测到设备/)).toBeInTheDocument();
+  });
+
+  it("设备初值补拉：错过启动事件的在位设备出现（device_list 兜底）", async () => {
+    deviceListMock.mockResolvedValue([volumeDevice()]);
+
+    renderWizard();
+
+    expect(await screen.findByText("SanDisk 64G")).toBeInTheDocument();
+    expect(deviceListMock).toHaveBeenCalled();
   });
 
   it("URL device 参数选中指定设备并展示信息卡", async () => {

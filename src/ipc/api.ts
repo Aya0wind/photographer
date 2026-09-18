@@ -173,10 +173,11 @@ export function kindFromName(name: string): FileKind {
   return EXT_KIND_TABLE[name.slice(dot + 1).toLowerCase()] ?? "other";
 }
 
-/** 已连接设备列表（含各类型文件统计） */
+/** 已连接设备列表（含各类型文件统计）；非数组回退空（防御后端异常返回） */
 export async function deviceList(): Promise<DeviceSnapshot[]> {
   try {
-    return await ipc<DeviceSnapshot[]>("device_list");
+    const devices = await ipc<DeviceSnapshot[] | null>("device_list");
+    return Array.isArray(devices) ? devices : [];
   } catch {
     return [];
   }

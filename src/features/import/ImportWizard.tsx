@@ -23,7 +23,7 @@ import {
 import { formatBytes } from "@/lib/format";
 import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
+import { seedDevicesFromBackend, useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
 
 /**
  * 导入向导（LR 式源面板 + A 密度三栏）：
@@ -1005,6 +1005,12 @@ export default function ImportWizard() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // 设备初值补拉：后端启动枚举的 deviceScanned 事件早于 webview 订阅，
+  // 错过事件的在位设备（如已连接的相机）从这里直接出现
+  useEffect(() => {
+    void seedDevicesFromBackend();
   }, []);
 
   const isMtp = device?.kind === "mtp";

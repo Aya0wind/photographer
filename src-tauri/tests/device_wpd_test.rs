@@ -8,8 +8,29 @@ pub use common::{db, devices, events, import, ipc, metadata, settings};
 use std::io::Read;
 
 use common::utc;
-use devices::wpd::{filetime_to_utc, join_rel_path, ole_date_to_utc, parse_wpd_date_string};
+use devices::wpd::{
+    com_apartment_owned, filetime_to_utc, join_rel_path, ole_date_to_utc, parse_wpd_date_string,
+};
 use devices::{DeviceSource, SourceKind};
+
+#[test]
+fn com_apartment_guard_three_state_semantics() {
+    // S_OK：本线程首次初始化成功 → owned（drop 时配对 CoUninitialize）
+    assert_eq!(com_apartment_owned(0), Ok(true));
+    // S_FALSE：线程已初始化（他人持有）→ 沿用现有 apartment，绝不 uninit
+    assert_eq!(com_apartment_owned(1), Ok(false));
+    // RPC_E_CHANGED_MODE（0x80010106）：线程为 STA（tao 事件循环的 IPC 主线程）
+    // → 沿用现有 apartment 继续调用（WPD 在 STA 上合法），绝不 uninit
+    assert_eq!(com_apartment_owned(0x8001_0106u32 as i32), Ok(false));
+    // 其余失败码上抛（调用方转设备错误语义）
+    assert_eq!(
+        com_apartment_owned(0x8000_4005u32 as i32),
+        Err(0x8000_4005u32 as i32)
+    );
+    assert!(com_apartment_owned(-1).is_err());
+    // 负 HRESULT 表示（0x80010106 即 -2147417850）与 u32 判定一致
+    assert_eq!(com_apartment_owned(-2147417850i32), Ok(false));
+}
 
 #[test]
 fn wpd_join_rel_path() {

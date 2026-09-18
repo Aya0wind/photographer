@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import {
+  deviceList,
   deviceScan,
   importCancel,
   importJobsPage,
@@ -559,11 +560,25 @@ function applyStatusTransition(
 
 let eventsBound = false;
 
-/** 应用启动时调用一次：订阅唯一事件通道 app://event（失败静默） */
+/**
+ * 从后端拉一次设备初值并合并（upsert 去重）。
+ * 必要性：后端启动枚举在 app 一启动就扫描并发出 deviceScanned，
+ * 而此刻 webview 尚未加载、前端还没订阅 app://event——事件必然错过；
+ * 订阅完成后 / 向导打开时主动拉 device_list 补齐。
+ */
+export async function seedDevicesFromBackend(): Promise<void> {
+  const devices = await deviceList();
+  for (const snapshot of devices) {
+    useImportStore.getState().addDevice(snapshot);
+  }
+}
+
+/** 应用启动时调用一次：订阅唯一事件通道 app://event（失败静默）+ 拉设备初值 */
 export async function initImportStore(): Promise<void> {
   if (eventsBound) return;
   eventsBound = true;
   await subscribeAppEvents((event) => useImportStore.getState().handleAppEvent(event));
+  await seedDevicesFromBackend();
 }
 
 /** 仅测试用：重置模块级缓冲/队列并清空 store */

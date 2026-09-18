@@ -3,8 +3,11 @@
 //! 结构：跨平台纯函数（路径拼接 / OLE DATE / ISO 日期 / FILETIME 解析，
 //! 有单测）+ Windows COM 实现 + 非 Windows 桩。
 //!
-//! COM 约定：每个对外入口（list/open_head/stream/enumerate）都在调用线程
-//! `CoInitializeEx(COINIT_MULTITHREADED)` 并由 guard 配对 `CoUninitialize`；
+//! COM 约定：每个对外入口（list/open_head/stream/enumerate/delete）都在
+//! 调用线程经三态 guard `CoInitializeEx(COINIT_MULTITHREADED)`：S_OK 才由
+//! 本 guard 配对 `CoUninitialize`；S_FALSE（他人已初始化）与
+//! RPC_E_CHANGED_MODE（线程为 STA，如 tao 主线程/IPC 命令线程）沿用现有
+//! apartment 且绝不注销（决策纯函数 [`com_apartment_owned`] 单测覆盖）；
 //! COM 接口指针全部使用 windows crate 封装，禁止手写 AddRef/Release。
 //!
 //! 降级点（真机 ILCE-7RM5 验证通过 list/open_head/stream）：
@@ -71,6 +74,27 @@ pub fn filetime_to_utc(low: u32, high: u32) -> Option<DateTime<Utc>> {
     let nanos = ((ticks % 10_000_000) * 100) as u32;
     let unix = seconds.checked_sub(11_644_473_600)?; // 1601→1970 纪元差
     DateTime::from_timestamp(unix, nanos)
+}
+
+/// CoInitializeEx 返回码 → apartment guard 决策（三态语义，纯函数单测覆盖）。
+///
+/// - S_OK（0）：本线程首次初始化成功 → `Ok(true)`（drop 时配对 CoUninitialize）；
+/// - S_FALSE（1）：线程已初始化（他人持有引用）→ `Ok(false)`：沿用现有
+///   apartment，**绝不 CoUninitialize**（不注销他人的初始化）；
+/// - RPC_E_CHANGED_MODE（0x80010106）：线程已按**其他线程模型**初始化——
+///   典型场景是 tao 事件循环把 Tauri IPC 命令线程（主线程）初始化为 STA。
+///   → `Ok(false)`：沿用现有 apartment 继续调用（WPD 在 STA 线程上合法
+///   可用，Windows Explorer 本身就是 STA 用 WPD），同样绝不 uninit；
+/// - 其余：`Err(hr)` 上抛（调用方转设备错误语义）。
+///
+/// 返回值 `Ok(owned)` 的 owned=true 表示本 guard 拥有这次初始化。
+pub fn com_apartment_owned(hr: i32) -> Result<bool, i32> {
+    match hr as u32 {
+        0 => Ok(true),            // S_OK
+        1 => Ok(false),           // S_FALSE
+        0x8001_0106 => Ok(false), // RPC_E_CHANGED_MODE（线程为 STA）
+        _ => Err(hr),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,30 +238,36 @@ mod com {
         hr_error(e.code())
     }
 
-    /// 每线程 COM 初始化 guard。
+    /// 每线程 COM apartment guard（三态，决策逻辑见
+    /// [`super::com_apartment_owned`]，纯函数单测覆盖）。
     ///
-    /// S_OK（首次初始化）与 S_FALSE（该线程已初始化）都必须配对一次
-    /// `CoUninitialize`；RPC_E_CHANGED_MODE（他线程模型已存在）视为失败。
+    /// - `owned=true`：本线程 CoInitializeEx 首次初始化成功（S_OK）——
+    ///   drop 时配对一次 `CoUninitialize`；
+    /// - `owned=false`：S_FALSE（线程已初始化，他人持有引用）或
+    ///   RPC_E_CHANGED_MODE（线程为 STA——tao 事件循环把 Tauri IPC 命令
+    ///   线程/主线程初始化为 STA；WPD 在 STA 上调用合法，Windows
+    ///   Explorer 同款用法）——沿用现有 apartment，**绝不
+    ///   CoUninitialize**（不注销他人/宿主的初始化，泄漏的引用至多延长
+    ///   apartment 生命周期到进程退出，无害）。
     struct ComApartment {
-        active: bool,
+        owned: bool,
     }
 
     impl ComApartment {
         fn init() -> Result<Self, WinError> {
             // SAFETY: 无指针参数，仅改变当前线程 COM 状态
             let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            if hr.is_ok() {
-                Ok(Self { active: true })
-            } else {
-                Err(WinError::from(hr))
+            match super::com_apartment_owned(hr.0) {
+                Ok(owned) => Ok(Self { owned }),
+                Err(hr) => Err(WinError::from(HRESULT(hr))),
             }
         }
     }
 
     impl Drop for ComApartment {
         fn drop(&mut self) {
-            if self.active {
-                // SAFETY: 与本 guard 的成功 CoInitializeEx（含 S_FALSE）配对
+            if self.owned {
+                // SAFETY: 仅与本 guard 自己的 S_OK CoInitializeEx 配对
                 unsafe { CoUninitialize() };
             }
         }
@@ -246,7 +276,7 @@ mod com {
     impl ComApartment {
         /// 放弃注销（见 stream() 的 COM 契约说明）。
         fn leak(mut self) {
-            self.active = false;
+            self.owned = false;
         }
     }
 
