@@ -3,6 +3,7 @@
 
 pub mod device;
 pub mod import;
+pub mod reconcile;
 pub mod settings;
 pub mod thumb;
 
@@ -234,9 +235,20 @@ pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, Stri
     Ok(files.iter().map(FileEntryDto::from).collect())
 }
 
+/// 事件链路自检：向总线发布一条 Probe 事件（经转发器 emit 到前端
+/// `app://event`），返回发布的时间戳供前端对账。前端能收到即
+/// bus→转发器→emit 整链通（诊断设备事件不达的定位手段）。
+pub fn event_ping(bus: &EventBus) -> String {
+    use crate::events::AppEvent;
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    bus.publish(AppEvent::Probe { ts: ts.clone() });
+    ts
+}
+
 /// 设备是否已注册（到达幂等判定：id 过规范化后查注册表——同一 WPD 设备
 /// 大小写两种到达形式命中同一条目；枚举空窗期的重复到达按"已在库"忽略，
 /// 不误报"未找到"也不动既有条目）。
+#[allow(dead_code)] // 集成测试引用（lib 内调用点已由调和器取代）
 pub fn device_registered(state: &AppState, id: &str) -> bool {
     let key = crate::devices::normalize_device_id(id);
     state

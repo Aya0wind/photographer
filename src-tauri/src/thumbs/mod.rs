@@ -36,8 +36,29 @@ pub const DECODABLE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif"
 pub const SIZE_TIERS: &[u16] = &[256, 512];
 /// 解码超时（61MP 解码 1-2s 可接受；>10s 视为失败放弃）。
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
-/// 后台解码并发上限（CPU 密集）。
-const MAX_CONCURRENT: u32 = 2;
+/// 后台解码并发上限（CPU 密集）：动态 = min(6, 可用核数/2)，下限 1
+///（turbojpeg 缩放解码后单张成本大降，允许更高并行吃满多核；
+/// 8 核 → 4，12 核 → 6，4 核 → 2）。
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn permit_count_for_test(cores: usize) -> u32 {
+    permit_count(cores)
+}
+
+fn permit_count(cores: usize) -> u32 {
+    (cores as u32 / 2).clamp(1, 6)
+}
+
+fn desired_permits() -> u32 {
+    permit_count(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    )
+}
+
+/// turbojpeg 快路径成功解码计数（测试断言/运维观测）。
+pub static TURBO_DECODES: AtomicUsize = AtomicUsize::new(0);
 
 /// 真实解码次数（并发合并验证 / 运维统计；命中缓存不计数）。
 pub static DECODE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -91,7 +112,7 @@ fn service() -> &'static ThumbSvc {
     static SERVICE: OnceLock<ThumbSvc> = OnceLock::new();
     SERVICE.get_or_init(|| ThumbSvc {
         inflight: Mutex::new(HashMap::new()),
-        permits: Arc::new(Permits::new(MAX_CONCURRENT)),
+        permits: Arc::new(Permits::new(desired_permits())),
     })
 }
 
@@ -169,15 +190,106 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
     }
 }
 
-/// 解码 → 拟合缩放（thumbnail，box/三角滤波足够缩略图用）→ JPEG q80。
+/// 解码 → 拟合缩放 → JPEG q80。
+/// JPEG 走 turbojpeg 缩放解码快路径（TJSCALED：DCT 域直出小图，61MP
+/// 全量解码 1-3s → ~百 ms 级），失败回退 image crate 全量解码（turbojpeg
+/// 拒收的怪 JPEG 兜底）；其余格式（PNG/GIF/BMP/TIFF/WEBP）走 image crate。
 fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
-    let img = image::ImageReader::open(src).ok()?.decode().ok()?;
-    let fit = u32::from(size);
-    let thumb = img.thumbnail(fit, fit).to_rgb8();
+    let ext = src.extension()?.to_str()?.to_ascii_lowercase();
+    let thumb: image::RgbImage = if matches!(ext.as_str(), "jpg" | "jpeg") {
+        jpeg_scaled(src, size).unwrap_or_else(|| full_decode_resize(src, size))
+    } else {
+        full_decode_resize(src, size)
+    };
     let mut jpeg = Vec::new();
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80);
     thumb.write_with_encoder(encoder).ok()?;
     Some(jpeg)
+}
+
+/// image crate 全量解码 + thumbnail 拟合（慢路径/非 JPEG）。解码失败返回
+/// 空图（0x0）使后续编码失败 → 整体 None。
+fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
+    match image::ImageReader::open(src)
+        .ok()
+        .and_then(|r| r.decode().ok())
+    {
+        Some(img) => img.thumbnail(u32::from(size), u32::from(size)).to_rgb8(),
+        None => image::RgbImage::new(0, 0),
+    }
+}
+
+/// turbojpeg 缩放解码：按源尺寸选最小满足目标的缩放档（1/8..1/1，
+/// DCT 域直出），再 thumbnail 精确拟合到目标尺寸。
+fn jpeg_scaled(src: &Path, target: u16) -> Option<image::RgbImage> {
+    let data = fs::read(src).ok()?;
+    let header = turbojpeg::read_header(&data).ok()?;
+    let factor =
+        turbojpeg::ScalingFactor::new(pick_jpeg_scale(header.width, header.height, target), 8);
+    let width = factor.scale(header.width);
+    let height = factor.scale(header.height);
+    let mut decompressor = turbojpeg::Decompressor::new().ok()?;
+    decompressor.set_scaling_factor(factor).ok()?;
+    let mut pixels = vec![0u8; width * height * turbojpeg::PixelFormat::RGB.size()];
+    let mut image = turbojpeg::Image {
+        pixels: &mut pixels[..],
+        width,
+        pitch: width * turbojpeg::PixelFormat::RGB.size(),
+        height,
+        format: turbojpeg::PixelFormat::RGB,
+    };
+    decompressor.decompress(&data, image.as_deref_mut()).ok()?;
+    let scaled = image::RgbImage::from_raw(width as u32, height as u32, pixels)?;
+    TURBO_DECODES.fetch_add(1, Ordering::SeqCst);
+    Some(
+        image::DynamicImage::ImageRgb8(scaled)
+            .thumbnail(u32::from(target), u32::from(target))
+            .to_rgb8(),
+    )
+}
+
+/// 测试钩子：thumbs 目录下的 .tmp 残留（原子写失败/中断的半成品）。
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn find_tmp_residue(db_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(db_dir.join("thumbs")) {
+        for tier in entries.flatten() {
+            if let Ok(files) = fs::read_dir(tier.path()) {
+                out.extend(
+                    files
+                        .flatten()
+                        .map(|f| f.path())
+                        .filter(|p| p.extension().is_some_and(|e| e == "tmp")),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// 基准/测试钩子：turbojpeg 缩放解码到 RgbImage（bench 用例引用）。
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn bench_scaled_rgb(src: &Path, target: u16) -> Option<image::RgbImage> {
+    jpeg_scaled(src, target)
+}
+
+/// 依源尺寸选 turbojpeg 缩放档分子（num/8，num 越小图越小）：
+/// 从 1/8 起找**最小**档位使缩放后两边仍 ≥ target（后续精确拟合有足够
+/// 像素）；源小于目标时返回 8（原尺寸，避免上采样糊）。
+/// 例：9504px→256 档 → 1/8（1188px）；1000px→256 → 3/8（375px）；
+/// 200px→256 → 8（原尺寸）。
+pub fn pick_jpeg_scale(width: usize, height: usize, target: u16) -> usize {
+    let target = target as usize;
+    for num in 1..=8usize {
+        let sw = width * num / 8;
+        let sh = height * num / 8;
+        if sw >= target && sh >= target {
+            return num;
+        }
+    }
+    8
 }
 
 /// 原子落盘：tmp 写满后 rename（失败不留坏缓存）。

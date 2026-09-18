@@ -5,6 +5,7 @@
 //! Rust 内部用 tokio::sync::broadcast 分发；tauri 启动后由转发任务
 //! 把 `AppEvent` 序列化 emit 给前端（`app://event`），IPC 层负责接线。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +151,12 @@ pub enum AppEvent {
         state: FileState,
     },
 
+    /// 事件链路自检（event_ping 命令 → 转发器 → 前端）：携带时间戳供
+    /// 前端回显对账。诊断专用，不参与业务。
+    Probe {
+        ts: String,
+    },
+
     // 安全清卡（M2 F1）
     /// 清卡开始：候选数与总字节（删前逐文件复验）。
     CleanStarted {
@@ -224,6 +231,78 @@ impl Throttle {
             _ => {
                 self.last = Some(now);
                 true
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 事件转发核心（bus → 前端通道；lib.rs 经 TaskSupervisor 起线程调用）
+// ---------------------------------------------------------------------------
+
+/// 单次转发一行事件并计数（每 100 条打一行活性日志）。
+/// 返回 false 表示通道已关闭（发送端全部消亡，正常退出）。
+fn forward_once(
+    event: AppEvent,
+    emit: &Arc<dyn Fn(&AppEvent) + Send + Sync>,
+    forwarded: &mut u64,
+) -> bool {
+    emit(&event);
+    *forwarded += 1;
+    if forwarded.is_multiple_of(100) {
+        eprintln!("事件转发已启动并转发 {forwarded} 条（活性心跳）");
+    }
+    true
+}
+
+/// 转发循环：阻塞收事件 → emit。Lagged（消费落后被裁剪）跳过继续；
+/// Closed（无发送者）正常返回。
+fn forward_loop(
+    rx: &mut broadcast::Receiver<AppEvent>,
+    emit: &Arc<dyn Fn(&AppEvent) + Send + Sync>,
+) {
+    let mut forwarded = 0u64;
+    loop {
+        match rx.blocking_recv() {
+            Ok(event) => {
+                let _ = forward_once(event, emit, &mut forwarded);
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("事件转发落后被裁剪 {n} 条（继续）");
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// 带自恢复的转发监督循环：emit 侧 panic 被捕获 → on_panic 上报 →
+/// 退避 1s 重启循环（转发器死亡 = 前端全盲，绝不静默退出）。
+/// 通道正常关闭时返回。
+pub fn forward_supervised(
+    rx: &mut broadcast::Receiver<AppEvent>,
+    emit: Arc<dyn Fn(&AppEvent) + Send + Sync>,
+    on_panic: impl Fn(String),
+) {
+    let mut restarts = 0u32;
+    loop {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            forward_loop(rx, &emit);
+        }));
+        match outcome {
+            Ok(()) => return, // Closed：正常退出
+            Err(payload) => {
+                restarts += 1;
+                let detail = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "未知 panic 载荷".to_string()
+                };
+                let msg = format!("事件转发器 panic（第 {restarts} 次自恢复）: {detail}");
+                eprintln!("{msg}");
+                on_panic(msg);
+                std::thread::sleep(std::time::Duration::from_secs(1)); // 退避，防风暴
             }
         }
     }

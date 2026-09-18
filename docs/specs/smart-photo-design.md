@@ -94,6 +94,7 @@ trait DeviceSource {
 - `VolumeSource`：盘符设备，std::fs，2-4 并发流，FILE_FLAG_SEQUENTIAL_SCAN
 - `MtpSource`：WPD COM（IPortableDevice/Content/Resources），1-2 并发流；属性批量枚举；属性缺拍摄时间时读头 1MB 解 EXIF；Seek 不可用时查重降级为 大小+文件名+头部哈希；拔线→任务暂停，重连差量续传
 - 检测：`RegisterDeviceNotification`（卷接口 + WPD 接口双注册），`WM_DEVICECHANGE`
+- **状态调和器（用户规定 2026-09-19，替代边沿触发多路径）**：OS 枚举结果（WPD GetDevices + 可移动卷探测）为唯一真值；DBT 事件/启动/探活超时等一切信号仅作触发器（去抖合并）→ `reconcile_devices` 重算真值与注册表 diff → 增删+事件。到达/移除/重启窗口/大小写/幂等/幽灵设备结构性正确；MTP 探活（20s，连败 2 次修正真值）弥补"关 MTP 不拔线 OS 无通知"的物理限制
 - 托盘常驻（空闲 <50MB 内存），可选开机自启，关闭=最小化托盘
 
 ### 5.2 导入引擎
@@ -205,6 +206,14 @@ settings 由 settings.json 承载（带 schema_version）
 - 换 `dbDir`：整库目录自包含 → 两阶段移动（复制+逐文件校验 journal → 原子改注册表指向 → 旧目录留 `.bak`）；中断不丢数据
 - 换 `photoRoot`：模式A「仅切换」（旧照片转外部目录语义，零风险）/ 模式B「迁移照片」（复用导入引擎移动模式 + journal + 资产路径批量更新，可暂停恢复）
 - 实现：dbDir 迁移与 photoRoot 模式B 引擎侧随 M2；设置 UI 随 M4
+
+### 5.12 后台线程与资源生命周期（统一方案，用户规定 2026-09-19）
+
+**原则：资源在同一线程/套间内创建、使用、释放；所有长活后台操作走统一任务框架。**（真机教训：WPD COM 对象在热插线程被 drop → 跨套间 Release → 访问违规闪退；补丁式修复被用户否决，定统一方案）
+
+1. **WPD 代理化**：单一常驻 `WpdWorker` 线程（MTA）独占全部 WPD COM 对象；`WpdSource` 为轻量消息代理（list/open_head/stream/delete → oneshot/channel 回执；Drop=Release 消息）。COM 套间类 bug 整类消灭；任意线程可安全持有/克隆/丢弃代理。volume/folder 源为纯 std::fs，不走代理。
+2. **TaskSupervisor 统一任务框架**：设备扫描/导入/清卡/缩略图/（未来）AI 索引一律 `supervisor.spawn()`——统一线程命名、**panic 捕获**（catch_unwind → 日志 + appError 事件，子线程 panic 绝不无声致死进程）、TaskHandle{pause,cancel,progress} 统一控制面、资源在任务线程内获取与释放。
+3. **准入规则**：新增后台能力必须挂 supervisor + 资源所有权声明，评审与 §6 UI 零阻塞铁律同级。
 
 ## 6. 性能设计
 

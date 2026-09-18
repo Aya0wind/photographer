@@ -19,6 +19,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
+# JPEG 缩放解码（TJSCALED：DCT 域直出小图，61MP 全量 1-3s → ~100ms）；
+# vendored 自带 libjpeg-turbo 源码构建（需 cmake，已验证本机可用）；
+# "image" feature 直接解到 image::RgbImage。
+turbojpeg = { version = "1", features = ["image"] }
 
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"

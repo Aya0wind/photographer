@@ -264,23 +264,11 @@ mod win {
                 if is_net {
                     return; // 网络卷忽略
                 }
+                // 信号语义（调和器架构，2026-09-18）：DBT 只发触发信号，
+                // 到达/移除不做任何注册/摘除/过滤——「设备」语义全部收敛到
+                // reconcile 的真值（有媒体可移动卷；网络盘/本地盘不在真值）。
                 for drive in drives {
-                    // 「设备」语义过滤（与启动枚举共用 present::probe_volume）：
-                    // 仅注册有媒体的可移动介质。映射盘在会话/网络恢复时
-                    // 也会触发卷到达（DBTF_NET 不总是置位），本地固定盘同排。
-                    // 只滤到达不滤移除——拔盘瞬间 GetDriveTypeW 已失效，
-                    // 移除事件必须照发才能清注册表。
-                    let name = if arrival {
-                        match super::super::present::probe_volume(&drive) {
-                            Some(label) => label,
-                            None => {
-                                eprintln!("忽略非设备卷到达: {drive}（网络盘/本地盘/无媒体）");
-                                continue;
-                            }
-                        }
-                    } else {
-                        volume::drive_label(&drive).unwrap_or_else(|| drive.clone())
-                    };
+                    let name = volume::drive_label(&drive).unwrap_or_else(|| drive.clone());
                     publish(event, SourceKind::Volume, drive, name);
                 }
             }

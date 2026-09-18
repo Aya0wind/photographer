@@ -3,6 +3,7 @@
 //! 卷实现在 `volume`，WPD/MTP 实现在 `wpd`。
 
 pub mod folder;
+pub mod health;
 pub mod hotplug;
 pub mod orchestrator;
 pub mod present;

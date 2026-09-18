@@ -188,3 +188,152 @@ fn concurrent_same_request_decodes_once() {
         "同 path+size 并发必须合并为一次解码（in-flight dedup）"
     );
 }
+
+// ---------------------------------------------------------------------------
+// turbojpeg 缩放解码快路径（提速轮）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pick_jpeg_scale_tier_matrix() {
+    use thumbs::pick_jpeg_scale;
+    // 大图（61MP 级 9504px）→ 1/8（1188px 仍 ≥256，取最小图）
+    assert_eq!(pick_jpeg_scale(9504, 6336, 256), 1);
+    // 大图 512 档 → 1/8（1188 ≥ 512）
+    assert_eq!(pick_jpeg_scale(9504, 6336, 512), 1);
+    // 中图 1024x768 → 256：2/8=256x192（高不足）→ 3/8=384x288 ✓
+    assert_eq!(pick_jpeg_scale(1024, 768, 256), 3);
+    // 中图 1000px → 256：1/8=125 ✗ 2/8=250 ✗ 3/8=375 ✓ → 3/8
+    assert_eq!(pick_jpeg_scale(1000, 750, 256), 3);
+    // 中图 2000px → 512：1/8=250 ✗ 2/8=500 ✗ 3/8=750 ✓ → 3/8
+    assert_eq!(pick_jpeg_scale(2000, 1500, 512), 3);
+    // 小图（200px < 256）→ 原尺寸 8/8（避免上采样糊）
+    assert_eq!(pick_jpeg_scale(200, 150, 256), 8);
+    assert_eq!(pick_jpeg_scale(300, 200, 512), 8);
+    // 恰好边界：2048px → 256 档 1/8=256 ✓ → 1
+    assert_eq!(pick_jpeg_scale(2048, 2048, 256), 1);
+}
+
+#[test]
+fn permit_count_dynamic_matrix() {
+    // min(6, cores/2)，下限 1：4 核→2、8 核→4、12 核→6、24 核→6、1 核→1
+    assert_eq!(thumbs::permit_count_for_test(4), 2);
+    assert_eq!(thumbs::permit_count_for_test(8), 4);
+    assert_eq!(thumbs::permit_count_for_test(12), 6);
+    assert_eq!(thumbs::permit_count_for_test(24), 6);
+    assert_eq!(thumbs::permit_count_for_test(1), 1);
+    assert_eq!(thumbs::permit_count_for_test(0), 1);
+}
+
+#[test]
+fn jpeg_uses_turbo_fast_path_png_does_not() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let before = thumbs::TURBO_DECODES.load(std::sync::atomic::Ordering::SeqCst);
+
+    // JPG → 快路径命中（计数器进程级共享、测试并行执行，取 ≥ 断言防串扰）
+    let jpg = src_dir.path().join("fast.jpg");
+    write_jpg(&jpg, 1024, 768);
+    let out = thumbs::thumb_file(&db, &jpg, 256).expect("JPG 应生成");
+    let (w, h) = image::image_dimensions(Path::new(&out)).unwrap();
+    assert!(w.max(h) <= 256);
+    assert!(
+        thumbs::TURBO_DECODES.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "JPG 必须走 turbojpeg 快路径"
+    );
+
+    // PNG → 不走快路径（image crate）但正常生成
+    let png = src_dir.path().join("slow.png");
+    let img = DynamicImage::new_rgb8(900, 300);
+    img.save_with_format(&png, image::ImageFormat::Png).unwrap();
+    assert!(thumbs::thumb_file(&db, &png, 256).is_some());
+}
+
+#[test]
+fn truncated_jpeg_falls_back_without_panic() {
+    // turbojpeg 拒收 + image crate 也解不了 → null（不 panic）；
+    // 半合法 JPEG（turbo 失败但 image 能解）→ 仍出图（回退兜底）
+    let src_dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let bad = src_dir.path().join("trunc.jpg");
+    let mut data = fs::read(src_dir.path().join({
+        // 先造一张合法 jpg 再截断
+        let good = src_dir.path().join("good.jpg");
+        write_jpg(&good, 640, 480);
+        good
+    }))
+    .unwrap();
+    data.truncate(data.len() / 3); // 砍掉 2/3
+    fs::write(&bad, data).unwrap();
+
+    // 截断 JPEG：turbo 与 image 两条路径要么失败（→None）要么侥幸解出
+    //（→Some）都可接受——关键断言：不 panic、无 .tmp 残留、重复调用稳定
+    let _first = thumbs::thumb_file(&db, &bad, 256);
+    let _second = thumbs::thumb_file(&db, &bad, 256);
+    assert!(
+        thumbs::find_tmp_residue(&db).is_empty(),
+        "失败路径不得留 .tmp 半成品"
+    );
+}
+
+/// 基准：全量解码 vs 缩放解码（手动跑：cargo test --test thumb_test bench_ --ignored --nocapture）。
+#[test]
+#[ignore = "基准用例（报告数字）"]
+fn bench_full_decode_vs_scaled() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("big.jpg");
+    // 9504x6336（61MP 级），高频噪声内容（贴近真实照片的熵解码成本，
+    // 平滑渐变对解码器过于友好测不出差异）
+    let mut rng: u32 = 0x1234_5678;
+    let mut img = image::RgbImage::new(9504, 6336);
+    for (_x, _y, px) in img.enumerate_pixels_mut() {
+        // xorshift 伪随机（无依赖）
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        *px = image::Rgb([(rng >> 24) as u8, (rng >> 16) as u8, (rng >> 8) as u8]);
+    }
+    let dynimg = DynamicImage::ImageRgb8(img);
+    let mut buf = Vec::new();
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 92);
+    dynimg.write_with_encoder(enc).unwrap();
+    fs::write(&src, buf).unwrap();
+    println!(
+        "源 JPEG 大小: {:.1} MB",
+        fs::read(&src).unwrap().len() as f64 / 1e6
+    );
+
+    // 全量（image crate）计时
+    let t0 = std::time::Instant::now();
+    let data = fs::read(&src).unwrap();
+    let full = image::ImageReader::new(std::io::Cursor::new(&data))
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap();
+    let full_thumb = full.thumbnail(256, 256).to_rgb8();
+    let t_full = t0.elapsed();
+    println!(
+        "全量解码+缩放: {:?}（{}x{}）",
+        t_full,
+        full_thumb.width(),
+        full_thumb.height()
+    );
+
+    // 缩放（turbojpeg）计时
+    let t0 = std::time::Instant::now();
+    let mut out = Vec::new();
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+    let fast = thumbs::bench_scaled_rgb(&src, 256).expect("快路径应成功");
+    fast.write_with_encoder(enc).unwrap();
+    let t_fast = t0.elapsed();
+    println!(
+        "缩放解码+编码: {:?}（{}x{}）",
+        t_fast,
+        fast.width(),
+        fast.height()
+    );
+    println!(
+        "提速倍数: {:.1}x",
+        t_full.as_secs_f64() / t_fast.as_secs_f64()
+    );
+}

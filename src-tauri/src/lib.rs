@@ -10,17 +10,14 @@ mod thumbs;
 mod tray;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::devices::hotplug;
-use crate::devices::orchestrator::scan_device;
-use crate::devices::volume::VolumeSource;
-use crate::devices::wpd::WpdSource;
-use crate::devices::{DeviceSource, SourceKind};
+use crate::devices::SourceKind;
 use crate::events::{AppEvent, EventBus};
-use crate::ipc::{active_library_db, AppState, DeviceEntry};
+use crate::ipc::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -59,6 +56,7 @@ pub fn run() {
             // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
             // supervisor：统一后台任务框架（panic 捕获 + 命名 + 软取消）。
             let supervisor = tasks::TaskSupervisor::new(bus.clone());
+            let supervisor_handle = std::sync::Arc::clone(&supervisor);
             app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
@@ -69,10 +67,11 @@ pub fn run() {
             }));
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
-            spawn_event_forwarder(app.handle().clone(), bus.clone());
+            spawn_event_forwarder(app.handle().clone(), bus.clone(), supervisor_handle.clone());
             // 后台线程 2：设备编排（热插拔 → 建源 → 扫描 → 注册表 + DeviceScanned）
             spawn_device_orchestrator(app.handle().clone());
             // 后台线程 3：系统通知（会话开始/结束 + 里程碑）
+            spawn_health_monitor(supervisor_handle.clone(), app.handle().clone());
             spawn_notification_subscriber(app.handle().clone());
             // 后台线程 4：热插拔检测（message-only 窗口泵）
             let _hotplug = hotplug::spawn_hotplug_thread(bus);
@@ -127,171 +126,140 @@ pub fn run() {
             ipc::import::clean_candidates,
             ipc::import::clean_apply,
             ipc::thumb::thumb_get,
+            ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 /// 事件转发：EventBus → 前端 `app://event`（唯一的前端事件通道）。
-fn spawn_event_forwarder(app: AppHandle, bus: EventBus) {
-    std::thread::Builder::new()
-        .name("event-forwarder".into())
-        .spawn(move || {
-            let mut rx = bus.subscribe();
-            loop {
-                match rx.blocking_recv() {
-                    Ok(event) => {
-                        let _ = app.emit("app://event", &event);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-        .expect("spawn event forwarder");
+///
+/// 关键时序（P0 修复，2026-09-18）：**订阅在 setup 线程同步完成**后
+/// receiver 才移入任务线程——spawn 返回即可保证后续任何发布（存量枚举/
+/// 热插/探活）必被转发器收到（此前订阅在新线程内执行，存在晚于首条
+/// 事件发布的竞态）。转发循环带 panic 捕获自恢复（转发器死亡 = 前端
+/// 全盲），每 100 条打活性心跳日志。
+fn spawn_event_forwarder(
+    app: AppHandle,
+    bus: EventBus,
+    supervisor: std::sync::Arc<tasks::TaskSupervisor>,
+) {
+    let mut rx = bus.subscribe(); // setup 线程内同步订阅：先于一切发布
+    let emit_app = app.clone();
+    let report_bus = bus.clone();
+    eprintln!("事件转发已启动（app://event 通道就绪）");
+    supervisor.spawn("event-forward", "app://event 转发".into(), move |_| {
+        let emit: std::sync::Arc<dyn Fn(&AppEvent) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                let _ = emit_app.emit("app://event", event);
+            });
+        events::forward_supervised(&mut rx, emit, move |msg| {
+            report_bus.publish(AppEvent::AppError {
+                level: "error".into(),
+                message: msg,
+                recoverable: true,
+            });
+        });
+    });
 }
 
-/// 设备编排：启动存量设备枚举（补扫）+ DeviceArrived → 建源 → 扫描 →
-/// 注册表 + DeviceScanned；DeviceRemoved → 注销。
+/// 设备编排（调和器架构，2026-09-18）：**信号去抖 + reconcile**。
+/// 任何 DBT 信号（到达/移除，不分语义）→ 1s 窗口合并 → 调和一次；
+/// 启动时先调和一次（覆盖存量设备）。注册/摘除/扫描全部由
+/// `ipc::reconcile` 依真值决定，本线程不做任何设备特殊处理。
 fn spawn_device_orchestrator(app: AppHandle) {
     std::thread::Builder::new()
         .name("device-orchestrator".into())
         .spawn(move || {
-            let bus = app.state::<ipc::SharedState>().bus.clone();
-            let mut rx = bus.subscribe();
-            // 启动存量设备枚举（相机检测不到的修复，2026-09-18）：必须在
-            // 订阅之后发布——app 重启窗口内插入的设备收不到热插事件，
-            // 这里把当下在位的设备走与热插**完全相同**的 DeviceArrived 链路
-            // 补发一遍（卷仅含有媒体的可移动介质；网络盘/本地盘在
-            // present::probe_volume 统一过滤）。
-            let present = devices::present::enumerate_present_devices();
-            eprintln!("启动存量设备枚举：发现 {} 台设备", present.len());
-            for (id, kind, name) in present {
-                eprintln!("存量设备在位：{name}（kind={kind:?}, id={id}）");
-                bus.publish(AppEvent::DeviceArrived { id, kind, name });
-            }
+            let state = app.state::<ipc::SharedState>();
+            let mut rx = state.bus.subscribe();
+            // 启动调和：存量设备（订阅完成后调用，事件必达）
+            ipc::reconcile::reconcile_devices(&state, "startup");
             loop {
                 let Ok(event) = rx.blocking_recv() else {
                     continue;
                 };
-                match event {
-                    AppEvent::DeviceArrived { id, kind, name } => {
-                        handle_device_arrived(&app, id, kind, name);
-                    }
-                    AppEvent::DeviceRemoved { id } => {
-                        // 移除与注册同一规范化 key（WPD 大小写变体不漏删）。
-                        // 摘出后不在本线程 drop：源可能持有 COM 资源，
-                        // Release 转移到专用 MTA 线程（断开闪退修复 2026-09-18）。
-                        let key = devices::normalize_device_id(&id);
-                        let removed = app
-                            .state::<ipc::SharedState>()
-                            .devices
-                            .lock()
-                            .expect("devices mutex poisoned")
-                            .remove(&key);
-                        if removed.is_some() {
-                            eprintln!("设备已移除（注册表清理；WPD 代理无 COM 资源，就地 drop 安全）: {key}");
-                        }
-                    }
-                    _ => {}
+                let is_signal = matches!(
+                    event,
+                    AppEvent::DeviceArrived { .. } | AppEvent::DeviceRemoved { .. }
+                );
+                if !is_signal {
+                    continue;
                 }
+                // 去抖：1s 窗口内合并后续信号（含 reconcile 自身发出的
+                // DeviceRemoved 回声——下次调和 diff 为空即 no-op）。
+                // broadcast 无阻塞超时收：窗口内 try_recv 轮询。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < deadline {
+                    match rx.try_recv() {
+                        Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                    }
+                }
+                ipc::reconcile::reconcile_devices(&state, "dbt");
             }
         })
         .expect("spawn device orchestrator");
 }
 
-/// 到达处理入口：**扫描放后台线程**（2349 文件 WPD 枚举数十秒——在编排
-/// 线程串行会卡掉后续到达/移除事件，前端也迟迟看不到响应），本函数瞬间
-/// 返回；注册/DeviceScanned 在扫描线程完成（幂等：重复到达同 key 覆盖刷新）。
-fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: String) {
-    let app = app.clone();
-    let supervisor = std::sync::Arc::clone(&app.state::<ipc::SharedState>().supervisor);
-    supervisor.spawn("scan", name.clone(), move |_| {
-        handle_device_arrived_blocking(&app, id, kind, name);
-    });
-}
-
-fn handle_device_arrived_blocking(app: &AppHandle, id: String, kind: SourceKind, name: String) {
-    // 失败日志必须带 id/kind 上下文（2026-09-18 排查教训：静默吞错全靠猜）。
-    // id 一律先规范化（WPD 大小写变体收敛为注册表单一 key；卷/FOLDER 原样）
-    let id = devices::normalize_device_id(&id);
-    let kind_tag = format!("{kind:?}");
-    let state = app.state::<ipc::SharedState>();
-    let source: Arc<dyn DeviceSource> = match kind {
-        // 卷事件 id 形如 "E:"，根路径必须补尾反斜杠（"E:" 是该盘当前目录）
-        SourceKind::Volume => Arc::new(VolumeSource::new(format!("{id}\\"))),
-        SourceKind::Folder => {
-            // 文件夹源不经热插拔/启动枚举产生（仅 folder_scan 注册），忽略
-            return;
-        }
-        SourceKind::Mtp => match devices::wpd::enumerate_mtp_devices() {
-            Ok(list) => match list
-                .into_iter()
-                .find(|(pnp, _)| devices::normalize_device_id(pnp) == id)
-            {
-                Some((pnp, friendly)) => Arc::new(WpdSource::new(pnp, friendly)),
-                None => {
-                    // 枚举空窗期（接口重枚举/会话互斥）可能暂时列不出设备：
-                    // 已注册的同设备重复到达按幂等忽略，不动既有条目、不报错
-                    if ipc::device_registered(&state, &id) {
-                        eprintln!("WPD 设备重复到达（已在库，接口重枚举），忽略: {name} ({id})");
-                    } else {
-                        eprintln!(
-                            "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举未找到该设备，忽略"
-                        );
+/// MTP 设备健康监控（调和器信号源）：每 20s 对注册中的 MTP 设备轻量
+/// ping（worker 消息，5s 超时）；连续 2 次失败 → 从真值剔除
+/// （`health::set_offline`）；graveyard（离线名单）每 3 轮（60s）探回，
+/// 恢复可达 → 重回真值（`clear_offline`）。两种真值修正后都触发
+/// reconcile（摘除/重建 + 事件）。周期 tick 本身也是 reconcile 信号
+///（结构性兜底：DBT 丢失/幽灵注册最终一致）。
+fn spawn_health_monitor(supervisor: std::sync::Arc<tasks::TaskSupervisor>, app: AppHandle) {
+    supervisor.spawn("health", "mtp-probe".into(), move |_| {
+        let mut failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut tick: u32 = 0;
+        loop {
+            // 周期自适应（H2 恢复延迟）：有设备处于离线态 → 5s（快速探回，
+            // 重开相机后恢复感知上限 5s×3 轮退避）；全在线 → 常规 20s。
+            let interval = if devices::health::offline_ids().is_empty() {
+                std::time::Duration::from_secs(20)
+            } else {
+                std::time::Duration::from_secs(5)
+            };
+            std::thread::sleep(interval);
+            tick = tick.wrapping_add(1);
+            let state = app.state::<ipc::SharedState>();
+            // 注册中的 MTP 设备（探活对象）
+            let registered: Vec<(String, String)> = state
+                .devices
+                .lock()
+                .expect("devices mutex poisoned")
+                .iter()
+                .filter(|(_, entry)| entry.source.kind() == SourceKind::Mtp)
+                .map(|(id, entry)| (id.clone(), entry.snapshot.name.clone()))
+                .collect();
+            let mut graveyard = devices::health::offline_graveyard();
+            let actions = devices::health::monitor_step(
+                &registered,
+                &mut graveyard,
+                &mut failures,
+                &mut |id| devices::wpd::worker_ping(id),
+                tick.is_multiple_of(3),
+            );
+            devices::health::apply_graveyard(&graveyard);
+            for action in actions {
+                match action {
+                    devices::health::HealthAction::MarkOffline { id, name } => {
+                        eprintln!("设备无响应，从真值剔除: {name} ({id})");
+                        devices::health::set_offline(&id, &name);
                     }
-                    return;
+                    devices::health::HealthAction::Revive { id, name } => {
+                        eprintln!("设备恢复可达，重回真值: {name} ({id})");
+                        devices::health::clear_offline(&id);
+                    }
                 }
-            },
-            Err(err) => {
-                if ipc::device_registered(&state, &id) {
-                    eprintln!("WPD 设备重复到达（已在库，枚举暂失败），忽略: {name} ({id}): {err}");
-                } else {
-                    eprintln!(
-                        "设备到达处理失败 kind={kind_tag} id={id}: WPD 枚举失败（相机未切 PC 模式？）: {err}"
-                    );
-                }
-                return;
             }
-        },
-    };
-
-    let skip_imported = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .import
-        .skip_imported;
-    let Ok(db) = active_library_db(&state) else {
-        eprintln!("设备 {id}（kind={kind_tag}）到达但尚未创建库，跳过扫描");
-        return;
-    };
-    let snapshot = match scan_device(&*source, &db, skip_imported) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            eprintln!("设备到达处理失败 kind={kind_tag} id={id}: 扫描设备失败: {err}");
-            return;
+            ipc::reconcile::reconcile_devices(&state, "health");
         }
-    };
-    let total_files: u64 = snapshot.files_by_kind.values().sum();
-    let replaced = state
-        .devices
-        .lock()
-        .expect("devices mutex poisoned")
-        .insert(
-            id.clone(),
-            DeviceEntry {
-                source,
-                snapshot: snapshot.clone(),
-            },
-        );
-    drop(replaced); // 覆盖刷新：旧条目（纯数据代理）就地释放安全
-    eprintln!("设备已注册并扫描：{name}（kind={kind_tag}, id={id}, {total_files} 个媒体文件）");
-    state.bus.publish(AppEvent::DeviceScanned {
-        id,
-        name,
-        kind,
-        snapshot,
     });
 }
 

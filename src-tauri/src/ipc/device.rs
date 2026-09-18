@@ -103,3 +103,11 @@ pub async fn fs_list_dirs(parent: Option<String>) -> Vec<DirEntryDto> {
         .await
         .unwrap_or_default()
 }
+
+/// 事件链路自检（同步、立即）：发布 Probe{ts} → 转发器 emit → 前端
+/// `app://event`。返回 ts 供对账；前端收到即整链通（纯内存发布，豁免
+/// 异步铁律）。
+#[tauri::command]
+pub fn event_ping(state: State<SharedState>) -> String {
+    super::event_ping(&state.bus)
+}

@@ -307,8 +307,8 @@ function relPathOf(file: SourceFile): string {
 /** 缩略图请求边长（px）：后端缓存档位就近 */
 const THUMB_SIZE = 256;
 
-/** thumb_get 在途并发上限：小图 IPC+解码极快，3 足够（避免大目录打爆请求队列） */
-const IMAGE_LOAD_CONCURRENCY = 3;
+/** thumb_get 在途并发上限：后端已提速（turbojpeg 缩放解码+动态并发），前端拉高铺屏速度 */
+const IMAGE_LOAD_CONCURRENCY = 8;
 let activeImageLoads = 0;
 const imageSlotQueue: Array<() => void> = [];
 

@@ -240,6 +240,17 @@ pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
     Ok(Vec::new())
 }
 
+/// 探活（健康监控接线）：worker 打开会话+列举顶层对象，5s 超时。
+#[cfg(windows)]
+pub fn worker_ping(pnp: &str) -> bool {
+    worker::ping(pnp, std::time::Duration::from_secs(5))
+}
+
+#[cfg(not(windows))]
+pub fn worker_ping(_pnp: &str) -> bool {
+    false
+}
+
 /// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
 /// lib 目标内无调用点（集成测试经 #[path] 模块树引用）——豁免 dead_code。
 #[cfg(windows)]
@@ -294,6 +305,11 @@ mod worker {
             obj: String,
             reply: mpsc::Sender<DeviceResult<()>>,
         },
+        /// 探活：打开会话 + 列举顶层 1 个对象（健康监控用，轻量）。
+        Ping {
+            pnp: String,
+            reply: mpsc::Sender<DeviceResult<()>>,
+        },
         /// 测试注入：panic 捕获验证（lib 目标内不构造——集成测试引用）。
         #[doc(hidden)]
         #[allow(dead_code)]
@@ -346,6 +362,9 @@ mod worker {
             }
             WpdCmd::Delete { pnp, obj, reply } => {
                 let _ = reply.send(guarded("delete", move || com::delete(&pnp, &obj)));
+            }
+            WpdCmd::Ping { pnp, reply } => {
+                let _ = reply.send(guarded("ping", move || com::ping(&pnp)));
             }
             WpdCmd::PanicProbe { reply } => {
                 let _ = reply.send(guarded("panic_probe", || panic!("注入测试 panic")));
@@ -421,6 +440,21 @@ mod worker {
             obj: obj.into(),
             reply,
         })
+    }
+
+    /// 探活（带超时）：worker 执行打开会话+顶层枚举；`recv_timeout` 到点
+    /// 即放弃（迟到的回执自然丢弃）。设备挂死会占住 worker——接受（后续
+    /// 命令排队），监控侧不受影响。
+    pub(super) fn ping(pnp: &str, timeout: std::time::Duration) -> bool {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let send = tx().send(WpdCmd::Ping {
+            pnp: pnp.into(),
+            reply: reply_tx,
+        });
+        if send.is_err() {
+            return false;
+        }
+        matches!(reply_rx.recv_timeout(timeout), Ok(Ok(())))
     }
 
     #[doc(hidden)]
@@ -1006,6 +1040,28 @@ mod com {
             Some(stream) => Ok((stream, optimal_buffer)),
             None => Err(WinError::from_hresult(HRESULT(0x8000_4005u32 as i32))), // E_FAIL
         }
+    }
+
+    /// 轻量探活：打开会话 + 列举顶层 1 个对象（能走到 EnumObjects/Next
+    /// 即视为可达；不关心对象本身）。
+    pub fn ping(pnp_id: &str) -> DeviceResult<()> {
+        let _com = ComApartment::init().map_err(win_error)?;
+        let device = open_device(pnp_id)?;
+        // SAFETY: 设备已 Open
+        let content = unsafe { device.Content() }.map_err(win_error)?;
+        // SAFETY: 设备根为合法对象 ID；无过滤条件
+        let enumerator =
+            unsafe { content.EnumObjects(0, WPD_DEVICE_OBJECT_ID, None::<&IPortableDeviceValues>) }
+                .map_err(win_error)?;
+        let mut one = [PWSTR::null(); 1];
+        let mut fetched = 0u32;
+        // SAFETY: 缓冲与请求条数一致
+        let _ = unsafe { enumerator.Next(&mut one, &mut fetched) };
+        // SAFETY: Next 分配的字符串（若有）由调用方释放
+        if fetched > 0 {
+            unsafe { free_pwstr(one[0]) };
+        }
+        Ok(())
     }
 
     pub fn open_head(pnp_id: &str, obj_id: &str, max: u64) -> DeviceResult<Vec<u8>> {
