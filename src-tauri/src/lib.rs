@@ -1,4 +1,9 @@
+mod db;
+mod devices;
+mod events;
+mod import;
 mod ipc;
+mod metadata;
 pub mod settings;
 mod tray;
 
