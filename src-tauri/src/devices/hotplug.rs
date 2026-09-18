@@ -106,6 +106,7 @@ mod win {
     fn run(bus: EventBus) {
         BUS.with(|b| *b.borrow_mut() = Some(bus));
         if let Some((hwnd, notifies)) = setup() {
+            eprintln!("热插拔监听已启动（卷 + WPD 设备通知已注册）");
             let mut msg = MSG::default();
             loop {
                 // SAFETY: msg 为本帧合法栈变量
@@ -120,6 +121,8 @@ mod win {
                 }
             }
             cleanup(hwnd, notifies);
+        } else {
+            eprintln!("热插拔监听启动失败：窗口创建/设备通知注册失败，插拔事件将不可用");
         }
         BUS.with(|b| *b.borrow_mut() = None);
     }
@@ -237,7 +240,8 @@ mod win {
     }
 
     fn handle_device_change(event: u32, lparam: *const core::ffi::c_void) {
-        if event != DBT_DEVICEARRIVAL && event != DBT_DEVICEREMOVECOMPLETE {
+        let arrival = event == DBT_DEVICEARRIVAL;
+        if !arrival && event != DBT_DEVICEREMOVECOMPLETE {
             return;
         }
         // SAFETY: WM_DEVICECHANGE 的 lParam 由系统指向按 dbch_devicetype
@@ -252,7 +256,22 @@ mod win {
                     return; // 网络卷忽略
                 }
                 for drive in unitmask_to_drives(vol.dbcv_unitmask) {
-                    let name = volume::drive_label(&drive).unwrap_or_else(|| drive.clone());
+                    // 「设备」语义过滤（与启动枚举共用 present::probe_volume）：
+                    // 仅注册有媒体的可移动介质。映射网络盘在会话/网络恢复时
+                    // 也会触发卷到达（DBTF_NET 不总是置位），本地固定盘同排。
+                    // 只滤到达不滤移除——拔盘瞬间 GetDriveTypeW 已失效，
+                    // 移除事件必须照发才能清注册表。
+                    let name = if arrival {
+                        match super::super::present::probe_volume(&drive) {
+                            Some(label) => label,
+                            None => {
+                                eprintln!("忽略非设备卷到达: {drive}（网络盘/本地盘/无媒体）");
+                                continue;
+                            }
+                        }
+                    } else {
+                        volume::drive_label(&drive).unwrap_or_else(|| drive.clone())
+                    };
                     publish(event, SourceKind::Volume, drive, name);
                 }
             }

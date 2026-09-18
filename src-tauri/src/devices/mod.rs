@@ -5,6 +5,7 @@
 pub mod folder;
 pub mod hotplug;
 pub mod orchestrator;
+pub mod present;
 pub mod volume;
 pub mod wpd;
 
