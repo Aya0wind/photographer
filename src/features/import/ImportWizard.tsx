@@ -13,6 +13,7 @@ import {
   importStart,
   isIpcAvailable,
   kindFromName,
+  thumbGet,
   type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
@@ -90,6 +91,58 @@ function FolderGlyph({ size = 14, className = "" }: { size?: number; className?:
       <path d="M2 4.75C2 3.78 2.78 3 3.75 3h2.6l1.5 1.75h4.4c.97 0 1.75.78 1.75 1.75v5.75c0 .97-.78 1.75-1.75 1.75h-8.5C2.78 14 2 13.22 2 12.25v-7.5z" />
     </svg>
   );
+}
+
+/** 设备类型图标（读卡器=存储卡 / 相机 / 文件夹），16 viewBox stroke 手写 */
+function DeviceGlyph({
+  kind,
+  size = 14,
+  className = "",
+}: {
+  kind: DeviceKind;
+  size?: number;
+  className?: string;
+}) {
+  const paths: Record<DeviceKind, React.ReactNode> = {
+    volume: (
+      <>
+        <path d="M4.6 2.5h4.5L12.5 6v6.2c0 .8-.6 1.3-1.4 1.3H4.6c-.9 0-1.6-.7-1.6-1.5V4c0-.8.7-1.5 1.6-1.5z" />
+        <path d="M9.1 2.5V6h3.4" />
+      </>
+    ),
+    mtp: (
+      <>
+        <rect x="2" y="4.6" width="12" height="8.4" rx="1.5" />
+        <path d="M5.7 4.6l.9-1.7h2.8l.9 1.7" />
+        <circle cx="8" cy="8.7" r="2.4" />
+      </>
+    ),
+    folder: (
+      <path d="M2 4.75C2 3.78 2.78 3 3.75 3h2.6l1.5 1.75h4.4c.97 0 1.75.78 1.75 1.75v5.75c0 .97-.78 1.75-1.75 1.75h-8.5C2.78 14 2 13.22 2 12.25v-7.5z" />
+    ),
+  };
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`shrink-0 ${className}`}
+      aria-hidden="true"
+    >
+      {paths[kind]}
+    </svg>
+  );
+}
+
+/** 设备列表行的文件数徽标：总文件数千分位；无文件时退回类型中文标签 */
+function deviceBadge(d: DeviceSnapshot, t: (key: string) => string): string {
+  const total = Object.values(d.filesByKind).reduce((sum, n) => sum + n, 0);
+  return total > 0 ? `${total.toLocaleString("zh-CN")} ${t("wizard.deviceFiles")}` : t(KIND_LABEL_KEY[d.kind]);
 }
 
 /** Windows 路径宽松比较（大小写/分隔符/尾斜杠归一）——树节点选中高亮用 */
@@ -251,18 +304,11 @@ function relPathOf(file: SourceFile): string {
   return file.dir ? `${file.dir}/${file.name}` : file.name;
 }
 
-/** absPath → asset 协议 URL；非 Tauri 环境抛错或空结果回退 null（占位） */
-function toAssetUrl(base: string | null, relPath: string): string | null {
-  if (base === null) return null;
-  try {
-    return convertFileSrc(`${base}/${relPath}`) || null;
-  } catch {
-    return null;
-  }
-}
+/** 缩略图请求边长（px）：后端缓存档位就近 */
+const THUMB_SIZE = 256;
 
-/** 同一时刻在途解码上限：超出排队，避免大目录一次性打爆 IO/解码 */
-const IMAGE_LOAD_CONCURRENCY = 6;
+/** thumb_get 在途并发上限：小图 IPC+解码极快，3 足够（避免大目录打爆请求队列） */
+const IMAGE_LOAD_CONCURRENCY = 3;
 let activeImageLoads = 0;
 const imageSlotQueue: Array<() => void> = [];
 
@@ -283,6 +329,55 @@ function releaseImageSlot(): void {
   activeImageLoads = Math.max(0, activeImageLoads - 1);
   const next = imageSlotQueue.shift();
   if (next) next();
+}
+
+/** 会话内缩略图缓存：absPath → asset URL（null=该文件无缩略图，RAW/视频/失败同态） */
+const thumbUrlCache = new Map<string, string | null>();
+/** in-flight 去重：同 absPath 的并发请求共享同一 Promise（滚动复用不重复 IPC） */
+const thumbInflight = new Map<string, Promise<string | null>>();
+
+/** 缩略图文件路径 → asset 协议 URL；非 Tauri 环境抛错/空结果回退 null（占位） */
+function thumbAssetUrl(thumbPath: string): string | null {
+  try {
+    return convertFileSrc(thumbPath) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 取某源文件的缩略图 asset URL（M2 起 img 一律读后端小图，不再解码原图）：
+ * thumb_get(absPath, 256) → 缓存文件路径 → convertFileSrc；null → 调用方保持占位。
+ * 命中缓存直接返回；同 path 并发共享 in-flight Promise；thumb_get 失败静默记 null。
+ */
+export function fetchThumbUrl(absPath: string): Promise<string | null> {
+  const cached = thumbUrlCache.get(absPath);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const inflight = thumbInflight.get(absPath);
+  if (inflight) return inflight;
+  const promise = (async () => {
+    await acquireImageSlot();
+    try {
+      const thumbPath = await thumbGet(absPath, THUMB_SIZE);
+      const url = thumbPath !== null ? thumbAssetUrl(thumbPath) : null;
+      thumbUrlCache.set(absPath, url);
+      return url;
+    } catch {
+      thumbUrlCache.set(absPath, null);
+      return null;
+    } finally {
+      releaseImageSlot();
+      thumbInflight.delete(absPath);
+    }
+  })();
+  thumbInflight.set(absPath, promise);
+  return promise;
+}
+
+/** 仅测试用：清空缩略图会话缓存 */
+export function resetThumbCacheForTests(): void {
+  thumbUrlCache.clear();
+  thumbInflight.clear();
 }
 
 function extOf(name: string): string {
@@ -352,38 +447,33 @@ function FileTile({
   file,
   selected,
   onToggle,
-  assetUrl,
+  absPath,
   size,
 }: {
   file: SourceFile;
   selected: boolean;
   onToggle: (path: string) => void;
-  assetUrl: string | null;
+  /** 源文件绝对路径（photo 且源有文件系统路径）；thumb_get 据此取后端小图 */
+  absPath: string | null;
   size: TileSizeSpec;
 }) {
-  // 解码槽位到位后才置 src；onLoad 淡入，onError/15s 超时静默保持占位（不重试）
+  // M2 起 img 一律读后端小图（~30KB），不再解码原图；onLoad 淡入，onError/15s 超时静默保持占位
   const [src, setSrc] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const settledRef = useRef(false);
-  const releaseRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    if (assetUrl === null) return;
-    void acquireImageSlot().then(() => {
-      if (cancelled) {
-        releaseImageSlot();
-        return;
-      }
-      releaseRef.current = releaseImageSlot;
-      setSrc(assetUrl);
+    if (absPath === null) return;
+    void fetchThumbUrl(absPath).then((url) => {
+      // null=无缩略图（RAW/视频/失败）：保持占位
+      if (cancelled || url === null) return;
+      setSrc(url);
     });
     return () => {
       cancelled = true;
-      releaseRef.current?.();
-      releaseRef.current = null;
     };
-  }, [assetUrl]);
+  }, [absPath]);
 
   useEffect(() => {
     if (src === null) return;
@@ -398,8 +488,6 @@ function FileTile({
     settledRef.current = true;
     if (ok) setLoaded(true);
     else setSrc(null);
-    releaseRef.current?.();
-    releaseRef.current = null;
   }
 
   const showImg = src !== null;
@@ -745,7 +833,9 @@ function FileGridView({
                         file={f}
                         selected={selected.has(f.path)}
                         onToggle={onToggleFile}
-                        assetUrl={f.kind === "photo" ? toAssetUrl(basePath, relPathOf(f)) : null}
+                        absPath={
+                          f.kind === "photo" && basePath !== null ? `${basePath}/${relPathOf(f)}` : null
+                        }
                         size={tile}
                       />
                     ))}
@@ -910,11 +1000,20 @@ export default function ImportWizard() {
       : null,
   );
 
-  // 设备选择：URL ?device= 优先，回落第一台
+  // 设备选择：显式选中（会话内）优先 → URL ?device=（深链/设备弹窗入口）→ 首台回落。
+  // 修复「设备在场时点文件系统文件夹无反应」：此前 selectedId 只认 URL——URL 往返
+  // （URLSearchParams 序列化不编码反斜杠，真机 browser history 下读回值可能变形）
+  // 或 addDevice/setSearchParams 跨渲染批次的中间态都会让 some() 匹配失败，回落
+  // devices[0]（在场旧设备），表现为点了文件夹毫无反应。显式选中不再依赖 URL 往返与时序。
+  const [explicitId, setExplicitId] = useState<string | null>(null);
   const urlDevice = searchParams.get("device");
-  const selectedId = devices.some((d) => d.id === urlDevice)
-    ? (urlDevice as string)
-    : (devices[0]?.id ?? null);
+  const explicitValid = explicitId !== null && devices.some((d) => d.id === explicitId);
+  const urlValid = urlDevice !== null && devices.some((d) => d.id === urlDevice);
+  const selectedId = explicitValid
+    ? (explicitId as string)
+    : urlValid
+      ? (urlDevice as string)
+      : (devices[0]?.id ?? null);
   const device = devices.find((d) => d.id === selectedId) ?? null;
 
   // 选中源变化时拉取文件清单（device_files）；已有缓存的源不重复拉取。
@@ -982,6 +1081,8 @@ export default function ImportWizard() {
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
+  // 源选择失败文案（folderScan 失败等）：中栏一行红字，选中其他源时清除
+  const [sourceError, setSourceError] = useState<string | null>(null);
   // LR 式导入模式（顶部分段条）：复制保留原文件 / 移动纳管
   const [mode, setMode] = useState<ImportMode>("copy");
   // 查看方式：列表默认 / 缩略图网格；切换不重置勾选（selected 与视图无关）
@@ -1095,19 +1196,27 @@ export default function ImportWizard() {
 
   // --- 源选择 -------------------------------------------------------------------
 
-  /** 手动从设备下拉选择：切 URL 并记入最近使用 */
+  /** 手动从设备列表选择：显式选中 + 切 URL + 记入最近使用 */
   function selectDevice(id: string): void {
     const snapshot = devices.find((d) => d.id === id);
     if (snapshot) recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
+    setExplicitId(id);
+    setSourceError(null);
     setSearchParams(id ? { device: id } : {});
   }
 
-  /** 选中文件夹为源：folderScan 成快照则入库并选中；失败（IPC 不可用）静默保持原源 */
+  /** 选中文件夹为源：folderScan 成快照则入库并显式选中；失败（IPC 不可用等）提示并保持原源 */
   async function selectFolder(path: string): Promise<boolean> {
     const snapshot = await folderScan(path);
-    if (!snapshot) return false;
+    if (!snapshot) {
+      // 失败不再静默：中栏一行红字提示（此前「点了没反应」难排查）
+      setSourceError(t("wizard.fs.scanFailed", { dir: path }));
+      return false;
+    }
     addDevice(snapshot);
     recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
+    setExplicitId(snapshot.id);
+    setSourceError(null);
     setSearchParams({ device: snapshot.id });
     return true;
   }
@@ -1140,6 +1249,8 @@ export default function ImportWizard() {
     }
     if (devices.some((d) => d.id === entry.id)) {
       recordRecentSource(entry);
+      setExplicitId(entry.id);
+      setSourceError(null);
       setSearchParams({ device: entry.id });
     }
   }
@@ -1337,7 +1448,7 @@ export default function ImportWizard() {
       >
         {/* 左栏：源面板（设备 / 文件系统树 / 最近使用，三区可折叠）+ 源文件树 */}
         <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.leftPane")}>
-          {/* 设备区（可折叠） */}
+          {/* 设备区（可折叠）：设备列表（可点切换，与树选中态同样式）+ 选中设备信息卡 */}
           <PanelSection
             sectionKey="devices"
             title={t("wizard.section.devices")}
@@ -1351,62 +1462,92 @@ export default function ImportWizard() {
                 </p>
               ) : (
                 <>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={selectedId ?? ""}
-                      onChange={(e) => selectDevice(e.target.value)}
-                      className="min-w-0 flex-1 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent"
-                      aria-label={t("wizard.deviceSelect")}
-                    >
-                      {devices.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => device && void refreshDevice(device.id)}
-                      className="shrink-0 rounded-md border border-edge px-2 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                      title={t("wizard.rescan")}
-                    >
-                      {t("wizard.rescan")}
-                    </button>
+                  {/* 设备列表：行=图标+名称+文件数徽标；点击=选中该设备（中栏立即切换清单） */}
+                  <div className="flex flex-col gap-0.5" data-testid="wizard-device-list">
+                    {devices.map((d) => {
+                      const isSelected = d.id === selectedId;
+                      return (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={() => selectDevice(d.id)}
+                          className={`flex w-full items-center gap-1.5 rounded border-l-2 py-1 pl-2 pr-1.5 text-left transition-colors ${
+                            isSelected
+                              ? "border-accent bg-accent/10"
+                              : "border-transparent hover:bg-panel/40"
+                          }`}
+                          data-testid="wizard-device-item"
+                          data-device-id={d.id}
+                          data-selected={isSelected}
+                          title={d.id}
+                        >
+                          <DeviceGlyph
+                            kind={d.kind}
+                            size={13}
+                            className={isSelected ? "text-accent" : "text-text-muted"}
+                          />
+                          <span
+                            className={`min-w-0 flex-1 truncate text-xs ${
+                              isSelected ? "font-medium text-accent" : "text-text-secondary"
+                            }`}
+                          >
+                            {d.name}
+                          </span>
+                          <span className="ml-auto shrink-0 rounded bg-panel px-1.5 py-0.5 text-[10px] text-text-muted tabular-nums">
+                            {deviceBadge(d, t)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
+
+                  {/* 选中设备详细信息（仅当前选中）+ 重新扫描 */}
                   {device && (
-                    <dl className="mt-3 space-y-1 text-xs" data-testid="wizard-device-info">
-                      <div className="flex justify-between">
-                        <dt className="text-text-muted">{t("wizard.deviceKind")}</dt>
-                        <dd className="flex items-center gap-1 text-text-secondary">
-                          {device.kind === "folder" && <FolderGlyph className="text-text-secondary" />}
-                          {t(KIND_LABEL_KEY[device.kind])}
-                        </dd>
+                    <>
+                      <div className="mt-2.5 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => device && void refreshDevice(device.id)}
+                          className="rounded-md border border-edge px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                          title={t("wizard.rescan")}
+                        >
+                          {t("wizard.rescan")}
+                        </button>
                       </div>
-                      {(Object.keys(device.filesByKind) as FileKind[]).map((kind) => (
-                        <div key={kind} className="flex justify-between">
-                          <dt className="text-text-muted">{t(`wizard.fileKind.${kind}`)}</dt>
-                          <dd className={`font-mono tabular-nums ${KIND_LABEL_COLOR[kind]}`}>
-                            {device.filesByKind[kind]}
+                      <dl className="mt-1.5 space-y-1 text-xs" data-testid="wizard-device-info">
+                        <div className="flex justify-between">
+                          <dt className="text-text-muted">{t("wizard.deviceKind")}</dt>
+                          <dd className="flex items-center gap-1 text-text-secondary">
+                            <DeviceGlyph kind={device.kind} size={12} className="text-text-secondary" />
+                            {t(KIND_LABEL_KEY[device.kind])}
                           </dd>
                         </div>
-                      ))}
-                      <div className="flex justify-between">
-                        <dt className="text-text-muted">{t("wizard.totalSize")}</dt>
-                        <dd className="font-mono text-text-secondary">{formatBytes(device.bytesTotal)}</dd>
-                      </div>
-                      <div className="flex justify-between">
-                        <dt className="text-text-muted">{t("wizard.newFiles")}</dt>
-                        <dd className="font-mono text-accent">{device.newFiles}</dd>
-                      </div>
-                      {device.kind === "mtp" && (
-                        <div className="flex justify-between" data-testid="wizard-mtp-streams">
-                          <dt className="text-text-muted">{t("wizard.streams")}</dt>
-                          <dd className="font-mono text-text-secondary" title={t("wizard.mtpSingleStream")}>
-                            1
-                          </dd>
+                        {(Object.keys(device.filesByKind) as FileKind[]).map((kind) => (
+                          <div key={kind} className="flex justify-between">
+                            <dt className="text-text-muted">{t(`wizard.fileKind.${kind}`)}</dt>
+                            <dd className={`font-mono tabular-nums ${KIND_LABEL_COLOR[kind]}`}>
+                              {device.filesByKind[kind]}
+                            </dd>
+                          </div>
+                        ))}
+                        <div className="flex justify-between">
+                          <dt className="text-text-muted">{t("wizard.totalSize")}</dt>
+                          <dd className="font-mono text-text-secondary">{formatBytes(device.bytesTotal)}</dd>
                         </div>
-                      )}
-                    </dl>
+                        <div className="flex justify-between">
+                          <dt className="text-text-muted">{t("wizard.newFiles")}</dt>
+                          <dd className="font-mono text-accent">{device.newFiles}</dd>
+                        </div>
+                        {device.kind === "mtp" && (
+                          <div className="flex justify-between" data-testid="wizard-mtp-streams">
+                            <dt className="text-text-muted">{t("wizard.streams")}</dt>
+                            <dd className="font-mono text-text-secondary" title={t("wizard.mtpSingleStream")}>
+                              1
+                            </dd>
+                          </div>
+                        )}
+                      </dl>
+                    </>
                   )}
                 </>
               )}
@@ -1606,6 +1747,11 @@ export default function ImportWizard() {
               </button>
             </div>
           </div>
+          {sourceError && (
+            <p className="shrink-0 border-b border-edge px-3 py-1.5 text-[11px] text-red-400" role="alert" data-testid="wizard-source-error">
+              {sourceError}
+            </p>
+          )}
           {files.length === 0 ? (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center">
               <p className="text-xs leading-relaxed text-text-muted">

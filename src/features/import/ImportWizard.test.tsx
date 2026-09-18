@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -11,10 +11,19 @@ import ImportWizard, {
   PANEL_COLLAPSE_KEY,
   TILE_SIZE_KEY,
   VIEW_MODE_STORAGE_KEY,
+  resetThumbCacheForTests,
 } from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { deviceFiles, deviceList, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
+import {
+  deviceFiles,
+  deviceList,
+  folderScan,
+  fsListDirs,
+  importStart,
+  thumbGet,
+  type ImportPlan,
+} from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -25,6 +34,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     fsListDirs: vi.fn(),
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
+    thumbGet: vi.fn(),
   };
 });
 
@@ -45,6 +55,7 @@ const openMock = vi.mocked(openDialog);
 const deviceFilesMock = vi.mocked(deviceFiles);
 const deviceListMock = vi.mocked(deviceList);
 const convertMock = vi.mocked(convertFileSrc);
+const thumbMock = vi.mocked(thumbGet);
 
 function volumeDevice() {
   return {
@@ -162,6 +173,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   resetImportStoreForTests();
+  resetThumbCacheForTests();
   startMock.mockReset().mockResolvedValue({ ok: false, error: null });
   scanMock.mockReset().mockResolvedValue(null);
   listMock.mockReset().mockResolvedValue([]);
@@ -169,6 +181,7 @@ beforeEach(() => {
   deviceFilesMock.mockReset().mockResolvedValue(null);
   deviceListMock.mockReset().mockResolvedValue([]);
   convertMock.mockReset().mockReturnValue("");
+  thumbMock.mockReset().mockResolvedValue(null);
   localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
   localStorage.removeItem(PANEL_COLLAPSE_KEY);
   localStorage.removeItem(COL_WIDTHS_KEY);
@@ -218,6 +231,45 @@ describe("ImportWizard 布局与设备", () => {
     expect(within(list).getByText("IMG_0010.JPG")).toBeInTheDocument();
     expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 2");
     expect(deviceFilesMock).toHaveBeenCalledWith("E:");
+  });
+
+  it("设备列表：多设备行可点切换，信息卡与中栏清单随选中切换", async () => {
+    seedSession(); // E:(volume, 4 文件) + MTP:CAM(mtp, 2 文件)；sourceFiles 只 seed 了 E:
+    deviceFilesMock.mockResolvedValue([
+      { id: "0", relPath: "DCIM/B.JPG", size: 10, mtime: "2026-01-01T00:00:00Z" },
+      { id: "1", relPath: "DCIM/C.JPG", size: 20, mtime: "2026-01-01T00:00:01Z" },
+    ]);
+    const user = userEvent.setup();
+    renderWizard();
+
+    // 列表两行：E: 默认选中；徽标显示文件总数
+    const rows = await screen.findAllByTestId("wizard-device-item");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAttribute("data-device-id", "E:");
+    expect(rows[0]).toHaveAttribute("data-selected", "true");
+    expect(rows[0]).toHaveTextContent("SanDisk 64G");
+    expect(rows[0]).toHaveTextContent("4 文件");
+    expect(rows[1]).toHaveAttribute("data-device-id", "MTP:CAM");
+    expect(rows[1]).toHaveAttribute("data-selected", "false");
+    expect(rows[1]).toHaveTextContent("2 文件");
+
+    // 点击 MTP 行：选中态切换、信息卡跟随（相机）、中栏随切换重新拉取（device_files(MTP:CAM)）
+    await user.click(rows[1]);
+    const mtpRow = screen
+      .getAllByTestId("wizard-device-item")
+      .find((el) => el.getAttribute("data-device-id") === "MTP:CAM");
+    expect(mtpRow).toHaveAttribute("data-selected", "true");
+    const info = await screen.findByTestId("wizard-device-info");
+    expect(info).toHaveTextContent("相机");
+    await waitFor(() => expect(deviceFilesMock).toHaveBeenCalledWith("MTP:CAM"));
+    const list = await screen.findByTestId("wizard-file-list");
+    expect(await within(list).findByText("B.JPG")).toBeInTheDocument();
+
+    // 切回 E:（清单已缓存，不重复拉取）
+    await user.click(screen.getAllByTestId("wizard-device-item")[0]);
+    expect(await screen.findByTestId("wizard-device-info")).toHaveTextContent("读卡器");
+    await within(await screen.findByTestId("wizard-file-list")).findByText("IMG_0001.CR3");
+    expect(deviceFilesMock).toHaveBeenCalledTimes(1); // 仅 MTP:CAM 拉过一次
   });
 });
 
@@ -501,6 +553,36 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(node?.getAttribute("data-selected")).toBe("true");
   });
 
+  it("修复回归：设备在场 + URL device 值失效时点文件夹仍能选中（显式选中优先于回落）", async () => {
+    // 复现真机「设备在场时点文件系统文件夹无反应」：
+    // 根因是 selectedId 只认 URL——URL 读回值变形/写歪时 some() 匹配失败，
+    // 回落 devices[0]（在场旧设备），点文件夹表现为何都没发生。
+    // 此处用「无效 ?device= 值」模拟 URL 失效：显式选中必须优先生效。
+    seedSession();
+    const user = userEvent.setup();
+    listMock.mockResolvedValue([{ name: "照片", path: "D:\\照片", hasSubdirs: false }]);
+    scanMock.mockResolvedValue(folderSnapshot("FOLDER:D:\\照片", "照片"));
+
+    renderWizard("?device=BROKEN"); // URL 值不在设备表 → 无显式选中时回落 devices[0]=E:
+    await user.click(await screen.findByRole("button", { name: "照片" }));
+
+    // 文件夹被显式选中：列表行高亮 FOLDER 设备而非回落 E:
+    const folderRow = await waitFor(() => {
+      const row = screen
+        .getAllByTestId("wizard-device-item")
+        .find((el) => el.getAttribute("data-device-id") === "FOLDER:D:\\照片");
+      expect(row).toBeDefined();
+      return row!;
+    });
+    expect(folderRow).toHaveAttribute("data-selected", "true");
+    expect(screen.getByTestId("wizard-device-info")).toHaveTextContent("本地文件夹");
+    // 树节点同步高亮
+    const node = screen
+      .getAllByTestId("wizard-fs-node")
+      .find((el) => el.getAttribute("data-path") === "D:\\照片");
+    expect(node?.getAttribute("data-selected")).toBe("true");
+  });
+
   it("浏览…选目录等价于选中该文件夹（openDialog→folderScan 链路）", async () => {
     seedSession();
     const user = userEvent.setup();
@@ -514,11 +596,18 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
     const info = await screen.findByTestId("wizard-device-info");
     expect(info).toHaveTextContent("本地文件夹");
-    // 选中源切到文件夹（下拉框当前值为 FOLDER: id）
-    expect(screen.getByLabelText("选择设备")).toHaveValue("FOLDER:D:\\老照片");
+    // 选中源切到文件夹（设备列表行高亮切到 FOLDER: 设备）
+    const folderRow = screen
+      .getAllByTestId("wizard-device-item")
+      .find((el) => el.getAttribute("data-device-id") === "FOLDER:D:\\老照片");
+    expect(folderRow).toHaveAttribute("data-selected", "true");
+    const eRow = screen
+      .getAllByTestId("wizard-device-item")
+      .find((el) => el.getAttribute("data-device-id") === "E:");
+    expect(eRow).toHaveAttribute("data-selected", "false");
   });
 
-  it("folderScan 失败（IPC 不可用）时静默保持原源", async () => {
+  it("folderScan 失败（IPC 不可用）时保持原源并给出红字提示", async () => {
     seedSession();
     const user = userEvent.setup();
     openMock.mockResolvedValue("D:\\老照片");
@@ -531,6 +620,9 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(useImportStore.getState().devices).toHaveLength(2);
     const info = screen.getByTestId("wizard-device-info");
     expect(info).toHaveTextContent("读卡器");
+    // 失败不再静默：中栏一行红字（含目录名），选中其他源后清除
+    const error = screen.getByTestId("wizard-source-error");
+    expect(error).toHaveTextContent("D:\\老照片");
   });
 });
 
@@ -540,7 +632,11 @@ describe("最近使用", () => {
     const user = userEvent.setup();
     renderWizard("?device=E:");
 
-    await user.selectOptions(await screen.findByLabelText("选择设备"), "MTP:CAM");
+    // 设备列表点击 MTP 行 = 选中该设备
+    const mtpRow = (await screen.findAllByTestId("wizard-device-item")).find(
+      (el) => el.getAttribute("data-device-id") === "MTP:CAM",
+    );
+    await user.click(mtpRow!);
 
     const recent = await screen.findByTestId("wizard-recent");
     expect(recent).toHaveTextContent("EOS R5");
@@ -550,7 +646,10 @@ describe("最近使用", () => {
     expect(stored[0]?.id).toBe("MTP:CAM");
 
     // 切回 E: 后，从最近使用重选相机
-    await user.selectOptions(screen.getByLabelText("选择设备"), "E:");
+    const eRow = screen
+      .getAllByTestId("wizard-device-item")
+      .find((el) => el.getAttribute("data-device-id") === "E:");
+    await user.click(eRow!);
     await user.click(within(recent).getByText("EOS R5"));
     expect(await screen.findByTestId("wizard-device-info")).toHaveTextContent("相机");
   });
@@ -669,20 +768,27 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
   });
 
-  it("volume 源 photo 走 asset 协议：src = convertFileSrc(设备id/relPath)；RAW/视频无 img", async () => {
+  it("M2 缩略图：photo 走 thumb_get(256)→convertFileSrc(小图路径)；RAW/视频不调 thumb_get", async () => {
     seedSession();
-    convertMock.mockImplementation((p: string) => `asset://${p}`);
-    renderWizard("?device=E:");
     const user = userEvent.setup();
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockImplementation(async (path: string) =>
+      path === "E:/DCIM/101CANON/IMG_0003.JPG" ? "C:\\thumbCache\\0003_256.jpg" : null,
+    );
+    renderWizard("?device=E:");
 
     await user.click(await screen.findByTestId("wizard-view-grid"));
     const img = await screen.findByRole("img", { name: "IMG_0003.JPG" });
-    expect(img).toHaveAttribute("src", "asset://E:/DCIM/101CANON/IMG_0003.JPG");
-    expect(convertMock).toHaveBeenCalledWith("E:/DCIM/101CANON/IMG_0003.JPG");
+    // img src = asset 协议的后端缩略图文件路径（不再解码原图）
+    expect(img).toHaveAttribute("src", "asset://C:\\thumbCache\\0003_256.jpg");
+    expect(thumbMock).toHaveBeenCalledWith("E:/DCIM/101CANON/IMG_0003.JPG", 256);
+    expect(convertMock).toHaveBeenCalledWith("C:\\thumbCache\\0003_256.jpg");
+    // RAW/视频不请求缩略图（后端返回 null 的语义在前端直接短路）
+    expect(thumbMock).not.toHaveBeenCalledWith(expect.stringContaining("IMG_0001.CR3"), 256);
     expect(screen.queryByRole("img", { name: "IMG_0001.CR3" })).not.toBeInTheDocument();
   });
 
-  it("folder 源 absPath = id 去 FOLDER: 前缀 + / + relPath", async () => {
+  it("folder 源 absPath = id 去 FOLDER: 前缀 + / + relPath（作为 thumb_get 入参）", async () => {
     useImportStore.setState({
       devices: [folderSnapshot()],
       sourceFiles: {
@@ -692,37 +798,71 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
       },
     });
     convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockResolvedValue("C:\\thumbCache\\a_256.jpg");
     renderWizard();
     const user = userEvent.setup();
 
     await user.click(await screen.findByTestId("wizard-view-grid"));
-    expect(convertMock).toHaveBeenCalledWith("D:\\老照片/DCIM/A.JPG");
+    expect(thumbMock).toHaveBeenCalledWith("D:\\老照片/DCIM/A.JPG", 256);
     expect(await screen.findByRole("img", { name: "A.JPG" })).toHaveAttribute(
       "src",
-      "asset://D:\\老照片/DCIM/A.JPG",
+      "asset://C:\\thumbCache\\a_256.jpg",
     );
   });
 
-  it("MTP 源无文件系统路径：photo 恒占位、不调 convertFileSrc", async () => {
+  it("MTP 源无文件系统路径：photo 恒占位、不调 thumb_get", async () => {
     useImportStore.setState({
       devices: [mtpDevice()],
       sourceFiles: {
         "MTP:CAM": [{ path: "DCIM/B.JPG", dir: "DCIM", name: "B.JPG", size: 10, kind: "photo" }],
       },
     });
-    convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderWizard("?device=MTP:CAM");
     const user = userEvent.setup();
 
     await user.click(await screen.findByTestId("wizard-view-grid"));
-    expect(convertMock).not.toHaveBeenCalled();
+    expect(thumbMock).not.toHaveBeenCalled();
     const grid = await screen.findByTestId("wizard-file-grid");
     expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
+  it("thumb_get 返回 null（后端无缩略图/RAW）：静默占位不崩溃", async () => {
+    seedSession();
+    thumbMock.mockResolvedValue(null);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    await screen.findByTestId("wizard-file-grid");
+    await waitFor(() => expect(thumbMock).toHaveBeenCalled());
+    const grid = screen.getByTestId("wizard-file-grid");
+    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("会话缓存：同 absPath 只调一次 thumb_get（视图切换复用不重复 IPC）", async () => {
+    seedSession();
+    thumbMock.mockResolvedValue("C:\\thumbCache\\x_256.jpg");
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    // 进网格 → 回列表 → 再进网格：IMG_0003 的 thumb_get 只调一次
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    await screen.findByRole("img", { name: "IMG_0003.JPG" });
+    await user.click(screen.getByTestId("wizard-view-list"));
+    await screen.findByTestId("wizard-file-list");
+    await user.click(screen.getByTestId("wizard-view-grid"));
+    await screen.findByRole("img", { name: "IMG_0003.JPG" });
+
+    const calls = thumbMock.mock.calls.filter(([p]) => p === "E:/DCIM/101CANON/IMG_0003.JPG");
+    expect(calls).toHaveLength(1);
+  });
+
   it("convertFileSrc 抛错时静默占位不崩溃", async () => {
     seedSession();
+    thumbMock.mockResolvedValue("C:\\thumbCache\\bad.jpg");
     convertMock.mockImplementation(() => {
       throw new Error("no tauri internals");
     });

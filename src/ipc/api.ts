@@ -329,6 +329,16 @@ export async function cleanApply(jobId: number): Promise<CleanResultDto | null> 
   }
 }
 
+/** 取后端缓存缩略图文件路径（JPG/PNG 等可生成；RAW/视频返回 null）；命令失败静默 null。
+ *  @param size 期望边长（px），如 256；实际以缓存档位就近为准 */
+export async function thumbGet(path: string, size: number): Promise<string | null> {
+  try {
+    return await ipc<string | null>("thumb_get", { path, size });
+  } catch {
+    return null;
+  }
+}
+
 // --- 事件订阅 ----------------------------------------------------------------
 
 /**
