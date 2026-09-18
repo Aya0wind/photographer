@@ -29,6 +29,31 @@ body {
   user-select: none;
 }
 
+/* 全局滚动条主题化（WebView2=Chromium）：8px 窄条、thumb=edge 色、hover 提亮
+   至 text-muted，track 透明——一处全局规则覆盖树/清单/任务/日志/设置全部容器 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-edge);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 主滚动容器：预留滚动条槽位，避免滚动条出现/消失时内容跳动 */
+.sp-scroll {
+  scrollbar-gutter: stable;
+}
+
 /* 当前文件名跑马灯（任务中心）：仅文本溢出时由组件挂上 sp-marquee-track，
    双份内容 + translateX(-50%) 无缝循环，纯合成层动画 */
 @keyframes sp-marquee {

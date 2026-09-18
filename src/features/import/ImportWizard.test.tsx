@@ -6,7 +6,12 @@ import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
-import ImportWizard, { VIEW_MODE_STORAGE_KEY } from "./ImportWizard";
+import ImportWizard, {
+  COL_WIDTHS_KEY,
+  PANEL_COLLAPSE_KEY,
+  TILE_SIZE_KEY,
+  VIEW_MODE_STORAGE_KEY,
+} from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { deviceFiles, folderScan, fsListDirs, importStart, type ImportPlan } from "@/ipc/api";
@@ -143,6 +148,9 @@ beforeEach(() => {
   deviceFilesMock.mockReset().mockResolvedValue(null);
   convertMock.mockReset().mockReturnValue("");
   localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
+  localStorage.removeItem(PANEL_COLLAPSE_KEY);
+  localStorage.removeItem(COL_WIDTHS_KEY);
+  localStorage.removeItem(TILE_SIZE_KEY);
 });
 
 describe("ImportWizard 布局与设备", () => {
@@ -601,5 +609,147 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     const grid = await screen.findByTestId("wizard-file-grid");
     expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
+  });
+});
+
+describe("左栏分区折叠（LR 式）", () => {
+  it("点击标题行折叠/展开设备区并写入 localStorage", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    const toggle = await screen.findByTestId("wizard-section-toggle-devices");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("wizard-device-info")).toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(PANEL_COLLAPSE_KEY) ?? "{}")).toEqual({
+      devices: true,
+      fs: false,
+      recent: false,
+    });
+
+    await user.click(toggle);
+    expect(await screen.findByTestId("wizard-device-info")).toBeInTheDocument();
+  });
+
+  it("折叠状态跨挂载恢复；其他分区不受影响", async () => {
+    seedSession();
+    localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify({ fs: true }));
+    renderWizard("?device=E:");
+
+    expect(screen.getByTestId("wizard-section-toggle-fs")).toHaveAttribute("aria-expanded", "false");
+    // 折叠时文件系统树内容不渲染（默认后端不可用文案也不出现）
+    expect(screen.queryByText(/目录树不可用/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("wizard-section-toggle-devices")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("wizard-device-info")).toBeInTheDocument();
+  });
+});
+
+describe("三栏列宽拖动", () => {
+  it("默认 270/320；拖左条加宽左栏并持久化，中列 1fr 自动补偿", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-file-list");
+
+    const cols = screen.getByTestId("wizard-columns");
+    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 320px");
+
+    const handle = screen.getByTestId("wizard-col-handle-left");
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 300 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 340 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+
+    expect(cols.style.gridTemplateColumns).toBe("310px 6px minmax(0, 1fr) 6px 320px");
+    expect(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) ?? "{}")).toEqual({
+      left: 310,
+      right: 320,
+    });
+  });
+
+  it("拖右条右拖变窄并钳制 260；双击分隔条恢复默认", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-file-list");
+    const cols = screen.getByTestId("wizard-columns");
+
+    const handle = screen.getByTestId("wizard-col-handle-right");
+    // 右拖 200px：右栏 320-200=120 → 钳制到下限 260（中列自动变宽）
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 300 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 260px");
+
+    fireEvent.dblClick(handle);
+    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 320px");
+    expect(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) ?? "{}")).toEqual({
+      left: 270,
+      right: 320,
+    });
+  });
+
+  it("左栏钳制 200–400", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-file-list");
+    const cols = screen.getByTestId("wizard-columns");
+
+    const handle = screen.getByTestId("wizard-col-handle-left");
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 0 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: -500 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(cols.style.gridTemplateColumns).toBe("200px 6px minmax(0, 1fr) 6px 320px");
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 0 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 999 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    expect(cols.style.gridTemplateColumns).toBe("400px 6px minmax(0, 1fr) 6px 320px");
+  });
+});
+
+describe("缩略图档位", () => {
+  it("默认标准 120px；大档 150；紧凑档 100 且信息条只显文件名", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    const grid = await screen.findByTestId("wizard-file-grid");
+    const firstTile = within(grid).getAllByTestId("wizard-tile")[0];
+    expect(firstTile.style.width).toBe("120px");
+    expect(firstTile).toHaveTextContent("MB"); // 标准档信息条显示大小
+
+    await user.click(screen.getByTestId("wizard-tile-size-large"));
+    expect(within(grid).getAllByTestId("wizard-tile")[0].style.width).toBe("150px");
+    expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("large");
+
+    await user.click(screen.getByTestId("wizard-tile-size-compact"));
+    const tile = within(grid).getAllByTestId("wizard-tile")[0];
+    expect(tile.style.width).toBe("100px");
+    expect(tile).not.toHaveTextContent("MB"); // 紧凑档只显文件名
+    expect(tile).toHaveTextContent("IMG_0001.CR3");
+    expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("compact");
+  });
+});
+
+describe("全局滚动条主题", () => {
+  it("app.css 含 webkit 滚动条规则与 sp-scroll；滚动容器挂 sp-scroll", async () => {
+    // vitest 把 CSS import 转译为空模块，测试运行于 Node 直接读源文件断言规则存在
+    // @ts-ignore 项目未安装 @types/node，仅测试内使用
+    const { readFileSync } = await import("node:fs");
+    // @ts-ignore 同上
+    const { cwd } = await import("node:process");
+    const css = readFileSync(`${cwd()}/src/styles/app.css`, "utf-8") as string;
+    expect(css).toContain("::-webkit-scrollbar-thumb");
+    expect(css).toContain("::-webkit-scrollbar-thumb:hover");
+    expect(css).toContain("scrollbar-gutter: stable");
+
+    seedSession();
+    renderWizard("?device=E:");
+    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-list-scroll").className).toContain("sp-scroll");
+    expect(screen.getByTestId("wizard-tree").className).toContain("sp-scroll");
   });
 });
