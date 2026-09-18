@@ -96,16 +96,9 @@ export default function Sidebar() {
 
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-edge bg-surface">
-      {/* 应用标识 */}
-      <div className="flex h-14 items-center gap-2.5 px-5">
-        <span className="h-2.5 w-2.5 rounded-full bg-accent" aria-hidden="true" />
-        <span className="text-[15px] font-semibold tracking-wide text-text-primary">
-          Smart Photo
-        </span>
-      </div>
-
+      {/* 品牌区已让位整窗顶部标题栏；导航从顶部开始 */}
       {/* 主导航 */}
-      <nav className="mt-2 flex flex-col gap-0.5 px-2" aria-label="primary">
+      <nav className="mt-3 flex flex-col gap-0.5 px-2" aria-label="primary">
         {NAV_ITEMS.map((item) => (
           <NavLink
             key={item.to}

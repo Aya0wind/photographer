@@ -1,112 +1,409 @@
+import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 
-import PagePlaceholder from "@/app/components/PagePlaceholder";
 import { importRootOf } from "@/features/onboarding/onboardingConfig";
-import { useSettingsStore } from "@/stores/settingsStore";
+import NewLibraryDialog from "@/features/library/NewLibraryDialog";
+import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
+
+/**
+ * 设置页（经典工业风选项卡）：常规 / 导入 / 库 / AI 四个水平 tab
+ * （下划线选中、紧凑行高）。每项行式布局——标签（左）+ 控件（右）+
+ * 说明小字（下一行），分组用 uppercase 小节标题，不用卡片框。
+ * 修改即存：settingsStore.update + save（IPC 失败本地仍生效）。
+ * 「库」tab 保留库管理能力（只读信息 + 列表 + 激活标记 + 新建/打开入口），
+ * 新建库走可复用 NewLibraryDialog（顶部菜单共用）。
+ */
+
+type SettingsTab = "general" | "import" | "libraries" | "ai";
+
+const TABS: { key: SettingsTab; labelKey: string }[] = [
+  { key: "general", labelKey: "settings.tab.general" },
+  { key: "import", labelKey: "settings.tab.import" },
+  { key: "libraries", labelKey: "settings.tab.libraries" },
+  { key: "ai", labelKey: "settings.tab.ai" },
+];
+
+/** 修改即存：本地合并 + 持久化（失败静默，本地已更新） */
+function commit(partial: DeepPartial<Settings>): void {
+  const { update, save } = useSettingsStore.getState();
+  update(partial);
+  void save(useSettingsStore.getState().settings);
+}
+
+function SectionTitle({ children }: { children: ReactNode }) {
+  return (
+    <h3 className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+      {children}
+    </h3>
+  );
+}
+
+/** 行式设置项：标签（左）+ 控件（右）+ 说明小字（下一行），行高约 36px */
+function SettingRow({
+  label,
+  desc,
+  children,
+  testId,
+}: {
+  label: ReactNode;
+  desc?: string;
+  children: ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div
+      className="flex min-h-[36px] items-center justify-between gap-8 border-b border-edge/40 py-2"
+      data-testid={testId}
+    >
+      <div className="min-w-0">
+        <div className="text-xs text-text-primary">{label}</div>
+        {desc && <div className="mt-0.5 text-[11px] leading-relaxed text-text-muted">{desc}</div>}
+      </div>
+      <div className="flex shrink-0 items-center">{children}</div>
+    </div>
+  );
+}
+
+function Toggle({
+  checked,
+  disabled = false,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+}) {
+  return (
+    <input
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.checked)}
+      aria-label={label}
+      className="h-3.5 w-3.5 accent-[#F0A83C] disabled:opacity-40"
+    />
+  );
+}
+
+const SELECT_CLASS =
+  "rounded-md border border-edge bg-bg px-2 py-1 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40";
 
 function InfoRow({ label, value, mono = true }: { label: string; value: string | null; mono?: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-edge pt-4 text-left">
-      <span className="shrink-0 text-sm text-text-secondary">{label}</span>
+    <div className="flex items-center justify-between gap-4 py-1.5 text-left">
+      <span className="shrink-0 text-xs text-text-secondary">{label}</span>
       <span
         className={`truncate text-xs ${mono ? "font-mono" : ""} ${
           value ? "text-text-primary" : "text-text-muted"
         }`}
         title={value ?? ""}
       >
-        {value}
+        {value ?? "—"}
       </span>
     </div>
   );
 }
 
-/**
- * 设置页·库管理区（达芬奇式）：当前库信息只读（整理规则是库属性，在新建链/选择器修改）
- * + 库列表展示（激活高亮；切换统一走库选择器，不在原地切换）+「前往库选择器」入口。
- */
 export default function SettingsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const settings = useSettingsStore((s) => s.settings);
+  const [tab, setTab] = useState<SettingsTab>("general");
+  const [newLibOpen, setNewLibOpen] = useState(false);
+
   const library = settings.activeLibraryId
     ? settings.libraries.find((lib) => lib.id === settings.activeLibraryId) ?? null
     : null;
 
   return (
-    <PagePlaceholder titleKey="pages.settings.title" descKey="pages.settings.desc">
-      <div className="mt-6 flex w-full max-w-xl flex-col gap-5 text-center">
-        {/* 标题行 + 前往库选择器 */}
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-text-secondary">
-            {t("settings.libraries.title")}
-          </h2>
-          <button
-            type="button"
-            onClick={() => navigate("/library-picker")}
-            className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="settings-goto-picker"
-          >
-            {t("settings.libraries.goPicker")}
-          </button>
-        </div>
+    <div className="flex h-full flex-col">
+      <header className="flex h-12 shrink-0 items-center border-b border-edge px-4">
+        <h1 className="text-sm font-semibold text-text-primary">{t("pages.settings.title")}</h1>
+      </header>
 
-        {/* 当前库信息（只读） */}
-        <div className="flex flex-col gap-4" data-testid="settings-current-library">
-          <InfoRow
-            label={t("pages.settings.currentLibrary")}
-            value={library?.name ?? null}
-            mono={false}
-          />
-          <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
-          <InfoRow label={t("pages.settings.dbDir")} value={library?.dbDir ?? null} />
-          <InfoRow
-            label={t("settings.libraries.importRoot")}
-            value={
-              library ? importRootOf(library.photoRoot, library.importSubdir || "") || library.photoRoot : null
-            }
-          />
-          <InfoRow
-            label={t("settings.libraries.template")}
-            value={library?.dirTemplate ?? null}
-          />
-        </div>
-
-        {/* 库列表：仅展示 + 激活高亮（切换走选择器） */}
-        {settings.libraries.length > 0 && (
-          <div className="flex flex-col gap-1.5" data-testid="settings-library-list">
-            {settings.libraries.map((lib) => {
-              const isActive = lib.id === settings.activeLibraryId;
-              return (
-                <div
-                  key={lib.id}
-                  className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left ${
-                    isActive ? "border-accent bg-accent/10" : "border-edge"
-                  }`}
-                  data-testid="settings-library-item"
-                  data-active={isActive}
-                >
-                  <span className="truncate text-sm text-text-primary" title={lib.name}>
-                    {lib.name}
-                  </span>
-                  {isActive ? (
-                    <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">
-                      {t("settings.libraries.active")}
-                    </span>
-                  ) : (
-                    <span
-                      className="shrink-0 truncate font-mono text-[11px] text-text-muted"
-                      title={lib.dbDir}
-                    >
-                      {lib.dbDir}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+      {/* 水平选项卡行（下划线选中） */}
+      <div
+        role="tablist"
+        aria-label={t("pages.settings.title")}
+        className="flex h-9 shrink-0 items-stretch gap-1 border-b border-edge px-4"
+      >
+        {TABS.map((item) => {
+          const active = tab === item.key;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(item.key)}
+              className={`border-b-2 px-3 text-xs transition-colors ${
+                active
+                  ? "border-accent text-accent"
+                  : "border-transparent text-text-secondary hover:text-text-primary"
+              }`}
+              data-testid={`settings-tab-${item.key}`}
+            >
+              {t(item.labelKey)}
+            </button>
+          );
+        })}
       </div>
-    </PagePlaceholder>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-5">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-2.5">
+          {tab === "general" && (
+            <>
+              <SectionTitle>{t("settings.section.system")}</SectionTitle>
+              <SettingRow
+                label={t("settings.closeBehavior")}
+                desc={t("settings.closeBehaviorDesc")}
+                testId="settings-row-close-behavior"
+              >
+                <div
+                  role="radiogroup"
+                  aria-label={t("settings.closeBehavior")}
+                  className="flex rounded-md border border-edge bg-bg p-0.5"
+                  data-testid="settings-close-behavior"
+                >
+                  {(
+                    [
+                      { value: true, labelKey: "settings.closeToTray" },
+                      { value: false, labelKey: "settings.quitOnClose" },
+                    ] as const
+                  ).map((option) => (
+                    <button
+                      key={option.labelKey}
+                      type="button"
+                      role="radio"
+                      aria-checked={settings.system.closeToTray === option.value}
+                      onClick={() => commit({ system: { closeToTray: option.value } })}
+                      className={`rounded px-2.5 py-1 text-[11px] transition-colors ${
+                        settings.system.closeToTray === option.value
+                          ? "bg-accent text-black"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                    >
+                      {t(option.labelKey)}
+                    </button>
+                  ))}
+                </div>
+              </SettingRow>
+              <SettingRow label={t("settings.launchAtLogin")} desc={t("settings.launchAtLoginDesc")}>
+                <Toggle
+                  checked={settings.system.launchAtLogin}
+                  label={t("settings.launchAtLogin")}
+                  onChange={(next) => commit({ system: { launchAtLogin: next } })}
+                />
+              </SettingRow>
+              <SettingRow label={t("settings.language")} desc={t("settings.languageDesc")}>
+                <select
+                  disabled
+                  value={settings.system.language}
+                  aria-label={t("settings.language")}
+                  className={SELECT_CLASS}
+                  data-testid="settings-language"
+                >
+                  <option value="zh">{t("settings.languageZh")}</option>
+                </select>
+              </SettingRow>
+            </>
+          )}
+
+          {tab === "import" && (
+            <>
+              <SectionTitle>{t("settings.section.import")}</SectionTitle>
+              <SettingRow label={t("settings.promptOnDevice")} desc={t("settings.promptOnDeviceDesc")}>
+                <Toggle
+                  checked={settings.import.promptOnDevice}
+                  label={t("settings.promptOnDevice")}
+                  onChange={(next) => commit({ import: { promptOnDevice: next } })}
+                />
+              </SettingRow>
+              <SettingRow label={t("wizard.skipImported")}>
+                <Toggle
+                  checked={settings.import.skipImported}
+                  label={t("wizard.skipImported")}
+                  onChange={(next) => commit({ import: { skipImported: next } })}
+                />
+              </SettingRow>
+              <SettingRow label={t("wizard.duplicatePolicy")}>
+                <select
+                  value={settings.import.duplicatePolicy}
+                  onChange={(e) =>
+                    commit({
+                      import: {
+                        duplicatePolicy: e.target.value as Settings["import"]["duplicatePolicy"],
+                      },
+                    })
+                  }
+                  aria-label={t("wizard.duplicatePolicy")}
+                  className={SELECT_CLASS}
+                  data-testid="settings-duplicate-policy"
+                >
+                  <option value="skip">{t("onboarding.scheme.dup.skip")}</option>
+                  <option value="rename">{t("onboarding.scheme.dup.rename")}</option>
+                  <option value="ask">{t("onboarding.scheme.dup.ask")}</option>
+                </select>
+              </SettingRow>
+              <SettingRow label={t("onboarding.scheme.notify")}>
+                <Toggle
+                  checked={settings.import.notifyMilestones}
+                  label={t("onboarding.scheme.notify")}
+                  onChange={(next) => commit({ import: { notifyMilestones: next } })}
+                />
+              </SettingRow>
+              <SettingRow label={t("settings.dualDest")} desc={t("settings.dualDestDesc")}>
+                <span className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-text-muted">
+                  {t("settings.comingSoon")}
+                </span>
+              </SettingRow>
+            </>
+          )}
+
+          {tab === "libraries" && (
+            <>
+              <SectionTitle>{t("settings.section.library")}</SectionTitle>
+
+              {/* 当前库信息（只读）：整理规则是库属性，在新建链/选择器修改 */}
+              <div className="flex flex-col" data-testid="settings-current-library">
+                <InfoRow
+                  label={t("pages.settings.currentLibrary")}
+                  value={library?.name ?? null}
+                  mono={false}
+                />
+                <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
+                <InfoRow label={t("pages.settings.dbDir")} value={library?.dbDir ?? null} />
+                <InfoRow
+                  label={t("settings.libraries.importRoot")}
+                  value={
+                    library
+                      ? importRootOf(library.photoRoot, library.importSubdir || "") ||
+                        library.photoRoot
+                      : null
+                  }
+                />
+                <InfoRow label={t("settings.libraries.template")} value={library?.dirTemplate ?? null} />
+              </div>
+
+              {/* 新建库（复用对话框）+ 打开其他库（选择器） */}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setNewLibOpen(true)}
+                  className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
+                  data-testid="settings-new-library"
+                >
+                  {t("picker.newLibrary")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate("/library-picker")}
+                  className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                  data-testid="settings-goto-picker"
+                >
+                  {t("settings.libraries.goPicker")}
+                </button>
+              </div>
+
+              {/* 库列表：仅展示 + 激活高亮（切换走选择器，不在原地切换） */}
+              {settings.libraries.length > 0 && (
+                <div className="mt-3 flex flex-col gap-1.5" data-testid="settings-library-list">
+                  {settings.libraries.map((lib) => {
+                    const isActive = lib.id === settings.activeLibraryId;
+                    return (
+                      <div
+                        key={lib.id}
+                        className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left ${
+                          isActive ? "border-accent bg-accent/10" : "border-edge"
+                        }`}
+                        data-testid="settings-library-item"
+                        data-active={isActive}
+                      >
+                        <span className="truncate text-sm text-text-primary" title={lib.name}>
+                          {lib.name}
+                        </span>
+                        {isActive ? (
+                          <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">
+                            {t("settings.libraries.active")}
+                          </span>
+                        ) : (
+                          <span
+                            className="shrink-0 truncate font-mono text-[11px] text-text-muted"
+                            title={lib.dbDir}
+                          >
+                            {lib.dbDir}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === "ai" && (
+            <>
+              <p className="text-[11px] leading-relaxed text-text-muted">{t("settings.ai.note")}</p>
+              <SectionTitle>{t("settings.section.ai")}</SectionTitle>
+              <SettingRow label={t("settings.ai.semantic")} desc={t("settings.ai.semanticDesc")}>
+                <Toggle
+                  checked={settings.ai.enableClip}
+                  disabled
+                  label={t("settings.ai.semantic")}
+                  onChange={() => {}}
+                />
+              </SettingRow>
+              <SettingRow label={t("settings.ai.face")}>
+                <Toggle
+                  checked={settings.ai.enableFace}
+                  disabled
+                  label={t("settings.ai.face")}
+                  onChange={() => {}}
+                />
+              </SettingRow>
+              <SettingRow label={t("settings.ai.scene")}>
+                <Toggle
+                  checked={settings.ai.enableSceneTags}
+                  disabled
+                  label={t("settings.ai.scene")}
+                  onChange={() => {}}
+                />
+              </SettingRow>
+              <SettingRow label={t("settings.ai.schedule")}>
+                <select
+                  disabled
+                  value={settings.ai.indexSchedule}
+                  aria-label={t("settings.ai.schedule")}
+                  className={SELECT_CLASS}
+                >
+                  <option value="idleOnly">{t("settings.ai.schedule.idleOnly")}</option>
+                  <option value="afterImport">{t("settings.ai.schedule.afterImport")}</option>
+                  <option value="manual">{t("settings.ai.schedule.manual")}</option>
+                </select>
+              </SettingRow>
+              <SettingRow label={t("settings.ai.cpu")}>
+                <span className="font-mono text-xs text-text-muted tabular-nums">
+                  {settings.ai.cpuLimitPercent}%
+                </span>
+              </SettingRow>
+              <SettingRow label={t("settings.ai.gpu")}>
+                <Toggle
+                  checked={settings.ai.useGpu}
+                  disabled
+                  label={t("settings.ai.gpu")}
+                  onChange={() => {}}
+                />
+              </SettingRow>
+            </>
+          )}
+        </div>
+      </div>
+
+      <NewLibraryDialog open={newLibOpen} onClose={() => setNewLibOpen(false)} />
+    </div>
   );
 }

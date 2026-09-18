@@ -74,8 +74,9 @@ describe("Sidebar", () => {
     );
   });
 
-  it("侧栏展示应用标识 Smart Photo", () => {
+  it("品牌区让位顶部标题栏：侧栏不再展示应用标识", () => {
     renderSidebar("/gallery");
-    expect(screen.getByText("Smart Photo")).toBeInTheDocument();
+    // 「Smart Photo」品牌已上移整窗顶部 TitleBar（侧栏单独渲染时不可见）
+    expect(screen.queryByText("Smart Photo")).not.toBeInTheDocument();
   });
 });

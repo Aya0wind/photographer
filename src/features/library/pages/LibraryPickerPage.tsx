@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 
+import TitleBar from "@/app/shell/TitleBar";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
 
 /**
@@ -50,7 +51,10 @@ export default function LibraryPickerPage() {
   if (!loaded) return null;
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-8 bg-bg px-8 font-sans text-text-primary">
+    <div className="flex h-full w-full flex-col bg-bg font-sans text-text-primary">
+      {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
+      <TitleBar />
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-8 overflow-y-auto px-8 py-6">
       <div className="flex flex-col items-center gap-1.5">
         <h1 className="text-2xl font-semibold">{t("picker.title")}</h1>
         <p className="text-sm text-text-muted">{t("picker.subtitle")}</p>
@@ -175,6 +179,7 @@ export default function LibraryPickerPage() {
           </div>
         </>
       )}
+      </div>
     </div>
   );
 }

@@ -156,4 +156,15 @@ describe("LibraryPickerPage（达芬奇式启动首屏）", () => {
     expect(container.querySelector("[data-testid='picker-grid']")).toBeNull();
     expect(screen.queryByTestId("onboarding-probe")).not.toBeInTheDocument();
   });
+
+  it("渲染自绘标题栏（主壳外全屏页：窗口可拖动/控制）", () => {
+    setLibraries([LIB_A], "lib-1");
+    renderPicker();
+
+    expect(screen.getByTestId("titlebar")).toBeInTheDocument();
+    expect(screen.getByTestId("titlebar-drag-region")).toHaveAttribute("data-tauri-drag-region");
+    expect(screen.getByTestId("titlebar-close")).toBeInTheDocument();
+    // 无菜单内容（菜单只在主壳 TitleBar 中）
+    expect(screen.queryByTestId("menubar")).not.toBeInTheDocument();
+  });
 });

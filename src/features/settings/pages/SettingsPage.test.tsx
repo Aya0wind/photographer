@@ -1,8 +1,13 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
+
+// ipc mock：settingsStore.save 断言 payload 用
+vi.mock("@/ipc", () => ({ ipc: vi.fn(async () => undefined) }));
+import { ipc } from "@/ipc";
+const ipcMock = vi.mocked(ipc);
 
 import i18n from "@/i18n";
 import SettingsPage from "./SettingsPage";
@@ -49,17 +54,113 @@ function renderSettingsPage() {
   );
 }
 
+async function switchTab(user: ReturnType<typeof userEvent.setup>, key: string): Promise<void> {
+  await user.click(screen.getByTestId(`settings-tab-${key}`));
+}
+
 beforeEach(() => {
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
     libraryChosen: false,
   });
+  ipcMock.mockClear();
 });
 
-describe("SettingsPage 库管理区", () => {
-  it("无激活库时信息为空，仍有前往选择器入口", () => {
+describe("选项卡", () => {
+  it("四个选项卡；切换渲染对应分组", async () => {
+    const user = userEvent.setup();
     renderSettingsPage();
+
+    for (const label of ["常规", "导入", "库", "AI"] as const) {
+      expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
+    }
+
+    // 默认常规：关闭行为/开机自启/语言
+    expect(screen.getByTestId("settings-row-close-behavior")).toBeInTheDocument();
+    expect(screen.getByLabelText("开机自启")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-language")).toBeDisabled();
+    expect(screen.queryByTestId("settings-current-library")).not.toBeInTheDocument();
+
+    // 导入
+    await switchTab(user, "import");
+    expect(screen.getByLabelText("设备接入弹窗")).toBeInTheDocument();
+    expect(screen.getByLabelText("跳过已导入文件（按内容指纹）")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-duplicate-policy")).toBeInTheDocument();
+    expect(screen.getByText("双目的地导入")).toBeInTheDocument();
+    expect(screen.getByText("即将支持")).toBeInTheDocument();
+
+    // 库
+    await switchTab(user, "libraries");
+    expect(screen.getByTestId("settings-current-library")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
+
+    // AI：M4 前全部禁用但可见
+    await switchTab(user, "ai");
+    expect(screen.getByText(/将在 AI 里程碑开放/)).toBeInTheDocument();
+    expect(screen.getByLabelText("语义搜索")).toBeDisabled();
+    expect(screen.getByLabelText("人脸识别")).toBeDisabled();
+    expect(screen.getByLabelText("GPU 加速")).toBeDisabled();
+  });
+
+  it("常规：关闭行为切换即存（settings_set payload 断言）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+
+    await user.click(screen.getByRole("radio", { name: "退出应用" }));
+
+    expect(useSettingsStore.getState().settings.system.closeToTray).toBe(false);
+    expect(ipcMock).toHaveBeenLastCalledWith(
+      "settings_set",
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          system: expect.objectContaining({ closeToTray: false }),
+        }),
+      }),
+    );
+    // 选中态跟随
+    expect(screen.getByRole("radio", { name: "退出应用" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("导入：开关与查重策略修改即存", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "import");
+
+    await user.click(screen.getByLabelText("设备接入弹窗"));
+    expect(useSettingsStore.getState().settings.import.promptOnDevice).toBe(false);
+    expect(ipcMock).toHaveBeenLastCalledWith(
+      "settings_set",
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          import: expect.objectContaining({ promptOnDevice: false }),
+        }),
+      }),
+    );
+
+    await user.selectOptions(screen.getByTestId("settings-duplicate-policy"), "rename");
+    expect(useSettingsStore.getState().settings.import.duplicatePolicy).toBe("rename");
+  });
+
+  it("开机自启开关修改即存（v1 仅存设置，后端接线生效）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+
+    await user.click(screen.getByLabelText("开机自启"));
+    expect(useSettingsStore.getState().settings.system.launchAtLogin).toBe(true);
+    expect(ipcMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("「库」选项卡（保留库管理能力）", () => {
+  async function openLibraryTab(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await switchTab(user, "libraries");
+  }
+
+  it("无激活库时信息为空，仍有前往选择器入口", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await openLibraryTab(user);
 
     expect(screen.getByText("设置")).toBeInTheDocument();
     expect(screen.queryByText("主库")).not.toBeInTheDocument();
@@ -67,11 +168,13 @@ describe("SettingsPage 库管理区", () => {
     expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
   });
 
-  it("当前库信息只读：名称/照片目录/数据库目录/导入收纳区/模板", () => {
+  it("当前库信息只读：名称/照片目录/数据库目录/导入收纳区/模板", async () => {
     useSettingsStore.setState((s) => ({
       settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
     }));
+    const user = userEvent.setup();
     renderSettingsPage();
+    await openLibraryTab(user);
 
     const current = screen.getByTestId("settings-current-library");
     expect(within(current).getByText("主库")).toBeInTheDocument();
@@ -81,11 +184,13 @@ describe("SettingsPage 库管理区", () => {
     expect(within(current).getByText("{YYYY}/{MM-DD}/{原文件名}")).toBeInTheDocument();
   });
 
-  it("库列表渲染并高亮激活库（切换统一走选择器，不在原地切换）", () => {
+  it("库列表渲染并高亮激活库（切换统一走选择器，不在原地切换）", async () => {
     useSettingsStore.setState((s) => ({
       settings: { ...s.settings, libraries: [LIB_A, LIB_B], activeLibraryId: "lib-1" },
     }));
+    const user = userEvent.setup();
     renderSettingsPage();
+    await openLibraryTab(user);
 
     const items = screen.getAllByTestId("settings-library-item");
     expect(items).toHaveLength(2);
@@ -100,9 +205,25 @@ describe("SettingsPage 库管理区", () => {
   it("「前往库选择器」跳转 /library-picker", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
+    await openLibraryTab(user);
 
     await user.click(screen.getByTestId("settings-goto-picker"));
 
     expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+  });
+
+  it("「新建库」打开与菜单共用的对话框（同一 testid）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await openLibraryTab(user);
+
+    await user.click(screen.getByTestId("settings-new-library"));
+
+    const dialog = await screen.findByTestId("new-library-dialog");
+    expect(within(dialog).getByLabelText("库名称")).toBeInTheDocument();
+    await user.click(within(dialog).getByTestId("new-library-cancel"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("new-library-dialog")).not.toBeInTheDocument(),
+    );
   });
 });

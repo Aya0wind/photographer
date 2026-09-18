@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
+import TitleBar from "@/app/shell/TitleBar";
 import AiStep from "../steps/AiStep";
 import DoneStep from "../steps/DoneStep";
 import ImportSchemeStep from "../steps/ImportSchemeStep";
@@ -138,8 +139,11 @@ export default function OnboardingPage() {
   const isLast = step === STEP_TITLES.length - 1;
 
   return (
-    <div className="flex h-full w-full items-center justify-center bg-bg font-sans text-text-primary">
-      <div className="flex w-full max-w-xl flex-col gap-6 px-8">
+    <div className="flex h-full w-full flex-col bg-bg font-sans text-text-primary">
+      {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
+      <TitleBar />
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-6">
+        <div className="flex w-full max-w-xl flex-col gap-6">
         {/* 标题与步骤指示 */}
         <div className="flex flex-col gap-3">
           <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
@@ -206,6 +210,7 @@ export default function OnboardingPage() {
               {t("common.next")}
             </button>
           )}
+        </div>
         </div>
       </div>
     </div>

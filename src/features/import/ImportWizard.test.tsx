@@ -121,6 +121,14 @@ function TasksProbe() {
   return <div data-testid="tasks-probe">TASKS_PAGE</div>;
 }
 
+function GalleryProbe() {
+  return <div data-testid="gallery-probe">GALLERY_PAGE</div>;
+}
+
+function SettingsProbe() {
+  return <div data-testid="settings-probe">SETTINGS_PAGE</div>;
+}
+
 function renderWizard(query = "") {
   return render(
     <I18nextProvider i18n={i18n}>
@@ -128,6 +136,8 @@ function renderWizard(query = "") {
         <Routes>
           <Route path="/import" element={<ImportWizard />} />
           <Route path="/tasks" element={<TasksProbe />} />
+          <Route path="/gallery" element={<GalleryProbe />} />
+          <Route path="/settings" element={<SettingsProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -269,6 +279,20 @@ describe("方案面板", () => {
     expect(screen.getByTestId("wizard-location-edit")).toBeInTheDocument();
   });
 
+  it("库属性徽标文案为「在设置中修改」，点击跳设置页", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    const badge = await screen.findByTestId("wizard-location-edit");
+    expect(badge).toHaveTextContent("库属性 · 在设置中修改");
+    expect(badge).not.toHaveTextContent("去选择器修改");
+
+    await user.click(badge);
+    expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-location-card")).not.toBeInTheDocument();
+  });
+
   it("无激活库时信息卡显示未选库提示，开始导入禁用", async () => {
     useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
     // 显式清空库（真实 store 跨用例共享，避免残留上一个 seed）
@@ -291,7 +315,7 @@ describe("方案面板", () => {
     expect(screen.getByLabelText("并发流数")).toBeDisabled();
   });
 
-  it("开始导入：按库属性组装 plan、跳转任务中心", async () => {
+  it("开始导入：按库属性组装 plan、成功后回画廊（LR 式后台导入，不跳任务中心）", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -300,7 +324,8 @@ describe("方案面板", () => {
     const startButton = await screen.findByRole("button", { name: "开始导入" });
     await user.click(startButton);
 
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
     expect(startMock).toHaveBeenCalledTimes(1);
     const plan: ImportPlan = startMock.mock.calls[0][0];
     expect(plan).toEqual({
@@ -329,6 +354,7 @@ describe("方案面板", () => {
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("目标目录不能位于源目录内");
     expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
 
     // invoke 不可用（error=null）：通用文案
     startMock.mockResolvedValueOnce({ ok: false, error: null });
@@ -482,9 +508,9 @@ describe("导入模式分段条（LR 式顶部切换）", () => {
     expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0].mode).toBe("move");
+      await user.click(screen.getByRole("button", { name: "开始导入" }));
+      expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+      expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(useImportStore.getState().jobModes[11]).toBe("move");
     // 竞态防护：模式已预挂（sessionStarted 事件先到也能归位）
     expect(useImportStore.getState().pendingJobMode).toBe("move");

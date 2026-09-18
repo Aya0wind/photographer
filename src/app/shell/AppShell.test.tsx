@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import AppShell from "./AppShell";
+import { resetImportStoreForTests, useImportStore } from "@/stores/importStore";
 
 function renderShell(initialPath: string) {
   return render(
@@ -57,5 +58,24 @@ describe("AppShell", () => {
       await screen.findByText("OUTLET_SETTINGS", {}, { timeout: 2000 }),
     ).toBeInTheDocument();
     expect(screen.queryByText("OUTLET_GALLERY")).not.toBeInTheDocument();
+  });
+
+  it("全局导入进度卡随壳挂载：有活跃任务时任意页面可见", async () => {
+    resetImportStoreForTests();
+    renderShell("/gallery");
+
+    expect(screen.queryByTestId("import-card")).not.toBeInTheDocument();
+    act(() => {
+      useImportStore.getState().handleAppEvent({
+        type: "importSessionStarted",
+        jobId: 7,
+        totalFiles: 10,
+        totalBytes: 1000,
+      });
+    });
+
+    const card = await screen.findByTestId("import-card");
+    expect(card).toBeInTheDocument();
+    expect(within(card).getByText("复制任务 #7")).toBeInTheDocument();
   });
 });

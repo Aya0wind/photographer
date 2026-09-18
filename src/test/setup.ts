@@ -22,6 +22,18 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: vi.fn().mockResolvedValue(undefined),
 }));
 
+// 窗口控制（自绘标题栏）：三钮/最大化状态/resize 订阅。
+// 各测试可用 vi.mocked(getCurrentWindow).mockReturnValue(...) 覆写为可控实例。
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: vi.fn(() => ({
+    minimize: vi.fn(),
+    toggleMaximize: vi.fn(),
+    close: vi.fn(),
+    isMaximized: vi.fn().mockResolvedValue(false),
+    onResized: vi.fn().mockResolvedValue(() => {}),
+  })),
+}));
+
 // --- jsdom 缺失的浏览器 API stub ---------------------------------------------
 
 if (typeof window !== "undefined") {

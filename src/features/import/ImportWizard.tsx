@@ -1252,7 +1252,8 @@ export default function ImportWizard() {
       },
     });
     void save(useSettingsStore.getState().settings);
-    navigate("/tasks");
+    // LR 式后台导入：点了导入立即回画廊继续浏览，进度由全局右下角进度卡常驻呈现
+    navigate("/gallery");
   }
 
   return (
@@ -1689,7 +1690,7 @@ export default function ImportWizard() {
             </div>
           </div>
 
-          {/* 导入位置（库属性，只读）：目标根/模板随库走，去设置或选择器修改 */}
+          {/* 导入位置（库属性，只读）：目标根/模板随库走，在设置中修改 */}
           <div className="mt-4 flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-text-secondary">
@@ -1697,7 +1698,7 @@ export default function ImportWizard() {
               </span>
               <button
                 type="button"
-                onClick={() => navigate("/library-picker")}
+                onClick={() => navigate("/settings")}
                 className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:text-accent"
                 title={t("wizard.location.badge")}
                 data-testid="wizard-location-edit"

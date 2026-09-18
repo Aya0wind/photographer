@@ -177,4 +177,14 @@ describe("OnboardingPage 向导", () => {
     // 新建库配置链任何时候可进（不再按 onboardingCompleted 重定向）
     expect(screen.getByLabelText("库名称")).toBeInTheDocument();
   });
+
+  it("渲染自绘标题栏（主壳外全屏页：窗口可拖动/控制）", () => {
+    primeStore();
+    renderWizard();
+
+    expect(screen.getByTestId("titlebar")).toBeInTheDocument();
+    expect(screen.getByTestId("titlebar-drag-region")).toHaveAttribute("data-tauri-drag-region");
+    expect(screen.getByTestId("titlebar-close")).toBeInTheDocument();
+    expect(screen.queryByTestId("menubar")).not.toBeInTheDocument();
+  });
 });
