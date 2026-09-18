@@ -130,8 +130,9 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ settings: clone(next) });
     try {
       await ipc("settings_set", { settings: next });
-    } catch {
-      // 忽略持久化失败（如 Rust 命令尚未实现）
+    } catch (e) {
+      // 持久化失败不阻断 UI，但必须在控制台留痕（便于 DevTools 排查）
+      console.error("settings_set failed:", e);
     }
   },
 
