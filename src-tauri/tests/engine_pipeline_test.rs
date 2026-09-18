@@ -205,3 +205,112 @@ fn plan_mode_defaults_to_copy_and_round_trips() {
     let back: ImportPlan = serde_json::from_value(value).unwrap();
     assert_eq!(back.mode, ImportMode::Move);
 }
+
+// ---------------------------------------------------------------------------
+// M2：plan.include 文件筛选（向导勾选）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn include_filters_queue_to_selected_files() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let files = build_source(src.path()); // 3 个媒体文件
+
+    // 只勾选 2 个（jpg + mp4，跳过 CR3）
+    let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
+        plan.include = Some(vec![
+            "DCIM/100CANON/IMG_0001.jpg".into(),
+            "DCIM/100CANON/MVI_0003.MP4".into(),
+        ]);
+    });
+
+    assert_eq!(stats.total_files, 2, "只统计勾选文件: {stats:?}");
+    assert_eq!(stats.done_files, 2);
+    assert_eq!(stats.failed_files, 0);
+
+    let db = open_db(db_dir.path());
+    // journal 只有 2 行且全 verified
+    let rows = db.all_job_files(job_id).unwrap();
+    assert_eq!(rows.len(), 2, "未勾选文件不得进 journal: {rows:?}");
+    assert!(rows.iter().all(|r| r.state == FileState::Verified));
+    assert!(rows.iter().any(|r| r.src.ends_with("IMG_0001.jpg")));
+    assert!(rows.iter().any(|r| r.src.ends_with("MVI_0003.MP4")));
+    // assets 恰好 2；勾选的落位、未勾选的不落位
+    assert_eq!(count_assets(&db), 2);
+    for (rel, content) in &files {
+        let dst = target
+            .path()
+            .join(expected_subdir(src.path(), rel))
+            .join(rel.rsplit('/').next().unwrap());
+        if rel.ends_with("IMG_0002.CR3") {
+            assert!(!dst.exists(), "未勾选文件不得导入: {rel}");
+        } else {
+            assert_eq!(fs::read(&dst).unwrap(), *content, "勾选文件正常导入: {rel}");
+        }
+    }
+}
+
+#[test]
+fn include_with_empty_intersection_is_invalid_plan() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_source(src.path());
+
+    let db = open_db(db_dir.path());
+    let mut plan = plan_for(target.path());
+    plan.include = Some(vec!["DCIM/不存在.jpg".into()]);
+    let mut engine = Engine::new(
+        db,
+        EventBus::new(),
+        Box::new(VolumeSource::new(src.path())),
+        plan,
+    );
+    let err = engine.begin().expect_err("勾选与源无交集应拒绝");
+    assert!(err.to_string().contains("所选文件均不在源中"), "{err}");
+
+    // 拒绝时不建任务
+    let db = open_db(db_dir.path());
+    let jobs: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(jobs, 0);
+}
+
+#[test]
+fn include_none_and_serde_round_trip() {
+    // 缺省 None = 全量导入（回归：现有全部用例走此路径）
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_source(src.path());
+    let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
+        assert_eq!(plan.include, None);
+        plan.include = None; // 显式 None 与缺省同义
+    });
+    assert_eq!(stats.done_files, 3, "None 必须全量导入: {stats:?}");
+
+    // 旧 journal plan JSON（无 include 字段）→ None；Some 列表 round-trip
+    let legacy = r#"{
+        "sourceId": "FOLDER:C:\\photos-in",
+        "targetRoot": "C:\\vault",
+        "dirTemplate": "{YYYY}/{MM-DD}",
+        "nameTemplate": "{原文件名}",
+        "duplicatePolicy": "skip",
+        "skipImported": true,
+        "streams": 2
+    }"#;
+    let plan: ImportPlan = serde_json::from_str(legacy).unwrap();
+    assert_eq!(plan.include, None);
+    let mut partial = plan.clone();
+    partial.include = Some(vec!["DCIM/A.jpg".into(), "DCIM/B.NEF".into()]);
+    let value = serde_json::to_value(&partial).unwrap();
+    assert_eq!(
+        value["include"],
+        serde_json::json!(["DCIM/A.jpg", "DCIM/B.NEF"]),
+        "include 键 camelCase 透传 rel_path 列表"
+    );
+    let back: ImportPlan = serde_json::from_value(value).unwrap();
+    assert_eq!(back.include, partial.include);
+}

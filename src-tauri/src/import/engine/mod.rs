@@ -26,7 +26,7 @@ mod dedup;
 mod fsutil;
 mod pipeline;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -90,6 +90,11 @@ pub struct ImportPlan {
     /// F2 第二目的地；缺省 None（M1/M2 历史计划兼容）。
     #[serde(default)]
     pub second_target: Option<SecondTarget>,
+    /// 向导勾选的文件（rel_path 列表）；None=全部导入。Some 时 begin 阶段
+    /// 严格过滤源清单，只保留勾选文件；与源无交集 → InvalidPlan。
+    /// 随 plan_json 落 journal，resume/retry 自然兼容。
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
 }
 
 /// 引擎错误（begin 阶段：设备枚举或建任务失败）。
@@ -289,7 +294,7 @@ impl Engine {
             ));
         }
         self.check_nesting()?;
-        let entries = self.source.list()?;
+        let entries = self.filter_included(self.source.list()?)?;
         let mut base = Counters::default();
         for e in &entries {
             base.total_files += 1;
@@ -649,6 +654,25 @@ impl Engine {
         });
         self.controls.done.store(true, Ordering::SeqCst);
         stats
+    }
+
+    /// 向导勾选过滤（plan.include）：Some 时只保留 rel_path 在勾选集合内的
+    /// 条目；无交集 → InvalidPlan（提示"所选文件均不在源中"，拒绝建任务）。
+    fn filter_included(&self, entries: Vec<FileEntry>) -> Result<Vec<FileEntry>, EngineError> {
+        let Some(include) = &self.plan.include else {
+            return Ok(entries); // None = 全部
+        };
+        let selected: HashSet<&str> = include.iter().map(String::as_str).collect();
+        let filtered: Vec<FileEntry> = entries
+            .into_iter()
+            .filter(|e| selected.contains(e.rel_path.as_str()))
+            .collect();
+        if filtered.is_empty() {
+            return Err(EngineError::InvalidPlan(
+                "所选文件均不在源中，无法导入（勾选列表与设备清单无交集）".into(),
+            ));
+        }
+        Ok(filtered)
     }
 
     /// 自我嵌套守卫（spec §5.11）：文件系统源的根与任一目标根（主/第二

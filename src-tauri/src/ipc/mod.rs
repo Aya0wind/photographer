@@ -9,9 +9,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chrono::SecondsFormat;
-use serde::{Deserialize, Serialize};
-
 use crate::db::{Db, JobRow, LogRow};
 use crate::devices::folder::{LocalFolderSource, FOLDER_ID_PREFIX};
 use crate::devices::orchestrator::{self, DeviceSnapshot};
@@ -20,6 +17,8 @@ use crate::events::EventBus;
 use crate::import::clean::{CleanCandidateDto, CleanResultDto};
 use crate::import::engine::{Engine, EngineControls, ImportPlan};
 use crate::settings::Settings;
+use chrono::SecondsFormat;
+use serde::{Deserialize, Serialize};
 
 /// 接入设备注册表条目：源 + 最近扫描快照。
 pub struct DeviceEntry {
@@ -67,6 +66,27 @@ pub struct DirEntryDto {
 
 /// 目录浏览黑名单（与设备源枚举的系统目录一致）。
 const DIR_BLACKLIST: &[&str] = &["$RECYCLE.BIN", "System Volume Information"];
+
+/// 托管共享态：`Arc<AppState>`（'static 可跨线程 clone 进 spawn_blocking
+/// 闭包；lib.rs `manage(SharedState)`，async 慢命令壳的载体）。
+pub type SharedState = std::sync::Arc<AppState>;
+
+/// 慢命令统一壳（铁律：磁盘 IO / WPD COM / 网络(SMB/NAS) / 大结果集 DB
+/// 查询 / 哈希计算绝不上主线程——Tauri 同步命令跑在主线程，会冻结事件循环）。
+///
+/// 核心同步逻辑保持原签名（集成测试直测）；async 命令壳从托管态 clone
+/// `SharedState` 后把工作丢 `spawn_blocking` 后台线程执行。返回 `Result`
+/// 的命令用本壳；非 `Result` 命令（如 fs_list_dirs 的"失败→空数组"契约）
+/// 就地 spawn。本函数不依赖 tauri 运行时外壳（AppHandle/mock app），
+/// 集成测试可直接 await。
+pub async fn run_blocking<T: Send + 'static>(
+    state: SharedState,
+    work: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || work(&state))
+        .await
+        .map_err(|e| format!("后台任务失败: {e}"))?
+}
 
 /// Windows 文件属性位。
 #[cfg(windows)]

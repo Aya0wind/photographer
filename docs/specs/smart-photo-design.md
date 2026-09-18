@@ -208,6 +208,8 @@ settings 由 settings.json 承载（带 schema_version）
 
 ## 6. 性能设计
 
+**UI 线程零阻塞铁律（用户规定 2026-09-19）**：任何涉及磁盘 IO / WPD COM / 网络(SMB/NAS) / 大结果集 DB 查询 / 哈希计算的 IPC 命令，一律 async + `spawn_blocking` 后台执行——同步命令只允许纯内存操作（如 settings_get 快照）。真机教训：MTP 枚举 1161 文件的同步命令直接把主线程冻成「未响应」。新命令默认 async，除非证明纯内存。
+
 **验收预算**（USB3 读卡器+NVMe+RTX 3060+8 核）：
 
 | 指标 | 目标 |

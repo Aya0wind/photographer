@@ -134,6 +134,7 @@ pub fn plan_for(target: &Path) -> ImportPlan {
         streams: 2,
         mode: ImportMode::Copy,
         second_target: None,
+        include: None,
     }
 }
 
@@ -343,6 +344,7 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         streams: 2,
         mode: ImportMode::Copy,
         second_target: None,
+        include: None,
     }
 }
 

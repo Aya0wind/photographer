@@ -53,13 +53,15 @@ pub fn run() {
                 Settings::default()
             });
             let bus = EventBus::new();
-            app.manage(AppState {
+            // 托管 Arc<AppState>（SharedState）：async 慢命令壳需要 'static
+            // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
+            app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
                 bus: bus.clone(),
                 devices: Mutex::new(HashMap::new()),
                 active_import: Mutex::new(None),
-            });
+            }));
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
             spawn_event_forwarder(app.handle().clone(), bus.clone());
@@ -77,7 +79,7 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let close_to_tray = window
                             .app_handle()
-                            .state::<AppState>()
+                            .state::<ipc::SharedState>()
                             .settings
                             .lock()
                             .expect("settings mutex poisoned")
@@ -94,6 +96,12 @@ pub fn run() {
             tray::create(app.handle())?;
             Ok(())
         })
+        // 铁律（用户定规矩，2026-09-18）：耗时的操作一律不准在 UI/主线程做。
+        // Tauri 同步命令跑在主线程（tao 事件循环），任何磁盘 IO / WPD COM /
+        // 网络(SMB/NAS) / 大结果集 DB 查询 / 哈希计算都会冻结窗口——
+        // 新命令**默认 async + spawn_blocking**（ipc::run_blocking 壳），
+        // 除非能证明纯内存/原子操作（现存豁免：settings_get、device_list、
+        // import_pause、import_cancel）。此清单是新命令评审的准入模板。
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::settings::settings_set,
@@ -141,7 +149,7 @@ fn spawn_device_orchestrator(app: AppHandle) {
     std::thread::Builder::new()
         .name("device-orchestrator".into())
         .spawn(move || {
-            let bus = app.state::<AppState>().bus.clone();
+            let bus = app.state::<ipc::SharedState>().bus.clone();
             let mut rx = bus.subscribe();
             // 启动存量设备枚举（相机检测不到的修复，2026-09-18）：必须在
             // 订阅之后发布——app 重启窗口内插入的设备收不到热插事件，
@@ -163,7 +171,7 @@ fn spawn_device_orchestrator(app: AppHandle) {
                         handle_device_arrived(&app, id, kind, name);
                     }
                     AppEvent::DeviceRemoved { id } => {
-                        app.state::<AppState>()
+                        app.state::<ipc::SharedState>()
                             .devices
                             .lock()
                             .expect("devices mutex poisoned")
@@ -205,7 +213,7 @@ fn handle_device_arrived(app: &AppHandle, id: String, kind: SourceKind, name: St
         },
     };
 
-    let state = app.state::<AppState>();
+    let state = app.state::<ipc::SharedState>();
     let skip_imported = state
         .settings
         .lock()
@@ -249,7 +257,7 @@ fn spawn_notification_subscriber(app: AppHandle) {
     use tauri_plugin_notification::NotificationExt;
 
     fn notify_enabled(app: &AppHandle) -> bool {
-        app.state::<AppState>()
+        app.state::<ipc::SharedState>()
             .settings
             .lock()
             .expect("settings mutex poisoned")
@@ -263,7 +271,7 @@ fn spawn_notification_subscriber(app: AppHandle) {
     std::thread::Builder::new()
         .name("notify-subscriber".into())
         .spawn(move || {
-            let bus = app.state::<AppState>().bus.clone();
+            let bus = app.state::<ipc::SharedState>().bus.clone();
             let mut rx = bus.subscribe();
             loop {
                 let Ok(event) = rx.blocking_recv() else {
