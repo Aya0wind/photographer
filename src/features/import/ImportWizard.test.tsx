@@ -110,6 +110,7 @@ function seedSession(): void {
           dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
           importSubdir: "SmartPhoto",
           configured: true,
+        streams: 4,
         },
       ],
       activeLibraryId: "lib1",
@@ -306,13 +307,56 @@ describe("方案面板", () => {
     expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
   });
 
-  it("MTP 源强制单流并禁用调节", async () => {
+  it("MTP 源强制单流（设备信息卡提示），向导不再有并发流数控件", async () => {
     seedSession();
     renderWizard("?device=MTP:CAM");
 
-    expect(await screen.findByText(/仅支持单流/)).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-streams-value")).toHaveTextContent("1");
-    expect(screen.getByLabelText("并发流数")).toBeDisabled();
+    const info = await screen.findByTestId("wizard-device-info");
+    const mtpRow = within(info).getByTestId("wizard-mtp-streams");
+    expect(mtpRow).toHaveTextContent("并发流数");
+    expect(mtpRow).toHaveTextContent("1");
+    // 协议限制完整说明挂在 title 上
+    expect(mtpRow.querySelector("dd")).toHaveAttribute(
+      "title",
+      "相机（MTP）直连受协议限制，仅支持单流。",
+    );
+    // 并发流数是库属性：向导方案面板不再渲染该控件
+    expect(screen.queryByLabelText("并发流数")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-streams-value")).not.toBeInTheDocument();
+  });
+
+  it("plan.streams 从库属性合成：库值 3 → 3；MTP 恒 1", async () => {
+    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
+    useSettingsStore.setState((s) => ({
+      settings: {
+        ...s.settings,
+        libraries: [
+          {
+            id: "lib1",
+            name: "主库",
+            dbDir: "I:\\SmartPhoto\\主库",
+            photoRoot: "Y:\\照片",
+            dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
+            importSubdir: "SmartPhoto",
+            streams: 3,
+            configured: true,
+          },
+        ],
+        activeLibraryId: "lib1",
+      },
+    }));
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 21 });
+
+    renderWizard("?device=E:");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].streams).toBe(3);
+
+    // MTP：设备协议限制恒单流（覆盖库值）
+    renderWizard("?device=MTP:CAM");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(startMock.mock.calls[1][0].streams).toBe(1);
   });
 
   it("开始导入：按库属性组装 plan、成功后回画廊（LR 式后台导入，不跳任务中心）", async () => {

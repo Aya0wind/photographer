@@ -26,6 +26,7 @@ const LIB_A: Library = {
   dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
+streams: 4,
 };
 const LIB_B: Library = {
   id: "lib-2",
@@ -35,6 +36,7 @@ const LIB_B: Library = {
   dirTemplate: "{YYYY}/{MM}",
   importSubdir: "",
   configured: true,
+streams: 4,
 };
 
 function PickerProbe() {
@@ -182,6 +184,33 @@ describe("「库」选项卡（保留库管理能力）", () => {
     expect(within(current).getByText("D:\\SmartPhoto\\db")).toBeInTheDocument();
     expect(within(current).getByText("D:\\Photos\\SmartPhoto")).toBeInTheDocument();
     expect(within(current).getByText("{YYYY}/{MM-DD}/{原文件名}")).toBeInTheDocument();
+  });
+
+  it("并发流数（库属性）：分段展示当前值，改即存并落盘", async () => {
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
+    }));
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await openLibraryTab(user);
+
+    const group = screen.getByTestId("settings-library-streams");
+    // LIB_A.streams=4：默认选中 4，2 未选
+    expect(within(group).getByRole("radio", { name: "4" })).toHaveAttribute("aria-checked", "true");
+    expect(within(group).getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "false");
+
+    await user.click(within(group).getByRole("radio", { name: "2" }));
+
+    expect(useSettingsStore.getState().settings.libraries[0].streams).toBe(2);
+    expect(ipcMock).toHaveBeenLastCalledWith(
+      "settings_set",
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          libraries: [expect.objectContaining({ id: "lib-1", streams: 2 })],
+        }),
+      }),
+    );
+    expect(within(group).getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("库列表渲染并高亮激活库（切换统一走选择器，不在原地切换）", async () => {

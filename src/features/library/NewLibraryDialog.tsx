@@ -23,6 +23,26 @@ interface NewLibraryDialogProps {
   onClose: () => void;
 }
 
+/** sessionStorage 标记：本次会话由对话框新建、尚未配置完成的库 id。
+ *  向导（/onboarding）取消时据此判定「可删除的空库」；配置完成或取消后清除。 */
+export const NEW_LIBRARY_DRAFT_KEY = "smartphoto.import.newLibDraft";
+
+export function readDraftLibraryId(): string | null {
+  try {
+    return sessionStorage.getItem(NEW_LIBRARY_DRAFT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function clearDraftLibraryId(): void {
+  try {
+    sessionStorage.removeItem(NEW_LIBRARY_DRAFT_KEY);
+  } catch {
+    // 存储不可用时静默
+  }
+}
+
 function makeLibraryId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -34,6 +54,7 @@ interface Draft {
   dbDir: string;
   photoRoot: string;
   importSubdir: string;
+  streams: number;
 }
 
 function defaultDraft(): Draft {
@@ -42,6 +63,7 @@ function defaultDraft(): Draft {
     dbDir: SUGGESTED_DB_DIR,
     photoRoot: SUGGESTED_PHOTO_ROOT,
     importSubdir: DEFAULT_IMPORT_SUBDIR,
+    streams: 4,
   };
 }
 
@@ -82,6 +104,7 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
       photoRoot: draft.photoRoot.trim(),
       dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
       importSubdir: draft.importSubdir.trim(),
+      streams: draft.streams,
       configured: false,
     };
     const current = useSettingsStore.getState().settings;
@@ -91,6 +114,12 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
       activeLibraryId: library.id,
     });
     useSettingsStore.getState().setLibraryChosen(true);
+    // 记「本次会话新建」标记：向导取消时可安全删除这个未配置空库
+    try {
+      sessionStorage.setItem(NEW_LIBRARY_DRAFT_KEY, library.id);
+    } catch {
+      // 存储不可用时静默（取消退化为不删库，仅退出）
+    }
     onClose();
     navigate(`/onboarding?library=${encodeURIComponent(library.id)}`);
   }
@@ -156,6 +185,35 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
                   className={FIELD_CLASS}
                 />
               </label>
+              <div className="flex flex-col gap-1 text-xs text-text-secondary">
+                <span className="flex items-center gap-2">
+                  {t("wizard.streams")}
+                  <span className="text-[11px] text-text-muted">{t("newLib.streamsDesc")}</span>
+                </span>
+                <div
+                  role="radiogroup"
+                  aria-label={t("wizard.streams")}
+                  className="flex w-fit rounded-md border border-edge bg-bg p-0.5"
+                  data-testid="new-library-streams"
+                >
+                  {[1, 2, 3, 4].map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={draft.streams === value}
+                      onClick={() => patch({ streams: value })}
+                      className={`w-10 rounded px-1 py-1.5 text-center font-mono text-[11px] transition-colors ${
+                        draft.streams === value
+                          ? "bg-accent text-black"
+                          : "text-text-secondary hover:text-text-primary"
+                      }`}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <p className="mt-3 text-[11px] leading-relaxed text-text-muted">{t("newLib.hint")}</p>

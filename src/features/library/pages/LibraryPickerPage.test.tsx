@@ -21,6 +21,7 @@ const LIB_A: Library = {
   dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
+streams: 4,
 };
 const LIB_B: Library = {
   id: "lib-2",
@@ -30,6 +31,7 @@ const LIB_B: Library = {
   dirTemplate: "{YYYY}/{MM}",
   importSubdir: "",
   configured: true,
+streams: 4,
 };
 
 function OnboardingProbe() {

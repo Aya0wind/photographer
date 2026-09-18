@@ -976,7 +976,6 @@ export default function ImportWizard() {
   const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
-  const [streams, setStreams] = useState(4);
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
@@ -1006,7 +1005,8 @@ export default function ImportWizard() {
   }, []);
 
   const isMtp = device?.kind === "mtp";
-  const effectiveStreams = isMtp ? 1 : streams;
+  // 并发流数是库属性（设置页/新建库改）：向导只读合成；MTP 受协议限制恒 1
+  const effectiveStreams = isMtp ? 1 : activeLibrary?.streams ?? 4;
   const canStart =
     Boolean(device && activeLibrary && targetRoot) && !starting;
 
@@ -1367,6 +1367,14 @@ export default function ImportWizard() {
                         <dt className="text-text-muted">{t("wizard.newFiles")}</dt>
                         <dd className="font-mono text-accent">{device.newFiles}</dd>
                       </div>
+                      {device.kind === "mtp" && (
+                        <div className="flex justify-between" data-testid="wizard-mtp-streams">
+                          <dt className="text-text-muted">{t("wizard.streams")}</dt>
+                          <dd className="font-mono text-text-secondary" title={t("wizard.mtpSingleStream")}>
+                            1
+                          </dd>
+                        </div>
+                      )}
                     </dl>
                   )}
                 </>
@@ -1779,28 +1787,7 @@ export default function ImportWizard() {
             {t("wizard.skipImported")}
           </label>
 
-          <div className="mt-4 flex flex-col gap-1.5">
-            <label htmlFor="wizard.streams" className="text-xs font-medium text-text-secondary">
-              {t("wizard.streams")}
-            </label>
-            <div className="flex items-center gap-2">
-              <input
-                id="wizard.streams"
-                type="range"
-                min={1}
-                max={8}
-                step={1}
-                value={effectiveStreams}
-                disabled={isMtp}
-                onChange={(e) => setStreams(Number(e.target.value))}
-                className="h-1 flex-1 accent-[#F0A83C] disabled:opacity-40"
-              />
-              <span className="w-8 text-right font-mono text-xs text-text-primary tabular-nums" data-testid="wizard-streams-value">
-                {effectiveStreams}
-              </span>
-            </div>
-            {isMtp && <p className="text-[11px] text-text-muted">{t("wizard.mtpSingleStream")}</p>}
-          </div>
+          {/* 并发流数已下沉库属性（设置页/新建库对话框修改），向导不再展示控件 */}
 
           <div className="mt-auto pt-4">
             <button

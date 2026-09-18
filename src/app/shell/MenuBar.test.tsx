@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import MenuBar from "./MenuBar";
+import { NEW_LIBRARY_DRAFT_KEY } from "@/features/library/NewLibraryDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   DEFAULT_SETTINGS,
@@ -75,6 +76,7 @@ beforeEach(() => {
       }) as unknown as ReturnType<typeof getCurrentWindow>,
   );
   useSettingsStore.setState({ settings: clone(DEFAULT_SETTINGS), loaded: true });
+  sessionStorage.removeItem(NEW_LIBRARY_DRAFT_KEY);
 });
 
 describe("菜单栏交互（工业软件惯例）", () => {
@@ -255,6 +257,8 @@ describe("新建库对话框（与设置页共用）", () => {
     expect(settings.libraries).toHaveLength(1);
     expect(settings.libraries[0].configured).toBe(false);
     expect(settings.activeLibraryId).toBe(settings.libraries[0].id);
+    // 记「本次会话新建」标记：向导取消时可安全删除这个空库
+    expect(sessionStorage.getItem(NEW_LIBRARY_DRAFT_KEY)).toBe(settings.libraries[0].id);
     await waitFor(() =>
       expect(screen.queryByTestId("new-library-dialog")).not.toBeInTheDocument(),
     );

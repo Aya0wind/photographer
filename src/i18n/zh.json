@@ -84,6 +84,7 @@
   "newLib.title": "新建库",
   "newLib.hint": "创建后进入配置向导，补完整理规则与 AI 设置。",
   "newLib.create": "创建",
+  "newLib.streamsDesc": "复制/移动文件的并行数（相机 MTP 恒为 1）",
 
   "picker.title": "选择要打开的库",
   "picker.subtitle": "双击库卡片，或选中后点“打开”进入；每次启动都会先到这里。",

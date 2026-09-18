@@ -26,6 +26,7 @@ const LIB: Library = {
   dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
+streams: 4,
 };
 
 function PickerProbe() {

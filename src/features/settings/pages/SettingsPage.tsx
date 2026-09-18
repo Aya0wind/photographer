@@ -288,6 +288,48 @@ export default function SettingsPage() {
                 <InfoRow label={t("settings.libraries.template")} value={library?.dirTemplate ?? null} />
               </div>
 
+              {/* 并发流数（库属性）：1-4 分段，改即存；无激活库时占位 */}
+              <div className="flex items-center justify-between gap-8 py-2">
+                <span className="shrink-0 text-xs text-text-secondary">{t("wizard.streams")}</span>
+                {library ? (
+                  <div
+                    role="radiogroup"
+                    aria-label={t("wizard.streams")}
+                    className="flex rounded-md border border-edge bg-bg p-0.5"
+                    data-testid="settings-library-streams"
+                  >
+                    {[1, 2, 3, 4].map((value) => {
+                      const active = (library.streams ?? 4) === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={() => {
+                            if (active) return;
+                            commit({
+                              libraries: settings.libraries.map((lib) =>
+                                lib.id === library.id ? { ...lib, streams: value } : lib,
+                              ),
+                            });
+                          }}
+                          className={`w-8 rounded px-1 py-1 text-center font-mono text-[11px] transition-colors ${
+                            active
+                              ? "bg-accent text-black"
+                              : "text-text-secondary hover:text-text-primary"
+                          }`}
+                        >
+                          {value}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <span className="text-xs text-text-muted">—</span>
+                )}
+              </div>
+
               {/* 新建库（复用对话框）+ 打开其他库（选择器） */}
               <div className="mt-3 flex gap-2">
                 <button

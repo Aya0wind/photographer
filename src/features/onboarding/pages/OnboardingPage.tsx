@@ -4,6 +4,10 @@ import { AnimatePresence, motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
 import TitleBar from "@/app/shell/TitleBar";
+import {
+  clearDraftLibraryId,
+  readDraftLibraryId,
+} from "@/features/library/NewLibraryDialog";
 import AiStep from "../steps/AiStep";
 import DoneStep from "../steps/DoneStep";
 import ImportSchemeStep from "../steps/ImportSchemeStep";
@@ -105,6 +109,10 @@ export default function OnboardingPage() {
 
   const commit = async () => {
     const current = useSettingsStore.getState().settings;
+    // 并发流数是库属性：补完模式保留库既有值（NewLibraryDialog 新建的带过来），新建默认 4
+    const existing = editId
+      ? current.libraries.find((lib) => lib.id === editId) ?? undefined
+      : undefined;
     const library: Library = {
       id: editId ?? makeLibraryId(),
       name: draft.libraryName.trim(),
@@ -112,6 +120,7 @@ export default function OnboardingPage() {
       photoRoot: draft.photoRoot.trim(),
       dirTemplate: draft.dirTemplate.trim(),
       importSubdir: draft.importSubdir.trim(),
+      streams: existing?.streams ?? 4,
       configured: true,
     };
     const libraries = editId
@@ -133,7 +142,46 @@ export default function OnboardingPage() {
       ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice] },
     });
     useSettingsStore.getState().setLibraryChosen(true);
+    // 配置完成：清除「本次会话新建」标记（该库已不再是可删空库）
+    clearDraftLibraryId();
     navigate("/gallery", { replace: true });
+  };
+
+  /**
+   * 取消（退出新建库补完流）：
+   * - 本次会话新建（sessionStorage 标记匹配 ?library=<id>）且仍未配置 →
+   *   该空库无任何资产，直接从 libraries 移除并 save，激活回落到其他已配置库；
+   * - 存量未配置库（从选择器点进来的老库）→ 保留不动，仅退出。
+   * 导航：settings.activeLibraryId 指向某个已配置库 → /gallery；否则回 /library-picker。
+   */
+  const cancel = async () => {
+    const draftId = readDraftLibraryId();
+    const current = useSettingsStore.getState().settings;
+    if (editId !== null && draftId === editId) {
+      const target = current.libraries.find((lib) => lib.id === editId);
+      // 防呆：仅删「仍未配置完成」的本次新建空库；已完成配置的库不删
+      if (target && target.configured === false) {
+        const libraries = current.libraries.filter((lib) => lib.id !== editId);
+        const restore = libraries.find((lib) => lib.configured) ?? null;
+        await useSettingsStore.getState().save({
+          ...current,
+          libraries,
+          activeLibraryId: restore ? restore.id : null,
+        });
+      }
+      clearDraftLibraryId();
+    }
+    const after = useSettingsStore.getState().settings;
+    const activeConfigured =
+      after.activeLibraryId !== null &&
+      after.libraries.some((lib) => lib.id === after.activeLibraryId && lib.configured);
+    if (activeConfigured) {
+      navigate("/gallery", { replace: true });
+    } else {
+      // 没有可用的已配置激活库：回选择器重选（会话选库标志一并复位）
+      useSettingsStore.getState().setLibraryChosen(false);
+      navigate("/library-picker", { replace: true });
+    }
   };
 
   const isLast = step === STEP_TITLES.length - 1;
@@ -148,19 +196,41 @@ export default function OnboardingPage() {
         <div className="flex flex-col gap-3">
           <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
           <div className="flex items-center gap-2" role="tablist" aria-label="onboarding steps">
-            {STEP_TITLES.map((titleKey, i) => (
-              <div key={titleKey} className="flex items-center gap-2">
-                {/* 当前步=accent 实心；已完成=accent/60 弱化；未来=panel 底 */}
-                <span
-                  className={`h-1.5 w-8 rounded-full transition-colors ${
-                    i === step ? "bg-accent" : i < step ? "bg-accent/60" : "bg-panel"
+            {STEP_TITLES.map((titleKey, i) => {
+              // 已完成的步骤可点击直接跳回（草稿保留在内存）；当前/未来步不可点
+              const reachable = i < step;
+              return (
+                <button
+                  key={titleKey}
+                  type="button"
+                  disabled={!reachable}
+                  onClick={() => reachable && setStep(i)}
+                  aria-current={i === step ? "step" : undefined}
+                  className={`flex items-center gap-2 rounded px-0.5 py-0.5 transition-colors ${
+                    reachable ? "cursor-pointer" : "cursor-default"
                   }`}
-                />
-                <span className={`text-xs ${i === step ? "text-accent" : "text-text-muted"}`}>
-                  {t(titleKey)}
-                </span>
-              </div>
-            ))}
+                  data-testid={`onboarding-step-${i}`}
+                >
+                  {/* 当前步=accent 实心；已完成=accent/60 弱化；未来=panel 底 */}
+                  <span
+                    className={`h-1.5 w-8 rounded-full transition-colors ${
+                      i === step ? "bg-accent" : i < step ? "bg-accent/60" : "bg-panel"
+                    }`}
+                  />
+                  <span
+                    className={`text-xs transition-colors ${
+                      i === step
+                        ? "text-accent"
+                        : reachable
+                          ? "text-text-secondary hover:text-accent"
+                          : "text-text-muted"
+                    }`}
+                  >
+                    {t(titleKey)}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -182,34 +252,44 @@ export default function OnboardingPage() {
           </AnimatePresence>
         </div>
 
-        {/* 底部操作条 */}
+        {/* 底部操作条：[取消] …… [上一步] [下一步/开始使用]（取消=退出新建库流） */}
         <div className="flex items-center justify-between">
           <button
             type="button"
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
-            disabled={step === 0}
-            className="rounded-md px-4 py-2 text-sm text-text-secondary transition-colors hover:text-text-primary disabled:invisible"
+            onClick={() => void cancel()}
+            className="rounded-md px-4 py-2 text-sm text-text-muted transition-colors hover:text-text-primary"
+            data-testid="onboarding-cancel"
           >
-            {t("common.back")}
+            {t("common.cancel")}
           </button>
-          {isLast ? (
+          <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => void commit()}
-              className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+              onClick={() => setStep((s) => Math.max(0, s - 1))}
+              disabled={step === 0}
+              className="rounded-md px-4 py-2 text-sm text-text-secondary transition-colors hover:text-text-primary disabled:invisible"
             >
-              {t("onboarding.done.start")}
+              {t("common.back")}
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setStep((s) => s + 1)}
-              disabled={!canProceed(step, draft)}
-              className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {t("common.next")}
-            </button>
-          )}
+            {isLast ? (
+              <button
+                type="button"
+                onClick={() => void commit()}
+                className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
+              >
+                {t("onboarding.done.start")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setStep((s) => s + 1)}
+                disabled={!canProceed(step, draft)}
+                className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {t("common.next")}
+              </button>
+            )}
+          </div>
         </div>
         </div>
       </div>
