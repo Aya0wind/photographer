@@ -137,7 +137,7 @@ fn corrupt_image_fails_with_attempts_then_failed() {
     let database = open_db(db_dir.path());
     for expected in [1i64, 2] {
         assert!(
-            database.claim_index_task().unwrap().is_some(),
+            database.claim_index_task("thumb").unwrap().is_some(),
             "第 {expected} 次认领"
         );
         database.finish_index_task(1, false).unwrap();
@@ -149,7 +149,7 @@ fn corrupt_image_fails_with_attempts_then_failed() {
             "失败 {expected} 次后应回 pending: {tasks:?}"
         );
     }
-    assert!(database.claim_index_task().unwrap().is_some());
+    assert!(database.claim_index_task("thumb").unwrap().is_some());
     database.finish_index_task(1, false).unwrap();
     let tasks = states(&database);
     assert!(
@@ -159,7 +159,7 @@ fn corrupt_image_fails_with_attempts_then_failed() {
         "attempts 封顶后落 failed: {tasks:?}"
     );
     assert_eq!(
-        database.claim_index_task().unwrap(),
+        database.claim_index_task("thumb").unwrap(),
         None,
         "failed 不再被认领"
     );

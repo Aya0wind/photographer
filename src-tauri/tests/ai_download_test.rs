@@ -201,13 +201,27 @@ fn payload(n: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn catalog_has_four_models_with_full_metadata() {
+fn catalog_has_five_models_with_full_metadata() {
     let catalog = ai::catalog();
-    assert_eq!(catalog.len(), 4, "clip-visual/clip-text/scrfd/arcface");
+    assert_eq!(
+        catalog.len(),
+        5,
+        "siglip2-visual/text/tokenizer + scrfd/arcface"
+    );
     let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
-    for expect in ["clip-visual", "clip-text", "scrfd", "arcface"] {
+    for expect in [
+        "siglip2-visual",
+        "siglip2-text",
+        "siglip2-tokenizer",
+        "scrfd",
+        "arcface",
+    ] {
         assert!(ids.contains(&expect), "缺 {expect}: {ids:?}");
     }
+    // SigLIP2 语义模型同版本号成对（visual/text/tokenizer 必须同源同代）
+    let ver = |id: &str| catalog.iter().find(|m| m.id == id).unwrap().version.clone();
+    assert_eq!(ver("siglip2-visual"), ver("siglip2-text"));
+    assert_eq!(ver("siglip2-text"), ver("siglip2-tokenizer"));
     for m in catalog {
         assert!(m.url.starts_with("https://"), "{} url", m.id);
         assert!(m.mirror_url.contains("hf-mirror.com"), "{} mirror", m.id);

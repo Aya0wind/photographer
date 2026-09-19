@@ -149,6 +149,7 @@ pub fn run() {
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
             ipc::assets::camera_list,
+            ipc::assets::assets_by_ids,
             ipc::thumb::asset_thumb_get,
             ipc::thumb::thumb_get_by_path,
             ipc::migrate::db_dir_migrate,
@@ -157,6 +158,7 @@ pub fn run() {
             ipc::ai::ai_model_download,
             ipc::ai::ai_model_cancel,
             ipc::ai::ai_model_delete,
+            ipc::ai::search_semantic,
             ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())

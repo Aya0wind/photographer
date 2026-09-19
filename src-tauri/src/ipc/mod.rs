@@ -532,11 +532,27 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
             .db_dir,
     );
     let index_supervisor = std::sync::Arc::clone(&state.supervisor);
+    let ai_manager = state.ai.clone();
+    let ai_bus = state.bus.clone();
+    let enable_clip = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_clip;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
-            crate::index::kick(index_db_dir, &index_supervisor);
+            crate::index::kick(index_db_dir.clone(), &index_supervisor);
+            if enable_clip {
+                crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir,
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
         });
     *active = Some(ActiveImport {
         job_id,
@@ -584,11 +600,27 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
             .db_dir,
     );
     let index_supervisor = std::sync::Arc::clone(&state.supervisor);
+    let ai_manager = state.ai.clone();
+    let ai_bus = state.bus.clone();
+    let enable_clip = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_clip;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
-            crate::index::kick(index_db_dir, &index_supervisor);
+            crate::index::kick(index_db_dir.clone(), &index_supervisor);
+            if enable_clip {
+                crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir,
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
         });
     *active = Some(ActiveImport {
         job_id,
@@ -708,11 +740,27 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
             .db_dir,
     );
     let index_supervisor = std::sync::Arc::clone(&state.supervisor);
+    let ai_manager = state.ai.clone();
+    let ai_bus = state.bus.clone();
+    let enable_clip = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_clip;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{new_id}"), move |_| {
             engine.run();
-            crate::index::kick(index_db_dir, &index_supervisor);
+            crate::index::kick(index_db_dir.clone(), &index_supervisor);
+            if enable_clip {
+                crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir,
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
         });
     *active = Some(ActiveImport {
         job_id: new_id,

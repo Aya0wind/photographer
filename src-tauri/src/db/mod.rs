@@ -753,18 +753,54 @@ impl Db {
 
     /// 认领一条 pending 任务（原子置 running；多 worker 并发认领不重不漏，
     /// SQLite 写锁串行化保证单行独占）。无待办返回 None。
-    pub fn claim_index_task(&self) -> Result<Option<IndexTaskRow>> {
+    pub fn claim_index_task(&self, kind: &str) -> Result<Option<IndexTaskRow>> {
         let now = now_rfc3339();
         let mut stmt = self.0.prepare(
-            "UPDATE index_tasks SET state = 'running', updated_at = ?1 \
-             WHERE id = (SELECT id FROM index_tasks WHERE state = 'pending' ORDER BY id LIMIT 1) \
+            "UPDATE index_tasks SET state = 'running', updated_at = ?2 \
+             WHERE id = (SELECT id FROM index_tasks WHERE state = 'pending' \
+                         AND kind = ?1 ORDER BY id LIMIT 1) \
              RETURNING id, kind, asset_id, state, attempts, created_at, updated_at",
         )?;
-        let mut rows = stmt.query_map(params![now], map_index_task)?;
+        let mut rows = stmt.query_map(params![kind, now], map_index_task)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
+    }
+
+    /// 为语义回填建任务：`ai_indexed_at IS NULL` 的库内照片（photo/raw）
+    /// 且无未完成 ai 任务的行，逐行插 pending ai 任务；返回建任务数。
+    pub fn create_ai_tasks_for_unindexed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             SELECT 'ai', a.id, 'pending', 0, ?1, ?1 FROM assets a \
+             WHERE a.ai_indexed_at IS NULL AND a.kind IN ('photo', 'raw') \
+               AND NOT EXISTS (SELECT 1 FROM index_tasks t \
+                               WHERE t.kind = 'ai' AND t.asset_id = a.id \
+                               AND t.state IN ('pending', 'running'))",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
+    /// 语义嵌入记账（usearch 落盘成功后调用）。
+    pub fn set_ai_indexed(&self, id: i64) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET ai_indexed_at = ?2 WHERE id = ?1",
+            params![id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 语义检索 join：资产是否存在且可检索（photo/raw）。
+    pub fn asset_searchable(&self, id: i64) -> Result<bool> {
+        let ok: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(ok > 0)
     }
 
     /// 启动恢复：上次中断遗留的 running 复位为 pending，返回复位条数。

@@ -41,6 +41,12 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 sha2 = "0.10"
+# M4 AI 推理：ONNX Runtime（默认 CPU EP；DirectML 见 ai/embed.rs 通道说明）
+ort = "2.0.0-rc.13"
+# SigLIP2 文本分词（HuggingFace 官方 Rust，加载 tokenizer.json WordPiece 词表）
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# HNSW 向量索引（768 维 cos 距离，dbDir/vectors.usearch）
+usearch = "=2.19.23" # 2.20+ 引入 numkong 多目标分发，MSVC 编译失败（icelake/turin 探针 #error）
 # M4 模型在线下载：阻塞式 HTTP(S) 客户端（rustls；supervisor 线程内用，
 # Content-Range 断点续传 + 流式写 .part）
 ureq = "2"

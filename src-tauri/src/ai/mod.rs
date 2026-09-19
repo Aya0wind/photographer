@@ -2,7 +2,11 @@
 //! 安装包不含模型）。推理（ort/usearch）后续接入；本模块只管模型生命周期。
 //!
 //! - [`catalog`]：内置清单（HuggingFace 主源 + hf-mirror.com 镜像，sha256/
-//!   bytesTotal 已用 HF API pin 死）。
+//!   bytesTotal 已用 HF API pin 死）。语义检索模型 = SigLIP2
+//!   base-patch16-256（分离导出：vision_model_quantized 94MB /
+//!   text_model_quantized 283MB / tokenizer.json 34MB——双塔合体文件
+//!   model_quantized.onnx 378MB 的替代，内存减半语义相同；int8 量化在
+//!   语义检索场景质量损失可接受，输出维度仍 768）。
 //! - [`ModelManager`]：`.part` 暂存 + Content-Range 断点续传（网络中断保留
 //!   `.part`，换源/重连从断点续传）；下载完成 SHA256 校验，不匹配删
 //!   `.part` 重来一次，再失败置 failed；主 URL 失败自动切镜像，两处都败
@@ -23,6 +27,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod embed;
+pub mod semantic;
+
 use crate::events::{AppEvent, EventBus, Throttle};
 use crate::tasks::TaskSupervisor;
 
@@ -39,21 +46,30 @@ const CHUNK: usize = 256 * 1024;
 /// siglip2-base-patch16-256 的 onnx 社区转换源（维度 512→768，HNSW/DB 同步改）。
 const CATALOG_JSON: &str = r#"[
   {
-    "id": "clip-visual",
-    "url": "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx",
-    "mirrorUrl": "https://hf-mirror.com/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx",
-    "sha256": "583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299",
-    "bytesTotal": 89117001,
-    "version": "2023-06-v1",
+    "id": "siglip2-visual",
+    "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_quantized.onnx",
+    "mirrorUrl": "https://hf-mirror.com/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_quantized.onnx",
+    "sha256": "f2eb8ccfa3dc0b3761d9ea9a39554fe0f2be71b247ad7f68a80720ec88895650",
+    "bytesTotal": 94737653,
+    "version": "siglip2-base-patch16-256-v1",
     "feature": "semantic"
   },
   {
-    "id": "clip-text",
-    "url": "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx",
-    "mirrorUrl": "https://hf-mirror.com/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx",
-    "sha256": "73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a",
-    "bytesTotal": 64504507,
-    "version": "2023-06-v1",
+    "id": "siglip2-text",
+    "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/text_model_quantized.onnx",
+    "mirrorUrl": "https://hf-mirror.com/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/text_model_quantized.onnx",
+    "sha256": "6f59b39d880c413042314b79302b74d0dd93b273caf8fbfdb1eb2df61a7fefd4",
+    "bytesTotal": 283438275,
+    "version": "siglip2-base-patch16-256-v1",
+    "feature": "semantic"
+  },
+  {
+    "id": "siglip2-tokenizer",
+    "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/tokenizer.json",
+    "mirrorUrl": "https://hf-mirror.com/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/tokenizer.json",
+    "sha256": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
+    "bytesTotal": 34363039,
+    "version": "siglip2-base-patch16-256-v1",
     "feature": "semantic"
   },
   {

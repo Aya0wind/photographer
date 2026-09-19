@@ -26,17 +26,6 @@ use crate::db::Db;
 use crate::events::{AppEvent, EventBus};
 use crate::thumbs::SIZE_TIERS;
 
-/// 单条任务处理（认领后的工作体）。返回成功与否。
-/// 通道路由：thumb/exif → CPU；ai → GPU 预留（v1 落 CPU 失败语义）。
-fn process_task(db: &Db, db_dir: &Path, kind: &str, asset_id: i64) -> bool {
-    match kind {
-        "thumb" => process_thumb_task(db, db_dir, asset_id),
-        // exif/ai：v1 无实现——按失败计（attempts 封顶后落 failed）。
-        // M4 接入：ai 先试 DirectML（use_gpu 允许时），失败落 CPU 通道。
-        _ => false,
-    }
-}
-
 /// 缩略图任务：三档全部生成才算 done；任一档失败 → 资产
 /// thumb_state=2（permanent-none，前端占位兜底）+ 任务按 attempts 策略重试。
 fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
@@ -72,12 +61,15 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 
 /// 消费一条任务（认领 → 处理 → 收尾）。返回 false 表示队列已空。
 fn step(db: &Db, db_dir: &Path) -> bool {
-    let task = match db.claim_index_task() {
+    let task = match db.claim_index_task("thumb") {
         Ok(Some(t)) => t,
         Ok(None) => return false,
         Err(_) => return false,
     };
-    let ok = process_task(db, db_dir, &task.kind, task.asset_id);
+    let ok = match task.kind.as_str() {
+        "thumb" => process_thumb_task(db, db_dir, task.asset_id),
+        _ => false,
+    };
     let _ = db.finish_index_task(task.id, ok);
     true
 }

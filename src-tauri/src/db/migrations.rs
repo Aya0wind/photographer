@@ -9,6 +9,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0002_PLAN_AND_LOOSE,
     MIGRATION_0003_ORIGIN_AND_DST2,
     MIGRATION_0004_SHOOTING_PARAMS,
+    MIGRATION_0005_SEMANTIC_LEDGER,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -117,4 +118,10 @@ CREATE TABLE index_tasks (
 );
 
 CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
+"#;
+
+/// 0005（M4）：assets.ai_indexed_at——语义嵌入记账（usearch 为向量真值，
+/// 本列只是时间账：NULL = 未索引，语义回填据此建任务）。
+const MIGRATION_0005_SEMANTIC_LEDGER: &str = r#"
+ALTER TABLE assets ADD COLUMN ai_indexed_at TEXT;
 "#;

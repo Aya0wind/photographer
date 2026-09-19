@@ -251,6 +251,12 @@ pub enum AppEvent {
     IndexTaskResumed {
         pending: u64,
     },
+    /// 索引任务进度（kind = "ai" 等；done/total 为本轮任务数）。
+    IndexTaskProgress {
+        kind: String,
+        done: u64,
+        total: u64,
+    },
 
     // 错误
     AppError {

@@ -225,3 +225,42 @@ pub async fn camera_list(state: State<'_, SharedState>) -> Result<Vec<CameraCoun
     let shared = state.inner().clone();
     run_blocking(shared, fetch_camera_list).await
 }
+
+/// 按 id 批量取资产（语义检索命中→画廊瓦片解析；保持入参顺序，失效 id 跳过）。
+pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<AssetDto>, String> {
+    let db = super::active_library_db(state)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids.iter().take(200) {
+        if let Some(asset) = db.asset_by_id(*id).map_err(|e| e.to_string())? {
+            out.push(AssetDto {
+                id: *id,
+                path: asset.path,
+                name: asset.filename,
+                kind: asset.kind,
+                captured_at: asset.captured_at,
+                camera: asset.camera,
+                size_bytes: asset.size,
+                width: asset.width,
+                height: asset.height,
+                iso: asset.iso,
+                f_number: asset.f_number,
+                exposure_time: asset.exposure_time,
+                focal_length: asset.focal_length,
+                lens: asset.lens,
+                pair_id: asset.pair_asset_id,
+                thumb_state: asset.thumb_state,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// 按 id 批量取资产（DB 查询 → 后台线程）。
+#[tauri::command]
+pub async fn assets_by_ids(
+    state: State<'_, SharedState>,
+    ids: Vec<i64>,
+) -> Result<Vec<AssetDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_assets_by_ids(state, &ids)).await
+}

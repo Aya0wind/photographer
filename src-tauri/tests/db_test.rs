@@ -102,15 +102,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 4);
+        assert_eq!(user_version(&db), 5);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 4, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 5, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 4);
+    assert_eq!(user_version(&db), 5);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \

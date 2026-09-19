@@ -864,7 +864,7 @@ fn legacy_v3_library_migrates_to_v4_and_stays_readable() {
         .0
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4, "迁移应推进到 0004");
+    assert!(version >= 4, "迁移应推进到 0004+");
 
     let old_id = database.asset_id_by_path(r"X:\old\a.jpg").unwrap().unwrap();
     let old_row = database.asset_by_id(old_id).unwrap().unwrap();
@@ -883,4 +883,19 @@ fn legacy_v3_library_migrates_to_v4_and_stays_readable() {
         database.asset_by_id(new_id).unwrap().unwrap().iso,
         Some(800)
     );
+}
+
+#[test]
+fn assets_by_ids_preserves_order_and_skips_missing() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let database = common::open_db(db_dir.path());
+    let a = ins(&database, "a.jpg", None, AssetKind::Photo, None, 10, 1);
+    let b = ins(&database, "b.jpg", None, AssetKind::Photo, None, 10, 2);
+    let state = query_state(db_dir.path());
+
+    let got = ipc::assets::fetch_assets_by_ids(&state, &[b, 9999, a]).unwrap();
+    let ids: Vec<i64> = got.iter().map(|d| d.id).collect();
+    assert_eq!(ids, vec![b, a], "保持入参顺序、失效 id 跳过");
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].thumb_state, 0);
 }
