@@ -65,8 +65,10 @@ tempfile = "3"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
+# 开发阶段（用户 2026-09-19）：关 LTO/降 codegen 并行度换编译速度；
+# 发布打包前（M8）恢复 codegen-units=1 + lto=true
+codegen-units = 16
+lto = false
+opt-level = 2
 panic = "abort"
 strip = true
