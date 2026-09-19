@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { importRootOf } from "@/features/onboarding/onboardingConfig";
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
+import AiTab from "@/features/settings/AiTab";
 import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
 
 /**
@@ -32,7 +33,7 @@ function commit(partial: DeepPartial<Settings>): void {
   void save(useSettingsStore.getState().settings);
 }
 
-function SectionTitle({ children }: { children: ReactNode }) {
+export function SectionTitle({ children }: { children: ReactNode }) {
   return (
     <h3 className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
       {children}
@@ -41,7 +42,7 @@ function SectionTitle({ children }: { children: ReactNode }) {
 }
 
 /** 行式设置项：标签（左）+ 控件（右）+ 说明小字（下一行），行高约 36px */
-function SettingRow({
+export function SettingRow({
   label,
   desc,
   children,
@@ -66,16 +67,18 @@ function SettingRow({
   );
 }
 
-function Toggle({
+export function Toggle({
   checked,
   disabled = false,
   onChange,
   label,
+  testId,
 }: {
   checked: boolean;
   disabled?: boolean;
   onChange: (next: boolean) => void;
   label: string;
+  testId?: string;
 }) {
   return (
     <input
@@ -84,12 +87,13 @@ function Toggle({
       disabled={disabled}
       onChange={(e) => onChange(e.target.checked)}
       aria-label={label}
+      data-testid={testId}
       className="h-3.5 w-3.5 accent-[#F0A83C] disabled:opacity-40"
     />
   );
 }
 
-const SELECT_CLASS =
+export const SELECT_CLASS =
   "rounded-md border border-edge bg-bg px-2 py-1 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40";
 
 function InfoRow({ label, value, mono = true }: { label: string; value: string | null; mono?: boolean }) {
@@ -405,61 +409,7 @@ export default function SettingsPage() {
             </>
           )}
 
-          {tab === "ai" && (
-            <>
-              <p className="text-[11px] leading-relaxed text-text-muted">{t("settings.ai.note")}</p>
-              <SectionTitle>{t("settings.section.ai")}</SectionTitle>
-              <SettingRow label={t("settings.ai.semantic")} desc={t("settings.ai.semanticDesc")}>
-                <Toggle
-                  checked={settings.ai.enableClip}
-                  disabled
-                  label={t("settings.ai.semantic")}
-                  onChange={() => {}}
-                />
-              </SettingRow>
-              <SettingRow label={t("settings.ai.face")}>
-                <Toggle
-                  checked={settings.ai.enableFace}
-                  disabled
-                  label={t("settings.ai.face")}
-                  onChange={() => {}}
-                />
-              </SettingRow>
-              <SettingRow label={t("settings.ai.scene")}>
-                <Toggle
-                  checked={settings.ai.enableSceneTags}
-                  disabled
-                  label={t("settings.ai.scene")}
-                  onChange={() => {}}
-                />
-              </SettingRow>
-              <SettingRow label={t("settings.ai.schedule")}>
-                <select
-                  disabled
-                  value={settings.ai.indexSchedule}
-                  aria-label={t("settings.ai.schedule")}
-                  className={SELECT_CLASS}
-                >
-                  <option value="idleOnly">{t("settings.ai.schedule.idleOnly")}</option>
-                  <option value="afterImport">{t("settings.ai.schedule.afterImport")}</option>
-                  <option value="manual">{t("settings.ai.schedule.manual")}</option>
-                </select>
-              </SettingRow>
-              <SettingRow label={t("settings.ai.cpu")}>
-                <span className="font-mono text-xs text-text-muted tabular-nums">
-                  {settings.ai.cpuLimitPercent}%
-                </span>
-              </SettingRow>
-              <SettingRow label={t("settings.ai.gpu")}>
-                <Toggle
-                  checked={settings.ai.useGpu}
-                  disabled
-                  label={t("settings.ai.gpu")}
-                  onChange={() => {}}
-                />
-              </SettingRow>
-            </>
-          )}
+          {tab === "ai" && <AiTab />}
         </div>
       </div>
 

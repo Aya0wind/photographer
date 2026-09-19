@@ -5,11 +5,18 @@ import { listen } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";
 
 import {
+  aiFaceDataClear,
+  aiModelCancel,
+  aiModelDelete,
+  aiModelDownload,
+  aiModelsStatus,
   assetDetail,
   assetGroupDates,
   assetThumbGet,
+  assetsByIds,
   assetsPage,
   cameraList,
+  searchSemantic,
   deviceList,
   deviceScan,
   folderScan,
@@ -428,5 +435,73 @@ describe("M3 画廊命令", () => {
     await expect(cameraList()).resolves.toEqual([]);
     invokeMock.mockResolvedValueOnce(null);
     await expect(cameraList()).resolves.toEqual([]);
+  });
+});
+
+
+describe("M4 AI 命令", () => {
+  const MODELS = [
+    { id: "siglip2-visual", installed: true, bytesTotal: 160_000_000, downloadedBytes: 160_000_000, version: "v1.0", feature: "semantic", state: "done" },
+    { id: "scrfd", installed: false, bytesTotal: 2_500_000, downloadedBytes: 0, version: null, feature: "face", state: "idle" },
+  ];
+
+  it("aiModelsStatus 返回模型清单；失败/非数组回退空数组", async () => {
+    invokeMock.mockResolvedValueOnce(MODELS);
+    await expect(aiModelsStatus()).resolves.toEqual(MODELS);
+    expect(invokeMock).toHaveBeenCalledWith("ai_models_status", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(aiModelsStatus()).resolves.toEqual([]);
+  });
+
+  it("aiModelDownload/Cancel/Delete 传 id；失败静默", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await aiModelDownload("siglip2-visual");
+    await aiModelCancel("scrfd");
+    await aiModelDelete("arcface");
+
+    expect(invokeMock).toHaveBeenCalledWith("ai_model_download", { id: "siglip2-visual" });
+    expect(invokeMock).toHaveBeenCalledWith("ai_model_cancel", { id: "scrfd" });
+    expect(invokeMock).toHaveBeenCalledWith("ai_model_delete", { id: "arcface" });
+
+    invokeMock.mockRejectedValue(new Error("nope"));
+    await expect(aiModelDownload("x")).resolves.toBeUndefined();
+    await expect(aiModelDelete("x")).resolves.toBeUndefined();
+  });
+
+  it("aiFaceDataClear 返回布尔；失败回退 false", async () => {
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(aiFaceDataClear()).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith("ai_face_data_clear", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(aiFaceDataClear()).resolves.toBe(false);
+  });
+
+  it("searchSemantic 传 camelCase 负载（minScore 可选）；命令错误原样抛出（模型未就绪语义）", async () => {
+    const hits = [{ assetId: 7, score: 0.93 }];
+    invokeMock.mockResolvedValueOnce(hits);
+
+    await expect(searchSemantic("海边日落", 100)).resolves.toEqual(hits);
+    expect(invokeMock).toHaveBeenCalledWith("search_semantic", { query: "海边日落", limit: 100 });
+
+    invokeMock.mockResolvedValueOnce(hits);
+    await searchSemantic("猫", 50, 0.2);
+    expect(invokeMock).toHaveBeenLastCalledWith("search_semantic", { query: "猫", limit: 50, minScore: 0.2 });
+
+    // 模型未就绪：后端返回明确错误字符串 → 抛给调用方（区别于回退空）
+    invokeMock.mockRejectedValueOnce("语义模型未就绪");
+    await expect(searchSemantic("海边日落", 100)).rejects.toBe("语义模型未就绪");
+  });
+
+  it("assetsByIds 传 ids 数组；失败/非数组回退空数组", async () => {
+    const asset = { id: 3, path: "P", name: "A.JPG", kind: "photo", capturedAt: null, camera: null, sizeBytes: 1 };
+    invokeMock.mockResolvedValueOnce([asset]);
+    await expect(assetsByIds([3])).resolves.toEqual([asset]);
+    expect(invokeMock).toHaveBeenCalledWith("assets_by_ids", { ids: [3] });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetsByIds([3])).resolves.toEqual([]);
   });
 });

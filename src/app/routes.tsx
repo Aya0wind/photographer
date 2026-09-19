@@ -6,6 +6,8 @@ import ImportPage from "@/features/import/pages/ImportPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import SearchPage from "@/features/search/pages/SearchPage";
+import PeoplePage from "@/features/people/pages/PeoplePage";
+import { AlbumsIndexPage, AlbumTagPage } from "@/features/albums/pages/AlbumsPages";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
 import TasksPage from "@/features/tasks/pages/TasksPage";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -41,6 +43,9 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/gallery" replace /> },
       { path: "gallery", element: <GalleryPage /> },
       { path: "search", element: <SearchPage /> },
+      { path: "people", element: <PeoplePage /> },
+      { path: "albums", element: <AlbumsIndexPage /> },
+      { path: "albums/:tag", element: <AlbumTagPage /> },
       { path: "import", element: <ImportPage /> },
       { path: "tasks", element: <TasksPage /> },
       { path: "settings", element: <SettingsPage /> },

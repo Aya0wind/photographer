@@ -65,6 +65,28 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    to: "/people",
+    labelKey: "nav.people",
+    icon: icon(
+      <>
+        <circle cx="8" cy="5.5" r="2.6" />
+        <path d="M2.8 13.5c1-2.8 2.9-4.2 5.2-4.2s4.2 1.4 5.2 4.2" />
+      </>,
+      "people",
+    ),
+  },
+  {
+    to: "/albums",
+    labelKey: "nav.albums",
+    icon: icon(
+      <>
+        <rect x="1.5" y="3" width="13" height="10.5" rx="1.5" />
+        <path d="M1.5 6h13M5 1.5h6" />
+      </>,
+      "albums",
+    ),
+  },
+  {
     to: "/tasks",
     labelKey: "nav.tasks",
     icon: icon(

@@ -1,0 +1,102 @@
+import { create } from "zustand";
+import { subscribeAppEvents, type AppEvent } from "@/ipc/api";
+
+import {
+  aiModelsStatus,
+  type AiModelStatus,
+} from "@/ipc/api";
+
+/**
+ * AI 模型/索引状态（M4）：设置页 AI tab 与语义搜索共用。
+ * - models：ai_models_status 快照（refresh 拉取；事件 aiModelDownloadFinished 后重拉）
+ * - downloadProgress：aiModelDownloadProgress 节流事件（单模型下载进度条）
+ * - indexProgress：indexTaskProgress（kind="ai" 语义索引进度，"正在建立语义索引（N/M）"）
+ * 事件经唯一通道 app://event（initAi 幂等订阅；测试可直接 handleAppEvent 驱动）。
+ */
+
+export interface AiDownloadProgress {
+  doneBytes: number;
+  totalBytes: number;
+}
+
+export interface AiIndexProgress {
+  kind: string;
+  done: number;
+  total: number;
+}
+
+interface AiState {
+  models: AiModelStatus[];
+  /** null=尚未拉取过（首屏 loading） */
+  modelsLoaded: boolean;
+  downloadProgress: Record<string, AiDownloadProgress>;
+  indexProgress: AiIndexProgress | null;
+
+  /** 拉取模型状态（设置页挂载/下载结束后调用） */
+  refresh: () => Promise<void>;
+  /** 事件入口（initAi 订阅转发；测试可直接驱动） */
+  handleAppEvent: (event: AppEvent) => void;
+  /** 仅测试用：清空状态 */
+  resetForTests: () => void;
+}
+
+export const useAiStore = create<AiState>((set, get) => ({
+  models: [],
+  modelsLoaded: false,
+  downloadProgress: {},
+  indexProgress: null,
+
+  refresh: async () => {
+    const models = await aiModelsStatus();
+    set({ models, modelsLoaded: true });
+  },
+
+  handleAppEvent: (event) => {
+    switch (event.type) {
+      case "aiModelDownloadProgress": {
+        set((s) => ({
+          downloadProgress: {
+            ...s.downloadProgress,
+            [event.id]: { doneBytes: event.doneBytes, totalBytes: event.totalBytes },
+          },
+        }));
+        break;
+      }
+      case "aiModelDownloadFinished": {
+        // 进度条退场 + 状态快照重拉（done/failed/idle 由后端落定）
+        set((s) => {
+          const next = { ...s.downloadProgress };
+          delete next[event.id];
+          return { downloadProgress: next };
+        });
+        void get().refresh();
+        break;
+      }
+      case "indexTaskProgress": {
+        if (event.kind === "ai") {
+          set({ indexProgress: { kind: event.kind, done: event.done, total: event.total } });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  },
+
+  resetForTests: () => {
+    set({ models: [], modelsLoaded: false, downloadProgress: {}, indexProgress: null });
+  },
+}));
+
+let eventsBound = false;
+
+/** 应用启动时调用一次（幂等）：订阅模型下载/索引进度事件 */
+export async function initAi(): Promise<void> {
+  if (eventsBound) return;
+  eventsBound = true;
+  try {
+    await subscribeAppEvents((event) => useAiStore.getState().handleAppEvent(event));
+  } catch {
+    // 非 Tauri 环境（vite dev 预览）静默
+  }
+}

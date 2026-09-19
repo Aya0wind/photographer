@@ -8,7 +8,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import i18n from "@/i18n";
 import Sidebar from "./Sidebar";
 
-const NAV_LABELS = ["画廊", "搜索", "导入", "任务", "设置"] as const;
+const NAV_LABELS = ["画廊", "搜索", "导入", "人物", "智能相册", "任务", "设置"] as const;
 
 function renderSidebar(initialPath: string) {
   return render(
@@ -18,6 +18,8 @@ function renderSidebar(initialPath: string) {
         <Routes>
           <Route path="/gallery" element={<div>GALLERY_CONTENT</div>} />
           <Route path="/search" element={<div>SEARCH_CONTENT</div>} />
+          <Route path="/people" element={<div>PEOPLE_CONTENT</div>} />
+          <Route path="/albums" element={<div>ALBUMS_CONTENT</div>} />
           <Route path="/import" element={<div>IMPORT_CONTENT</div>} />
           <Route path="/tasks" element={<div>TASKS_CONTENT</div>} />
           <Route path="/settings" element={<div>SETTINGS_CONTENT</div>} />

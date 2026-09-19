@@ -18,6 +18,10 @@ import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import SemanticResultsView, {
+  SemanticQueryInput,
+} from "@/features/ai/SemanticResultsView";
 
 /**
  * 搜索页（M3+）：紧凑工业风条件栏 + 结果复用画廊网格。
@@ -134,6 +138,11 @@ function parseFilters(key: string): AssetFilters {
 export default function SearchPage() {
   const { t } = useTranslation();
 
+  // 模式：条件（元数据筛选）/ 语义（自然语言）
+  const [mode, setMode] = useState<"filters" | "semantic">("filters");
+  const semantic = useSemanticSearch();
+  const [lastQuery, setLastQuery] = useState("");
+
   const [kind, setKind] = useState<"all" | "photo" | "video">("all");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -222,14 +231,17 @@ export default function SearchPage() {
     return () => io.disconnect();
   }, [queryState, appendPage, results.length]);
 
-  // RAW+JPG 合并（与画廊同开关）+ 日期分组
+  // RAW+JPG 合并（与画廊同开关）+ 日期分组；语义模式结果同样分组供查看器导航
   const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
   const { cards, badges } = useMemo(
     () => mergeRawJpgCards(results, mergeEnabled),
     [results, mergeEnabled],
   );
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  const semanticGroups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
+  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(
+    mode === "semantic" ? semanticGroups : groups,
+  );
 
   // 三档方格尺寸（与画廊共享）
   const [tileSize, setTileSize] = useGalleryTileSize();
@@ -253,8 +265,54 @@ export default function SearchPage() {
         className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
         data-testid="search-content"
       >
-        {/* 条件栏（紧凑工业风） */}
+        {/* 条件栏（紧凑工业风）：模式切换 + （条件|语义）控件 */}
         <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge" data-testid="search-filters">
+          {/* 模式分段：条件 / 语义 */}
+          <div
+            className="flex shrink-0 items-center rounded-md border border-edge bg-bg p-0.5"
+            role="radiogroup"
+            aria-label={t("search.mode")}
+            data-testid="search-mode"
+          >
+            {(["filters", "semantic"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="radio"
+                aria-checked={mode === option}
+                onClick={() => setMode(option)}
+                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  mode === option
+                    ? "bg-accent text-black"
+                    : "text-text-secondary hover:text-text-primary"
+                }`}
+                data-testid={`search-mode-${option}`}
+              >
+                {t(`search.mode.${option}`)}
+              </button>
+            ))}
+          </div>
+
+          {mode === "semantic" ? (
+            <>
+              <SemanticQueryInput
+                busy={semantic.status === "loading"}
+                onRun={(q) => {
+                  setLastQuery(q);
+                  void semantic.run(q);
+                }}
+              />
+              <span
+                className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
+                data-testid="search-count"
+              >
+                {semantic.status === "loading"
+                  ? t("search.loading")
+                  : t("search.count", { count: semantic.assets.length })}
+              </span>
+            </>
+          ) : (
+            <>
           {/* 类型分段 */}
           <div
             className="flex items-center rounded-md border border-edge bg-bg p-0.5"
@@ -385,11 +443,21 @@ export default function SearchPage() {
 
           {/* 三档尺寸（与画廊共享） */}
           <TileSizeSwitch value={tileSize} onChange={setTileSize} />
+            </>
+          )}
         </div>
 
-        {/* 结果：复用画廊网格（同一虚拟化 + 缩略图管线 + 查看器 + 合并展示） */}
+        {/* 结果：复用画廊网格（同一虚拟化 + 缩略图管线 + 查看器 + 合并展示）；
+            语义模式走 SemanticResultsView（进度/未就绪引导/相似度角标） */}
         <div className="relative min-h-0 flex-1">
-          {queryState === "loading" && results.length === 0 ? (
+          {mode === "semantic" ? (
+            <SemanticResultsView
+              status={semantic.status}
+              assets={semantic.assets}
+              scores={semantic.scores}
+              onRetry={() => void semantic.run(lastQuery)}
+            />
+          ) : queryState === "loading" && results.length === 0 ? (
             <div className="flex h-full items-center justify-center text-xs text-text-muted" data-testid="search-loading">
               {t("search.loading")}
             </div>

@@ -1,13 +1,22 @@
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import SearchPage, { dateToRfc3339, quickRange } from "./SearchPage";
 import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
-import { assetThumbGet, assetsPage, cameraList, type AssetDto } from "@/ipc/api";
+import {
+  assetThumbGet,
+  assetsByIds,
+  assetsPage,
+  cameraList,
+  searchSemantic,
+  type AssetDto,
+} from "@/ipc/api";
+import { useAiStore } from "@/stores/aiStore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -16,6 +25,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetsPage: vi.fn(),
     assetThumbGet: vi.fn(),
     cameraList: vi.fn(),
+    searchSemantic: vi.fn(),
+    assetsByIds: vi.fn(),
   };
 });
 
@@ -46,12 +57,17 @@ function makeAsset(id: number, date: string | null, kind: AssetDto["kind"] = "ph
   };
 }
 
+function SettingsProbe() {
+  return <div data-testid="settings-probe">SETTINGS</div>;
+}
+
 function renderSearch() {
   return render(
     <I18nextProvider i18n={i18n}>
       <MemoryRouter initialEntries={["/search"]}>
         <Routes>
           <Route path="/search" element={<SearchPage />} />
+          <Route path="/settings" element={<SettingsProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -75,6 +91,9 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue(null);
   convertMock.mockReset().mockReturnValue("");
   cameraListMock.mockReset().mockResolvedValue([]);
+  vi.mocked(searchSemantic).mockReset();
+  vi.mocked(assetsByIds).mockReset().mockResolvedValue([]);
+  useAiStore.getState().resetForTests();
   resetThumbPipelineForTests();
 });
 
@@ -338,5 +357,97 @@ describe("搜索：结果与状态", () => {
 
     expect(await screen.findByTestId("search-empty")).toHaveTextContent("没有匹配的照片");
     expect(screen.getByTestId("search-count")).toHaveTextContent("0 个结果");
+  });
+});
+
+
+// --- 语义搜索（M4） ----------------------------------------------------------------
+
+describe("搜索：语义模式", () => {
+  function switchToSemantic(user: ReturnType<typeof import("@testing-library/user-event").default.setup>) {
+    return user.click(screen.getByTestId("search-mode-semantic"));
+  }
+
+  it("模式切换：语义模式显示输入/搜索按钮，条件控件隐藏；切回条件恢复", async () => {
+    const user = userEvent.setup();
+    renderSearch();
+
+    await screen.findByTestId("search-page");
+    expect(screen.getByTestId("search-mode-filters")).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("semantic-input")).not.toBeInTheDocument();
+
+    await switchToSemantic(user);
+    expect(screen.getByTestId("semantic-input")).toBeInTheDocument();
+    expect(screen.getByTestId("semantic-run")).toBeInTheDocument();
+    expect(screen.queryByTestId("search-kind")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("search-from")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("search-mode-filters"));
+    expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+  });
+
+  it("语义搜索：searchSemantic 负载 + assets_by_ids 回填 + 相似度百分比角标", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([
+      { assetId: 1, score: 0.93 },
+      { assetId: 2, score: 0.51 },
+    ]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18"), makeAsset(2, "2026-09-17")]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "海边日落");
+    await user.click(screen.getByTestId("semantic-run"));
+
+    await screen.findAllByTestId("gallery-tile");
+    expect(searchSemantic).toHaveBeenCalledWith("海边日落", 100, undefined);
+    expect(assetsByIds).toHaveBeenCalledWith([1, 2]);
+    const tiles = screen.getAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(2);
+    // 命中序保持（分数降序语义由后端保证）：首个是 asset 1，角标 93%
+    expect(tiles[0]).toHaveAttribute("data-asset-id", "1");
+    expect(within(tiles[0]).getByTestId("search-score-badge")).toHaveTextContent("93%");
+    expect(within(tiles[1]).getByTestId("search-score-badge")).toHaveTextContent("51%");
+  });
+
+  it("模型未就绪：引导卡片（约 630MB）+ 去设置跳转", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockRejectedValue("语义模型未就绪");
+    renderSearch();
+    await screen.findByTestId("search-page");
+
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "猫");
+    await user.click(screen.getByTestId("semantic-run"));
+
+    const card = await screen.findByTestId("semantic-model-notready");
+    expect(card).toHaveTextContent("约 630MB");
+    await user.click(screen.getByTestId("semantic-gosettings"));
+    expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();
+  });
+
+  it("索引进度：indexTaskProgress(kind=ai) 驱动「正在建立语义索引（N/M）」", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.8 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "日落");
+    await user.click(screen.getByTestId("semantic-run"));
+    await screen.findAllByTestId("gallery-tile");
+
+    act(() => {
+      useAiStore.getState().handleAppEvent({ type: "indexTaskProgress", kind: "ai", done: 3, total: 10 });
+    });
+    expect(await screen.findByTestId("semantic-indexing")).toHaveTextContent("3/10");
+
+    // 完成后提示消失
+    act(() => {
+      useAiStore.getState().handleAppEvent({ type: "indexTaskProgress", kind: "ai", done: 10, total: 10 });
+    });
+    await waitFor(() => expect(screen.queryByTestId("semantic-indexing")).not.toBeInTheDocument());
   });
 });

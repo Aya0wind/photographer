@@ -68,6 +68,8 @@ interface AssetGridProps {
   tile?: number;
   /** 合并卡角标（RAW+JPG）：代表资产 id → 文案；无合并时不传 */
   badges?: Map<number, string>;
+  /** 相似度角标（语义搜索）：assetId → 0..1，右下角百分比 */
+  scores?: Map<number, number>;
   scrollTestId?: string;
 }
 
@@ -79,6 +81,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     onViewportChange,
     tile = TILE,
     badges,
+    scores,
     scrollTestId = "gallery-grid-scroll",
   },
   ref,
@@ -246,6 +249,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                 <div className="flex flex-wrap gap-1 pb-1">
                   {row.assets.map((asset) => {
                     const badge = badges?.get(asset.id) ?? null;
+                    const score = scores?.get(asset.id);
                     const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
                     const inner = (
                       <>
@@ -256,6 +260,14 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             data-testid="gallery-pair-badge"
                           >
                             {badge}
+                          </span>
+                        )}
+                        {score !== undefined && (
+                          <span
+                            className="absolute bottom-1 right-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] leading-none text-white"
+                            data-testid="search-score-badge"
+                          >
+                            {Math.round(score * 100)}%
                           </span>
                         )}
                       </>

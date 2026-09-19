@@ -123,6 +123,12 @@ export type AppEvent =
   | { type: "thumbnailReady"; assetId: number; size: number; path: string }
   /** 索引任务启动恢复（库级后台：缩略图三档/EXIF 深提取/未来 AI）；pending=剩余项数 */
   | { type: "indexTaskResumed"; pending: number }
+  /** 索引任务进度（kind="ai" 语义索引 / 其余为缩略图等）；节流由后端负责 */
+  | { type: "indexTaskProgress"; kind: string; done: number; total: number }
+  /** AI 模型下载进度（单模型，节流 1s） */
+  | { type: "aiModelDownloadProgress"; id: string; doneBytes: number; totalBytes: number }
+  /** AI 模型下载结束（ok=false 时 error 为原因文案） */
+  | { type: "aiModelDownloadFinished"; id: string; ok: boolean; error?: string | null }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -476,6 +482,100 @@ export async function indexTaskPause(): Promise<void> {
   try {
     await ipc<void>("index_task_pause");
   } catch {
+  }
+}
+
+// --- M4 AI：模型管理 / 语义搜索 ----------------------------------------------------
+
+export type AiFeature = "semantic" | "face";
+export type AiModelState = "idle" | "downloading" | "verifying" | "done" | "failed";
+
+/** AI 模型状态（ai_models_status 返回；清单：siglip2-visual/siglip2-text/scrfd/arcface） */
+export interface AiModelStatus {
+  id: string;
+  /** 旧字段兼容（=state==="done"） */
+  installed: boolean;
+  bytesTotal: number;
+  downloadedBytes: number;
+  version: string | null;
+  feature: AiFeature;
+  state: AiModelState;
+}
+
+/** 模型清单（ai_models_status 失败/非数组回退 []——UI 显示后端未连接态） */
+export async function aiModelsStatus(): Promise<AiModelStatus[]> {
+  try {
+    const list = await ipc<AiModelStatus[] | null>("ai_models_status");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 开始下载模型；命令失败静默（UI 状态以 status 轮询/事件为准） */
+export async function aiModelDownload(id: string): Promise<void> {
+  try {
+    await ipc<void>("ai_model_download", { id });
+  } catch {
+  }
+}
+
+/** 取消下载；命令失败静默 */
+export async function aiModelCancel(id: string): Promise<void> {
+  try {
+    await ipc<void>("ai_model_cancel", { id });
+  } catch {
+  }
+}
+
+/** 删除已安装模型释放磁盘；命令失败静默 */
+export async function aiModelDelete(id: string): Promise<void> {
+  try {
+    await ipc<void>("ai_model_delete", { id });
+  } catch {
+  }
+}
+
+/** 一键清除人脸数据（聚类结果+特征向量，红色强确认后调用）；失败返回 false */
+export async function aiFaceDataClear(): Promise<boolean> {
+  try {
+    const ok = await ipc<boolean | null>("ai_face_data_clear");
+    return ok === true;
+  } catch {
+    return false;
+  }
+}
+
+export interface SemanticHit {
+  assetId: number;
+  /** 相似度 0..1 */
+  score: number;
+}
+
+/**
+ * 语义搜索（SIGLIP2 向量检索）；模型未就绪时后端返回明确错误字符串，
+ * 本封装将其抛给调用方（区别于传输失败——用 isIpcAvailable 区分不了，故显式透传）。
+ * @param query 自然语言描述（"海边日落"）；limit 默认 100；minScore 可选阈值
+ */
+export async function searchSemantic(
+  query: string,
+  limit: number,
+  minScore?: number,
+): Promise<SemanticHit[]> {
+  const payload: Record<string, unknown> = { query, limit };
+  if (minScore !== undefined) payload.minScore = minScore;
+  const hits = await ipc<SemanticHit[]>("search_semantic", payload);
+  return Array.isArray(hits) ? hits : [];
+}
+
+/** 按 id 批量取资产（语义/智能相册结果回填 AssetDto 用）；失败/非数组回退 []。
+ *  契约补充项（assets_by_ids，需后端 lane 实现；keyset 之外唯一的随机访问口）。 */
+export async function assetsByIds(ids: number[]): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("assets_by_ids", { ids });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
   }
 }
 

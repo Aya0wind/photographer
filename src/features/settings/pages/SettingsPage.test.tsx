@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -8,6 +8,63 @@ import { MemoryRouter, Route, Routes } from "react-router";
 vi.mock("@/ipc", () => ({ ipc: vi.fn(async () => undefined) }));
 import { ipc } from "@/ipc";
 const ipcMock = vi.mocked(ipc);
+
+// M4 AI：模型命令 mock（ai_models_status 走 useAiStore.refresh）
+vi.mock("@/ipc/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/ipc/api")>();
+  return {
+    ...actual,
+    aiModelsStatus: vi.fn(),
+    aiModelDownload: vi.fn(),
+    aiModelCancel: vi.fn(),
+    aiModelDelete: vi.fn(),
+    aiFaceDataClear: vi.fn(),
+  };
+});
+import {
+  aiFaceDataClear,
+  aiModelDelete,
+  aiModelDownload,
+  aiModelsStatus,
+} from "@/ipc/api";
+import { useAiStore } from "@/stores/aiStore";
+
+const aiModelsStatusMock = vi.mocked(aiModelsStatus);
+const aiModelDownloadMock = vi.mocked(aiModelDownload);
+const aiModelDeleteMock = vi.mocked(aiModelDelete);
+const aiFaceDataClearMock = vi.mocked(aiFaceDataClear);
+
+function aiModel(
+  id: string,
+  state: "idle" | "downloading" | "verifying" | "done" | "failed",
+  feature: "semantic" | "face",
+  bytesTotal = 150 * 1024 * 1024,
+) {
+  return {
+    id,
+    installed: state === "done",
+    bytesTotal,
+    downloadedBytes: state === "done" ? bytesTotal : 0,
+    version: state === "done" ? "v1.0" : null,
+    feature,
+    state,
+  };
+}
+
+function allModels(
+  overrides: Array<Partial<ReturnType<typeof aiModel> & { id: string; state: "idle" | "downloading" | "verifying" | "done" | "failed" }>> = [],
+) {
+  const base = [
+    aiModel("siglip2-visual", "done", "semantic"),
+    aiModel("siglip2-text", "done", "semantic", 250 * 1024 * 1024),
+    aiModel("scrfd", "idle", "face", 2 * 1024 * 1024),
+    aiModel("arcface", "idle", "face", 230 * 1024 * 1024),
+  ];
+  return base.map((m) => {
+    const o = overrides.find((x) => (x as { id: string }).id === m.id);
+    return o ? { ...m, ...o } : m;
+  }) as Array<import("@/ipc/api").AiModelStatus>;
+}
 
 import i18n from "@/i18n";
 import SettingsPage from "./SettingsPage";
@@ -97,12 +154,15 @@ describe("选项卡", () => {
     expect(screen.getByTestId("settings-current-library")).toBeInTheDocument();
     expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
 
-    // AI：M4 前全部禁用但可见
+    // AI：M4 实化——模型状态区（未接后端时显示未连接提示）+ 功能开关区
     await switchTab(user, "ai");
-    expect(screen.getByText(/将在 AI 里程碑开放/)).toBeInTheDocument();
-    expect(screen.getByLabelText("语义搜索")).toBeDisabled();
-    expect(screen.getByLabelText("人脸识别")).toBeDisabled();
-    expect(screen.getByLabelText("GPU 加速")).toBeDisabled();
+    expect(screen.getByTestId("ai-model-list")).toBeInTheDocument();
+    expect(screen.getByText(/所有 AI 处理 100% 在本机完成/)).toBeInTheDocument();
+    expect(screen.getByText("模型管理")).toBeInTheDocument();
+    // M4：GPU/调度已实化（可操作），场景标签仍待后续里程碑
+    expect(screen.getByLabelText("GPU 加速")).toBeEnabled();
+    expect(screen.getByTestId("ai-schedule")).toBeEnabled();
+    expect(screen.getByLabelText("场景标签")).toBeDisabled();
   });
 
   it("常规：关闭行为切换即存（settings_set payload 断言）", async () => {
@@ -254,5 +314,130 @@ describe("「库」选项卡（保留库管理能力）", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("new-library-dialog")).not.toBeInTheDocument(),
     );
+  });
+});
+
+
+describe("AI tab（M4 实化）", () => {
+  beforeEach(() => {
+    useAiStore.getState().resetForTests();
+    aiModelsStatusMock.mockReset();
+    aiModelDownloadMock.mockReset().mockResolvedValue(undefined);
+    aiModelDeleteMock.mockReset().mockResolvedValue(undefined);
+    aiFaceDataClearMock.mockReset().mockResolvedValue(true);
+  });
+
+  async function gotoAiTab(user: ReturnType<typeof userEvent.setup>) {
+    await switchTab(user, "ai");
+  }
+
+  it("模型状态区：4 行渲染（显示名/体积/状态徽标）", async () => {
+    aiModelsStatusMock.mockResolvedValue(allModels());
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    const rows = await screen.findAllByTestId("ai-model-row");
+    expect(rows).toHaveLength(4);
+    expect(rows[0]).toHaveTextContent("语义 · 图像编码");
+    expect(rows[0]).toHaveTextContent("已安装");
+    expect(rows[2]).toHaveTextContent("人脸 · 检测");
+    expect(rows[2]).toHaveTextContent("2.0 MB");
+    expect(rows[2]).toHaveTextContent("未下载");
+  });
+
+  it("下载：idle 行点击下载 → ai_model_download；状态翻 downloading 后进度条随事件增长", async () => {
+    const idle = allModels();
+    aiModelsStatusMock
+      .mockResolvedValueOnce(idle)
+      .mockResolvedValue(
+        allModels([{ id: "scrfd", state: "downloading" }]),
+      );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await user.click(await screen.findByTestId("ai-model-download-scrfd"));
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("scrfd");
+
+    // refresh 后状态翻 downloading：进度条出现（快照字段 0/2MB）
+    const row = document.querySelector('[data-model-id="scrfd"]');
+    expect(row).not.toBeNull();
+    expect(row).toHaveAttribute("data-state", "downloading");
+
+    // 事件驱动进度（节流 1s 的节流事件）
+    act(() => {
+      useAiStore.getState().handleAppEvent({
+        type: "aiModelDownloadProgress",
+        id: "scrfd",
+        doneBytes: 1024 * 1024,
+        totalBytes: 2 * 1024 * 1024,
+      });
+    });
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="ai-model-progress-scrfd"]')).not.toBeNull(),
+    );
+    expect(row).toHaveTextContent("1.0 MB / 2.0 MB");
+  });
+
+  it("删除释放磁盘：两步确认（可取消）；确认后调 ai_model_delete", async () => {
+    aiModelsStatusMock.mockResolvedValue(allModels());
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await user.click(await screen.findByTestId("ai-model-delete-siglip2-visual"));
+    // 取消路径
+    await user.click(screen.getByTestId("ai-model-delete-cancel-siglip2-visual"));
+    expect(screen.queryByTestId("ai-model-delete-confirm-siglip2-visual")).not.toBeInTheDocument();
+
+    // 确认路径
+    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
+    await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
+    expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-visual");
+  });
+
+  it("功能门控：两个 siglip2 未 done → 语义开关禁用+「先下载模型」；都 done → 开启写设置", async () => {
+    // scrfd/arcface 已装，语义模型未装 → 语义禁用、人脸可用
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "scrfd", state: "done" },
+        { id: "arcface", state: "done" },
+        { id: "siglip2-visual", state: "idle" },
+        { id: "siglip2-text", state: "idle" },
+      ]),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    const semanticToggle = await screen.findByTestId("ai-toggle-semantic");
+    expect(semanticToggle).toBeDisabled();
+    expect(screen.getByText("先下载模型")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-toggle-face")).toBeEnabled();
+
+    // 全部就绪 → 语义开关可开，开启即存（settings_set payload 带 enableClip=true）
+    aiModelsStatusMock.mockResolvedValue(allModels());
+    await user.click(screen.getByTestId("settings-tab-general"));
+    await user.click(screen.getByTestId("settings-tab-ai"));
+    ipcMock.mockClear();
+    const toggle = await screen.findByTestId("ai-toggle-semantic");
+    expect(toggle).toBeEnabled();
+    await user.click(toggle);
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.ai.enableClip).toBe(true),
+    );
+  });
+
+  it("人脸数据一键清除：两步强确认 → ai_face_data_clear", async () => {
+    aiModelsStatusMock.mockResolvedValue(allModels());
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await user.click(await screen.findByTestId("ai-face-clear"));
+    expect(screen.getByTestId("ai-face-clear-confirm")).toBeInTheDocument();
+    await user.click(screen.getByTestId("ai-face-clear-confirm"));
+    expect(aiFaceDataClearMock).toHaveBeenCalledTimes(1);
   });
 });
