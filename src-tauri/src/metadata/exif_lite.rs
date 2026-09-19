@@ -79,6 +79,25 @@ fn datetime_field(exif: &exif::Exif, tag: exif::Tag) -> Option<DateTime<Utc>> {
         .map(|naive| naive.and_utc())
 }
 
+/// 拍摄方向 Orientation(0x0112，IFD0/TIFF 上下文)，EXIF 1-8；缺失/非法 None。
+/// RAW（TIFF 容器）与 JPEG（APP1）都经 kamadak 解析——真机的方向语义在
+/// 容器 IFD0 上，内嵌预览 JPEG 自带的 EXIF 不代表拍摄方向。
+#[doc(hidden)]
+#[allow(dead_code)] // exif_lite_test 单文件编译场景下无调用方
+pub fn parse_orientation(head: &[u8]) -> Option<u32> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(head))
+        .ok()?;
+    let value = &exif
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value;
+    match value {
+        exif::Value::Short(list) => list.first().copied().map(u32::from),
+        exif::Value::Long(list) => list.first().copied(),
+        _ => None,
+    }
+}
+
 /// 无符号整数字段（SHORT/LONG 均可；相机按 tag 指定类型存储）。
 fn uint_field(exif: &exif::Exif, tag: u16) -> Option<u16> {
     let value = &exif

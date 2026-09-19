@@ -6,6 +6,10 @@
 #[allow(dead_code)]
 mod thumbs;
 
+#[path = "../src/metadata/mod.rs"]
+#[allow(dead_code)]
+mod metadata;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -392,4 +396,99 @@ fn corrupt_raw_returns_none_without_cache() {
     // 有 SOI 但无 EOI（截断）→ None
     fs::write(&src, [0xFF, 0xD8, 0xFF, 0xD8, 0x00, 0x00]).unwrap();
     assert!(thumbs::thumb_file(&db, &src, 256).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// EXIF Orientation 转正（生成时一次性旋转，6/8 宽高互换）
+// ---------------------------------------------------------------------------
+
+/// 构造带 Orientation(IFD0 0x0112) 的**真实可解码** JPEG（横存储 800x600）：
+/// image crate 编码出全量 JPEG，再在 SOI 后插入 APP1 EXIF 段。
+fn jpeg_with_orientation(orientation: u16) -> Vec<u8> {
+    let mut img = image::RgbImage::new(800, 600);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+    }
+    let mut jpg = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
+    DynamicImage::ImageRgb8(img)
+        .write_with_encoder(encoder)
+        .unwrap();
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II* ");
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&1u16.to_le_bytes()); // 条目数
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // Orientation
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes()); // count
+    tiff.extend_from_slice(&orientation.to_le_bytes()); // 内联值
+    tiff.extend_from_slice(&0u16.to_le_bytes()); // 填充
+    tiff.extend_from_slice(&0u32.to_le_bytes()); // 下一 IFD = 0
+
+    let mut app1 = Vec::new();
+    app1.extend_from_slice(&[0xFF, 0xE1]);
+    app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif  ");
+    app1.extend_from_slice(&tiff);
+
+    // SOI 后插 APP1（JPEG 段序合法位置）
+    let mut out = jpg[..2].to_vec();
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&jpg[2..]);
+    out
+}
+
+fn thumb_dims(orientation: u16) -> (u32, u32) {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("o.jpg");
+    fs::write(&src, jpeg_with_orientation(orientation)).unwrap();
+    let db = db_dir();
+    let p = thumbs::thumb_file(&db, &src, 256).expect("应生成");
+    image::image_dimensions(Path::new(&p)).unwrap()
+}
+
+#[test]
+fn orientation_6_and_8_swap_thumbnail_dimensions() {
+    // 存储向 800x600（横躺）→ orientation 6/8 转正后必须竖（宽高互换）
+    let base = thumb_dims(1);
+    assert!(base.0 > base.1, "基线（orientation=1）应保持横: {base:?}");
+
+    let o6 = thumb_dims(6);
+    assert_eq!(o6, (base.1, base.0), "orientation 6 = 旋转 90°，宽高互换");
+    let o8 = thumb_dims(8);
+    assert_eq!(o8, (base.1, base.0), "orientation 8 = 旋转 270°，宽高互换");
+}
+
+#[test]
+fn orientation_2_3_4_flips_keep_dimensions() {
+    let base = thumb_dims(1);
+    assert_eq!(thumb_dims(2), base, "水平翻转不改尺寸");
+    assert_eq!(thumb_dims(3), base, "180° 不改尺寸");
+    assert_eq!(thumb_dims(4), base, "垂直翻转不改尺寸");
+}
+
+#[test]
+fn raw_tiff_orientation_applies_to_embedded_preview() {
+    // RAW 容器（TIFF IFD0 Orientation=6）+ 内嵌预览 JPEG（横存储 800x600）
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"II* ");
+    raw.extend_from_slice(&8u32.to_le_bytes());
+    raw.extend_from_slice(&1u16.to_le_bytes());
+    raw.extend_from_slice(&0x0112u16.to_le_bytes());
+    raw.extend_from_slice(&3u16.to_le_bytes());
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    raw.extend_from_slice(&6u16.to_le_bytes());
+    raw.extend_from_slice(&0u16.to_le_bytes());
+    raw.extend_from_slice(&0u32.to_le_bytes());
+    raw.extend_from_slice(&[0u8; 256]);
+    raw.extend_from_slice(&jpeg_with_orientation(1)[..jpeg_with_orientation(1).len()]);
+
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("IMG.NEF");
+    fs::write(&src, &raw).unwrap();
+    let db = db_dir();
+    let p = thumbs::thumb_file(&db, &src, 256).expect("RAW 预览应提取");
+    let (w, h) = image::image_dimensions(Path::new(&p)).unwrap();
+    assert!(h > w, "容器 IFD0 Orientation=6 应转正预览: {w}x{h}");
 }

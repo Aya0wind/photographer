@@ -30,6 +30,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xxhash_rust::xxh64::Xxh64;
 
+use crate::metadata::exif_lite;
+
 /// 可解码扩展名（小写；image crate 位图格式集）。
 pub const DECODABLE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
 /// RAW 扩展名（内嵌 JPEG 预览提取；提取失败回退前端占位）。
@@ -247,6 +249,8 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
 /// 拒收的怪 JPEG 兜底）；其余格式（PNG/GIF/BMP/TIFF/WEBP）走 image crate。
 fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
+    // EXIF Orientation 生成时一次性转正（缓存里存的就是正的，前端零改动）
+    let orientation = orientation_from_file(src).unwrap_or(1);
     let thumb: image::RgbImage = if is_raw_ext(&ext) {
         // RAW：提取内嵌 JPEG 预览 → turbojpeg 缩放解码（复用 JPEG 快路径）
         let preview = raw_preview_jpeg(src)?;
@@ -257,10 +261,38 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     } else {
         full_decode_resize(src, size)
     };
+    let thumb = apply_orientation(thumb, orientation);
     let mut jpeg = Vec::new();
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80);
     thumb.write_with_encoder(encoder).ok()?;
     Some(jpeg)
+}
+
+/// 从文件头解析 EXIF Orientation（JPEG APP1 / RAW TIFF IFD0 同源）。
+fn orientation_from_file(src: &Path) -> Option<u32> {
+    use std::io::Read;
+    let mut buf = Vec::with_capacity(1024 * 1024);
+    fs::File::open(src)
+        .ok()?
+        .take(1024 * 1024)
+        .read_to_end(&mut buf)
+        .ok()?;
+    exif_lite::parse_orientation(&buf)
+}
+
+/// 按 EXIF Orientation 1-8 转正像素（5/7 为转置组合，6/8 宽高互换）。
+fn apply_orientation(img: image::RgbImage, orientation: u32) -> image::RgbImage {
+    use image::imageops;
+    match orientation {
+        2 => imageops::flip_horizontal(&img),
+        3 => imageops::rotate180(&img),
+        4 => imageops::flip_vertical(&img),
+        5 => imageops::flip_horizontal(&imageops::rotate90(&img)),
+        6 => imageops::rotate90(&img),
+        7 => imageops::flip_vertical(&imageops::rotate90(&img)),
+        8 => imageops::rotate270(&img),
+        _ => img,
+    }
 }
 
 /// image crate 全量解码 + thumbnail 拟合（慢路径/非 JPEG）。解码失败返回
