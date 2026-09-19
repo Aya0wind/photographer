@@ -498,17 +498,29 @@ fn full_decode_bytes(data: &[u8]) -> Option<image::RgbImage> {
 /// RAW 内嵌预览提取上限（预览 JPEG 通常 <5MB；留足余量）。
 const RAW_SCAN_LIMIT: u64 = 256 * 1024 * 1024;
 
-/// 在 RAW 文件字节里定位**最大**的一段「结构完整」内嵌 JPEG：
-/// 逐个 SOI(FFD8FF) 候选走段链验证（SOF 尺寸>0 才有效），按像素数取最大。
-/// NEF/ARW 里第一段常是 160px 小缩略图，全幅预览在后——取第一段会让整条
-/// 缩略图管线建立在最糊的源上（真机踩坑 2026-09-20）。候选扫描上限 16、
-/// 文件 256MB 上限；找不到/结构坏返回 None（前端占位兜底）。
+/// 在 RAW 文件里提取**最大**的内嵌 JPEG。两级策略：
+/// ① **TIFF 指针定位（范围读）**：NEF/ARW/CR2/DNG 等 TIFF 基容器里，
+///    缩略图/预览都由 IFD 链引用（JPEGInterchangeFormat 或 compression
+///    6/7 的 StripOffsets）——只读 IFD 结构（KB 级）+ 头窗口验尺寸 +
+///    载荷精确范围读。NAS 61MP ARW 实测：73MB 全读 → ~2.6MB（28 倍）。
+/// ② 兜底：SOI 全文件扫描（非 TIFF 基/指针缺失的怪容器）。
+/// 两级都按像素数取最大；NEF/ARW 里第一段常是 160px 小缩略图，取第一段
+/// 会让整条管线建立在最糊的源上（真机踩坑 2026-09-20）。
 pub fn raw_preview_jpeg(src: &Path) -> Option<Vec<u8>> {
     let meta = fs::metadata(src).ok()?;
     if meta.len() > RAW_SCAN_LIMIT {
         return None;
     }
+    let mut file = fs::File::open(src).ok()?;
+    if let Some(jpeg) = preview_via_tiff(&mut file) {
+        return Some(jpeg);
+    }
     let data = fs::read(src).ok()?;
+    scan_best_embedded(&data)
+}
+
+/// SOI 全文件扫描路径（兜底）：逐个候选走段链验证，取像素最大者。
+pub fn scan_best_embedded(data: &[u8]) -> Option<Vec<u8>> {
     let mut from = 0usize;
     let mut best: Option<(u64, usize, usize)> = None; // (pixels, soi, len)
     let mut candidates = 0usize;
@@ -533,6 +545,211 @@ pub fn raw_preview_jpeg(src: &Path) -> Option<Vec<u8>> {
         }
     }
     best.map(|(_, soi, end)| data[soi..soi + end].to_vec())
+}
+
+// --- TIFF 指针定位（范围读） --------------------------------------------------------
+
+/// 精确范围读（seek + read_exact；长度夹取到文件内）。
+fn read_at<R: std::io::Read + std::io::Seek>(r: &mut R, off: u64, len: u64) -> Option<Vec<u8>> {
+    r.seek(std::io::SeekFrom::Start(off)).ok()?;
+    let mut buf = vec![0u8; len as usize];
+    r.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// JPEG 头部尺寸解析（走到 SOS 即可，无需 EOI；范围读候选的廉价验证）。
+pub fn jpeg_header_dims(buf: &[u8]) -> Option<(u32, u32)> {
+    if buf.len() < 4 || &buf[..3] != [0xFF, 0xD8, 0xFF] {
+        return None;
+    }
+    let mut i = 2usize;
+    for _ in 0..64 {
+        while i + 1 < buf.len() && buf[i] == 0xFF && buf[i + 1] == 0xFF {
+            i += 1;
+        }
+        if i + 4 > buf.len() || buf[i] != 0xFF {
+            return None;
+        }
+        let marker = buf[i + 1];
+        if marker == 0xDA || marker == 0xD9 {
+            return None; // 头窗口内没遇到 SOF
+        }
+        let len = seg_len_u16(buf, i)?;
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+            if len < 7 || i + 2 + len > buf.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([buf[i + 5], buf[i + 6]]);
+            let w = u16::from_be_bytes([buf[i + 7], buf[i + 8]]);
+            return (w > 0 && h > 0).then_some((u32::from(w), u32::from(h)));
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// TIFF IFD 走读产物：一个「JPEG 数据段」的完整布局（多 strip 拼接为连续段）。
+#[derive(Debug, Clone)]
+struct TiffJpegBlock {
+    /// 连续段：单一 (offset, len)；多 strip：各段依次拼接
+    parts: Vec<(u64, u64)>,
+    total: u64,
+}
+
+/// 走 IFD0 → NextIFD 链 + SubIFD(0x014A)，收集全部内嵌 JPEG 数据段。
+/// 防御：IFD 数 ≤64、访问去重、SubIFD 深度 ≤4；非经典 TIFF（BigTIFF 等）
+/// 返回 None 走兜底扫描。
+fn tiff_jpeg_blocks<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<Vec<TiffJpegBlock>> {
+    let mut head = [0u8; 8];
+    r.read_exact(&mut head).ok()?;
+    let little = match &head[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    if u16_val(&head[2..4], little) != Some(42) {
+        return None; // BigTIFF（magic 43）等不支持
+    }
+    let ifd0 = u32_val(&head[4..8], little)? as u64;
+
+    let mut blocks = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    // (offset, is_root)：NextIFD 链延续同级遍历；SubIFD 深度受限
+    let mut queue: Vec<(u64, u32)> = vec![(ifd0, 0)];
+    while let Some((off, depth)) = queue.pop() {
+        if depth > 4 || !visited.insert(off) || blocks.len() >= 64 {
+            continue;
+        }
+        let mut ifd_buf = [0u8; 2];
+        if r.seek(std::io::SeekFrom::Start(off)).is_err() || r.read_exact(&mut ifd_buf).is_err() {
+            continue;
+        }
+        let count = u16_val(&ifd_buf, little)? as usize;
+        if count == 0 || count > 512 {
+            continue;
+        }
+        let mut entries = vec![0u8; count * 12 + 4];
+        if r.read_exact(&mut entries).is_err() {
+            continue;
+        }
+        let mut compression = None;
+        let mut strip_offsets: Vec<u64> = Vec::new();
+        let mut strip_counts: Vec<u64> = Vec::new();
+        let mut jpg_off: Option<u64> = None;
+        let mut jpg_len: Option<u64> = None;
+        for i in 0..count {
+            let e = &entries[i * 12..i * 12 + 12];
+            let tag = u16_val(&e[..2], little)?;
+            let typ = u16_val(&e[2..4], little)?;
+            let n = u32_val(&e[4..8], little)? as usize;
+            let field = &e[8..12];
+            let read_arr = |r: &mut R, field: &[u8], typ: u16, n: usize| -> Option<Vec<u64>> {
+                let unit: usize = match typ {
+                    1 | 2 | 6 | 7 => 1,
+                    3 | 8 => 2,
+                    4 | 9 | 11 => 4,
+                    _ => return None,
+                };
+                let size = unit.checked_mul(n)?;
+                let data: Vec<u8> = if size <= 4 {
+                    field[..size].to_vec()
+                } else {
+                    let off = u32_val(field, little)? as u64;
+                    read_at(r, off, size as u64)?
+                };
+                let mut vals = Vec::with_capacity(n);
+                for k in 0..n {
+                    let v = match unit {
+                        1 => u64::from(data[k]),
+                        2 => u64::from(u16_val(&data[k * 2..k * 2 + 2], little)?),
+                        _ => u64::from(u32_val(&data[k * 4..k * 4 + 4], little)?),
+                    };
+                    vals.push(v);
+                }
+                Some(vals)
+            };
+            match tag {
+                0x0103 => compression = u16_val(field, little),
+                0x0111 => strip_offsets = read_arr(r, field, typ, n).unwrap_or_default(),
+                0x0117 => strip_counts = read_arr(r, field, typ, n).unwrap_or_default(),
+                0x0201 => jpg_off = read_arr(r, field, typ, n).and_then(|v| v.first().copied()),
+                0x0202 => jpg_len = read_arr(r, field, typ, n).and_then(|v| v.first().copied()),
+                0x014A => {
+                    if let Some(subs) = read_arr(r, field, typ, n) {
+                        for s in subs {
+                            queue.push((s, depth + 1));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // NextIFD 链（entries 之后的 4 字节）
+        if let Some(next) = u32_val(&entries[count * 12..count * 12 + 4], little) {
+            if next > 0 {
+                queue.push((u64::from(next), depth));
+            }
+        }
+        // 本 IFD 的 JPEG 数据段
+        if let (Some(off), Some(len)) = (jpg_off, jpg_len) {
+            if len > 0 && len <= 64 * 1024 * 1024 {
+                blocks.push(TiffJpegBlock { parts: vec![(off, len)], total: len });
+            }
+        } else if compression == Some(6) || compression == Some(7) {
+            let parts: Vec<(u64, u64)> = strip_offsets
+                .iter()
+                .zip(strip_counts.iter())
+                .filter(|(_, &c)| c > 0 && c <= 64 * 1024 * 1024)
+                .map(|(&o, &c)| (o, c))
+                .collect();
+            if !parts.is_empty() {
+                let total = parts.iter().map(|(_, c)| c).sum();
+                blocks.push(TiffJpegBlock { parts, total });
+            }
+        }
+    }
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+fn u16_val(b: &[u8], little: bool) -> Option<u16> {
+    let arr: [u8; 2] = b.try_into().ok()?;
+    Some(if little {
+        u16::from_le_bytes(arr)
+    } else {
+        u16::from_be_bytes(arr)
+    })
+}
+
+fn u32_val(b: &[u8], little: bool) -> Option<u32> {
+    let arr: [u8; 4] = b.try_into().ok()?;
+    Some(if little {
+        u32::from_le_bytes(arr)
+    } else {
+        u32::from_be_bytes(arr)
+    })
+}
+
+/// TIFF 指针路线：定位全部候选 → 头窗口验尺寸取最大 → 精确读载荷。
+pub fn preview_via_tiff<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<Vec<u8>> {
+    let blocks = tiff_jpeg_blocks(r)?;
+    let mut best: Option<(u64, &TiffJpegBlock)> = None;
+    for block in &blocks {
+        let (off, len) = block.parts[0];
+        let window = read_at(r, off, len.min(256 * 1024))?;
+        let Some((w, h)) = jpeg_header_dims(&window) else { continue };
+        let pixels = u64::from(w) * u64::from(h);
+        if best.is_none_or(|(p, _)| pixels > p) {
+            best = Some((pixels, block));
+        }
+    }
+    let (_, block) = best?;
+    let mut jpeg = Vec::with_capacity(block.total as usize);
+    for (off, len) in &block.parts {
+        jpeg.extend_from_slice(&read_at(r, *off, *len)?);
+    }
+    // 载荷完整性验证：SOI 起手且头可解析（防 TIFF 脏指针读出垃圾）
+    jpeg_header_dims(&jpeg)?;
+    Some(jpeg)
 }
 
 /// 从 SOI 起走段链：返回 (含 EOI 的完整 JPEG 长度, SOF 宽, SOF 高)；

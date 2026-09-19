@@ -11,6 +11,7 @@ mod thumbs;
 mod metadata;
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -287,7 +288,7 @@ fn bench_full_decode_vs_scaled() {
     // 9504x6336（61MP 级），高频噪声内容（贴近真实照片的熵解码成本，
     // 平滑渐变对解码器过于友好测不出差异）
     let mut rng: u32 = 0x1234_5678;
-    let mut img = image::RgbImage::new(9504, 6336);
+    let mut img = image::RgbImage::new(9504u32, 6336u32);
     for (_x, _y, px) in img.enumerate_pixels_mut() {
         // xorshift 伪随机（无依赖）
         rng ^= rng << 13;
@@ -694,4 +695,169 @@ fn raw_low_tiers_use_generation_dir() {
         out.replace('/', "\\").contains(r"\thumbs\512\"),
         "JPG 低档仍落数字目录: {out}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RAW 内嵌预览范围读（TIFF 指针定位，2026-09-20）
+// ---------------------------------------------------------------------------
+
+/// 字节计数 Reader：统计实际读取量，证明 TIFF 路线没有整文件读。
+struct CountingCursor {
+    inner: std::io::Cursor<Vec<u8>>,
+    read_bytes: usize,
+}
+impl CountingCursor {
+    fn new(data: Vec<u8>) -> Self {
+        Self { inner: std::io::Cursor::new(data), read_bytes: 0 }
+    }
+}
+impl std::io::Read for CountingCursor {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read_bytes += n;
+        Ok(n)
+    }
+}
+impl std::io::Seek for CountingCursor {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// 构造 TIFF 基 RAW：IFD0 引用小 JPEG、NextIFD 引用大 JPEG，之间塞大 filler。
+fn tiff_raw_with_referenced_jpegs(small: &[u8], large: &[u8]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"II*\0");
+    b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 @ 8
+    // 占位：先算好偏移再填——布局：IFD0(2+2*12+4=30) + IFD1(30) + small + filler + large
+    let ifd0 = 8usize;
+    let ifd1 = ifd0 + 30;
+    let small_off = ifd1 + 30;
+    let filler: Vec<u8> = vec![0x55u8; 8 * 1024 * 1024]; // 8MB 垃圾段
+    let large_off = small_off + small.len() + filler.len();
+
+    // IFD0：引用 small
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&0x0201u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes()); // LONG
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(small_off as u32).to_le_bytes());
+    b.extend_from_slice(&0x0202u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(small.len() as u32).to_le_bytes());
+    b.extend_from_slice(&(ifd1 as u32).to_le_bytes()); // NextIFD
+    // IFD1：引用 large
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&0x0201u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(large_off as u32).to_le_bytes());
+    b.extend_from_slice(&0x0202u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(large.len() as u32).to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    debug_assert_eq!(b.len(), small_off);
+    b.extend_from_slice(small);
+    b.extend_from_slice(&filler);
+    b.extend_from_slice(large);
+    b
+}
+
+fn test_jpeg(w: u32, h: u32) -> Vec<u8> {
+    let mut img = image::RgbImage::new(w, h);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, 0x7F]);
+    }
+    let mut jpg = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
+    DynamicImage::ImageRgb8(img).write_with_encoder(encoder).unwrap();
+    jpg
+}
+
+#[test]
+fn raw_preview_range_read_picks_largest_referenced_and_avoids_filler() {
+    let small = test_jpeg(160, 120);
+    let large = test_jpeg(2400, 1600);
+    let raw = tiff_raw_with_referenced_jpegs(&small, &large);
+    let total = raw.len();
+    let mut reader = CountingCursor::new(raw);
+
+    // 走内部实现（与 raw_preview_jpeg 同构；文件包装层不在本测试范围）
+    let extracted = thumbs::preview_via_tiff(&mut reader);
+    assert!(extracted.is_some(), "TIFF 指针路线应命中");
+    let jpeg = extracted.unwrap();
+    // 大图胜出且字节一致
+    assert_eq!(jpeg.len(), large.len());
+    assert_eq!(jpeg, large);
+    // 范围读证明：读取量远小于文件体积（8MB filler 未被读）
+    assert!(
+        reader.read_bytes < total / 4,
+        "范围读不得整文件读：read={} total={}",
+        reader.read_bytes,
+        total
+    );
+}
+
+#[test]
+fn raw_preview_tiff_dirty_pointer_falls_back_to_scan() {
+    // TIFF 头完好但指针指向垃圾 → 指针路线 None → 外层走全文件扫描
+    let mut b = Vec::new();
+    b.extend_from_slice(b"II*\0");
+    b.extend_from_slice(&8u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&0x0201u16.to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&0xFFFF_FF00u32.to_le_bytes()); // 脏指针
+    b.extend_from_slice(&0u32.to_le_bytes());
+    let good = test_jpeg(800, 600);
+    b.extend_from_slice(&good);
+    let mut reader = CountingCursor::new(b);
+    assert!(thumbs::preview_via_tiff(&mut reader).is_none());
+    // 外层兜底：scan 路径仍能拿到 good
+    let mut data = Vec::new();
+    reader.seek(std::io::SeekFrom::Start(0)).unwrap();
+    reader.read_to_end(&mut data).unwrap();
+    let scanned = thumbs::scan_best_embedded(&data).expect("兜底扫描应命中");
+    assert_eq!(scanned, good);
+}
+
+/// 真机 smoke：TIFF 指针路线在真实 NEF/ARW 上必须命中全幅预览（与全文件
+/// 扫描结果一致），且读取量远小于文件体积。#[ignore]：依赖本机样例。
+#[test]
+#[ignore = "真机样例 smoke：本地 NEF 与 NAS ARW；交付验证用"]
+fn real_raw_tiff_route_matches_full_scan() {
+    let samples = [
+        ("NEF", r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF", (6048u32, 4032u32)),
+        ("ARW", r"Y:\照片\SmartPhoto\2026\08-30\DSC08115.ARW", (9504, 6336)),
+    ];
+    for (label, path, expect_dims) in samples {
+        let src = Path::new(path);
+        if !src.is_file() {
+            eprintln!("{label}: 样例不存在，跳过");
+            continue;
+        }
+        let total = fs::metadata(src).unwrap().len() as usize;
+        let mut reader = CountingCursor::new(fs::read(src).unwrap());
+        let via_tiff = thumbs::preview_via_tiff(&mut reader).unwrap_or_else(|| {
+            panic!("{label}: TIFF 指针路线应命中（真实相机文件）")
+        });
+        let (w, h) = thumbs::jpeg_header_dims(&via_tiff).unwrap();
+        assert_eq!(
+            (w, h),
+            (expect_dims.0, expect_dims.1),
+            "{label}: 应取全幅段"
+        );
+        eprintln!(
+            "{label}: tiff 路线读取 {}/{} 字节（{:.1}%）",
+            reader.read_bytes,
+            total,
+            reader.read_bytes as f64 * 100.0 / total as f64
+        );
+        // 与兜底扫描结果一致（同一段）
+        let scan = thumbs::scan_best_embedded(&reader.inner.into_inner()).unwrap();
+        assert_eq!(via_tiff, scan, "{label}: 两级路线应取同一段");
+    }
 }
