@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";
 
 import {
+  deviceList,
   importCancel,
   importJobsPage,
   importPause,
@@ -13,13 +14,14 @@ import {
   type DeviceSnapshot,
   type JobRow,
 } from "@/ipc/api";
-import { useImportStore, resetImportStoreForTests, initImportStore } from "./importStore";
+import { useImportStore, resetImportStoreForTests, initImportStore, seedDevicesFromBackend } from "./importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
   return {
     ...actual,
+    deviceList: vi.fn(),
     importJobsPage: vi.fn(),
     importPause: vi.fn(),
     importResume: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   };
 });
 
+const deviceListMock = vi.mocked(deviceList);
 const jobsPageMock = vi.mocked(importJobsPage);
 const pauseMock = vi.mocked(importPause);
 const resumeMock = vi.mocked(importResume);
@@ -53,6 +56,7 @@ function emit(event: AppEvent): void {
 beforeEach(() => {
   vi.useFakeTimers();
   resetImportStoreForTests();
+  deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
   jobsPageMock.mockReset().mockResolvedValue([]);
   pauseMock.mockReset().mockResolvedValue(undefined);
   resumeMock.mockReset().mockResolvedValue(undefined);
@@ -384,4 +388,74 @@ describe("initImportStore 事件订阅", () => {
     await initImportStore();
     expect(listenMock).not.toHaveBeenCalled();
   });
+});
+
+
+describe("设备状态补偿与重连", () => {
+  it("先显示已发现设备，扫描失败仍保持可见", () => {
+    emit({ type: "deviceArrived", id: "cam", kind: "mtp", name: "相机" });
+    expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+    emit({ type: "deviceScanFailed", id: "cam", message: "暂不可读" });
+    expect(useImportStore.getState().devices[0]).toMatchObject({ id: "cam", scanStatus: "failed", scanError: "暂不可读" });
+    expect(useImportStore.getState().scanning).toEqual([]);
+  });
+
+  it("补拉列表清理漏掉断开事件的设备与文件缓存", async () => {
+    useImportStore.getState().addDevice(snapshot("E:"));
+    useImportStore.getState().setSourceFiles("E:", []);
+    deviceListMock.mockResolvedValueOnce([]);
+    await seedDevicesFromBackend();
+    expect(useImportStore.getState().devices).toEqual([]);
+    expect(useImportStore.getState().sourceFiles).toEqual({});
+  });
+
+  it("请求失败保留现有设备", async () => {
+    useImportStore.getState().addDevice(snapshot("E:"));
+    deviceListMock.mockRejectedValueOnce(new Error("IPC failed"));
+    await seedDevicesFromBackend();
+    expect(useImportStore.getState().devices.map((d) => d.id)).toEqual(["E:"]);
+  });
+
+  it("迟到列表不能复活请求期间已断开的设备", async () => {
+    let resolve!: (devices: DeviceSnapshot[]) => void;
+    deviceListMock.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const request = seedDevicesFromBackend();
+    emit({ type: "deviceRemoved", id: "E:" });
+    resolve([snapshot("E:")]);
+    await request;
+    expect(useImportStore.getState().devices).toEqual([]);
+  });
+
+  it("迟到空列表不能删除请求期间新到达的设备", async () => {
+    let resolve!: (devices: DeviceSnapshot[]) => void;
+    deviceListMock.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const request = seedDevicesFromBackend();
+    emit({ type: "deviceArrived", id: "E:", kind: "volume", name: "新连接" });
+    resolve([]);
+    await request;
+    expect(useImportStore.getState().devices[0].name).toBe("新连接");
+  });
+
+  it("快速移除再扫描清除旧文件并恢复显示", () => {
+    useImportStore.getState().addDevice(snapshot("E:"));
+    useImportStore.getState().setSourceFiles("E:", []);
+    emit({ type: "deviceRemoved", id: "E:" });
+    emit({ type: "deviceArrived", id: "E:", kind: "volume", name: "新连接" });
+    emit({ type: "deviceScanned", id: "E:", kind: "volume", name: "新连接", snapshot: snapshot("E:", "新连接") });
+    expect(useImportStore.getState().devices[0]).toMatchObject({ name: "新连接", scanStatus: "ready" });
+    expect(useImportStore.getState().sourceFiles["E:"]).toEqual([]);
+  });
+});
+
+
+it("扫描中的增量可立即读取，扫描完成保留文件避免二次枚举", () => {
+  emit({ type: "deviceArrived", id: "cam", kind: "mtp", name: "相机" });
+  const file = { id: "1", relPath: "DCIM/A.JPG", size: 10, mtime: "2026-09-19T00:00:00Z" };
+  emit({ type: "deviceFilesProgress", id: "cam", files: [file] });
+  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+  expect(useImportStore.getState().sourceFiles.cam[0].name).toBe("A.JPG");
+  emit({ type: "deviceFilesProgress", id: "cam", files: [file, { ...file, id: "2", relPath: "DCIM/B.JPG" }] });
+  expect(useImportStore.getState().sourceFiles.cam).toHaveLength(2);
+  emit({ type: "deviceScanned", id: "cam", kind: "mtp", name: "相机", snapshot: { ...snapshot("cam"), kind: "mtp" } });
+  expect(useImportStore.getState().sourceFiles.cam).toHaveLength(2);
 });

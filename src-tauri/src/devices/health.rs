@@ -10,7 +10,7 @@
 //!   引擎持有的 Arc 保证不提前释放）。
 //! - 摘除后进 graveyard（探回名单）：恢复可达 → `Revive`（重新发布
 //!   DeviceArrived → 重新注册扫描）；DBT 再到达同样接住（幂等）。
-//! - 退避：常规 20s 一轮；graveyard 每 3 轮（60s）才探一次，失败不风暴。
+//! - 运行时每轮间隔 3 秒，离线设备每轮探回；单次探活最多等待 5 秒。
 //!
 //! 决策核心 [`monitor_step`] 为纯函数（ping 经闭包注入，测试可 mock）；
 //! 线程接线在 lib.rs（TaskSupervisor 任务 `task-health`）。
@@ -98,17 +98,20 @@ pub enum HealthAction {
 /// - `failures`：连续失败计数（in-out：成功清零，判离线后消费）；
 /// - `ping`：探活闭包（返回是否可达；真实接线为 worker ping + 5s 超时）；
 /// - `probe_graveyard`：本轮是否探 graveyard（退避：每 3 轮一次）。
-pub fn monitor_step(
+pub fn monitor_step<P: Into<Option<bool>>>(
     registered: &[(String, String)],
     graveyard: &mut Vec<(String, String)>,
     failures: &mut HashMap<String, u32>,
-    ping: &mut dyn FnMut(&str) -> bool,
+    ping: &mut dyn FnMut(&str) -> P,
     probe_graveyard: bool,
 ) -> Vec<HealthAction> {
     let mut actions = Vec::new();
     // 注册中设备：逐个探活（单设备并发 1：顺序执行）
     for (id, name) in registered {
-        if ping(id) {
+        let Some(reachable) = ping(id).into() else {
+            continue;
+        };
+        if reachable {
             failures.remove(id);
         } else {
             let count = failures.entry(id.clone()).or_insert(0);
@@ -127,7 +130,7 @@ pub fn monitor_step(
         let mut index = 0;
         while index < graveyard.len() {
             let (id, name) = &graveyard[index];
-            if ping(id) {
+            if ping(id).into() == Some(true) {
                 actions.push(HealthAction::Revive {
                     id: id.clone(),
                     name: name.clone(),

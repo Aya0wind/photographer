@@ -164,12 +164,12 @@ describe("IPC 失败兜底", () => {
     expect(isIpcAvailable()).toBe(false);
   });
 
-  it("标量类失败返回 null 并置 ipcAvailable=false", async () => {
+  it("后端业务错误返回 null，但后端仍可达", async () => {
     invokeMock.mockRejectedValue("raw failure");
 
     await expect(deviceScan("E:")).resolves.toBe(null);
     await expect(importRetryFailed(7)).resolves.toBe(null);
-    expect(isIpcAvailable()).toBe(false);
+    expect(isIpcAvailable()).toBe(true);
   });
 
   it("void 命令失败不抛错（静默）但同样置标志", async () => {
@@ -232,4 +232,11 @@ describe("IPC 可用性自愈", () => {
     await deviceScan("E:");
     expect(isIpcAvailable()).toBe(true);
   });
+});
+
+
+it("文件夹失败透出原始原因，不伪装成后端离线", async () => {
+  invokeMock.mockRejectedValue("打开库失败: database is locked");
+  await expect(folderScan("D:\\photos", true)).rejects.toBe("打开库失败: database is locked");
+  expect(isIpcAvailable()).toBe(true);
 });

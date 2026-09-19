@@ -47,6 +47,7 @@ pub fn run() {
                 .app_config_dir()
                 .expect("failed to resolve app config dir");
             std::fs::create_dir_all(&config_dir)?;
+            devices::diagnostics::init(&config_dir);
             let settings = SettingsManager::load(&config_dir).unwrap_or_else(|err| {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
@@ -151,7 +152,9 @@ fn spawn_event_forwarder(
     supervisor.spawn("event-forward", "app://event 转发".into(), move |_| {
         let emit: std::sync::Arc<dyn Fn(&AppEvent) + Send + Sync> =
             std::sync::Arc::new(move |event| {
-                let _ = emit_app.emit("app://event", event);
+                if !matches!(event, AppEvent::DeviceTopologyChanged { .. }) {
+                    let _ = emit_app.emit("app://event", event);
+                }
             });
         events::forward_supervised(&mut rx, emit, move |msg| {
             report_bus.publish(AppEvent::AppError {
@@ -163,79 +166,78 @@ fn spawn_event_forwarder(
     });
 }
 
-/// 设备编排（调和器架构，2026-09-18）：**信号去抖 + reconcile**。
-/// 任何 DBT 信号（到达/移除，不分语义）→ 1s 窗口合并 → 调和一次；
-/// 启动时先调和一次（覆盖存量设备）。注册/摘除/扫描全部由
-/// `ipc::reconcile` 依真值决定，本线程不做任何设备特殊处理。
+/// 系统信号由单一编排线程处理，2 秒周期枚举补偿遗漏通知。
+/// 移除立即使连接代次失效；后续到达重新建源并异步扫描。
 fn spawn_device_orchestrator(app: AppHandle) {
+    // 先订阅，再启动热插拔线程，消除启动时订阅空窗。
+    let mut rx = app.state::<ipc::SharedState>().bus.subscribe();
     std::thread::Builder::new()
         .name("device-orchestrator".into())
         .spawn(move || {
             let state = app.state::<ipc::SharedState>();
-            let mut rx = state.bus.subscribe();
-            // 启动调和：存量设备（订阅完成后调用，事件必达）
-            ipc::reconcile::reconcile_devices(&state, "startup");
+            let mut next = std::time::Instant::now();
             loop {
-                let Ok(event) = rx.blocking_recv() else {
-                    continue;
-                };
-                let is_signal = matches!(
-                    event,
-                    AppEvent::DeviceArrived { .. } | AppEvent::DeviceRemoved { .. }
-                );
-                if !is_signal {
-                    continue;
-                }
-                // 去抖：1s 窗口内合并后续信号（含 reconcile 自身发出的
-                // DeviceRemoved 回声——下次调和 diff 为空即 no-op）。
-                // broadcast 无阻塞超时收：窗口内 try_recv 轮询。
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-                while std::time::Instant::now() < deadline {
-                    match rx.try_recv() {
-                        Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
-                            continue;
+                // 合并信号，但不丢弃窗口内的移除；立即让旧连接代次失效。
+                while let Ok(event) = rx.try_recv() {
+                    if let AppEvent::DeviceTopologyChanged { id, arrived } = event {
+                        if !arrived && !id.is_empty() {
+                            ipc::reconcile::remove_device(&state, &id);
                         }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                            std::thread::sleep(std::time::Duration::from_millis(20));
-                        }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                        next = next
+                            .min(std::time::Instant::now() + std::time::Duration::from_millis(300));
                     }
                 }
-                ipc::reconcile::reconcile_devices(&state, "dbt");
+                if std::time::Instant::now() >= next {
+                    ipc::reconcile::reconcile_devices(&state, "poll/dbt");
+                    next = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         })
         .expect("spawn device orchestrator");
 }
 
-/// MTP 设备健康监控（调和器信号源）：每 20s 对注册中的 MTP 设备轻量
-/// ping（worker 消息，5s 超时）；连续 2 次失败 → 从真值剔除
-/// （`health::set_offline`）；graveyard（离线名单）每 3 轮（60s）探回，
-/// 恢复可达 → 重回真值（`clear_offline`）。两种真值修正后都触发
-/// reconcile（摘除/重建 + 事件）。周期 tick 本身也是 reconcile 信号
-///（结构性兜底：DBT 丢失/幽灵注册最终一致）。
+/// 每轮间隔 3 秒探活，连续两次失败标记离线；每轮尝试恢复离线设备。
+/// 探活与枚举/文件扫描使用独立 worker，单次最多等待 5 秒。
+/// 只发布内部调和信号，不与编排线程并发修改设备注册表。
 fn spawn_health_monitor(supervisor: std::sync::Arc<tasks::TaskSupervisor>, app: AppHandle) {
     supervisor.spawn("health", "mtp-probe".into(), move |_| {
         let mut failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut tick: u32 = 0;
+        let mut generations: HashMap<String, std::sync::Arc<dyn devices::DeviceSource>> =
+            HashMap::new();
         loop {
-            // 周期自适应（H2 恢复延迟）：有设备处于离线态 → 5s（快速探回，
-            // 重开相机后恢复感知上限 5s×3 轮退避）；全在线 → 常规 20s。
-            let interval = if devices::health::offline_ids().is_empty() {
-                std::time::Duration::from_secs(20)
-            } else {
-                std::time::Duration::from_secs(5)
-            };
-            std::thread::sleep(interval);
-            tick = tick.wrapping_add(1);
+            std::thread::sleep(std::time::Duration::from_secs(3));
             let state = app.state::<ipc::SharedState>();
             // 注册中的 MTP 设备（探活对象）
-            let registered: Vec<(String, String)> = state
+            let connected: Vec<_> = state
                 .devices
                 .lock()
                 .expect("devices mutex poisoned")
                 .iter()
-                .filter(|(_, entry)| entry.source.kind() == SourceKind::Mtp)
-                .map(|(id, entry)| (id.clone(), entry.snapshot.name.clone()))
+                .filter(|(_, entry)| entry.snapshot.kind == SourceKind::Mtp)
+                .map(|(id, entry)| {
+                    (
+                        id.clone(),
+                        entry.snapshot.name.clone(),
+                        std::sync::Arc::clone(&entry.source),
+                    )
+                })
+                .collect();
+            failures.retain(|id, _| {
+                connected.iter().any(|(key, _, source)| {
+                    key == id
+                        && generations
+                            .get(id)
+                            .is_some_and(|old| std::sync::Arc::ptr_eq(old, source))
+                })
+            });
+            generations = connected
+                .iter()
+                .map(|(id, _, source)| (id.clone(), source.clone()))
+                .collect();
+            let registered: Vec<_> = connected
+                .iter()
+                .map(|(id, name, _)| (id.clone(), name.clone()))
                 .collect();
             let mut graveyard = devices::health::offline_graveyard();
             let actions = devices::health::monitor_step(
@@ -243,14 +245,21 @@ fn spawn_health_monitor(supervisor: std::sync::Arc<tasks::TaskSupervisor>, app: 
                 &mut graveyard,
                 &mut failures,
                 &mut |id| devices::wpd::worker_ping(id),
-                tick.is_multiple_of(3),
+                true,
             );
             devices::health::apply_graveyard(&graveyard);
             for action in actions {
                 match action {
                     devices::health::HealthAction::MarkOffline { id, name } => {
                         eprintln!("设备无响应，从真值剔除: {name} ({id})");
-                        devices::health::set_offline(&id, &name);
+                        let registry = state.devices.lock().expect("devices mutex poisoned");
+                        if registry.get(&id).is_some_and(|entry| {
+                            generations
+                                .get(&id)
+                                .is_some_and(|old| std::sync::Arc::ptr_eq(old, &entry.source))
+                        }) {
+                            devices::health::set_offline(&id, &name);
+                        }
                     }
                     devices::health::HealthAction::Revive { id, name } => {
                         eprintln!("设备恢复可达，重回真值: {name} ({id})");
@@ -258,7 +267,10 @@ fn spawn_health_monitor(supervisor: std::sync::Arc<tasks::TaskSupervisor>, app: 
                     }
                 }
             }
-            ipc::reconcile::reconcile_devices(&state, "health");
+            state.bus.publish(AppEvent::DeviceTopologyChanged {
+                id: String::new(),
+                arrived: true,
+            });
         }
     });
 }

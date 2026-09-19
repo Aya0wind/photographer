@@ -9,6 +9,25 @@ use std::collections::HashMap;
 
 use health::{monitor_step, HealthAction};
 
+#[test]
+fn busy_camera_is_neither_offline_nor_revived() {
+    let registered = vec![("cam".to_string(), "camera".to_string())];
+    let mut failures = HashMap::from([("cam".to_string(), 1)]);
+    let mut graveyard = vec![("offline".to_string(), "camera".to_string())];
+    for _ in 0..4 {
+        assert!(monitor_step(
+            &registered,
+            &mut graveyard,
+            &mut failures,
+            &mut |_| None::<bool>,
+            true
+        )
+        .is_empty());
+    }
+    assert_eq!(failures["cam"], 1);
+    assert_eq!(graveyard.len(), 1);
+}
+
 fn offline(action: &HealthAction) -> Option<(&String, &String)> {
     match action {
         HealthAction::MarkOffline { id, name } => Some((id, name)),

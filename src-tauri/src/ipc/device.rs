@@ -53,7 +53,7 @@ pub fn device_list(state: State<SharedState>) -> Vec<DeviceSnapshotInfo> {
             let mut info = DeviceSnapshotInfo::from(&entry.snapshot);
             match &entry.scan {
                 super::DeviceScan::Scanning => info.scan_status = "scanning",
-                super::DeviceScan::Ready => {},
+                super::DeviceScan::Ready => {}
                 super::DeviceScan::Failed(message, _) => {
                     info.scan_status = "failed";
                     info.scan_error = Some(message.clone());
@@ -72,17 +72,7 @@ pub async fn device_scan(
     id: String,
 ) -> Result<DeviceSnapshot, String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| {
-        let snapshot = scan_by_id(state, &id)?;
-        state.bus.publish(crate::events::AppEvent::DeviceScanned {
-            id: snapshot.id.clone(),
-            name: snapshot.name.clone(),
-            kind: snapshot.kind,
-            snapshot: snapshot.clone(),
-        });
-        Ok(snapshot)
-    })
-    .await
+    run_blocking(shared, move |state| scan_by_id(state, &id)).await
 }
 
 /// 注册并扫描本地文件夹源（M2“从文件夹导入”），返回快照。

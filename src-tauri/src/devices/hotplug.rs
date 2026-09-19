@@ -1,8 +1,8 @@
-//! 热插拔检测（WM_DEVICECHANGE）：message-only 窗口 + RegisterDeviceNotificationW，
+//! 热插拔检测（WM_DEVICECHANGE）：隐藏顶层窗口 + RegisterDeviceNotificationW，
 //! 同时监听卷（DBT_DEVTYP_VOLUME）与 WPD 设备接口（GUID_DEVINTERFACE_WPD），
-//! 独立线程泵消息并翻译为 `DeviceArrived` / `DeviceRemoved` 发布到 EventBus。
+//! 独立线程泵消息并发布内部 DeviceTopologyChanged 信号。
 //!
-//! message-only 窗口收不到系统广播，两类通知都必须显式注册。
+//! 卷使用顶层窗口广播；WPD 接口显式注册。
 //! 窗口泵不做自动化测试（需真机插拔，手动验收）；纯函数有单测
 //! （tests/devices_test.rs）。
 
@@ -49,7 +49,6 @@ mod win {
     use std::sync::atomic::{AtomicIsize, Ordering};
     use std::thread::JoinHandle;
 
-    use super::super::volume;
     use super::{pnp_display_name, unitmask_to_drives};
     use crate::events::{AppEvent, EventBus, SourceKind};
 
@@ -60,9 +59,10 @@ mod win {
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
         PostMessageW, RegisterClassW, RegisterDeviceNotificationW, TranslateMessage,
         UnregisterDeviceNotification, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
-        DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME, DEVICE_NOTIFY_WINDOW_HANDLE,
-        DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME, HDEVNOTIFY,
-        HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DEVICECHANGE, WM_QUIT, WNDCLASSW,
+        DBT_DEVNODES_CHANGED, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME,
+        DEVICE_NOTIFY_WINDOW_HANDLE, DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR,
+        DEV_BROADCAST_VOLUME, HDEVNOTIFY, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DEVICECHANGE,
+        WM_QUIT, WNDCLASSW,
     };
 
     /// WPD 设备接口 GUID（DEVINTERFACE_WPD）。
@@ -106,7 +106,7 @@ mod win {
     fn run(bus: EventBus) {
         BUS.with(|b| *b.borrow_mut() = Some(bus));
         if let Some((hwnd, notifies)) = setup() {
-            eprintln!("热插拔监听已启动（卷 + WPD 设备通知已注册）");
+            eprintln!("热插拔窗口已启动（卷广播 + WPD 接口通知/轮询）");
             let mut msg = MSG::default();
             loop {
                 // SAFETY: msg 为本帧合法栈变量
@@ -127,7 +127,7 @@ mod win {
         BUS.with(|b| *b.borrow_mut() = None);
     }
 
-    /// 注册窗口类、创建 message-only 窗口、注册两类设备通知。
+    /// 注册窗口类、创建 隐藏顶层窗口、注册两类设备通知。
     fn setup() -> Option<(HWND, Vec<HDEVNOTIFY>)> {
         // SAFETY: 模块名传 NULL 取当前进程可执行模块句柄
         let module = unsafe { GetModuleHandleW(None::<&PCWSTR>) }.ok()?;
@@ -146,7 +146,7 @@ mod win {
         if unsafe { RegisterClassW(&wc) } == 0 {
             return None;
         }
-        // SAFETY: 类已注册；message-only 窗口（父句柄 HWND_MESSAGE）不接收广播
+        // SAFETY: 类已注册；无父窗口、未设置 WS_VISIBLE，接收卷广播但不显示。
         let hwnd = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -157,7 +157,7 @@ mod win {
                 0,
                 0,
                 0,
-                Some(HWND_MESSAGE),
+                None,
                 None,
                 Some(hinstance),
                 None,
@@ -168,25 +168,7 @@ mod win {
 
         let mut notifies = Vec::new();
 
-        // 卷到达/移除（盘符级）
-        let volume_filter = DEV_BROADCAST_VOLUME {
-            dbcv_size: std::mem::size_of::<DEV_BROADCAST_VOLUME>() as u32,
-            dbcv_devicetype: DBT_DEVTYP_VOLUME.0,
-            dbcv_reserved: 0,
-            dbcv_unitmask: 0,
-            dbcv_flags: Default::default(),
-        };
-        // SAFETY: hwnd 合法；filter 在调用期间存活
-        if let Ok(h) = unsafe {
-            RegisterDeviceNotificationW(
-                HANDLE(hwnd.0),
-                &volume_filter as *const _ as *const core::ffi::c_void,
-                DEVICE_NOTIFY_WINDOW_HANDLE,
-            )
-        } {
-            notifies.push(h);
-        }
-
+        // 隐藏顶层窗口接收系统卷广播；DBT_DEVTYP_VOLUME 不能显式注册。
         // WPD 设备接口（相机/手机 MTP）
         let iface_filter = DEV_BROADCAST_DEVICEINTERFACE_W {
             dbcc_size: std::mem::size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32,
@@ -207,8 +189,7 @@ mod win {
         }
 
         if notifies.is_empty() {
-            cleanup(hwnd, notifies);
-            return None;
+            eprintln!("WPD 接口通知注册失败，将使用周期枚举；卷广播仍可用");
         }
         Some((hwnd, notifies))
     }
@@ -240,8 +221,20 @@ mod win {
     }
 
     fn handle_device_change(event: u32, lparam: *const core::ffi::c_void) {
+        if event == DBT_DEVNODES_CHANGED {
+            publish(
+                DBT_DEVICEARRIVAL,
+                SourceKind::Mtp,
+                String::new(),
+                String::new(),
+            );
+            return;
+        }
         let arrival = event == DBT_DEVICEARRIVAL;
         if !arrival && event != DBT_DEVICEREMOVECOMPLETE {
+            return;
+        }
+        if lparam.is_null() {
             return;
         }
         // SAFETY: WM_DEVICECHANGE 的 lParam 由系统指向按 dbch_devicetype
@@ -268,7 +261,8 @@ mod win {
                 // 到达/移除不做任何注册/摘除/过滤——「设备」语义全部收敛到
                 // reconcile 的真值（有媒体可移动卷；网络盘/本地盘不在真值）。
                 for drive in drives {
-                    let name = volume::drive_label(&drive).unwrap_or_else(|| drive.clone());
+                    // 消息泵只搬运信号，卷标读取留给后台枚举。
+                    let name = drive.clone();
                     publish(event, SourceKind::Volume, drive, name);
                 }
             }
@@ -295,11 +289,11 @@ mod win {
     fn publish(event: u32, kind: SourceKind, id: String, name: String) {
         BUS.with(|b| {
             if let Some(bus) = b.borrow().as_ref() {
-                if event == DBT_DEVICEARRIVAL {
-                    bus.publish(AppEvent::DeviceArrived { id, kind, name });
-                } else {
-                    bus.publish(AppEvent::DeviceRemoved { id });
-                }
+                let _ = (kind, name);
+                bus.publish(AppEvent::DeviceTopologyChanged {
+                    id: super::super::normalize_device_id(&id),
+                    arrived: event == DBT_DEVICEARRIVAL,
+                });
             }
         });
     }

@@ -29,7 +29,9 @@ export async function ipc<T>(cmd: string, payload?: unknown): Promise<T> {
     ipcAvailable = true;
     return result;
   } catch (err) {
-    ipcAvailable = false;
+    // Rust command 返回 String 错误本身就证明后端已响应；不能把设备/数据库
+    // 业务错误误报为整个后端离线。桥接缺失/通道中断才标记不可用。
+    ipcAvailable = typeof err === "string" && !/__TAURI_INTERNALS__|invoke is not available|command .*not found|channel.*closed|failed to fetch|ipc.*disconnect/i.test(err);
     console.error(`[ipc] ${cmd} failed:`, err);
     throw err;
   }

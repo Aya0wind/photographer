@@ -141,6 +141,8 @@ function DeviceGlyph({
 
 /** 设备列表行的文件数徽标：总文件数千分位；无文件时退回类型中文标签 */
 function deviceBadge(d: DeviceSnapshot, t: (key: string) => string): string {
+  if (d.scanStatus === "scanning") return t("wizard.deviceScanning");
+  if (d.scanStatus === "failed") return t("wizard.deviceScanFailed");
   const total = Object.values(d.filesByKind).reduce((sum, n) => sum + n, 0);
   return total > 0 ? `${total.toLocaleString("zh-CN")} ${t("wizard.deviceFiles")}` : t(KIND_LABEL_KEY[d.kind]);
 }
@@ -1020,7 +1022,10 @@ export default function ImportWizard() {
   // 大目录（数千文件）枚举在后端完成后一次性返回，此处仅等待并填充。
   const [filesLoading, setFilesLoading] = useState(false);
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedId || device?.scanStatus === "scanning" || device?.scanStatus === "failed") {
+      setFilesLoading(false);
+      return;
+    }
     if (sourceFilesMap[selectedId]) return;
     let cancelled = false;
     setFilesLoading(true);
@@ -1043,7 +1048,7 @@ export default function ImportWizard() {
     };
     // sourceFilesMap[selectedId] 变为存在即触发跳过分支，无需进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [selectedId, device?.scanStatus, sourceFilesMap[selectedId ?? ""]]);
 
   const files = useMemo(
     () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []),
@@ -1066,9 +1071,17 @@ export default function ImportWizard() {
   // 选择状态（路径集合）；设备切换时重置为全选（默认导入全部）
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const seenFiles = useRef<{ id: string | null; paths: Set<string> }>({ id: null, paths: new Set() });
   useEffect(() => {
-    setSelected(new Set(files.map((f) => f.path)));
-    setCollapsed(new Set());
+    const next = new Set(files.map((f) => f.path));
+    const previous = seenFiles.current;
+    if (previous.id !== selectedId) {
+      setSelected(next);
+      setCollapsed(new Set());
+    } else {
+      setSelected((current) => new Set([...next].filter((path) => current.has(path) || !previous.paths.has(path))));
+    }
+    seenFiles.current = { id: selectedId, paths: next };
   }, [selectedId, files]);
 
   // 方案状态：目标根/模板从激活库合成（只读；旧库缺字段时以全局设置兜底）
@@ -1128,7 +1141,7 @@ export default function ImportWizard() {
   // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
   const secondReady = !secondEnabled || secondRoot.trim().length > 0;
   const canStart =
-    Boolean(device && activeLibrary && targetRoot) && secondReady && !starting;
+    Boolean(device && activeLibrary && targetRoot) && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed" && secondReady && !starting;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -1215,7 +1228,13 @@ export default function ImportWizard() {
 
   /** 选中文件夹为源：folderScan 成快照则入库并显式选中；失败（IPC 不可用等）提示并保持原源 */
   async function selectFolder(path: string): Promise<boolean> {
-    const snapshot = await folderScan(path);
+    let snapshot: DeviceSnapshot | null;
+    try { snapshot = await folderScan(path, true); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSourceError(`${t("wizard.fs.scanFailed", { dir: path })}：${message}`);
+      return false;
+    }
     if (!snapshot) {
       // 失败不再静默：中栏一行红字提示（此前「点了没反应」难排查）
       setSourceError(t("wizard.fs.scanFailed", { dir: path }));
@@ -1523,6 +1542,7 @@ export default function ImportWizard() {
                           {t("wizard.rescan")}
                         </button>
                       </div>
+                      {device.scanError && <p role="status" className="mt-2 text-xs text-red-400">{t("wizard.deviceScanFailed")}: {device.scanError}</p>}
                       <dl className="mt-1.5 space-y-1 text-xs" data-testid="wizard-device-info">
                         <div className="flex justify-between">
                           <dt className="text-text-muted">{t("wizard.deviceKind")}</dt>

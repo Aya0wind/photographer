@@ -2,11 +2,14 @@
 //! 导入引擎不感知设备类型。热插拔检测在 `hotplug`（WM_DEVICECHANGE），
 //! 卷实现在 `volume`，WPD/MTP 实现在 `wpd`。
 
+pub mod diagnostics;
 pub mod folder;
 pub mod health;
 pub mod hotplug;
 pub mod orchestrator;
 pub mod present;
+#[cfg(any(windows, test))]
+pub mod timed_worker;
 pub mod volume;
 pub mod wpd;
 
@@ -48,6 +51,7 @@ pub enum DeviceError {
 }
 
 pub type DeviceResult<T> = Result<T, DeviceError>;
+pub type FileBatchCallback = std::sync::Arc<dyn Fn(Vec<FileEntry>) + Send + Sync>;
 
 /// 设备源统一接口。
 pub trait DeviceSource: Send + Sync {
@@ -58,6 +62,11 @@ pub trait DeviceSource: Send + Sync {
     fn name(&self) -> String;
     /// 枚举全部媒体文件（跳过系统目录与非媒体扩展名）。
     fn list(&self) -> DeviceResult<Vec<FileEntry>>;
+    fn list_with_progress(&self, on_batch: FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
+        let files = self.list()?;
+        on_batch(files.clone());
+        Ok(files)
+    }
     /// 读取文件头部（≤max 字节）用于魔数识别与 EXIF 探测。
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>>;
     /// 全文件流（复制用）。调用方负责读完或 drop。

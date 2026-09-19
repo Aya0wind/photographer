@@ -1,4 +1,6 @@
 {
+  "wizard.deviceScanning": "扫描中",
+  "wizard.deviceScanFailed": "扫描失败，可重新扫描",
   "nav.gallery": "画廊",
   "nav.search": "搜索",
   "nav.import": "导入",
@@ -166,7 +168,7 @@
   "wizard.rescan": "重新扫描",
   "wizard.deviceKind": "设备类型",
   "wizard.deviceFiles": "文件",
-  "wizard.fs.scanFailed": "无法读取文件夹 {{dir}}（后端未连接或目录不可访问）",
+  "wizard.fs.scanFailed": "无法读取文件夹 {{dir}}",
   "wizard.totalSize": "总容量",
   "wizard.newFiles": "新增文件",
   "wizard.fileKind.photo": "照片",

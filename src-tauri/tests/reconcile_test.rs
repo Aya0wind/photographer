@@ -18,7 +18,12 @@ use ipc::reconcile::{reconcile_devices, reconcile_with_truth};
 fn eventually_registry(state: &ipc::AppState, cond: impl Fn(&str) -> bool) -> bool {
     let started = std::time::Instant::now();
     loop {
-        let hit = state.devices.lock().unwrap().keys().any(|id| cond(id));
+        let hit = state
+            .devices
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, entry)| cond(id) && matches!(entry.scan, ipc::DeviceScan::Ready));
         if hit {
             return true;
         }
@@ -245,11 +250,8 @@ fn real_truth_reconcile_smoke() {
 }
 
 #[test]
-fn h1_stale_offline_mark_forces_rescan_replacement() {
-    // 场景 H1：先连相机 → 关电源 → 重开并切 MTP（Windows 发 remove+arrival
-    // 对，但摘除未及生效）——注册表仍有幽灵条目 + 探活离线标记仍在 +
-    // 到达信号触发 reconcile（真值含该设备）：
-    // 必须清除陈旧标记、摘除幽灵条目并**重扫替换**（不得因已注册跳过）。
+fn offline_device_requires_successful_probe_before_rescan() {
+    // OS 在场不能推翻探活失败；确认探活恢复后才重新扫描。
     let src = tempfile::tempdir().unwrap();
     build_many(src.path(), 3);
     let db_dir = tempfile::tempdir().unwrap();
@@ -266,6 +268,22 @@ fn h1_stale_offline_mark_forces_rescan_replacement() {
     let mut rx = state.bus.subscribe();
     let truth = vec![(volume_id.clone(), SourceKind::Volume, "新扫描".into())];
     reconcile_with_truth(&state, "h1-arrival", &truth);
+    assert!(!state.devices.lock().unwrap().contains_key(&volume_id));
+    assert!(devices::health::offline_ids().contains(&volume_id));
+    let mut graveyard = vec![(volume_id.clone(), "旧名".to_string())];
+    let actions = devices::health::monitor_step(
+        &[],
+        &mut graveyard,
+        &mut Default::default(),
+        &mut |_| true,
+        true,
+    );
+    assert!(matches!(
+        &actions[0],
+        devices::health::HealthAction::Revive { .. }
+    ));
+    devices::health::clear_offline(&volume_id);
+    reconcile_with_truth(&state, "probe-recovered", &truth);
 
     // 重扫完成：注册表仍含该设备（条目被替换为新鲜扫描结果）
     assert!(
@@ -296,4 +314,67 @@ fn h1_stale_offline_mark_forces_rescan_replacement() {
     }
     assert!(removed_hit, "幽灵条目必须摘除（替换语义）");
     assert!(scanned_hit, "重扫必须发布 DeviceScanned");
+}
+
+#[test]
+fn discovery_without_library_still_scans_and_folder_sources_survive_poll() {
+    let src = tempfile::tempdir().unwrap();
+    build_many(src.path(), 2);
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(state_with_library(
+        db_dir.path(),
+        src.path(),
+        Duration::ZERO,
+    ));
+    let folder = ipc::scan_folder(&state, &src.path().to_string_lossy()).unwrap();
+    state.settings.lock().unwrap().active_library_id = None;
+    let id = devices::normalize_device_id(&src.path().to_string_lossy());
+    ipc::reconcile::remove_device(&state, &id);
+    reconcile_with_truth(
+        &state,
+        "startup",
+        &[(id.clone(), SourceKind::Volume, "卡".into())],
+    );
+    assert!(
+        state.devices.lock().unwrap().contains_key(&id),
+        "连接应立即可见"
+    );
+    assert!(eventually_registry(&state, |key| key == id));
+    assert_eq!(state.devices.lock().unwrap()[&id].snapshot.new_files, 2);
+    assert!(state.devices.lock().unwrap().contains_key(&folder.id));
+}
+
+#[test]
+fn rapid_remove_arrive_replaces_connection_and_emits_new_scan() {
+    let src = tempfile::tempdir().unwrap();
+    build_many(src.path(), 1);
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(state_with_library(
+        db_dir.path(),
+        src.path(),
+        Duration::ZERO,
+    ));
+    let id = devices::normalize_device_id(&src.path().to_string_lossy());
+    let old = Arc::clone(&state.devices.lock().unwrap()[&id].source);
+    let mut rx = state.bus.subscribe();
+    ipc::reconcile::remove_device(&state, &id);
+    reconcile_with_truth(
+        &state,
+        "dbt",
+        &[(id.clone(), SourceKind::Volume, "相机".into())],
+    );
+    assert!(eventually_registry(&state, |key| key == id));
+    assert!(!Arc::ptr_eq(
+        &old,
+        &state.devices.lock().unwrap()[&id].source
+    ));
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(matches!(&events[0], AppEvent::DeviceRemoved { .. }));
+    assert!(matches!(&events[1], AppEvent::DeviceArrived { .. }));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AppEvent::DeviceScanned { .. })));
 }

@@ -17,6 +17,8 @@ export type DeviceKind = "volume" | "mtp" | "folder";
 export type FileKind = "photo" | "raw" | "video" | "other";
 
 export interface DeviceSnapshot {
+  scanStatus?: "scanning" | "ready" | "failed";
+  scanError?: string | null;
   id: string;
   name: string;
   kind: DeviceKind;
@@ -89,6 +91,8 @@ export interface ImportStats {
 
 /** 唯一事件通道 `app://event` 的 payload：以 type（camelCase）辨识的联合 */
 export type AppEvent =
+  | { type: "deviceFilesProgress"; id: string; files: FileEntryDto[] }
+  | { type: "deviceScanFailed"; id: string; message: string }
   | { type: "deviceArrived"; id: string; kind: DeviceKind; name: string }
   | { type: "deviceRemoved"; id: string }
   | {
@@ -179,11 +183,13 @@ export function kindFromName(name: string): FileKind {
 }
 
 /** 已连接设备列表（含各类型文件统计）；非数组回退空（防御后端异常返回） */
-export async function deviceList(): Promise<DeviceSnapshot[]> {
+export async function deviceList(strict = false): Promise<DeviceSnapshot[]> {
   try {
     const devices = await ipc<DeviceSnapshot[] | null>("device_list");
+    if (strict && !Array.isArray(devices)) throw new Error("设备列表响应无效");
     return Array.isArray(devices) ? devices : [];
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }
@@ -208,11 +214,12 @@ export async function deviceFiles(id: string): Promise<FileEntryDto[] | null> {
 }
 
 /** 扫描本地文件夹作为导入源（kind="folder"，id="FOLDER:<绝对路径>"）；失败返回 null */
-export async function folderScan(path: string): Promise<DeviceSnapshot | null> {
+export async function folderScan(path: string, strict = false): Promise<DeviceSnapshot | null> {
   try {
     const snapshot = await ipc<DeviceSnapshot | null>("folder_scan", { path });
     return snapshot ?? null;
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return null;
   }
 }

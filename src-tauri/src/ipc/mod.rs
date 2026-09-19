@@ -38,8 +38,13 @@ pub enum DeviceScan {
 }
 
 impl DeviceEntry {
+    #[allow(dead_code)] // 测试脚手架构建已扫描的源
     pub fn ready(source: Arc<dyn DeviceSource>, snapshot: DeviceSnapshot) -> Self {
-        Self { source, snapshot, scan: DeviceScan::Ready }
+        Self {
+            source,
+            snapshot,
+            scan: DeviceScan::Ready,
+        }
     }
 }
 
@@ -65,15 +70,9 @@ pub struct AppState {
     pub supervisor: std::sync::Arc<crate::tasks::TaskSupervisor>,
 }
 
-/// 设备文件条目 DTO（导入向导源树/勾选表数据；mtime 为 RFC3339 字符串）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileEntryDto {
-    pub id: String,
-    pub rel_path: String,
-    pub size: u64,
-    pub mtime: String,
-}
+/// 设备文件条目 DTO：唯一定义在 events 层（事件载荷与 IPC 共享），此处重导出
+/// 保持 `ipc::FileEntryDto` 路径兼容（含 tests/common 的 #[path] 包含场景）。
+pub use crate::events::FileEntryDto;
 
 /// 目录树浏览条目（fs_list_dirs 返回；M2 导入向导源面板懒加载）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,9 +104,15 @@ pub async fn run_blocking<T: Send + 'static>(
     state: SharedState,
     work: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(move || work(&state))
-        .await
-        .map_err(|e| format!("后台任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = work(&state);
+        if let Err(error) = &result {
+            crate::devices::diagnostics::record(format!("IPC command failed: {error}"));
+        }
+        result
+    })
+    .await
+    .map_err(|e| format!("后台任务失败: {e}"))?
 }
 
 /// Windows 文件属性位。
@@ -241,11 +246,25 @@ pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, Stri
     let key = crate::devices::normalize_device_id(id);
     let source = {
         let devices = state.devices.lock().expect("devices mutex poisoned");
-        Arc::clone(&devices.get(&key).ok_or_else(|| format!("设备 {id} 不在线"))?.source)
+        Arc::clone(
+            &devices
+                .get(&key)
+                .ok_or_else(|| format!("设备 {id} 不在线"))?
+                .source,
+        )
     };
     let files = source
         .list()
         .map_err(|e| format!("枚举设备文件失败: {e}"))?;
+    if !state
+        .devices
+        .lock()
+        .expect("devices mutex poisoned")
+        .get(&key)
+        .is_some_and(|entry| Arc::ptr_eq(&entry.source, &source))
+    {
+        return Err(format!("设备 {id} 已断开或重新连接"));
+    }
     Ok(files.iter().map(FileEntryDto::from).collect())
 }
 
@@ -331,13 +350,39 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
             .ok_or_else(|| format!("设备 {id} 不在线"))?;
         Arc::clone(&entry.source)
     };
-    let snapshot = orchestrator::scan_device(&*source, &db, skip_imported)
-        .map_err(|e| format!("扫描设备失败: {e}"))?;
+    let result = orchestrator::scan_device(&*source, &db, skip_imported)
+        .map_err(|e| format!("扫描设备失败: {e}"));
     let mut devices = state.devices.lock().expect("devices mutex poisoned");
-    let entry = devices.get_mut(&key).filter(|entry| Arc::ptr_eq(&entry.source, &source))
+    let entry = devices
+        .get_mut(&key)
+        .filter(|entry| Arc::ptr_eq(&entry.source, &source))
         .ok_or_else(|| format!("设备 {id} 已断开或重新连接"))?;
+    let snapshot = match result {
+        Ok(snapshot) => snapshot,
+        Err(message) => {
+            entry.scan = DeviceScan::Failed(
+                message.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            );
+            state
+                .bus
+                .publish(crate::events::AppEvent::DeviceScanFailed {
+                    id: key,
+                    message: message.clone(),
+                });
+            return Err(message);
+        }
+    };
     entry.snapshot = snapshot.clone();
     entry.scan = DeviceScan::Ready;
+    if snapshot.kind != SourceKind::Folder {
+        state.bus.publish(crate::events::AppEvent::DeviceScanned {
+            id: snapshot.id.clone(),
+            name: snapshot.name.clone(),
+            kind: snapshot.kind,
+            snapshot: snapshot.clone(),
+        });
+    }
     Ok(snapshot)
 }
 

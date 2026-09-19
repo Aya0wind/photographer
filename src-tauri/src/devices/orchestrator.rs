@@ -38,8 +38,19 @@ pub fn scan_device<'a>(
     db: impl Into<Option<&'a Db>>,
     skip_imported: bool,
 ) -> DeviceResult<DeviceSnapshot> {
-    let db = db.into();
-    let entries = source.list()?;
+    scan_device_with_progress(source, db.into(), skip_imported, None)
+}
+
+pub fn scan_device_with_progress(
+    source: &dyn DeviceSource,
+    db: Option<&Db>,
+    skip_imported: bool,
+    on_batch: Option<super::FileBatchCallback>,
+) -> DeviceResult<DeviceSnapshot> {
+    let entries = match on_batch {
+        Some(callback) => source.list_with_progress(callback)?,
+        None => source.list()?,
+    };
     let mut snapshot = DeviceSnapshot {
         id: source.id(),
         name: source.name(),

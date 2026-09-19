@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -179,7 +179,7 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
-  deviceListMock.mockReset().mockResolvedValue([]);
+  deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
   convertMock.mockReset().mockReturnValue("");
   thumbMock.mockReset().mockResolvedValue(null);
   localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
@@ -541,7 +541,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     await user.click(await screen.findByRole("button", { name: "展开 D:\\" }));
     await user.click(await screen.findByRole("button", { name: "照片" }));
 
-    expect(scanMock).toHaveBeenCalledWith("D:\\照片");
+    expect(scanMock).toHaveBeenCalledWith("D:\\照片", true);
     expect(useImportStore.getState().devices.some((d) => d.id === "FOLDER:D:\\照片")).toBe(true);
     // 树节点高亮 = 文件夹选中态
     const node = screen
@@ -591,7 +591,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     await user.click(await screen.findByTestId("wizard-fs-browse"));
 
     expect(openMock).toHaveBeenCalledWith({ directory: true });
-    expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
     // 选中源切到文件夹：设备区无高亮行、信息卡隐藏（folder 不是设备条目）
     const rows = await screen.findAllByTestId("wizard-device-item");
     expect(rows).toHaveLength(2); // E: + MTP:CAM，无 FOLDER 行
@@ -610,7 +610,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     renderWizard("?device=E:");
     await user.click(await screen.findByTestId("wizard-fs-browse"));
 
-    expect(scanMock).toHaveBeenCalledWith("D:\\老照片");
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
     expect(useImportStore.getState().devices).toHaveLength(2);
     const info = screen.getByTestId("wizard-device-info");
     expect(info).toHaveTextContent("读卡器");
@@ -1095,4 +1095,25 @@ describe("全局滚动条主题", () => {
     expect(screen.getByTestId("wizard-list-scroll").className).toContain("sp-scroll");
     expect(screen.getByTestId("wizard-tree").className).toContain("sp-scroll");
   });
+});
+
+
+it("扫描尚未结束时立即展示增量文件，完成后不二次读取相机", async () => {
+  seedSession();
+  useImportStore.setState({ devices: [], sourceFiles: {} });
+  useImportStore.getState().handleAppEvent({ type: "deviceArrived", id: "camera", kind: "mtp", name: "测试相机" });
+  renderWizard("?device=camera");
+  await act(async () => {
+    useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files: [
+      { id: "1", relPath: "DCIM/LIVE.JPG", size: 100, mtime: "2026-09-19T00:00:00Z" },
+    ] });
+  });
+  expect((await screen.findAllByText("LIVE.JPG")).length).toBeGreaterThan(0);
+  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+  expect(deviceFilesMock).not.toHaveBeenCalled();
+  await act(async () => {
+    useImportStore.getState().handleAppEvent({ type: "deviceScanned", id: "camera", kind: "mtp", name: "测试相机", snapshot: { ...mtpDevice(), id: "camera" } });
+  });
+  expect(screen.getAllByText("LIVE.JPG").length).toBeGreaterThan(0);
+  expect(deviceFilesMock).not.toHaveBeenCalled();
 });

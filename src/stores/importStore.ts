@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
   deviceList,
   deviceScan,
+  kindFromName,
   importCancel,
   importJobsPage,
   importPause,
@@ -228,6 +229,14 @@ function canTransition(from: JobLifecycleStatus, to: ActiveJob["status"]): boole
 
 /** 本会话已弹过窗的设备 id（避免手动重扫重复弹；拔出后清除以便重插再弹） */
 const promptedDevices = new Set<string>();
+const streamingDevices = new Set<string>();
+let deviceRevision = 0;
+let seedRequest = 0;
+const deviceChanges = new Map<string, number>();
+
+function normalizeDeviceId(id: string): string {
+  return id.startsWith("\\\\?\\") ? id.toLowerCase() : id;
+}
 
 const EMPTY_HISTORY: HistoryState = { rows: [], cursor: 0, exhausted: false, loading: false };
 
@@ -287,9 +296,23 @@ export const useImportStore = create<ImportState>((set, get) => ({
   clean: null,
 
   handleAppEvent: (event) => {
+    if (event.type === "deviceArrived" || event.type === "deviceRemoved" ||
+        event.type === "deviceScanned" || event.type === "deviceScanFailed" || event.type === "deviceFilesProgress") {
+      event = { ...event, id: normalizeDeviceId(event.id) };
+      deviceChanges.set(event.id, ++deviceRevision);
+    }
     switch (event.type) {
       case "deviceArrived": {
+        streamingDevices.add(event.id);
         set((s) => ({
+          sourceFiles: { ...s.sourceFiles, [event.id]: [] },
+          devices: upsertDevice(s.devices, {
+            ...(s.devices.find((d) => d.id === event.id) ?? {
+              id: event.id, name: event.name, kind: event.kind,
+              filesByKind: { photo: 0, raw: 0, video: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
+            }),
+            scanStatus: "scanning", scanError: null,
+          }),
           scanning: [
             ...s.scanning.filter((d) => d.id !== event.id),
             { id: event.id, name: event.name, kind: event.kind },
@@ -299,24 +322,51 @@ export const useImportStore = create<ImportState>((set, get) => ({
       }
 
       case "deviceRemoved": {
+        streamingDevices.delete(event.id);
         promptedDevices.delete(event.id);
         set((s) => ({
           devices: s.devices.filter((d) => d.id !== event.id),
           scanning: s.scanning.filter((d) => d.id !== event.id),
           promptQueue: s.promptQueue.filter((id) => id !== event.id),
+          sourceFiles: Object.fromEntries(Object.entries(s.sourceFiles).filter(([id]) => id !== event.id)),
         }));
         break;
       }
 
+      case "deviceScanFailed": {
+        set((s) => ({
+          devices: s.devices.map((d) => d.id === event.id ? { ...d, scanStatus: "failed", scanError: event.message } : d),
+          scanning: s.scanning.filter((d) => d.id !== event.id),
+        }));
+        break;
+      }
+
+      case "deviceFilesProgress": {
+        streamingDevices.add(event.id);
+        set((s) => {
+          if (!s.devices.some((d) => d.id === event.id)) return s;
+          const files = new Map((s.sourceFiles[event.id] ?? []).map((f) => [f.path, f]));
+          for (const entry of event.files) {
+            const slash = entry.relPath.lastIndexOf("/");
+            const name = entry.relPath.slice(slash + 1);
+            files.set(entry.relPath, { path: entry.relPath, dir: slash < 0 ? "" : entry.relPath.slice(0, slash), name, size: entry.size, kind: kindFromName(name) });
+          }
+          return { sourceFiles: { ...s.sourceFiles, [event.id]: [...files.values()] } };
+        });
+        break;
+      }
+
       case "deviceScanned": {
+        const keepFiles = streamingDevices.delete(event.id);
         // 遵循“插入设备时提示”设置：关闭则不弹窗（视为已处理）
         const prompt =
           useSettingsStore.getState().settings.import.promptOnDevice &&
           !promptedDevices.has(event.id);
         promptedDevices.add(event.id);
         set((s) => ({
-          devices: upsertDevice(s.devices, event.snapshot),
+          devices: upsertDevice(s.devices, { ...event.snapshot, id: event.id, scanStatus: "ready", scanError: null }),
           scanning: s.scanning.filter((d) => d.id !== event.id),
+          sourceFiles: keepFiles ? s.sourceFiles : Object.fromEntries(Object.entries(s.sourceFiles).filter(([id]) => id !== event.id)),
           promptQueue:
             prompt && !s.promptQueue.includes(event.id)
               ? [...s.promptQueue, event.id]
@@ -471,13 +521,16 @@ export const useImportStore = create<ImportState>((set, get) => ({
   },
 
   refreshDevice: async (id) => {
+    const revision = deviceChanges.get(id);
     const snapshot = await deviceScan(id);
-    if (snapshot) {
-      set((s) => ({ devices: upsertDevice(s.devices, snapshot) }));
+    if (snapshot && revision === deviceChanges.get(id)) {
+      set((s) => ({ devices: upsertDevice(s.devices, { ...snapshot, scanStatus: "ready", scanError: null }) }));
     }
   },
 
   addDevice: (snapshot) => {
+    snapshot = { ...snapshot, id: normalizeDeviceId(snapshot.id) };
+    deviceChanges.set(snapshot.id, ++deviceRevision);
     set((s) => ({ devices: upsertDevice(s.devices, snapshot) }));
   },
 
@@ -571,10 +624,28 @@ let eventsBound = false;
  * 订阅完成后 / 向导打开时主动拉 device_list 补齐。
  */
 export async function seedDevicesFromBackend(): Promise<void> {
-  const devices = await deviceList();
-  for (const snapshot of devices) {
-    useImportStore.getState().addDevice(snapshot);
-  }
+  const revision = deviceRevision;
+  const request = ++seedRequest;
+  let devices: DeviceSnapshot[];
+  try { devices = await deviceList(true); } catch { return; }
+  if (request !== seedRequest) return;
+  const changed = (id: string) => (deviceChanges.get(id) ?? 0) > revision;
+  const snapshots = devices.map((d) => ({ ...d, id: normalizeDeviceId(d.id) }));
+  useImportStore.setState((s) => {
+    // 在请求期间收到的事件优先；迟到快照不能复活已拔出的设备。
+    let next = s.devices.filter((d) => changed(d.id) || snapshots.some((v) => v.id === d.id));
+    for (const snapshot of snapshots) {
+      if (!changed(snapshot.id)) next = upsertDevice(next, snapshot);
+    }
+    const ids = new Set(next.map((d) => d.id));
+    for (const id of promptedDevices) if (!ids.has(id)) promptedDevices.delete(id);
+    return {
+      devices: next,
+      scanning: next.filter((d) => d.scanStatus === "scanning").map(({ id, name, kind }) => ({ id, name, kind })),
+      promptQueue: s.promptQueue.filter((id) => ids.has(id)),
+      sourceFiles: Object.fromEntries(Object.entries(s.sourceFiles).filter(([id]) => ids.has(id))),
+    };
+  });
 }
 
 /** 应用启动时调用一次：订阅唯一事件通道 app://event（失败静默）+ 拉设备初值 */
@@ -583,10 +654,16 @@ export async function initImportStore(): Promise<void> {
   eventsBound = true;
   await subscribeAppEvents((event) => useImportStore.getState().handleAppEvent(event));
   await seedDevicesFromBackend();
+  // 补偿漏事件、窗口恢复以及监听短暂失败；失败响应不会清空设备。
+  setInterval(() => { void seedDevicesFromBackend(); }, 3000);
 }
 
 /** 仅测试用：重置模块级缓冲/队列并清空 store */
 export function resetImportStoreForTests(): void {
+  streamingDevices.clear();
+  deviceRevision = 0;
+  seedRequest++;
+  deviceChanges.clear();
   pendingProgress.clear();
   if (flushTimer !== null) {
     clearTimeout(flushTimer);

@@ -18,8 +18,6 @@
 //! WPD 存量：`IPortableDeviceManager::GetDevices`（`wpd::enumerate_mtp_devices`，
 //! COM 初始化由 wpd.rs 每入口自带且幂等，编排线程无需预初始化）。
 
-use crate::events::SourceKind;
-
 // GetDriveTypeW 返回值（Win32 ABI 固定；windows crate 该组常量在未启用的
 // feature 内，此处照抄数值——与 wpd.rs CLSID 同策略）。仅
 // DRIVE_REMOVABLE/DRIVE_CDROM 进入 lib 判定，其余供测试矩阵与文档完整性。
@@ -73,35 +71,6 @@ pub fn probe_volume(drive: &str) -> Option<String> {
 #[allow(dead_code)]
 pub fn probe_volume(_drive: &str) -> Option<String> {
     None
-}
-
-/// 枚举当下在位的全部设备，产出 DeviceArrived 载荷 `(id, kind, name)`。
-/// WPD 枚举失败仅告警（相机未切 PC 模式等），不阻塞卷枚举。
-pub fn enumerate_present_devices() -> Vec<(String, SourceKind, String)> {
-    let mut out = Vec::new();
-    for (drive, label) in enumerate_present_volumes() {
-        out.push((drive, SourceKind::Volume, label));
-    }
-    for (pnp, friendly) in enumerate_present_mtp() {
-        out.push((pnp, SourceKind::Mtp, friendly));
-    }
-    out
-}
-
-/// 存量 WPD/MTP 设备：`(规范化 id, friendly_name)`。id 过
-/// [`super::normalize_device_id`]（与热插到达/移除同一事实源，大小写
-/// 变体收敛为同一注册 key）。
-pub fn enumerate_present_mtp() -> Vec<(String, String)> {
-    match super::wpd::enumerate_mtp_devices() {
-        Ok(list) => list
-            .into_iter()
-            .map(|(pnp, friendly)| (super::normalize_device_id(&pnp), friendly))
-            .collect(),
-        Err(err) => {
-            eprintln!("启动 WPD 存量枚举失败（相机未切 PC 模式？）: {err}");
-            Vec::new()
-        }
-    }
 }
 
 /// 存量可导入卷：`(盘符 "E:", 展示名)`。过滤决策经 [`probe_volume`]

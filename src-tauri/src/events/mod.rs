@@ -83,6 +83,18 @@ pub struct CleanStats {
     pub errors: Vec<String>,
 }
 
+/// 设备文件条目 DTO（DeviceFilesProgress 载荷；导入向导源树/勾选表数据）。
+/// 定义在 events 层供各处共享（ipc 层重导出保持 `ipc::FileEntryDto` 路径兼容）；
+/// mtime 为 RFC3339 字符串。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntryDto {
+    pub id: String,
+    pub rel_path: String,
+    pub size: u64,
+    pub mtime: String,
+}
+
 // ---------------------------------------------------------------------------
 // 事件（扁平单枚举，serde tag=type，前端做可辨识联合处理）
 // ---------------------------------------------------------------------------
@@ -98,9 +110,19 @@ pub struct CleanStats {
     rename_all_fields = "camelCase"
 )]
 pub enum AppEvent {
+    DeviceFilesProgress {
+        id: String,
+        files: Vec<FileEntryDto>,
+    },
     /// 内部系统通知；不转发给界面。最终在线状态由设备编排器发布。
-    DeviceTopologyChanged { id: String, arrived: bool },
-    DeviceScanFailed { id: String, message: String },
+    DeviceTopologyChanged {
+        id: String,
+        arrived: bool,
+    },
+    DeviceScanFailed {
+        id: String,
+        message: String,
+    },
     // 设备
     DeviceArrived {
         id: String,

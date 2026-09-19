@@ -3,16 +3,9 @@
 //! 结构：跨平台纯函数（路径拼接 / OLE DATE / ISO 日期 / FILETIME 解析，
 //! 有单测）+ Windows COM 实现 + 非 Windows 桩。
 //!
-//! 统一架构（2026-09-18）：**单一 WPD worker 线程 + 轻量代理**——所有 WPD
-//! COM 对象（Manager/Device/流）只在 worker 线程及其创建的流泵线程上创建
-//! 与释放；`WpdSource` 是无状态代理（{id, name} + 消息通道），任意线程
-//! clone/drop 自由，COM 套间类 bug（断开闪退）整类消灭。worker 每条命令
-//! `catch_unwind`：panic 转 Err 回执 + 日志，进程不死。
-//!
-//! COM 约定：worker/流泵线程经三态 guard `CoInitializeEx(MTA)`（决策纯
-//! 函数 [`com_apartment_owned`] 单测覆盖；S_FALSE/CHANGED_MODE 沿用现有
-//! apartment 不注销）；接口指针全部 windows crate 封装，禁止手写
-//! AddRef/Release。
+//! COM 对象在拥有它的 worker 线程内创建、调用与释放。WpdSource 是
+//! 无 COM 状态的代理；设备枚举、每台设备的数据操作与探活分别排队。
+//! 等待有超时，旧连接调用被隔离，恢复和线程数量限制见 timed_worker。
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
@@ -181,7 +174,15 @@ impl DeviceSource for WpdSource {
 
     #[cfg(windows)]
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        worker::list(&self.pnp_id)
+        worker::list(&self.pnp_id, None)
+    }
+
+    #[cfg(windows)]
+    fn list_with_progress(
+        &self,
+        on_batch: super::FileBatchCallback,
+    ) -> DeviceResult<Vec<FileEntry>> {
+        worker::list(&self.pnp_id, Some(on_batch))
     }
 
     #[cfg(not(windows))]
@@ -242,13 +243,21 @@ pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
 
 /// 探活（健康监控接线）：worker 打开会话+列举顶层对象，5s 超时。
 #[cfg(windows)]
-pub fn worker_ping(pnp: &str) -> bool {
+pub fn worker_ping(pnp: &str) -> Option<bool> {
     worker::ping(pnp, std::time::Duration::from_secs(5))
 }
 
 #[cfg(not(windows))]
-pub fn worker_ping(_pnp: &str) -> bool {
-    false
+pub fn worker_ping(_pnp: &str) -> Option<bool> {
+    Some(false)
+}
+
+/// 断开时隔离旧连接的排队调用；重连不等待旧驱动调用返回。
+pub fn invalidate_device(pnp: &str) {
+    #[cfg(windows)]
+    worker::invalidate(pnp);
+    #[cfg(not(windows))]
+    let _ = pnp;
 }
 
 /// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
@@ -273,194 +282,68 @@ pub fn panic_probe() -> DeviceResult<()> {
 
 #[cfg(windows)]
 mod worker {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::mpsc;
-    use std::sync::OnceLock;
-
-    use super::super::{DeviceError, DeviceResult, FileEntry};
+    use super::super::{DeviceResult, FileEntry};
     use super::{com, StreamChunk};
-
-    /// worker 指令（reply 为一次性应答通道）。
-    pub(super) enum WpdCmd {
-        Enumerate {
-            reply: mpsc::Sender<DeviceResult<Vec<(String, String)>>>,
-        },
-        List {
-            pnp: String,
-            reply: mpsc::Sender<DeviceResult<Vec<FileEntry>>>,
-        },
-        OpenHead {
-            pnp: String,
-            obj: String,
-            max: u64,
-            reply: mpsc::Sender<DeviceResult<Vec<u8>>>,
-        },
-        Stream {
-            pnp: String,
-            obj: String,
-            reply: mpsc::Sender<DeviceResult<tokio::sync::mpsc::Receiver<StreamChunk>>>,
-        },
-        Delete {
-            pnp: String,
-            obj: String,
-            reply: mpsc::Sender<DeviceResult<()>>,
-        },
-        /// 探活：打开会话 + 列举顶层 1 个对象（健康监控用，轻量）。
-        Ping {
-            pnp: String,
-            reply: mpsc::Sender<DeviceResult<()>>,
-        },
-        /// 测试注入：panic 捕获验证（lib 目标内不构造——集成测试引用）。
-        #[doc(hidden)]
-        #[allow(dead_code)]
-        PanicProbe {
-            reply: mpsc::Sender<DeviceResult<()>>,
-        },
-    }
-
-    /// worker 发送端（首次使用时拉起线程，进程生命周期常驻）。
-    fn tx() -> &'static mpsc::Sender<WpdCmd> {
-        static TX: OnceLock<mpsc::Sender<WpdCmd>> = OnceLock::new();
-        TX.get_or_init(|| {
-            let (tx, rx) = mpsc::channel::<WpdCmd>();
-            std::thread::Builder::new()
-                .name("wpd-worker".into())
-                .spawn(move || run(rx))
-                .expect("spawn wpd worker");
-            tx
+    use std::sync::OnceLock;
+    use std::time::Duration;
+    fn pool() -> &'static super::super::timed_worker::WorkerPool {
+        static POOL: OnceLock<super::super::timed_worker::WorkerPool> = OnceLock::new();
+        POOL.get_or_init(|| {
+            super::super::timed_worker::WorkerPool::with_initializer(|| {
+                Box::new(com::ComApartment::init())
+            })
         })
     }
-
-    /// worker 主循环：线程生命周期内持有 COM 初始化；逐命令执行。
-    fn run(rx: mpsc::Receiver<WpdCmd>) {
-        let _com = com::ComApartment::init();
-        while let Ok(cmd) = rx.recv() {
-            handle(cmd);
-        }
+    pub(super) fn invalidate(pnp: &str) {
+        pool().invalidate(&format!("data:{pnp}"));
+        pool().invalidate(&format!("probe:{pnp}"));
     }
-
-    fn handle(cmd: WpdCmd) {
-        match cmd {
-            WpdCmd::Enumerate { reply } => {
-                let _ = reply.send(guarded("enumerate", com::enumerate));
-            }
-            WpdCmd::List { pnp, reply } => {
-                let _ = reply.send(guarded("list", move || com::list(&pnp)));
-            }
-            WpdCmd::OpenHead {
-                pnp,
-                obj,
-                max,
-                reply,
-            } => {
-                let _ = reply.send(guarded("open_head", move || {
-                    com::open_head(&pnp, &obj, max)
-                }));
-            }
-            WpdCmd::Stream { pnp, obj, reply } => {
-                let _ = reply.send(guarded("stream", move || com::stream_channel(&pnp, &obj)));
-            }
-            WpdCmd::Delete { pnp, obj, reply } => {
-                let _ = reply.send(guarded("delete", move || com::delete(&pnp, &obj)));
-            }
-            WpdCmd::Ping { pnp, reply } => {
-                let _ = reply.send(guarded("ping", move || com::ping(&pnp)));
-            }
-            WpdCmd::PanicProbe { reply } => {
-                let _ = reply.send(guarded("panic_probe", || panic!("注入测试 panic")));
-            }
-        }
-    }
-
-    /// 每命令 panic 捕获：转 Err 回执（reply 必达），worker 继续服务。
-    fn guarded<T>(name: &str, f: impl FnOnce() -> DeviceResult<T>) -> DeviceResult<T> {
-        catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
-            let detail = panic_msg(&payload);
-            eprintln!("WPD worker 命令 panic（{name}）: {detail}");
-            Err(DeviceError::Other(format!(
-                "WPD worker {name} panic: {detail}"
-            )))
-        })
-    }
-
-    fn panic_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
-        if let Some(s) = payload.downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = payload.downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "未知 panic 载荷".to_string()
-        }
-    }
-
-    /// 发送指令并等待一次性回执（worker 关闭/无响应 → Err）。
-    fn call<T>(make: impl FnOnce(mpsc::Sender<DeviceResult<T>>) -> WpdCmd) -> DeviceResult<T> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        tx().send(make(reply_tx))
-            .map_err(|_| DeviceError::Other("WPD worker 不可用".into()))?;
-        reply_rx
-            .recv()
-            .map_err(|_| DeviceError::Other("WPD worker 无响应".into()))?
-    }
-
     pub(super) fn enumerate() -> DeviceResult<Vec<(String, String)>> {
-        call(|reply| WpdCmd::Enumerate { reply })
+        pool().call("enumerate", Duration::from_secs(5), com::enumerate)
     }
-
-    pub(super) fn list(pnp: &str) -> DeviceResult<Vec<FileEntry>> {
-        call(|reply| WpdCmd::List {
-            pnp: pnp.into(),
-            reply,
+    pub(super) fn list(
+        pnp: &str,
+        on_batch: Option<super::super::FileBatchCallback>,
+    ) -> DeviceResult<Vec<FileEntry>> {
+        let id = pnp.to_owned();
+        pool().call_with_idle_timeout(&format!("data:{pnp}"), Duration::from_secs(30), move || {
+            com::list(&id, on_batch)
         })
     }
-
     pub(super) fn open_head(pnp: &str, obj: &str, max: u64) -> DeviceResult<Vec<u8>> {
-        call(|reply| WpdCmd::OpenHead {
-            pnp: pnp.into(),
-            obj: obj.into(),
-            max,
-            reply,
+        let (id, obj) = (pnp.to_owned(), obj.to_owned());
+        pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
+            com::open_head(&id, &obj, max)
         })
     }
-
     pub(super) fn stream(
         pnp: &str,
         obj: &str,
     ) -> DeviceResult<tokio::sync::mpsc::Receiver<StreamChunk>> {
-        call(|reply| WpdCmd::Stream {
-            pnp: pnp.into(),
-            obj: obj.into(),
-            reply,
+        let (id, obj) = (pnp.to_owned(), obj.to_owned());
+        pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
+            com::stream_channel(&id, &obj)
         })
     }
-
     pub(super) fn delete(pnp: &str, obj: &str) -> DeviceResult<()> {
-        call(|reply| WpdCmd::Delete {
-            pnp: pnp.into(),
-            obj: obj.into(),
-            reply,
+        let (id, obj) = (pnp.to_owned(), obj.to_owned());
+        pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
+            com::delete(&id, &obj)
         })
     }
-
-    /// 探活（带超时）：worker 执行打开会话+顶层枚举；`recv_timeout` 到点
-    /// 即放弃（迟到的回执自然丢弃）。设备挂死会占住 worker——接受（后续
-    /// 命令排队），监控侧不受影响。
-    pub(super) fn ping(pnp: &str, timeout: std::time::Duration) -> bool {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        let send = tx().send(WpdCmd::Ping {
-            pnp: pnp.into(),
-            reply: reply_tx,
-        });
-        if send.is_err() {
-            return false;
+    pub(super) fn ping(pnp: &str, timeout: Duration) -> Option<bool> {
+        let id = pnp.to_owned();
+        match pool().call_if_idle(&format!("data:{pnp}"), timeout, move || com::ping(&id)) {
+            Ok(Some(())) => Some(true),
+            Ok(None) => None,
+            Err(_) => Some(false),
         }
-        matches!(reply_rx.recv_timeout(timeout), Ok(Ok(())))
     }
-
-    #[doc(hidden)]
     #[allow(dead_code)]
     pub(super) fn panic_probe() -> DeviceResult<()> {
-        call(|reply| WpdCmd::PanicProbe { reply })
+        pool().call("panic-test", Duration::from_secs(1), || {
+            panic!("注入测试 panic")
+        })
     }
 }
 
@@ -663,14 +546,45 @@ mod com {
     /// 流泵有界通道缓冲块数（8MB 在途；背压阻塞泵线程而非 worker）。
     const STREAM_BUFFER_CHUNKS: usize = 8;
 
-    pub fn list(pnp_id: &str) -> DeviceResult<Vec<FileEntry>> {
+    struct ScanProgress {
+        callback: Option<super::super::FileBatchCallback>,
+        sent: usize,
+        last_emit: std::time::Instant,
+    }
+    impl ScanProgress {
+        fn flush(&mut self, files: &[FileEntry], force: bool) {
+            if files.len() > self.sent
+                && (force
+                    || self.sent == 0
+                    || files.len() - self.sent >= 32
+                    || self.last_emit.elapsed() >= std::time::Duration::from_millis(150))
+            {
+                if let Some(callback) = &self.callback {
+                    callback(files[self.sent..].to_vec());
+                }
+                self.sent = files.len();
+                self.last_emit = std::time::Instant::now();
+            }
+        }
+    }
+    pub fn list(
+        pnp_id: &str,
+        on_batch: Option<super::super::FileBatchCallback>,
+    ) -> DeviceResult<Vec<FileEntry>> {
         let _com = ComApartment::init().map_err(win_error)?;
+        super::super::diagnostics::record(format!("WPD open begin: {pnp_id}"));
         let device = open_device(pnp_id)?;
+        super::super::diagnostics::record("WPD open complete; enumerating media");
         // SAFETY: 设备已 Open
         let content = unsafe { device.Content() }.map_err(win_error)?;
         let keys = build_property_keys()?;
         let mut out = Vec::new();
         let mut skipped = 0u32;
+        let mut progress = ScanProgress {
+            callback: on_batch,
+            sent: 0,
+            last_emit: std::time::Instant::now(),
+        };
         walk_folder(
             &content,
             &keys,
@@ -679,18 +593,22 @@ mod com {
             0,
             &mut out,
             &mut skipped,
+            &mut progress,
         )?;
+        progress.flush(&out, true);
         // 「要么完整要么报错」：中途错误已整体上抛；此处只剩受限对象计数
         if skipped > 0 {
             eprintln!(
                 "WPD 枚举跳过 {skipped} 个受限/无名对象（访问被拒或缺基本属性，                 如播放列表/系统对象），其余完整返回"
             );
         }
+        super::super::diagnostics::record(format!("WPD list complete: {} files", out.len()));
         out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
         Ok(out)
     }
 
     fn open_device(pnp_id: &str) -> DeviceResult<IPortableDevice> {
+        super::super::timed_worker::checkpoint()?;
         // SAFETY: CLSID 为静态常量；无外部聚合
         let client_info: IPortableDeviceValues = unsafe {
             CoCreateInstance(
@@ -759,7 +677,9 @@ mod com {
         depth: u32,
         out: &mut Vec<FileEntry>,
         skipped: &mut u32,
+        progress: &mut ScanProgress,
     ) -> DeviceResult<()> {
+        super::super::timed_worker::checkpoint()?;
         if depth > MAX_DEPTH {
             eprintln!("WPD 枚举达到深度上限 {MAX_DEPTH}，截断该子树（防御异常设备）");
             return Ok(());
@@ -768,6 +688,7 @@ mod com {
         let enumerator = unsafe { content.EnumObjects(0, folder, None::<&IPortableDeviceValues>) }
             .map_err(win_error)?;
         loop {
+            super::super::timed_worker::checkpoint()?;
             let mut batch = vec![PWSTR::null(); BATCH];
             let mut fetched = 0u32;
             // SAFETY: batch 容量与请求条数一致
@@ -778,11 +699,16 @@ mod com {
             if fetched == 0 {
                 break;
             }
-            for &id_ptr in &batch[..fetched as usize] {
-                // SAFETY: id_ptr 由 Next 填充（可能为 NULL）
-                let obj_id = unsafe { pwstr_to_string(id_ptr) };
-                // SAFETY: Next 分配的对象 ID 字符串由调用方释放
-                unsafe { free_pwstr(id_ptr) };
+            // 先释放整批系统字符串，防止子树报错/取消时遗留后半批。
+            let ids: Vec<_> = batch[..fetched as usize]
+                .iter()
+                .map(|&id_ptr| {
+                    let id = unsafe { pwstr_to_string(id_ptr) };
+                    unsafe { free_pwstr(id_ptr) };
+                    id
+                })
+                .collect();
+            for obj_id in ids {
                 if obj_id.is_empty() {
                     continue;
                 }
@@ -791,15 +717,16 @@ mod com {
                 // 部分结果）。现在：仅受限对象/子树（AccessDenied，如相机受保护
                 // 目录、并发会话被拒）跳过并计数（收尾日志可见）；其余错误
                 // （传输中断/会话失效等）整体上抛，绝不出半份清单。
-                if let Err(err) =
-                    process_object(content, keys, &obj_id, prefix, depth, out, skipped)
-                {
+                if let Err(err) = process_object(
+                    content, keys, &obj_id, prefix, depth, out, skipped, progress,
+                ) {
                     if is_object_level_skip(&err) {
                         *skipped += 1;
                     } else {
                         return Err(err);
                     }
                 }
+                progress.flush(out, false);
             }
             if fetched < BATCH as u32 {
                 break; // S_FALSE：本次不足一批，枚举已尽
@@ -809,6 +736,7 @@ mod com {
     }
 
     /// 处理单个对象：目录则递归；媒体文件则产出 FileEntry。
+    #[allow(clippy::too_many_arguments)]
     fn process_object(
         content: &IPortableDeviceContent,
         keys: &IPortableDeviceKeyCollection,
@@ -817,8 +745,10 @@ mod com {
         depth: u32,
         out: &mut Vec<FileEntry>,
         skipped: &mut u32,
+        progress: &mut ScanProgress,
     ) -> DeviceResult<()> {
         // SAFETY: 设备已 Open
+        super::super::timed_worker::checkpoint()?;
         let properties = unsafe { content.Properties() }.map_err(win_error)?;
         let wide = to_wide(obj_id);
         // SAFETY: 批量属性查询；keys 为合法集合
@@ -844,6 +774,7 @@ mod com {
                 depth + 1,
                 out,
                 skipped,
+                progress,
             )?;
         } else if content_type == WPD_CONTENT_TYPE_FOLDER {
             let name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)
@@ -860,6 +791,7 @@ mod com {
                 depth + 1,
                 out,
                 skipped,
+                progress,
             )?;
         } else {
             let file_name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)
@@ -1056,11 +988,12 @@ mod com {
         let mut one = [PWSTR::null(); 1];
         let mut fetched = 0u32;
         // SAFETY: 缓冲与请求条数一致
-        let _ = unsafe { enumerator.Next(&mut one, &mut fetched) };
+        let result = unsafe { enumerator.Next(&mut one, &mut fetched) };
         // SAFETY: Next 分配的字符串（若有）由调用方释放
         if fetched > 0 {
             unsafe { free_pwstr(one[0]) };
         }
+        result.ok().map_err(win_error)?;
         Ok(())
     }
 
@@ -1118,6 +1051,7 @@ mod com {
         unsafe impl<T> Send for ComMove<T> {}
 
         let coms = ComMove((device, stream));
+        let operation_lease = super::super::timed_worker::lease_current_operation();
         let (tx, rx) = tokio::sync::mpsc::channel::<super::StreamChunk>(STREAM_BUFFER_CHUNKS);
         // 泵线程：会话与流移交本线程（MTA 初始化；in-proc 对象跨 MTA 线程
         // 合法）——分块泵入有界通道（背压：reader 消费慢/暂停时阻塞在此，
@@ -1128,6 +1062,7 @@ mod com {
             .name("wpd-stream".into())
             .spawn(move || {
                 let _com = ComApartment::init();
+                let _operation_lease = operation_lease;
                 let coms = coms;
                 let (_device, stream) = coms.0; // _device 保活：流关闭前不 Close
                 let mut chunk = vec![0u8; STREAM_CHUNK_BYTES];
