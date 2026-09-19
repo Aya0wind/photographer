@@ -27,3 +27,4 @@ dist-ssr
 *.sw?
 .e2e-shots/
 target-test/
+hh.json
