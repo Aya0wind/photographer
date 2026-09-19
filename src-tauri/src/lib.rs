@@ -4,6 +4,7 @@ mod events;
 mod import;
 mod ipc;
 mod metadata;
+mod migrate;
 pub mod settings;
 mod tasks;
 mod thumbs;
@@ -15,7 +16,6 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::devices::hotplug;
-use crate::devices::SourceKind;
 use crate::events::{AppEvent, EventBus};
 use crate::ipc::AppState;
 
@@ -65,16 +65,17 @@ pub fn run() {
                 devices: Mutex::new(HashMap::new()),
                 active_import: Mutex::new(None),
                 supervisor,
+                thumb_queue: ipc::thumb::ThumbQueue::new(),
+                migrations: Mutex::new(std::collections::HashSet::new()),
             }));
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
             spawn_event_forwarder(app.handle().clone(), bus.clone(), supervisor_handle.clone());
             // 后台线程 2：设备编排（热插拔 → 建源 → 扫描 → 注册表 + DeviceScanned）
-            spawn_device_orchestrator(app.handle().clone());
+            ipc::device_manager::spawn(app.state::<ipc::SharedState>().inner().clone());
             // 后台线程 3：系统通知（会话开始/结束 + 里程碑）
-            spawn_health_monitor(supervisor_handle.clone(), app.handle().clone());
             spawn_notification_subscriber(app.handle().clone());
-            // 后台线程 4：热插拔检测（message-only 窗口泵）
+            // 后台线程 4：热插拔检测（隐藏顶层窗口泵）
             let _hotplug = hotplug::spawn_hotplug_thread(bus);
 
             // 主窗口关闭行为：close_to_tray=true 时隐藏到托盘，否则放行正常退出。
@@ -126,7 +127,13 @@ pub fn run() {
             ipc::import::import_retry_failed,
             ipc::import::clean_candidates,
             ipc::import::clean_apply,
-            ipc::thumb::thumb_get,
+            ipc::assets::assets_page,
+            ipc::assets::asset_group_dates,
+            ipc::assets::asset_detail,
+            ipc::thumb::asset_thumb_get,
+            ipc::thumb::thumb_get_by_path,
+            ipc::migrate::db_dir_migrate,
+            ipc::migrate::photo_root_switch,
             ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())
@@ -163,115 +170,6 @@ fn spawn_event_forwarder(
                 recoverable: true,
             });
         });
-    });
-}
-
-/// 系统信号由单一编排线程处理，2 秒周期枚举补偿遗漏通知。
-/// 移除立即使连接代次失效；后续到达重新建源并异步扫描。
-fn spawn_device_orchestrator(app: AppHandle) {
-    // 先订阅，再启动热插拔线程，消除启动时订阅空窗。
-    let mut rx = app.state::<ipc::SharedState>().bus.subscribe();
-    std::thread::Builder::new()
-        .name("device-orchestrator".into())
-        .spawn(move || {
-            let state = app.state::<ipc::SharedState>();
-            let mut next = std::time::Instant::now();
-            loop {
-                // 合并信号，但不丢弃窗口内的移除；立即让旧连接代次失效。
-                while let Ok(event) = rx.try_recv() {
-                    if let AppEvent::DeviceTopologyChanged { id, arrived } = event {
-                        if !arrived && !id.is_empty() {
-                            ipc::reconcile::remove_device(&state, &id);
-                        }
-                        next = next
-                            .min(std::time::Instant::now() + std::time::Duration::from_millis(300));
-                    }
-                }
-                if std::time::Instant::now() >= next {
-                    ipc::reconcile::reconcile_devices(&state, "poll/dbt");
-                    next = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        })
-        .expect("spawn device orchestrator");
-}
-
-/// 每轮间隔 3 秒探活，连续两次失败标记离线；每轮尝试恢复离线设备。
-/// 探活与枚举/文件扫描使用独立 worker，单次最多等待 5 秒。
-/// 只发布内部调和信号，不与编排线程并发修改设备注册表。
-fn spawn_health_monitor(supervisor: std::sync::Arc<tasks::TaskSupervisor>, app: AppHandle) {
-    supervisor.spawn("health", "mtp-probe".into(), move |_| {
-        let mut failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let mut generations: HashMap<String, std::sync::Arc<dyn devices::DeviceSource>> =
-            HashMap::new();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            let state = app.state::<ipc::SharedState>();
-            // 注册中的 MTP 设备（探活对象）
-            let connected: Vec<_> = state
-                .devices
-                .lock()
-                .expect("devices mutex poisoned")
-                .iter()
-                .filter(|(_, entry)| entry.snapshot.kind == SourceKind::Mtp)
-                .map(|(id, entry)| {
-                    (
-                        id.clone(),
-                        entry.snapshot.name.clone(),
-                        std::sync::Arc::clone(&entry.source),
-                    )
-                })
-                .collect();
-            failures.retain(|id, _| {
-                connected.iter().any(|(key, _, source)| {
-                    key == id
-                        && generations
-                            .get(id)
-                            .is_some_and(|old| std::sync::Arc::ptr_eq(old, source))
-                })
-            });
-            generations = connected
-                .iter()
-                .map(|(id, _, source)| (id.clone(), source.clone()))
-                .collect();
-            let registered: Vec<_> = connected
-                .iter()
-                .map(|(id, name, _)| (id.clone(), name.clone()))
-                .collect();
-            let mut graveyard = devices::health::offline_graveyard();
-            let actions = devices::health::monitor_step(
-                &registered,
-                &mut graveyard,
-                &mut failures,
-                &mut |id| devices::wpd::worker_ping(id),
-                true,
-            );
-            devices::health::apply_graveyard(&graveyard);
-            for action in actions {
-                match action {
-                    devices::health::HealthAction::MarkOffline { id, name } => {
-                        eprintln!("设备无响应，从真值剔除: {name} ({id})");
-                        let registry = state.devices.lock().expect("devices mutex poisoned");
-                        if registry.get(&id).is_some_and(|entry| {
-                            generations
-                                .get(&id)
-                                .is_some_and(|old| std::sync::Arc::ptr_eq(old, &entry.source))
-                        }) {
-                            devices::health::set_offline(&id, &name);
-                        }
-                    }
-                    devices::health::HealthAction::Revive { id, name } => {
-                        eprintln!("设备恢复可达，重回真值: {name} ({id})");
-                        devices::health::clear_offline(&id);
-                    }
-                }
-            }
-            state.bus.publish(AppEvent::DeviceTopologyChanged {
-                id: String::new(),
-                arrived: true,
-            });
-        }
     });
 }
 

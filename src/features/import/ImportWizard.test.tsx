@@ -1117,3 +1117,34 @@ it("扫描尚未结束时立即展示增量文件，完成后不二次读取相�
   expect(screen.getAllByText("LIVE.JPG").length).toBeGreaterThan(0);
   expect(deviceFilesMock).not.toHaveBeenCalled();
 });
+
+
+it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾选", async () => {
+  seedSession();
+  useImportStore.setState({ devices: [], sourceFiles: {} });
+  useImportStore.getState().handleAppEvent({ type: "deviceArrived", id: "camera", kind: "mtp", name: "测试相机" });
+  renderWizard("?device=camera");
+  await act(async () => {
+    useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files:
+      Array.from({ length: 10000 }, (_, i) => ({ id: String(i), relPath: `DCIM/IMG_${String(i).padStart(5, "0")}.JPG`, size: 100, mtime: "2026-09-19T00:00:00Z" })),
+    });
+  });
+  const tree = screen.getByTestId("wizard-tree");
+  expect(await within(tree).findByText("IMG_00000.JPG")).toBeInTheDocument();
+  expect(tree.querySelectorAll("[data-tree-row]").length).toBeLessThan(100);
+  expect(useImportStore.getState().sourceFiles.camera).toHaveLength(10000);
+  const user = userEvent.setup();
+  await user.click(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" }));
+  expect(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
+  await user.click(screen.getByTestId("wizard-view-grid"));
+  expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
+  await act(async () => {
+    useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files: [
+      { id: "next", relPath: "DCIM/NEXT.JPG", size: 100, mtime: "2026-09-19T00:00:00Z" },
+    ] });
+  });
+  expect(useImportStore.getState().sourceFiles.camera).toHaveLength(10001);
+  expect(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
+  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+  expect(deviceFilesMock).not.toHaveBeenCalled();
+});

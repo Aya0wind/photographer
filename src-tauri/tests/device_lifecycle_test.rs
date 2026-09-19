@@ -1,5 +1,5 @@
 mod common;
-pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
+pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
 
 use devices::{DeviceResult, DeviceSource, FileEntry, SourceKind};
 use std::sync::{mpsc, Arc, Mutex};
@@ -140,6 +140,12 @@ fn old_background_scan_cannot_revive_removed_device() {
         state.devices.lock().unwrap()[&id].scan,
         ipc::DeviceScan::Scanning
     ));
+    assert!(
+        ipc::scan_by_id(&state, &id)
+            .unwrap_err()
+            .contains("正在扫描"),
+        "自动扫描期间不能再排入手动扫描"
+    );
     let mut progress = false;
     while let Ok(event) = events.try_recv() {
         if let events::AppEvent::DeviceFilesProgress { files, .. } = event {

@@ -1,13 +1,16 @@
 //! IPC 命令层，按命名空间拆分模块。 AppState + 可测的核心编排函数
 //! （命令层只做 tauri 参数/返回值的薄包装）。
 
+pub mod assets;
 pub mod device;
+pub mod device_manager;
 pub mod import;
+pub mod migrate;
 pub mod reconcile;
 pub mod settings;
 pub mod thumb;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -68,6 +71,32 @@ pub struct AppState {
     pub active_import: Mutex<Option<ActiveImport>>,
     /// 统一后台任务框架（扫描/导入等长活线程的派发/panic 捕获/命名）。
     pub supervisor: std::sync::Arc<crate::tasks::TaskSupervisor>,
+    /// 按需缩略图生成队列（thumb_get(asset_id) 未命中路径）。
+    pub thumb_queue: thumb::ThumbQueue,
+    /// 目录迁移守卫（库 id 集合）：迁移期间该库拒绝新导入/新迁移。
+    pub migrations: Mutex<HashSet<String>>,
+}
+
+/// 活跃库迁移守卫检查：迁移中返回 Err（导入/迁移入口共用）。
+pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {
+    let library_id = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .active_library()
+        .map(|lib| lib.id.clone());
+    let Some(library_id) = library_id else {
+        return Ok(());
+    };
+    if state
+        .migrations
+        .lock()
+        .expect("migrations mutex poisoned")
+        .contains(&library_id)
+    {
+        return Err(format!("库 {library_id} 迁移中，拒绝导入"));
+    }
+    Ok(())
 }
 
 /// 设备文件条目 DTO：唯一定义在 events 层（事件载荷与 IPC 共享），此处重导出
@@ -328,7 +357,13 @@ pub fn active_library_db(state: &AppState) -> Result<Db, String> {
     let library = settings.active_library().ok_or("尚未创建库")?;
     let dir = PathBuf::from(&library.db_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("库目录不可用: {e}"))?;
-    let db = Db::open(&dir.join("library.db")).map_err(|e| format!("打开库失败: {e}"))?;
+    open_library_db(&dir)
+}
+
+/// 打开指定 dbDir 的库连接（library.db + 迁移幂等）。
+pub fn open_library_db(db_dir: &Path) -> Result<Db, String> {
+    std::fs::create_dir_all(db_dir).map_err(|e| format!("库目录不可用: {e}"))?;
+    let db = Db::open(&db_dir.join("library.db")).map_err(|e| format!("打开库失败: {e}"))?;
     db.migrate().map_err(|e| format!("库迁移失败: {e}"))?;
     Ok(db)
 }
@@ -344,14 +379,21 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
     let db = active_library_db(state)?;
     let key = crate::devices::normalize_device_id(id);
     let source = {
-        let devices = state.devices.lock().expect("devices mutex poisoned");
+        let mut devices = state.devices.lock().expect("devices mutex poisoned");
         let entry = devices
-            .get(&key)
+            .get_mut(&key)
             .ok_or_else(|| format!("设备 {id} 不在线"))?;
+        if matches!(entry.scan, DeviceScan::Scanning) {
+            return Err("设备正在扫描，请稍后重试".into());
+        }
+        entry.scan = DeviceScan::Scanning;
         Arc::clone(&entry.source)
     };
-    let result = orchestrator::scan_device(&*source, &db, skip_imported)
-        .map_err(|e| format!("扫描设备失败: {e}"));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        orchestrator::scan_device(&*source, &db, skip_imported)
+            .map_err(|e| format!("扫描设备失败: {e}"))
+    }))
+    .unwrap_or_else(|_| Err("设备扫描异常，请重试".into()));
     let mut devices = state.devices.lock().expect("devices mutex poisoned");
     let entry = devices
         .get_mut(&key)
@@ -461,6 +503,7 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
 pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
+    ensure_library_not_migrating(state)?;
     let mut active = state
         .active_import
         .lock()
@@ -490,6 +533,7 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
 
 /// 从 journal 恢复导入（设备失联暂停后重连 / 显式恢复无活跃任务的任务）。
 pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
+    ensure_library_not_migrating(state)?;
     let mut active = state
         .active_import
         .lock()
@@ -606,6 +650,7 @@ pub fn logs_page(
 
 /// 失败重试：失败行复制为 pending 新任务并立即执行。
 pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
+    ensure_library_not_migrating(state)?;
     let mut active = state
         .active_import
         .lock()

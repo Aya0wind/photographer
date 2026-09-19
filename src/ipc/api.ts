@@ -120,7 +120,63 @@ export type AppEvent =
   | { type: "importFileCompleted"; jobId: number; src: string; dst: string; state: string }
   | { type: "cleanStarted"; jobId: number; count: number; bytes: number }
   | { type: "cleanFinished"; jobId: number; stats: CleanResultDto }
+  | { type: "thumbnailReady"; assetId: number; size: number; path: string }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
+
+// --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
+
+/** 库内资产大类（与导入侧 FileKind 对齐，不含 other——入库文件必属其一） */
+export type AssetKind = "photo" | "raw" | "video";
+
+/** 库内资产（assets_page 返回；按 capturedAt DESC 排列，capturedAt 为 NULL 的排最前） */
+export interface AssetDto {
+  id: number;
+  /** 库内绝对路径 */
+  path: string;
+  name: string;
+  kind: AssetKind;
+  /** EXIF 拍摄时间（ISO 8601）；EXIF 缺失为 null——前端归「未知日期」组（组序最前） */
+  capturedAt: string | null;
+  camera: string | null;
+  sizeBytes: number;
+}
+
+/** 搜索/过滤条件（camelCase 平铺进 assets_page 负载；全字段可省略） */
+export interface AssetFilters {
+  kind?: AssetKind;
+  /** "YYYY-MM-DD"（含当日，由后端解释） */
+  capturedAfter?: string;
+  capturedBefore?: string;
+  /** 相机名子串（不区分大小写，后端解释） */
+  camera?: string;
+}
+
+/** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
+export interface AssetGroupDate {
+  date: string | null;
+  count: number;
+  coverAssetId: number;
+}
+
+/** 单资产全量元数据（asset_detail 返回，查看器 EXIF 面板）；dupCount=库内内容指纹重复数 */
+export interface AssetDetailDto {
+  id: number;
+  path: string;
+  name: string;
+  kind: AssetKind;
+  capturedAt: string | null;
+  camera: string | null;
+  lens: string | null;
+  sizeBytes: number;
+  importedAt: string | null;
+  dupCount: number;
+  width: number | null;
+  height: number | null;
+  iso: number | null;
+  aperture: number | null;
+  shutter: string | null;
+  focalLength: number | null;
+}
 
 // --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
 
@@ -343,6 +399,55 @@ export async function cleanApply(jobId: number): Promise<CleanResultDto | null> 
 export async function thumbGet(path: string, size: number): Promise<string | null> {
   try {
     return await ipc<string | null>("thumb_get", { path, size });
+  } catch {
+    return null;
+  }
+}
+
+// --- M3 画廊命令封装 --------------------------------------------------------------
+
+/** 画廊/搜索分页（keyset：afterId=上一页最后一条资产 id，首页传 0；capturedAt DESC，
+ *  NULL capturedAt 排最前——排序由后端负责，前端分组渲染按未知组最前处理）。
+ *  filters 平铺为 camelCase 负载字段；失败/非数组回退 []。 */
+export async function assetsPage(
+  afterId: number,
+  limit: number,
+  filters?: AssetFilters,
+): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("assets_page", { afterId, limit, ...(filters ?? {}) });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 日期分组统计（画廊顶部日期 chips 条）；未知日期组 date=null，后端排最前 */
+export async function assetGroupDates(): Promise<AssetGroupDate[]> {
+  try {
+    const list = await ipc<AssetGroupDate[] | null>("asset_group_dates");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 单资产全量元数据（查看器 EXIF 面板）；命令失败/不存在返回 null */
+export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
+  try {
+    return await ipc<AssetDetailDto | null>("asset_detail", { id });
+  } catch {
+    return null;
+  }
+}
+
+/** 库内资产缩略图（按 assetId 取后端缓存文件绝对路径，调用方自行 convertFileSrc）。
+ *  与向导的 thumbGet（按源文件路径，导入前预览用）是两个命令：本命令为 asset_thumb_get。
+ *  size 为期望边长（画廊网格 240 / 查看器大图 1280），后端 snap 到 256/512 档就近返回；
+ *  RAW（NEF/ARW 等）与视频恒返回 null——调用方按 kind 短路为永久占位，不进管线。 */
+export async function assetThumbGet(assetId: number, size: number): Promise<string | null> {
+  try {
+    return await ipc<string | null>("asset_thumb_get", { assetId, size });
   } catch {
     return null;
   }

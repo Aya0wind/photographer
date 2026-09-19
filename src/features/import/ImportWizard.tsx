@@ -44,7 +44,7 @@ interface DirGroup {
   files: SourceFile[];
 }
 
-function groupByDir(files: SourceFile[]): DirGroup[] {
+function groupByDir(files: SourceFile[], scanning = false): DirGroup[] {
   const map = new Map<string, SourceFile[]>();
   for (const f of files) {
     const list = map.get(f.dir);
@@ -55,7 +55,7 @@ function groupByDir(files: SourceFile[]): DirGroup[] {
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([dir, list]) => ({
       dir,
-      files: [...list].sort((a, b) => a.name.localeCompare(b.name)),
+      files: scanning ? list : [...list].sort((a, b) => a.name.localeCompare(b.name)),
     }));
 }
 
@@ -625,6 +625,108 @@ type ListRow =
   | { type: "group"; group: DirGroup }
   | { type: "file"; file: SourceFile };
 
+function SourceTree({ groups, collapsed, selected, onToggleGroup, onToggleCollapse, onToggleFile }: {
+  groups: DirGroup[];
+  collapsed: Set<string>;
+  selected: Set<string>;
+  onToggleGroup: (group: DirGroup) => void;
+  onToggleCollapse: (dir: string) => void;
+  onToggleFile: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rows = useMemo<ListRow[]>(() => groups.flatMap((group): ListRow[] => [
+    { type: "group", group },
+    ...(collapsed.has(group.dir) ? [] : group.files.map((file): ListRow => ({ type: "file", file }))),
+  ]), [groups, collapsed]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 26,
+    overscan: 10,
+    getItemKey: (index) => {
+      const row = rows[index];
+      return row.type === "group" ? `group:${row.group.dir}` : `file:${row.file.path}`;
+    },
+  });
+  return (
+    <div ref={scrollRef} className="sp-scroll min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" data-testid="wizard-tree">
+      {rows.length === 0 ? <p className="px-2 py-4 text-xs leading-relaxed text-text-muted">{t("wizard.treeEmpty")}</p> : (
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualizer.getVirtualItems().map((item) => {
+            const row = rows[item.index];
+            let content;
+            if (row.type === "group") {
+              const group = row.group;
+              const allIn = group.files.every((f) => selected.has(f.path));
+              const someIn = group.files.some((f) => selected.has(f.path));
+              const isCollapsed = collapsed.has(group.dir);
+              content = (
+                <div className="flex items-center gap-1.5 rounded px-1.5 py-1 hover:bg-panel/40">
+                  <input
+                    type="checkbox"
+                    checked={allIn}
+                    ref={(el) => {
+                      if (el) el.indeterminate = !allIn && someIn;
+                    }}
+                    onChange={() => onToggleGroup(group)}
+                    aria-label={t("wizard.groupToggle", { dir: group.dir })}
+                    className="h-3 w-3 shrink-0 accent-[#F0A83C]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onToggleCollapse(group.dir)}
+                    className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      width="10"
+                      height="10"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      className={`shrink-0 text-text-muted transition-transform ${isCollapsed ? "" : "rotate-90"}`}
+                      aria-hidden="true"
+                    >
+                      <path d="M5 3l5 5-5 5" />
+                    </svg>
+                    <span className="truncate font-mono text-[11px] text-text-secondary" title={group.dir}>
+                      {group.dir}
+                    </span>
+                    <span className="ml-auto shrink-0 text-[11px] text-text-muted">
+                      {group.files.length}
+                    </span>
+                  </button>
+                </div>
+              );
+            } else {
+              const f = row.file;
+              content = (
+                <label
+                  key={f.path}
+                  className="flex cursor-pointer items-center gap-1.5 rounded h-[26px] pl-7 pr-1.5 hover:bg-panel/40"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(f.path)}
+                    onChange={() => onToggleFile(f.path)}
+                    className="h-3 w-3 shrink-0 accent-[#F0A83C]"
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary" title={f.name}>
+                    {f.name}
+                  </span>
+                </label>
+              );
+            }
+            return <div key={item.key} data-tree-row style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 26, transform: `translateY(${item.start}px)` }}>{content}</div>;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function FileListView({
   groups,
   collapsed,
@@ -1019,7 +1121,7 @@ export default function ImportWizard() {
   const device = devices.find((d) => d.id === selectedId) ?? null;
 
   // 选中源变化时拉取文件清单（device_files）；已有缓存的源不重复拉取。
-  // 大目录（数千文件）枚举在后端完成后一次性返回，此处仅等待并填充。
+  // 扫描中由文件增量填充；仅已完成且没有缓存的源使用兼容读取。
   const [filesLoading, setFilesLoading] = useState(false);
   useEffect(() => {
     if (!selectedId || device?.scanStatus === "scanning" || device?.scanStatus === "failed") {
@@ -1054,7 +1156,8 @@ export default function ImportWizard() {
     () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []),
     [selectedId, sourceFilesMap],
   );
-  const groups = useMemo(() => groupByDir(files), [files]);
+  // 扫描中按到达顺序追加，结束后再排序，避免每批重排所有文件。
+  const groups = useMemo(() => groupByDir(files, device?.scanStatus === "scanning"), [files, device?.scanStatus]);
 
   // 当前选中源对应的文件夹路径（树高亮）；设备源为 null
   const selectedFolderPath =
@@ -1666,76 +1769,8 @@ export default function ImportWizard() {
             onToggle={() => togglePanelSection("source")}
             fill
           >
-            <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" data-testid="wizard-tree">
-              {groups.length === 0 ? (
-                <p className="px-2 py-4 text-xs leading-relaxed text-text-muted">
-                  {t("wizard.treeEmpty")}
-                </p>
-              ) : (
-                groups.map((group) => {
-                  const allIn = group.files.every((f) => selected.has(f.path));
-                  const someIn = group.files.some((f) => selected.has(f.path));
-                  const isCollapsed = collapsed.has(group.dir);
-                  return (
-                    <div key={group.dir} className="mb-0.5">
-                      <div className="flex items-center gap-1.5 rounded px-1.5 py-1 hover:bg-panel/40">
-                        <input
-                          type="checkbox"
-                          checked={allIn}
-                          ref={(el) => {
-                            if (el) el.indeterminate = !allIn && someIn;
-                          }}
-                          onChange={() => toggleGroup(group)}
-                          aria-label={t("wizard.groupToggle", { dir: group.dir })}
-                          className="h-3 w-3 shrink-0 accent-[#F0A83C]"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleCollapse(group.dir)}
-                          className="flex min-w-0 flex-1 items-center gap-1 text-left"
-                        >
-                          <svg
-                            viewBox="0 0 16 16"
-                            width="10"
-                            height="10"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.6"
-                            className={`shrink-0 text-text-muted transition-transform ${isCollapsed ? "" : "rotate-90"}`}
-                            aria-hidden="true"
-                          >
-                            <path d="M5 3l5 5-5 5" />
-                          </svg>
-                          <span className="truncate font-mono text-[11px] text-text-secondary" title={group.dir}>
-                            {group.dir}
-                          </span>
-                          <span className="ml-auto shrink-0 text-[11px] text-text-muted">
-                            {group.files.length}
-                          </span>
-                        </button>
-                      </div>
-                      {!isCollapsed &&
-                        group.files.map((f) => (
-                          <label
-                            key={f.path}
-                            className="flex cursor-pointer items-center gap-1.5 rounded py-0.5 pl-7 pr-1.5 hover:bg-panel/40"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={selected.has(f.path)}
-                              onChange={() => toggleFile(f.path)}
-                              className="h-3 w-3 shrink-0 accent-[#F0A83C]"
-                            />
-                            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary" title={f.name}>
-                              {f.name}
-                            </span>
-                          </label>
-                        ))}
-                    </div>
-                  );
-                })
-              )}
-            </div>
+            <SourceTree groups={groups} collapsed={collapsed} selected={selected}
+              onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} onToggleFile={toggleFile} />
           </PanelSection>
         </section>
 

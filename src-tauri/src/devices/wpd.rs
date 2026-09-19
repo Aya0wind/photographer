@@ -553,10 +553,11 @@ mod com {
     }
     impl ScanProgress {
         fn flush(&mut self, files: &[FileEntry], force: bool) {
+            // 首个文件立即显示；之后按时间合并，避免高速枚举按文件数触发大量 UI 更新。
+            // 扫描结束强制送出最后一批，不丢尾部文件。
             if files.len() > self.sent
                 && (force
                     || self.sent == 0
-                    || files.len() - self.sent >= 32
                     || self.last_emit.elapsed() >= std::time::Duration::from_millis(150))
             {
                 if let Some(callback) = &self.callback {

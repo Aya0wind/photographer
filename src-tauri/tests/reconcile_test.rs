@@ -4,7 +4,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
+pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{build_many, state_with_library};
 use devices::SourceKind;
 use events::AppEvent;
-use ipc::reconcile::{reconcile_devices, reconcile_with_truth};
+use ipc::reconcile::reconcile_with_truth;
 
 /// 等 registry 达到谓词（上限 5s；扫描经 supervisor 异步）。
 fn eventually_registry(state: &ipc::AppState, cond: impl Fn(&str) -> bool) -> bool {
@@ -183,7 +183,7 @@ fn repeated_reconcile_with_same_truth_is_idempotent() {
 }
 
 #[test]
-fn health_offline_exclusion_and_recovery_flow_through_truth() {
+fn manager_disconnect_and_recovery_update_projection() {
     let src = tempfile::tempdir().unwrap();
     build_many(src.path(), 2);
     let db_dir = tempfile::tempdir().unwrap();
@@ -197,16 +197,14 @@ fn health_offline_exclusion_and_recovery_flow_through_truth() {
     reconcile_with_truth(&state, "t", &truth);
     assert!(eventually_registry(&state, |id| id == volume_id));
 
-    // 健康监控标记离线（真值修正）→ 即便枚举真值仍含该设备，调和也摘除
-    devices::health::set_offline(&volume_id, "卡");
-    reconcile_with_truth(&state, "health", &truth);
+    // 管理器确认离线后，扫描投影同步摘除。
+    reconcile_with_truth(&state, "manager-offline", &[]);
     assert!(
         eventually_absent(&state, &volume_id),
         "离线剔除应从真值生效（设备摘除）"
     );
 
     // 恢复在线 → 重回真值 → 重建
-    devices::health::clear_offline(&volume_id);
     reconcile_with_truth(&state, "health", &truth);
     assert!(
         eventually_registry(&state, |id| id == volume_id),
@@ -226,94 +224,6 @@ fn eventually_absent(state: &ipc::AppState, target: &str) -> bool {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-#[test]
-fn real_truth_reconcile_smoke() {
-    // 真实真值调和烟测：不 panic；注册表与真实真值一致（测试注册的
-    // tempdir 卷源不在真实真值 → 被摘除；真实可移动卷/WPD 由本机决定）
-    let src = tempfile::tempdir().unwrap();
-    build_many(src.path(), 1);
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = Arc::new(state_with_library(
-        db_dir.path(),
-        src.path(),
-        Duration::from_millis(1),
-    ));
-    let volume_id = devices::normalize_device_id(&src.path().to_string_lossy());
-
-    reconcile_devices(&state, "smoke");
-    assert!(
-        eventually_absent(&state, &volume_id),
-        "真实真值不含 tempdir 卷源 → 必须摘除（结构性一致）"
-    );
-}
-
-#[test]
-fn offline_device_requires_successful_probe_before_rescan() {
-    // OS 在场不能推翻探活失败；确认探活恢复后才重新扫描。
-    let src = tempfile::tempdir().unwrap();
-    build_many(src.path(), 3);
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = Arc::new(state_with_library(
-        db_dir.path(),
-        src.path(),
-        Duration::from_millis(1),
-    ));
-    let volume_id = devices::normalize_device_id(&src.path().to_string_lossy());
-
-    // 幽灵态：在册 + 探活已标记离线（连续失败）
-    devices::health::set_offline(&volume_id, "旧名");
-
-    let mut rx = state.bus.subscribe();
-    let truth = vec![(volume_id.clone(), SourceKind::Volume, "新扫描".into())];
-    reconcile_with_truth(&state, "h1-arrival", &truth);
-    assert!(!state.devices.lock().unwrap().contains_key(&volume_id));
-    assert!(devices::health::offline_ids().contains(&volume_id));
-    let mut graveyard = vec![(volume_id.clone(), "旧名".to_string())];
-    let actions = devices::health::monitor_step(
-        &[],
-        &mut graveyard,
-        &mut Default::default(),
-        &mut |_| true,
-        true,
-    );
-    assert!(matches!(
-        &actions[0],
-        devices::health::HealthAction::Revive { .. }
-    ));
-    devices::health::clear_offline(&volume_id);
-    reconcile_with_truth(&state, "probe-recovered", &truth);
-
-    // 重扫完成：注册表仍含该设备（条目被替换为新鲜扫描结果）
-    assert!(
-        eventually_registry(&state, |id| id == volume_id),
-        "H1：必须重扫替换而非跳过"
-    );
-    // 陈旧离线标记已清除
-    assert!(
-        !devices::health::offline_ids().contains(&volume_id),
-        "H1：真值在场胜过陈旧离线标记"
-    );
-    // 幽灵条目摘除 + 重扫发布的事件序列（DeviceRemoved + DeviceScanned）
-    let mut removed_hit = false;
-    let mut scanned_hit = false;
-    while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::DeviceRemoved { id } if devices::normalize_device_id(&id) == volume_id => {
-                removed_hit = true;
-            }
-            AppEvent::DeviceScanned { id, snapshot, .. }
-                if devices::normalize_device_id(&id) == volume_id =>
-            {
-                assert_eq!(snapshot.new_files, 3, "新扫描结果（非旧幽灵快照）");
-                scanned_hit = true;
-            }
-            _ => {}
-        }
-    }
-    assert!(removed_hit, "幽灵条目必须摘除（替换语义）");
-    assert!(scanned_hit, "重扫必须发布 DeviceScanned");
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, settings, tasks, thumbs};
+pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

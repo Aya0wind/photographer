@@ -20,6 +20,8 @@ pub mod import;
 pub mod ipc;
 #[path = "../../src/metadata/mod.rs"]
 pub mod metadata;
+#[path = "../../src/migrate/mod.rs"]
+pub mod migrate;
 #[path = "../../src/settings/mod.rs"]
 pub mod settings;
 #[path = "../../src/tasks/mod.rs"]
@@ -326,6 +328,8 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
         devices: Mutex::new(devices_map),
         active_import: Mutex::new(None),
         supervisor: tasks::TaskSupervisor::new(EventBus::new()),
+        thumb_queue: ipc::thumb::ThumbQueue::new(),
+        migrations: Mutex::new(Default::default()),
     }
 }
 

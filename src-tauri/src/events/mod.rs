@@ -192,6 +192,15 @@ pub enum AppEvent {
         ts: String,
     },
 
+    // 缩略图按需管线（M3）
+    /// 后台缩略图生成完成（thumb_get 未命中入队后的回执）：path 为缓存文件
+    /// 绝对路径；生成失败（超时/不可解码）为 null——前端据此停止等待重试。
+    ThumbnailReady {
+        asset_id: i64,
+        size: u16,
+        path: Option<String>,
+    },
+
     // 安全清卡（M2 F1）
     /// 清卡开始：候选数与总字节（删前逐文件复验）。
     CleanStarted {
@@ -202,6 +211,24 @@ pub enum AppEvent {
     CleanFinished {
         job_id: i64,
         stats: CleanStats,
+    },
+
+    // 目录迁移（M3，spec §5.11：dbDir 两阶段 / photoRoot switch|migrate）
+    /// 迁移开始：kind = "dbDir" | "photoRoot"。
+    MigrationStarted {
+        kind: String,
+        total_bytes: u64,
+    },
+    /// 迁移进度（发布侧节流 ≥100ms）：current 为当前文件名/相对路径。
+    MigrationProgress {
+        done_bytes: u64,
+        current: String,
+    },
+    /// 迁移收尾：ok=是否全部成功；failed=失败文件数（dbDir 失败已回滚
+    /// 不留脏；photoRoot 失败可断点恢复）。
+    MigrationFinished {
+        ok: bool,
+        failed: u64,
     },
 
     // 错误

@@ -212,6 +212,50 @@ impl FromSql for AssetKind {
 }
 
 // ---------------------------------------------------------------------------
+// 画廊查询（M3）：分页 / 日期分组 / 详情
+// ---------------------------------------------------------------------------
+
+/// captured_at 为 NULL 的高哨兵（RFC3339 字典序最大）：COALESCE 归一后
+/// `ORDER BY k DESC` 即「NULL 最先，随后 captured 降序」，keyset 游标
+/// 退化为 (k, id) 二元组比较（真机契约 2026-09-19：117 资产 5 NULL）。
+pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
+
+/// 资产分页过滤（IPC 载荷，camelCase）。日期为 RFC3339 字符串，与
+/// captured_at 同格式（定宽 UTC）字典序比较即时间序；任一日期过滤出现时
+/// NULL captured_at 的行被排除（无日期不落任何区间）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetFilters {
+    pub kind: Option<AssetKind>,
+    pub captured_after: Option<String>,
+    pub captured_before: Option<String>,
+    /// 相机型号精确匹配。
+    pub camera: Option<String>,
+}
+
+/// 分页行（画廊网格数据源）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetPageRow {
+    pub id: i64,
+    pub path: String,
+    pub filename: String,
+    pub size: u64,
+    pub kind: AssetKind,
+    pub captured_at: Option<String>,
+    pub camera: Option<String>,
+}
+
+/// 日期分组行（画廊吸顶 + 跳转）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DateGroupRow {
+    /// 本地时区日期 `YYYY-MM-DD`；captured_at 为 NULL 的资产归 "unknown" 组。
+    pub date: String,
+    pub count: u64,
+    /// 组内同排序首张（最新/最大 id）的资产 id。
+    pub cover_asset_id: i64,
+}
+
+// ---------------------------------------------------------------------------
 // 仓储方法
 // ---------------------------------------------------------------------------
 
@@ -387,6 +431,109 @@ impl Db {
         rows.collect()
     }
 
+    /// 画廊 keyset 分页：序 = (COALESCE(captured_at, 哨兵) DESC, id DESC)，
+    /// 即 NULL captured_at 最先、随后拍摄时间降序、id 倒序 tiebreak。
+    /// 游标 after_id 为上一页末行 id（0 = 第一页）；游标行已不存在时按第一页
+    /// 处理。全参数化（可选过滤用 `?n IS NULL OR …` 形态，动态 SQL 零拼接）。
+    pub fn assets_page(
+        &self,
+        after_id: i64,
+        limit: u32,
+        filters: &AssetFilters,
+    ) -> Result<Vec<AssetPageRow>> {
+        // 游标键解析：after 行的归一排序键（NULL → 高哨兵）
+        let (cursor_key, cursor_id) = if after_id > 0 {
+            match self.sort_key_of(after_id)? {
+                Some(key) => (key, after_id),
+                None => (CAPTURED_NULL_HIGH.to_string(), 0), // 行已删：回退第一页
+            }
+        } else {
+            (CAPTURED_NULL_HIGH.to_string(), 0)
+        };
+        let mut stmt = self.0.prepare(
+            "SELECT id, path, filename, size, kind, captured_at, camera FROM \
+             (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
+              COALESCE(a.captured_at, ?6) AS k FROM assets a) \
+             WHERE (?1 IS NULL OR kind = ?1) \
+               AND (?2 IS NULL OR camera = ?2) \
+               AND (?3 IS NULL OR captured_at >= ?3) \
+               AND (?4 IS NULL OR captured_at <= ?4) \
+               AND (?7 = 0 OR k < ?5 OR (k = ?5 AND id < ?7)) \
+             ORDER BY k DESC, id DESC LIMIT ?8",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                filters.kind,
+                filters.camera,
+                filters.captured_after,
+                filters.captured_before,
+                cursor_key,
+                CAPTURED_NULL_HIGH,
+                cursor_id,
+                limit
+            ],
+            map_asset_page,
+        )?;
+        rows.collect()
+    }
+
+    /// 某资产 id 的归一排序键（行不存在返回 None）。
+    fn sort_key_of(&self, id: i64) -> Result<Option<String>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT COALESCE(captured_at, ?2) FROM assets WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id, CAPTURED_NULL_HIGH])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 本地时区日期分组（降序；unknown 组置顶与画廊页序一致）。
+    /// date() 无值（NULL）→ 'unknown'；cover 取组内同排序首张
+    /// （captured DESC、id DESC）。
+    pub fn asset_group_dates(&self) -> Result<Vec<DateGroupRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT day, COUNT(*), \
+               (SELECT t.id FROM assets t \
+                 WHERE COALESCE(date(t.captured_at, 'localtime'), 'unknown') = day \
+                 ORDER BY COALESCE(t.captured_at, ?1) DESC, t.id DESC LIMIT 1) \
+             FROM (SELECT COALESCE(date(captured_at, 'localtime'), 'unknown') AS day \
+                   FROM assets) \
+             GROUP BY day ORDER BY (day = 'unknown') DESC, day DESC",
+        )?;
+        let rows = stmt.query_map(params![CAPTURED_NULL_HIGH], |row| {
+            Ok(DateGroupRow {
+                date: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+                cover_asset_id: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 按 id 取完整资产行（详情数据源）。
+    pub fn asset_by_id(&self, id: i64) -> Result<Option<AssetRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, \
+             source, created_at, origin FROM assets WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(map_asset_full(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 库内同指纹 (size, xxhash) 的**其他**资产数（不含自身）。
+    pub fn asset_duplicate_count(&self, id: i64, size: u64, xxhash: u64) -> Result<u64> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT COUNT(*) FROM assets WHERE size = ?1 AND xxhash = ?2 AND id != ?3")?;
+        let count: i64 = stmt.query_row(params![size as i64, xxhash as i64, id], |r| r.get(0))?;
+        Ok(count as u64)
+    }
+
     /// 资产入库：同路径重复导入整行覆盖。
     pub fn insert_asset(&self, a: &AssetRow) -> Result<()> {
         self.0.execute(
@@ -465,6 +612,16 @@ impl Db {
         }
     }
 
+    /// 按 id 取资产绝对路径（缩略图按需管线等）；无则 None。
+    pub fn asset_path_by_id(&self, id: i64) -> Result<Option<String>> {
+        let mut stmt = self.0.prepare("SELECT path FROM assets WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
     /// 失败重试：把 old 任务中 failed 的文件复制为 new 任务的 pending 行
     /// （沿用 kind/device/plan），返回 new job_id；无 failed 行返回 None。
     pub fn retry_failed_into_new_job(&self, old_job_id: i64) -> Result<Option<i64>> {
@@ -530,6 +687,35 @@ impl Db {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
+    Ok(AssetPageRow {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        filename: row.get(2)?,
+        size: row.get::<_, i64>(3)? as u64,
+        kind: row.get(4)?,
+        captured_at: row.get(5)?,
+        camera: row.get(6)?,
+    })
+}
+
+fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
+    Ok(AssetRow {
+        path: row.get(0)?,
+        filename: row.get(1)?,
+        size: row.get::<_, i64>(2)? as u64,
+        mtime: row.get(3)?,
+        xxhash: row.get::<_, i64>(4)? as u64,
+        sha256: blob_to_sha256(Some(row.get(5)?))?.unwrap_or([0; 32]),
+        kind: row.get(6)?,
+        captured_at: row.get(7)?,
+        camera: row.get(8)?,
+        source: row.get(9)?,
+        created_at: row.get(10)?,
+        origin: row.get(11)?,
+    })
 }
 
 fn map_job_file(row: &Row<'_>) -> Result<JobFileRow> {

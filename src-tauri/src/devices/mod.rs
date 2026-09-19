@@ -4,8 +4,8 @@
 
 pub mod diagnostics;
 pub mod folder;
-pub mod health;
 pub mod hotplug;
+pub mod lifecycle;
 pub mod orchestrator;
 pub mod present;
 #[cfg(any(windows, test))]

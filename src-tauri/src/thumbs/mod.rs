@@ -142,6 +142,29 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     result.as_ref().map(|p| p.to_string_lossy().into_owned())
 }
 
+/// 源是否在可解码集内（扩展名预检；入队前的廉价否决）。
+pub fn is_decodable(src: &Path) -> bool {
+    src.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DECODABLE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// 缓存命中探测（不生成、不阻塞）：命中返回缓存文件绝对路径，未命中/
+/// 不可解码/源缺失返回 None。按需管线（thumb_get(asset_id)）的快路径。
+pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
+    let size = snap_size(size);
+    if !is_decodable(src) {
+        return None;
+    }
+    let meta = fs::metadata(src).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta.modified().ok()?;
+    let cache = cache_path(db_dir, src, size, mtime);
+    cache.exists().then(|| cache.to_string_lossy().into_owned())
+}
+
 /// 缓存路径：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime secs>.jpg`。
 fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
     let mut xxh = Xxh64::new(0);

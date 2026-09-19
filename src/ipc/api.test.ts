@@ -5,6 +5,10 @@ import { listen } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";
 
 import {
+  assetDetail,
+  assetGroupDates,
+  assetThumbGet,
+  assetsPage,
   deviceList,
   deviceScan,
   folderScan,
@@ -19,6 +23,7 @@ import {
   isIpcAvailable,
   resetIpcAvailable,
   subscribeAppEvents,
+  type AssetDetailDto,
   type ImportPlan,
 } from "./api";
 
@@ -239,4 +244,93 @@ it("文件夹失败透出原始原因，不伪装成后端离线", async () => {
   invokeMock.mockRejectedValue("打开库失败: database is locked");
   await expect(folderScan("D:\\photos", true)).rejects.toBe("打开库失败: database is locked");
   expect(isIpcAvailable()).toBe(true);
+});
+
+describe("M3 画廊命令", () => {
+  const ASSET = {
+    id: 3,
+    path: "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.JPG",
+    name: "IMG_0001.JPG",
+    kind: "photo" as const,
+    capturedAt: "2026-09-18T10:20:30",
+    camera: "Canon EOS R5",
+    sizeBytes: 5242880,
+  };
+
+  it("assetsPage 透传 keyset 参数并平铺 camelCase filters", async () => {
+    invokeMock.mockResolvedValue([ASSET]);
+
+    await expect(
+      assetsPage(7, 100, {
+        kind: "raw",
+        capturedAfter: "2026-01-01",
+        capturedBefore: "2026-02-01",
+        camera: "Canon",
+      }),
+    ).resolves.toEqual([ASSET]);
+    expect(invokeMock).toHaveBeenCalledWith("assets_page", {
+      afterId: 7,
+      limit: 100,
+      kind: "raw",
+      capturedAfter: "2026-01-01",
+      capturedBefore: "2026-02-01",
+      camera: "Canon",
+    });
+  });
+
+  it("assetsPage 无 filters 时只带分页参数；失败/非数组回退空数组", async () => {
+    invokeMock.mockResolvedValue([]);
+    await assetsPage(0, 50);
+    expect(invokeMock).toHaveBeenLastCalledWith("assets_page", { afterId: 0, limit: 50 });
+
+    invokeMock.mockRejectedValueOnce(new Error("command not found"));
+    await expect(assetsPage(0, 100)).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(assetsPage(0, 100)).resolves.toEqual([]);
+  });
+
+  it("assetGroupDates 返回分组统计（含未知日期组 date=null）；失败回退空数组", async () => {
+    const groups = [
+      { date: null, count: 5, coverAssetId: 9 },
+      { date: "2026-09-18", count: 12, coverAssetId: 3 },
+    ];
+    invokeMock.mockResolvedValueOnce(groups);
+    await expect(assetGroupDates()).resolves.toEqual(groups);
+    expect(invokeMock).toHaveBeenCalledWith("asset_group_dates", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetGroupDates()).resolves.toEqual([]);
+  });
+
+  it("assetDetail 传 id 并返回详情；失败返回 null", async () => {
+    const detail: AssetDetailDto = {
+      ...ASSET,
+      lens: "RF 24-70mm F2.8",
+      importedAt: "2026-09-19T08:00:00",
+      dupCount: 2,
+      width: 8192,
+      height: 5464,
+      iso: 400,
+      aperture: 2.8,
+      shutter: "1/250",
+      focalLength: 35,
+    };
+    invokeMock.mockResolvedValueOnce(detail);
+    await expect(assetDetail(3)).resolves.toEqual(detail);
+    expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetDetail(3)).resolves.toBeNull();
+  });
+
+  it("assetThumbGet 传 assetId/size；失败返回 null", async () => {
+    invokeMock.mockResolvedValueOnce("I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg");
+    await expect(assetThumbGet(3, 240)).resolves.toBe(
+      "I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("asset_thumb_get", { assetId: 3, size: 240 });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetThumbGet(3, 1280)).resolves.toBeNull();
+  });
 });

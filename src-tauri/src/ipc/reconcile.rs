@@ -10,57 +10,27 @@ use crate::devices::wpd::WpdSource;
 use crate::devices::{normalize_device_id, DeviceSource, SourceKind};
 use crate::events::AppEvent;
 
-pub fn reconcile_devices(state: &SharedState, trigger: &str) {
-    let mut truth: Vec<_> = crate::devices::present::enumerate_present_volumes()
-        .into_iter()
-        .map(|(id, name)| (id, SourceKind::Volume, name))
-        .collect();
-    match crate::devices::wpd::enumerate_mtp_devices() {
-        Ok(devices) => truth.extend(
-            devices
-                .into_iter()
-                .map(|(id, name)| (id, SourceKind::Mtp, name)),
-        ),
-        Err(err) => {
-            // 枚举失败是未知状态，不能把所有相机当作已拔出。
-            eprintln!("reconcile[{trigger}]: WPD 枚举暂不可用: {err}");
-            truth.extend(
-                state
-                    .devices
-                    .lock()
-                    .expect("devices mutex poisoned")
-                    .iter()
-                    .filter(|(_, entry)| entry.snapshot.kind == SourceKind::Mtp)
-                    .map(|(id, entry)| (id.clone(), SourceKind::Mtp, entry.snapshot.name.clone())),
-            );
-        }
-    }
-    reconcile_with_truth(state, trigger, &truth);
-}
-
 /// 已确认的系统移除立即使旧连接失效；随后的到达会建立新的源 Arc。
 pub fn remove_device(state: &SharedState, id: &str) {
     let id = normalize_device_id(id);
+    // 尚处于就绪探测、还未注册的相机同样需要作废旧会话。
+    crate::devices::wpd::invalidate_device(&id);
     let mut registry = state.devices.lock().expect("devices mutex poisoned");
-    if let Some(entry) = registry.remove(&id) {
-        if entry.snapshot.kind == SourceKind::Mtp {
-            crate::devices::wpd::invalidate_device(&id);
-        }
+    if registry.remove(&id).is_some() {
+        crate::devices::diagnostics::record(format!("device removed: {id}"));
         state.bus.publish(AppEvent::DeviceRemoved { id });
     }
 }
 
-/// 注入的在位枚举与运行时走相同的离线过滤、注册与扫描逻辑。
+/// 只接收管理器确认可用的设备；注册表是供 IPC/UI 使用的扫描投影。
 pub fn reconcile_with_truth(
     state: &SharedState,
     trigger: &str,
     truth: &[(String, SourceKind, String)],
 ) {
-    let offline = crate::devices::health::offline_ids();
     let truth: Vec<_> = truth
         .iter()
         .map(|(id, kind, name)| (normalize_device_id(id), *kind, name.clone()))
-        .filter(|(id, _, _)| !offline.contains(id))
         .collect();
     let mut scans = Vec::new();
     {
@@ -79,6 +49,7 @@ pub fn reconcile_with_truth(
                     crate::devices::wpd::invalidate_device(&id);
                 }
             }
+            crate::devices::diagnostics::record(format!("device unavailable: {id}"));
             state.bus.publish(AppEvent::DeviceRemoved { id });
         }
         for (id, kind, name) in truth {
@@ -118,6 +89,7 @@ pub fn reconcile_with_truth(
                     scan: DeviceScan::Scanning,
                 },
             );
+            crate::devices::diagnostics::record(format!("device ready: {id}; {name}"));
             state.bus.publish(AppEvent::DeviceArrived {
                 id: id.clone(),
                 kind,
