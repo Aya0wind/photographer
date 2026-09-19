@@ -5,8 +5,10 @@ import { useAssetThumbUrl } from "../lib/thumbPipeline";
 
 /**
  * 库内资产缩略图单元（网格块/查看器胶片条共用）：
- * - photo：进缩略图管线（assetThumbGet→convertFileSrc；未命中占位，thumbnailReady 重试）
- * - raw/video：后端恒无缩略图——永久 kind 占位（不请求不订阅，避免请求风暴）
+ * - photo/raw：进缩略图管线（assetThumbGet→convertFileSrc；未命中占位，
+ *   thumbnailReady 重试；RAW 走后端内嵌预览提取，可能较慢——占位期间有水印角标）
+ * - video：后端恒无缩略图——永久 kind 占位（不请求不订阅）
+ * - RAW 恒叠右上角 RAW 水印角标（半透明深底白字；有真实缩略图后仍可一眼区分）
  * - img onLoad 150ms 淡入；解码失败（缓存文件丢失等）回退占位
  */
 
@@ -91,8 +93,8 @@ export interface AssetThumbProps {
 }
 
 export default function AssetThumb({ asset, size, alt, className = "", testId }: AssetThumbProps) {
-  // raw/video 恒占位（后端缩略图恒 None）：短路管线，不产生请求与重试订阅
-  const { url } = useAssetThumbUrl(asset.id, size, asset.kind === "photo");
+  // RAW 走后端内嵌预览提取（rawloader），与 photo 同管线；video 恒占位（不请求）
+  const { url } = useAssetThumbUrl(asset.id, size, asset.kind !== "video");
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -122,6 +124,15 @@ export default function AssetThumb({ asset, size, alt, className = "", testId }:
         />
       ) : (
         <KindPlaceholder kind={asset.kind} name={asset.name} />
+      )}
+      {/* RAW 水印角标：真实缩略图就位后仍可一眼区分 RAW/JPG */}
+      {asset.kind === "raw" && (
+        <span
+          className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+          data-testid="thumb-raw-badge"
+        >
+          RAW
+        </span>
       )}
     </div>
   );

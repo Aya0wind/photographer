@@ -31,6 +31,7 @@ import AssetThumb from "./AssetThumb";
  * onViewportChange 上报「视口首行所属组 + scrollTop」。
  */
 
+/** 默认方格边长（中档；三档切换见 useGalleryTileSize） */
 const TILE = 200;
 const GAP = 4;
 const HEADER_H = 40;
@@ -56,17 +57,29 @@ export interface ViewportInfo {
 
 interface AssetGridProps {
   groups: AssetGroup[];
-  /** 点击资产块（打开查看器）；省略时块为纯展示（搜索结果暂不接查看器的形态） */
+  /** 点击资产块（打开查看器）；省略时块为纯展示 */
   onOpenAsset?: (asset: AssetDto, group: AssetGroup) => void;
   /** 无限滚动哨兵节点（挂在本网格滚动容器内、全部内容之后） */
   sentinelRef?: Ref<HTMLDivElement>;
   /** 视口变化上报（吸顶组头/滚动状态用；仅组键或 scrollTop 显著变化时触发） */
   onViewportChange?: (info: ViewportInfo) => void;
+  /** 方格边长（三档 120/200/280，默认 200；行模型按此重算） */
+  tile?: number;
+  /** 合并卡角标（RAW+JPG）：代表资产 id → 文案；无合并时不传 */
+  badges?: Map<number, string>;
   scrollTestId?: string;
 }
 
 const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid(
-  { groups, onOpenAsset, sentinelRef, onViewportChange, scrollTestId = "gallery-grid-scroll" },
+  {
+    groups,
+    onOpenAsset,
+    sentinelRef,
+    onViewportChange,
+    tile = TILE,
+    badges,
+    scrollTestId = "gallery-grid-scroll",
+  },
   ref,
 ) {
   const { t } = useTranslation();
@@ -86,7 +99,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     return () => ro.disconnect();
   }, []);
 
-  const columns = Math.max(1, Math.floor((width + GAP) / (TILE + GAP)));
+  const columns = Math.max(1, Math.floor((width + GAP) / (tile + GAP)));
 
   const rows = useMemo<GridRow[]>(() => {
     const out: GridRow[] = [];
@@ -102,7 +115,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : TILE + GAP),
+    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : tile + GAP),
     overscan: 6,
   });
 
@@ -176,35 +189,49 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                 </div>
               ) : (
                 <div className="flex flex-wrap gap-1 pb-1">
-                  {row.assets.map((asset) =>
-                    onOpenAsset ? (
+                  {row.assets.map((asset) => {
+                    const badge = badges?.get(asset.id) ?? null;
+                    const inner = (
+                      <>
+                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
+                        {badge && (
+                          <span
+                            className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            data-testid="gallery-pair-badge"
+                          >
+                            {badge}
+                          </span>
+                        )}
+                      </>
+                    );
+                    return onOpenAsset ? (
                       <button
                         key={asset.id}
                         type="button"
                         onClick={() => onOpenAsset(asset, row.group)}
-                        className="overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge"
-                        style={{ width: TILE, height: TILE }}
+                        className="relative overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge"
+                        style={{ width: tile, height: tile }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
                       >
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
+                        {inner}
                       </button>
                     ) : (
                       <div
                         key={asset.id}
-                        className="overflow-hidden rounded-md bg-panel/40"
-                        style={{ width: TILE, height: TILE }}
+                        className="relative overflow-hidden rounded-md bg-panel/40"
+                        style={{ width: tile, height: tile }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
                       >
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
+                        {inner}
                       </div>
-                    ),
-                  )}
+                    );
+                  })}
                 </div>
               )}
             </div>

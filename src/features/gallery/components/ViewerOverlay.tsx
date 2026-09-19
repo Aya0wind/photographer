@@ -15,7 +15,9 @@ import { formatBytes } from "@/lib/format";
  *   大档缩略图（名义 1280，后端 snap 512）；RAW 无可载原图（inline-JPEG 提取在 M4），
  *   直接用大档缩略图放大显示；视频恒占位（播放是后续里程碑）。
  * - 交互：wheel 以指针为锚缩放 1x-4x（原生非 passive 监听），scale>1 可拖拽平移，
- *   双击复位；←/→ 同组切换（首尾禁用）；Esc 返回画廊（画廊页不卸载，滚动位置保留）。
+ *   90° 步进旋转（按钮 / 键盘 . , R，transform 顺序 rotate→scale→translate，
+ *   150ms 过渡），双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
+ *   Esc 返回画廊（画廊页不卸载，滚动位置保留）。旋转随资产切换重置，不持久化。
  * - 右侧 EXIF 面板可收起（assetDetail 全元数据 + 库内重复数）；底部胶片条为当前组
  *   缩略图（240 档与网格共享缓存），当前项 accent 描边，点击跳转；相邻 1 张预取。
  */
@@ -46,6 +48,11 @@ function isoLabel(iso: string | null): string {
   );
 }
 
+/** 文本元数据容错：null/undefined/空串 → "—"（绝不渲染 "undefined"） */
+function formatValue(value: string | null | undefined): string {
+  return value === null || value === undefined || value === "" ? "—" : value;
+}
+
 interface ViewerOverlayProps {
   asset: AssetDto;
   group: AssetGroup;
@@ -59,13 +66,16 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement | null>(null);
 
-  // --- 缩放/平移状态（资产切换时复位） ---------------------------------------------
-  const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
+  // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
+  const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
   useEffect(() => {
-    setView({ scale: 1, x: 0, y: 0 });
+    setView({ scale: 1, x: 0, y: 0, rotation: 0 });
   }, [asset.id]);
 
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+  /** 90° 步进旋转（负=逆时针）；触发拖拽/缩放之外的独立维度 */
+  const rotate = (delta: number) =>
+    setView((v) => ({ ...v, rotation: (((v.rotation + delta) % 360) + 360) % 360 }));
 
   // wheel 缩放：原生非 passive 监听（React 合成 wheel 为 passive，无法 preventDefault）
   useEffect(() => {
@@ -79,10 +89,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       setView((v) => {
         const next = clampScale(v.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2));
         if (next === v.scale) return v;
-        if (next === MIN_SCALE) return { scale: MIN_SCALE, x: 0, y: 0 };
+        if (next === MIN_SCALE) return { scale: MIN_SCALE, x: 0, y: 0, rotation: v.rotation };
         const ratio = next / v.scale;
         // 指针为锚：保持光标下的图像点不动
-        return { scale: next, x: cx - (cx - v.x) * ratio, y: cy - (cy - v.y) * ratio };
+        return { scale: next, x: cx - (cx - v.x) * ratio, y: cy - (cy - v.y) * ratio, rotation: v.rotation };
       });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -115,7 +125,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     }
   }
 
-  // 键盘：Esc 返回画廊；←/→ 同组切换
+  // 键盘：Esc 返回画廊；←/→ 同组切换；. , R 旋转（. / R=顺时针，,=逆时针）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -125,6 +135,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         onNavigate(index - 1);
       } else if (e.key === "ArrowRight" && index < group.assets.length - 1) {
         onNavigate(index + 1);
+      } else if (e.key === "." || e.key === "r" || e.key === "R") {
+        rotate(90);
+      } else if (e.key === ",") {
+        rotate(-90);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -174,21 +188,25 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
 
   const exifRows: Array<[string, React.ReactNode]> = useMemo(() => {
     if (!detail) return [];
+    // 核心行：缺失显示「—」（后端字段可能为 null/undefined，均按无值处理）
     const rows: Array<[string, React.ReactNode]> = [
-      [t("viewer.camera"), detail.camera ?? "—"],
-      [t("viewer.lens"), detail.lens ?? "—"],
+      [t("viewer.camera"), formatValue(detail.camera)],
+      [t("viewer.lens"), formatValue(detail.lens)],
       [t("viewer.capturedAt"), isoLabel(detail.capturedAt)],
-      [t("viewer.size"), formatBytes(detail.sizeBytes)],
+      [t("viewer.size"), formatBytes(detail.size)],
     ];
-    if (detail.width !== null && detail.height !== null) {
+    // EXIF 扩展行（后端契约扩展中）：无值整行隐藏（比一排「—」干净）
+    if (detail.width != null && detail.height != null) {
       rows.push([t("viewer.dimensions"), `${detail.width} × ${detail.height}`]);
     }
-    if (detail.iso !== null) rows.push([t("viewer.iso"), String(detail.iso)]);
-    if (detail.aperture !== null) rows.push([t("viewer.aperture"), `f/${detail.aperture}`]);
-    if (detail.shutter !== null) rows.push([t("viewer.shutter"), detail.shutter]);
-    if (detail.focalLength !== null) rows.push([t("viewer.focalLength"), `${detail.focalLength} mm`]);
+    if (detail.iso != null) rows.push([t("viewer.iso"), String(detail.iso)]);
+    if (detail.aperture != null) rows.push([t("viewer.aperture"), `f/${detail.aperture}`]);
+    if (detail.shutter != null) rows.push([t("viewer.shutter"), detail.shutter]);
+    if (detail.focalLength != null) {
+      rows.push([t("viewer.focalLength"), `${detail.focalLength} mm`]);
+    }
     rows.push([t("viewer.path"), <span key="path" className="break-all font-mono text-[11px]">{detail.path}</span>]);
-    rows.push([t("viewer.importedAt"), isoLabel(detail.importedAt)]);
+    rows.push([t("viewer.importedAt"), isoLabel(detail.createdAt)]);
     rows.push([
       t("viewer.dupCount"),
       <span key="dup" className={detail.dupCount > 0 ? "font-medium text-accent" : undefined}>
@@ -218,6 +236,33 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           {t("viewer.index", { index: index + 1, total: group.assets.length })}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {/* 旋转：90° 步进（逆/顺时针），150ms 过渡；随资产切换重置 */}
+          <button
+            type="button"
+            onClick={() => rotate(-90)}
+            aria-label={t("viewer.rotateCcw")}
+            title={t("viewer.rotateCcw")}
+            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="viewer-rotate-ccw"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3.5 6.5a5 5 0 1 1 1.2 5.4" />
+              <path d="M3.2 3.2v3.3h3.3" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => rotate(90)}
+            aria-label={t("viewer.rotateCw")}
+            title={t("viewer.rotateCw")}
+            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="viewer-rotate-cw"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12.5 6.5a5 5 0 1 0-1.2 5.4" />
+              <path d="M12.8 3.2v3.3H9.5" />
+            </svg>
+          </button>
           <button
             type="button"
             onClick={() => setExifOpen((v) => !v)}
@@ -245,13 +290,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           <div
             ref={stageRef}
             className="absolute inset-0 flex touch-none items-center justify-center overflow-hidden"
-            onDoubleClick={() => setView({ scale: 1, x: 0, y: 0 })}
+            onDoubleClick={() => setView({ scale: 1, x: 0, y: 0, rotation: 0 })}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
             data-testid="viewer-stage"
             data-scale={view.scale.toFixed(2)}
+            data-rotation={view.rotation}
             style={{ cursor: view.scale > 1 ? "grab" : "default" }}
           >
             {mainSrc !== null ? (
@@ -267,8 +313,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 data-fallback={mainSrc === originalUrl ? "original" : "thumb"}
                 className="max-h-full max-w-full select-none object-contain"
                 style={{
-                  transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
-                  transition: dragRef.current ? "none" : "transform 80ms ease-out",
+                  // 变换顺序 rotate→scale→translate（先旋转后缩放）
+                  transform: `rotate(${view.rotation}deg) scale(${view.scale}) translate(${view.x}px, ${view.y}px)`,
+                  transition: dragRef.current ? "none" : "transform 150ms ease-out",
                 }}
               />
             ) : mainFailed ? (

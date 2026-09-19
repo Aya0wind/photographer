@@ -15,10 +15,11 @@ import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/sett
  * 新建库走可复用 NewLibraryDialog（顶部菜单共用）。
  */
 
-type SettingsTab = "general" | "import" | "libraries" | "ai";
+type SettingsTab = "general" | "gallery" | "import" | "libraries" | "ai";
 
 const TABS: { key: SettingsTab; labelKey: string }[] = [
   { key: "general", labelKey: "settings.tab.general" },
+  { key: "gallery", labelKey: "settings.tab.gallery" },
   { key: "import", labelKey: "settings.tab.import" },
   { key: "libraries", labelKey: "settings.tab.libraries" },
   { key: "ai", labelKey: "settings.tab.ai" },
@@ -208,6 +209,23 @@ export default function SettingsPage() {
                 >
                   <option value="zh">{t("settings.languageZh")}</option>
                 </select>
+              </SettingRow>
+            </>
+          )}
+
+          {tab === "gallery" && (
+            <>
+              <SectionTitle>{t("settings.section.gallery")}</SectionTitle>
+              <SettingRow
+                label={t("settings.gallery.mergeRawJpg")}
+                desc={t("settings.gallery.mergeRawJpgDesc")}
+                testId="settings-row-merge-raw-jpg"
+              >
+                <Toggle
+                  checked={settings.gallery.mergeRawJpg}
+                  label={t("settings.gallery.mergeRawJpg")}
+                  onChange={(next) => commit({ gallery: { mergeRawJpg: next } })}
+                />
               </SettingRow>
             </>
           )}

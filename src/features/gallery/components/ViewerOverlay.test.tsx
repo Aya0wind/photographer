@@ -54,20 +54,14 @@ const GROUP_ASSETS: AssetDto[] = [
 const DETAIL: AssetDetailDto = {
   id: 1,
   path: GROUP_ASSETS[0].path,
-  name: "IMG_0001.JPG",
+  filename: "IMG_0001.JPG",
+  size: 5242880,
   kind: "photo",
   capturedAt: "2026-09-18T10:20:30",
   camera: "Canon EOS R5",
-  lens: "RF 24-70mm F2.8 L",
-  sizeBytes: 5242880,
-  importedAt: "2026-09-19T08:00:00",
+  lens: null,
+  createdAt: "2026-09-19T08:00:00",
   dupCount: 2,
-  width: 8192,
-  height: 5464,
-  iso: 400,
-  aperture: 2.8,
-  shutter: "1/250",
-  focalLength: 35,
 };
 
 function renderViewer(
@@ -261,24 +255,71 @@ describe("查看器：缩放与复位", () => {
   });
 });
 
+// --- 旋转 -------------------------------------------------------------------------
+
+describe("查看器：旋转（90° 步进）", () => {
+  it("按钮顺/逆时针步进；双击复位归零（含旋转）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderViewer();
+    const stage = await screen.findByTestId("viewer-stage");
+    expect(stage).toHaveAttribute("data-rotation", "0");
+
+    fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+    fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "180");
+    // 逆时针回退；继续逆时针从 0 回绕到 270
+    fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+    fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
+    fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "270");
+
+    // 双击复位：缩放/平移/旋转全部归零
+    fireEvent.dblClick(screen.getByTestId("viewer-stage"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "0");
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
+  });
+
+  it("键盘 . , R 旋转（./R=顺时针，,=逆时针）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderViewer();
+    await screen.findByTestId("viewer-stage");
+
+    fireEvent.keyDown(window, { key: "." });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+    fireEvent.keyDown(window, { key: "," });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "0");
+    fireEvent.keyDown(window, { key: "R" });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+  });
+});
+
 // --- EXIF 面板 ---------------------------------------------------------------------
 
 describe("查看器：EXIF 面板", () => {
-  it("assetDetail 展示全元数据与库内重复；可收起/展开", async () => {
+  it("展示核心元数据与库内重复；EXIF 扩展无值行整行隐藏；可收起/展开", async () => {
     const user = userEvent.setup();
     renderViewer();
 
     const rows = await screen.findByTestId("viewer-exif-rows");
     expect(rows).toHaveTextContent("Canon EOS R5");
-    expect(rows).toHaveTextContent("RF 24-70mm F2.8 L");
+    // 镜头后端暂未返回 →「—」（不渲染 undefined）
+    expect(rows).toHaveTextContent("—");
     expect(rows).toHaveTextContent("2026-09-18 10:20:30");
     expect(rows).toHaveTextContent("5.0 MB");
-    expect(rows).toHaveTextContent("8192 × 5464");
-    expect(rows).toHaveTextContent("f/2.8");
     expect(rows).toHaveTextContent(GROUP_ASSETS[0].path);
     expect(rows).toHaveTextContent("2026-09-19 08:00:00");
     const dup = within(rows).getByText("库内重复");
     expect(dup.nextSibling).toHaveTextContent("2 张");
+
+    // 无 EXIF 扩展数据：尺寸/ISO/光圈/快门/焦距行不渲染（无值行不显示「—」）
+    expect(screen.queryByText("尺寸")).not.toBeInTheDocument();
+    expect(screen.queryByText("ISO")).not.toBeInTheDocument();
+    expect(screen.queryByText("光圈")).not.toBeInTheDocument();
+    expect(screen.queryByText("快门")).not.toBeInTheDocument();
+    expect(screen.queryByText("焦距")).not.toBeInTheDocument();
+    expect(rows.textContent).not.toContain("undefined");
 
     // 收起（AnimatePresence 退场 → waitFor）
     await user.click(screen.getByTestId("viewer-exif-toggle"));
@@ -286,6 +327,43 @@ describe("查看器：EXIF 面板", () => {
 
     await user.click(screen.getByTestId("viewer-exif-toggle"));
     expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
+  });
+
+  it("EXIF 扩展字段存在时展示尺寸/ISO/光圈/快门/焦距（契约扩展后自动出现）", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
+      width: 8192,
+      height: 5464,
+      iso: 400,
+      aperture: 2.8,
+      shutter: "1/250",
+      focalLength: 35,
+    });
+    renderViewer();
+
+    const rows = await screen.findByTestId("viewer-exif-rows");
+    expect(within(rows).getByText("尺寸").nextSibling).toHaveTextContent("8192 × 5464");
+    expect(within(rows).getByText("ISO").nextSibling).toHaveTextContent("400");
+    expect(within(rows).getByText("光圈").nextSibling).toHaveTextContent("f/2.8");
+    expect(within(rows).getByText("快门").nextSibling).toHaveTextContent("1/250");
+    expect(within(rows).getByText("焦距").nextSibling).toHaveTextContent("35 mm");
+  });
+
+  it("字段全缺失：核心行显示「—」、重复计数 0 张，绝不渲染 undefined", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
+      camera: null,
+      capturedAt: null,
+      createdAt: null,
+      dupCount: 0,
+    });
+    renderViewer();
+
+    const rows = await screen.findByTestId("viewer-exif-rows");
+    expect(rows).toHaveTextContent("0 张");
+    expect(rows.textContent).not.toContain("undefined");
+    // 相机/拍摄时间/入库时间行仍渲染（核心行），值为「—」/空时间
+    expect(within(rows).getByText("相机").nextSibling).toHaveTextContent("—");
   });
 
   it("assetDetail 失败（后端不可用）：面板显示降级文案", async () => {

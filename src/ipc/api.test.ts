@@ -9,6 +9,7 @@ import {
   assetGroupDates,
   assetThumbGet,
   assetsPage,
+  cameraList,
   deviceList,
   deviceScan,
   folderScan,
@@ -23,7 +24,6 @@ import {
   isIpcAvailable,
   resetIpcAvailable,
   subscribeAppEvents,
-  type AssetDetailDto,
   type ImportPlan,
 } from "./api";
 
@@ -304,22 +304,104 @@ describe("M3 画廊命令", () => {
     await expect(assetGroupDates()).resolves.toEqual([]);
   });
 
-  it("assetDetail 传 id 并返回详情；失败返回 null", async () => {
-    const detail: AssetDetailDto = {
-      ...ASSET,
-      lens: "RF 24-70mm F2.8",
-      importedAt: "2026-09-19T08:00:00",
+  it("assetDetail 传 id 并按后端实测负载归一（filename/size/duplicate_count→dupCount）", async () => {
+    // 后端真实负载：AssetDetailDto = {id, flatten(AssetRow camelCase), duplicate_count（顶层 snake_case）}
+    invokeMock.mockResolvedValueOnce({
+      id: 3,
+      path: "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.JPG",
+      filename: "IMG_0001.JPG",
+      size: 5242880,
+      mtime: "2026-09-18T09:00:00Z",
+      xxhash: 123,
+      sha256: [1, 2, 3],
+      kind: "photo",
+      capturedAt: "2026-09-18T10:20:30Z",
+      camera: "Canon EOS R5",
+      source: "E:",
+      createdAt: "2026-09-19T08:00:00Z",
+      origin: "imported",
+      duplicate_count: 2,
+    });
+    await expect(assetDetail(3)).resolves.toEqual({
+      id: 3,
+      path: "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.JPG",
+      filename: "IMG_0001.JPG",
+      size: 5242880,
+      kind: "photo",
+      capturedAt: "2026-09-18T10:20:30Z",
+      camera: "Canon EOS R5",
+      lens: null,
+      createdAt: "2026-09-19T08:00:00Z",
       dupCount: 2,
+      width: null,
+      height: null,
+      iso: null,
+      aperture: null,
+      shutter: null,
+      focalLength: null,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
+  });
+
+  it("assetDetail：EXIF 扩展字段存在即透出（fNumber/exposure 别名、duplicateCount 驼峰兼容）", async () => {
+    invokeMock.mockResolvedValueOnce({
+      id: 4,
+      path: "P",
+      filename: "A.NEF",
+      size: 1,
+      kind: "raw",
+      capturedAt: null,
+      camera: null,
+      createdAt: "2026-09-19T08:00:00Z",
+      duplicateCount: 1, // 未来后端修正命名时仍可读
+      width: 8192,
+      height: 5464,
+      iso: 400,
+      fNumber: 2.8,
+      exposure: "1/250",
+      focalLength: 35,
+    });
+    await expect(assetDetail(4)).resolves.toMatchObject({
+      kind: "raw",
+      dupCount: 1,
       width: 8192,
       height: 5464,
       iso: 400,
       aperture: 2.8,
       shutter: "1/250",
       focalLength: 35,
-    };
-    invokeMock.mockResolvedValueOnce(detail);
-    await expect(assetDetail(3)).resolves.toEqual(detail);
-    expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
+      capturedAt: null,
+      camera: null,
+    });
+  });
+
+  it("assetDetail：负载异常（null/非对象/字段类型异常）容错；命令失败返回 null", async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(assetDetail(3)).resolves.toBeNull();
+
+    invokeMock.mockResolvedValueOnce("oops");
+    await expect(assetDetail(3)).resolves.toBeNull();
+
+    // 字段类型异常 → 归一兜底值而非 undefined 透传
+    invokeMock.mockResolvedValueOnce({ id: "bad", size: "bad", camera: 42 });
+    await expect(assetDetail(3)).resolves.toEqual({
+      id: 0,
+      path: "",
+      filename: "",
+      size: 0,
+      kind: "photo",
+      capturedAt: null,
+      camera: null,
+      lens: null,
+      createdAt: null,
+      dupCount: 0,
+      width: null,
+      height: null,
+      iso: null,
+      aperture: null,
+      shutter: null,
+      focalLength: null,
+    });
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
     await expect(assetDetail(3)).resolves.toBeNull();
@@ -334,5 +416,17 @@ describe("M3 画廊命令", () => {
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
     await expect(assetThumbGet(3, 1280)).resolves.toBeNull();
+  });
+
+  it("cameraList 返回相机计数清单（cameras_list）；失败/非数组回退空数组", async () => {
+    const list = [{ camera: "Canon EOS R5", count: 12 }];
+    invokeMock.mockResolvedValueOnce(list);
+    await expect(cameraList()).resolves.toEqual(list);
+    expect(invokeMock).toHaveBeenCalledWith("cameras_list", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(cameraList()).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(cameraList()).resolves.toEqual([]);
   });
 });

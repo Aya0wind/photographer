@@ -327,6 +327,15 @@
   "gallery.empty.desc": "从存储卡、相机或已有文件夹导入照片，开始构建你的照片库。",
   "gallery.empty.goImport": "去导入",
   "gallery.loadingMore": "正在加载更多…",
+  "gallery.tileSize.label": "缩略图尺寸",
+  "gallery.tileSize.small": "小",
+  "gallery.tileSize.medium": "中",
+  "gallery.tileSize.large": "大",
+  "gallery.calendar.button": "按月份跳转",
+  "gallery.calendar.year": "年份",
+  "gallery.calendar.month": "月份",
+  "gallery.calendar.monthN": "{{month}} 月",
+  "gallery.calendar.jump": "跳转",
 
   "viewer.exif": "详细信息",
   "viewer.exifLoading": "正在读取…",
@@ -348,6 +357,8 @@
   "viewer.close": "关闭",
   "viewer.prev": "上一张",
   "viewer.next": "下一张",
+  "viewer.rotateCw": "顺时针旋转 90°",
+  "viewer.rotateCcw": "逆时针旋转 90°",
   "viewer.zoomHint": "滚轮缩放 · 拖拽平移 · 双击复位",
   "viewer.noPreview": "暂无预览",
 
@@ -358,10 +369,20 @@
   "search.kind.video": "视频",
   "search.dateFrom": "从",
   "search.dateTo": "到",
+  "search.quick.recent7": "近7天",
+  "search.quick.recent30": "近30天",
+  "search.quick.thisYear": "今年",
+  "search.quick.lastYear": "去年",
   "search.camera": "相机",
-  "search.cameraPlaceholder": "如 Canon / iPhone…",
+  "search.cameraAll": "全部相机",
+  "search.cameraEmpty": "库内还没有相机信息。",
   "search.count": "{{count}} 个结果",
   "search.loading": "搜索中…",
   "search.empty": "没有匹配的照片",
-  "search.emptyHint": "试试放宽日期范围或清除相机关键词。"
+  "search.emptyHint": "试试放宽日期范围或清除相机筛选。",
+
+  "settings.tab.gallery": "画廊",
+  "settings.section.gallery": "画廊展示",
+  "settings.gallery.mergeRawJpg": "RAW+JPG 合并展示",
+  "settings.gallery.mergeRawJpgDesc": "同一拍摄的 RAW 与 JPG 只显示一张卡（优先 JPG 缩略图），角标「RAW+JPG」；点击打开 JPG 版。"
 }

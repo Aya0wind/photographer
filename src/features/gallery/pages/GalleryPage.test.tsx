@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -16,6 +16,7 @@ import {
   type AssetDto,
   type AssetGroupDate,
 } from "@/ipc/api";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -189,24 +190,30 @@ describe("画廊：日期分组照片墙", () => {
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(4);
   });
 
-  it("缩略图管线：photo 未命中先占位，thumbnailReady 后重试成功；RAW 不请求", async () => {
+  it("缩略图管线：photo/RAW 未命中先占位，thumbnailReady 后重试成功；RAW 恒带水印角标", async () => {
     assetsPageMock.mockResolvedValue([
       makeAsset(1, "2026-09-18"),
       makeAsset(2, "2026-09-18", "raw", "IMG_0002.CR3"),
     ]);
-    // 第一次未命中；重试（thumbnailReady 驱动）时返回缓存文件路径
-    thumbMock.mockResolvedValueOnce(null).mockResolvedValue("C:\\thumbs\\256\\img1.jpg");
+    // photo：首次未命中，thumbnailReady 后重试命中；RAW：内嵌提取未就绪（null）→占位
+    thumbMock.mockImplementation(async (id: number) =>
+      id === 1 && thumbMock.mock.calls.filter(([i]) => i === 1).length >= 2
+        ? "C:\\thumbs\\256\\img1.jpg"
+        : null,
+    );
     convertMock.mockImplementation((p: string) => `asset://${p}`);
 
     renderGallery();
 
-    // 初始：photo 占位（无 img），raw 恒占位
+    // 初始：photo/RAW 都进管线（RAW 走后端内嵌提取，可能较慢）——先占位
     expect(await screen.findByTestId("thumb-photo")).toBeInTheDocument();
     expect(screen.getByTestId("thumb-raw")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
     await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(1, 240));
-    // RAW 短路：不进缩略图管线
-    expect(thumbMock).not.toHaveBeenCalledWith(2, expect.anything());
+    // RAW 不再短路：同样请求缩略图
+    await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(2, 240));
+    // RAW 水印角标（占位期就渲染）
+    expect(screen.getByTestId("thumb-raw-badge")).toBeInTheDocument();
 
     // 后台补齐缓存 → 事件驱动重试 → img 出现
     act(() => {
@@ -219,8 +226,9 @@ describe("画廊：日期分组照片墙", () => {
     });
     const img = await screen.findByRole("img", { name: "IMG_0001.JPG" });
     expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\256\\img1.jpg");
-    expect(thumbMock).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("thumb-raw")).toBeInTheDocument(); // RAW 仍占位
+    // RAW 仍未就绪：占位 + 水印
+    expect(screen.getByTestId("thumb-raw")).toBeInTheDocument();
+    expect(screen.getByTestId("thumb-raw-badge")).toBeInTheDocument();
   });
 
   it("点击资产块打开查看器（?asset=），Esc 关闭返回画廊（画廊未卸载）", async () => {
@@ -398,5 +406,125 @@ describe("画廊：日期 chips 条", () => {
     await user.click(screen.getAllByTestId("gallery-chip")[1]);
     await waitFor(() => expect(screen.getByText("2026年9月16日")).toBeInTheDocument());
     expect(assetsPageMock).toHaveBeenCalledWith(101, 100);
+  });
+
+  it("日历按钮：年月下拉弹层 + 跳转滚动到该月最新组并收起（v1 年月跳转）", async () => {
+    // 两组：2026-09（首屏）+ 2025-05（视口外）；跳 2025-05 需要真实滚动
+    assetsPageMock.mockResolvedValue([
+      ...makePage(6, "2026-09-18", 20),
+      ...makePage(6, "2025-05-10", 10),
+    ]);
+    groupDatesMock.mockResolvedValue([
+      { date: "2026-09-18", count: 6, coverAssetId: 20 },
+      { date: "2025-05-10", count: 6, coverAssetId: 10 },
+    ]);
+    const user = userEvent.setup();
+    renderGallery();
+
+    await screen.findAllByTestId("gallery-tile");
+    const scroll = screen.getByTestId("gallery-grid-scroll");
+    expect(scroll.scrollTop).toBe(0);
+
+    await user.click(screen.getByTestId("gallery-calendar-button"));
+    const panel = screen.getByTestId("gallery-calendar-panel");
+    expect(within(panel).getByTestId("gallery-calendar-year")).toBeInTheDocument();
+    expect(within(panel).getByTestId("gallery-calendar-month")).toBeInTheDocument();
+
+    // 选 2025 年 5 月 → 跳转到该月最新组（2025-05-10）
+    fireEvent.change(within(panel).getByTestId("gallery-calendar-year"), {
+      target: { value: "2025" },
+    });
+    fireEvent.change(within(panel).getByTestId("gallery-calendar-month"), {
+      target: { value: "5" },
+    });
+    await user.click(screen.getByTestId("gallery-calendar-jump"));
+
+    await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(screen.queryByTestId("gallery-calendar-panel")).not.toBeInTheDocument(),
+    );
+  });
+});
+
+// --- RAW+JPG 合并展示 --------------------------------------------------------------
+
+describe("RAW+JPG 合并展示", () => {
+  function pairAssets(): AssetDto[] {
+    return [
+      { ...makeAsset(1, "2026-09-18"), pairId: 9 }, // JPG（代表卡）
+      { ...makeAsset(2, "2026-09-18", "raw", "IMG_0002.CR3"), pairId: 9 },
+      makeAsset(3, "2026-09-18"),
+    ];
+  }
+
+  it("pairId 成对合并为一张卡（代表=JPG）+ RAW+JPG 角标；点击开 JPG 版", async () => {
+    assetsPageMock.mockResolvedValue(pairAssets());
+    const user = userEvent.setup();
+    renderGallery();
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(2);
+    const merged = tiles.find((el) => el.getAttribute("data-asset-id") === "1");
+    expect(merged).toBeDefined();
+    expect(within(merged!).getByTestId("gallery-pair-badge")).toHaveTextContent("RAW+JPG");
+    const single = tiles.find((el) => el.getAttribute("data-asset-id") === "3")!;
+    expect(single.querySelector('[data-testid="gallery-pair-badge"]')).toBeNull();
+
+    await user.click(merged!);
+    expect(await screen.findByTestId("viewer-name")).toHaveTextContent("IMG_0001.JPG");
+  });
+
+  it("设置关闭合并 → RAW/JPG 分开展示（3 张卡，无合并角标；RAW 卡有水印）", async () => {
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, gallery: { mergeRawJpg: false } },
+    }));
+    assetsPageMock.mockResolvedValue(pairAssets());
+    renderGallery();
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(3);
+    expect(screen.queryByTestId("gallery-pair-badge")).not.toBeInTheDocument();
+    expect(screen.getByTestId("thumb-raw-badge")).toBeInTheDocument();
+
+    // 恢复默认开（store 跨用例共享）
+    useSettingsStore.setState((s) => ({
+      settings: { ...s.settings, gallery: { mergeRawJpg: true } },
+    }));
+  });
+});
+
+// --- 工具条：居中 / 三档尺寸 ---------------------------------------------------------
+
+describe("画廊工具条：居中与尺寸", () => {
+  it("内容区水平居中 + 对称 padding（max-w 容器，chips 与网格同宽对齐）", async () => {
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    renderGallery();
+
+    const content = await screen.findByTestId("gallery-content");
+    expect(content.className).toContain("mx-auto");
+    expect(content.className).toContain("max-w-[1600px]");
+    expect(content.className).toContain("px-6");
+  });
+
+  it("三档尺寸：默认中档 200px；切大 280px 并写 localStorage", async () => {
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    const user = userEvent.setup();
+    renderGallery();
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles[0].style.width).toBe("200px");
+
+    await user.click(screen.getByTestId("gallery-tile-size-large"));
+    expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("280px");
+    expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("large");
+  });
+
+  it("localStorage 预设小档 → 首渲染 120px（画廊/搜索跨页共享）", async () => {
+    localStorage.setItem("smartphoto.gallery.tileSize", "small");
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    renderGallery();
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles[0].style.width).toBe("120px");
   });
 });

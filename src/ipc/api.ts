@@ -139,6 +139,14 @@ export interface AssetDto {
   capturedAt: string | null;
   camera: string | null;
   sizeBytes: number;
+  /** RAW+JPG 配对 id（同一拍摄的两格式同值）；后端契约扩展中，缺省/单条均不成对 */
+  pairId?: number | null;
+}
+
+/** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
+export interface AssetCameraCount {
+  camera: string;
+  count: number;
 }
 
 /** 搜索/过滤条件（camelCase 平铺进 assets_page 负载；全字段可省略） */
@@ -158,24 +166,38 @@ export interface AssetGroupDate {
   coverAssetId: number;
 }
 
-/** 单资产全量元数据（asset_detail 返回，查看器 EXIF 面板）；dupCount=库内内容指纹重复数 */
+/**
+ * 单资产全量元数据（asset_detail 返回，查看器 EXIF 面板）。
+ * 字段名与后端实测对齐（src-tauri assets.rs：{id, flatten(AssetRow), duplicate_count}），
+ * 由 assetDetail() 归一为 camelCase：后端 flatten 的 AssetRow 是 filename/size/createdAt，
+ * 顶层 duplicate_count 未做 camelCase 重命名；EXIF 扩展字段（宽高/ISO/光圈/快门/焦距）
+ * 后端暂未返回（契约扩展中），存在即透出、缺失为 null/undefined。
+ */
 export interface AssetDetailDto {
   id: number;
   path: string;
-  name: string;
+  /** 文件名（后端 AssetRow.filename） */
+  filename: string;
+  /** 文件大小（字节；后端 AssetRow.size） */
+  size: number;
   kind: AssetKind;
   capturedAt: string | null;
   camera: string | null;
-  lens: string | null;
-  sizeBytes: number;
-  importedAt: string | null;
+  /** 镜头（后端暂未返回，契约扩展中） */
+  lens?: string | null;
+  /** 入库时间（后端 AssetRow.createdAt） */
+  createdAt: string | null;
+  /** 库内同指纹重复数（不含自身；后端 duplicate_count 归一） */
   dupCount: number;
-  width: number | null;
-  height: number | null;
-  iso: number | null;
-  aperture: number | null;
-  shutter: string | null;
-  focalLength: number | null;
+  // --- EXIF 扩展（后端契约扩展中；未返回时缺省） ---
+  width?: number | null;
+  height?: number | null;
+  iso?: number | null;
+  /** 光圈 f 值（后端扩展可能名 fNumber） */
+  aperture?: number | null;
+  /** 快门（后端扩展可能名 exposure，如 "1/250"） */
+  shutter?: string | null;
+  focalLength?: number | null;
 }
 
 // --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
@@ -435,10 +457,49 @@ export async function assetGroupDates(): Promise<AssetGroupDate[]> {
   }
 }
 
-/** 单资产全量元数据（查看器 EXIF 面板）；命令失败/不存在返回 null */
+/** 库内相机型号清单（搜索页相机勾选；按 count 降序）；失败/非数组回退 [] */
+export async function cameraList(): Promise<AssetCameraCount[]> {
+  try {
+    const list = await ipc<AssetCameraCount[] | null>("cameras_list");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 单资产全量元数据（查看器 EXIF 面板）；命令失败/不存在/负载异常返回 null。
+ *  后端负载 → AssetDetailDto 归一：filename/size/createdAt + duplicate_count（顶层
+ *  snake_case，未做 camelCase 重命名）→ dupCount；字段缺失容错（不透传 undefined），
+ *  EXIF 扩展字段存在即带出（aperture/shutter 兼容 fNumber/exposure 别名）。 */
 export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
   try {
-    return await ipc<AssetDetailDto | null>("asset_detail", { id });
+    const raw = await ipc<unknown>("asset_detail", { id });
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const numOf = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const strOf = (v: unknown): string | null =>
+      typeof v === "string" && v.length > 0 ? v : null;
+    const kind = r.kind === "raw" || r.kind === "video" ? r.kind : "photo";
+    return {
+      id: numOf(r.id) ?? 0,
+      path: typeof r.path === "string" ? r.path : "",
+      filename:
+        typeof r.filename === "string" ? r.filename : typeof r.name === "string" ? r.name : "",
+      size: numOf(r.size ?? r.sizeBytes) ?? 0,
+      kind,
+      capturedAt: strOf(r.capturedAt),
+      camera: strOf(r.camera),
+      lens: strOf(r.lens),
+      createdAt: strOf(r.createdAt),
+      dupCount: numOf(r.duplicate_count ?? r.duplicateCount) ?? 0,
+      width: numOf(r.width),
+      height: numOf(r.height),
+      iso: numOf(r.iso),
+      aperture: numOf(r.aperture ?? r.fNumber),
+      shutter: strOf(r.shutter ?? r.exposure),
+      focalLength: numOf(r.focalLength),
+    };
   } catch {
     return null;
   }

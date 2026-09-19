@@ -216,3 +216,292 @@ fn chrono_exif_format_reference() {
     let t = NaiveDateTime::parse_from_str("2026:01:02 03:04:05", "%Y:%m:%d %H:%M:%S").unwrap();
     assert_eq!(t.and_utc(), naive(2026, 1, 2, 3, 4, 5));
 }
+
+// ---------------------------------------------------------------------------
+// 拍摄参数扩展（M3.5）：FNumber/ExposureTime/ISO/FocalLength/LensModel + 宽高
+// ---------------------------------------------------------------------------
+
+use exif_lite::MetaLite as M;
+
+/// 通用 IFD 条目（payload = 实际数据字节；≤4 内联，否则进数据区）。
+struct Ent {
+    tag: u16,
+    typ: u16,
+    payload: Vec<u8>,
+}
+
+fn ent(tag: u16, typ: u16, payload: Vec<u8>) -> Ent {
+    Ent { tag, typ, payload }
+}
+
+fn ascii_val(s: &str) -> Vec<u8> {
+    let mut v = s.as_bytes().to_vec();
+    v.push(0);
+    v
+}
+
+/// 小端 IFD 段编码：entries 升序；返回 (ifd 字节, 数据区字节)。
+fn encode_ifd(entries: &[Ent], data_base: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut ifd = Vec::new();
+    let mut data = Vec::new();
+    ifd.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for e in entries {
+        ifd.extend_from_slice(&e.tag.to_le_bytes());
+        ifd.extend_from_slice(&e.typ.to_le_bytes());
+        ifd.extend_from_slice(&(e.payload.len() as u32).to_le_bytes());
+        if e.payload.len() <= 4 {
+            let mut inline = [0u8; 4];
+            inline[..e.payload.len()].copy_from_slice(&e.payload);
+            ifd.extend_from_slice(&inline);
+        } else {
+            ifd.extend_from_slice(&((data_base + data.len()) as u32).to_le_bytes());
+            data.extend_from_slice(&e.payload);
+        }
+    }
+    ifd.extend_from_slice(&0u32.to_le_bytes()); // 下一 IFD = 0
+    (ifd, data)
+}
+
+/// 全功能 TIFF 构造：IFD0[Make, Model, (ImageWidth 0x0100), (ImageLength
+/// 0x0101), ExifIFD 指针] + ExifIFD[ExposureTime, FNumber, ISO,
+/// DateTimeOriginal, FocalLength, LensModel]。
+#[allow(clippy::too_many_arguments)]
+fn build_full_tiff(
+    make: Option<&str>,
+    model: Option<&str>,
+    dims: Option<(u32, u32)>,
+    exposure: Option<(u32, u32)>,
+    fnumber: Option<(u32, u32)>,
+    iso: Option<u16>,
+    dto: Option<&str>,
+    focal: Option<(u32, u32)>,
+    lens: Option<&str>,
+) -> Vec<u8> {
+    let mut ifd0 = Vec::new();
+    if let Some(m) = make {
+        ifd0.push(ent(0x010F, 2, ascii_val(m)));
+    }
+    if let Some(m) = model {
+        ifd0.push(ent(0x0110, 2, ascii_val(m)));
+    }
+    if let Some((w, h)) = dims {
+        ifd0.push(ent(0x0100, 4, w.to_le_bytes().to_vec()));
+        ifd0.push(ent(0x0101, 4, h.to_le_bytes().to_vec()));
+    }
+    let mut exif_ents = Vec::new();
+    if let Some((n, d)) = exposure {
+        let mut p = Vec::new();
+        p.extend_from_slice(&n.to_le_bytes());
+        p.extend_from_slice(&d.to_le_bytes());
+        exif_ents.push(ent(0x829A, 5, p));
+    }
+    if let Some((n, d)) = fnumber {
+        let mut p = Vec::new();
+        p.extend_from_slice(&n.to_le_bytes());
+        p.extend_from_slice(&d.to_le_bytes());
+        exif_ents.push(ent(0x829D, 5, p));
+    }
+    if let Some(v) = iso {
+        exif_ents.push(ent(0x8827, 3, v.to_le_bytes().to_vec()));
+    }
+    if let Some(s) = dto {
+        exif_ents.push(ent(0x9003, 2, ascii_val(s)));
+    }
+    if let Some((n, d)) = focal {
+        let mut p = Vec::new();
+        p.extend_from_slice(&n.to_le_bytes());
+        p.extend_from_slice(&d.to_le_bytes());
+        exif_ents.push(ent(0x920A, 5, p));
+    }
+    if let Some(s) = lens {
+        exif_ents.push(ent(0xA434, 2, ascii_val(s)));
+    }
+    exif_ents.sort_by_key(|e| e.tag);
+
+    let n0 = ifd0.len() + 1; // + ExifIFD 指针
+    let ifd0_size = 2 + 12 * n0 + 4;
+    let exif_off = 8 + ifd0_size;
+    let exif_size = 2 + 12 * exif_ents.len() + 4;
+    let ifd0_data_base = exif_off + exif_size;
+
+    // ExifIFD 指针作为普通条目并入 IFD0（encode_ifd 输出含自身计数头）
+    ifd0.push(ent(0x8769, 4, (exif_off as u32).to_le_bytes().to_vec()));
+    ifd0.sort_by_key(|e| e.tag);
+
+    let (ifd0_bytes, ifd0_data) = encode_ifd(&ifd0, ifd0_data_base);
+    let exif_data_base = ifd0_data_base + ifd0_data.len();
+    let (exif_bytes, exif_data) = encode_ifd(&exif_ents, exif_data_base);
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II\x2a\x00");
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    buf.extend_from_slice(&ifd0_bytes);
+    buf.extend_from_slice(&exif_bytes);
+    buf.extend_from_slice(&ifd0_data);
+    buf.extend_from_slice(&exif_data);
+    buf
+}
+
+/// 最小 JPEG 扫描段（ncomp=3 的 SOF0 + EOI）。
+fn sof0_segment(width: u16, height: u16) -> Vec<u8> {
+    let mut seg = Vec::new();
+    seg.extend_from_slice(&[0xFF, 0xC0]);
+    seg.extend_from_slice(&17u16.to_be_bytes()); // len = 8 + 3*3
+    seg.push(8); // precision
+    seg.extend_from_slice(&height.to_be_bytes());
+    seg.extend_from_slice(&width.to_be_bytes());
+    seg.push(3);
+    seg.extend_from_slice(&[0; 9]);
+    seg
+}
+
+fn wrap_jpeg_with_sof(tiff: &[u8], sof: Option<(u16, u16)>) -> Vec<u8> {
+    let mut buf = wrap_jpeg(tiff);
+    if let Some((w, h)) = sof {
+        buf.extend_from_slice(&sof0_segment(w, h));
+    }
+    buf.extend_from_slice(&[0xFF, 0xD9]); // EOI
+    buf
+}
+
+#[test]
+fn parses_exposure_iso_fnumber_focal_lens_and_dimensions() {
+    let tiff = build_full_tiff(
+        Some("Sony"),
+        Some("A7R5"),
+        None,
+        Some((1, 250)),
+        Some((28, 10)),
+        Some(1600),
+        Some("2026:06:28 15:30:00"),
+        Some((85, 1)),
+        Some("FE 85mm F1.8"),
+    );
+    let bytes = wrap_jpeg_with_sof(&tiff, Some((6048, 8064)));
+    let meta = parse(&bytes);
+    eprintln!("DEBUG meta = {:?}", meta);
+    assert_eq!(meta.width, Some(6048));
+    assert_eq!(meta.height, Some(8064));
+    assert_eq!(meta.iso, Some(1600));
+    assert_eq!(meta.f_number.as_deref(), Some("2.8"));
+    assert_eq!(meta.exposure_time.as_deref(), Some("1/250"));
+    assert_eq!(meta.focal_length.as_deref(), Some("85"));
+    assert_eq!(meta.lens.as_deref(), Some("FE 85mm F1.8"));
+    // 原有字段不回归
+    assert_eq!(meta.captured_at, Some(naive(2026, 6, 28, 15, 30, 0)));
+    assert_eq!(meta.camera.as_deref(), Some("Sony A7R5"));
+}
+
+#[test]
+fn rational_formatting_decimal_and_fraction() {
+    // 0.4s（4/10）小数；f/4（40/10）整值去尾零；85.0mm 同
+    let tiff = build_full_tiff(
+        Some("C"),
+        Some("M"),
+        None,
+        Some((4, 10)),
+        Some((40, 10)),
+        Some(100),
+        None,
+        Some((850, 10)),
+        None,
+    );
+    let meta = parse(&wrap_jpeg_with_sof(&tiff, None));
+    assert_eq!(meta.exposure_time.as_deref(), Some("0.4"));
+    assert_eq!(meta.f_number.as_deref(), Some("4"));
+    assert_eq!(meta.focal_length.as_deref(), Some("85"));
+    assert_eq!(meta.lens, None);
+}
+
+#[test]
+fn missing_shooting_fields_tolerated() {
+    // 只有 Make/Model：新字段全 None（PartialEq 对 default 的扩展字段）
+    let tiff = build_full_tiff(Some("TestCam"), Some("Model X"), None, None, None, None, None, None, None);
+    let meta = parse(&wrap_jpeg_with_sof(&tiff, None));
+    assert_eq!(meta.width, None);
+    assert_eq!(meta.height, None);
+    assert_eq!(meta.iso, None);
+    assert_eq!(meta.f_number, None);
+    assert_eq!(meta.exposure_time, None);
+    assert_eq!(meta.focal_length, None);
+    assert_eq!(meta.lens, None);
+    assert_eq!(meta.camera.as_deref(), Some("TestCam Model X"));
+}
+
+#[test]
+fn dimensions_from_sof2_progressive_and_from_tiff_tags() {
+    // SOF2（渐进式，0xC2）
+    let tiff = build_full_tiff(Some("C"), Some("M"), None, None, None, None, None, None, None);
+    let mut bytes = wrap_jpeg(tiff.as_slice());
+    bytes.extend_from_slice(&[0xFF, 0xC2]);
+    bytes.extend_from_slice(&17u16.to_be_bytes());
+    bytes.push(8);
+    bytes.extend_from_slice(&1080u16.to_be_bytes());
+    bytes.extend_from_slice(&1920u16.to_be_bytes());
+    bytes.push(3);
+    bytes.extend_from_slice(&[0; 9]);
+    let meta = parse(&bytes);
+    assert_eq!(meta.width, Some(1920));
+    assert_eq!(meta.height, Some(1080));
+
+    // TIFF 形态（RAW 容器）：无 SOF，从 IFD0 ImageWidth/ImageLength 取
+    let raw = build_full_tiff(
+        Some("Nikon"),
+        Some("Z8"),
+        Some((8256, 5504)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let meta = parse(&raw);
+    assert_eq!(meta.width, Some(8256));
+    assert_eq!(meta.height, Some(5504));
+}
+
+#[test]
+fn dimensions_from_embedded_preview_in_raw_head() {
+    // RAW TIFF 头 + 头部后段的内嵌预览 JPEG（SOI…SOF0…EOI）
+    let mut raw = build_full_tiff(None, None, None, None, None, None, None, None, None);
+    raw.extend_from_slice(&[0u8; 512]); // TIFF 数据与预览间填充
+    let mut preview = Vec::new();
+    preview.extend_from_slice(&[0xFF, 0xD8]);
+    preview.extend_from_slice(&sof0_segment(1616, 1080));
+    preview.extend_from_slice(&[0xFF, 0xD9]);
+    raw.extend_from_slice(&preview);
+    let meta = parse(&raw);
+    assert_eq!(meta.width, Some(1616));
+    assert_eq!(meta.height, Some(1080));
+}
+
+#[test]
+fn bad_truncated_sof_yields_none_not_panic() {
+    let tiff = build_full_tiff(Some("C"), Some("M"), None, None, None, None, None, None, None);
+    let mut bytes = wrap_jpeg_with_sof(&tiff, Some((100, 200)));
+    // SOF 段被截断（声明长度超出缓冲）
+    let cut = bytes.len() - 4;
+    bytes.truncate(cut);
+    let meta = parse(&bytes);
+    assert_eq!(meta.width, None);
+    assert_eq!(meta.height, None);
+}
+
+
+#[test]
+fn debug_dump_parse_error() {
+    use std::io::Cursor;
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("make+model", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, None, None, None, None)),
+        ("make+model+dims", build_full_tiff(Some("Sony"), Some("A7R5"), Some((10, 20)), None, None, None, None, None, None)),
+        ("make+model+iso", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, Some(100), None, None, None)),
+        ("make+model+lens", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, None, None, None, Some("L"))),
+        ("full", build_full_tiff(Some("Sony"), Some("A7R5"), None, Some((1, 250)), Some((28, 10)), Some(1600), Some("2026:06:28 15:30:00"), Some((85, 1)), Some("FE 85mm F1.8"))),
+    ];
+    for (name, bytes) in cases {
+        let parsed = exif::Reader::new().read_from_container(&mut Cursor::new(&bytes));
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("DEBUG {name}: len={} hex={} -> {:?}", bytes.len(), hex.join(" "), parsed.is_ok());
+    }
+}

@@ -1,13 +1,13 @@
 import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
-import SearchPage from "./SearchPage";
+import SearchPage, { quickRange } from "./SearchPage";
 import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
-import { assetThumbGet, assetsPage, type AssetDto } from "@/ipc/api";
+import { assetThumbGet, assetsPage, cameraList, type AssetDto } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -15,6 +15,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     assetsPage: vi.fn(),
     assetThumbGet: vi.fn(),
+    cameraList: vi.fn(),
   };
 });
 
@@ -27,6 +28,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 const assetsPageMock = vi.mocked(assetsPage);
 const thumbMock = vi.mocked(assetThumbGet);
+const cameraListMock = vi.mocked(cameraList);
 const convertMock = vi.mocked(convertFileSrc);
 
 // --- 工具 -------------------------------------------------------------------------
@@ -72,6 +74,7 @@ beforeEach(() => {
   assetsPageMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue(null);
   convertMock.mockReset().mockReturnValue("");
+  cameraListMock.mockReset().mockResolvedValue([]);
   resetThumbPipelineForTests();
 });
 
@@ -89,19 +92,29 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     await waitFor(() => expect(assetsPageMock).toHaveBeenCalledWith(0, 100, {}));
   });
 
-  it("类型+日期范围+相机组合成完整 filters（防抖后单次查询）", async () => {
+  it("类型+日期范围+相机勾选组合成完整 filters（防抖后单次查询）", async () => {
     vi.useFakeTimers();
+    cameraListMock.mockResolvedValue([
+      { camera: "Canon EOS R5", count: 12 },
+      { camera: "Apple iPhone 15", count: 3 },
+    ]);
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-01-15", "raw")]);
     renderSearch();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // 组合条件：RAW + 日期范围 + 相机
+    // 组合条件：RAW + 日期范围 + 相机勾选
     fireEvent.click(screen.getByTestId("search-kind-raw"));
     fireEvent.change(screen.getByTestId("search-from"), { target: { value: "2026-01-01" } });
     fireEvent.change(screen.getByTestId("search-to"), { target: { value: "2026-02-01" } });
-    fireEvent.change(screen.getByTestId("search-camera"), { target: { value: "Canon" } });
+    fireEvent.click(screen.getByTestId("search-camera-button"));
+    const menu = screen.getByTestId("search-camera-menu");
+    const options = within(menu).getAllByTestId("search-camera-option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveAttribute("data-camera", "Canon EOS R5");
+    expect(options[0]).toHaveTextContent("12");
+    fireEvent.click(within(options[0]).getByRole("checkbox"));
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
@@ -112,38 +125,45 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
       kind: "raw",
       capturedAfter: "2026-01-01",
       capturedBefore: "2026-02-01",
-      camera: "Canon",
+      camera: "Canon EOS R5",
     });
     // 防抖后只有两查询：初始 + 组合条件（中间态不发起）
     expect(assetsPageMock).toHaveBeenCalledTimes(2);
   });
 
-  it("相机输入去首尾空白；空条件不产生 filters 字段", async () => {
+  it("日期快捷段：近7天/去年 → 负载端点（本地时区 YYYY-MM-DD）", async () => {
     vi.useFakeTimers();
     renderSearch();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    fireEvent.change(screen.getByTestId("search-camera"), { target: { value: "  Canon  " } });
+    fireEvent.click(screen.getByTestId("search-quick-recent7"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { camera: "Canon" });
+    const [r7From, r7To] = quickRange("recent7");
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+      capturedAfter: r7From,
+      capturedBefore: r7To,
+    });
 
-    // 清空 → 回到无条件
-    fireEvent.change(screen.getByTestId("search-camera"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("search-quick-lastYear"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {});
+    const [lyFrom, lyTo] = quickRange("lastYear");
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+      capturedAfter: lyFrom,
+      capturedBefore: lyTo,
+    });
   });
 });
 
 // --- 防抖 -------------------------------------------------------------------------
 
 describe("搜索：300ms 防抖", () => {
-  it("连续输入只查一次（299ms 内不查，300ms 后以最终值查）", async () => {
+  it("连续变更只查一次（299ms 内不查，300ms 后以最终值查）", async () => {
     vi.useFakeTimers();
     renderSearch();
     await act(async () => {
@@ -151,25 +171,16 @@ describe("搜索：300ms 防抖", () => {
     });
     expect(assetsPageMock).toHaveBeenCalledTimes(1);
 
-    // 快速连打 5 个字符
-    const input = screen.getByTestId("search-camera");
-    fireEvent.change(input, { target: { value: "C" } });
+    // 快速连点快捷段（条件连续变更）
+    fireEvent.click(screen.getByTestId("search-quick-recent7"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
     });
-    fireEvent.change(input, { target: { value: "Ca" } });
+    fireEvent.click(screen.getByTestId("search-quick-recent30"));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
     });
-    fireEvent.change(input, { target: { value: "Can" } });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(100);
-    });
-    fireEvent.change(input, { target: { value: "Cano" } });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(100);
-    });
-    fireEvent.change(input, { target: { value: "Canon" } });
+    fireEvent.click(screen.getByTestId("search-quick-thisYear"));
     // 最后一击后 299ms：仍未查询
     await act(async () => {
       await vi.advanceTimersByTimeAsync(299);
@@ -180,17 +191,78 @@ describe("搜索：300ms 防抖", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
     expect(assetsPageMock).toHaveBeenCalledTimes(2);
-    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { camera: "Canon" });
-    // 无任何中间态查询（"C"/"Ca"/…）
-    const cameraCalls = assetsPageMock.mock.calls.filter((call) => (call[2] as { camera?: string }).camera);
-    expect(cameraCalls).toHaveLength(1);
+    const [thisFrom, thisTo] = quickRange("thisYear");
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+      capturedAfter: thisFrom,
+      capturedBefore: thisTo,
+    });
+    // 无任何中间态查询
+    const withDate = assetsPageMock.mock.calls.filter(
+      (call) => (call[2] as { capturedAfter?: string }).capturedAfter,
+    );
+    expect(withDate).toHaveLength(1);
+  });
+});
+
+// --- 相机勾选下拉 -------------------------------------------------------------------
+
+describe("搜索：相机勾选（cameraList 清单）", () => {
+  it("「全部相机」默认态；列表渲染计数徽标；勾选过滤、多选先传第一个、清空回无条件", async () => {
+    cameraListMock.mockResolvedValue([
+      { camera: "Canon EOS R5", count: 12 },
+      { camera: "Apple iPhone 15", count: 3 },
+    ]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+    await waitFor(() => expect(assetsPageMock).toHaveBeenCalledWith(0, 100, {}));
+
+    // 默认按钮=全部相机；打开下拉
+    expect(screen.getByTestId("search-camera-button")).toHaveTextContent("全部相机");
+    fireEvent.click(screen.getByTestId("search-camera-button"));
+    const options = screen.getAllByTestId("search-camera-option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveAttribute("data-camera", "Canon EOS R5");
+    expect(options[0]).toHaveTextContent("12");
+    expect(options[1]).toHaveTextContent("Apple iPhone 15");
+    expect(options[1]).toHaveTextContent("3");
+
+    // 勾选 Canon → 过滤
+    fireEvent.click(within(options[0]).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { camera: "Canon EOS R5" }),
+    );
+
+    // 再勾 iPhone：多选 OR（后端数组契约未到位 → 仍传第一个）
+    fireEvent.click(within(options[1]).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { camera: "Canon EOS R5" }),
+    );
+
+    // 取消 Canon → 剩 iPhone 成为第一个
+    fireEvent.click(within(options[0]).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { camera: "Apple iPhone 15" }),
+    );
+
+    // 全部取消 → 回无条件
+    fireEvent.click(within(options[1]).getByRole("checkbox"));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {}));
+    expect(screen.getByTestId("search-camera-button")).toHaveTextContent("全部相机");
+  });
+
+  it("相机清单为空：下拉显示空态文案（不过滤）", async () => {
+    renderSearch();
+    await waitFor(() => expect(cameraListMock).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTestId("search-camera-button"));
+    expect(screen.getByTestId("search-camera-menu")).toHaveTextContent("库内还没有相机信息");
   });
 });
 
 // --- 结果渲染 ---------------------------------------------------------------------
 
 describe("搜索：结果与状态", () => {
-  it("结果复用画廊网格（同一虚拟化+缩略图管线）：分组/瓦片/计数徽标", async () => {
+  it("结果复用画廊网格（同一虚拟化+缩略图管线）：分组/瓦片/计数徽标/内容区居中", async () => {
     assetsPageMock.mockResolvedValue([
       makeAsset(1, "2026-09-18"),
       makeAsset(2, "2026-09-18"),
@@ -201,10 +273,27 @@ describe("搜索：结果与状态", () => {
     const tiles = await screen.findAllByTestId("gallery-tile");
     expect(tiles).toHaveLength(3);
     expect(screen.getByTestId("search-count")).toHaveTextContent("3 个结果");
-    // 复用 AssetGrid 的组头与滚动容器
+    // 复用 AssetGrid 的组头与滚动容器；内容区与画廊同款居中容器
     expect(screen.getAllByTestId("gallery-group")).toHaveLength(2);
     expect(screen.getByTestId("search-grid-scroll")).toBeInTheDocument();
     expect(screen.queryByTestId("gallery-chips")).not.toBeInTheDocument();
+    const content = screen.getByTestId("search-content");
+    expect(content.className).toContain("mx-auto");
+    expect(content.className).toContain("max-w-[1600px]");
+    expect(content.className).toContain("px-6");
+  });
+
+  it("RAW+JPG 合并展示与画廊同开关：pairId 成对合并 + RAW+JPG 角标", async () => {
+    assetsPageMock.mockResolvedValue([
+      { ...makeAsset(1, "2026-09-18"), pairId: 5 },
+      { ...makeAsset(2, "2026-09-18", "raw"), pairId: 5 },
+    ]);
+    renderSearch();
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(1);
+    expect(tiles[0]).toHaveAttribute("data-asset-id", "1"); // 代表=JPG
+    expect(within(tiles[0]).getByTestId("gallery-pair-badge")).toHaveTextContent("RAW+JPG");
   });
 
   it("点击结果瓦片打开查看器（?asset=）", async () => {

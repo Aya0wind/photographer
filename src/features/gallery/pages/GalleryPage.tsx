@@ -10,32 +10,49 @@ import {
   type AssetDto,
   type AssetGroupDate,
 } from "@/ipc/api";
+import { useSettingsStore } from "@/stores/settingsStore";
 import {
   groupAssetsByDate,
   groupKeyOfDate,
   formatDateLabel,
 } from "../lib/assetGroups";
+import { mergeRawJpgCards } from "../lib/mergeRawJpg";
+import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import DateChipBar from "../components/DateChipBar";
+import TileSizeSwitch from "../components/TileSizeSwitch";
 import ViewerOverlay from "../components/ViewerOverlay";
 
 /**
  * 画廊页（B 风格 Google Photos 深色沉浸，M3 主体）：
- * - 日期分组照片墙（AssetGrid：虚拟化等宽方格 + 缩略图管线）；
- *   组头=日期+数量，滚动时当前组日期以覆盖条吸顶（150ms 切换动画——虚拟行内做
- *   CSS sticky 需要 transform 对齐，覆盖条是虚拟化下更稳的形态）
+ * - 日期分组照片墙（AssetGrid：虚拟化方格 + 缩略图管线）；组头=日期+数量，
+ *   滚动时当前组日期覆盖条吸顶（150ms 切换动画）
  * - 无限滚动：尾部哨兵 IntersectionObserver（提前 800px）触发 assetsPage 下一页
  *   （keyset afterId=已加载最后一条 id，limit 100）
- * - 顶部日期 chips（assetGroupDates，含「未知」组）点击滚动到组；目标组未加载时
- *   顺序补页直到出现
+ * - 顶部：日期 chips（含「未知」组）+ 日历按钮（年月下拉跳转，v1 不做整月历——
+ *   chips 覆盖已加载组的快速跳转，日历覆盖任意月份的补页跳转）+ 三档尺寸切换
+ * - RAW+JPG 合并展示（设置 gallery.mergeRawJpg，默认开）：pairId 成对的合并为
+ *   一张卡（代表=JPG），角标「RAW+JPG」；点击进查看器即 JPG 版
  * - 状态：首屏骨架行 / 空库引导（去导入）/ IPC 不可用降级提示（可重试）
- * - 查看器：/gallery?asset=<id>（组件不卸载，Esc 返回后滚动位置保留——见 useAssetViewer）
+ * - 内容区水平居中 + 对称 padding（max-w 容器），chips 条与网格同宽对齐
+ * - 查看器：/gallery?asset=<id>（组件不卸载，Esc 返回后滚动位置保留）
  */
 
 const PAGE_LIMIT = 100;
 /** 组头完全滚出视口后显示吸顶条（低于此偏移视为仍在组头处） */
 const STICKY_MIN_SCROLL = 48;
+
+/** 年月选择范围：chips 数据的年份边界 ∪ 当前年（空数据退当前年） */
+function yearRange(dates: AssetGroupDate[]): number[] {
+  const now = new Date().getFullYear();
+  const years = new Set<number>([now]);
+  for (const entry of dates) {
+    const y = Number(entry.date?.slice(0, 4));
+    if (Number.isFinite(y) && y > 0) years.add(y);
+  }
+  return [...years].sort((a, b) => b - a);
+}
 
 export default function GalleryPage() {
   const { t } = useTranslation();
@@ -55,7 +72,16 @@ export default function GalleryPage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState<ViewportInfo>({ scrollTop: 0, group: null });
 
-  const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
+  // RAW+JPG 合并展示（设置项；旧 settings 数据缺 gallery 分组时兜底为开）
+  const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
+  const { cards, badges } = useMemo(
+    () => mergeRawJpgCards(assets, mergeEnabled),
+    [assets, mergeEnabled],
+  );
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+
+  // 三档方格尺寸（localStorage 全局共享，画廊与搜索一致）
+  const [tileSize, setTileSize] = useGalleryTileSize();
 
   /** 追加下一页（keyset）；返回本页结果供补页循环判断 */
   const appendPage = useCallback(async (): Promise<AssetDto[]> => {
@@ -145,6 +171,30 @@ export default function GalleryPage() {
     [appendPage],
   );
 
+  /** 月份跳转（日历面板）：补页直到该月有资产，滚到该月最新一天所在组 */
+  const jumpToMonth = useCallback(
+    async (year: number, month: number) => {
+      const prefix = `${year}-${String(month).padStart(2, "0")}`;
+      const inMonth = () => assetsRef.current.find((a) => (a.capturedAt ?? "").startsWith(prefix));
+      let guard = 0;
+      let hit = inMonth();
+      while (!hit && hasMoreRef.current && guard < 200) {
+        guard += 1;
+        const page = await appendPage();
+        if (page.length === 0) break;
+        hit = inMonth();
+      }
+      if (hit) setPendingJumpKey(groupKeyOfDate(hit.capturedAt));
+    },
+    [appendPage],
+  );
+
+  // 日历弹层：年/月下拉（v1 取年月跳转，不做整月历栅格）
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [calMonth, setCalMonth] = useState(new Date().getMonth() + 1);
+  const years = useMemo(() => yearRange(dates), [dates]);
+
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
 
   const currentGroup = viewport.group;
@@ -217,63 +267,144 @@ export default function GalleryPage() {
   }
 
   return (
-    <div className="relative flex h-full flex-col" data-testid="gallery-page">
-      {/* 顶部：日期 chips 条 */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge px-3">
-        <span className="shrink-0 text-xs font-medium text-text-secondary">{t("gallery.title")}</span>
-        {dates.length > 0 && (
-          <DateChipBar dates={dates} currentKey={viewport.group?.key ?? null} onJump={(d) => void jumpToDate(d)} />
+    <div className="h-full" data-testid="gallery-page">
+      {/* 内容区：水平居中 + 左右对称 padding（修复贴导航边起排/首卡被切） */}
+      <div
+        className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
+        data-testid="gallery-content"
+      >
+        {/* 顶部：日期 chips + 日历跳转 + 尺寸切换 */}
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge">
+          <span className="shrink-0 text-xs font-medium text-text-secondary">{t("gallery.title")}</span>
+          {dates.length > 0 && (
+            <DateChipBar dates={dates} currentKey={viewport.group?.key ?? null} onJump={(d) => void jumpToDate(d)} />
+          )}
+          {/* 日历按钮 → 年月跳转弹层 */}
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setCalendarOpen((v) => !v)}
+              aria-label={t("gallery.calendar.button")}
+              aria-expanded={calendarOpen}
+              className={`rounded-md border p-1 transition-colors ${
+                calendarOpen
+                  ? "border-accent text-accent"
+                  : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+              }`}
+              data-testid="gallery-calendar-button"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="3" width="12" height="11" rx="1.5" />
+                <path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" />
+              </svg>
+            </button>
+            {calendarOpen && (
+              <div
+                className="absolute right-0 top-9 z-20 flex items-center gap-1.5 rounded-lg border border-edge bg-surface p-2 shadow-lg"
+                data-testid="gallery-calendar-panel"
+              >
+                <select
+                  value={calYear}
+                  onChange={(e) => setCalYear(Number(e.target.value))}
+                  aria-label={t("gallery.calendar.year")}
+                  className="rounded border border-edge bg-bg px-1.5 py-1 font-mono text-[11px] text-text-primary outline-none focus:border-accent"
+                  data-testid="gallery-calendar-year"
+                >
+                  {years.map((y) => (
+                    <option key={y} value={y}>{y}</option>
+                  ))}
+                </select>
+                <select
+                  value={calMonth}
+                  onChange={(e) => setCalMonth(Number(e.target.value))}
+                  aria-label={t("gallery.calendar.month")}
+                  className="rounded border border-edge bg-bg px-1.5 py-1 font-mono text-[11px] text-text-primary outline-none focus:border-accent"
+                  data-testid="gallery-calendar-month"
+                >
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                    <option key={m} value={m}>{t("gallery.calendar.monthN", { month: m })}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCalendarOpen(false);
+                    void jumpToMonth(calYear, calMonth);
+                  }}
+                  className="rounded bg-accent px-2 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+                  data-testid="gallery-calendar-jump"
+                >
+                  {t("gallery.calendar.jump")}
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="ml-auto shrink-0">
+            <TileSizeSwitch value={tileSize} onChange={setTileSize} />
+          </div>
+        </div>
+
+        {/* 照片墙 + 吸顶当前日期 */}
+        <div className="relative min-h-0 flex-1">
+          <AssetGrid
+            ref={gridRef}
+            groups={groups}
+            onOpenAsset={openAsset}
+            sentinelRef={sentinelRef}
+            onViewportChange={setViewport}
+            tile={GALLERY_TILE_PX[tileSize]}
+            badges={badges}
+          />
+          <AnimatePresence initial={false}>
+            {showSticky && (
+              <motion.div
+                key="sticky-date"
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                className="pointer-events-none absolute inset-x-0 top-0 z-10 border-b border-edge/60 bg-bg/85 px-4 py-2 backdrop-blur-sm"
+                data-testid="gallery-sticky-date"
+              >
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.span
+                    key={currentGroup.key}
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    transition={{ duration: 0.15, ease: "easeOut" }}
+                    className="text-[13px] font-semibold text-text-primary"
+                  >
+                    {currentGroup.date === null
+                      ? t("gallery.unknownDate")
+                      : formatDateLabel(currentGroup.date)}
+                    <span className="ml-2 text-xs font-normal text-text-muted">
+                      {t("gallery.groupCount", { count: currentGroup.assets.length })}
+                    </span>
+                  </motion.span>
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* 底部加载指示（无限滚动补页中） */}
+        {loadingMore && (
+          <div className="flex h-7 shrink-0 items-center justify-center text-[11px] text-text-muted" data-testid="gallery-loading-more">
+            {t("gallery.loadingMore")}
+          </div>
         )}
       </div>
-
-      {/* 照片墙 + 吸顶当前日期 */}
-      <div className="relative min-h-0 flex-1">
-        <AssetGrid
-          ref={gridRef}
-          groups={groups}
-          onOpenAsset={openAsset}
-          sentinelRef={sentinelRef}
-          onViewportChange={setViewport}
-        />
-        <AnimatePresence initial={false}>
-          {showSticky && (
-            <motion.div
-              key="sticky-date"
-              initial={{ opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.15, ease: "easeOut" }}
-              className="pointer-events-none absolute inset-x-0 top-0 z-10 border-b border-edge/60 bg-bg/85 px-4 py-2 backdrop-blur-sm"
-              data-testid="gallery-sticky-date"
-            >
-              <AnimatePresence mode="wait" initial={false}>
-                <motion.span
-                  key={currentGroup.key}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                  className="text-[13px] font-semibold text-text-primary"
-                >
-                  {currentGroup.date === null
-                    ? t("gallery.unknownDate")
-                    : formatDateLabel(currentGroup.date)}
-                  <span className="ml-2 text-xs font-normal text-text-muted">
-                    {t("gallery.groupCount", { count: currentGroup.assets.length })}
-                  </span>
-                </motion.span>
-              </AnimatePresence>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* 底部加载指示（无限滚动补页中） */}
-      {loadingMore && (
-        <div className="flex h-7 shrink-0 items-center justify-center text-[11px] text-text-muted" data-testid="gallery-loading-more">
-          {t("gallery.loadingMore")}
-        </div>
-      )}
 
       {/* 全屏查看器（/gallery?asset=<id>） */}
       {viewer && (
