@@ -102,15 +102,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 6);
+        assert_eq!(user_version(&db), 7);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 6, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 7, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 6);
+    assert_eq!(user_version(&db), 7);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -128,9 +128,45 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 9,
-        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 1          + faces 2（asset/cluster，migration 0006）"
+        indexes, 10,
+        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，migration 0007）"
     );
+}
+
+#[test]
+fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.db");
+    {
+        let db = Db::open(&path).unwrap();
+        db.migrate().unwrap();
+        db.insert_asset(&asset("X:/dup.jpg", 10, 7, AssetKind::Photo))
+            .unwrap();
+        let asset_id = asset_row_id(&db, "X:/dup.jpg");
+        // 模拟升级前的重复脏数据：去掉 0007 唯一索引，给同一资产再插一条
+        // done；迁移应优先保留 done 而不是旧 pending。
+        db.0.execute("DROP INDEX idx_index_tasks_kind_asset", [])
+            .unwrap();
+        db.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             VALUES ('thumb', ?1, 'done', 0, '2026', '2026')",
+            [asset_id],
+        )
+        .unwrap();
+        db.0.pragma_update(None, "user_version", 6).unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    db.migrate().unwrap();
+    assert_eq!(user_version(&db), 7);
+    let rows: Vec<(String, String)> =
+        db.0.prepare("SELECT kind, state FROM index_tasks")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+    assert_eq!(rows, vec![("thumb".into(), "done".into())]);
 }
 
 #[test]

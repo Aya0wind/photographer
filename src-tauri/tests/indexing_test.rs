@@ -130,6 +130,75 @@ fn startup_kick_after_models_ready_creates_ai_tasks_for_legacy_assets() {
     );
 }
 
+/// 回归：失败任务不能在每次手动点击时重复插入；手动重试应原地复位同一行。
+#[test]
+fn failed_ai_task_is_retried_without_duplicate_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    db.insert_asset(&asset_row("X:/p/retry.jpg", AssetKind::Photo))
+        .unwrap();
+    assert_eq!(db.create_ai_tasks_for_unindexed().unwrap(), 1);
+    let task_id: i64 =
+        db.0.query_row("SELECT id FROM index_tasks WHERE kind = 'ai'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    for _ in 0..3 {
+        db.finish_index_task(task_id, false).unwrap();
+    }
+    assert_eq!(db.create_ai_tasks_for_unindexed().unwrap(), 0);
+    assert_eq!(ai_task_count(&db), 1, "失败后补种不得产生重复任务");
+
+    assert_eq!(db.retry_failed_index_tasks("ai").unwrap(), 1);
+    let (state, attempts): (String, i64) =
+        db.0.query_row(
+            "SELECT state, attempts FROM index_tasks WHERE id = ?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((state.as_str(), attempts), ("pending", 0));
+}
+
+/// 回归（真机修复 2026-09-19）：人脸回填与语义同病灶——以「本轮新建任务数」
+/// 为闸，任务已存在时新建数为 0 直接空转，存量 pending 无人消费（真机 face
+/// 干 9 条后经一次重启就永久停摆）。修复后判据=存量 pending。
+#[test]
+fn face_backfill_consumes_existing_pending_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    db.insert_asset(&asset_row("X:/p/f1.jpg", AssetKind::Photo))
+        .unwrap();
+    assert_eq!(db.create_face_tasks_for_unindexed().unwrap(), 1);
+    assert_eq!(db.pending_index_task_count("face").unwrap(), 1);
+
+    // 模型目录为空 → 处理必失败；但任务必须被 worker 消费（attempts 封顶 → failed）
+    let manager = ai::ModelManager::new(
+        dir.path().join("models-empty"),
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    let done = ai::face::run_face_backfill(
+        dir.path(),
+        std::sync::Arc::new(manager),
+        &events::EventBus::new(),
+    );
+    assert_eq!(done, 0, "无模型不可能成功");
+    assert_eq!(
+        db.pending_index_task_count("face").unwrap(),
+        0,
+        "存量 pending 必须被 worker 消费"
+    );
+    let failed: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'face' AND state = 'failed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed, 1);
+}
+
 // ---------------------------------------------------------------------------
 // index_kick_now
 // ---------------------------------------------------------------------------

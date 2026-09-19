@@ -91,9 +91,12 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         .cloned()
         .ok_or("尚未创建库")?;
     let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
         "thumb" | "exif" => {
+            db.retry_failed_index_tasks(kind)
+                .map_err(|e| format!("重试失败索引任务失败: {e}"))?;
             crate::index::kick(db_dir, &supervisor);
             Ok(())
         }
@@ -104,6 +107,8 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             if !enable_clip {
                 return Err("语义索引未开启（设置 → AI → 语义检索）".into());
             }
+            db.retry_failed_index_tasks("ai")
+                .map_err(|e| format!("重试失败语义任务失败: {e}"))?;
             crate::ai::semantic::kick_semantic_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
             Ok(())
         }
@@ -114,6 +119,8 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             if !enable_face {
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
             }
+            db.retry_failed_index_tasks("face")
+                .map_err(|e| format!("重试失败人脸任务失败: {e}"))?;
             crate::ai::face::kick_face_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
             Ok(())
         }

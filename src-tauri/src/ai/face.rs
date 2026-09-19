@@ -697,9 +697,15 @@ pub fn run_face_backfill(
     bus: &EventBus,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
+        eprintln!("人脸回填：库打开失败（{}），本轮跳过", db_dir.display());
         return 0;
     };
-    let total = db.create_face_tasks_for_unindexed().unwrap_or(0);
+    // 与语义回填同款修复：派 worker 看存量 pending，不看本轮新建数
+    // （任务已存在时新建数为 0，此前直接空转返回——点击立即索引假成功）。
+    if let Err(e) = db.create_face_tasks_for_unindexed() {
+        eprintln!("人脸回填：补种任务失败: {e}");
+    }
+    let total = db.pending_index_task_count("face").unwrap_or(0);
     if total == 0 {
         return 0;
     }
@@ -708,7 +714,11 @@ pub fn run_face_backfill(
     loop {
         let task = match db.claim_index_task("face") {
             Ok(Some(t)) => t,
-            Ok(None) | Err(_) => break,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("人脸回填：认领任务失败，worker 退出: {e}");
+                break;
+            }
         };
         let ok = process_face_task(&db, db_dir, &manager, task.asset_id);
         let _ = db.finish_index_task(task.id, ok);

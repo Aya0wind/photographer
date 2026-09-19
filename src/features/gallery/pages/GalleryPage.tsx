@@ -17,6 +17,10 @@ import {
   formatDateLabel,
 } from "../lib/assetGroups";
 import { mergeRawJpgCards } from "../lib/mergeRawJpg";
+import {
+  gallerySnapshot,
+  saveGallerySnapshot,
+} from "../lib/galleryCache";
 import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
@@ -58,19 +62,41 @@ export default function GalleryPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
-  const [assets, setAssets] = useState<AssetDto[]>([]);
+  // 会话快照（模块级，见 galleryCache.ts）：重挂载立即渲染缓存内容，
+  // 后台静默 revalidate——此前每次挂载从零拉数据，切页回来全体资产回到加载态
+  const cachedAtMount = gallerySnapshot();
+  const [assets, setAssets] = useState<AssetDto[]>(() => cachedAtMount?.assets ?? []);
   /** 已加载资产（与 state 同步维护，供补页循环同步读取） */
-  const assetsRef = useRef<AssetDto[]>([]);
-  const [status, setStatus] = useState<"loading" | "ready" | "degraded">("loading");
-  const hasMoreRef = useRef(true);
+  const assetsRef = useRef<AssetDto[]>(cachedAtMount?.assets ?? []);
+  const [status, setStatus] = useState<"loading" | "ready" | "degraded">(() =>
+    cachedAtMount && cachedAtMount.assets.length > 0 ? "ready" : "loading",
+  );
+  const hasMoreRef = useRef(cachedAtMount?.hasMore ?? true);
   const loadingRef = useRef(false);
   const loadSeqRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const [dates, setDates] = useState<AssetGroupDate[]>([]);
+  const [dates, setDates] = useState<AssetGroupDate[]>(() => cachedAtMount?.dates ?? []);
+  const datesRef = useRef<AssetGroupDate[]>(cachedAtMount?.dates ?? []);
+  /** 视口滚动位置（快照保存用；重挂载恢复） */
+  const scrollTopRef = useRef(cachedAtMount?.scrollTop ?? 0);
   const gridRef = useRef<AssetGridHandle | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const [viewport, setViewport] = useState<ViewportInfo>({ scrollTop: 0, group: null });
+  const [viewport, setViewport] = useState<ViewportInfo>({
+    scrollTop: scrollTopRef.current,
+    group: null,
+  });
+
+  /** 快照落盘（加载/补页/日期更新后调用；滚动位置由视口回调实时维护） */
+  const persistSnapshot = useCallback(() => {
+    saveGallerySnapshot({
+      assets: assetsRef.current,
+      dates: datesRef.current,
+      hasMore: hasMoreRef.current,
+      scrollTop: scrollTopRef.current,
+      savedAt: Date.now(),
+    });
+  }, []);
 
   // RAW+JPG 合并展示（设置项；旧 settings 数据缺 gallery 分组时兜底为开）
   const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
@@ -103,34 +129,47 @@ export default function GalleryPage() {
     if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
     loadingRef.current = false;
     setLoadingMore(false);
+    persistSnapshot();
     return page;
-  }, []);
+  }, [persistSnapshot]);
 
-  /** 首屏（重试共用）：空结果且 IPC 不可用 → 降级态 */
+  /** 首屏（重试共用）：有会话快照则静默 revalidate——首页与缓存前缀一致
+   *  （库未变）保留已加载全量，首页变化（新导入/删除）才重置；无快照常规 loading。 */
   const initialLoad = useCallback(async () => {
-    setStatus("loading");
+    const cached = gallerySnapshot();
+    if (!cached) setStatus("loading");
     hasMoreRef.current = true;
     loadingRef.current = false;
     const seq = ++loadSeqRef.current;
     const page = await assetsPage(0, PAGE_LIMIT);
     if (seq !== loadSeqRef.current) return;
-    assetsRef.current = page;
-    setAssets(page);
+    const samePrefix =
+      cached !== null &&
+      cached.assets.length >= page.length &&
+      page.every((a, i) => cached.assets[i].id === a.id);
+    if (!samePrefix) {
+      assetsRef.current = page;
+      setAssets(page);
+    }
     if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
     setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
-  }, []);
+    persistSnapshot();
+  }, [persistSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
     void initialLoad();
     void assetGroupDates().then((result) => {
-      if (!cancelled) setDates(result);
+      if (cancelled) return;
+      datesRef.current = result;
+      setDates(result);
+      persistSnapshot();
     });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialLoad, persistSnapshot]);
 
   // 无限滚动：哨兵进入视口（提前 800px 预载）
   useEffect(() => {
@@ -170,6 +209,23 @@ export default function GalleryPage() {
     },
     [appendPage],
   );
+
+  // 重挂载滚动恢复：快照有位置且首次 ready（数据已渲染）后立即还原
+  const scrollRestoredRef = useRef(false);
+  useEffect(() => {
+    if (scrollRestoredRef.current || status !== "ready") return;
+    const snap = gallerySnapshot();
+    if (snap && snap.scrollTop > 0) {
+      scrollRestoredRef.current = true;
+      gridRef.current?.restoreScroll(snap.scrollTop);
+    }
+  }, [status, assets.length]);
+
+  /** 视口回调：上报吸顶/日期之外，滚动位置实时记入快照（切页保留） */
+  const handleViewportChange = useCallback((info: ViewportInfo) => {
+    scrollTopRef.current = info.scrollTop;
+    setViewport(info);
+  }, []);
 
   /** 月份跳转（日历面板）：补页直到该月有资产，滚到该月最新一天所在组 */
   const jumpToMonth = useCallback(
@@ -361,7 +417,7 @@ export default function GalleryPage() {
             groups={groups}
             onOpenAsset={openAsset}
             sentinelRef={sentinelRef}
-            onViewportChange={setViewport}
+            onViewportChange={handleViewportChange}
             tile={GALLERY_TILE_PX[tileSize]}
             badges={badges}
           />

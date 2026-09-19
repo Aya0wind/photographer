@@ -134,9 +134,16 @@ pub fn run_semantic_backfill(
     workers: usize,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
+        eprintln!("语义回填：库打开失败（{}），本轮跳过", db_dir.display());
         return 0;
     };
-    let total = db.create_ai_tasks_for_unindexed().unwrap_or(0);
+    // 补种只做幂等兜底；派 worker 与否看存量 pending（修复：此前以「本轮
+    // 新建数」为闸——任务已存在时（重复 kick/启动恢复）新建数为 0，worker
+    // 从不派出，119 条存量 pending 永远无人消费，点击立即索引假成功）。
+    if let Err(e) = db.create_ai_tasks_for_unindexed() {
+        eprintln!("语义回填：补种任务失败: {e}");
+    }
+    let total = db.pending_index_task_count("ai").unwrap_or(0);
     if total == 0 {
         return 0;
     }
@@ -157,7 +164,11 @@ pub fn run_semantic_backfill(
                     loop {
                         let task = match db.claim_index_task("ai") {
                             Ok(Some(t)) => t,
-                            Ok(None) | Err(_) => break,
+                            Ok(None) => break,
+                            Err(e) => {
+                                eprintln!("语义回填：认领任务失败，worker 退出: {e}");
+                                break;
+                            }
                         };
                         let ok = process_ai_task(&db, &db_dir, &*embedder, task.asset_id);
                         let _ = db.finish_index_task(task.id, ok);
@@ -199,10 +210,13 @@ pub fn kick_semantic_if_ready(
     });
 }
 
-fn worker_count_for_ai() -> usize {
+/// AI 推理 worker 数（测试断言用）：ort 会话内存/线程重，封顶 4——
+/// embed.rs 会话 intra 线程 ≈ 核心数/4，总线程 ≈ 全核不超订。
+pub fn worker_count_for_ai() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+        .clamp(1, 4)
 }
 
 /// 语义检索：embed 查询 → HNSW KNN → 资产账 join（过滤失效 id 与

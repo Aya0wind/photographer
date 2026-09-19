@@ -182,6 +182,61 @@ fn empty_index_search_returns_empty() {
     assert!(hits.is_empty());
 }
 
+/// 回归（真机修复 2026-09-19）：回填 worker 的启动判据必须是「存量 pending」
+/// 而非「本轮新建任务数」。此前任务已存在（重复 kick/启动恢复）时新建数为
+/// 0 → 直接空转返回，存量 pending 永远无人消费，点击立即索引假成功。
+#[test]
+fn semantic_backfill_consumes_existing_pending_tasks() {
+    let lib = tempfile::tempdir().unwrap();
+    let database = common::open_db(lib.path());
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+             kind, captured_at, camera, source, created_at) \
+             VALUES (1, 'X:/p/1.jpg', '1.jpg', 1, '2026', 1, x'00', 'photo', \
+             NULL, NULL, 'imported', '2026')",
+            [],
+        )
+        .unwrap();
+    // 历史遗留场景：任务已入库但 worker 从未消费
+    assert_eq!(database.create_ai_tasks_for_unindexed().unwrap(), 1);
+    assert_eq!(database.pending_index_task_count("ai").unwrap(), 1);
+
+    // 二次回填：新建数为 0（幂等补种），存量 pending 也必须被消费
+    let done = ai::semantic::run_semantic_backfill(
+        lib.path(),
+        std::sync::Arc::new(StubEmbedder),
+        &events::EventBus::new(),
+        2,
+    );
+    assert_eq!(
+        database.pending_index_task_count("ai").unwrap(),
+        0,
+        "存量 pending 必须被 worker 消费"
+    );
+    // 资产路径不存在 → 缩略图生成失败 → 处理必败（attempts 封顶进 failed），
+    // 不可能凭空成功；关键断言是上面「pending 被消费」
+    assert_eq!(done, 0);
+    let failed: i64 = database
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'ai' AND state = 'failed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed, 1);
+}
+
+/// worker 封顶契约：AI 推理 worker ≤ 4（ort 会话线程重，多 worker × 全核
+/// 会话平方级超订阅——「在跑但极慢」的预防性约束）。
+#[test]
+fn ai_worker_count_capped() {
+    let n = ai::semantic::worker_count_for_ai();
+    assert!((1..=4).contains(&n), "AI worker 应封顶 4，实际 {n}");
+}
+
 // ---------------------------------------------------------------------------
 // 真 smoke（#[ignore]）：需先通过设置页/ai_model_download 下载三件套到
 // %APPDATA%\com.smartphoto.app\models\。手动跑：
@@ -253,6 +308,57 @@ fn real_embed_image_and_text() {
         eprintln!("cos(图,图自身)={d_same:.4} cos(图,DSC_0177)={d_cross:.4}");
         assert!(d_same > d_cross, "自身相似度应高于他图");
     }
+}
+
+/// 真实单资产端到端回填：覆盖任务创建、缩略图、视觉推理、usearch 落盘和
+/// SQLite 记账。与上面的纯推理 smoke 分开，便于定位“模型可运行但索引全败”。
+#[test]
+#[ignore = "可选 smoke：需已下载 SigLIP2 三件套和本机样例照片"]
+fn real_semantic_backfill_one_asset() {
+    let Some(models) = models_dir() else {
+        eprintln!("skip: 模型目录不存在（先下载模型）");
+        return;
+    };
+    let source = Path::new(r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF");
+    if !source.is_file() {
+        eprintln!("skip: 样例不存在 {}", source.display());
+        return;
+    }
+    let manager = ai::ModelManager::new(
+        models,
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    let lib = tempfile::tempdir().unwrap();
+    let database = common::open_db(lib.path());
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+             kind, captured_at, camera, source, created_at) \
+             VALUES (1, ?1, 'DSC_0176.NEF', 1, '2026', 1, x'00', 'raw', \
+             NULL, NULL, 'imported', '2026')",
+            rusqlite::params![source.to_string_lossy()],
+        )
+        .unwrap();
+
+    let done = ai::semantic::run_semantic_backfill(
+        lib.path(),
+        std::sync::Arc::new(manager),
+        &events::EventBus::new(),
+        2,
+    );
+    assert_eq!(done, 1, "真实单资产回填应成功");
+    let indexed: i64 = database
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE ai_indexed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 1);
+    assert!(lib.path().join("vectors.usearch").is_file());
 }
 
 /// 1 万规模正确性验证（随机向量插入 + KNN 自检索；性能验证留 M8 真库实测）。

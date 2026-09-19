@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { AssetKind } from "@/ipc/api";
 import { useAssetThumbUrl } from "../lib/thumbPipeline";
@@ -119,6 +119,15 @@ export default function AssetThumb({
     setFailed(false);
   }, [url]);
 
+  // WebView2 对内存缓存中的 asset:// 图片偶尔不会再次派发 load；同时原生
+  // lazy-loading 与 transform 虚拟列表组合后可能不启动解码。网格本身只
+  // 挂载视口+overscan 项，因此直接 eager，并补查缓存图片的 complete 状态。
+  const handleImageRef = useCallback((img: HTMLImageElement | null) => {
+    if (!img || !img.complete) return;
+    if (img.naturalWidth > 0) setLoaded(true);
+    else setFailed(true);
+  }, []);
+
   const showImg = url !== null && !failed;
   // 加载中（请求在途 / 缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
   // video 不进管线（settled 恒 false）：静态占位，不吃骨架。
@@ -133,9 +142,10 @@ export default function AssetThumb({
     >
       {showImg ? (
         <img
+          ref={handleImageRef}
           src={url ?? undefined}
           alt={alt ?? asset.name}
-          loading="lazy"
+          loading="eager"
           decoding="async"
           onLoad={() => setLoaded(true)}
           onError={() => setFailed(true)}

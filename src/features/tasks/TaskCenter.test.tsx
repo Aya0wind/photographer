@@ -438,9 +438,9 @@ describe("安全清卡入口（M2）", () => {
 
 describe("索引任务卡（indexStatus 计数 + 立即开始）", () => {
   const STATUS: IndexStatus = {
-    thumb: { pending: 3, done: 117, failed: 1 },
-    exif: { pending: 0, done: 120, failed: 0 },
-    ai: { pending: 0, done: 45, total: 120 },
+    thumb: { pending: 3, running: 0, done: 117, failed: 1, total: 120 },
+    exif: { pending: 0, running: 0, done: 120, failed: 0, total: 120 },
+    ai: { pending: 0, running: 0, done: 45, failed: 0, total: 120 },
   };
 
   it("无恢复事件（indexPending=null）→ 不渲染索引卡", () => {

@@ -559,6 +559,27 @@ export interface PersonCluster {
   coverAssetId: number;
 }
 
+/** 后端 PersonRow 的公开载荷。历史前端曾把 `id` 误写成 `clusterId`，
+ * 这里在 IPC 边界统一归一，避免 UI 再出现「人物 NaN」和 NaN 操作参数。 */
+function normalizePersonCluster(value: unknown): PersonCluster | null {
+  if (value === null || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const clusterId = typeof row.clusterId === "number" ? row.clusterId : row.id;
+  const faceCount = row.faceCount;
+  const coverAssetId = row.coverAssetId;
+  if (
+    typeof clusterId !== "number" || !Number.isFinite(clusterId) ||
+    typeof faceCount !== "number" || !Number.isFinite(faceCount) ||
+    typeof coverAssetId !== "number" || !Number.isFinite(coverAssetId)
+  ) return null;
+  return {
+    clusterId,
+    name: typeof row.name === "string" ? row.name : null,
+    faceCount,
+    coverAssetId,
+  };
+}
+
 export interface SemanticHit {
   assetId: number;
   /** 相似度 0..1 */
@@ -647,8 +668,11 @@ export async function assetThumbGet(assetId: number, size: number): Promise<stri
 /** 人物清单（人脸聚类结果；失败/非数组回退 []——后端未就绪即空态兜底） */
 export async function peopleList(): Promise<PersonCluster[]> {
   try {
-    const list = await ipc<PersonCluster[] | null>("people_list");
-    return Array.isArray(list) ? list : [];
+    const list = await ipc<unknown>("people_list");
+    if (!Array.isArray(list)) return [];
+    return list
+      .map(normalizePersonCluster)
+      .filter((person): person is PersonCluster => person !== null);
   } catch {
     return [];
   }
@@ -688,18 +712,24 @@ export async function personDelete(clusterId: number): Promise<boolean> {
 
 export type IndexKind = "thumb" | "exif" | "ai";
 
-/** 单类索引计数（index_status；failed 仅 thumb/exif 有意义） */
+/**
+ * 单通道任务计数（index_status，对应后端 IndexKindStatus）。与后端持久化
+ * 任务账（index_tasks 表）同构：pending/running 是「进行中」按钮态的派生
+ * 真值；total=可索引资产数（N/M 口径）；failed 仅展示用途。
+ */
 export interface IndexCounters {
   pending: number;
+  running: number;
   done: number;
   failed: number;
+  total: number;
 }
 
-/** 索引状态（index_status 返回；ai 的 total 为库内资产总数，供「N / M」口径） */
+/** 索引状态（index_status 返回；thumb/exif/ai 三通道计数） */
 export interface IndexStatus {
   thumb: IndexCounters;
   exif: IndexCounters;
-  ai: { pending: number; done: number; total: number };
+  ai: IndexCounters;
 }
 
 /** 索引状态快照；失败/负载异常返回 null（调用方隐藏/降级区块） */

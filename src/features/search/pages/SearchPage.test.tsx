@@ -555,10 +555,18 @@ describe("搜索：相似度角标分档", () => {
 
 describe("搜索：空结果提示（语义索引未建完）", () => {
   function aiStatus(done: number, total: number): import("@/ipc/api").IndexStatus {
+    const counters = (over: Partial<import("@/ipc/api").IndexCounters>): import("@/ipc/api").IndexCounters => ({
+      pending: 0,
+      running: 0,
+      done: 0,
+      failed: 0,
+      total: 0,
+      ...over,
+    });
     return {
-      thumb: { pending: 0, done: 0, failed: 0 },
-      exif: { pending: 0, done: 0, failed: 0 },
-      ai: { pending: total - done, done, total },
+      thumb: counters({}),
+      exif: counters({}),
+      ai: counters({ pending: total - done, done, total }),
     };
   }
 

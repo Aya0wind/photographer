@@ -49,6 +49,8 @@ type GridRow =
 export interface AssetGridHandle {
   /** 滚动到指定组（组头对齐吸顶条下缘）；组不存在时静默 */
   scrollToGroup: (key: string) => void;
+  /** 恢复到绝对滚动位置（画廊会话快照重挂载还原用） */
+  restoreScroll: (top: number) => void;
 }
 
 export interface ViewportInfo {
@@ -201,6 +203,13 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
         // 赋值后补发 scroll 事件：真机浏览器赋值本就会异步派发（此处幂等），
         // jsdom/测试环境下赋值不派发——补发让虚拟化器立即按新偏移重算可视行。
         el.scrollTop = Math.max(0, offset[0] - STICKY_OFFSET);
+        el.dispatchEvent(new Event("scroll"));
+      },
+      restoreScroll: (top: number) => {
+        const el = scrollRef.current;
+        if (!el) return;
+        // 与 scrollToGroup 同语义：直接赋值 + 补发 scroll 事件（jsdom 兼容）
+        el.scrollTop = Math.max(0, top);
         el.dispatchEvent(new Event("scroll"));
       },
     }),

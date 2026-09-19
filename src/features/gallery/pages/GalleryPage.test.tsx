@@ -8,6 +8,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import i18n from "@/i18n";
 import GalleryPage from "./GalleryPage";
 import { resetThumbPipelineForTests, emitAssetEventForTests } from "../lib/thumbPipeline";
+import { clearGallerySnapshotForTests } from "../lib/galleryCache";
 import {
   assetGroupDates,
   assetThumbGet,
@@ -147,6 +148,7 @@ beforeEach(() => {
   convertMock.mockReset().mockReturnValue("");
   ipcAvailableMock.mockReset().mockReturnValue(true);
   resetThumbPipelineForTests();
+  clearGallerySnapshotForTests(); // 模块级会话快照：用例间必须清（否则跨用例泄漏资产）
   IntersectionObserverStub.instances = [];
 });
 
@@ -247,6 +249,44 @@ describe("画廊：日期分组照片墙", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("viewer")).not.toBeInTheDocument());
     expect(screen.getByTestId("gallery-page")).toBeInTheDocument();
+  });
+
+  // 真机修复 2026-09-19：切页回来全体资产回到加载态——会话快照让重挂载
+  // 立即渲染缓存内容（不闪骨架屏），后台静默 revalidate
+  it("重挂载立即渲染会话快照（无骨架屏闪烁），后台 revalidate 保留数据", async () => {
+    assetsPageMock.mockResolvedValue(makePage(3, "2026-09-18", 3));
+    const { unmount } = renderGallery();
+    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(3);
+
+    unmount();
+    // IPC 永久挂起：重挂载只靠快照也应立即出内容（等不到 assetsPage 解析）
+    let release: (v: AssetDto[]) => void = () => {};
+    assetsPageMock.mockReset().mockReturnValue(
+      new Promise<AssetDto[]>((resolve) => {
+        release = resolve;
+      }),
+    );
+    renderGallery();
+
+    expect(screen.getByTestId("gallery-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("gallery-skeleton")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("gallery-tile")).toHaveLength(3);
+
+    // revalidate 归来且首页一致 → 数据保留
+    act(() => release(makePage(3, "2026-09-18", 3)));
+    await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(3));
+  });
+
+  it("快照与库内容不一致（首页变化）→ revalidate 后重置为新数据", async () => {
+    assetsPageMock.mockResolvedValueOnce(makePage(3, "2026-09-18", 3));
+    const { unmount } = renderGallery();
+    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(3);
+    unmount();
+
+    // 新导入 2 条：首页(5) 与快照首页(3) 不一致 → 重置
+    assetsPageMock.mockResolvedValue(makePage(5, "2026-09-18", 5));
+    renderGallery();
+    await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(5));
   });
 });
 

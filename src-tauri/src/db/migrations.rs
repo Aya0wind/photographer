@@ -11,6 +11,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0004_SHOOTING_PARAMS,
     MIGRATION_0005_SEMANTIC_LEDGER,
     MIGRATION_0006_FACES_AND_PEOPLE,
+    MIGRATION_0007_UNIQUE_INDEX_TASKS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -177,4 +178,32 @@ INSERT INTO index_tasks_new (id, kind, asset_id, state, attempts, created_at, up
 DROP TABLE index_tasks;
 ALTER TABLE index_tasks_new RENAME TO index_tasks;
 CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
+"#;
+
+/// 0007：每个资产的每种索引任务只能有一条。旧实现仅排除 pending/running，
+/// failed 后再次点击“立即索引”会重复 INSERT，导致 119 张照片累计出 1700+
+/// 条失败记录。迁移优先保留已完成任务，其次保留仍可执行的任务，最后才保留
+/// 最新失败任务，再建立唯一约束；手动重试通过 UPDATE 原任务完成。
+const MIGRATION_0007_UNIQUE_INDEX_TASKS: &str = r#"
+DELETE FROM index_tasks
+WHERE id NOT IN (
+    SELECT id FROM (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY kind, asset_id
+                   ORDER BY CASE state
+                       WHEN 'done' THEN 0
+                       WHEN 'running' THEN 1
+                       WHEN 'pending' THEN 2
+                       ELSE 3
+                   END,
+                   updated_at DESC,
+                   id DESC
+               ) AS row_num
+        FROM index_tasks
+    ) ranked
+    WHERE row_num = 1
+);
+
+CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
 "#;

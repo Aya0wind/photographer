@@ -196,10 +196,10 @@ export function SemanticQueryInput({
   }, []);
 
   return (
-    <div className="flex min-w-0 flex-1 items-start gap-2" data-testid="semantic-query">
+    <div className="flex min-w-0 flex-1 items-center gap-2" data-testid="semantic-query">
       <textarea
         ref={inputRef}
-        rows={2}
+        rows={1}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
@@ -210,7 +210,7 @@ export function SemanticQueryInput({
         }}
         placeholder={t("search.semantic.placeholder")}
         aria-label={t("search.semantic.input")}
-        className="min-w-0 flex-1 resize-none rounded-md border border-edge bg-bg px-2.5 py-1.5 text-xs leading-relaxed text-text-primary outline-none transition-colors focus:border-accent"
+        className="h-8 min-w-0 flex-1 resize-none overflow-hidden rounded-md border border-edge bg-bg px-2.5 py-1.5 text-xs leading-4 text-text-primary outline-none transition-colors focus:border-accent"
         data-testid="semantic-input"
       />
       <button

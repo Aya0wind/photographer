@@ -27,7 +27,8 @@ import {
  *   （下载/取消/重试/删除释放磁盘），下载进度条走 aiModelDownloadProgress 事件
  * - 索引状态与操作区：三类索引（缩略图/EXIF/语义）计数 + 立即索引（indexKickNow，
  *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
- *   indexTaskProgress 事件驱动重拉（aiStore）
+ *   indexTaskProgress 事件驱动重拉（aiStore）。运行态从持久化 indexStatus
+ *   派生（pending/running>0）——切页重挂载/重启后状态保留，不丢「进行中」
  * - 功能开关门控：语义=两个 siglip2 都 done；人脸=scrfd+arcface 都 done
  * - 调度/CPU 滑条（仅用于 AI 推理）/GPU（DirectML 自动回退）
  * - 人脸数据一键清除（红色强确认，两步确认防误触）
@@ -183,20 +184,16 @@ function ModelRow({ model }: { model: AiModelStatus }) {
 
 type T = ReturnType<typeof useTranslation>["t"];
 
-/** 单类索引是否已无待办（解除「进行中」禁用；ai 口径 done>=total） */
-function kindSettled(kind: IndexKind, status: IndexStatus): boolean {
-  if (kind === "ai") return status.ai.total > 0 && status.ai.done >= status.ai.total;
-  const counters = kind === "thumb" ? status.thumb : status.exif;
-  return counters.pending === 0;
-}
-
-/** 行计数文案（thumb/exif：待处理/已完成/失败；ai：待处理 + 已索引 N/M） */
+/** 行计数文案（thumb/exif：待处理/已完成/失败；ai：待处理 + 已索引 N/M + 失败） */
 function countersText(kind: IndexKind, status: IndexStatus, t: T): string {
   if (kind === "ai") {
     return [
       t("settings.ai.index.pending", { count: status.ai.pending }),
       t("settings.ai.index.aiProgress", { done: status.ai.done, total: status.ai.total }),
-    ].join(" · ");
+      status.ai.failed > 0 ? t("settings.ai.index.failed", { count: status.ai.failed }) : null,
+    ]
+      .filter((part): part is string => part !== null)
+      .join(" · ");
   }
   const c = kind === "thumb" ? status.thumb : status.exif;
   return [
@@ -212,7 +209,6 @@ function IndexStatusSection() {
   const { t } = useTranslation();
   const status = useAiStore((s) => s.indexStatus);
   const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
-  const [kicked, setKicked] = useState<Partial<Record<IndexKind, boolean>>>({});
   const [error, setError] = useState<string | null>(null);
 
   // 进 tab 拉一次；此后 indexTaskProgress/indexTaskResumed 事件经 aiStore 驱动重拉
@@ -230,13 +226,12 @@ function IndexStatusSection() {
         setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
         return;
       }
-      setKicked((prev) => ({ ...prev, [kind]: true }));
       void refreshIndexStatus();
     },
     [refreshIndexStatus],
   );
 
-  const rows: Array<{ kind: IndexKind }> = [{ kind: "thumb" }, { kind: "exif" }, { kind: "ai" }];
+  const rows: IndexKind[] = ["thumb", "exif", "ai"];
 
   return (
     <>
@@ -246,9 +241,13 @@ function IndexStatusSection() {
           {t("settings.ai.index.unavailable")}
         </p>
       ) : (
-        rows.map(({ kind }) => {
+        rows.map((kind) => {
           const label = t(`settings.ai.index.${kind}`);
-          const running = Boolean(kicked[kind]) && !kindSettled(kind, status);
+          // 运行态从持久化任务账派生（index_tasks 表是唯一真值）：
+          // 切页重挂载/应用重启后快照重拉，按钮状态随之恢复——
+          // 本地 state 派生会在重挂载时丢失（真机修复 2026-09-19）
+          const c = status[kind];
+          const running = c.pending > 0 || c.running > 0;
           return (
             <div
               key={kind}

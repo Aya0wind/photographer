@@ -788,8 +788,7 @@ impl Db {
              SELECT 'ai', a.id, 'pending', 0, ?1, ?1 FROM assets a \
              WHERE a.ai_indexed_at IS NULL AND a.kind IN ('photo', 'raw') \
                AND NOT EXISTS (SELECT 1 FROM index_tasks t \
-                               WHERE t.kind = 'ai' AND t.asset_id = a.id \
-                               AND t.state IN ('pending', 'running'))",
+                               WHERE t.kind = 'ai' AND t.asset_id = a.id)",
             params![now],
         )?;
         Ok(created as u64)
@@ -820,6 +819,27 @@ impl Db {
         self.0.execute(
             "UPDATE index_tasks SET state = 'pending', updated_at = ?1 WHERE state = 'running'",
             params![now],
+        )
+    }
+
+    /// 指定通道待办数（pending；回填 worker 的启动判据——不能依赖本轮
+    /// 新建任务数：存量 pending 也必须有人消费，否则重复 kick 全部空转）。
+    pub fn pending_index_task_count(&self, kind: &str) -> Result<u64> {
+        let count: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = ?1 AND state = 'pending'",
+            params![kind],
+            |r| r.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// 手动“立即索引”重试：复用已有失败任务，不再为同一资产重复插行。
+    /// attempts 清零后仍沿用单轮最多三次的坏文件熔断策略。
+    pub fn retry_failed_index_tasks(&self, kind: &str) -> Result<usize> {
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?2 \
+             WHERE kind = ?1 AND state = 'failed'",
+            params![kind, now_rfc3339()],
         )
     }
 
@@ -1051,8 +1071,7 @@ impl Db {
              SELECT 'face', a.id, 'pending', 0, ?1, ?1 FROM assets a \
              WHERE a.face_indexed_at IS NULL AND a.kind IN ('photo', 'raw') \
                AND NOT EXISTS (SELECT 1 FROM index_tasks t \
-                               WHERE t.kind = 'face' AND t.asset_id = a.id \
-                               AND t.state IN ('pending', 'running'))",
+                               WHERE t.kind = 'face' AND t.asset_id = a.id)",
             params![now],
         )?;
         Ok(created as u64)

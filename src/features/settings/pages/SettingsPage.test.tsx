@@ -494,14 +494,26 @@ describe("画廊 tab：智能相册显示的标签", () => {
 
 describe("AI tab：索引状态与操作", () => {
   function statusOf(partial?: {
-    thumb?: { pending: number; done: number; failed: number };
-    exif?: { pending: number; done: number; failed: number };
-    ai?: { pending: number; done: number; total: number };
+    thumb?: Partial<import("@/ipc/api").IndexCounters>;
+    exif?: Partial<import("@/ipc/api").IndexCounters>;
+    ai?: Partial<import("@/ipc/api").IndexCounters>;
   }): import("@/ipc/api").IndexStatus {
+    const counters = (
+      base: Partial<import("@/ipc/api").IndexCounters>,
+      patch?: Partial<import("@/ipc/api").IndexCounters>,
+    ): import("@/ipc/api").IndexCounters => ({
+      pending: 0,
+      running: 0,
+      done: 0,
+      failed: 0,
+      total: 120,
+      ...base,
+      ...patch,
+    });
     return {
-      thumb: { pending: 3, done: 117, failed: 0, ...partial?.thumb },
-      exif: { pending: 0, done: 120, failed: 0, ...partial?.exif },
-      ai: { pending: 0, done: 45, total: 120, ...partial?.ai },
+      thumb: counters({ pending: 3, done: 117 }, partial?.thumb),
+      exif: counters({ pending: 0, done: 120 }, partial?.exif),
+      ai: counters({ pending: 0, done: 45, total: 120 }, partial?.ai),
     };
   }
 
@@ -518,6 +530,17 @@ describe("AI tab：索引状态与操作", () => {
     expect(screen.getByTestId("index-count-ai")).toHaveTextContent("45 / 120");
   });
 
+  it("ai 行显示失败数（任务账 failed>0 时可见，失败不可再隐藏）", async () => {
+    indexStatusMock.mockResolvedValue(
+      statusOf({ ai: { pending: 0, done: 0, failed: 1326 } }),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("index-count-ai")).toHaveTextContent("失败 1326");
+  });
+
   it("index_status 不可用（null）→ 后端未连接提示（无计数行）", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
@@ -527,8 +550,12 @@ describe("AI tab：索引状态与操作", () => {
     expect(screen.queryByTestId("index-status-thumb")).not.toBeInTheDocument();
   });
 
-  it("立即索引：按钮负载 index_kick_now(kind)；进行中禁用显示「进行中」", async () => {
-    indexStatusMock.mockResolvedValue(statusOf());
+  it("立即索引：按钮负载 index_kick_now(kind)；kick 后重拉 pending>0 → 「进行中」", async () => {
+    indexStatusMock
+      .mockResolvedValueOnce(statusOf({ thumb: { pending: 0 } }))
+      .mockResolvedValue(
+        statusOf({ thumb: { pending: 0 }, ai: { pending: 119, done: 0, total: 119 } }),
+      );
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
@@ -537,11 +564,28 @@ describe("AI tab：索引状态与操作", () => {
     await user.click(screen.getByTestId("index-kick-ai"));
     await waitFor(() => expect(indexKickNowMock).toHaveBeenCalledWith("ai"));
 
-    // kicked 后 ai 未结算（45/120）→ 禁用 + 「进行中」
+    // kick 后重拉：持久化任务账 pending>0 → 禁用 + 「进行中」
     const kickAi = await screen.findByTestId("index-kick-ai");
     await waitFor(() => expect(kickAi).toBeDisabled());
     expect(kickAi).toHaveTextContent("进行中");
-    // thumb 无待办 → 不误禁用
+    // thumb/exif 待办为 0 → 不误禁用
+    expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
+    expect(screen.getByTestId("index-kick-exif")).toBeEnabled();
+  });
+
+  it("运行态从持久化任务账派生：未点击任何按钮，pending>0 直接「进行中」（切页重挂载不丢）", async () => {
+    indexStatusMock.mockResolvedValue(
+      statusOf({ thumb: { pending: 0 }, exif: { pending: 0 }, ai: { pending: 119, done: 0, total: 119 } }),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    const kickAi = await screen.findByTestId("index-kick-ai");
+    expect(kickAi).toBeDisabled();
+    expect(kickAi).toHaveTextContent("进行中");
+    expect(screen.getByTestId("index-status-ai")).toHaveAttribute("data-running", "true");
+    // 其余通道无待办 → 正常可点
     expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
   });
 

@@ -71,6 +71,18 @@ impl ModelManager {
 }
 
 impl ModelManager {
+    /// ort 会话 intra-op 线程数：≈核心数/4（AI worker 封顶 4，见
+    /// semantic::worker_count_for_ai；多 worker × 全核会话会平方级超订阅，
+    /// 表现为索引"在跑但极慢"）。搜索单查询用同会话，核心数/4 对 256px
+    /// 小模型延迟足够。
+    fn embed_intra_threads() -> usize {
+        (std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            / 4)
+        .clamp(1, 8)
+    }
+
     /// 惰性加载 vision 会话（模型缺失 → 明确错误）。
     fn ensure_visual(&self, slots: &mut InferSlots) -> Result<(), String> {
         if slots.visual.is_some() {
@@ -81,6 +93,8 @@ impl ModelManager {
             return Err("模型 siglip2-visual 未下载（设置页下载后再试）".into());
         }
         let session = Session::builder()
+            .map_err(|e| e.to_string())?
+            .with_intra_threads(Self::embed_intra_threads())
             .map_err(|e| e.to_string())?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| e.to_string())?
@@ -98,6 +112,8 @@ impl ModelManager {
                 return Err("模型 siglip2-text 未下载（设置页下载后再试）".into());
             }
             let session = Session::builder()
+                .map_err(|e| e.to_string())?
+                .with_intra_threads(Self::embed_intra_threads())
                 .map_err(|e| e.to_string())?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| e.to_string())?
