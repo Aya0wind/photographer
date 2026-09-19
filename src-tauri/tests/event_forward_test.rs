@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};

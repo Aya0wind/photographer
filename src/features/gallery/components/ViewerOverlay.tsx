@@ -1,11 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { assetDetail, type AssetDetailDto, type AssetDto } from "@/ipc/api";
 import type { AssetGroup } from "../lib/assetGroups";
-import { prefetchAssetThumb, useAssetThumbUrl } from "../lib/thumbPipeline";
+import {
+  fetchAssetThumb,
+  useAssetThumbUrl,
+  warmImageDecode,
+} from "../lib/thumbPipeline";
 import AssetThumb from "./AssetThumb";
 import { formatBytes } from "@/lib/format";
 
@@ -22,6 +27,7 @@ import { formatBytes } from "@/lib/format";
  *   缩略图（240 档与网格共享缓存），当前项 accent 描边，点击跳转；相邻 1 张预取。
  */
 
+const VIEWER_MID_SIZE = 2048; // 中间档（后端加 2048 档后生效）：原图渲染失败时的清晰回退
 const VIEWER_THUMB_SIZE = 1280; // 名义边长；后端 snap 512 档就近
 const FILM_THUMB_SIZE = 240; // 与网格同档，共享会话缓存
 const MIN_SCALE = 1;
@@ -125,7 +131,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     }
   }
 
-  // 键盘：Esc 返回画廊；←/→ 同组切换；. , R 旋转（. / R=顺时针，,=逆时针）
+  // 操作提示（#6）：首次 3s 后淡出；? 键或 hover 底部提示区重新唤出（再计时 3s）
+  const [hintVisible, setHintVisible] = useState(true);
+  const hintTimerRef = useRef<number | null>(null);
+  const showHint = useCallback(() => {
+    setHintVisible(true);
+    if (hintTimerRef.current !== null) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = window.setTimeout(() => setHintVisible(false), 3000);
+  }, []);
+  useEffect(() => {
+    showHint();
+    return () => {
+      if (hintTimerRef.current !== null) clearTimeout(hintTimerRef.current);
+    };
+  }, [showHint]);
+
+  // 键盘：Esc 返回画廊；←/→ 同组切换；Home/End 跳组首/尾；. , R 旋转；? 唤出操作提示
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -135,37 +156,128 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         onNavigate(index - 1);
       } else if (e.key === "ArrowRight" && index < group.assets.length - 1) {
         onNavigate(index + 1);
+      } else if (e.key === "Home") {
+        onNavigate(0);
+      } else if (e.key === "End") {
+        onNavigate(group.assets.length - 1);
       } else if (e.key === "." || e.key === "r" || e.key === "R") {
         rotate(90);
       } else if (e.key === ",") {
         rotate(-90);
+      } else if (e.key === "?") {
+        showHint();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [index, group.assets.length, onNavigate, onClose]);
+  }, [index, group.assets.length, onNavigate, onClose, showHint]);
 
-  // --- 大图来源（按 kind） -----------------------------------------------------------
-  // photo：原图优先，onError 回退缩略图；raw：直接大档缩略图；video：恒占位
+  // --- 大图来源（按 kind，分级回退链） -------------------------------------------------
+  // photo：原图 → 中间档缩略图（名义 2048，后端加 2048 档）→ 512 档。WebView2 对
+  // 大尺寸/无压缩 TIF 等原生渲染失败，onError 逐级降档，而不是一步到 512 模糊图。
+  // raw：直接大档缩略图（内嵌预览的缩放版）；video：恒占位。
   const originalUrl = useMemo(
     () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
     [asset.kind, asset.path],
   );
-  const [originalFailed, setOriginalFailed] = useState(false);
+  const [stage, setStage] = useState<"original" | "mid" | "thumb">("original");
   useEffect(() => {
-    setOriginalFailed(false);
+    setStage("original");
   }, [asset.id, originalUrl]);
   const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
-  const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb);
-  const mainSrc = originalUrl !== null && !originalFailed ? originalUrl : thumb.url;
-  // 两种「确定无图」：video 恒占位；photo 原图失败后缩略图也结算为 null
-  const mainFailed =
-    asset.kind === "video" || (mainSrc === null && (originalFailed || (asset.kind === "raw" && thumb.settled)));
+  const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
+  // 中间档仅 photo 且原图已失败时才请求（2048 档后端就位后生效；未就位时 settled null → 继续降 512）
+  const mid = useAssetThumbUrl(
+    asset.id,
+    VIEWER_MID_SIZE,
+    asset.kind === "photo" && stage !== "original",
+    "high",
+  );
 
-  // 相邻预取（胶片条+大图回退）：切到任一张时预热前后各 1
+  let mainSrc: string | null;
+  let mainFailed = false;
+  if (asset.kind === "video") {
+    mainSrc = null;
+    mainFailed = true; // 恒占位（播放是后续里程碑）
+  } else if (asset.kind === "photo" && stage === "original" && originalUrl !== null) {
+    mainSrc = originalUrl; // img onError → 降档；渲染失败前不作无图判定
+  } else if (asset.kind === "photo" && stage === "mid") {
+    mainSrc = mid.url; // 在途 null → 走加载提示；确定无图由下方自动降档
+  } else {
+    // photo 降到 512 档 / raw 直达大档缩略图
+    mainSrc = thumb.url;
+    mainFailed = thumb.settled && thumb.url === null;
+  }
+  // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档
   useEffect(() => {
-    if (index > 0) prefetchAssetThumb(group.assets[index - 1].id, FILM_THUMB_SIZE);
-    if (index < group.assets.length - 1) prefetchAssetThumb(group.assets[index + 1].id, FILM_THUMB_SIZE);
+    if (asset.kind === "photo" && stage === "mid" && mid.settled && mid.url === null) {
+      setStage("thumb");
+    }
+  }, [asset.kind, stage, mid.settled, mid.url]);
+  // photo 无原图可用（非 Tauri 环境 convertFileSrc 抛错）→ 直达 512 档
+  useEffect(() => {
+    if (asset.kind === "photo" && stage === "original" && originalUrl === null) {
+      setStage("thumb");
+    }
+  }, [asset.kind, stage, originalUrl]);
+
+  // --- 双图层交叉淡入（#7 切换闪烁） -------------------------------------------------
+  // 切换时保留上一张为底层，新图 onLoad 后 150ms 淡入盖上去再移除旧层——永远有内容无空窗。
+  const [committed, setCommitted] = useState<string | null>(null);
+  const [incoming, setIncoming] = useState<{ src: string } | null>(null);
+  const [incomingReady, setIncomingReady] = useState(false);
+  useEffect(() => {
+    if (mainSrc === null) return; // 源在途（等 2048/512 URL）——旧图层继续显示
+    if (mainSrc === committed || mainSrc === incoming?.src) return;
+    setIncoming({ src: mainSrc });
+    setIncomingReady(false);
+  }, [mainSrc, committed, incoming]);
+  // 新图 onLoad → 150ms 淡入完成后提交为新底层
+  useEffect(() => {
+    if (!incomingReady || incoming === null) return;
+    const timer = setTimeout(() => {
+      setCommitted(incoming.src);
+      setIncoming(null);
+      setIncomingReady(false);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [incomingReady, incoming]);
+  // 确定无图：清掉残留图层，显示占位
+  useEffect(() => {
+    if (mainFailed) {
+      setCommitted(null);
+      setIncoming(null);
+      setIncomingReady(false);
+    }
+  }, [mainFailed]);
+
+  // 大图加载提示：源在途超过 300ms 才转圈（几十 MB 原图加载慢，避免黑屏误判失败）；
+  // 切换期间旧图层兜底显示，仅新图 300ms 仍未 onLoad 才叠加 spinner（快速连按不闪）。
+  const [slowLoading, setSlowLoading] = useState(false);
+  const awaitingImage =
+    (incoming !== null && !incomingReady) || (mainSrc === null && !mainFailed);
+  useEffect(() => {
+    setSlowLoading(false);
+    if (!awaitingImage) return;
+    const timer = setTimeout(() => setSlowLoading(true), 300);
+    return () => clearTimeout(timer);
+  }, [awaitingImage]);
+
+  // 相邻预取（#7 预加载强化）：前后各 1 张——
+  // a) 512 回退档 URL 高优先预取；b) new Image() 解码预热（photo 的原图 asset URL 也预热），
+  // 让箭头切换时下一张大概率已在解码器缓存里。
+  useEffect(() => {
+    const neighbors = [
+      index > 0 ? group.assets[index - 1] : null,
+      index < group.assets.length - 1 ? group.assets[index + 1] : null,
+    ];
+    for (const neighbor of neighbors) {
+      if (!neighbor) continue;
+      if (neighbor.kind === "photo") warmImageDecode(safeConvert(neighbor.path));
+      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((url) => {
+        warmImageDecode(url);
+      });
+    }
   }, [index, group.assets]);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
@@ -219,6 +331,23 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;
 
+  // 胶片条横向虚拟化：格宽 64 + 间距 6；可视区外不渲染不请求
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const stripVirtualizer = useVirtualizer({
+    count: group.assets.length,
+    getScrollElement: () => stripRef.current,
+    estimateSize: () => 70,
+    horizontal: true,
+    overscan: 8,
+  });
+  // 当前项滚动入可视区（jsdom 无 scrollIntoView，静默跳过）
+  useEffect(() => {
+    const el = stripRef.current?.querySelector(`[data-asset-id="${asset.id}"]`);
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [asset.id, stripVirtualizer]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col bg-black/95"
@@ -227,14 +356,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       aria-label={asset.name}
       data-testid="viewer"
     >
-      {/* 顶栏：文件名 + 计数 + EXIF 开关 + 关闭 */}
-      <div className="flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
-        <span className="truncate text-sm font-medium" title={asset.name} data-testid="viewer-name">
-          {asset.name}
-        </span>
-        <span className="shrink-0 font-mono text-xs text-text-muted" data-testid="viewer-index">
-          {t("viewer.index", { index: index + 1, total: group.assets.length })}
-        </span>
+      {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
+          查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
+          （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
+      <div className="relative flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
+        <div className="absolute inset-0" data-tauri-drag-region />
+        <div className="flex min-w-0 items-baseline gap-4">
+          <span className="truncate text-sm font-semibold" title={asset.name} data-testid="viewer-name">
+            {asset.name}
+          </span>
+          <span
+            className="shrink-0 font-mono text-xs text-text-muted"
+            data-testid="viewer-index"
+          >
+            {t("viewer.index", { index: index + 1, total: group.assets.length })}
+          </span>
+        </div>
         <div className="ml-auto flex items-center gap-2">
           {/* 旋转：90° 步进（逆/顺时针），150ms 过渡；随资产切换重置 */}
           <button
@@ -300,25 +437,56 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             data-rotation={view.rotation}
             style={{ cursor: view.scale > 1 ? "grab" : "default" }}
           >
-            {mainSrc !== null ? (
+            {committed !== null && committed !== incoming?.src && (
+              /* 底层：上一张已就绪图——新图 onLoad 前一直保留，切换无空窗 */
               <img
-                src={mainSrc}
-                alt={asset.name}
+                src={committed}
+                alt=""
+                aria-hidden="true"
                 draggable={false}
-                onError={() => {
-                  // photo 原图失败（RAW 伪装/文件被移动等）→ 回退缩略图
-                  if (originalUrl !== null && !originalFailed) setOriginalFailed(true);
-                }}
-                data-testid="viewer-img"
-                data-fallback={mainSrc === originalUrl ? "original" : "thumb"}
-                className="max-h-full max-w-full select-none object-contain"
+                loading="eager"
+                decoding="async"
+                data-testid="viewer-img-prev"
+                className="absolute max-h-full max-w-full select-none object-contain"
                 style={{
-                  // 变换顺序 rotate→scale→translate（先旋转后缩放）
-                  transform: `rotate(${view.rotation}deg) scale(${view.scale}) translate(${view.x}px, ${view.y}px)`,
+                  transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
                   transition: dragRef.current ? "none" : "transform 150ms ease-out",
                 }}
               />
-            ) : mainFailed ? (
+            )}
+            {incoming !== null && (
+              /* 上层：切换中的新图，onLoad 后 150ms 淡入盖过底层 */
+              <img
+                src={incoming.src}
+                alt={asset.name}
+                draggable={false}
+                loading="eager"
+                decoding="async"
+                onLoad={() => setIncomingReady(true)}
+                onError={() => {
+                  // 分级降档：原图失败 → 中间档（2048）→ 512 档。
+                  // TIF 等大尺寸/特殊编码原图 WebView2 渲染不动，逐级降而不是一步到 512。
+                  if (asset.kind === "photo" && stage === "original") setStage("mid");
+                  else if (asset.kind === "photo" && stage === "mid") setStage("thumb");
+                }}
+                data-testid="viewer-img"
+                data-fallback={
+                  incoming.src === originalUrl ? "original" : incoming.src === mid.url ? "mid" : "thumb"
+                }
+                className={`max-h-full max-w-full select-none object-contain transition-opacity duration-150 ${
+                  incomingReady ? "opacity-100" : "opacity-0"
+                }`}
+                style={{
+                  // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
+                  // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）
+                  transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
+                  transition: dragRef.current
+                    ? "none"
+                    : "transform 150ms ease-out, opacity 150ms ease-out",
+                }}
+              />
+            )}
+            {incoming === null && committed === null && mainFailed && (
               <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-placeholder">
                 <svg
                   viewBox="0 0 24 24"
@@ -347,9 +515,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 </svg>
                 <span className="text-xs">{t("viewer.noPreview")}</span>
               </div>
-            ) : (
-              // 缩略图请求在途：轻占位（无闪跳）
-              <div className="h-48 w-48 animate-pulse rounded bg-panel/50" data-testid="viewer-loading" />
+            )}
+            {slowLoading && (
+              // 大图/新图在途超过 300ms：中央小 spinner（避免黑屏被误判为失败）
+              <div
+                className="absolute h-10 w-10 animate-spin rounded-full border-2 border-edge border-t-accent"
+                data-testid="viewer-loading"
+              />
             )}
 
             {/* 左右切换 */}
@@ -378,7 +550,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               </svg>
             </button>
           </div>
-          <p className="pointer-events-none absolute bottom-1.5 left-1/2 -translate-x-1/2 font-mono text-[10px] text-text-muted/70">
+          {/* 操作提示：CSS 过渡淡入淡出（确定性，不走动画帧） */}
+          <p
+            onMouseEnter={showHint}
+            className={`absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded bg-black/40 px-2 py-0.5 font-mono text-[10px] text-text-muted/80 transition-opacity duration-300 ${
+              hintVisible ? "opacity-100" : "pointer-events-none opacity-0"
+            }`}
+            data-testid="viewer-hint"
+          >
             {t("viewer.zoomHint")}
           </p>
         </div>
@@ -423,28 +602,45 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         </AnimatePresence>
       </div>
 
-      {/* 底部胶片条：当前组缩略图 */}
+      {/* 底部胶片条：当前组缩略图。横向虚拟化（只渲染可视区 ±overscan）——
+          整组几十格同时入队会挤占缩略图信号量、拖慢主图回退档；滚动按需请求。
+          格子未加载期间为静态迷你序号占位（skeleton=false，几十个一起闪很难看）。 */}
       <div
-        className="sp-scroll flex h-[76px] shrink-0 items-center gap-1.5 overflow-x-auto border-t border-edge px-3"
+        ref={stripRef}
+        className="sp-scroll flex h-[76px] shrink-0 items-center overflow-x-auto border-t border-edge px-3"
         data-testid="viewer-filmstrip"
       >
-        {group.assets.map((item, i) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => onNavigate(i)}
-            aria-label={item.name}
-            aria-current={i === index}
-            className={`h-16 w-16 shrink-0 overflow-hidden rounded-md border-2 transition-colors ${
-              i === index ? "border-accent" : "border-transparent hover:border-edge"
-            }`}
-            data-testid="viewer-filmthumb"
-            data-asset-id={item.id}
-            data-current={i === index}
-          >
-            <AssetThumb asset={item} size={FILM_THUMB_SIZE} className="h-full w-full" testId="viewer-filmthumb-cell" />
-          </button>
-        ))}
+        <div className="relative h-full" style={{ width: stripVirtualizer.getTotalSize() }}>
+          {stripVirtualizer.getVirtualItems().map((vi) => {
+            const item = group.assets[vi.index];
+            const current = vi.index === index;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onNavigate(vi.index)}
+                aria-label={item.name}
+                aria-current={current}
+                className={`absolute top-0 flex h-16 w-16 overflow-hidden rounded-md border-2 transition-colors ${
+                  current ? "border-accent" : "border-transparent hover:border-edge"
+                }`}
+                style={{ transform: `translateX(${vi.start}px)` }}
+                data-testid="viewer-filmthumb"
+                data-asset-id={item.id}
+                data-current={current}
+              >
+                <AssetThumb
+                  asset={item}
+                  size={FILM_THUMB_SIZE}
+                  className="h-full w-full"
+                  skeleton={false}
+                  miniLabel={String(vi.index + 1)}
+                  testId="viewer-filmthumb-cell"
+                />
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

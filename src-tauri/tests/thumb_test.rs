@@ -215,12 +215,11 @@ fn pick_jpeg_scale_tier_matrix() {
 
 #[test]
 fn permit_count_dynamic_matrix() {
-    // min(6, cores/2)，下限 1：4 核→2、8 核→4、12 核→6、24 核→6、1 核→1
-    assert_eq!(thumbs::permit_count_for_test(4), 2);
-    assert_eq!(thumbs::permit_count_for_test(8), 4);
-    assert_eq!(thumbs::permit_count_for_test(12), 6);
-    assert_eq!(thumbs::permit_count_for_test(24), 6);
-    assert_eq!(thumbs::permit_count_for_test(1), 1);
+    // 核心数直通（用户定案 2026-09-19：索引任务吃满硬件）：4 核→4、
+    // 8 核→8、16 核→16；0 防御为 1
+    assert_eq!(thumbs::permit_count_for_test(4), 4);
+    assert_eq!(thumbs::permit_count_for_test(8), 8);
+    assert_eq!(thumbs::permit_count_for_test(16), 16);
     assert_eq!(thumbs::permit_count_for_test(0), 1);
 }
 
@@ -336,4 +335,61 @@ fn bench_full_decode_vs_scaled() {
         "提速倍数: {:.1}x",
         t_full.as_secs_f64() / t_fast.as_secs_f64()
     );
+}
+
+// ---------------------------------------------------------------------------
+// RAW 内嵌预览提取（M3.5）：SOI 扫描 → turbojpeg 管线，同一缓存规则
+// ---------------------------------------------------------------------------
+
+#[test]
+fn raw_preview_extracted_and_cached_across_tiers() {
+    let db = db_dir();
+    // 真实 NEF（已知样例单文件直连，不遍历目录）：内嵌 JPEG 预览
+    let nef = Path::new(r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF");
+    if !nef.is_file() {
+        eprintln!("skip: 样例不存在 {}", nef.display());
+        return;
+    }
+    let first = thumbs::thumb_file(&db, nef, 256).expect("RAW 应提取出缩略图");
+    let cache = PathBuf::from(&first);
+    assert!(
+        cache.starts_with(db.join("thumbs")),
+        "缓存必须在 dbDir/thumbs: {first}"
+    );
+    let (w, h) = image::image_dimensions(&cache).unwrap();
+    assert!(w.max(h) <= 256, "拟合 256 档: {w}x{h}");
+
+    // 三档各自缓存
+    for tier in [512u16, 2048] {
+        let p = thumbs::thumb_file(&db, nef, tier).expect("高档应生成");
+        let (w, h) = image::image_dimensions(Path::new(&p)).unwrap();
+        assert!(w.max(h) <= u32::from(tier), "拟合 {tier}: {w}x{h}");
+    }
+
+    // 命中：二次调用同路径不重提取（mtime 不变）
+    let meta_before = fs::metadata(&cache).unwrap();
+    std::thread::sleep(Duration::from_millis(60));
+    let second = thumbs::thumb_file(&db, nef, 256).expect("二次应命中");
+    assert_eq!(PathBuf::from(&second), cache);
+    assert_eq!(
+        meta_before.modified().unwrap(),
+        fs::metadata(&cache).unwrap().modified().unwrap(),
+        "命中不得重新生成"
+    );
+}
+
+#[test]
+fn corrupt_raw_returns_none_without_cache() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("bad.NEF");
+    // 无 SOI 结构的垃圾
+    fs::write(&src, b"not a raw file at all, no jpeg inside").unwrap();
+    let db = db_dir();
+    assert!(thumbs::thumb_file(&db, &src, 256).is_none());
+    assert!(thumbs::raw_preview_jpeg(&src).is_none());
+    assert!(!db.join("thumbs").join("256").join("x").exists());
+
+    // 有 SOI 但无 EOI（截断）→ None
+    fs::write(&src, [0xFF, 0xD8, 0xFF, 0xD8, 0x00, 0x00]).unwrap();
+    assert!(thumbs::thumb_file(&db, &src, 256).is_none());
 }

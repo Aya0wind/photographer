@@ -18,6 +18,8 @@ pub mod devices;
 pub mod events;
 #[path = "../../src/import/mod.rs"]
 pub mod import;
+#[path = "../../src/index/mod.rs"]
+pub mod index;
 #[path = "../../src/ipc/mod.rs"]
 pub mod ipc;
 #[path = "../../src/metadata/mod.rs"]
@@ -379,4 +381,115 @@ pub fn wait_done(state: &AppState, timeout: Duration) -> bool {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+// ---------------------------------------------------------------------------
+// EXIF JPEG fixture（导入入库拍摄参数测试；II* 小端 + APP1 + SOF0 + EOI）
+// ---------------------------------------------------------------------------
+
+/// 一张带完整拍摄参数的 JPEG（Sony A7R5 / FE 85mm / f2.8 / 1-250s / ISO1600
+/// / 6048x8064 / 2026-06-28 15:30:00）。宽高经 SOF0 帧段给出。
+pub fn build_exif_jpeg() -> Vec<u8> {
+    fn ascii(s: &str) -> Vec<u8> {
+        let mut v = s.as_bytes().to_vec();
+        v.push(0);
+        v
+    }
+    fn rational(n: u32, d: u32) -> Vec<u8> {
+        let mut v = n.to_le_bytes().to_vec();
+        v.extend_from_slice(&d.to_le_bytes());
+        v
+    }
+    // (tag, type, payload)
+    let ifd0_entries: Vec<(u16, u16, Vec<u8>)> =
+        vec![(0x010F, 2, ascii("Sony")), (0x0110, 2, ascii("ILCE-7RM5"))];
+    let exif_entries: Vec<(u16, u16, Vec<u8>)> = vec![
+        (0x829A, 5, rational(1, 250)),               // ExposureTime
+        (0x829D, 5, rational(28, 10)),               // FNumber
+        (0x8827, 3, 1600u16.to_le_bytes().to_vec()), // ISO
+        (0x9003, 2, ascii("2026:06:28 15:30:00")),   // DateTimeOriginal
+        (0x920A, 5, rational(85, 1)),                // FocalLength
+        (0xA434, 2, ascii("FE 85mm F1.8")),          // LensModel
+    ];
+
+    let ifd0_size = 2 + 12 * (ifd0_entries.len() + 1) + 4; // + ExifIFD 指针
+    let exif_off = 8 + ifd0_size;
+    let exif_size = 2 + 12 * exif_entries.len() + 4;
+    let ifd0_data_off = exif_off + exif_size;
+    let mut ifd0_data = Vec::new();
+    let mut exif_data = Vec::new();
+
+    let encode = |entries: &[(u16, u16, Vec<u8>)],
+                  data_off: usize,
+                  data: &mut Vec<u8>,
+                  child: Option<(u16, u32)>|
+     -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&((entries.len() + child.is_some() as usize) as u16).to_le_bytes());
+        let mut list = entries.to_vec();
+        if let Some((tag, value)) = child {
+            list.push((tag, 4, value.to_le_bytes().to_vec()));
+        }
+        list.sort_by_key(|e| e.0);
+        for (tag, typ, payload) in list {
+            let count = payload.len().max(1) / if typ == 2 { 1 } else { typ_len(typ) };
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&typ.to_le_bytes());
+            buf.extend_from_slice(&(count as u32).to_le_bytes());
+            if payload.len() <= 4 {
+                let mut inline = [0u8; 4];
+                inline[..payload.len()].copy_from_slice(&payload);
+                buf.extend_from_slice(&inline);
+            } else {
+                buf.extend_from_slice(&((data_off + data.len()) as u32).to_le_bytes());
+                data.extend_from_slice(&payload);
+            }
+        }
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf
+    };
+    fn typ_len(typ: u16) -> usize {
+        match typ {
+            3 => 2,
+            4 => 4,
+            5 => 8,
+            _ => 1,
+        }
+    }
+
+    let ifd0_bytes = encode(
+        &ifd0_entries,
+        ifd0_data_off,
+        &mut ifd0_data,
+        Some((0x8769, exif_off as u32)),
+    );
+    let exif_bytes = encode(
+        &exif_entries,
+        ifd0_data_off + ifd0_data.len(),
+        &mut exif_data,
+        None,
+    );
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II* ");
+    tiff.extend_from_slice(&8u32.to_le_bytes());
+    tiff.extend_from_slice(&ifd0_bytes);
+    tiff.extend_from_slice(&exif_bytes);
+    tiff.extend_from_slice(&ifd0_data);
+    tiff.extend_from_slice(&exif_data);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0xFF, 0xD8]); // SOI
+    out.extend_from_slice(&[0xFF, 0xE1]); // APP1
+    out.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    out.extend_from_slice(b"Exif  ");
+    out.extend_from_slice(&tiff);
+    // SOF0：6048x8064
+    out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+    out.extend_from_slice(&8064u16.to_be_bytes());
+    out.extend_from_slice(&6048u16.to_be_bytes());
+    out.push(3);
+    out.extend_from_slice(&[0; 9]);
+    out.extend_from_slice(&[0xFF, 0xD9]); // EOI
+    out
 }

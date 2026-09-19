@@ -868,6 +868,29 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
+
+  it("缩略图加载中占位带骨架动画（sp-skeleton）；结算无图退静态", async () => {
+    seedSession();
+    let resolveThumb: (value: string | null) => void = () => {};
+    thumbMock.mockImplementationOnce(
+      () => new Promise<string | null>((resolve) => (resolveThumb = resolve)),
+    );
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    // photo tile 在途：缩略区挂骨架类
+    const area = document.querySelector('[data-testid="tile-photo"]')?.parentElement;
+    expect(area?.className).toContain("sp-skeleton");
+
+    // 结算为无图：退静态（无动画类）
+    resolveThumb(null);
+    await waitFor(() => expect(area?.className).not.toContain("sp-skeleton"));
+    expect(
+      within(screen.getByTestId("wizard-file-grid")).getByTestId("tile-photo"),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("左栏分区折叠（LR 式）", () => {

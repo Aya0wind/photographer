@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 
@@ -124,21 +124,58 @@ describe("查看器：打开与图片来源", () => {
     expect(thumbs[1]).toHaveAttribute("data-current", "false");
   });
 
-  it("photo 原图加载失败 → 回退大档缩略图（名义 1280）", async () => {
+  it("photo 原图加载失败（TIF 等）→ 中间档 2048 回退", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    thumbMock.mockResolvedValue("C:\\thumbs\\512\\img1.jpg");
+    thumbMock.mockImplementation(async (_id: number, size: number) =>
+      size === 2048 ? "C:\\thumbs\\2048\\img1.jpg" : null,
+    );
     renderViewer();
 
     const img = await screen.findByTestId("viewer-img");
     expect(img).toHaveAttribute("data-fallback", "original");
     fireEvent.error(img);
 
-    await waitFor(() => expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "thumb"));
+    // WebView2 渲染不动的原图 → 先降中间档（清晰版），而不是一步到 512
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "mid"),
+    );
+    expect(screen.getByTestId("viewer-img")).toHaveAttribute("src", "asset://C:\\thumbs\\2048\\img1.jpg");
+    expect(thumbMock).toHaveBeenCalledWith(1, 2048);
+  });
+
+  it("中间档确定无图（后端无 2048 档）→ 自动降 512 档", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockImplementation(async (_id: number, size: number) =>
+      size === 2048 ? null : "C:\\thumbs\\512\\img1.jpg",
+    );
+    renderViewer();
+
+    const img = await screen.findByTestId("viewer-img");
+    fireEvent.error(img);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "thumb"),
+    );
     expect(screen.getByTestId("viewer-img")).toHaveAttribute("src", "asset://C:\\thumbs\\512\\img1.jpg");
+    expect(thumbMock).toHaveBeenCalledWith(1, 2048);
     expect(thumbMock).toHaveBeenCalledWith(1, 1280);
   });
 
-  it("RAW 无原图：直接用大档缩略图（512 档），不尝试原图 asset 协议", async () => {
+  it("原图加载慢：在途超过 300ms 出现加载提示，不黑屏误判", async () => {
+    convertMock.mockImplementation(() => {
+      throw new Error("no asset protocol");
+    });
+    thumbMock.mockImplementation(() => new Promise(() => undefined)); // 512 档永不在途结算
+    renderViewer();
+
+    // 源在途（photo 无原图 → 直达 512 档，仍在途）：300ms 内不出现提示
+    await screen.findByTestId("viewer");
+    expect(screen.queryByTestId("viewer-loading")).not.toBeInTheDocument();
+    // 300ms 后出现 spinner
+    await waitFor(() => expect(screen.getByTestId("viewer-loading")).toBeInTheDocument());
+  });
+
+  it("RAW 无原图：直接用大档缩略图（512 档），不尝试原图 asset 协议与 2048 中间档", async () => {
     const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     thumbMock.mockResolvedValue("C:\\thumbs\\512\\img7.jpg");
@@ -150,6 +187,7 @@ describe("查看器：打开与图片来源", () => {
     expect(img).toHaveAttribute("data-fallback", "thumb");
     expect(convertMock).not.toHaveBeenCalledWith(rawAssets[0].path);
     expect(thumbMock).toHaveBeenCalledWith(7, 1280);
+    expect(thumbMock).not.toHaveBeenCalledWith(7, 2048);
   });
 
   it("RAW 无缩略图（后端恒 None 的兜底）：永久占位不崩溃", async () => {
@@ -204,6 +242,17 @@ describe("查看器：左右切换与关闭", () => {
     expect(setIndex).toBeDefined();
   });
 
+  it("旋转 transform 顺序 translate→rotate→scale（平移后旋转绕图片视觉中心）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderViewer();
+    const img = await screen.findByTestId("viewer-img");
+
+    fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
+    await waitFor(() =>
+      expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg) scale(1)"),
+    );
+  });
+
   it("胶片条点击跳转；Esc 关闭返回画廊", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     const { onNavigate, onClose } = renderViewer();
@@ -216,12 +265,12 @@ describe("查看器：左右切换与关闭", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("相邻预取：打开时对前后各 1 张预热缩略图缓存（240 档）", async () => {
+  it("相邻预取：512 回退档高优先预热（缩略管线）", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer(GROUP_ASSETS, 1);
 
-    await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(1, 240));
-    expect(thumbMock).toHaveBeenCalledWith(3, 240);
+    await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(1, 1280));
+    expect(thumbMock).toHaveBeenCalledWith(3, 1280);
   });
 });
 
@@ -292,6 +341,191 @@ describe("查看器：旋转（90° 步进）", () => {
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "0");
     fireEvent.keyDown(window, { key: "R" });
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+  });
+
+  it("键盘 Home/End 跳组首/尾（有状态容器驱动 index）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    function StatefulViewer() {
+      const [index, setIdx] = useState(1);
+      const group = groupAssetsByDate(GROUP_ASSETS)[0];
+      return (
+        <I18nextProvider i18n={i18n}>
+          <ViewerOverlay
+            asset={GROUP_ASSETS[index]}
+            group={group}
+            index={index}
+            onNavigate={setIdx}
+            onClose={() => {}}
+          />
+        </I18nextProvider>
+      );
+    }
+    render(<StatefulViewer />);
+    expect(await screen.findByTestId("viewer")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Home" });
+    expect(await screen.findByText("IMG_0001.JPG")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "End" });
+    expect(await screen.findByText("IMG_0003.JPG")).toBeInTheDocument();
+  });
+
+  it("操作提示：首次 3s 后淡出；? 键重新唤出并再计时（fake timers）", async () => {
+    vi.useFakeTimers();
+    try {
+      convertMock.mockImplementation((p: string) => `asset://${p}`);
+      renderViewer();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId("viewer-hint")).toBeInTheDocument();
+
+      // 3s 后淡出（CSS opacity 过渡：类切换确定）
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3250);
+      });
+      expect(screen.getByTestId("viewer-hint").className).toContain("opacity-0");
+
+      // ? 唤出，再过 3s 又淡出
+      fireEvent.keyDown(window, { key: "?" });
+      expect(screen.getByTestId("viewer-hint").className).toContain("opacity-100");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3250);
+      });
+      expect(screen.getByTestId("viewer-hint").className).toContain("opacity-0");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("胶片条当前格自动滚入可视区（scrollIntoView inline nearest）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const calls: Array<Record<string, unknown>> = [];
+    class FakeImage {
+      src = "";
+    }
+    vi.stubGlobal("Image", FakeImage);
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (arg?: unknown) {
+      calls.push((arg ?? {}) as Record<string, unknown>);
+    } as typeof HTMLElement.prototype.scrollIntoView;
+    try {
+      function StatefulViewer() {
+        const [index, setIdx] = useState(0);
+        const group = groupAssetsByDate(GROUP_ASSETS)[0];
+        return (
+          <I18nextProvider i18n={i18n}>
+            <ViewerOverlay
+              asset={GROUP_ASSETS[index]}
+              group={group}
+              index={index}
+              onNavigate={setIdx}
+              onClose={() => {}}
+            />
+          </I18nextProvider>
+        );
+      }
+      render(<StatefulViewer />);
+      expect(await screen.findByTestId("viewer")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId("viewer-next"));
+      await waitFor(() => {
+        const last = calls[calls.length - 1];
+        expect(last).toMatchObject({ block: "nearest", inline: "nearest" });
+      });
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+// --- 切换交叉淡入与胶片条 ------------------------------------------------------------
+
+describe("查看器：交叉淡入与胶片条", () => {
+  it("双图层交叉淡入：旧图层保留至新图 onLoad 提交（切换无空窗）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    let setIndex: ((i: number) => void) | undefined;
+    function StatefulViewer() {
+      const [index, setIdx] = useState(0);
+      setIndex = setIdx;
+      const group = groupAssetsByDate(GROUP_ASSETS)[0];
+      return (
+        <I18nextProvider i18n={i18n}>
+          <ViewerOverlay
+            asset={GROUP_ASSETS[index]}
+            group={group}
+            index={index}
+            onNavigate={setIdx}
+            onClose={() => {}}
+          />
+        </I18nextProvider>
+      );
+    }
+    render(<StatefulViewer />);
+
+    const url1 = `asset://${GROUP_ASSETS[0].path}`;
+    const url2 = `asset://${GROUP_ASSETS[1].path}`;
+    const img1 = await screen.findByTestId("viewer-img");
+    expect(img1).toHaveAttribute("src", url1);
+
+    // 首图 onLoad → 提交为底层
+    fireEvent.load(img1);
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-img-prev")).toHaveAttribute("src", url1),
+    );
+
+    // 切到第二张：新图层挂载（未 onLoad 前 opacity-0），旧图层仍在
+    act(() => setIndex?.(1));
+    const img2 = await screen.findByTestId("viewer-img");
+    expect(img2).toHaveAttribute("src", url2);
+    expect(img2.className).toContain("opacity-0");
+    expect(screen.getByTestId("viewer-img-prev")).toHaveAttribute("src", url1);
+
+    // 新图 onLoad → 150ms 淡入提交：旧图层移除，新图成为底层
+    fireEvent.load(img2);
+    await waitFor(() =>
+      expect(screen.queryByTestId("viewer-img-prev")).toHaveAttribute("src", url2),
+    );
+    expect(screen.queryByTestId("viewer-img")).not.toBeInTheDocument();
+  });
+
+  it("胶片条横向虚拟化：48 张组只渲染可视区格子（DOM 数远小于组总数）", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const bigGroup = Array.from({ length: 48 }, (_, i) =>
+      makeAsset(i + 1, "photo", `IMG_${String(i + 1).padStart(4, "0")}.JPG`),
+    );
+    renderViewer(bigGroup);
+
+    await screen.findByTestId("viewer");
+    const thumbs = screen.getAllByTestId("viewer-filmthumb");
+    expect(thumbs.length).toBeLessThan(48);
+    // 静态迷你占位（序号），无骨架动画
+    expect(thumbs[0].querySelector('[data-testid="thumb-mini"]')).not.toBeNull();
+    const cell = thumbs[0].querySelector('[data-testid="viewer-filmthumb-cell"]');
+    expect(cell?.className).not.toContain("sp-skeleton");
+  });
+
+  it("相邻预取：预热相邻 photo 原图与 512 档 URL 解码（new Image）", async () => {
+    const created: Array<{ src: string }> = [];
+    class FakeImage {
+      src = "";
+      constructor() {
+        created.push(this);
+      }
+    }
+    vi.stubGlobal("Image", FakeImage);
+    try {
+      convertMock.mockImplementation((p: string) => `asset://${p}`);
+      thumbMock.mockResolvedValue(null);
+      renderViewer(GROUP_ASSETS, 1);
+
+      await waitFor(() => expect(created.length).toBeGreaterThanOrEqual(2));
+      const srcs = created.map((c) => c.src);
+      expect(srcs).toContain(`asset://${GROUP_ASSETS[0].path}`);
+      expect(srcs).toContain(`asset://${GROUP_ASSETS[2].path}`);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

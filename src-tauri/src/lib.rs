@@ -3,6 +3,7 @@ mod db;
 mod devices;
 mod events;
 mod import;
+mod index;
 mod ipc;
 mod metadata;
 mod migrate;
@@ -53,6 +54,10 @@ pub fn run() {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
+            // 索引任务启动恢复目标（settings 交管 AppState 前先取）
+            let active_db_dir: Option<std::path::PathBuf> = settings
+                .active_library()
+                .map(|l| std::path::PathBuf::from(&l.db_dir));
             let bus = EventBus::new();
             // 托管 Arc<AppState>（SharedState）：async 慢命令壳需要 'static
             // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
@@ -75,6 +80,12 @@ pub fn run() {
                 migrations: Mutex::new(std::collections::HashSet::new()),
                 ai,
             }));
+
+            // 索引任务启动恢复（导入/索引分离）：遗留 running 复位 pending
+            // → indexTaskResumed 事件 → 后台 worker 全核续跑。
+            if let Some(db_dir) = active_db_dir {
+                index::resume_and_kick(db_dir, &bus, &supervisor_handle);
+            }
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
             spawn_event_forwarder(app.handle().clone(), bus.clone(), supervisor_handle.clone());
@@ -137,6 +148,7 @@ pub fn run() {
             ipc::assets::assets_page,
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
+            ipc::assets::camera_list,
             ipc::thumb::asset_thumb_get,
             ipc::thumb::thumb_get_by_path,
             ipc::migrate::db_dir_migrate,

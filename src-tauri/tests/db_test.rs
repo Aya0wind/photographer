@@ -73,6 +73,15 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         source: "volume:E:".to_string(),
         created_at: "2026-09-18T08:00:00.000Z".to_string(),
         origin: "imported".to_string(),
+        width: None,
+        height: None,
+        iso: None,
+        f_number: None,
+        exposure_time: None,
+        focal_length: None,
+        lens: None,
+        pair_asset_id: None,
+        thumb_state: 0,
     }
 }
 
@@ -93,15 +102,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 3);
+        assert_eq!(user_version(&db), 4);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 3, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 4, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 3);
+    assert_eq!(user_version(&db), 4);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -119,8 +128,8 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 6,
-        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1"
+        indexes, 7,
+        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 1"
     );
 }
 

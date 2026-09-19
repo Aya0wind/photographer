@@ -34,12 +34,21 @@ interface MenuDef {
   entries: MenuEntry[];
 }
 
-const VIEW_ITEMS: { key: string; to: string }[] = [
-  { key: "gallery", to: "/gallery" },
-  { key: "search", to: "/search" },
-  { key: "tasks", to: "/tasks" },
-  { key: "settings", to: "/settings" },
+const VIEW_ITEMS: { key: string; to: string; shortcut?: string }[] = [
+  { key: "gallery", to: "/gallery", shortcut: "Ctrl+1" },
+  { key: "search", to: "/search", shortcut: "Ctrl+2" },
+  { key: "tasks", to: "/tasks", shortcut: "Ctrl+4" },
+  { key: "settings", to: "/settings", shortcut: "Ctrl+5" },
 ];
+
+/** 全局导航快捷键：Ctrl+1..5 → 五个主页面（与侧栏导航一一对应；导入页无菜单项占 Ctrl+3） */
+const CTRL_NAV: Record<string, string> = {
+  "1": "/gallery",
+  "2": "/search",
+  "3": "/import",
+  "4": "/tasks",
+  "5": "/settings",
+};
 
 /** 勾选标记（查看菜单当前页），16 viewBox 手写 SVG */
 function CheckGlyph() {
@@ -130,6 +139,20 @@ export default function MenuBar() {
     };
   }, [openKey]);
 
+  // 全局导航快捷键（#9）：Ctrl+1..5 → 五个主页面；输入框聚焦时不劫持（数字键无
+  // Ctrl 组合的输入不受影响；带 Ctrl 的系统层无冲突）
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const to = CTRL_NAV[e.key];
+      if (!to) return;
+      e.preventDefault();
+      navigate(to);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
+
   const menus: MenuDef[] = [
     {
       key: "file",
@@ -149,14 +172,15 @@ export default function MenuBar() {
         },
         { kind: "separator", key: "file-sep" },
         // close() → 后端 CloseRequested → 按 system.closeToTray 收托盘/退出
-        { kind: "item", key: "quit", onSelect: () => void getCurrentWindow().close() },
+        { kind: "item", key: "quit", shortcut: "Alt+F4", onSelect: () => void getCurrentWindow().close() },
       ],
     },
     {
       key: "view",
-      entries: VIEW_ITEMS.map(({ key, to }) => ({
+      entries: VIEW_ITEMS.map(({ key, to, shortcut }) => ({
         kind: "item" as const,
         key,
+        shortcut,
         checked: location.pathname === to,
         onSelect: () => navigate(to),
       })),

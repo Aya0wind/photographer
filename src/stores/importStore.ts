@@ -135,6 +135,8 @@ interface ImportState {
   pendingJobSource: DeviceKind | null;
   /** 清卡任务态（cleanStarted/cleanFinished 驱动）；null=无清卡 */
   clean: CleanState | null;
+  /** 索引任务待处理项数（indexTaskResumed 驱动）；null=本会话未收到恢复事件 */
+  indexPending: number | null;
 
   /** 事件入口（initImportStore 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
@@ -294,6 +296,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
   jobSources: {},
   pendingJobSource: null,
   clean: null,
+  indexPending: null,
 
   handleAppEvent: (event) => {
     if (event.type === "deviceArrived" || event.type === "deviceRemoved" ||
@@ -302,6 +305,10 @@ export const useImportStore = create<ImportState>((set, get) => ({
       deviceChanges.set(event.id, ++deviceRevision);
     }
     switch (event.type) {
+      case "indexTaskResumed": {
+        set({ indexPending: event.pending });
+        break;
+      }
       case "deviceArrived": {
         streamingDevices.delete(event.id);
         set((s) => ({
@@ -693,5 +700,6 @@ export function resetImportStoreForTests(): void {
     jobSources: {},
     pendingJobSource: null,
     clean: null,
+    indexPending: null,
   });
 }

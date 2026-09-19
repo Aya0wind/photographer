@@ -245,6 +245,13 @@ pub enum AppEvent {
         error: Option<String>,
     },
 
+    // 索引任务（导入/索引分离，M3.5）
+    /// 启动恢复：检测到上次中断的索引待办（running 已复位 pending），
+    /// worker 自动续跑。
+    IndexTaskResumed {
+        pending: u64,
+    },
+
     // 错误
     AppError {
         level: String,

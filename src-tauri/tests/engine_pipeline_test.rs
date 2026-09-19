@@ -4,7 +4,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -315,4 +315,53 @@ fn include_none_and_serde_round_trip() {
     );
     let back: ImportPlan = serde_json::from_value(value).unwrap();
     assert_eq!(back.include, partial.include);
+}
+
+#[test]
+fn import_extracts_shooting_params_into_assets() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    // 单文件源：一张带完整拍摄参数的 JPEG fixture
+    fs::create_dir_all(src.path().join("DCIM")).unwrap();
+    let jpeg = common::build_exif_jpeg();
+    fs::write(src.path().join("DCIM").join("IMG_0001.jpg"), &jpeg).unwrap();
+
+    let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
+    assert_eq!(stats.done_files, 1);
+    assert_eq!(stats.failed_files, 0);
+
+    let db = open_db(db_dir.path());
+    type Params7 = (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let (width, height, iso, f_number, exposure_time, focal_length, lens): Params7 = db
+        .0
+        .query_row(
+            "SELECT width, height, iso, f_number, exposure_time, focal_length, lens              FROM assets WHERE kind = 'photo'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!((width, height), (Some(6048), Some(8064)), "宽高来自 SOF0");
+    assert_eq!(iso, Some(1600));
+    assert_eq!(f_number.as_deref(), Some("2.8"));
+    assert_eq!(exposure_time.as_deref(), Some("1/250"));
+    assert_eq!(focal_length.as_deref(), Some("85"));
+    assert_eq!(lens.as_deref(), Some("FE 85mm F1.8"));
+    // journal 仍 verified（提取失败不阻塞导入路径）
+    let state: String =
+        db.0.query_row(
+            "SELECT state FROM job_files WHERE job_id = ?1",
+            [job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "verified");
 }

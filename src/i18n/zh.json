@@ -300,6 +300,11 @@
 
   "tasks.columnActions": "操作",
 
+  "tasks.index.pending": "索引任务：{{count}} 项待处理",
+  "tasks.index.pause": "暂停",
+
+  "importCard.indexingNote": "缩略图与详细索引正在后台生成",
+
   "clean.entry": "清理源文件…",
   "clean.entryShort": "清理源文件",
   "clean.title": "清理源文件",

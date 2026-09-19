@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -119,6 +120,58 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     overscan: 6,
   });
 
+  // --- 键盘导航（#8）：网格聚焦后 ←→↑↓ 移动高亮（outline accent），Enter 打开查看器 ---
+  const [cursor, setCursor] = useState<number | null>(null);
+  const flatIndexById = useMemo(() => {
+    const map = new Map<number, number>();
+    let i = 0;
+    for (const group of groups) {
+      for (const asset of group.assets) {
+        map.set(asset.id, i);
+        i += 1;
+      }
+    }
+    return map;
+  }, [groups]);
+  const flatAssets = useMemo(() => groups.flatMap((g) => g.assets), [groups]);
+
+  const moveCursor = useCallback(
+    (delta: number) => {
+      setCursor((prev) => {
+        const base = prev ?? 0;
+        return Math.min(Math.max(base + delta, 0), flatAssets.length - 1);
+      });
+    },
+    [flatAssets.length],
+  );
+
+  function handleGridKeyDown(e: React.KeyboardEvent<HTMLDivElement>): void {
+    if (e.key === "ArrowRight") moveCursor(1);
+    else if (e.key === "ArrowLeft") moveCursor(-1);
+    else if (e.key === "ArrowDown") moveCursor(columns);
+    else if (e.key === "ArrowUp") moveCursor(-columns);
+    else if (e.key === "Home") setCursor(0);
+    else if (e.key === "End") setCursor(flatAssets.length - 1);
+    else if (e.key === "Enter") {
+      if (cursor === null) return;
+      const asset = flatAssets[cursor];
+      if (asset && onOpenAsset) {
+        const owner = groups.find((g) => g.assets.includes(asset));
+        if (owner) onOpenAsset(asset, owner);
+      }
+    } else return;
+    e.preventDefault();
+  }
+
+  // 高亮格滚入可视区（jsdom 无 scrollIntoView，静默跳过）
+  useEffect(() => {
+    if (cursor === null) return;
+    const el = scrollRef.current?.querySelector('[data-cursor="true"]');
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }, [cursor]);
+
   // 视口上报：首虚拟行所属组 + scrollTop（显著变化才上报，避免每次渲染触发上层 setState）
   const lastReport = useRef<{ key: string; top: number }>({ key: "", top: -1 });
   useEffect(() => {
@@ -153,7 +206,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   return (
     <div
       ref={scrollRef}
-      className="sp-scroll h-full overflow-y-auto"
+      tabIndex={0}
+      onKeyDown={handleGridKeyDown}
+      className="sp-scroll h-full overflow-y-auto outline-none"
       data-testid={scrollTestId}
     >
       <div className="px-3 pb-6" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
@@ -191,6 +246,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                 <div className="flex flex-wrap gap-1 pb-1">
                   {row.assets.map((asset) => {
                     const badge = badges?.get(asset.id) ?? null;
+                    const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
                     const inner = (
                       <>
                         <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
@@ -209,24 +265,30 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         key={asset.id}
                         type="button"
                         onClick={() => onOpenAsset(asset, row.group)}
-                        className="relative overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge"
+                        className={`relative overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge ${
+                          isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
+                        }`}
                         style={{ width: tile, height: tile }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
+                        data-cursor={isCursor}
                       >
                         {inner}
                       </button>
                     ) : (
                       <div
                         key={asset.id}
-                        className="relative overflow-hidden rounded-md bg-panel/40"
+                        className={`relative overflow-hidden rounded-md bg-panel/40 ${
+                          isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
+                        }`}
                         style={{ width: tile, height: tile }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
+                        data-cursor={isCursor}
                       >
                         {inner}
                       </div>

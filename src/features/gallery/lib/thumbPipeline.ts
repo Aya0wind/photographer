@@ -18,19 +18,25 @@ import { assetThumbGet, subscribeAppEvents, type AppEvent } from "@/ipc/api";
 
 const CONCURRENCY = 6;
 
+/** 请求优先级：high=查看器主图/相邻预取（插队），low=网格/胶片条（默认） */
+export type ThumbPriority = "high" | "low";
+
 let activeLoads = 0;
 const slotQueue: Array<() => void> = [];
 
-function acquireSlot(): Promise<void> {
+function acquireSlot(priority: ThumbPriority): Promise<void> {
   if (activeLoads < CONCURRENCY) {
     activeLoads += 1;
     return Promise.resolve();
   }
   return new Promise((resolve) => {
-    slotQueue.push(() => {
+    const grant = () => {
       activeLoads += 1;
       resolve();
-    });
+    };
+    // high 插到队首（主图不该排在几十个胶片条格子后面）
+    if (priority === "high") slotQueue.unshift(grant);
+    else slotQueue.push(grant);
   });
 }
 
@@ -38,6 +44,17 @@ function releaseSlot(): void {
   activeLoads = Math.max(0, activeLoads - 1);
   const next = slotQueue.shift();
   if (next) next();
+}
+
+/**
+ * 图片解码预热（查看器相邻预取）：prefetchAssetThumb 只预热 IPC 缓存路径，
+ * 不预热解码器——补 new Image().src 让相邻图进入 Chromium 解码缓存，
+ * 箭头切换时大概率瞬时显示。fire-and-forget，失败静默。
+ */
+export function warmImageDecode(url: string | null | undefined): void {
+  if (!url) return;
+  const img = new Image();
+  img.src = url;
 }
 
 /** 会话缓存：`${assetId}:${size}` → asset URL（null=未命中，等待 thumbnailReady） */
@@ -54,15 +71,20 @@ function toAssetUrl(path: string): string | null {
   }
 }
 
-/** 取库内资产缩略图 URL（命中缓存直接返回；失败/未生成记 null 占位） */
-export function fetchAssetThumb(assetId: number, size: number): Promise<string | null> {
+/** 取库内资产缩略图 URL（命中缓存直接返回；失败/未生成记 null 占位）。
+ *  priority：high 插队信号量队列（查看器主图/预取），low 默认（网格/胶片条）。 */
+export function fetchAssetThumb(
+  assetId: number,
+  size: number,
+  priority: ThumbPriority = "low",
+): Promise<string | null> {
   const key = `${assetId}:${size}`;
   const cached = thumbCache.get(key);
   if (cached !== undefined) return Promise.resolve(cached);
   const running = thumbInflight.get(key);
   if (running) return running;
   const promise = (async () => {
-    await acquireSlot();
+    await acquireSlot(priority);
     try {
       const path = await assetThumbGet(assetId, size);
       const url = path !== null ? toAssetUrl(path) : null;
@@ -80,9 +102,13 @@ export function fetchAssetThumb(assetId: number, size: number): Promise<string |
   return promise;
 }
 
-/** 预取（查看器相邻预热/胶片条）：静默，失败仅保持占位 */
-export function prefetchAssetThumb(assetId: number, size: number): void {
-  void fetchAssetThumb(assetId, size);
+/** 预取（查看器相邻预热/胶片条）：静默，失败仅保持占位；默认高优先级 */
+export function prefetchAssetThumb(
+  assetId: number,
+  size: number,
+  priority: ThumbPriority = "high",
+): void {
+  void fetchAssetThumb(assetId, size, priority);
 }
 
 // --- thumbnailReady 事件分发（单次订阅 + 按需注册监听） ----------------------------
@@ -127,25 +153,32 @@ export interface AssetThumbState {
 }
 
 /**
- * 单资产缩略图（enabled=false 时不请求不订阅——raw/video 短路占位用）。
+ * 单资产缩略图（enabled=false 时不请求不订阅——video 短路占位用）。
  * 未命中先渲染占位，thumbnailReady 事件到达后自动重试一次。
+ * 注意：disabled 时 settled 保持 false（惰性启用档位刚翻转时，调用方的
+ * 「结算即降级」判断不会被 disabled 期的陈旧 settled=true 误触发）。
  */
-export function useAssetThumbUrl(assetId: number, size: number, enabled: boolean): AssetThumbState {
+export function useAssetThumbUrl(
+  assetId: number,
+  size: number,
+  enabled: boolean,
+  priority: ThumbPriority = "low",
+): AssetThumbState {
   const [state, setState] = useState<AssetThumbState>({ url: null, settled: false });
 
   useEffect(() => {
     if (!enabled) {
-      setState({ url: null, settled: true });
+      setState({ url: null, settled: false });
       return;
     }
     let cancelled = false;
     setState({ url: null, settled: false });
-    void fetchAssetThumb(assetId, size).then((result) => {
+    void fetchAssetThumb(assetId, size, priority).then((result) => {
       if (!cancelled) setState({ url: result, settled: true });
     });
     const off = onAssetEvent((event) => {
       if (event.type !== "thumbnailReady" || event.assetId !== assetId) return;
-      void fetchAssetThumb(assetId, size).then((result) => {
+      void fetchAssetThumb(assetId, size, priority).then((result) => {
         if (!cancelled) setState({ url: result, settled: true });
       });
     });
@@ -153,7 +186,7 @@ export function useAssetThumbUrl(assetId: number, size: number, enabled: boolean
       cancelled = true;
       off();
     };
-  }, [assetId, size, enabled]);
+  }, [assetId, size, enabled, priority]);
 
   return state;
 }

@@ -221,8 +221,6 @@ fn chrono_exif_format_reference() {
 // 拍摄参数扩展（M3.5）：FNumber/ExposureTime/ISO/FocalLength/LensModel + 宽高
 // ---------------------------------------------------------------------------
 
-use exif_lite::MetaLite as M;
-
 /// 通用 IFD 条目（payload = 实际数据字节；≤4 内联，否则进数据区）。
 struct Ent {
     tag: u16,
@@ -240,15 +238,27 @@ fn ascii_val(s: &str) -> Vec<u8> {
     v
 }
 
+/// 各类型单元素字节数（TIFF 类型 1..12）。
+fn unit_len(typ: u16) -> usize {
+    match typ {
+        3 | 8 => 2,
+        4 | 9 | 11 => 4,
+        5 | 10 | 12 => 8,
+        _ => 1, // 1/2/6/7 及未知
+    }
+}
+
 /// 小端 IFD 段编码：entries 升序；返回 (ifd 字节, 数据区字节)。
+/// count = payload.len() / unit_len(typ)（ASCII 按字节，数值类型按元素）。
 fn encode_ifd(entries: &[Ent], data_base: usize) -> (Vec<u8>, Vec<u8>) {
     let mut ifd = Vec::new();
     let mut data = Vec::new();
     ifd.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for e in entries {
+        let count = (e.payload.len() / unit_len(e.typ)).max(1);
         ifd.extend_from_slice(&e.tag.to_le_bytes());
         ifd.extend_from_slice(&e.typ.to_le_bytes());
-        ifd.extend_from_slice(&(e.payload.len() as u32).to_le_bytes());
+        ifd.extend_from_slice(&(count as u32).to_le_bytes());
         if e.payload.len() <= 4 {
             let mut inline = [0u8; 4];
             inline[..e.payload.len()].copy_from_slice(&e.payload);
@@ -416,7 +426,17 @@ fn rational_formatting_decimal_and_fraction() {
 #[test]
 fn missing_shooting_fields_tolerated() {
     // 只有 Make/Model：新字段全 None（PartialEq 对 default 的扩展字段）
-    let tiff = build_full_tiff(Some("TestCam"), Some("Model X"), None, None, None, None, None, None, None);
+    let tiff = build_full_tiff(
+        Some("TestCam"),
+        Some("Model X"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let meta = parse(&wrap_jpeg_with_sof(&tiff, None));
     assert_eq!(meta.width, None);
     assert_eq!(meta.height, None);
@@ -431,7 +451,17 @@ fn missing_shooting_fields_tolerated() {
 #[test]
 fn dimensions_from_sof2_progressive_and_from_tiff_tags() {
     // SOF2（渐进式，0xC2）
-    let tiff = build_full_tiff(Some("C"), Some("M"), None, None, None, None, None, None, None);
+    let tiff = build_full_tiff(
+        Some("C"),
+        Some("M"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let mut bytes = wrap_jpeg(tiff.as_slice());
     bytes.extend_from_slice(&[0xFF, 0xC2]);
     bytes.extend_from_slice(&17u16.to_be_bytes());
@@ -478,7 +508,17 @@ fn dimensions_from_embedded_preview_in_raw_head() {
 
 #[test]
 fn bad_truncated_sof_yields_none_not_panic() {
-    let tiff = build_full_tiff(Some("C"), Some("M"), None, None, None, None, None, None, None);
+    let tiff = build_full_tiff(
+        Some("C"),
+        Some("M"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     let mut bytes = wrap_jpeg_with_sof(&tiff, Some((100, 200)));
     // SOF 段被截断（声明长度超出缓冲）
     let cut = bytes.len() - 4;
@@ -486,22 +526,4 @@ fn bad_truncated_sof_yields_none_not_panic() {
     let meta = parse(&bytes);
     assert_eq!(meta.width, None);
     assert_eq!(meta.height, None);
-}
-
-
-#[test]
-fn debug_dump_parse_error() {
-    use std::io::Cursor;
-    let cases: Vec<(&str, Vec<u8>)> = vec![
-        ("make+model", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, None, None, None, None)),
-        ("make+model+dims", build_full_tiff(Some("Sony"), Some("A7R5"), Some((10, 20)), None, None, None, None, None, None)),
-        ("make+model+iso", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, Some(100), None, None, None)),
-        ("make+model+lens", build_full_tiff(Some("Sony"), Some("A7R5"), None, None, None, None, None, None, Some("L"))),
-        ("full", build_full_tiff(Some("Sony"), Some("A7R5"), None, Some((1, 250)), Some((28, 10)), Some(1600), Some("2026:06:28 15:30:00"), Some((85, 1)), Some("FE 85mm F1.8"))),
-    ];
-    for (name, bytes) in cases {
-        let parsed = exif::Reader::new().read_from_container(&mut Cursor::new(&bytes));
-        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        eprintln!("DEBUG {name}: len={} hex={} -> {:?}", bytes.len(), hex.join(" "), parsed.is_ok());
-    }
 }

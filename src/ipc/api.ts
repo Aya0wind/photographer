@@ -121,6 +121,8 @@ export type AppEvent =
   | { type: "cleanStarted"; jobId: number; count: number; bytes: number }
   | { type: "cleanFinished"; jobId: number; stats: CleanResultDto }
   | { type: "thumbnailReady"; assetId: number; size: number; path: string }
+  /** 索引任务启动恢复（库级后台：缩略图三档/EXIF 深提取/未来 AI）；pending=剩余项数 */
+  | { type: "indexTaskResumed"; pending: number }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -151,11 +153,13 @@ export interface AssetCameraCount {
 
 /** 搜索/过滤条件（camelCase 平铺进 assets_page 负载；全字段可省略） */
 export interface AssetFilters {
-  kind?: AssetKind;
-  /** "YYYY-MM-DD"（含当日，由后端解释） */
+  /** 类型集合（两档语义：照片=photo+raw，视频=video）；省略=全部。
+   *  M3 二轮起用 kinds 数组（后端 lane 同步加 Vec<AssetKind> 参数），替代单值 kind */
+  kinds?: AssetKind[];
+  /** RFC3339（后端按绝对时间归一比较）；前端由 "YYYY-MM-DD" 本地日界转 UTC */
   capturedAfter?: string;
   capturedBefore?: string;
-  /** 相机名子串（不区分大小写，后端解释） */
+  /** 相机名子串（不区分大小写，后端解释）；数组 OR 契约到位前传第一个 */
   camera?: string;
 }
 
@@ -464,6 +468,14 @@ export async function cameraList(): Promise<AssetCameraCount[]> {
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+/** 暂停索引任务（库级后台：缩略图三档/EXIF 深提取）；命令失败静默（后端接线前按钮无副作用） */
+export async function indexTaskPause(): Promise<void> {
+  try {
+    await ipc<void>("index_task_pause");
+  } catch {
   }
 }
 

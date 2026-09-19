@@ -120,6 +120,51 @@ pub struct AssetRow {
     /// 'external' 原地索引只读入册（文件不在库内，绝不可被清理/移动）。
     #[serde(default = "default_origin")]
     pub origin: String,
+    // —— 0004 起的可空列（存量资产全 None，不回填）——
+    /// 像素宽/高（EXIF SOF 或 TIFF 尺寸 tag）。
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// 感光度。
+    #[serde(default)]
+    pub iso: Option<u32>,
+    /// 光圈（展示态，如 "2.8"）。
+    #[serde(default)]
+    pub f_number: Option<String>,
+    /// 快门（展示态，如 "1/250"）。
+    #[serde(default)]
+    pub exposure_time: Option<String>,
+    /// 焦距 mm（展示态，如 "85"）。
+    #[serde(default)]
+    pub focal_length: Option<String>,
+    /// 镜头型号。
+    #[serde(default)]
+    pub lens: Option<String>,
+    /// RAW/JPG 配对（同目录同 stem 另一格式资产的 id；导入入册时双向写）。
+    #[serde(default)]
+    pub pair_asset_id: Option<i64>,
+    /// 缩略图状态镜像（index_tasks 的 O(1) 读路径）：
+    /// 0=pending 1=done 2=permanent-none（视频/不可解码/生成失败）。
+    #[serde(default)]
+    pub thumb_state: i32,
+}
+
+/// 索引任务行（index_tasks；导入/索引任务分离后的资产级待办）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexTaskRow {
+    pub id: i64,
+    /// "thumb" | "exif" | "ai"（通道路由：thumb/exif=CPU 全核；ai 预留
+    /// GPU(DirectML/ort) 通道，能力允许即上 GPU，失败自动落 CPU——见
+    /// crate::index 通道说明；v1 仅 CPU 落地）。
+    pub kind: String,
+    pub asset_id: i64,
+    /// "pending" | "running" | "done" | "failed"
+    pub state: String,
+    pub attempts: i64,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// assets.origin 默认值（导入入册）。
@@ -220,17 +265,21 @@ impl FromSql for AssetKind {
 /// 退化为 (k, id) 二元组比较（真机契约 2026-09-19：117 资产 5 NULL）。
 pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 
-/// 资产分页过滤（IPC 载荷，camelCase）。日期为 RFC3339 字符串，与
-/// captured_at 同格式（定宽 UTC）字典序比较即时间序；任一日期过滤出现时
+/// 资产分页过滤（IPC 载荷，camelCase）。日期为 RFC3339 字符串或纯日期
+/// `YYYY-MM-DD`（IPC 层归一定宽 UTC：纯日期 after=当日 00:00、before=当日
+/// 23:59:59.999 本地时区），字典序比较即时间序；任一日期过滤出现时
 /// NULL captured_at 的行被排除（无日期不落任何区间）。
+/// `kinds` 多选（SQL IN，空 = 不过滤；用户分类语义「照片」=photo+raw 由
+/// 前端传 [photo,raw]）；`cameras` 多选 OR（搜索页相机勾选）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AssetFilters {
-    pub kind: Option<AssetKind>,
+    /// 格式分类多选（空 = 不过滤）。
+    pub kinds: Vec<AssetKind>,
     pub captured_after: Option<String>,
     pub captured_before: Option<String>,
-    /// 相机型号精确匹配。
-    pub camera: Option<String>,
+    /// 相机型号多选（OR 语义；空 = 不过滤）。
+    pub cameras: Vec<String>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -243,6 +292,25 @@ pub struct AssetPageRow {
     pub kind: AssetKind,
     pub captured_at: Option<String>,
     pub camera: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub iso: Option<u32>,
+    pub f_number: Option<String>,
+    pub exposure_time: Option<String>,
+    pub focal_length: Option<String>,
+    pub lens: Option<String>,
+    /// RAW/JPG 配对资产 id（无配对为 None）。
+    pub pair_id: Option<i64>,
+    /// 缩略图状态（0 pending / 1 done / 2 permanent-none）。
+    pub thumb_state: i32,
+}
+
+/// 相机聚合行（搜索页相机勾选数据源）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraCountRow {
+    pub camera: String,
+    pub count: u64,
 }
 
 /// 日期分组行（画廊吸顶 + 跳转）。
@@ -450,30 +518,53 @@ impl Db {
         } else {
             (CAPTURED_NULL_HIGH.to_string(), 0)
         };
-        let mut stmt = self.0.prepare(
-            "SELECT id, path, filename, size, kind, captured_at, camera FROM \
+        // kinds/cameras 多选 → IN 占位串（全参数化，无值拼接；各上限 16）
+        let kinds: Vec<AssetKind> = filters.kinds.iter().take(16).copied().collect();
+        let cameras: Vec<String> = filters.cameras.iter().take(16).cloned().collect();
+        let kind_slots = (0..kinds.len())
+            .map(|i| format!("?{}", i + 9))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cam_slots = (0..cameras.len())
+            .map(|i| format!("?{}", i + 9 + kinds.len()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT id, path, filename, size, kind, captured_at, camera, \
+             width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state FROM \
              (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
-              COALESCE(a.captured_at, ?6) AS k FROM assets a) \
-             WHERE (?1 IS NULL OR kind = ?1) \
-               AND (?2 IS NULL OR camera = ?2) \
-               AND (?3 IS NULL OR captured_at >= ?3) \
-               AND (?4 IS NULL OR captured_at <= ?4) \
-               AND (?7 = 0 OR k < ?5 OR (k = ?5 AND id < ?7)) \
+              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
+              a.pair_asset_id, a.thumb_state, COALESCE(a.captured_at, ?5) AS k FROM assets a) \
+             WHERE (?1 = 0 OR kind IN ({kind_slots})) \
+               AND (?2 IS NULL OR captured_at >= ?2) \
+               AND (?3 IS NULL OR captured_at <= ?3) \
+               AND (?6 = 0 OR camera IN ({cam_slots})) \
+               AND (?4 = 0 OR k < ?7 OR (k = ?7 AND id < ?4)) \
              ORDER BY k DESC, id DESC LIMIT ?8",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                filters.kind,
-                filters.camera,
-                filters.captured_after,
-                filters.captured_before,
-                cursor_key,
-                CAPTURED_NULL_HIGH,
-                cursor_id,
-                limit
-            ],
-            map_asset_page,
-        )?;
+        ))?;
+        // 位置参数（?1..?8 固定段 + ?9.. kind 段 + 相机段；rusqlite 按序绑定）
+        use rusqlite::types::Value as V;
+        let mut params_vec = vec![
+            V::from(kinds.len() as i64),
+            filters
+                .captured_after
+                .clone()
+                .map(V::from)
+                .unwrap_or(V::Null),
+            filters
+                .captured_before
+                .clone()
+                .map(V::from)
+                .unwrap_or(V::Null),
+            V::from(cursor_id),
+            V::from(CAPTURED_NULL_HIGH.to_string()),
+            V::from(cameras.len() as i64),
+            V::from(cursor_key),
+            V::from(limit),
+        ];
+        params_vec.extend(kinds.iter().map(|k| V::from(k.as_db_str().to_string())));
+        params_vec.extend(cameras.iter().map(|c| V::from(c.as_str().to_string())));
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), map_asset_page)?;
         rows.collect()
     }
 
@@ -516,7 +607,8 @@ impl Db {
     pub fn asset_by_id(&self, id: i64) -> Result<Option<AssetRow>> {
         let mut stmt = self.0.prepare(
             "SELECT path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, \
-             source, created_at, origin FROM assets WHERE id = ?1",
+             source, created_at, origin, width, height, iso, f_number, exposure_time, \
+             focal_length, lens, pair_asset_id, thumb_state FROM assets WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
@@ -534,12 +626,27 @@ impl Db {
         Ok(count as u64)
     }
 
-    /// 资产入库：同路径重复导入整行覆盖。
+    /// 资产入库：同路径重复导入整行覆盖（REPLACE 换 id 时自动重指
+    /// pair_asset_id 既有引用），随后按 (同目录, 同 stem, 异扩展名) 双向
+    /// 写 RAW/JPG 配对（pair_asset_id）。
     pub fn insert_asset(&self, a: &AssetRow) -> Result<()> {
+        let old_id: Option<i64> = self
+            .0
+            .query_row("SELECT id FROM assets WHERE path = ?1", [&a.path], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
         self.0.execute(
             "INSERT OR REPLACE INTO assets \
              (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, \
-             created_at, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
+             lens, pair_asset_id, thumb_state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, ?18, ?19, ?20, ?21)",
             params![
                 a.path,
                 a.filename,
@@ -552,10 +659,193 @@ impl Db {
                 a.camera,
                 a.source,
                 a.created_at,
-                a.origin
+                a.origin,
+                a.width.map(|v| v as i64),
+                a.height.map(|v| v as i64),
+                a.iso.map(|v| v as i64),
+                a.f_number,
+                a.exposure_time,
+                a.focal_length,
+                a.lens,
+                a.pair_asset_id,
+                a.thumb_state,
             ],
         )?;
+        let id = self
+            .asset_id_by_path(&a.path)?
+            .ok_or(Error::QueryReturnedNoRows)?;
+        if let Some(old) = old_id {
+            if old != id {
+                self.0.execute(
+                    "UPDATE assets SET pair_asset_id = ?2 WHERE pair_asset_id = ?1 AND id != ?2",
+                    params![old, id],
+                )?;
+            }
+        }
+        self.refresh_asset_pair(id, &a.path)?;
+
+        // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video/
+        // other 直接永久占位（无缩略图可言）。REPLACE 旧资产行时其任务行
+        // 随 ON DELETE CASCADE 消失，这里只补新行。
+        if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
+            let now = now_rfc3339();
+            self.0.execute(
+                "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+                 VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
+                params![id, now],
+            )?;
+        } else {
+            self.0.execute(
+                "UPDATE assets SET thumb_state = 2 WHERE id = ?1",
+                params![id],
+            )?;
+        }
         Ok(())
+    }
+
+    /// 按 (同目录, 同 stem, 异扩展名) 找配对伙伴并双向写 pair_asset_id；
+    /// 多候选取 id 最小（先入册者）。目录前缀 = 原样前缀（含分隔符）匹配，
+    /// stem 大小写折叠（Windows 路径大小写不敏感）。
+    fn refresh_asset_pair(&self, id: i64, path: &str) -> Result<()> {
+        let (dir, stem, _ext) = split_dir_stem_ext(path);
+        if stem.is_empty() || dir.is_empty() {
+            return Ok(());
+        }
+        let prefix_chars = dir.chars().count(); // dir 已含尾分隔符
+        let stem_chars = stem.chars().count();
+        let mut stmt = self.0.prepare(
+            "SELECT id FROM assets WHERE id != ?1 \
+             AND substr(path, 1, ?2) = ?3 \
+             AND lower(substr(path, ?2 + 1, ?4 + 1)) = lower(?5) \
+             AND length(substr(path, ?2 + 1)) > ?4 + 1 \
+             ORDER BY id LIMIT 1",
+        )?;
+        let partner: Option<i64> = stmt
+            .query_row(
+                params![
+                    id,
+                    prefix_chars as i64,
+                    dir,
+                    stem_chars as i64,
+                    format!("{stem}.")
+                ],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        self.0.execute(
+            "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
+            params![id, partner],
+        )?;
+        if let Some(p) = partner {
+            self.0.execute(
+                "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
+                params![p, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    // —— 索引任务（index_tasks）——
+
+    /// 认领一条 pending 任务（原子置 running；多 worker 并发认领不重不漏，
+    /// SQLite 写锁串行化保证单行独占）。无待办返回 None。
+    pub fn claim_index_task(&self) -> Result<Option<IndexTaskRow>> {
+        let now = now_rfc3339();
+        let mut stmt = self.0.prepare(
+            "UPDATE index_tasks SET state = 'running', updated_at = ?1 \
+             WHERE id = (SELECT id FROM index_tasks WHERE state = 'pending' ORDER BY id LIMIT 1) \
+             RETURNING id, kind, asset_id, state, attempts, created_at, updated_at",
+        )?;
+        let mut rows = stmt.query_map(params![now], map_index_task)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 启动恢复：上次中断遗留的 running 复位为 pending，返回复位条数。
+    pub fn reclaim_running_index_tasks(&self) -> Result<usize> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', updated_at = ?1 WHERE state = 'running'",
+            params![now],
+        )
+    }
+
+    /// 待办统计（pending+running；启动恢复事件/前端提示数据源）。
+    pub fn pending_index_count(&self) -> Result<u64> {
+        let count: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending', 'running')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// 任务收尾：done（成果落 assets 列由调用方先写）或 failed（attempts+1，
+    /// 未达 3 次封顶回 pending 自动重试，达 3 次保持 failed——防坏死资产
+    /// 无限循环）。
+    pub fn finish_index_task(&self, id: i64, ok: bool) -> Result<()> {
+        let now = now_rfc3339();
+        if ok {
+            self.0.execute(
+                "UPDATE index_tasks SET state = 'done', updated_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )?;
+        } else {
+            self.0.execute(
+                "UPDATE index_tasks SET attempts = attempts + 1, updated_at = ?2, \
+                 state = CASE WHEN attempts + 1 >= 3 THEN 'failed' ELSE 'pending' END \
+                 WHERE id = ?1",
+                params![id, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 资产缩略图状态镜像更新（index worker 成果）。
+    pub fn set_thumb_state(&self, id: i64, state: i32) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET thumb_state = ?2 WHERE id = ?1",
+            params![id, state],
+        )?;
+        Ok(())
+    }
+
+    /// 按需兜底通道的快路径：资产 (path, thumb_state)；无资产返回 None。
+    pub fn thumb_info_by_id(&self, id: i64) -> Result<Option<(String, i32)>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT path, thumb_state FROM assets WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some((
+                row.get(0)?,
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0) as i32,
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    /// 相机聚合（搜索页相机勾选）：camera 非空分组计数，count 降序、
+    /// camera 升序稳定排序。
+    pub fn camera_list(&self) -> Result<Vec<CameraCountRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT camera, COUNT(*) FROM assets \
+             WHERE camera IS NOT NULL AND camera != '' \
+             GROUP BY camera ORDER BY COUNT(*) DESC, camera ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(CameraCountRow {
+                camera: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+            })
+        })?;
+        rows.collect()
     }
 
     /// 查重索引：同 (size, xxhash) 的既有资产 id（导入前快速预判）。
@@ -606,16 +896,6 @@ impl Db {
             .0
             .prepare("SELECT id FROM assets WHERE path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![path])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(row.get(0)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// 按 id 取资产绝对路径（缩略图按需管线等）；无则 None。
-    pub fn asset_path_by_id(&self, id: i64) -> Result<Option<String>> {
-        let mut stmt = self.0.prepare("SELECT path FROM assets WHERE id = ?1")?;
-        let mut rows = stmt.query(params![id])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
@@ -698,6 +978,15 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         kind: row.get(4)?,
         captured_at: row.get(5)?,
         camera: row.get(6)?,
+        width: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
+        height: row.get::<_, Option<i64>>(8)?.map(|v| v as u32),
+        iso: row.get::<_, Option<i64>>(9)?.map(|v| v as u32),
+        f_number: row.get(10)?,
+        exposure_time: row.get(11)?,
+        focal_length: row.get(12)?,
+        lens: row.get(13)?,
+        pair_id: row.get(14)?,
+        thumb_state: row.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
     })
 }
 
@@ -715,7 +1004,38 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
         source: row.get(9)?,
         created_at: row.get(10)?,
         origin: row.get(11)?,
+        width: row.get::<_, Option<i64>>(12)?.map(|v| v as u32),
+        height: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
+        iso: row.get::<_, Option<i64>>(14)?.map(|v| v as u32),
+        f_number: row.get(15)?,
+        exposure_time: row.get(16)?,
+        focal_length: row.get(17)?,
+        lens: row.get(18)?,
+        pair_asset_id: row.get(19)?,
+        thumb_state: row.get::<_, Option<i64>>(20)?.unwrap_or(0) as i32,
     })
+}
+
+fn map_index_task(row: &Row<'_>) -> Result<IndexTaskRow> {
+    Ok(IndexTaskRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        asset_id: row.get(2)?,
+        state: row.get(3)?,
+        attempts: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+/// 路径 → (目录含尾分隔符, stem, 扩展名含点)；无扩展名 stem = 文件名。
+fn split_dir_stem_ext(path: &str) -> (&str, &str, &str) {
+    let after_dir = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let dir = &path[..path.len() - after_dir.len()];
+    match after_dir.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (dir, stem, ext),
+        _ => (dir, after_dir, ""),
+    }
 }
 
 fn map_job_file(row: &Row<'_>) -> Result<JobFileRow> {

@@ -832,6 +832,15 @@ impl Engine {
             source: "imported".into(),
             created_at: rfc3339(Utc::now()),
             origin: "imported".into(),
+            width: copied.meta.width,
+            height: copied.meta.height,
+            iso: copied.meta.iso,
+            f_number: copied.meta.f_number.clone(),
+            exposure_time: copied.meta.exposure_time.clone(),
+            focal_length: copied.meta.focal_length.clone(),
+            lens: copied.meta.lens.clone(),
+            pair_asset_id: None,
+            thumb_state: 0,
         });
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2

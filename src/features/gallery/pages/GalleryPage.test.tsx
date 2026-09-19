@@ -170,7 +170,7 @@ describe("画廊：日期分组照片墙", () => {
     expect(headers[1]).toHaveTextContent("2 张");
   });
 
-  it("capturedAt 为 NULL 的资产归「未知日期」组且排在最前", async () => {
+  it("capturedAt 为 NULL 的资产归「未知日期」组且沉底（最新日期在前）", async () => {
     assetsPageMock.mockResolvedValue([
       makeAsset(1, "2026-01-05"),
       makeAsset(2, null),
@@ -180,13 +180,15 @@ describe("画廊：日期分组照片墙", () => {
 
     renderGallery();
 
-    // 未知组组头（专用 testid）在最前：先于任何已知日期组
     const unknown = await screen.findByTestId("gallery-group-unknown");
     expect(unknown).toHaveTextContent("未知日期");
     expect(unknown).toHaveTextContent("2 张");
     const known = await screen.findAllByTestId("gallery-group");
     expect(known).toHaveLength(2);
-    expect(unknown.compareDocumentPosition(known[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 未知组在所有已知日期组之后（最新日期第一眼可见）
+    expect(known[1].compareDocumentPosition(unknown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(known[0]).toHaveTextContent("2026年9月18日");
+    expect(known[1]).toHaveTextContent("2026年1月5日");
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(4);
   });
 
@@ -348,7 +350,7 @@ describe("画廊：日期 chips 条", () => {
     { date: null, count: 5, coverAssetId: 9 },
   ];
 
-  it("chips 来自 assetGroupDates，含「未知」chip 且排最前", async () => {
+  it("chips 来自 assetGroupDates，含「未知」chip 且沉底（最新日期在前）", async () => {
     assetsPageMock.mockResolvedValue(makePage(3, "2026-09-18", 3));
     groupDatesMock.mockResolvedValue(dates);
     renderGallery();
@@ -358,8 +360,8 @@ describe("画廊：日期 chips 条", () => {
     const unknown = screen.getByTestId("gallery-chip-unknown");
     expect(unknown).toHaveTextContent("未知");
     expect(unknown).toHaveTextContent("5");
-    // 未知 chip 在所有已知日期 chip 之前
-    expect(unknown.compareDocumentPosition(known[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 未知 chip 在所有已知日期 chip 之后
+    expect(known[1].compareDocumentPosition(unknown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(known[0]).toHaveAttribute("data-date", "2026-09-18");
     expect(known[1]).toHaveAttribute("data-date", "2026-09-17");
   });
@@ -526,5 +528,32 @@ describe("画廊工具条：居中与尺寸", () => {
 
     const tiles = await screen.findAllByTestId("gallery-tile");
     expect(tiles[0].style.width).toBe("120px");
+  });
+
+  it("键盘导航：→ 移动高亮（outline accent），Enter 打开查看器，Home 跳首格", async () => {
+    assetsPageMock.mockResolvedValue(makePage(3, "2026-09-18", 3));
+    renderGallery();
+
+    const scroll = await screen.findByTestId("gallery-grid-scroll");
+    const tiles = () => screen.getAllByTestId("gallery-tile");
+    // 初始无高亮
+    expect(tiles().every((t) => t.getAttribute("data-cursor") === "false")).toBe(true);
+
+    // 网格容器聚焦（tabIndex=0）后方向键移动高亮
+    fireEvent.keyDown(scroll, { key: "ArrowRight" });
+    const cursor1 = tiles().find((t) => t.getAttribute("data-cursor") === "true");
+    expect(cursor1).toHaveAttribute("data-asset-id", "2");
+    expect(cursor1?.className).toContain("outline-accent");
+
+    // Enter 打开高亮格对应资产
+    fireEvent.keyDown(scroll, { key: "Enter" });
+    expect(await screen.findByTestId("viewer-name")).toHaveTextContent("IMG_0002.JPG");
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("viewer")).not.toBeInTheDocument());
+
+    // Home 跳首格（keyset DESC：首个平铺资产是 id 3）
+    fireEvent.keyDown(scroll, { key: "Home" });
+    const cursor2 = tiles().find((t) => t.getAttribute("data-cursor") === "true");
+    expect(cursor2).toHaveAttribute("data-asset-id", "3");
   });
 });

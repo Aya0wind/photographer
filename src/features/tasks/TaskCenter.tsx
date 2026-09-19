@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import type { JobRow, JobStatus } from "@/ipc/api";
+import { indexTaskPause } from "@/ipc/api";
 import { formatBytes, formatDateTime, formatDuration, formatSpeed } from "@/lib/format";
 import { useImportStore, type ActiveJob, type JobSummary } from "@/stores/importStore";
 import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
@@ -55,6 +56,40 @@ function FileNameTicker({ text }: { text: string }) {
         )}
       </span>
     </div>
+  );
+}
+
+/** 索引任务卡（v1 简版）：启动恢复事件带出待处理项数 + 暂停按钮。
+ *  索引=库级后台任务（缩略图三档/EXIF 深提取/未来 AI），退出重开自动恢复。 */
+function IndexTaskCard() {
+  const { t } = useTranslation();
+  const indexPending = useImportStore((s) => s.indexPending);
+  if (indexPending === null) return null;
+  return (
+    <section
+      className="flex items-center justify-between gap-3 rounded-lg border border-edge bg-surface px-4 py-3"
+      data-testid="task-index"
+    >
+      <div className="flex min-w-0 items-center gap-2.5">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-panel text-text-muted">
+          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3.5" y="4.5" width="9" height="8" rx="1.5" />
+            <path d="M5.5 4.5V3h5v1.5M5.5 8h5M5.5 10.5h3" />
+          </svg>
+        </span>
+        <span className="min-w-0 truncate text-sm text-text-primary">
+          {t("tasks.index.pending", { count: indexPending })}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={() => void indexTaskPause()}
+        className="shrink-0 rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+        data-testid="task-index-pause"
+      >
+        {t("tasks.index.pause")}
+      </button>
+    </section>
   );
 }
 
@@ -449,6 +484,7 @@ export default function TaskCenter() {
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         <div className="flex flex-col gap-2">
+          <IndexTaskCard />
           <CurrentJobCard job={current} />
           <HistoryTable onOpenClean={setCleanJobId} />
         </div>

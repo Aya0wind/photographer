@@ -5,7 +5,7 @@ import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
-import SearchPage, { quickRange } from "./SearchPage";
+import SearchPage, { dateToRfc3339, quickRange } from "./SearchPage";
 import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
 import { assetThumbGet, assetsPage, cameraList, type AssetDto } from "@/ipc/api";
 
@@ -104,8 +104,8 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // 组合条件：RAW + 日期范围 + 相机勾选
-    fireEvent.click(screen.getByTestId("search-kind-raw"));
+    // 组合条件：照片档（=photo+raw）+ 日期范围（RFC3339 本地日界）+ 相机勾选
+    fireEvent.click(screen.getByTestId("search-kind-photo"));
     fireEvent.change(screen.getByTestId("search-from"), { target: { value: "2026-01-01" } });
     fireEvent.change(screen.getByTestId("search-to"), { target: { value: "2026-02-01" } });
     fireEvent.click(screen.getByTestId("search-camera-button"));
@@ -122,16 +122,42 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
 
     // fake timers 下 waitFor 不推进：advanceTimersByTimeAsync 已同刷微任务，直接断言
     expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
-      kind: "raw",
-      capturedAfter: "2026-01-01",
-      capturedBefore: "2026-02-01",
+      kinds: ["photo", "raw"],
+      capturedAfter: dateToRfc3339("2026-01-01"),
+      capturedBefore: dateToRfc3339("2026-02-01", true),
       camera: "Canon EOS R5",
     });
     // 防抖后只有两查询：初始 + 组合条件（中间态不发起）
     expect(assetsPageMock).toHaveBeenCalledTimes(2);
   });
 
-  it("日期快捷段：近7天/去年 → 负载端点（本地时区 YYYY-MM-DD）", async () => {
+  it("类型两档映射 kinds：照片=photo+raw、视频=video、全部=不传", async () => {
+    vi.useFakeTimers();
+    renderSearch();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    fireEvent.click(screen.getByTestId("search-kind-photo"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["photo", "raw"] });
+
+    fireEvent.click(screen.getByTestId("search-kind-video"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["video"] });
+
+    fireEvent.click(screen.getByTestId("search-kind-all"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {});
+  });
+
+  it("日期快捷段：负载为 RFC3339 端点（本地日界转 UTC，后端 parse_from_rfc3339 可解析）", async () => {
     vi.useFakeTimers();
     renderSearch();
     await act(async () => {
@@ -144,8 +170,8 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     });
     const [r7From, r7To] = quickRange("recent7");
     expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
-      capturedAfter: r7From,
-      capturedBefore: r7To,
+      capturedAfter: dateToRfc3339(r7From),
+      capturedBefore: dateToRfc3339(r7To, true),
     });
 
     fireEvent.click(screen.getByTestId("search-quick-lastYear"));
@@ -154,8 +180,8 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     });
     const [lyFrom, lyTo] = quickRange("lastYear");
     expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
-      capturedAfter: lyFrom,
-      capturedBefore: lyTo,
+      capturedAfter: dateToRfc3339(lyFrom),
+      capturedBefore: dateToRfc3339(lyTo, true),
     });
   });
 });
@@ -193,8 +219,8 @@ describe("搜索：300ms 防抖", () => {
     expect(assetsPageMock).toHaveBeenCalledTimes(2);
     const [thisFrom, thisTo] = quickRange("thisYear");
     expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
-      capturedAfter: thisFrom,
-      capturedBefore: thisTo,
+      capturedAfter: dateToRfc3339(thisFrom),
+      capturedBefore: dateToRfc3339(thisTo, true),
     });
     // 无任何中间态查询
     const withDate = assetsPageMock.mock.calls.filter(

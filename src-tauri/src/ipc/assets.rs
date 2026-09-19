@@ -1,4 +1,5 @@
-//! assets 命令（M3 画廊数据源）：keyset 分页 / 日期分组 / 资产详情。
+//! assets 命令（M3 画廊数据源）：keyset 分页 / 日期分组 / 资产详情 /
+//! 相机聚合。
 //!
 //! 排序契约（真机核对 2026-09-19）：NULL captured_at 最先，随后拍摄时间
 //! 降序、id 倒序 tiebreak——db 层用 COALESCE 高哨兵归一成单键。DB 查询
@@ -25,6 +26,18 @@ pub struct AssetDto {
     pub captured_at: Option<String>,
     pub camera: Option<String>,
     pub size_bytes: u64,
+    // —— 拍摄参数（0004 起新导入有值，存量全 null）——
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub iso: Option<u32>,
+    pub f_number: Option<String>,
+    pub exposure_time: Option<String>,
+    pub focal_length: Option<String>,
+    pub lens: Option<String>,
+    /// RAW/JPG 配对资产 id（无配对 null）。
+    pub pair_id: Option<i64>,
+    /// 缩略图状态 0 pending / 1 done / 2 permanent-none。
+    pub thumb_state: i32,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -47,12 +60,32 @@ pub struct AssetDetailDto {
     pub duplicate_count: u64,
 }
 
-/// RFC3339 过滤值归一：解析后转与库内 captured_at 同构的定宽 UTC 字符串
-/// （库内为 `to_rfc3339_opts(Millis, true)`；带时区偏移的入参字典序不可比）。
-fn normalize_rfc3339(value: &str, field: &str) -> Result<String, String> {
+/// 日期过滤值归一：转与库内 captured_at 同构的定宽 UTC 字符串
+/// （库内为 `to_rfc3339_opts(Millis, true)`；带时区偏移的入参转 UTC 瞬时）。
+/// **纯日期 `YYYY-MM-DD`**：按本地时区解释——起始（after）= 当日
+/// 00:00:00.000，结束（before）= 当日 23:59:59.999（含当日全 天）。
+fn normalize_date_filter(value: &str, field: &str, end_of_day: bool) -> Result<String, String> {
+    let value = value.trim();
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        use chrono::TimeZone;
+        let naive = if end_of_day {
+            date.and_hms_micro_opt(23, 59, 59, 999_000)
+        } else {
+            date.and_hms_micro_opt(0, 0, 0, 0)
+        }
+        .ok_or_else(|| format!("无效的{field}日期过滤: {value}"))?;
+        let dt = chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .ok_or_else(|| format!("无效的{field}日期过滤: {value}"))?;
+        // 关键：转 UTC 定宽（保留 +08:00 偏移会让字典序比较错位）
+        return Ok(dt
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .map_err(|_| format!("无效的{field}日期过滤（需 RFC3339）: {value}"))
+        .map_err(|_| format!("无效的{field}日期过滤（需 RFC3339 或 YYYY-MM-DD）: {value}"))
 }
 
 /// keyset 分页：after_id = 上一页末行 id（0 = 第一页；行已删按第一页）。
@@ -65,10 +98,10 @@ pub fn fetch_assets_page(
 ) -> Result<Vec<AssetDto>, String> {
     let mut filters = filters;
     if let Some(after) = filters.captured_after.take() {
-        filters.captured_after = Some(normalize_rfc3339(&after, "起始")?);
+        filters.captured_after = Some(normalize_date_filter(&after, "起始", false)?);
     }
     if let Some(before) = filters.captured_before.take() {
-        filters.captured_before = Some(normalize_rfc3339(&before, "结束")?);
+        filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
     }
     let db = super::active_library_db(state)?;
     let rows = db
@@ -84,6 +117,15 @@ pub fn fetch_assets_page(
             captured_at: r.captured_at,
             camera: r.camera,
             size_bytes: r.size,
+            width: r.width,
+            height: r.height,
+            iso: r.iso,
+            f_number: r.f_number,
+            exposure_time: r.exposure_time,
+            focal_length: r.focal_length,
+            lens: r.lens,
+            pair_id: r.pair_id,
+            thumb_state: r.thumb_state,
         })
         .collect())
 }
@@ -154,4 +196,32 @@ pub async fn asset_detail(
 ) -> Result<Option<AssetDetailDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| fetch_asset_detail(state, id)).await
+}
+
+/// 相机聚合 DTO（搜索页相机勾选）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraCountDto {
+    pub camera: String,
+    pub count: u64,
+}
+
+/// 相机聚合（camera 非空分组计数，count 降序；搜索页勾选数据源）。
+pub fn fetch_camera_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
+    let db = super::active_library_db(state)?;
+    let rows = db.camera_list().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CameraCountDto {
+            camera: r.camera,
+            count: r.count,
+        })
+        .collect())
+}
+
+/// 相机聚合（DB 查询 → 后台线程）。
+#[tauri::command]
+pub async fn camera_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_camera_list).await
 }

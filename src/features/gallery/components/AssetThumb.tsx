@@ -12,20 +12,22 @@ import { useAssetThumbUrl } from "../lib/thumbPipeline";
  * - img onLoad 150ms 淡入；解码失败（缓存文件丢失等）回退占位
  */
 
-/** kind 占位图形：photo=图片框(accent) / raw=扩展名大字+RAW 徽标(sky) / video=胶片(violet) */
+/** kind 占位图形：photo=图片框(accent) / raw=扩展名徽标(sky) / video=胶片(violet)。
+ *  视觉降噪：图形缩小沉到左下角 1/3 区域（大字降一档），其余留白给骨架动画。
+ *  容器底色由外层提供（加载中=sp-skeleton 骨架 / 永久无图=静态 panel），此层保持透明。 */
 function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
   const dot = name.lastIndexOf(".");
   const ext = dot >= 0 ? name.slice(dot + 1).toUpperCase() : "";
   if (kind === "raw") {
     return (
       <div
-        className="flex h-full w-full flex-col items-center justify-center gap-1 bg-panel/60"
+        className="flex h-full w-full flex-col items-start justify-end gap-0.5 p-1.5"
         data-testid="thumb-raw"
       >
-        <span className="font-mono text-base font-bold tracking-wide text-sky-400">
+        <span className="font-mono text-sm font-bold tracking-wide text-sky-400">
           {ext || "RAW"}
         </span>
-        <span className="rounded bg-bg px-1.5 py-0.5 text-[10px] font-medium text-text-secondary">
+        <span className="rounded bg-bg px-1 py-0.5 text-[9px] font-medium leading-none text-text-secondary">
           RAW
         </span>
       </div>
@@ -34,13 +36,13 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
   if (kind === "video") {
     return (
       <div
-        className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-panel/60"
+        className="flex h-full w-full flex-col items-start justify-end gap-0.5 p-1.5"
         data-testid="thumb-video"
       >
         <svg
           viewBox="0 0 24 24"
-          width="28"
-          height="28"
+          width="18"
+          height="18"
           fill="none"
           stroke="currentColor"
           strokeWidth="1.4"
@@ -52,19 +54,19 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
           <rect x="3" y="5" width="18" height="14" rx="2" />
           <path d="M10 9.5l5 2.5-5 2.5v-5z" />
         </svg>
-        {ext && <span className="font-mono text-[10px] text-text-muted">{ext}</span>}
+        {ext && <span className="font-mono text-[9px] text-text-muted">{ext}</span>}
       </div>
     );
   }
   return (
     <div
-      className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-panel/60"
+      className="flex h-full w-full flex-col items-start justify-end gap-0.5 p-1.5"
       data-testid="thumb-photo"
     >
       <svg
         viewBox="0 0 24 24"
-        width="28"
-        height="28"
+        width="18"
+        height="18"
         fill="none"
         stroke="currentColor"
         strokeWidth="1.4"
@@ -77,7 +79,7 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
         <circle cx="9" cy="10" r="1.8" />
         <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
       </svg>
-      {ext && <span className="font-mono text-[10px] text-text-muted">{ext}</span>}
+      {ext && <span className="font-mono text-[9px] text-text-muted">{ext}</span>}
     </div>
   );
 }
@@ -89,12 +91,27 @@ export interface AssetThumbProps {
   alt?: string;
   /** 容器额外类（尺寸/圆角由调用方给） */
   className?: string;
+  /** 加载中是否用骨架动画（默认开）；胶片条等密集小格传 false——几十个一起闪很难看 */
+  skeleton?: boolean;
+  /** 无图占位文案（如胶片条序号）；给定时替代 kind 图形（静态迷你占位） */
+  miniLabel?: string;
+  /** 请求优先级：查看器主图用 high（插队），网格/胶片条默认 low */
+  priority?: "high" | "low";
   testId?: string;
 }
 
-export default function AssetThumb({ asset, size, alt, className = "", testId }: AssetThumbProps) {
+export default function AssetThumb({
+  asset,
+  size,
+  alt,
+  className = "",
+  skeleton = true,
+  miniLabel,
+  priority = "low",
+  testId,
+}: AssetThumbProps) {
   // RAW 走后端内嵌预览提取（rawloader），与 photo 同管线；video 恒占位（不请求）
-  const { url } = useAssetThumbUrl(asset.id, size, asset.kind !== "video");
+  const { url, settled } = useAssetThumbUrl(asset.id, size, asset.kind !== "video", priority);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -103,11 +120,16 @@ export default function AssetThumb({ asset, size, alt, className = "", testId }:
   }, [url]);
 
   const showImg = url !== null && !failed;
+  // 加载中（请求在途 / 缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
+  // video 不进管线（settled 恒 false）：静态占位，不吃骨架。
+  const loading =
+    skeleton && asset.kind !== "video" && (!settled || (showImg && !loaded));
   return (
     <div
-      className={`relative overflow-hidden bg-panel/40 ${className}`}
+      className={`relative overflow-hidden ${loading ? "sp-skeleton" : "bg-panel/40"} ${className}`}
       data-testid={testId}
       data-kind={asset.kind}
+      data-loading={loading}
     >
       {showImg ? (
         <img
@@ -122,6 +144,10 @@ export default function AssetThumb({ asset, size, alt, className = "", testId }:
             loaded ? "opacity-100" : "opacity-0"
           }`}
         />
+      ) : miniLabel !== undefined ? (
+        <div className="flex h-full w-full items-center justify-center" data-testid="thumb-mini">
+          <span className="font-mono text-[10px] tabular-nums text-text-muted">{miniLabel}</span>
+        </div>
       ) : (
         <KindPlaceholder kind={asset.kind} name={asset.name} />
       )}

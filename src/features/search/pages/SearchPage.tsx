@@ -33,12 +33,19 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 const PAGE_LIMIT = 100;
 const DEBOUNCE_MS = 300;
 
-const KIND_OPTIONS: ReadonlyArray<{ value: "all" | AssetKind; labelKey: string }> = [
+/** 类型两档（M3 二轮）：RAW 归入「照片」档（RAW 也是照片），不再单列 */
+const KIND_OPTIONS: ReadonlyArray<{ value: "all" | "photo" | "video"; labelKey: string }> = [
   { value: "all", labelKey: "search.kind.all" },
   { value: "photo", labelKey: "search.kind.photo" },
-  { value: "raw", labelKey: "search.kind.raw" },
   { value: "video", labelKey: "search.kind.video" },
 ];
+
+/** UI 档位 → filters.kinds（照片=photo+raw；视频=video；全部=不传） */
+function kindsOf(kind: "all" | "photo" | "video"): AssetKind[] | undefined {
+  if (kind === "photo") return ["photo", "raw"];
+  if (kind === "video") return ["video"];
+  return undefined;
+}
 
 type QuickRangeKey = "recent7" | "recent30" | "thisYear" | "lastYear";
 
@@ -64,22 +71,62 @@ export function quickRange(key: QuickRangeKey, now = new Date()): [string, strin
   return [`${today.getFullYear() - 1}-01-01`, `${today.getFullYear() - 1}-12-31`];
 }
 
+/**
+ * "YYYY-MM-DD" → RFC3339（后端 parse_from_rfc3339 归一为 UTC 绝对时间比较）。
+ * 起点取本地当日 00:00:00.000，终点取本地当日 23:59:59.999（含当日，本地日界）。
+ * 日期不合法返回 undefined（不进 filters，避免后端 400/Err 导致整页空结果）。
+ */
+export function dateToRfc3339(dateOnly: string, endOfDay = false): string | undefined {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateOnly);
+  if (!m) return undefined;
+  const date = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0,
+  );
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
+}
+
 /** 条件 → AssetFilters（全空=无过滤；相机多选 OR——单值契约期只传第一个） */
-function buildFilters(kind: string, from: string, to: string, cameras: string[]): AssetFilters {
+function buildFilters(
+  kind: "all" | "photo" | "video",
+  from: string,
+  to: string,
+  cameras: string[],
+): AssetFilters {
   const filters: AssetFilters = {};
-  if (kind !== "all") filters.kind = kind as AssetKind;
-  if (from) filters.capturedAfter = from;
-  if (to) filters.capturedBefore = to;
+  const kinds = kindsOf(kind);
+  if (kinds) filters.kinds = kinds;
+  // 日期转 RFC3339：后端按绝对时间比较；无效日期不传（空条件语义）
+  const after = dateToRfc3339(from, false);
+  if (from && after) filters.capturedAfter = after;
+  const before = dateToRfc3339(to, true);
+  if (to && before) filters.capturedBefore = before;
   if (cameras.length > 0) filters.camera = cameras[0];
   return filters;
 }
 
 /** 序列化键（防抖用，原始值拼接） ↔ 条件互转 */
-function serializeInputs(kind: string, from: string, to: string, cameras: string[]): string {
+function serializeInputs(
+  kind: "all" | "photo" | "video",
+  from: string,
+  to: string,
+  cameras: string[],
+): string {
   return JSON.stringify([kind, from, to, cameras.join("\u0000")]);
 }
 function parseFilters(key: string): AssetFilters {
-  const [kind, from, to, cameraBlob] = JSON.parse(key) as [string, string, string, string];
+  const [kind, from, to, cameraBlob] = JSON.parse(key) as [
+    "all" | "photo" | "video",
+    string,
+    string,
+    string,
+  ];
   const cameras = cameraBlob === "" ? [] : cameraBlob.split("\u0000");
   return buildFilters(kind, from, to, cameras);
 }
@@ -87,7 +134,7 @@ function parseFilters(key: string): AssetFilters {
 export default function SearchPage() {
   const { t } = useTranslation();
 
-  const [kind, setKind] = useState<"all" | AssetKind>("all");
+  const [kind, setKind] = useState<"all" | "photo" | "video">("all");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [cameras, setCameras] = useState<string[]>([]);

@@ -19,10 +19,10 @@ export default function DateChipBar({
   onJump: (date: string | null) => void;
 }) {
   const { t } = useTranslation();
-  // 防御排序：未知组恒在最前，其余日期降序（正常后端已排好，不信任到达顺序）
+  // 防御排序：日期降序（最新在前），未知组沉底（正常后端已排好，不信任到达顺序）
   const ordered = [...dates].sort((a, b) => {
-    if (a.date === null) return b.date === null ? 0 : -1;
-    if (b.date === null) return 1;
+    if (a.date === null) return b.date === null ? 0 : 1;
+    if (b.date === null) return -1;
     return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
   });
 

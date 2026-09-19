@@ -8,6 +8,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0001_INIT,
     MIGRATION_0002_PLAN_AND_LOOSE,
     MIGRATION_0003_ORIGIN_AND_DST2,
+    MIGRATION_0004_SHOOTING_PARAMS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -85,4 +86,35 @@ const MIGRATION_0003_ORIGIN_AND_DST2: &str = r#"
 ALTER TABLE assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported';
 
 ALTER TABLE job_files ADD COLUMN dst2 TEXT NOT NULL DEFAULT '';
+"#;
+
+/// 0004（M3.5）：assets 增加拍摄参数列（全 nullable：存量资产不回填，
+/// 新导入经 EXIF 深提取自动有值）+ pair_asset_id（RAW/JPG 配对——同目录
+/// 同 stem 另一格式资产的 id，导入入册时双向写，画廊合并展示）+
+/// thumb_state（缩略图状态镜像：0=pending 1=done 2=permanent-none）+
+/// index_tasks（索引任务表：导入/索引任务分离，资产级待办持久化，
+/// 重启自动恢复；kind 路由通道——thumb/exif 走 CPU 全核通道，
+/// ai 预留 GPU（DirectML/ort）通道，见 crate::index 通道说明）。
+const MIGRATION_0004_SHOOTING_PARAMS: &str = r#"
+ALTER TABLE assets ADD COLUMN width        INTEGER;
+ALTER TABLE assets ADD COLUMN height       INTEGER;
+ALTER TABLE assets ADD COLUMN iso          INTEGER;
+ALTER TABLE assets ADD COLUMN f_number     TEXT;
+ALTER TABLE assets ADD COLUMN exposure_time TEXT;
+ALTER TABLE assets ADD COLUMN focal_length  TEXT;
+ALTER TABLE assets ADD COLUMN lens         TEXT;
+ALTER TABLE assets ADD COLUMN pair_asset_id INTEGER;
+ALTER TABLE assets ADD COLUMN thumb_state INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE index_tasks (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL CHECK (kind IN ('thumb', 'exif', 'ai')),
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+
+CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 "#;

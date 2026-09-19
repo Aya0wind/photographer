@@ -3,8 +3,9 @@ import type { AssetDto } from "@/ipc/api";
 /**
  * 画廊/搜索共用的日期分组（M3）：
  * capturedAt（ISO 8601）→ 本地日期组 "YYYY-MM-DD"；EXIF 缺失（capturedAt=null）
- * 归「未知日期」组且组序最前（比最早日期还前）。组序不信任 assets_page 的到达顺序，
- * 分组后统一排序：未知组 → 日期降序（ISO 日期字符串字典序即时间序）。
+ * 归「未知日期」组且组序沉底（默认最新在前——用户第一眼看到最新照片）。
+ * 组序不信任 assets_page 的到达顺序，分组后统一排序：日期降序 → 未知组最后
+ * （ISO 日期字符串字典序即时间序；chips 条同序）。
  */
 
 /** 未知日期组键（EXIF 缺失资产的归组；组头/chips 中显示为「未知日期」） */
@@ -39,8 +40,8 @@ export function groupAssetsByDate(assets: AssetDto[]): AssetGroup[] {
     group.assets.push(asset);
   }
   keys.sort((a, b) => {
-    if (a === UNKNOWN_GROUP_KEY) return b === UNKNOWN_GROUP_KEY ? 0 : -1;
-    if (b === UNKNOWN_GROUP_KEY) return 1;
+    if (a === UNKNOWN_GROUP_KEY) return 1; // 未知组沉底
+    if (b === UNKNOWN_GROUP_KEY) return -1;
     return a < b ? 1 : a > b ? -1 : 0;
   });
   return keys.map((key) => map.get(key) as AssetGroup);

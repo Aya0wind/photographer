@@ -29,6 +29,10 @@ function ImportProbe() {
   return <div data-testid="import-probe" />;
 }
 
+function SearchProbe() {
+  return <div data-testid="search-probe" />;
+}
+
 function TasksProbe() {
   return <div data-testid="tasks-probe" />;
 }
@@ -52,6 +56,7 @@ function renderMenu(initialPath = "/gallery") {
         <MenuBar />
         <Routes>
           <Route path="/gallery" element={<GalleryProbe />} />
+          <Route path="/search" element={<SearchProbe />} />
           <Route path="/import" element={<ImportProbe />} />
           <Route path="/tasks" element={<TasksProbe />} />
           <Route path="/settings" element={<SettingsProbe />} />
@@ -271,5 +276,43 @@ describe("新建库对话框（与设置页共用）", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("new-library-dialog")).not.toBeInTheDocument(),
     );
+  });
+});
+
+describe("菜单快捷键提示与全局导航绑定（巡检 #9）", () => {
+  it("查看菜单项右侧显示 Ctrl+1..5 快捷键位；退出项显示 Alt+F4 位", async () => {
+    const user = userEvent.setup();
+    renderMenu();
+    await user.click(screen.getByTestId("menu-button-view"));
+    expect(screen.getByTestId("menu-item-gallery")).toHaveTextContent("Ctrl+1");
+    expect(screen.getByTestId("menu-item-search")).toHaveTextContent("Ctrl+2");
+    expect(screen.getByTestId("menu-item-tasks")).toHaveTextContent("Ctrl+4");
+    expect(screen.getByTestId("menu-item-settings")).toHaveTextContent("Ctrl+5");
+
+    await user.click(screen.getByTestId("menu-button-file"));
+    expect(screen.getByTestId("menu-item-quit")).toHaveTextContent("Alt+F4");
+  });
+
+  it("全局 Ctrl+1..5 导航五个主页面；无 Ctrl 的数字键不导航", async () => {
+    renderMenu("/gallery");
+
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument(); // 已在画廊
+
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    expect(await screen.findByTestId("search-probe")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(await screen.findByTestId("import-probe")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "4", ctrlKey: true });
+    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "5", ctrlKey: true });
+    expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();
+
+    // 无 Ctrl：不导航（仍停在 settings）
+    fireEvent.keyDown(window, { key: "1" });
+    expect(screen.getByTestId("settings-probe")).toBeInTheDocument();
   });
 });

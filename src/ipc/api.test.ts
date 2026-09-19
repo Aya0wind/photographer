@@ -262,9 +262,9 @@ describe("M3 画廊命令", () => {
 
     await expect(
       assetsPage(7, 100, {
-        kind: "raw",
-        capturedAfter: "2026-01-01",
-        capturedBefore: "2026-02-01",
+        kinds: ["photo", "raw"],
+        capturedAfter: "2026-01-01T00:00:00.000Z",
+        capturedBefore: "2026-02-01T23:59:59.999Z",
         camera: "Canon",
       }),
     ).resolves.toEqual([ASSET]);
@@ -272,9 +272,9 @@ describe("M3 画廊命令", () => {
       afterId: 7,
       limit: 100,
       filters: {
-        kind: "raw",
-        capturedAfter: "2026-01-01",
-        capturedBefore: "2026-02-01",
+        kinds: ["photo", "raw"],
+        capturedAfter: "2026-01-01T00:00:00.000Z",
+        capturedBefore: "2026-02-01T23:59:59.999Z",
         camera: "Canon",
       },
     });

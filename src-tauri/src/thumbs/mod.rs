@@ -32,13 +32,18 @@ use xxhash_rust::xxh64::Xxh64;
 
 /// 可解码扩展名（小写；image crate 位图格式集）。
 pub const DECODABLE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
-/// 支持的缩略图档位。
-pub const SIZE_TIERS: &[u16] = &[256, 512];
+/// RAW 扩展名（内嵌 JPEG 预览提取；提取失败回退前端占位）。
+pub const RAW_EXTS: &[&str] = &[
+    "nef", "arw", "cr2", "cr3", "orf", "rw2", "dng", "raf", "pef", "srw",
+];
+/// 支持的缩略图档位（2048 供查看器原图回退链中继；缓存无上限 v1 接受，
+/// M8 做 LRU——2048 档单张约 1-2MB）。
+pub const SIZE_TIERS: &[u16] = &[256, 512, 2048];
 /// 解码超时（61MP 解码 1-2s 可接受；>10s 视为失败放弃）。
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
-/// 后台解码并发上限（CPU 密集）：动态 = min(6, 可用核数/2)，下限 1
-///（turbojpeg 缩放解码后单张成本大降，允许更高并行吃满多核；
-/// 8 核 → 4，12 核 → 6，4 核 → 2）。
+/// 后台解码并发上限（用户定案 2026-09-19：索引任务吃满硬件）：
+/// 物理核心数直通（turbojpeg SIMD 缩放解码近线性扩展；与导入/索引任务
+/// 共享本池——导入优先/主图兜底优先由池的先到先得天然实现，不超发）。
 #[doc(hidden)]
 #[allow(dead_code)]
 pub fn permit_count_for_test(cores: usize) -> u32 {
@@ -46,7 +51,7 @@ pub fn permit_count_for_test(cores: usize) -> u32 {
 }
 
 fn permit_count(cores: usize) -> u32 {
-    (cores as u32 / 2).clamp(1, 6)
+    cores.max(1) as u32
 }
 
 fn desired_permits() -> u32 {
@@ -121,8 +126,25 @@ fn service() -> &'static ThumbSvc {
 pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let size = snap_size(size);
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
-    if !DECODABLE_EXTS.contains(&ext.as_str()) {
-        return None; // RAW/视频/未知格式 v1 不支持
+    if !DECODABLE_EXTS.contains(&ext.as_str()) && !is_raw_ext(&ext) {
+        return None; // 视频等永久不支持
+    }
+    if is_raw_ext(&ext) {
+        // RAW：内嵌预览提取路径（同一缓存规则/同一超时与并发许可）
+        let meta = fs::metadata(src).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let mtime = meta.modified().ok()?;
+        let cache = cache_path(db_dir, src, size, mtime);
+        if cache.exists() {
+            return Some(cache.to_string_lossy().into_owned());
+        }
+        let svc = service();
+        let cell = svc.cell_for(&cache);
+        let result = cell.get_or_init(|| generate(&cache, src, size));
+        svc.remove(&cache);
+        return result.as_ref().map(|p| p.to_string_lossy().into_owned());
     }
     let meta = fs::metadata(src).ok()?;
     if !meta.is_file() {
@@ -142,11 +164,17 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     result.as_ref().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// 源是否在可解码集内（扩展名预检；入队前的廉价否决）。
+/// 源是否可出缩略图（位图直解或 RAW 内嵌预览提取；入队前的廉价否决）。
 pub fn is_decodable(src: &Path) -> bool {
-    src.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| DECODABLE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+    src.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        let e = e.to_ascii_lowercase();
+        DECODABLE_EXTS.contains(&e.as_str()) || RAW_EXTS.contains(&e.as_str())
+    })
+}
+
+/// 扩展名是否为 RAW（内嵌预览路径）。
+fn is_raw_ext(ext: &str) -> bool {
+    RAW_EXTS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
 /// 缓存命中探测（不生成、不阻塞）：命中返回缓存文件绝对路径，未命中/
@@ -219,7 +247,12 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
 /// 拒收的怪 JPEG 兜底）；其余格式（PNG/GIF/BMP/TIFF/WEBP）走 image crate。
 fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
-    let thumb: image::RgbImage = if matches!(ext.as_str(), "jpg" | "jpeg") {
+    let thumb: image::RgbImage = if is_raw_ext(&ext) {
+        // RAW：提取内嵌 JPEG 预览 → turbojpeg 缩放解码（复用 JPEG 快路径）
+        let preview = raw_preview_jpeg(src)?;
+        jpeg_scaled_bytes(&preview, size)
+            .unwrap_or_else(|| full_decode_bytes_resize(&preview, size))
+    } else if matches!(ext.as_str(), "jpg" | "jpeg") {
         jpeg_scaled(src, size).unwrap_or_else(|| full_decode_resize(src, size))
     } else {
         full_decode_resize(src, size)
@@ -246,7 +279,11 @@ fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
 /// DCT 域直出），再 thumbnail 精确拟合到目标尺寸。
 fn jpeg_scaled(src: &Path, target: u16) -> Option<image::RgbImage> {
     let data = fs::read(src).ok()?;
-    let header = turbojpeg::read_header(&data).ok()?;
+    jpeg_scaled_bytes(&data, target)
+}
+
+fn jpeg_scaled_bytes(data: &[u8], target: u16) -> Option<image::RgbImage> {
+    let header = turbojpeg::read_header(data).ok()?;
     let factor =
         turbojpeg::ScalingFactor::new(pick_jpeg_scale(header.width, header.height, target), 8);
     let width = factor.scale(header.width);
@@ -261,7 +298,7 @@ fn jpeg_scaled(src: &Path, target: u16) -> Option<image::RgbImage> {
         height,
         format: turbojpeg::PixelFormat::RGB,
     };
-    decompressor.decompress(&data, image.as_deref_mut()).ok()?;
+    decompressor.decompress(data, image.as_deref_mut()).ok()?;
     let scaled = image::RgbImage::from_raw(width as u32, height as u32, pixels)?;
     TURBO_DECODES.fetch_add(1, Ordering::SeqCst);
     Some(
@@ -323,6 +360,100 @@ fn write_atomic(cache: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = cache.with_extension("jpg.tmp");
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, cache)
+}
+
+/// 全量解码字节源（RAW 预览 JPEG 的慢路径兜底）。
+fn full_decode_bytes_resize(data: &[u8], size: u16) -> image::RgbImage {
+    match image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.decode().ok())
+    {
+        Some(img) => img.thumbnail(u32::from(size), u32::from(size)).to_rgb8(),
+        None => image::RgbImage::new(0, 0),
+    }
+}
+
+/// RAW 内嵌预览提取上限（预览 JPEG 通常 <5MB；留足余量）。
+const RAW_SCAN_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// 在 RAW 文件字节里定位第一段「结构完整」的内嵌 JPEG：
+/// SOI(FFD8FF) → 段链走到 SOS → 熵编码后首个 FFD9 即 EOI（熵数据中
+/// FF00 转义保证 FFD9 不会出现在内部）。找到 SOF（尺寸>0）才算有效。
+/// 找不到/结构坏返回 None（前端占位兜底）。
+pub fn raw_preview_jpeg(src: &Path) -> Option<Vec<u8>> {
+    let meta = fs::metadata(src).ok()?;
+    if meta.len() > RAW_SCAN_LIMIT {
+        return None;
+    }
+    let data = fs::read(src).ok()?;
+    let mut from = 0usize;
+    while let Some(rel) = data[from..]
+        .windows(3)
+        .position(|w| w == [0xFF, 0xD8, 0xFF])
+    {
+        let soi = from + rel;
+        if let Some(end) = jpeg_segment_end(&data[soi..]) {
+            return Some(data[soi..soi + end].to_vec());
+        }
+        from = soi + 2;
+        if from + 3 > data.len() {
+            return None;
+        }
+    }
+    None
+}
+
+/// 从 SOI 起走段链：返回含 EOI 的完整 JPEG 长度；结构非法返回 None。
+fn jpeg_segment_end(buf: &[u8]) -> Option<usize> {
+    let mut i = 2usize; // 跳过 SOI
+    for _ in 0..256 {
+        while i + 1 < buf.len() && buf[i] == 0xFF && buf[i + 1] == 0xFF {
+            i += 1; // 填充
+        }
+        if i + 2 > buf.len() || buf[i] != 0xFF {
+            return None;
+        }
+        let marker = buf[i + 1];
+        match marker {
+            0x01 | 0xD0..=0xD7 => i += 2,
+            0xD8 => return None,        // 嵌套 SOI：坏结构
+            0xD9 => return Some(i + 2), // EOI
+            0xDA => {
+                // SOS：其后熵编码内不会有 FFD9（FF00 转义），线性找 EOI
+                let mut j = i + 2 + seg_len_u16(buf, i)?;
+                while j + 1 < buf.len() {
+                    if buf[j] == 0xFF && buf[j + 1] == 0xD9 {
+                        return Some(j + 2);
+                    }
+                    j += 1;
+                }
+                return None;
+            }
+            0xC4 | 0xC8 | 0xCC => i += 2 + seg_len_u16(buf, i)?,
+            0xC0..=0xCF => {
+                // SOF：粗验尺寸>0
+                let len = seg_len_u16(buf, i)?;
+                if len < 7 || i + 2 + len > buf.len() {
+                    return None;
+                }
+                let h = u16::from_be_bytes([buf[i + 5], buf[i + 6]]);
+                let w = u16::from_be_bytes([buf[i + 7], buf[i + 8]]);
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                i += 2 + len;
+            }
+            _ => i += 2 + seg_len_u16(buf, i)?,
+        }
+    }
+    None
+}
+
+fn seg_len_u16(buf: &[u8], i: usize) -> Option<usize> {
+    let hi = *buf.get(i + 2)?;
+    let lo = *buf.get(i + 3)?;
+    Some(usize::from(u16::from_be_bytes([hi, lo])))
 }
 
 // ---------------------------------------------------------------------------

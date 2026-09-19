@@ -179,15 +179,22 @@ pub fn fetch_asset_thumb(
         .ok_or("尚未创建库")?;
     let db_dir = PathBuf::from(&library.db_dir);
     let db = super::open_library_db(&db_dir)?;
-    let Some(path) = db.asset_path_by_id(asset_id).map_err(|e| e.to_string())? else {
+    // 状态分流（thumb_state 列 O(1) 判断）：1=缓存命中直返（文件被清则
+    // 落入兜底入队重生成）；2=永久占位（视频/不可解码/三次失败）不排队；
+    // 0=pending 按需兜底（插队生成，索引 worker 之外的快速通道）。
+    let Some((path, thumb_state)) = db.thumb_info_by_id(asset_id).map_err(|e| e.to_string())?
+    else {
         return Ok(None); // 资产不存在：null（不入队）
     };
     let src = PathBuf::from(path);
     if let Some(hit) = crate::thumbs::cached(&db_dir, &src, size) {
+        if thumb_state != 2 {
+            let _ = db.set_thumb_state(asset_id, 1);
+        }
         return Ok(Some(hit)); // 命中直返，零事件零入队
     }
-    if !crate::thumbs::is_decodable(&src) {
-        return Ok(None); // RAW/视频 v1 不可解码：null（不入队，无谓的失败回执）
+    if thumb_state == 2 || !crate::thumbs::is_decodable(&src) {
+        return Ok(None); // 永久占位/不可解码：null（不入队，无谓的失败回执）
     }
     state.thumb_queue.push(ThumbJob {
         asset_id,

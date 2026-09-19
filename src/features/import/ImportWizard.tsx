@@ -462,14 +462,18 @@ function FileTile({
   // M2 起 img 一律读后端小图（~30KB），不再解码原图；onLoad 淡入，onError/15s 超时静默保持占位
   const [src, setSrc] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [pending, setPending] = useState(false);
   const settledRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     if (absPath === null) return;
+    setPending(true);
     void fetchThumbUrl(absPath).then((url) => {
       // null=无缩略图（RAW/视频/失败）：保持占位
-      if (cancelled || url === null) return;
+      if (cancelled) return;
+      setPending(false);
+      if (url === null) return;
       setSrc(url);
     });
     return () => {
@@ -493,6 +497,8 @@ function FileTile({
   }
 
   const showImg = src !== null;
+  // 加载中（请求在途 / 小图在解码）= 骨架动画；永久无图或已展示 = 静态底
+  const thumbLoading = pending || (showImg && !loaded);
   return (
     <div
       className={`group relative shrink-0 cursor-pointer select-none overflow-hidden rounded-md border-2 bg-surface transition-colors ${
@@ -506,7 +512,7 @@ function FileTile({
       data-kind={file.kind}
     >
       <div
-        className="relative w-full overflow-hidden bg-panel/40"
+        className={`relative w-full overflow-hidden ${thumbLoading ? "sp-skeleton" : "bg-panel/40"}`}
         style={{ height: size.thumbH }}
       >
         {showImg ? (

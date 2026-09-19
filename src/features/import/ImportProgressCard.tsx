@@ -282,6 +282,12 @@ function FinishedCardView({ card }: { card: FinishedCard }) {
             })}
           </p>
         )}
+        {card.kind === "done" && (
+          // 索引任务后台进行中（缩略图三档/EXIF 深提取），不阻塞浏览；条数后续由事件携带
+          <p className="mt-1 text-[10px] text-text-muted" data-testid="import-card-indexing">
+            {t("importCard.indexingNote")}
+          </p>
+        )}
         <p className="mt-1.5 text-[10px] text-text-muted">{t("importCard.viewSummary")}</p>
       </button>
 

@@ -3,7 +3,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -73,6 +73,15 @@ fn skip_imported_deducts_loose_matched_assets() {
         source: "imported".into(),
         created_at: mtime.to_rfc3339_opts(SecondsFormat::Millis, true),
         origin: "imported".into(),
+        width: None,
+        height: None,
+        iso: None,
+        f_number: None,
+        exposure_time: None,
+        focal_length: None,
+        lens: None,
+        pair_asset_id: None,
+        thumb_state: 0,
     })
     .unwrap();
 

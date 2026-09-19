@@ -34,7 +34,9 @@ pub struct MetaLite {
 
 /// 从文件头部字节（建议 ≥1MB）解析 EXIF-lite。永不返回 Err，也绝不 panic。
 pub fn parse(head: &[u8]) -> MetaLite {
-    let exif = exif::Reader::new().read_from_container(&mut Cursor::new(head)).ok();
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(head))
+        .ok();
     let dims = jpeg_sof_dimensions(head).or_else(|| tiff_ifd0_dimensions(head));
     let Some(exif) = exif else {
         // EXIF 容器失败（纯 JPEG 无 APP1 / 损坏）：宽高仍可从 SOF 提取
@@ -148,10 +150,7 @@ fn format_focal_length(r: (u32, u32)) -> Option<String> {
 /// 任一步骤越界/结构非法即换下一候选；全失败返回 None。绝不 panic。
 fn jpeg_sof_dimensions(head: &[u8]) -> Option<(u32, u32)> {
     let mut from = 0usize;
-    while let Some(rel) = head[from..]
-        .windows(2)
-        .position(|w| w == [0xFF, 0xD8])
-    {
+    while let Some(rel) = head[from..].windows(2).position(|w| w == [0xFF, 0xD8]) {
         let soi = from + rel;
         if let Some(dims) = walk_jpeg_markers(head, soi + 2) {
             return Some(dims);
@@ -179,7 +178,7 @@ fn walk_jpeg_markers(head: &[u8], mut i: usize) -> Option<(u32, u32)> {
         let marker = head[i + 1];
         match marker {
             0x01 | 0xD0..=0xD7 => i += 2, // TEM/RST：无负载
-            0xD8 | 0xD9 | 0xDA => return None, // SOI 重叠/EOI/SOS：无 SOF
+            0xD8..=0xDA => return None,   // SOI 重叠/EOI/SOS：无 SOF
             0xC0..=0xCF => {
                 if matches!(marker, 0xC4 | 0xC8 | 0xCC) {
                     i += 2 + seg_len(head, i)?; // DHT/JPG/DAC：非帧段
@@ -227,7 +226,12 @@ fn tiff_ifd0_dimensions(head: &[u8]) -> Option<(u32, u32)> {
         })
     };
     let u32_at = |i: usize| -> Option<u32> {
-        let b = [head.get(i)?, head.get(i + 1)?, head.get(i + 2)?, head.get(i + 3)?];
+        let b = [
+            head.get(i)?,
+            head.get(i + 1)?,
+            head.get(i + 2)?,
+            head.get(i + 3)?,
+        ];
         let b = [*b[0], *b[1], *b[2], *b[3]];
         Some(if le {
             u32::from_le_bytes(b)

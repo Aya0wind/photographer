@@ -521,10 +521,22 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
     let controls = engine.controls();
+    // 索引任务钩子：engine.run 收尾后全核跑待办（job 不等它）
+    let index_db_dir = PathBuf::from(
+        &state
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .active_library()
+            .expect("库已在")
+            .db_dir,
+    );
+    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
+            crate::index::kick(index_db_dir, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id,
@@ -562,10 +574,21 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     let controls = engine.controls();
+    let index_db_dir = PathBuf::from(
+        &state
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .active_library()
+            .expect("库已在")
+            .db_dir,
+    );
+    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
             engine.run();
+            crate::index::kick(index_db_dir, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id,
@@ -675,10 +698,21 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     let controls = engine.controls();
+    let index_db_dir = PathBuf::from(
+        &state
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .active_library()
+            .expect("库已在")
+            .db_dir,
+    );
+    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
     let handle = state
         .supervisor
-        .spawn("import", format!("job-{job_id}"), move |_| {
+        .spawn("import", format!("job-{new_id}"), move |_| {
             engine.run();
+            crate::index::kick(index_db_dir, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id: new_id,

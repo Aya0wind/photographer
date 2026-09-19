@@ -6,7 +6,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::path::{Path, PathBuf};
@@ -48,6 +48,15 @@ fn build_library_dir(db_dir: &Path) -> db::Db {
             source: "imported".into(),
             created_at: "2026-09-01T00:00:00.000Z".into(),
             origin: "imported".into(),
+            width: None,
+            height: None,
+            iso: None,
+            f_number: None,
+            exposure_time: None,
+            focal_length: None,
+            lens: None,
+            pair_asset_id: None,
+            thumb_state: 0,
         })
         .unwrap();
     std::fs::create_dir_all(db_dir.join("thumbs").join("256")).unwrap();
@@ -305,6 +314,15 @@ fn build_photo_library(old_root: &Path, db_dir: &Path) {
         source: "imported".into(),
         created_at: "2026-09-01T00:00:00.000Z".into(),
         origin: origin.into(),
+        width: None,
+        height: None,
+        iso: None,
+        f_number: None,
+        exposure_time: None,
+        focal_length: None,
+        lens: None,
+        pair_asset_id: None,
+        thumb_state: 0,
     };
     database
         .insert_asset(&row(
