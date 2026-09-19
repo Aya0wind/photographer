@@ -14,10 +14,11 @@
 //! 解码复用 `crate::thumbs`（turbojpeg 管线 + 自带超时/许可），worker 数
 //! 固定 2 = 队列生成并发 ≤2。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
+use serde::Serialize;
 use tauri::State;
 
 use super::{run_blocking, SharedState};
@@ -44,6 +45,9 @@ struct QueueState {
     pending: VecDeque<ThumbJob>,
     /// 待处理 + 处理中的 (asset,size) 键（去抖）。
     queued: HashSet<(i64, u16)>,
+    /// (asset,size) 连续失败计数（成功清零；≥3 视为永久失败不再入队，
+    /// 防止「事件→重试→再入队→再失败」的低频死循环）。
+    failures: HashMap<(i64, u16), u32>,
     stop: bool,
 }
 
@@ -71,6 +75,7 @@ impl ThumbQueue {
                 state: Mutex::new(QueueState {
                     pending: VecDeque::new(),
                     queued: HashSet::new(),
+                    failures: HashMap::new(),
                     stop: false,
                 }),
                 ready: Condvar::new(),
@@ -79,12 +84,16 @@ impl ThumbQueue {
         }
     }
 
-    /// 入队：去抖键命中返回 true（不重复入队）；队满丢弃返回 false。
+    /// 入队：去抖键命中返回 true（不重复入队）；连续失败 ≥3 次返回 false
+    /// （调用方报 Unavailable）；队满丢弃返回 false。
     pub fn push(&self, job: ThumbJob) -> bool {
         let key = (job.asset_id, job.size);
         let mut state = self.inner.state.lock().expect("thumb queue mutex poisoned");
         if state.queued.contains(&key) {
             return true; // 去抖：已有同键任务在途
+        }
+        if state.failures.get(&key).copied().unwrap_or(0) >= 3 {
+            return false; // 永久失败：不再入队
         }
         if state.pending.len() >= QUEUE_CAPACITY {
             return false; // 溢出丢弃（前端重试）
@@ -94,6 +103,16 @@ impl ThumbQueue {
         drop(state);
         self.inner.ready.notify_one();
         true
+    }
+
+    /// 生成结果记账：成功清失败计数；失败 +1（达 3 后不再入队）。
+    fn record_result(inner: &QueueInner, key: (i64, u16), ok: bool) {
+        let mut state = inner.state.lock().expect("thumb queue mutex poisoned");
+        if ok {
+            state.failures.remove(&key);
+        } else {
+            *state.failures.entry(key).or_insert(0) += 1;
+        }
     }
 
     /// worker 取任务：队列空则阻塞等待；停工返回 None。
@@ -129,6 +148,7 @@ impl ThumbQueue {
                 while let Some(job) = ThumbQueue::pop(&inner) {
                     // 复用 turbojpeg 管线：阻塞生成（自带并发许可 + 10s 超时）
                     let path = crate::thumbs::thumb_file(&job.db_dir, &job.src, job.size);
+                    ThumbQueue::record_result(&inner, (job.asset_id, job.size), path.is_some());
                     bus.publish(AppEvent::ThumbnailReady {
                         asset_id: job.asset_id,
                         size: crate::thumbs::snap_size(job.size),
@@ -162,14 +182,28 @@ impl Drop for ThumbQueue {
     }
 }
 
+/// 按需缩略图结果三态（前端「排队中≠失败」的关键区分）：
+/// - Ready：缓存命中，附绝对路径
+/// - Pending：已入队后台生成，`ThumbnailReady` 事件到达后前端重试即 Ready
+/// - Unavailable：永久不可用（资产不存在 / thumb_state=2 / 不可解码）
+///   ——此前统一返回 null，前端把「排队中」误判成「无内嵌预览」而过早
+///   启用 rawler 显影兜底（真机 NAS ARW 219ms 即回落显影的根因）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ThumbOutcome {
+    Ready { path: String },
+    Pending,
+    Unavailable,
+}
+
 /// 按需缩略图（画廊主通道）：命中返回缓存绝对路径；未命中入队后台生成
-/// （完成后 `ThumbnailReady` 事件回执），本轮返回 None；RAW/视频/资产
-/// 不存在也返回 None（不入队）。
+/// （完成后 `ThumbnailReady` 事件回执）；RAW/视频/资产不存在返回 Unavailable
+/// （不入队）。
 pub fn fetch_asset_thumb(
     state: &super::AppState,
     asset_id: i64,
     size: u16,
-) -> Result<Option<String>, String> {
+) -> Result<ThumbOutcome, String> {
     let library = state
         .settings
         .lock()
@@ -184,46 +218,50 @@ pub fn fetch_asset_thumb(
     // 0=pending 按需兜底（插队生成，索引 worker 之外的快速通道）。
     let Some((path, thumb_state)) = db.thumb_info_by_id(asset_id).map_err(|e| e.to_string())?
     else {
-        return Ok(None); // 资产不存在：null（不入队）
+        return Ok(ThumbOutcome::Unavailable); // 资产不存在：不入队
     };
     let src = PathBuf::from(path);
     if let Some(hit) = crate::thumbs::cached(&db_dir, &src, size) {
         if thumb_state != 2 {
             let _ = db.set_thumb_state(asset_id, 1);
         }
-        return Ok(Some(hit)); // 命中直返，零事件零入队
+        return Ok(ThumbOutcome::Ready { path: hit }); // 命中直返，零事件零入队
     }
     if thumb_state == 2 || !crate::thumbs::is_decodable(&src) {
-        return Ok(None); // 永久占位/不可解码：null（不入队，无谓的失败回执）
+        return Ok(ThumbOutcome::Unavailable); // 永久占位/不可解码：不入队
     }
-    state.thumb_queue.push(ThumbJob {
+    let queued = state.thumb_queue.push(ThumbJob {
         asset_id,
         size,
         src,
         db_dir,
     });
-    state
-        .thumb_queue
-        .ensure_workers(&state.supervisor, &state.bus);
-    Ok(None)
+    if queued {
+        state
+            .thumb_queue
+            .ensure_workers(&state.supervisor, &state.bus);
+        Ok(ThumbOutcome::Pending)
+    } else {
+        // 队满丢弃：没有回执事件，语义上仍是「生成中」（前端滚动重试自愈）
+        Ok(ThumbOutcome::Pending)
+    }
 }
 
-/// 取缩略图（画廊主通道，asset_id 语义）。解码/IO → 后台线程；错误与
-/// 未命中统一归一 null（契约 `String | null`，不向前端抛 reject）。
-/// 命名 asset_thumb_get 与路径语义的 thumb_get_by_path 区分（前端契约）。
+/// 取缩略图（画廊主通道，asset_id 语义）。解码/IO → 后台线程；错误归一
+/// Unavailable，契约三态 `ThumbOutcome`。命名 asset_thumb_get 与路径语义的
+/// thumb_get_by_path 区分（前端契约）。
 #[tauri::command]
 pub async fn asset_thumb_get(
     state: State<'_, SharedState>,
     asset_id: i64,
     size: u16,
-) -> Result<Option<String>, String> {
+) -> Result<ThumbOutcome, String> {
     let shared = state.inner().clone();
     Ok(run_blocking(shared, move |state| {
         fetch_asset_thumb(state, asset_id, size)
     })
     .await
-    .ok()
-    .flatten())
+    .unwrap_or(ThumbOutcome::Unavailable))
 }
 
 /// 取缩略图（路径语义，旧通道：导入进度卡等已知路径场景）。同步生成，

@@ -99,7 +99,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   detailMock.mockReset().mockResolvedValue(DETAIL);
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
 });
@@ -127,7 +127,9 @@ describe("查看器：打开与图片来源", () => {
   it("photo 原图加载失败（TIF 等）→ 中间档 2048 回退", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     thumbMock.mockImplementation(async (_id: number, size: number) =>
-      size === 2048 ? "C:\\thumbs\\2048\\img1.jpg" : null,
+      size === 2048
+        ? { status: "ready", path: "C:\\thumbs\\2048\\img1.jpg" }
+        : { status: "pending" },
     );
     renderViewer();
 
@@ -146,7 +148,7 @@ describe("查看器：打开与图片来源", () => {
   it("中间档确定无图（后端无 2048 档）→ 自动降 512 档", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     thumbMock.mockImplementation(async (_id: number, size: number) =>
-      size === 2048 ? null : "C:\\thumbs\\512\\img1.jpg",
+      size === 2048 ? { status: "unavailable" } : { status: "ready", path: "C:\\thumbs\\512\\img1.jpg" },
     );
     renderViewer();
 
@@ -178,15 +180,15 @@ describe("查看器：打开与图片来源", () => {
   it("RAW 先显示 512 内嵌 JPEG，内嵌全幅直出就绪后替换变清晰（Windows 照片同款）", async () => {
     const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    let resolveEmbed: ((path: string) => void) | undefined;
+    let resolveEmbed: ((r: { status: "ready"; path: string }) => void) | undefined;
     thumbMock.mockImplementation((id, size) => {
       if (size === 6000) {
         // 内嵌全幅直出档（>2048 为后端语义标记）在途
-        return new Promise<string>((resolve) => {
+        return new Promise<{ status: "ready"; path: string }>((resolve) => {
           if (id === 7) resolveEmbed = resolve;
         });
       }
-      return Promise.resolve("C:\\thumbs\\512\\img7.jpg");
+      return Promise.resolve({ status: "ready", path: "C:\\thumbs\\512\\img7.jpg" });
     });
     renderViewer(rawAssets);
 
@@ -201,7 +203,9 @@ describe("查看器：打开与图片来源", () => {
     expect(thumbMock).not.toHaveBeenCalledWith(7, 2048);
 
     // 内嵌全幅就绪：叠加替换变清晰。
-    act(() => resolveEmbed?.("C:\\thumbs\\raw-embed-v1\\img7.jpg"));
+    act(() =>
+      resolveEmbed?.({ status: "ready", path: "C:\\thumbs\\raw-embed-v1\\img7.jpg" }),
+    );
     await waitFor(() => {
       expect(screen.getByTestId("viewer-img")).toHaveAttribute(
         "src",
@@ -214,15 +218,16 @@ describe("查看器：打开与图片来源", () => {
   it("RAW 无内嵌预览（embed 结算 null）→ 才回落 2048 rawler 显影兜底", async () => {
     const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    let resolveFull: ((path: string) => void) | undefined;
+    let resolveFull: ((r: { status: "ready"; path: string }) => void) | undefined;
     thumbMock.mockImplementation((id, size) => {
-      if (size === 6000) return Promise.resolve(null); // 无内嵌预览
+      // 无内嵌预览：必须是「确定失败」而非排队中，显影兜底才应启用
+      if (size === 6000) return Promise.resolve({ status: "unavailable" });
       if (size === 2048) {
-        return new Promise<string>((resolve) => {
+        return new Promise<{ status: "ready"; path: string }>((resolve) => {
           if (id === 7) resolveFull = resolve;
         });
       }
-      return Promise.resolve("C:\\thumbs\\512\\img7.jpg");
+      return Promise.resolve({ status: "ready", path: "C:\\thumbs\\512\\img7.jpg" });
     });
     renderViewer(rawAssets);
 
@@ -231,7 +236,9 @@ describe("查看器：打开与图片来源", () => {
     // embed 失败结算后显影兜底才被请求
     await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(7, 2048));
 
-    act(() => resolveFull?.("C:\\thumbs\\2048-raw-full-v1\\img7.jpg"));
+    act(() =>
+      resolveFull?.({ status: "ready", path: "C:\\thumbs\\2048-raw-full-v1\\img7.jpg" }),
+    );
     await waitFor(() => {
       expect(screen.getByTestId("viewer-img")).toHaveAttribute(
         "src",
@@ -242,6 +249,7 @@ describe("查看器：打开与图片来源", () => {
   });
 
   it("RAW 无缩略图（后端恒 None 的兜底）：永久占位不崩溃", async () => {
+    thumbMock.mockResolvedValue({ status: "unavailable" });
     renderViewer([makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")]);
     await screen.findByTestId("viewer-placeholder");
     expect(document.querySelector("img[data-testid='viewer-img']")).toBeNull();
@@ -633,7 +641,7 @@ describe("查看器：交叉淡入与胶片条", () => {
     vi.stubGlobal("Image", FakeImage);
     try {
       convertMock.mockImplementation((p: string) => `asset://${p}`);
-      thumbMock.mockResolvedValue(null);
+      thumbMock.mockResolvedValue({ status: "pending" });
       renderViewer(GROUP_ASSETS, 1);
 
       await waitFor(() => expect(created.length).toBeGreaterThanOrEqual(2));

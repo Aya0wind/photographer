@@ -95,7 +95,7 @@ beforeEach(() => {
   vi.useRealTimers();
   localStorage.clear();
   assetsPageMock.mockReset().mockResolvedValue([]);
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   cameraListMock.mockReset().mockResolvedValue([]);
   vi.mocked(searchSemantic).mockReset();

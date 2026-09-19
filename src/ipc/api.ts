@@ -651,15 +651,33 @@ export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
   }
 }
 
+/** asset_thumb_get 三态结果（「排队中≠永久失败」的关键契约） */
+export type ThumbGetResult =
+  | { status: "ready"; path: string }
+  | { status: "pending" }
+  | { status: "unavailable" };
+
 /** 库内资产缩略图（按 assetId 取后端缓存文件绝对路径，调用方自行 convertFileSrc）。
  *  与向导的 thumbGet（按源文件路径，导入前预览用）是两个命令：本命令为 asset_thumb_get。
- *  size 为期望边长（画廊网格 240 / 查看器大图 1280），后端 snap 到 256/512 档就近返回；
- *  RAW（NEF/ARW 等）与视频恒返回 null——调用方按 kind 短路为永久占位，不进管线。 */
-export async function assetThumbGet(assetId: number, size: number): Promise<string | null> {
+ *  size 为期望边长（画廊网格 240 / 查看器大图 1280；RAW 传 >2048 = 内嵌全幅直出档）。
+ *  三态：ready=缓存命中（附路径）；pending=已入队后台生成（thumbnailReady 事件后
+ *  重试即 ready）；unavailable=永久不可用（资产不存在 / thumb_state=2 / 不可解码 /
+ *  连续失败 ≥3 次）。 */
+export async function assetThumbGet(assetId: number, size: number): Promise<ThumbGetResult> {
   try {
-    return await ipc<string | null>("asset_thumb_get", { assetId, size });
+    const raw = await ipc<unknown>("asset_thumb_get", { assetId, size });
+    if (raw !== null && typeof raw === "object") {
+      const r = raw as { status?: unknown; path?: unknown };
+      if (r.status === "ready" && typeof r.path === "string") {
+        return { status: "ready", path: r.path };
+      }
+      if (r.status === "pending" || r.status === "unavailable") {
+        return { status: r.status };
+      }
+    }
+    return { status: "unavailable" };
   } catch {
-    return null;
+    return { status: "unavailable" };
   }
 }
 

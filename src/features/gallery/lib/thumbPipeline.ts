@@ -1,19 +1,23 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { assetThumbGet, subscribeAppEvents, type AppEvent } from "@/ipc/api";
+import {
+  assetThumbGet,
+  subscribeAppEvents,
+  type AppEvent,
+  type ThumbGetResult,
+} from "@/ipc/api";
 
 /**
  * 库内资产缩略图管线（画廊网格/搜索结果/查看器胶片条共用，M3）：
  *
- * - 请求链：assetThumbGet(assetId, size) → 缓存文件绝对路径 → convertFileSrc；
- *   size 传名义边长（网格 240 / 查看器 1280），后端 snap 到 256/512 档就近返回。
- * - RAW（NEF/ARW 等）与视频 assetThumbGet 恒 null——调用方按 kind==="photo" 短路，
- *   非 photo 直接永久占位（不请求、不订阅重试，避免无效请求风暴）。
- * - 会话缓存 `${assetId}:${size}` → asset URL（null=未命中）；in-flight 去重；
+ * - 请求链：assetThumbGet(assetId, size) 三态契约——ready=缓存命中直返路径；
+ *   pending=已入队后台生成（thumbnailReady 事件到达后重试）；unavailable=
+ *   永久不可用（此前 null 一刀切，前端把「排队中」误判成失败而过早降级，
+ *   真机 RAW 查看器 219ms 即回落显影兜底的根因，2026-09-20 契约改造）。
+ * - 会话缓存 `${assetId}:${size}` → asset URL；in-flight 去重；
  *   信号量并发 ≤6（与后端缩略图生成对齐，快速滚动时不打满 IPC）。
- * - 未命中 → 占位；`thumbnailReady` 事件到达（后台补齐缓存）后仅当前挂载的
- *   （=虚拟化后视口内的）tile 重试——订阅者天然被虚拟化限定在视口。
+ * - pending → 骨架等待事件；unavailable → 调用方按「确定无图」占位。
  */
 
 const CONCURRENCY = 6;
@@ -57,42 +61,61 @@ export function warmImageDecode(url: string | null | undefined): void {
   img.src = url;
 }
 
-/** 会话缓存：`${assetId}:${size}` → asset URL（null=未命中，等待 thumbnailReady） */
-const thumbCache = new Map<string, string | null>();
+/** 会话缓存：`${assetId}:${size}` → asset URL（仅缓存成功结果；pending/
+ *  unavailable 不落缓存——事件重试与占位由 hook 状态机管理） */
+const thumbCache = new Map<string, string>();
 /** in-flight 去重：同 key 并发共享同一 Promise */
-const thumbInflight = new Map<string, Promise<string | null>>();
+const thumbInflight = new Map<string, Promise<ThumbResult>>();
 
-/** 缩略图文件路径 → asset 协议 URL；非 Tauri 环境抛错/空结果回退 null（占位） */
-function toAssetUrl(path: string): string | null {
+/** 缩略图文件路径 → asset 协议 URL；非 Tauri 环境抛错回退 unavailable */
+function toAssetUrl(path: string): ThumbGetResult {
   try {
-    return convertFileSrc(path) || null;
+    const url = convertFileSrc(path);
+    return url ? { status: "ready", path: url } : { status: "unavailable" };
   } catch {
-    return null;
+    return { status: "unavailable" };
   }
 }
 
-/** 取库内资产缩略图 URL（命中缓存直接返回；失败/未生成记 null 占位）。
- *  priority：high 插队信号量队列（查看器主图/预取），low 默认（网格/胶片条）。 */
+/** 管线结果：ready 附 URL；pending=排队生成中；failed=永久不可用 */
+export type ThumbResult =
+  | { kind: "url"; url: string }
+  | { kind: "pending" }
+  | { kind: "failed" };
+
+/** 取库内资产缩略图（命中会话缓存直接返回；priority：high 插队信号量队列，
+ *  low 默认）。pending 不写缓存（事件重试自愈）；failed 缓存避免风暴。 */
 export function fetchAssetThumb(
   assetId: number,
   size: number,
   priority: ThumbPriority = "low",
-): Promise<string | null> {
+): Promise<ThumbResult> {
   const key = `${assetId}:${size}`;
   const cached = thumbCache.get(key);
-  if (cached !== undefined) return Promise.resolve(cached);
+  if (cached !== undefined) return Promise.resolve({ kind: "url", url: cached });
+  const failed = failedCache.get(key);
+  if (failed) return Promise.resolve({ kind: "failed" });
   const running = thumbInflight.get(key);
   if (running) return running;
   const promise = (async () => {
     await acquireSlot(priority);
     try {
-      const path = await assetThumbGet(assetId, size);
-      const url = path !== null ? toAssetUrl(path) : null;
-      thumbCache.set(key, url);
-      return url;
+      const result = await assetThumbGet(assetId, size);
+      if (result.status === "ready") {
+        const converted = toAssetUrl(result.path);
+        if (converted.status === "ready") {
+          thumbCache.set(key, converted.path);
+          return { kind: "url", url: converted.path } as ThumbResult;
+        }
+        return { kind: "failed" } as ThumbResult;
+      }
+      if (result.status === "unavailable") {
+        failedCache.set(key, true);
+        return { kind: "failed" } as ThumbResult;
+      }
+      return { kind: "pending" } as ThumbResult; // 排队中：等事件重试
     } catch {
-      thumbCache.set(key, null);
-      return null;
+      return { kind: "failed" } as ThumbResult;
     } finally {
       thumbInflight.delete(key);
       releaseSlot();
@@ -101,6 +124,9 @@ export function fetchAssetThumb(
   thumbInflight.set(key, promise);
   return promise;
 }
+
+/** 永久失败缓存（连续失败/不可解码）；thumbnailReady 事件按资产整体失效 */
+const failedCache = new Map<string, boolean>();
 
 /** 预取（查看器相邻预热/胶片条）：静默，失败仅保持占位；默认高优先级 */
 export function prefetchAssetThumb(
@@ -119,10 +145,13 @@ let subscribed = false;
 
 function dispatchAssetEvent(event: AppEvent): void {
   if (event.type === "thumbnailReady") {
-    // 该资产缩略图已补齐：丢弃全部档位的未命中记录，让视口内 tile 重试取到新结果
-    // （档位对齐由后端 snap，事件里的 size 与名义请求尺寸可能不同，按资产整体失效最稳）
+    // 该资产缩略图已补齐：丢弃全部档位的缓存记录（成功+失败），让视口内
+    // tile 重试取到新结果（档位对齐由后端 snap，按资产整体失效最稳）
     for (const key of [...thumbCache.keys()]) {
       if (key.startsWith(`${event.assetId}:`)) thumbCache.delete(key);
+    }
+    for (const key of [...failedCache.keys()]) {
+      if (key.startsWith(`${event.assetId}:`)) failedCache.delete(key);
     }
   }
   for (const listener of listeners) listener(event);
@@ -146,17 +175,15 @@ export function onAssetEvent(listener: AssetEventListener): () => void {
 // --- React 绑定 -------------------------------------------------------------------
 
 export interface AssetThumbState {
-  /** asset URL；null=未就绪（未命中或仍在途——以 settled 区分） */
+  /** asset URL；null=尚未就绪（loading/pending 皆可能） */
   url: string | null;
-  /** 本次请求是否已结算（true 且 url=null 表示确定无缩略图，不再等待） */
-  settled: boolean;
+  /** loading=请求在途或排队生成中（骨架等待）；ready=有图；failed=永久无图 */
+  status: "loading" | "ready" | "failed";
 }
 
 /**
  * 单资产缩略图（enabled=false 时不请求不订阅——video 短路占位用）。
- * 未命中先渲染占位，thumbnailReady 事件到达后自动重试一次。
- * 注意：disabled 时 settled 保持 false（惰性启用档位刚翻转时，调用方的
- * 「结算即降级」判断不会被 disabled 期的陈旧 settled=true 误触发）。
+ * pending → 保持 loading 等 thumbnailReady 事件重试；unavailable → failed。
  */
 export function useAssetThumbUrl(
   assetId: number,
@@ -164,23 +191,25 @@ export function useAssetThumbUrl(
   enabled: boolean,
   priority: ThumbPriority = "low",
 ): AssetThumbState {
-  const [state, setState] = useState<AssetThumbState>({ url: null, settled: false });
+  const [state, setState] = useState<AssetThumbState>({ url: null, status: "loading" });
 
   useEffect(() => {
     if (!enabled) {
-      setState({ url: null, settled: false });
+      setState({ url: null, status: "loading" });
       return;
     }
     let cancelled = false;
-    setState({ url: null, settled: false });
-    void fetchAssetThumb(assetId, size, priority).then((result) => {
-      if (!cancelled) setState({ url: result, settled: true });
-    });
+    setState({ url: null, status: "loading" });
+    const apply = (result: ThumbResult) => {
+      if (cancelled) return;
+      if (result.kind === "url") setState({ url: result.url, status: "ready" });
+      else if (result.kind === "failed") setState({ url: null, status: "failed" });
+      // pending：保持 loading（事件重试）
+    };
+    void fetchAssetThumb(assetId, size, priority).then(apply);
     const off = onAssetEvent((event) => {
       if (event.type !== "thumbnailReady" || event.assetId !== assetId) return;
-      void fetchAssetThumb(assetId, size, priority).then((result) => {
-        if (!cancelled) setState({ url: result, settled: true });
-      });
+      void fetchAssetThumb(assetId, size, priority).then(apply);
     });
     return () => {
       cancelled = true;
@@ -201,6 +230,7 @@ export function emitAssetEventForTests(event: AppEvent): void {
 /** 仅测试用：清空管线状态（缓存/in-flight/信号量） */
 export function resetThumbPipelineForTests(): void {
   thumbCache.clear();
+  failedCache.clear();
   thumbInflight.clear();
   activeLoads = 0;
   slotQueue.length = 0;

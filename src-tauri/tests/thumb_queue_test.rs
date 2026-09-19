@@ -98,14 +98,15 @@ fn cache_hit_returns_path_immediately_without_event() {
     let pre = thumbs::thumb_file(db_dir.path(), &src, 256).expect("预生成");
     let (state, id) = state_with_asset(db_dir.path(), &src);
 
-    let got = ipc::thumb::fetch_asset_thumb(&state, id, 256)
-        .unwrap()
-        .expect("命中应直接返回");
-    assert_eq!(
-        PathBuf::from(&got),
-        PathBuf::from(&pre),
-        "命中返回同一缓存路径"
-    );
+    let got = ipc::thumb::fetch_asset_thumb(&state, id, 256).unwrap();
+    match got {
+        ipc::thumb::ThumbOutcome::Ready { path } => assert_eq!(
+            PathBuf::from(&path),
+            PathBuf::from(&pre),
+            "命中返回同一缓存路径"
+        ),
+        other => panic!("命中应 Ready，实际 {other:?}"),
+    }
     // 命中不发事件
     let mut rx = state.bus.subscribe();
     std::thread::sleep(Duration::from_millis(100));
@@ -122,8 +123,8 @@ fn miss_enqueues_generates_and_publishes_ready() {
 
     let first = ipc::thumb::fetch_asset_thumb(&state, id, 256).unwrap();
     assert!(
-        first.is_none(),
-        "未命中入队后本轮返回 None（前端等事件重试）"
+        first == ipc::thumb::ThumbOutcome::Pending,
+        "未命中入队后本轮返回 Pending（前端等事件重试），实际 {first:?}"
     );
 
     let path = wait_thumb_ready(&state, id).expect("生成成功事件应携带路径");
@@ -133,7 +134,12 @@ fn miss_enqueues_generates_and_publishes_ready() {
 
     // 生成完成后：缓存命中直返
     let second = ipc::thumb::fetch_asset_thumb(&state, id, 256).unwrap();
-    assert_eq!(second.as_deref(), Some(path.as_str()), "完成后转为命中");
+    match second {
+        ipc::thumb::ThumbOutcome::Ready { path: p } => {
+            assert_eq!(p, path, "完成后转为命中")
+        }
+        other => panic!("完成后应 Ready，实际 {other:?}"),
+    }
 }
 
 #[test]
@@ -190,20 +196,23 @@ fn bounded_queue_full_drops_request() {
 #[test]
 fn raw_and_missing_assets_return_none_without_enqueue() {
     let src_dir = tempfile::tempdir().unwrap();
-    let raw = src_dir.path().join("IMG_0001.CR3");
-    std::fs::write(&raw, b"raw-bytes").unwrap();
+    let raw = src_dir.path().join("VID_0001.MP4");
+    std::fs::write(&raw, b"video-bytes").unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let (state, id) = state_with_asset(db_dir.path(), &raw);
 
-    // RAW v1 不可解码：None 且不入队
-    assert!(ipc::thumb::fetch_asset_thumb(&state, id, 256)
-        .unwrap()
-        .is_none());
+    // 视频不可解码：Unavailable 且不入队
+    assert_eq!(
+        ipc::thumb::fetch_asset_thumb(&state, id, 256).unwrap(),
+        ipc::thumb::ThumbOutcome::Unavailable,
+        "不可解码：Unavailable 不入队"
+    );
     assert_eq!(state.thumb_queue.pending_len(), 0, "不可解码不得入队");
-    // 资产不存在：None
-    assert!(ipc::thumb::fetch_asset_thumb(&state, 9999, 256)
-        .unwrap()
-        .is_none());
+    // 资产不存在：Unavailable
+    assert_eq!(
+        ipc::thumb::fetch_asset_thumb(&state, 9999, 256).unwrap(),
+        ipc::thumb::ThumbOutcome::Unavailable
+    );
     assert_eq!(state.thumb_queue.pending_len(), 0);
 }
 

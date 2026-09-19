@@ -31,14 +31,14 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   searchSemanticMock.mockReset().mockResolvedValue([]);
-  assetThumbGetMock.mockReset().mockResolvedValue(null);
+  assetThumbGetMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
 });
 
 describe("标签封面（fetchAlbumCover）", () => {
   it("命中：searchSemantic(tag, 1) 首条 → assetThumbGet(240) → convertFileSrc", async () => {
     searchSemanticMock.mockResolvedValue([{ assetId: 9, score: 0.9 }]);
-    assetThumbGetMock.mockResolvedValue("D:\\cache\\9.jpg");
+    assetThumbGetMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\9.jpg" });
     convertMock.mockReturnValue("asset://D:/cache/9.jpg");
 
     await expect(fetchAlbumCover("日落")).resolves.toBe("asset://D:/cache/9.jpg");
@@ -54,7 +54,7 @@ describe("标签封面（fetchAlbumCover）", () => {
 
   it("缩略图缺失 → null（占位）", async () => {
     searchSemanticMock.mockResolvedValue([{ assetId: 1, score: 0.5 }]);
-    assetThumbGetMock.mockResolvedValue(null);
+    assetThumbGetMock.mockResolvedValue({ status: "pending" });
     await expect(fetchAlbumCover("雪")).resolves.toBeNull();
   });
 
@@ -65,7 +65,7 @@ describe("标签封面（fetchAlbumCover）", () => {
 
   it("convertFileSrc 空串/抛错 → null", async () => {
     searchSemanticMock.mockResolvedValue([{ assetId: 1, score: 0.5 }]);
-    assetThumbGetMock.mockResolvedValue("D:\\cache\\1.jpg");
+    assetThumbGetMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\1.jpg" });
     convertMock.mockReturnValue("");
     await expect(fetchAlbumCover("雪")).resolves.toBeNull();
   });

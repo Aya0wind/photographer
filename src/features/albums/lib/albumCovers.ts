@@ -20,9 +20,9 @@ export async function fetchAlbumCover(tag: string): Promise<string | null> {
     const hits = await searchSemantic(tag, 1);
     const hit = hits[0];
     if (!hit) return null;
-    const path = await assetThumbGet(hit.assetId, ALBUM_COVER_THUMB_SIZE);
-    if (path === null) return null;
-    return convertFileSrc(path) || null;
+    const result = await assetThumbGet(hit.assetId, ALBUM_COVER_THUMB_SIZE);
+    if (result.status !== "ready") return null; // pending 也当无封面（下轮事件自愈）
+    return convertFileSrc(result.path) || null;
   } catch {
     return null;
   }

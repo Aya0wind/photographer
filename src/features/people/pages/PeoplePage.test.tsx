@@ -84,7 +84,7 @@ beforeEach(() => {
   peopleAssetsMock.mockReset().mockResolvedValue([]);
   personRenameMock.mockReset().mockResolvedValue(true);
   personDeleteMock.mockReset().mockResolvedValue(true);
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
 });
@@ -94,7 +94,7 @@ beforeEach(() => {
 describe("人物页列表", () => {
   it("进页面拉取 peopleList；渲染封面/姓名或「人物 N」/faceCount 徽标/总数", async () => {
     peopleListMock.mockResolvedValue(PEOPLE);
-    thumbMock.mockResolvedValue("D:\\cache\\101.jpg");
+    thumbMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\101.jpg" });
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderPeople();
 

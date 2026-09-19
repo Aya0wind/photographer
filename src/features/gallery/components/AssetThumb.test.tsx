@@ -31,7 +31,7 @@ function renderThumb(kind: AssetKind, name: string, id = 1) {
 }
 
 beforeEach(() => {
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
 });
@@ -49,6 +49,7 @@ describe("AssetThumb 骨架屏（加载中 vs 永久无图）", () => {
   });
 
   it("结算为无图：骨架退静态（无动画类），kind 图形保留", async () => {
+    thumbMock.mockResolvedValue({ status: "unavailable" });
     renderThumb("photo", "IMG_0001.JPG");
 
     const container = await screen.findByTestId("thumb");
@@ -68,7 +69,7 @@ describe("AssetThumb 骨架屏（加载中 vs 永久无图）", () => {
   });
 
   it("raw：请求缩略图 + 水印角标恒在", async () => {
-    thumbMock.mockResolvedValue("C:\\thumbs\\256\\1.jpg");
+    thumbMock.mockResolvedValue({ status: "ready", path: "C:\\thumbs\\256\\1.jpg" });
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderThumb("raw", "IMG_0002.CR3");
 

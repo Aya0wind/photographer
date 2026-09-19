@@ -144,7 +144,7 @@ function triggerSentinel(): void {
 beforeEach(() => {
   assetsPageMock.mockReset().mockResolvedValue([]);
   groupDatesMock.mockReset().mockResolvedValue([]);
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   ipcAvailableMock.mockReset().mockReturnValue(true);
   resetThumbPipelineForTests();
@@ -202,8 +202,8 @@ describe("画廊：日期分组照片墙", () => {
     // photo：首次未命中，thumbnailReady 后重试命中；RAW：内嵌提取未就绪（null）→占位
     thumbMock.mockImplementation(async (id: number) =>
       id === 1 && thumbMock.mock.calls.filter(([i]) => i === 1).length >= 2
-        ? "C:\\thumbs\\256\\img1.jpg"
-        : null,
+        ? { status: "ready", path: "C:\\thumbs\\256\\img1.jpg" }
+        : { status: "pending" },
     );
     convertMock.mockImplementation((p: string) => `asset://${p}`);
 

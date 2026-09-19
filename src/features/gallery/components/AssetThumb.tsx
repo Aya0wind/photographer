@@ -110,8 +110,8 @@ export default function AssetThumb({
   priority = "low",
   testId,
 }: AssetThumbProps) {
-  // RAW 走后端内嵌预览提取（rawloader），与 photo 同管线；video 恒占位（不请求）
-  const { url, settled } = useAssetThumbUrl(asset.id, size, asset.kind !== "video", priority);
+  // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线；video 恒占位（不请求）
+  const { url, status } = useAssetThumbUrl(asset.id, size, asset.kind !== "video", priority);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -129,10 +129,10 @@ export default function AssetThumb({
   }, []);
 
   const showImg = url !== null && !failed;
-  // 加载中（请求在途 / 缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
-  // video 不进管线（settled 恒 false）：静态占位，不吃骨架。
+  // 加载中（请求在途/排队生成/缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
+  // video 不进管线（status 恒 loading）：静态占位，不吃骨架。
   const loading =
-    skeleton && asset.kind !== "video" && (!settled || (showImg && !loaded));
+    skeleton && asset.kind !== "video" && (status === "loading" || (showImg && !loaded));
   return (
     <div
       className={`relative overflow-hidden ${loading ? "sp-skeleton" : "bg-panel/40"} ${className}`}

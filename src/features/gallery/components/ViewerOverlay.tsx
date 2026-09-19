@@ -218,7 +218,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const rawFull = useAssetThumbUrl(
     asset.id,
     VIEWER_MID_SIZE,
-    asset.kind === "raw" && rawEmbed.settled && rawEmbed.url === null,
+    asset.kind === "raw" && rawEmbed.status === "failed",
     "high",
   );
   // 中间档仅 photo 且原图已失败时才请求（2048 档后端就位后生效；未就位时 settled null → 继续降 512）
@@ -242,22 +242,19 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     // 512 秒出 → 内嵌全幅替换变清晰；无内嵌预览 → 2048 显影兜底
     mainSrc = rawEmbed.url ?? rawFull.url ?? thumb.url;
     mainFailed =
-      rawEmbed.settled &&
-      rawEmbed.url === null &&
-      rawFull.settled &&
-      rawFull.url === null &&
-      thumb.settled &&
-      thumb.url === null;
+      rawEmbed.status === "failed" &&
+      rawFull.status === "failed" &&
+      thumb.status === "failed";
   } else {
     mainSrc = thumb.url;
-    mainFailed = thumb.settled && thumb.url === null;
+    mainFailed = thumb.status === "failed";
   }
   // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档
   useEffect(() => {
-    if (asset.kind === "photo" && stage === "mid" && mid.settled && mid.url === null) {
+    if (asset.kind === "photo" && stage === "mid" && mid.status === "failed") {
       setStage("thumb");
     }
-  }, [asset.kind, stage, mid.settled, mid.url]);
+  }, [asset.kind, stage, mid.status]);
   // photo 无原图可用（非 Tauri 环境 convertFileSrc 抛错）→ 直达 512 档
   useEffect(() => {
     if (asset.kind === "photo" && stage === "original" && originalUrl === null) {
@@ -318,13 +315,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     for (const neighbor of neighbors) {
       if (!neighbor) continue;
       if (neighbor.kind === "photo") warmImageDecode(safeConvert(neighbor.path));
-      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((url) => {
-        warmImageDecode(url);
+      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((r) => {
+        if (r.kind === "url") warmImageDecode(r.url);
       });
       if (neighbor.kind === "raw") {
         // RAW 相邻预热内嵌全幅直出档（毫秒级 IO，取最大内嵌 JPEG）
-        void fetchAssetThumb(neighbor.id, VIEWER_RAW_EMBED_SIZE, "high").then((url) => {
-          warmImageDecode(url);
+        void fetchAssetThumb(neighbor.id, VIEWER_RAW_EMBED_SIZE, "high").then((r) => {
+          if (r.kind === "url") warmImageDecode(r.url);
         });
       }
     }

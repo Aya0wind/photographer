@@ -76,7 +76,7 @@ beforeEach(() => {
   localStorage.clear();
   searchSemanticMock.mockReset().mockResolvedValue([]);
   assetsByIdsMock.mockReset().mockResolvedValue([]);
-  thumbMock.mockReset().mockResolvedValue(null);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   useAiStore.getState().resetForTests();
 });
@@ -157,7 +157,7 @@ describe("智能相册标签封面", () => {
     searchSemanticMock.mockImplementation((q: string) =>
       q === "日落" ? Promise.resolve([{ assetId: 9, score: 0.9 }]) : Promise.resolve([]),
     );
-    thumbMock.mockResolvedValue("D:\\cache\\9.jpg");
+    thumbMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\9.jpg" });
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderRoutes("/albums");
 
