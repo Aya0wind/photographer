@@ -122,13 +122,16 @@ pub fn fetch_asset_detail(
 }
 
 /// 画廊分页（DB 查询 → 后台线程）。
+/// 资产分页（画廊/搜索数据源）。`filters` 缺省 = 全部
+/// （Tauri 对 Option 参数允许缺键；前端不传 filters 或传 null 均可）。
 #[tauri::command]
 pub async fn assets_page(
     state: State<'_, SharedState>,
     after_id: i64,
     limit: u32,
-    filters: AssetFilters,
+    filters: Option<AssetFilters>,
 ) -> Result<Vec<AssetDto>, String> {
+    let filters = filters.unwrap_or_default();
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_assets_page(state, after_id, limit, filters)

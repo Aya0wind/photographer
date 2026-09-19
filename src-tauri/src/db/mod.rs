@@ -224,7 +224,7 @@ pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 /// captured_at 同格式（定宽 UTC）字典序比较即时间序；任一日期过滤出现时
 /// NULL captured_at 的行被排除（无日期不落任何区间）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AssetFilters {
     pub kind: Option<AssetKind>,
     pub captured_after: Option<String>,

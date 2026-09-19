@@ -257,7 +257,7 @@ describe("M3 画廊命令", () => {
     sizeBytes: 5242880,
   };
 
-  it("assetsPage 透传 keyset 参数并平铺 camelCase filters", async () => {
+  it("assetsPage 透传 keyset 参数并以 filters 容器键携带过滤条件", async () => {
     invokeMock.mockResolvedValue([ASSET]);
 
     await expect(
@@ -271,10 +271,12 @@ describe("M3 画廊命令", () => {
     expect(invokeMock).toHaveBeenCalledWith("assets_page", {
       afterId: 7,
       limit: 100,
-      kind: "raw",
-      capturedAfter: "2026-01-01",
-      capturedBefore: "2026-02-01",
-      camera: "Canon",
+      filters: {
+        kind: "raw",
+        capturedAfter: "2026-01-01",
+        capturedBefore: "2026-02-01",
+        camera: "Canon",
+      },
     });
   });
 

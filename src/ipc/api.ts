@@ -415,7 +415,10 @@ export async function assetsPage(
   filters?: AssetFilters,
 ): Promise<AssetDto[]> {
   try {
-    const list = await ipc<AssetDto[] | null>("assets_page", { afterId, limit, ...(filters ?? {}) });
+    const list = await ipc<AssetDto[] | null>(
+      "assets_page",
+      filters && Object.keys(filters).length > 0 ? { afterId, limit, filters } : { afterId, limit },
+    );
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
