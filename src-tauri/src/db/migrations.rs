@@ -10,6 +10,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0003_ORIGIN_AND_DST2,
     MIGRATION_0004_SHOOTING_PARAMS,
     MIGRATION_0005_SEMANTIC_LEDGER,
+    MIGRATION_0006_FACES_AND_PEOPLE,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -124,4 +125,56 @@ CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 /// 本列只是时间账：NULL = 未索引，语义回填据此建任务）。
 const MIGRATION_0005_SEMANTIC_LEDGER: &str = r#"
 ALTER TABLE assets ADD COLUMN ai_indexed_at TEXT;
+"#;
+
+/// 0006（M4 人脸全链路）：faces（人脸实例：SCRFD 框 + ArcFace 512 维特征 +
+/// 人物簇归属，资产删除级联清脸）+ people（人物簇：名称可空 = 未命名，封面
+/// 人脸；删簇 SET NULL 只解除归属不删脸数据）。assets.face_indexed_at 为
+/// 人脸处理时间账（NULL = 未处理，人脸回填据此建任务；ai_face_data_clear
+/// 连同 faces/people 一并复位）。
+///
+/// index_tasks.kind 的 CHECK 扩展 'face' 通道：SQLite 不支持 ALTER CHECK，
+/// 采用整表重建（列定义与 0004 完全一致，仅 kind 集合扩展 + 数据原样
+/// 搬迁——历史迁移条目不改动，数据零丢失）。
+const MIGRATION_0006_FACES_AND_PEOPLE: &str = r#"
+ALTER TABLE assets ADD COLUMN face_indexed_at TEXT;
+
+CREATE TABLE faces (
+    id          INTEGER PRIMARY KEY,
+    asset_id    INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    box_x       REAL    NOT NULL,
+    box_y       REAL    NOT NULL,
+    box_w       REAL    NOT NULL,
+    box_h       REAL    NOT NULL,
+    embedding   BLOB    NOT NULL,
+    cluster_id  INTEGER REFERENCES people (id) ON DELETE SET NULL,
+    created_at  TEXT    NOT NULL
+);
+
+CREATE TABLE people (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT,
+    cover_face_id INTEGER REFERENCES faces (id) ON DELETE SET NULL,
+    created_at    TEXT    NOT NULL
+);
+
+CREATE INDEX idx_faces_asset   ON faces (asset_id);
+CREATE INDEX idx_faces_cluster ON faces (cluster_id);
+
+CREATE TABLE index_tasks_new (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL CHECK (kind IN ('thumb', 'exif', 'ai', 'face')),
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+
+INSERT INTO index_tasks_new (id, kind, asset_id, state, attempts, created_at, updated_at)
+    SELECT id, kind, asset_id, state, attempts, created_at, updated_at FROM index_tasks;
+
+DROP TABLE index_tasks;
+ALTER TABLE index_tasks_new RENAME TO index_tasks;
+CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 "#;

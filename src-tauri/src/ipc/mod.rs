@@ -6,7 +6,9 @@ pub mod assets;
 pub mod device;
 pub mod device_manager;
 pub mod import;
+pub mod indexing;
 pub mod migrate;
+pub mod people;
 pub mod reconcile;
 pub mod settings;
 pub mod thumb;
@@ -540,6 +542,12 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_clip;
+    let enable_face = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_face;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
@@ -547,6 +555,14 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
             crate::index::kick(index_db_dir.clone(), &index_supervisor);
             if enable_clip {
                 crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir.clone(),
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
+            if enable_face {
+                crate::ai::face::kick_face_if_ready(
                     index_db_dir,
                     &ai_manager,
                     &ai_bus,
@@ -608,6 +624,12 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_clip;
+    let enable_face = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_face;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
@@ -615,6 +637,14 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
             crate::index::kick(index_db_dir.clone(), &index_supervisor);
             if enable_clip {
                 crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir.clone(),
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
+            if enable_face {
+                crate::ai::face::kick_face_if_ready(
                     index_db_dir,
                     &ai_manager,
                     &ai_bus,
@@ -748,6 +778,12 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_clip;
+    let enable_face = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .enable_face;
     let handle = state
         .supervisor
         .spawn("import", format!("job-{new_id}"), move |_| {
@@ -755,6 +791,14 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
             crate::index::kick(index_db_dir.clone(), &index_supervisor);
             if enable_clip {
                 crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir.clone(),
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
+            if enable_face {
+                crate::ai::face::kick_face_if_ready(
                     index_db_dir,
                     &ai_manager,
                     &ai_bus,

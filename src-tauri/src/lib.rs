@@ -69,6 +69,9 @@ pub fn run() {
                 bus.clone(),
                 std::sync::Arc::clone(&supervisor),
             );
+            // settings/ai 在 manage(move) 前先取启动自愈所需快照
+            let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
+            let ai_for_kick = ai.clone();
             app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
@@ -83,8 +86,22 @@ pub fn run() {
 
             // 索引任务启动恢复（导入/索引分离）：遗留 running 复位 pending
             // → indexTaskResumed 事件 → 后台 worker 全核续跑。
+            // 真机修复（2026-09-19）：AI 回填原只挂在「下载完成 watcher +
+            // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
+            // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
-                index::resume_and_kick(db_dir, &bus, &supervisor_handle);
+                index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
+                if enable_clip {
+                    ai::semantic::kick_semantic_if_ready(
+                        db_dir.clone(),
+                        &ai_for_kick,
+                        &bus,
+                        &supervisor_handle,
+                    );
+                }
+                if enable_face {
+                    ai::face::kick_face_if_ready(db_dir, &ai_for_kick, &bus, &supervisor_handle);
+                }
             }
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
@@ -159,6 +176,13 @@ pub fn run() {
             ipc::ai::ai_model_cancel,
             ipc::ai::ai_model_delete,
             ipc::ai::search_semantic,
+            ipc::ai::ai_face_data_clear,
+            ipc::people::people_list,
+            ipc::people::people_assets,
+            ipc::people::person_rename,
+            ipc::people::person_delete,
+            ipc::indexing::index_kick_now,
+            ipc::indexing::index_status,
             ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())

@@ -125,6 +125,7 @@ pub async fn ai_models_status(
 pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let shared = state.inner().clone();
     let is_semantic = id.starts_with("siglip2");
+    let is_face = id == "scrfd" || id == "arcface";
     run_blocking(shared.clone(), move |state| {
         let entry = crate::ai::catalog()
             .iter()
@@ -136,6 +137,9 @@ pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Res
     .await?;
     if is_semantic {
         spawn_post_install_watch(&shared);
+    }
+    if is_face {
+        spawn_face_post_install_watch(&shared);
     }
     Ok(())
 }
@@ -152,4 +156,66 @@ pub async fn ai_model_cancel(state: State<'_, SharedState>, id: String) -> Resul
 pub async fn ai_model_delete(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| state.ai.delete(&id)).await
+}
+
+/// 一键清除人脸数据核：faces + people 清空、face 通道任务清空、
+/// assets.face_indexed_at 复位（可重新回填）+ 簇心缓存失效。
+pub fn fetch_face_data_clear(state: &super::AppState) -> Result<bool, String> {
+    let library = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .active_library()
+        .cloned()
+        .ok_or("尚未创建库")?;
+    let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let db = super::open_library_db(&db_dir)?;
+    db.clear_face_data().map_err(|e| e.to_string())?;
+    crate::ai::face::invalidate_cluster_cache(&db_dir);
+    Ok(true)
+}
+
+/// 一键清除人脸数据（设置页两步强确认后调用；前端 aiFaceDataClear）。
+#[tauri::command]
+pub async fn ai_face_data_clear(state: State<'_, SharedState>) -> Result<bool, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_face_data_clear).await
+}
+
+/// scrfd/arcface 下载完成后的自动触发：轮询两件套就绪 → enable_face 时派
+/// 人脸回填。轮询上限 20 分钟。
+fn spawn_face_post_install_watch(state: &SharedState) {
+    let shared = std::sync::Arc::clone(state);
+    let supervisor = std::sync::Arc::clone(&state.supervisor);
+    supervisor.spawn("ai-postinstall", "face-watch".into(), move |_| {
+        for _ in 0..600 {
+            let enable_face = shared
+                .settings
+                .lock()
+                .expect("settings mutex poisoned")
+                .ai
+                .enable_face;
+            if shared.ai.face_models_ready() {
+                let library = shared
+                    .settings
+                    .lock()
+                    .expect("settings mutex poisoned")
+                    .active_library()
+                    .cloned();
+                if enable_face {
+                    if let Some(library) = library {
+                        let db_dir = std::path::PathBuf::from(&library.db_dir);
+                        crate::ai::face::kick_face_if_ready(
+                            db_dir,
+                            &shared.ai,
+                            &shared.bus,
+                            &shared.supervisor,
+                        );
+                    }
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
 }

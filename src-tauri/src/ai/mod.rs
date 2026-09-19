@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod embed;
+pub mod face;
 pub mod semantic;
 
 use crate::events::{AppEvent, EventBus, Throttle};

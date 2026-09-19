@@ -102,15 +102,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 5);
+        assert_eq!(user_version(&db), 6);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 5, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 6, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 5);
+    assert_eq!(user_version(&db), 6);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -128,8 +128,8 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 7,
-        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 1"
+        indexes, 9,
+        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 1          + faces 2（asset/cluster，migration 0006）"
     );
 }
 
