@@ -293,10 +293,14 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let orientation = orientation_from_file(src).unwrap_or(1);
     if is_raw_embed_request(&ext, size) {
         // 内嵌全幅直出：最大内嵌 JPEG。orientation=1 零重编码原样落盘
-        // （毫秒级）；带方向才解码转正重编 q92（一次性的全幅解码+编码）。
+        // （毫秒级）；带方向优先 JPEG 无损变换（重排 DCT 块不解码，百 ms 级），
+        // MCU 不整除（perfect 失败）才全幅解码转正重编（秒级慢路径）。
         let preview = raw_preview_jpeg(src)?;
         if orientation == 1 {
             return Some(preview);
+        }
+        if let Some(rotated) = jpeg_lossless_transform(&preview, orientation) {
+            return Some(rotated);
         }
         let img = full_decode_bytes(&preview)?;
         let img = apply_orientation(img, orientation);
@@ -727,6 +731,28 @@ fn u32_val(b: &[u8], little: bool) -> Option<u32> {
     } else {
         u32::from_be_bytes(arr)
     })
+}
+
+/// JPEG 无损变换（EXIF Orientation 1-8 → turbojpeg DCT 域重排；不解码
+/// 不重编，60MP 亦百 ms 级）。perfect=true：宽高不整除 MCU（典型 4:2:0 为
+/// 16px）时报错 → 调用方回退解码转正重编慢路径（相机全幅尺寸几乎都整除）。
+fn jpeg_lossless_transform(data: &[u8], orientation: u32) -> Option<Vec<u8>> {
+    use turbojpeg::{Transform, TransformOp};
+    let op = match orientation {
+        2 => TransformOp::Hflip,
+        3 => TransformOp::Rot180,
+        4 => TransformOp::Vflip,
+        5 => TransformOp::Transpose,
+        6 => TransformOp::Rot90,
+        7 => TransformOp::Transverse,
+        8 => TransformOp::Rot270,
+        _ => return None,
+    };
+    let mut transform = Transform::op(op);
+    transform.perfect = true;
+    let out = turbojpeg::transform(&transform, data).ok()?;
+    let vec = out.to_vec();
+    (!vec.is_empty()).then_some(vec)
 }
 
 /// TIFF 指针路线：定位全部候选 → 头窗口验尺寸取最大 → 精确读载荷。

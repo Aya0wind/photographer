@@ -861,3 +861,21 @@ fn real_raw_tiff_route_matches_full_scan() {
         assert_eq!(via_tiff, scan, "{label}: 两级路线应取同一段");
     }
 }
+
+#[test]
+fn raw_embed_orientation_uses_lossless_transform_when_perfect() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let src = dir.path().join("DSC_9998.ARW");
+    // 尺寸整除 16（4:2:0 MCU）：无损变换应成功；容器 Orientation=8
+    fs::write(
+        &src,
+        raw_with_two_embeds((160, 120), (2400, 1600), 8),
+    )
+    .unwrap();
+
+    let out = thumbs::thumb_file(&db, &src, 6000).expect("直出档应生成");
+    let (w, h) = image::image_dimensions(Path::new(&out)).unwrap();
+    assert!(h > w, "Orientation=8 转正后应为竖图: {w}x{h}");
+    assert_eq!((w, h), (1600, 2400), "尺寸应精确互换（无损无裁剪）");
+}
