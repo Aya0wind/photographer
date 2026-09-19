@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -6,7 +6,10 @@ import {
   aiModelCancel,
   aiModelDelete,
   aiModelDownload,
+  indexKickNow,
   type AiModelStatus,
+  type IndexKind,
+  type IndexStatus,
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
 import { useAiStore } from "@/stores/aiStore";
@@ -22,6 +25,9 @@ import {
  * 设置页 AI tab（M4 实化）：
  * - 模型状态区：4 行（siglip2-visual/text、scrfd、arcface）名称/体积/状态/操作
  *   （下载/取消/重试/删除释放磁盘），下载进度条走 aiModelDownloadProgress 事件
+ * - 索引状态与操作区：三类索引（缩略图/EXIF/语义）计数 + 立即索引（indexKickNow，
+ *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
+ *   indexTaskProgress 事件驱动重拉（aiStore）
  * - 功能开关门控：语义=两个 siglip2 都 done；人脸=scrfd+arcface 都 done
  * - 调度/CPU 滑条（仅用于 AI 推理）/GPU（DirectML 自动回退）
  * - 人脸数据一键清除（红色强确认，两步确认防误触）
@@ -173,6 +179,115 @@ function ModelRow({ model }: { model: AiModelStatus }) {
   );
 }
 
+// --- 索引状态与操作区 ---------------------------------------------------------------
+
+type T = ReturnType<typeof useTranslation>["t"];
+
+/** 单类索引是否已无待办（解除「进行中」禁用；ai 口径 done>=total） */
+function kindSettled(kind: IndexKind, status: IndexStatus): boolean {
+  if (kind === "ai") return status.ai.total > 0 && status.ai.done >= status.ai.total;
+  const counters = kind === "thumb" ? status.thumb : status.exif;
+  return counters.pending === 0;
+}
+
+/** 行计数文案（thumb/exif：待处理/已完成/失败；ai：待处理 + 已索引 N/M） */
+function countersText(kind: IndexKind, status: IndexStatus, t: T): string {
+  if (kind === "ai") {
+    return [
+      t("settings.ai.index.pending", { count: status.ai.pending }),
+      t("settings.ai.index.aiProgress", { done: status.ai.done, total: status.ai.total }),
+    ].join(" · ");
+  }
+  const c = kind === "thumb" ? status.thumb : status.exif;
+  return [
+    t("settings.ai.index.pending", { count: c.pending }),
+    t("settings.ai.index.done", { count: c.done }),
+    c.failed > 0 ? t("settings.ai.index.failed", { count: c.failed }) : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+function IndexStatusSection() {
+  const { t } = useTranslation();
+  const status = useAiStore((s) => s.indexStatus);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+  const [kicked, setKicked] = useState<Partial<Record<IndexKind, boolean>>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  // 进 tab 拉一次；此后 indexTaskProgress/indexTaskResumed 事件经 aiStore 驱动重拉
+  useEffect(() => {
+    void refreshIndexStatus();
+  }, [refreshIndexStatus]);
+
+  const kick = useCallback(
+    async (kind: IndexKind) => {
+      setError(null);
+      try {
+        await indexKickNow(kind);
+      } catch (err) {
+        // 后端 Err 文案透传（如 ai 模型未就绪「请先在设置中下载模型」）
+        setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
+        return;
+      }
+      setKicked((prev) => ({ ...prev, [kind]: true }));
+      void refreshIndexStatus();
+    },
+    [refreshIndexStatus],
+  );
+
+  const rows: Array<{ kind: IndexKind }> = [{ kind: "thumb" }, { kind: "exif" }, { kind: "ai" }];
+
+  return (
+    <>
+      <SectionTitle>{t("settings.ai.indexSection")}</SectionTitle>
+      {status === null ? (
+        <p className="py-2 text-[11px] text-text-muted" data-testid="index-status-unavailable">
+          {t("settings.ai.index.unavailable")}
+        </p>
+      ) : (
+        rows.map(({ kind }) => {
+          const label = t(`settings.ai.index.${kind}`);
+          const running = Boolean(kicked[kind]) && !kindSettled(kind, status);
+          return (
+            <div
+              key={kind}
+              className="flex min-h-[36px] items-center justify-between gap-8 border-b border-edge/40 py-2"
+              data-testid={`index-status-${kind}`}
+              data-running={running}
+            >
+              <div className="min-w-0">
+                <div className="text-xs text-text-primary">{label}</div>
+                <div className="mt-0.5 font-mono text-[11px] tabular-nums text-text-muted" data-testid={`index-count-${kind}`}>
+                  {countersText(kind, status, t)}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={running}
+                onClick={() => void kick(kind)}
+                className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  running
+                    ? "cursor-default bg-panel text-text-muted"
+                    : "bg-accent text-black hover:brightness-110"
+                }`}
+                data-testid={`index-kick-${kind}`}
+              >
+                {running ? t("settings.ai.index.running") : t("settings.ai.index.kick")}
+              </button>
+            </div>
+          );
+        })
+      )}
+      {error !== null && (
+        <p className="text-[11px] text-red-400" role="alert" data-testid="index-kick-error">
+          {t("settings.ai.index.kickError", { error })}
+        </p>
+      )}
+    </>
+  );
+}
+
 export default function AiTab() {
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
@@ -208,6 +323,9 @@ export default function AiTab() {
           models.map((model) => <ModelRow key={model.id} model={model} />)
         )}
       </div>
+
+      {/* 索引状态与操作区（三类计数 + 立即索引） */}
+      <IndexStatusSection />
 
       {/* 功能开关（模型门控） */}
       <SectionTitle>{t("settings.section.aiFeatures")}</SectionTitle>

@@ -1,5 +1,8 @@
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
 import { useTranslation } from "react-i18next";
+
+import { peopleList } from "@/ipc/api";
 
 import type { ReactElement } from "react";
 
@@ -115,6 +118,19 @@ const NAV_ITEMS: NavItem[] = [
 
 export default function Sidebar() {
   const { t } = useTranslation();
+  // 人物入口徽标：聚类人脸总数（进 app 拉一次；v1 无事件，人物页操作后以此页刷新为准）
+  const [peopleFaces, setPeopleFaces] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void peopleList().then((list) => {
+      if (cancelled) return;
+      setPeopleFaces(list.reduce((sum, p) => sum + p.faceCount, 0));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-edge bg-surface">
@@ -144,6 +160,14 @@ export default function Sidebar() {
                 )}
                 {item.icon}
                 <span>{t(item.labelKey)}</span>
+                {item.to === "/people" && peopleFaces > 0 && (
+                  <span
+                    className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
+                    data-testid="sidebar-people-badge"
+                  >
+                    {peopleFaces}
+                  </span>
+                )}
               </>
             )}
           </NavLink>

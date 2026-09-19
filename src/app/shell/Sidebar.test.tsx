@@ -1,12 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import Sidebar from "./Sidebar";
+import { peopleList, type PersonCluster } from "@/ipc/api";
+
+// 人物徽标数据源（默认空清单 → 无徽标，不影响既有用例的精确可访问名断言）
+vi.mock("@/ipc/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/ipc/api")>();
+  return {
+    ...actual,
+    peopleList: vi.fn(),
+  };
+});
+
+const peopleListMock = vi.mocked(peopleList);
 
 const NAV_LABELS = ["画廊", "搜索", "导入", "人物", "智能相册", "任务", "设置"] as const;
 
@@ -30,6 +42,10 @@ function renderSidebar(initialPath: string) {
 }
 
 describe("Sidebar", () => {
+  beforeEach(() => {
+    peopleListMock.mockReset().mockResolvedValue([]);
+  });
+
   it("渲染五个导航项，均为中文文案", () => {
     renderSidebar("/gallery");
 
@@ -80,5 +96,28 @@ describe("Sidebar", () => {
     renderSidebar("/gallery");
     // 「Smart Photo」品牌已上移整窗顶部 TitleBar（侧栏单独渲染时不可见）
     expect(screen.queryByText("Smart Photo")).not.toBeInTheDocument();
+  });
+
+  // --- 人物入口徽标（M4 二轮） -----------------------------------------------------
+
+  it("人物入口显示聚类人脸总数徽标（faceCount 求和）", async () => {
+    const people: PersonCluster[] = [
+      { clusterId: 0, name: "张三", faceCount: 8, coverAssetId: 1 },
+      { clusterId: 1, name: null, faceCount: 4, coverAssetId: 2 },
+    ];
+    peopleListMock.mockResolvedValue(people);
+    renderSidebar("/gallery");
+
+    const badge = await screen.findByTestId("sidebar-people-badge");
+    expect(badge).toHaveTextContent("12");
+    // 徽标在人物导航项内
+    const nav = screen.getByRole("navigation", { name: "primary" });
+    expect(within(within(nav).getByRole("link", { name: /人物/ })).getByTestId("sidebar-people-badge")).toBe(badge);
+  });
+
+  it("无人脸数据（空清单/后端未就绪）→ 人物入口无徽标", async () => {
+    renderSidebar("/gallery");
+    await waitFor(() => expect(peopleListMock).toHaveBeenCalled());
+    expect(screen.queryByTestId("sidebar-people-badge")).not.toBeInTheDocument();
   });
 });

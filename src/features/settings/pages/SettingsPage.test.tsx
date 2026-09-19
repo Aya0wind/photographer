@@ -19,6 +19,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     aiModelCancel: vi.fn(),
     aiModelDelete: vi.fn(),
     aiFaceDataClear: vi.fn(),
+    indexStatus: vi.fn(),
+    indexKickNow: vi.fn(),
   };
 });
 import {
@@ -26,13 +28,19 @@ import {
   aiModelDelete,
   aiModelDownload,
   aiModelsStatus,
+  indexKickNow,
+  indexStatus,
 } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
+import { SMART_ALBUM_TAGS } from "@/features/albums/pages/AlbumsPages";
+import { HIDDEN_ALBUM_TAGS_KEY } from "@/features/albums/lib/hiddenTags";
 
 const aiModelsStatusMock = vi.mocked(aiModelsStatus);
 const aiModelDownloadMock = vi.mocked(aiModelDownload);
 const aiModelDeleteMock = vi.mocked(aiModelDelete);
 const aiFaceDataClearMock = vi.mocked(aiFaceDataClear);
+const indexStatusMock = vi.mocked(indexStatus);
+const indexKickNowMock = vi.mocked(indexKickNow);
 
 function aiModel(
   id: string,
@@ -124,6 +132,11 @@ beforeEach(() => {
     libraryChosen: false,
   });
   ipcMock.mockClear();
+  // AiTab 索引状态区默认不可用（各用例按需覆写）
+  indexStatusMock.mockReset().mockResolvedValue(null);
+  indexKickNowMock.mockReset().mockResolvedValue(undefined);
+  useAiStore.getState().resetForTests();
+  localStorage.clear();
 });
 
 describe("选项卡", () => {
@@ -439,5 +452,134 @@ describe("AI tab（M4 实化）", () => {
     expect(screen.getByTestId("ai-face-clear-confirm")).toBeInTheDocument();
     await user.click(screen.getByTestId("ai-face-clear-confirm"));
     expect(aiFaceDataClearMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- 画廊 tab：智能相册显示的标签（M4 二轮，localStorage 简化存储） -------------------
+
+describe("画廊 tab：智能相册显示的标签", () => {
+  it("checkbox 组渲染全部预置标签（默认全显）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "gallery");
+
+    const group = screen.getByTestId("settings-album-tags");
+    const items = within(group).getAllByTestId("settings-album-tag");
+    expect(items).toHaveLength(SMART_ALBUM_TAGS.length);
+    expect(items[0]).toHaveAttribute("data-tag", SMART_ALBUM_TAGS[0]);
+    expect(items[0]).toHaveAttribute("data-checked", "true");
+  });
+
+  it("取消勾选 → 写入 localStorage 隐藏清单；重新勾选恢复", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "gallery");
+
+    const first = within(screen.getByTestId("settings-album-tags")).getAllByTestId(
+      "settings-album-tag",
+    )[0];
+    await user.click(within(first).getByRole("checkbox"));
+    expect(first).toHaveAttribute("data-checked", "false");
+    expect(JSON.parse(localStorage.getItem(HIDDEN_ALBUM_TAGS_KEY) ?? "[]")).toEqual([
+      SMART_ALBUM_TAGS[0],
+    ]);
+
+    await user.click(within(first).getByRole("checkbox"));
+    expect(first).toHaveAttribute("data-checked", "true");
+    expect(JSON.parse(localStorage.getItem(HIDDEN_ALBUM_TAGS_KEY) ?? "[]")).toEqual([]);
+  });
+});
+
+// --- AI tab：索引状态与操作（M4 二轮，index_status / index_kick_now） ------------------
+
+describe("AI tab：索引状态与操作", () => {
+  function statusOf(partial?: {
+    thumb?: { pending: number; done: number; failed: number };
+    exif?: { pending: number; done: number; failed: number };
+    ai?: { pending: number; done: number; total: number };
+  }): import("@/ipc/api").IndexStatus {
+    return {
+      thumb: { pending: 3, done: 117, failed: 0, ...partial?.thumb },
+      exif: { pending: 0, done: 120, failed: 0, ...partial?.exif },
+      ai: { pending: 0, done: 45, total: 120, ...partial?.ai },
+    };
+  }
+
+  it("区块渲染三类计数；语义行附加已索引 N / 库内总数 M", async () => {
+    indexStatusMock.mockResolvedValue(statusOf());
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("index-status-thumb")).toBeInTheDocument();
+    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 3");
+    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("已完成 117");
+    expect(screen.getByTestId("index-count-exif")).toHaveTextContent("待处理 0");
+    expect(screen.getByTestId("index-count-ai")).toHaveTextContent("45 / 120");
+  });
+
+  it("index_status 不可用（null）→ 后端未连接提示（无计数行）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("index-status-unavailable")).toBeInTheDocument();
+    expect(screen.queryByTestId("index-status-thumb")).not.toBeInTheDocument();
+  });
+
+  it("立即索引：按钮负载 index_kick_now(kind)；进行中禁用显示「进行中」", async () => {
+    indexStatusMock.mockResolvedValue(statusOf());
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+    await screen.findByTestId("index-status-ai");
+
+    await user.click(screen.getByTestId("index-kick-ai"));
+    await waitFor(() => expect(indexKickNowMock).toHaveBeenCalledWith("ai"));
+
+    // kicked 后 ai 未结算（45/120）→ 禁用 + 「进行中」
+    const kickAi = await screen.findByTestId("index-kick-ai");
+    await waitFor(() => expect(kickAi).toBeDisabled());
+    expect(kickAi).toHaveTextContent("进行中");
+    // thumb 无待办 → 不误禁用
+    expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
+  });
+
+  it("ai 模型未就绪：后端 Err 文案透传显示", async () => {
+    indexStatusMock.mockResolvedValue(statusOf());
+    indexKickNowMock.mockRejectedValue("请先在设置中下载模型");
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+    await screen.findByTestId("index-status-thumb");
+
+    await user.click(screen.getByTestId("index-kick-ai"));
+    expect(await screen.findByTestId("index-kick-error")).toHaveTextContent(
+      "请先在设置中下载模型",
+    );
+  });
+
+  it("事件刷新：indexTaskProgress → index_status 重拉（计数更新）", async () => {
+    indexStatusMock
+      .mockResolvedValueOnce(statusOf())
+      .mockResolvedValue(statusOf({ thumb: { pending: 0, done: 120, failed: 0 } }));
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+    await screen.findByTestId("index-status-thumb");
+    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 3");
+
+    act(() => {
+      useAiStore.getState().handleAppEvent({
+        type: "indexTaskProgress",
+        kind: "thumb",
+        done: 120,
+        total: 120,
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 0"),
+    );
   });
 });

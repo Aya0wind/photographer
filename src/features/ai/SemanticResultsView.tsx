@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 
-import type { AssetDto } from "@/ipc/api";
+import { indexKickNow, type AssetDto } from "@/ipc/api";
+import { useAiStore } from "@/stores/aiStore";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { useAiIndexingProgress } from "./useSemanticSearch";
@@ -10,7 +11,8 @@ import { useAiIndexingProgress } from "./useSemanticSearch";
 /**
  * 语义搜索结果视图（搜索页语义模式 / 智能相册共用）：
  * 状态化呈现——索引进度（首次需索引）/ loading / 模型未就绪引导卡（去设置）/
- * 后端未连接 / 空结果 / AssetGrid 结果（相似度百分比角标右下）。
+ * 后端未连接 / 空结果（附「语义索引建立中」提示 + 立即索引）/ AssetGrid 结果
+ * （相似度百分比角标右下，分档样式见 scoreBadge）。
  */
 
 export interface SemanticResultsViewProps {
@@ -21,6 +23,60 @@ export interface SemanticResultsViewProps {
   scrollTestId?: string;
   /** 触发重试（未就绪引导的「重试」入口；可选） */
   onRetry?: () => void;
+}
+
+/** 空结果附加提示：库内语义索引未建完（ai.done<total）→「建立中（N/M）」+ 立即索引 */
+function SemanticIndexBuildingHint() {
+  const { t } = useTranslation();
+  const status = useAiStore((s) => s.indexStatus);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+  const [kicked, setKicked] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void refreshIndexStatus();
+  }, [refreshIndexStatus]);
+
+  if (status === null || status.ai.total <= 0 || status.ai.done >= status.ai.total) return null;
+
+  async function kick(): Promise<void> {
+    setError(null);
+    try {
+      await indexKickNow("ai");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
+      return;
+    }
+    setKicked(true);
+    void refreshIndexStatus();
+  }
+
+  return (
+    <div className="mt-2 flex flex-col items-center gap-2" data-testid="semantic-empty-indexing">
+      <span className="text-[11px] text-text-muted">
+        {t("search.semantic.indexBuilding", { done: status.ai.done, total: status.ai.total })}
+      </span>
+      {error !== null && (
+        <span className="text-[11px] text-red-400" data-testid="semantic-empty-kick-error" role="alert">
+          {error}
+        </span>
+      )}
+      {kicked ? (
+        <span className="text-[11px] text-emerald-400" data-testid="semantic-empty-kicked">
+          {t("settings.ai.index.kicked")}
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => void kick()}
+          className="rounded-md bg-accent px-3 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+          data-testid="semantic-empty-kick"
+        >
+          {t("settings.ai.index.kick")}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function SemanticResultsView({
@@ -97,6 +153,7 @@ export default function SemanticResultsView({
       <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="semantic-empty">
         <p className="text-sm text-text-secondary">{t("search.semantic.empty")}</p>
         <p className="text-xs text-text-muted">{t("search.semantic.emptyHint")}</p>
+        <SemanticIndexBuildingHint />
       </div>
     );
   }

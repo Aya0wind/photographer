@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router";
@@ -8,6 +8,7 @@ import { MemoryRouter } from "react-router";
 import i18n from "@/i18n";
 import TaskCenter from "./TaskCenter";
 import { resetImportStoreForTests, useImportStore, type ActiveJob } from "@/stores/importStore";
+import { useAiStore } from "@/stores/aiStore";
 import {
   cleanCandidates,
   importCancel,
@@ -16,6 +17,9 @@ import {
   importPause,
   importResume,
   importRetryFailed,
+  indexKickNow,
+  indexStatus,
+  type IndexStatus,
   type JobRow,
   type LogRow,
 } from "@/ipc/api";
@@ -32,6 +36,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     importLogsPage: vi.fn(),
     cleanCandidates: vi.fn(),
     cleanApply: vi.fn(),
+    indexStatus: vi.fn(),
+    indexKickNow: vi.fn(),
   };
 });
 
@@ -42,6 +48,8 @@ const retryMock = vi.mocked(importRetryFailed);
 const jobsPageMock = vi.mocked(importJobsPage);
 const logsPageMock = vi.mocked(importLogsPage);
 const cleanCandidatesMock = vi.mocked(cleanCandidates);
+const indexStatusMock = vi.mocked(indexStatus);
+const indexKickNowMock = vi.mocked(indexKickNow);
 
 function runningJob(): ActiveJob {
   return {
@@ -96,6 +104,9 @@ beforeEach(() => {
   jobsPageMock.mockReset().mockResolvedValue([]);
   logsPageMock.mockReset().mockResolvedValue([]);
   cleanCandidatesMock.mockReset().mockResolvedValue([]);
+  indexStatusMock.mockReset().mockResolvedValue(null);
+  indexKickNowMock.mockReset().mockResolvedValue(undefined);
+  useAiStore.getState().resetForTests();
 });
 
 describe("当前任务卡", () => {
@@ -420,5 +431,51 @@ describe("安全清卡入口（M2）", () => {
     await user.click(screen.getByTestId("history-clean-3"));
     expect(await screen.findByTestId("clean-dialog")).toBeInTheDocument();
     expect(screen.queryByTestId("log-viewer-3")).not.toBeInTheDocument();
+  });
+});
+
+// --- 索引任务卡（M4 二轮升级：三类计数 + 立即开始） -----------------------------------
+
+describe("索引任务卡（indexStatus 计数 + 立即开始）", () => {
+  const STATUS: IndexStatus = {
+    thumb: { pending: 3, done: 117, failed: 1 },
+    exif: { pending: 0, done: 120, failed: 0 },
+    ai: { pending: 0, done: 45, total: 120 },
+  };
+
+  it("无恢复事件（indexPending=null）→ 不渲染索引卡", () => {
+    renderCenter();
+    expect(screen.queryByTestId("task-index")).not.toBeInTheDocument();
+  });
+
+  it("渲染三类计数；仅对有待办者给「立即开始」；点击负载 index_kick_now(kind)", async () => {
+    indexStatusMock.mockResolvedValue(STATUS);
+    useImportStore.setState({ indexPending: 12 });
+    useAiStore.setState({ indexStatus: STATUS });
+    renderCenter();
+
+    const card = await screen.findByTestId("task-index");
+    const statusLine = within(card).getByTestId("task-index-status");
+    expect(statusLine).toHaveTextContent("缩略图：待处理 3 · 已完成 117 · 失败 1");
+    expect(statusLine).toHaveTextContent("详细信息：待处理 0 · 已完成 120");
+    expect(statusLine).toHaveTextContent("语义：已索引 45 / 120");
+
+    // thumb（待处理 3）与 ai（45/120 未完成）可立即开始；exif 无待办 → 无按钮
+    expect(within(card).getByTestId("task-index-kick-thumb")).toBeInTheDocument();
+    expect(within(card).getByTestId("task-index-kick-ai")).toBeInTheDocument();
+    expect(within(card).queryByTestId("task-index-kick-exif")).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(within(card).getByTestId("task-index-kick-ai"));
+    await waitFor(() => expect(indexKickNowMock).toHaveBeenCalledWith("ai"));
+  });
+
+  it("index_status 不可用（null）→ 仅有待处理行 + 暂停（无立即开始）", async () => {
+    useImportStore.setState({ indexPending: 5 });
+    renderCenter();
+
+    const card = await screen.findByTestId("task-index");
+    expect(within(card).getByTestId("task-index-pause")).toBeInTheDocument();
+    expect(within(card).queryByTestId("task-index-kick-thumb")).not.toBeInTheDocument();
   });
 });

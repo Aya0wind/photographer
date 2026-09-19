@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { AssetDto } from "@/ipc/api";
+import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
 import {
   UNKNOWN_GROUP_KEY,
   formatDateLabel,
@@ -264,8 +265,11 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                         {score !== undefined && (
                           <span
-                            className="absolute bottom-1 right-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] leading-none text-white"
+                            className={`absolute bottom-1 right-1 rounded px-1 py-0.5 font-mono text-[10px] leading-none ${
+                              SIMILARITY_BADGE_CLASS[similarityTier(score)]
+                            }`}
                             data-testid="search-score-badge"
+                            data-score-tier={similarityTier(score)}
                           >
                             {Math.round(score * 100)}%
                           </span>

@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import type { JobRow, JobStatus } from "@/ipc/api";
-import { indexTaskPause } from "@/ipc/api";
+import { indexKickNow, indexTaskPause, type IndexKind } from "@/ipc/api";
 import { formatBytes, formatDateTime, formatDuration, formatSpeed } from "@/lib/format";
+import { useAiStore } from "@/stores/aiStore";
 import { useImportStore, type ActiveJob, type JobSummary } from "@/stores/importStore";
 import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
 import LogViewer from "./LogViewer";
@@ -59,12 +60,39 @@ function FileNameTicker({ text }: { text: string }) {
   );
 }
 
-/** 索引任务卡（v1 简版）：启动恢复事件带出待处理项数 + 暂停按钮。
- *  索引=库级后台任务（缩略图三档/EXIF 深提取/未来 AI），退出重开自动恢复。 */
+/** 索引任务卡：启动恢复事件带出待处理项数 + index_status 三类计数 + 立即开始/暂停。
+ *  索引=库级后台任务（缩略图/EXIF 深提取/语义），退出重开自动恢复；
+ *  计数快照进页面拉一次，indexTaskProgress 事件经 aiStore 驱动重拉。 */
 function IndexTaskCard() {
   const { t } = useTranslation();
   const indexPending = useImportStore((s) => s.indexPending);
+  const status = useAiStore((s) => s.indexStatus);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+
+  useEffect(() => {
+    void refreshIndexStatus();
+  }, [refreshIndexStatus]);
+
   if (indexPending === null) return null;
+
+  // 有待办的索引类型才给「立即开始」（indexKickNow 幂等；失败静默——计数以快照/事件为准）
+  const kickable: IndexKind[] = status
+    ? ([
+        status.thumb.pending > 0 ? "thumb" : null,
+        status.exif.pending > 0 ? "exif" : null,
+        status.ai.total > 0 && status.ai.done < status.ai.total ? "ai" : null,
+      ].filter((kind): kind is IndexKind => kind !== null))
+    : [];
+
+  async function kick(kind: IndexKind): Promise<void> {
+    try {
+      await indexKickNow(kind);
+    } catch {
+      return; // ai 模型未就绪等业务错误：任务中心静默，设置页 AI tab 有引导
+    }
+    void refreshIndexStatus();
+  }
+
   return (
     <section
       className="flex items-center justify-between gap-3 rounded-lg border border-edge bg-surface px-4 py-3"
@@ -77,18 +105,45 @@ function IndexTaskCard() {
             <path d="M5.5 4.5V3h5v1.5M5.5 8h5M5.5 10.5h3" />
           </svg>
         </span>
-        <span className="min-w-0 truncate text-sm text-text-primary">
-          {t("tasks.index.pending", { count: indexPending })}
-        </span>
+        <div className="min-w-0">
+          <span className="block truncate text-sm text-text-primary">
+            {t("tasks.index.pending", { count: indexPending })}
+          </span>
+          {status && (
+            <span
+              className="mt-0.5 block font-mono text-[11px] tabular-nums text-text-muted"
+              data-testid="task-index-status"
+            >
+              {[
+                t("tasks.index.statusThumb", { ...status.thumb }),
+                t("tasks.index.statusExif", { ...status.exif }),
+                t("tasks.index.statusAi", { ...status.ai }),
+              ].join("　")}
+            </span>
+          )}
+        </div>
       </div>
-      <button
-        type="button"
-        onClick={() => void indexTaskPause()}
-        className="shrink-0 rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-        data-testid="task-index-pause"
-      >
-        {t("tasks.index.pause")}
-      </button>
+      <div className="flex shrink-0 items-center gap-1.5">
+        {kickable.map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => void kick(kind)}
+            className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+            data-testid={`task-index-kick-${kind}`}
+          >
+            {t("tasks.index.kick")}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => void indexTaskPause()}
+          className="rounded-md border border-edge px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+          data-testid="task-index-pause"
+        >
+          {t("tasks.index.pause")}
+        </button>
+      </div>
     </section>
   );
 }

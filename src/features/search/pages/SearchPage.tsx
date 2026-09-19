@@ -19,6 +19,10 @@ import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import {
+  loadSemanticHistory,
+  recordSemanticQuery,
+} from "@/features/ai/semanticHistory";
 import SemanticResultsView, {
   SemanticQueryInput,
 } from "@/features/ai/SemanticResultsView";
@@ -142,6 +146,14 @@ export default function SearchPage() {
   const [mode, setMode] = useState<"filters" | "semantic">("filters");
   const semantic = useSemanticSearch();
   const [lastQuery, setLastQuery] = useState("");
+  // 语义查询历史（最近 5 条，localStorage；run 即记录——去重置顶）
+  const [history, setHistory] = useState<string[]>(() => loadSemanticHistory());
+
+  function runSemantic(query: string): void {
+    setLastQuery(query);
+    setHistory(recordSemanticQuery(query));
+    void semantic.run(query);
+  }
 
   const [kind, setKind] = useState<"all" | "photo" | "video">("all");
   const [from, setFrom] = useState("");
@@ -297,10 +309,7 @@ export default function SearchPage() {
             <>
               <SemanticQueryInput
                 busy={semantic.status === "loading"}
-                onRun={(q) => {
-                  setLastQuery(q);
-                  void semantic.run(q);
-                }}
+                onRun={runSemantic}
               />
               <span
                 className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
@@ -446,6 +455,31 @@ export default function SearchPage() {
             </>
           )}
         </div>
+
+        {/* 语义查询历史（最近 5 条）：点击重搜（记录去重置顶见 recordSemanticQuery） */}
+        {mode === "semantic" && history.length > 0 && (
+          <div
+            className="sp-scroll flex h-8 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-edge/60"
+            data-testid="semantic-history"
+          >
+            <span className="shrink-0 text-[11px] text-text-muted">
+              {t("search.semantic.history")}
+            </span>
+            {history.map((q) => (
+              <button
+                key={q}
+                type="button"
+                onClick={() => runSemantic(q)}
+                title={q}
+                className="max-w-[160px] shrink-0 truncate rounded-full border border-edge px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                data-testid="semantic-history-item"
+                data-query={q}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* 结果：复用画廊网格（同一虚拟化 + 缩略图管线 + 查看器 + 合并展示）；
             语义模式走 SemanticResultsView（进度/未就绪引导/相似度角标） */}

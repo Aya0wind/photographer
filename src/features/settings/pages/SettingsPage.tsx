@@ -5,6 +5,8 @@ import { useTranslation } from "react-i18next";
 import { importRootOf } from "@/features/onboarding/onboardingConfig";
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
+import { SMART_ALBUM_TAGS } from "@/features/albums/pages/AlbumsPages";
+import { loadHiddenTags, toggleHiddenTag } from "@/features/albums/lib/hiddenTags";
 import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
 
 /**
@@ -95,6 +97,43 @@ export function Toggle({
 
 export const SELECT_CLASS =
   "rounded-md border border-edge bg-bg px-2 py-1 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40";
+
+/** 智能相册显示的标签（简化存储：localStorage，不走 settings） */
+function AlbumTagsSetting() {
+  const { t } = useTranslation();
+  const [hidden, setHidden] = useState<string[]>(() => loadHiddenTags());
+  return (
+    <SettingRow
+      label={t("settings.albums.visibleTags")}
+      desc={t("settings.albums.visibleTagsDesc")}
+      testId="settings-row-album-tags"
+    >
+      <div
+        className="flex max-w-[360px] flex-wrap justify-end gap-x-3 gap-y-1.5"
+        data-testid="settings-album-tags"
+      >
+        {SMART_ALBUM_TAGS.map((tag) => (
+          <label
+            key={tag}
+            className="flex cursor-pointer items-center gap-1 text-[11px] text-text-secondary"
+            data-testid="settings-album-tag"
+            data-tag={tag}
+            data-checked={!hidden.includes(tag)}
+          >
+            <input
+              type="checkbox"
+              checked={!hidden.includes(tag)}
+              onChange={() => setHidden(toggleHiddenTag(tag))}
+              aria-label={tag}
+              className="h-3 w-3 accent-[#F0A83C]"
+            />
+            {tag}
+          </label>
+        ))}
+      </div>
+    </SettingRow>
+  );
+}
 
 function InfoRow({ label, value, mono = true }: { label: string; value: string | null; mono?: boolean }) {
   return (
@@ -231,6 +270,8 @@ export default function SettingsPage() {
                   onChange={(next) => commit({ gallery: { mergeRawJpg: next } })}
                 />
               </SettingRow>
+              <SectionTitle>{t("settings.section.albums")}</SectionTitle>
+              <AlbumTagsSetting />
             </>
           )}
 

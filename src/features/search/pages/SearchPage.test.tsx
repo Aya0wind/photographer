@@ -13,6 +13,8 @@ import {
   assetsByIds,
   assetsPage,
   cameraList,
+  indexKickNow,
+  indexStatus,
   searchSemantic,
   type AssetDto,
 } from "@/ipc/api";
@@ -27,6 +29,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     cameraList: vi.fn(),
     searchSemantic: vi.fn(),
     assetsByIds: vi.fn(),
+    indexStatus: vi.fn(),
+    indexKickNow: vi.fn(),
   };
 });
 
@@ -41,6 +45,8 @@ const assetsPageMock = vi.mocked(assetsPage);
 const thumbMock = vi.mocked(assetThumbGet);
 const cameraListMock = vi.mocked(cameraList);
 const convertMock = vi.mocked(convertFileSrc);
+const indexStatusMock = vi.mocked(indexStatus);
+const indexKickNowMock = vi.mocked(indexKickNow);
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -87,12 +93,15 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.useRealTimers();
+  localStorage.clear();
   assetsPageMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue(null);
   convertMock.mockReset().mockReturnValue("");
   cameraListMock.mockReset().mockResolvedValue([]);
   vi.mocked(searchSemantic).mockReset();
   vi.mocked(assetsByIds).mockReset().mockResolvedValue([]);
+  indexStatusMock.mockReset().mockResolvedValue(null);
+  indexKickNowMock.mockReset().mockResolvedValue(undefined);
   useAiStore.getState().resetForTests();
   resetThumbPipelineForTests();
 });
@@ -449,5 +458,145 @@ describe("搜索：语义模式", () => {
       useAiStore.getState().handleAppEvent({ type: "indexTaskProgress", kind: "ai", done: 10, total: 10 });
     });
     await waitFor(() => expect(screen.queryByTestId("semantic-indexing")).not.toBeInTheDocument());
+  });
+});
+
+// --- 语义查询历史（M4 二轮） ---------------------------------------------------------
+
+describe("搜索：语义查询历史", () => {
+  async function typeAndRun(
+    user: ReturnType<typeof import("@testing-library/user-event").default.setup>,
+    query: string,
+  ): Promise<void> {
+    const input = screen.getByTestId("semantic-input");
+    await user.clear(input);
+    await user.type(input, query);
+    await user.click(screen.getByTestId("semantic-run"));
+  }
+
+  it("记录历史（新→旧 chips）；点击 chip 重搜并去重置顶", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.8 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+    await user.click(screen.getByTestId("search-mode-semantic"));
+
+    await typeAndRun(user, "海边日落");
+    await typeAndRun(user, "猫");
+
+    const chips = screen.getAllByTestId("semantic-history-item");
+    expect(chips.map((chip) => chip.textContent)).toEqual(["猫", "海边日落"]);
+
+    // 点击历史 chip 重搜
+    vi.mocked(searchSemantic).mockClear();
+    await user.click(chips[1]);
+    await waitFor(() =>
+      expect(searchSemantic).toHaveBeenLastCalledWith("海边日落", 100, undefined),
+    );
+    // 重复查询去重置顶
+    expect(screen.getAllByTestId("semantic-history-item").map((chip) => chip.textContent)).toEqual([
+      "海边日落",
+      "猫",
+    ]);
+  });
+
+  it("历史上限 5 条（最旧的被挤出）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([]); // 空结果即可（历史记录与结果无关）
+    renderSearch();
+    await screen.findByTestId("search-page");
+    await user.click(screen.getByTestId("search-mode-semantic"));
+
+    for (const q of ["一", "二", "三", "四", "五", "六"]) {
+      await typeAndRun(user, q);
+    }
+    const chips = screen.getAllByTestId("semantic-history-item");
+    expect(chips).toHaveLength(5);
+    expect(chips[0]).toHaveTextContent("六");
+    expect(chips.map((chip) => chip.textContent)).not.toContain("一");
+  });
+});
+
+// --- 相似度角标分档（M4 二轮） ---------------------------------------------------------
+
+describe("搜索：相似度角标分档", () => {
+  it(">75% high(accent) / 60–75% mid(muted) / <60% low(灰)", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([
+      { assetId: 1, score: 0.9 },
+      { assetId: 2, score: 0.65 },
+      { assetId: 3, score: 0.4 },
+    ]);
+    vi.mocked(assetsByIds).mockResolvedValue([
+      makeAsset(1, "2026-09-18"),
+      makeAsset(2, "2026-09-18"),
+      makeAsset(3, "2026-09-18"),
+    ]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "日落");
+    await user.click(screen.getByTestId("semantic-run"));
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    const badgeOf = (tile: HTMLElement) => within(tile).getByTestId("search-score-badge");
+    expect(badgeOf(tiles[0])).toHaveAttribute("data-score-tier", "high");
+    expect(badgeOf(tiles[1])).toHaveAttribute("data-score-tier", "mid");
+    expect(badgeOf(tiles[2])).toHaveAttribute("data-score-tier", "low");
+    // 分档样式：high 档 accent 底、low 档灰字
+    expect(badgeOf(tiles[0]).className).toContain("bg-accent/90");
+    expect(badgeOf(tiles[1]).className).toContain("text-white/85");
+    expect(badgeOf(tiles[2]).className).toContain("text-white/45");
+  });
+});
+
+// --- 空结果 × 语义索引建立中提示（M4 二轮） -------------------------------------------
+
+describe("搜索：空结果提示（语义索引未建完）", () => {
+  function aiStatus(done: number, total: number): import("@/ipc/api").IndexStatus {
+    return {
+      thumb: { pending: 0, done: 0, failed: 0 },
+      exif: { pending: 0, done: 0, failed: 0 },
+      ai: { pending: total - done, done, total },
+    };
+  }
+
+  async function runSemanticQuery(
+    user: ReturnType<typeof import("@testing-library/user-event").default.setup>,
+  ): Promise<void> {
+    await screen.findByTestId("search-page");
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "日落");
+    await user.click(screen.getByTestId("semantic-run"));
+    await screen.findByTestId("semantic-empty");
+  }
+
+  it("索引未建完（70/100）→ 提示建立中 + 立即索引按钮（index_kick_now）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([]);
+    indexStatusMock.mockResolvedValue(aiStatus(70, 100));
+    renderSearch();
+    await runSemanticQuery(user);
+
+    const hint = await screen.findByTestId("semantic-empty-indexing");
+    expect(hint).toHaveTextContent("语义索引建立中（70/100）");
+
+    await user.click(screen.getByTestId("semantic-empty-kick"));
+    await waitFor(() => expect(indexKickNowMock).toHaveBeenCalledWith("ai"));
+    expect(await screen.findByTestId("semantic-empty-kicked")).toBeInTheDocument();
+  });
+
+  it("索引已完成（100/100）→ 仅空结果文案，无建立中提示", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([]);
+    indexStatusMock.mockResolvedValue(aiStatus(100, 100));
+    renderSearch();
+    await runSemanticQuery(user);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("semantic-empty-indexing")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("semantic-empty")).toHaveTextContent("没有语义匹配的照片");
   });
 });

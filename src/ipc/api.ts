@@ -546,6 +546,19 @@ export async function aiFaceDataClear(): Promise<boolean> {
   }
 }
 
+// --- M4 人物（人脸聚类）契约 ------------------------------------------------------
+
+/** 人物聚类条目（people_list 返回；faceCount 降序由后端保证） */
+export interface PersonCluster {
+  clusterId: number;
+  /** 用户命名；未命名为 null（UI 显示「人物 N」） */
+  name: string | null;
+  /** 聚类内人脸数（徽标） */
+  faceCount: number;
+  /** 封面资产 id（走 asset_thumb_get 管线取图） */
+  coverAssetId: number;
+}
+
 export interface SemanticHit {
   assetId: number;
   /** 相似度 0..1 */
@@ -627,6 +640,87 @@ export async function assetThumbGet(assetId: number, size: number): Promise<stri
   } catch {
     return null;
   }
+}
+
+// --- M4 人物命令封装 ----------------------------------------------------------------
+
+/** 人物清单（人脸聚类结果；失败/非数组回退 []——后端未就绪即空态兜底） */
+export async function peopleList(): Promise<PersonCluster[]> {
+  try {
+    const list = await ipc<PersonCluster[] | null>("people_list");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 某人物聚类内的照片（序由后端保证）；失败回退 [] */
+export async function peopleAssets(clusterId: number, limit: number): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("people_assets", { clusterId, limit });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 重命名人物（clusterId 聚类；空名由调用方拦下）；命令失败返回 false */
+export async function personRename(clusterId: number, name: string): Promise<boolean> {
+  try {
+    await ipc<unknown>("person_rename", { clusterId, name });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 删除人物聚类（仅拆聚类，照片不受影响）；命令失败返回 false */
+export async function personDelete(clusterId: number): Promise<boolean> {
+  try {
+    await ipc<unknown>("person_delete", { clusterId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- 索引任务（缩略图/EXIF/语义）：状态与手动触发 -------------------------------------
+
+export type IndexKind = "thumb" | "exif" | "ai";
+
+/** 单类索引计数（index_status；failed 仅 thumb/exif 有意义） */
+export interface IndexCounters {
+  pending: number;
+  done: number;
+  failed: number;
+}
+
+/** 索引状态（index_status 返回；ai 的 total 为库内资产总数，供「N / M」口径） */
+export interface IndexStatus {
+  thumb: IndexCounters;
+  exif: IndexCounters;
+  ai: { pending: number; done: number; total: number };
+}
+
+/** 索引状态快照；失败/负载异常返回 null（调用方隐藏/降级区块） */
+export async function indexStatus(): Promise<IndexStatus | null> {
+  try {
+    const status = await ipc<IndexStatus | null>("index_status");
+    if (status === null || typeof status !== "object") return null;
+    const s = status as Partial<Record<IndexKind, unknown>>;
+    const okThumb = s.thumb !== null && typeof s.thumb === "object";
+    const okExif = s.exif !== null && typeof s.exif === "object";
+    const okAi = s.ai !== null && typeof s.ai === "object";
+    return okThumb && okExif && okAi ? (status as IndexStatus) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 立即触发指定索引（幂等）。不 catch：ai 模型未就绪等业务错误（后端 Err 文案，
+ *  如「请先在设置中下载模型」）由调用方提示；传输失败经 ipc() 统一置不可用标志 */
+export async function indexKickNow(kind: IndexKind): Promise<void> {
+  await ipc<void>("index_kick_now", { kind });
 }
 
 // --- 事件订阅 ----------------------------------------------------------------

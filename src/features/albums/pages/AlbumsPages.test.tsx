@@ -9,7 +9,8 @@ import i18n from "@/i18n";
 import Sidebar from "@/app/shell/Sidebar";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import { AlbumsIndexPage, AlbumTagPage, SMART_ALBUM_TAGS } from "./AlbumsPages";
-import { searchSemantic, assetsByIds } from "@/ipc/api";
+import { HIDDEN_ALBUM_TAGS_KEY } from "../lib/hiddenTags";
+import { searchSemantic, assetsByIds, assetThumbGet } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -30,6 +31,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 const searchSemanticMock = vi.mocked(searchSemantic);
 const assetsByIdsMock = vi.mocked(assetsByIds);
+const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
 
 function makeAsset(id: number, name: string) {
@@ -71,8 +73,10 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  localStorage.clear();
   searchSemanticMock.mockReset().mockResolvedValue([]);
   assetsByIdsMock.mockReset().mockResolvedValue([]);
+  thumbMock.mockReset().mockResolvedValue(null);
   convertMock.mockReset().mockReturnValue("");
   useAiStore.getState().resetForTests();
 });
@@ -143,5 +147,66 @@ describe("M4 路由与侧栏", () => {
     await user.click(screen.getByTestId("semantic-run"));
 
     await waitFor(() => expect(searchSemanticMock).toHaveBeenLastCalledWith("雪", 100, undefined));
+  });
+});
+
+// --- 标签封面（M4 二轮）：首条语义命中缩略图，后台批量预取，失败静默占位 -------------
+
+describe("智能相册标签封面", () => {
+  it("命中标签显示封面 img（首条命中缩略图）；未命中标签显示占位", async () => {
+    searchSemanticMock.mockImplementation((q: string) =>
+      q === "日落" ? Promise.resolve([{ assetId: 9, score: 0.9 }]) : Promise.resolve([]),
+    );
+    thumbMock.mockResolvedValue("D:\\cache\\9.jpg");
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderRoutes("/albums");
+
+    const img = await screen.findByTestId("albums-tag-cover-img");
+    expect(img).toHaveAttribute("data-tag", "日落");
+    expect(img).toHaveAttribute("src", "asset://D:\\cache\\9.jpg");
+    expect(searchSemanticMock).toHaveBeenCalledWith("日落", 1);
+    expect(thumbMock).toHaveBeenCalledWith(9, 240);
+
+    const fallbacks = await screen.findAllByTestId("albums-tag-cover-fallback");
+    expect(fallbacks).toHaveLength(SMART_ALBUM_TAGS.length - 1);
+  });
+
+  it("缩略图缺失 → 全部静默占位（无 img）", async () => {
+    searchSemanticMock.mockImplementation((q: string) =>
+      q === "日落" ? Promise.resolve([{ assetId: 9, score: 0.9 }]) : Promise.resolve([]),
+    );
+    renderRoutes("/albums");
+    await screen.findByTestId("albums-page");
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("albums-tag-cover-fallback")).toHaveLength(
+        SMART_ALBUM_TAGS.length,
+      ),
+    );
+    expect(screen.queryByTestId("albums-tag-cover-img")).not.toBeInTheDocument();
+  });
+});
+
+// --- 标签隐藏（M4 二轮）：设置页勾选写入 localStorage，相册页过滤 ---------------------
+
+describe("智能相册标签隐藏", () => {
+  it("localStorage 记录的隐藏标签不渲染", async () => {
+    localStorage.setItem(HIDDEN_ALBUM_TAGS_KEY, JSON.stringify(["夜景", "美食"]));
+    renderRoutes("/albums");
+
+    const tags = await screen.findAllByTestId("albums-tag");
+    expect(tags).toHaveLength(SMART_ALBUM_TAGS.length - 2);
+    const shown = tags.map((tag) => tag.getAttribute("data-tag"));
+    expect(shown).not.toContain("夜景");
+    expect(shown).not.toContain("美食");
+    expect(shown).toContain("日落");
+  });
+
+  it("全部隐藏 → 提示文案（无标签网格）", async () => {
+    localStorage.setItem(HIDDEN_ALBUM_TAGS_KEY, JSON.stringify([...SMART_ALBUM_TAGS]));
+    renderRoutes("/albums");
+
+    expect(await screen.findByTestId("albums-all-hidden")).toBeInTheDocument();
+    expect(screen.queryByTestId("albums-tag")).not.toBeInTheDocument();
   });
 });

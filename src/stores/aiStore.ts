@@ -3,7 +3,9 @@ import { subscribeAppEvents, type AppEvent } from "@/ipc/api";
 
 import {
   aiModelsStatus,
+  indexStatus,
   type AiModelStatus,
+  type IndexStatus,
 } from "@/ipc/api";
 
 /**
@@ -11,6 +13,8 @@ import {
  * - models：ai_models_status 快照（refresh 拉取；事件 aiModelDownloadFinished 后重拉）
  * - downloadProgress：aiModelDownloadProgress 节流事件（单模型下载进度条）
  * - indexProgress：indexTaskProgress（kind="ai" 语义索引进度，"正在建立语义索引（N/M）"）
+ * - indexStatus：index_status 三类索引计数快照（缩略图/EXIF/语义）——进相关页面拉一次，
+ *   任意 indexTaskProgress/indexTaskResumed 事件后重拉（事件本身节流 1s，由后端负责）
  * 事件经唯一通道 app://event（initAi 幂等订阅；测试可直接 handleAppEvent 驱动）。
  */
 
@@ -31,9 +35,13 @@ interface AiState {
   modelsLoaded: boolean;
   downloadProgress: Record<string, AiDownloadProgress>;
   indexProgress: AiIndexProgress | null;
+  /** 三类索引计数（index_status）；null=未拉取/后端不可用 */
+  indexStatus: IndexStatus | null;
 
   /** 拉取模型状态（设置页挂载/下载结束后调用） */
   refresh: () => Promise<void>;
+  /** 拉取索引状态快照（相关页面挂载/索引进度事件后调用） */
+  refreshIndexStatus: () => Promise<void>;
   /** 事件入口（initAi 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
   /** 仅测试用：清空状态 */
@@ -45,10 +53,15 @@ export const useAiStore = create<AiState>((set, get) => ({
   modelsLoaded: false,
   downloadProgress: {},
   indexProgress: null,
+  indexStatus: null,
 
   refresh: async () => {
     const models = await aiModelsStatus();
     set({ models, modelsLoaded: true });
+  },
+
+  refreshIndexStatus: async () => {
+    set({ indexStatus: await indexStatus() });
   },
 
   handleAppEvent: (event) => {
@@ -72,10 +85,16 @@ export const useAiStore = create<AiState>((set, get) => ({
         void get().refresh();
         break;
       }
+      case "indexTaskResumed": {
+        void get().refreshIndexStatus();
+        break;
+      }
       case "indexTaskProgress": {
         if (event.kind === "ai") {
           set({ indexProgress: { kind: event.kind, done: event.done, total: event.total } });
         }
+        // 任一索引推进 → 三类计数快照重拉（事件已由后端节流）
+        void get().refreshIndexStatus();
         break;
       }
       default:
@@ -84,7 +103,13 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   resetForTests: () => {
-    set({ models: [], modelsLoaded: false, downloadProgress: {}, indexProgress: null });
+    set({
+      models: [],
+      modelsLoaded: false,
+      downloadProgress: {},
+      indexProgress: null,
+      indexStatus: null,
+    });
   },
 }));
 
