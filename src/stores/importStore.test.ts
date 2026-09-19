@@ -443,7 +443,7 @@ describe("设备状态补偿与重连", () => {
     emit({ type: "deviceArrived", id: "E:", kind: "volume", name: "新连接" });
     emit({ type: "deviceScanned", id: "E:", kind: "volume", name: "新连接", snapshot: snapshot("E:", "新连接") });
     expect(useImportStore.getState().devices[0]).toMatchObject({ name: "新连接", scanStatus: "ready" });
-    expect(useImportStore.getState().sourceFiles["E:"]).toEqual([]);
+    expect(useImportStore.getState().sourceFiles["E:"]).toBeUndefined();
   });
 });
 

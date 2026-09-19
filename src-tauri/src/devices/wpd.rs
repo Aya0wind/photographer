@@ -596,6 +596,11 @@ mod com {
             &mut progress,
         )?;
         progress.flush(&out, true);
+        if out.is_empty() {
+            if let Some(callback) = &progress.callback {
+                callback(Vec::new());
+            }
+        }
         // 「要么完整要么报错」：中途错误已整体上抛；此处只剩受限对象计数
         if skipped > 0 {
             eprintln!(

@@ -303,7 +303,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
     }
     switch (event.type) {
       case "deviceArrived": {
-        streamingDevices.add(event.id);
+        streamingDevices.delete(event.id);
         set((s) => ({
           sourceFiles: { ...s.sourceFiles, [event.id]: [] },
           devices: upsertDevice(s.devices, {
@@ -334,6 +334,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
       }
 
       case "deviceScanFailed": {
+        streamingDevices.delete(event.id);
         set((s) => ({
           devices: s.devices.map((d) => d.id === event.id ? { ...d, scanStatus: "failed", scanError: event.message } : d),
           scanning: s.scanning.filter((d) => d.id !== event.id),

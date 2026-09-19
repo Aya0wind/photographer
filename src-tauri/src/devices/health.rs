@@ -96,7 +96,7 @@ pub enum HealthAction {
 /// - `graveyard`：已离线待探回的 `(id, name)`（in-out：Revive 时移除；
 ///   真实接线中即 OFFLINE 集合快照，见 [`graveyard_snapshot`]）；
 /// - `failures`：连续失败计数（in-out：成功清零，判离线后消费）；
-/// - `ping`：探活闭包（返回是否可达；真实接线为 worker ping + 5s 超时）；
+/// - `ping`：Some(true/false) 表示探活结果；None 表示设备忙，本轮不计成功或失败。
 /// - `probe_graveyard`：本轮是否探 graveyard（退避：每 3 轮一次）。
 pub fn monitor_step<P: Into<Option<bool>>>(
     registered: &[(String, String)],
