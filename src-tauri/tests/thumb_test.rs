@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 
 /// 造一张指定尺寸的渐变 JPG。
 fn write_jpg(path: &Path, w: u32, h: u32) {
@@ -491,4 +491,207 @@ fn raw_tiff_orientation_applies_to_embedded_preview() {
     let p = thumbs::thumb_file(&db, &src, 256).expect("RAW 预览应提取");
     let (w, h) = image::image_dimensions(Path::new(&p)).unwrap();
     assert!(h > w, "容器 IFD0 Orientation=6 应转正预览: {w}x{h}");
+}
+
+// ---------------------------------------------------------------------------
+// RAW 全量显影性能诊断（#[ignore]）：分阶段计时定位 10s+ 卡点。
+// 手动跑：cargo test --test thumb_test raw_develop_timing -- --ignored --nocapture
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "性能诊断：需本机 NEF 与 NAS ARW 样例；交付验证用"]
+fn raw_develop_timing() {
+    use std::time::Instant;
+
+    let samples = [
+        ("本地NEF", r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF"),
+        ("NAS-ARW", r"Y:\照片\SmartPhoto\2026\08-30\DSC08115.ARW"),
+    ];
+    for (label, path) in samples {
+        let src = Path::new(path);
+        if !src.is_file() {
+            eprintln!("{label}: 样例不存在，跳过");
+            continue;
+        }
+        let t0 = Instant::now();
+        let raw = match rawler_probe_decode(src) {
+            Some(r) => r,
+            None => {
+                eprintln!("{label}: rawler 解码失败");
+                continue;
+            }
+        };
+        let t1 = Instant::now();
+        let raw = raw; // (dim 信息打点)
+        eprintln!(
+            "{label}: decode={:?} 尺寸={:?}x{:?}",
+            t1 - t0,
+            raw.width,
+            raw.height
+        );
+        let t2 = Instant::now();
+        let developed = match rawler_probe_develop(&raw) {
+            Some(d) => d,
+            None => {
+                eprintln!("{label}: 显影失败");
+                continue;
+            }
+        };
+        let t3 = Instant::now();
+        eprintln!("{label}: develop={:?}", t3 - t2);
+        let t4 = Instant::now();
+        let img = developed.to_dynamic_image().unwrap();
+        let t5 = Instant::now();
+        eprintln!("{label}: to_image={:?} ({}x{})", t5 - t4, img.width(), img.height());
+        let t6 = Instant::now();
+        let small = img.thumbnail(2048, 2048).to_rgb8();
+        let t7 = Instant::now();
+        eprintln!("{label}: resize={:?}", t7 - t6);
+        let t8 = Instant::now();
+        let mut jpeg = Vec::new();
+        let _enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88);
+        image::DynamicImage::ImageRgb8(small)
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .ok();
+        let t9 = Instant::now();
+        eprintln!("{label}: encode={:?} total={:?}", t9 - t8, t9 - t0);
+    }
+}
+
+fn rawler_probe_decode(src: &Path) -> Option<rawler::RawImage> {
+    rawler::decode_file(src).ok()
+}
+
+fn rawler_probe_develop(
+    raw: &rawler::RawImage,
+) -> Option<rawler::imgop::develop::Intermediate> {
+    use rawler::imgop::develop::RawDevelop;
+    RawDevelop::default()
+        .develop_intermediate(raw)
+        .ok()
+}
+
+// ---------------------------------------------------------------------------
+// RAW 最大内嵌预览选择 + raw-embed 直出档（Windows 照片同款方案，2026-09-20）
+// ---------------------------------------------------------------------------
+
+/// 构造「小缩略图在前、全幅在后」的 RAW 容器（NEF/ARW 真实布局）。
+/// orientation 参数控制容器 IFD0 Orientation（0 = 无 EXIF 段）。
+fn raw_with_two_embeds(small: (u32, u32), large: (u32, u32), orientation: u16) -> Vec<u8> {
+    let mut raw = Vec::new();
+    if orientation > 0 {
+        raw.extend_from_slice(b"II*\0");
+        raw.extend_from_slice(&8u32.to_le_bytes());
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&0x0112u16.to_le_bytes());
+        raw.extend_from_slice(&3u16.to_le_bytes());
+        raw.extend_from_slice(&1u32.to_le_bytes());
+        raw.extend_from_slice(&orientation.to_le_bytes());
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        raw.extend_from_slice(&0u32.to_le_bytes());
+    }
+    // 先小后大：旧行为（取第一段）会拿到小的
+    for (w, h) in [small, large] {
+        let mut img = image::RgbImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
+        }
+        let mut jpg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
+        DynamicImage::ImageRgb8(img)
+            .write_with_encoder(encoder)
+            .unwrap();
+        raw.extend_from_slice(&jpg);
+        raw.extend_from_slice(&[0u8; 32]); // 段间隔
+    }
+    raw
+}
+
+#[test]
+fn raw_preview_picks_largest_embedded_jpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("DSC_9999.NEF");
+    fs::write(&src, raw_with_two_embeds((160, 120), (2400, 1600), 0)).unwrap();
+
+    let preview = thumbs::raw_preview_jpeg(&src).expect("应提取到内嵌 JPEG");
+    let (w, h) = image::load_from_memory(&preview).unwrap().dimensions();
+    assert_eq!((w, h), (2400, 1600), "必须取最大段而非第一段");
+}
+
+#[test]
+fn raw_embed_tier_passthrough_and_dir_naming() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let src = dir.path().join("DSC_9999.NEF");
+    // 无 EXIF（orientation=1 语义）：直出档应零重编码原样落盘
+    let embedded = {
+        let mut img = image::RgbImage::new(2400, 1600);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, 0x7F]);
+        }
+        let mut jpg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
+        DynamicImage::ImageRgb8(img)
+            .write_with_encoder(encoder)
+            .unwrap();
+        jpg
+    };
+    let mut raw = embedded.clone();
+    raw.extend_from_slice(&[0u8; 32]);
+    fs::write(&src, raw).unwrap();
+
+    // >2048 为内嵌直出语义标记
+    let out = thumbs::thumb_file(&db, &src, 6000).expect("直出档应生成");
+    assert!(
+        out.replace('/', "\\").contains("raw-embed-v1"),
+        "应落 raw-embed-v1 目录: {out}"
+    );
+    let cached_bytes = fs::read(&out).unwrap();
+    assert_eq!(
+        cached_bytes, embedded,
+        "orientation=1 时必须零重编码原样落盘"
+    );
+    // 二次调用命中缓存
+    assert!(thumbs::cached(&db, &src, 6000).is_some());
+}
+
+#[test]
+fn raw_embed_tier_orientation_reencodes_upright() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let src = dir.path().join("DSC_9999.ARW");
+    // 容器 Orientation=6（顺时针 90°）：直出档解码转正重编
+    fs::write(
+        &src,
+        raw_with_two_embeds((160, 120), (2400, 1600), 6),
+    )
+    .unwrap();
+
+    let out = thumbs::thumb_file(&db, &src, 6000).expect("直出档应生成");
+    let (w, h) = image::image_dimensions(Path::new(&out)).unwrap();
+    assert!(h > w, "Orientation=6 转正后应为竖图: {w}x{h}");
+}
+
+#[test]
+fn raw_low_tiers_use_generation_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_dir();
+    let src = dir.path().join("DSC_9999.NEF");
+    fs::write(&src, raw_with_two_embeds((160, 120), (2400, 1600), 0)).unwrap();
+
+    for size in [256u16, 512] {
+        let out = thumbs::thumb_file(&db, &src, size).expect("低档应生成");
+        assert!(
+            out.replace('/', "\\").contains(&format!("raw-{size}-v{}", thumbs::RAW_THUMB_GENERATION)),
+            "RAW 低档应落代际目录: {out}"
+        );
+    }
+    // 照片档不受影响：JPG 仍落数字目录
+    let jpg = dir.path().join("P_0001.jpg");
+    write_jpg(&jpg, 800, 600);
+    let out = thumbs::thumb_file(&db, &jpg, 512).expect("JPG 应生成");
+    assert!(
+        out.replace('/', "\\").contains(r"\thumbs\512\"),
+        "JPG 低档仍落数字目录: {out}"
+    );
 }

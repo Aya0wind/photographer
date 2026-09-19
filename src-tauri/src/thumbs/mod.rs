@@ -124,31 +124,30 @@ fn service() -> &'static ThumbSvc {
     })
 }
 
+/// RAW 缩略图源代际：v2 = 取「最大」内嵌 JPEG 为源（v1 取第一段=小缩略图，
+/// 全线偏糊）。低档目录名带代际后缀，升代际即失效重建（照片档不受影响）。
+pub const RAW_THUMB_GENERATION: u32 = 2;
+
+/// 内嵌全幅直出档语义标记：RAW 且请求 size > 2048 → 提取最大内嵌 JPEG
+/// 原样直出（orientation=1 零重编码）。Windows 照片看 RAW 就是这条路——
+/// 相机自己渲染的全幅预览，毫秒级 IO，无需去马赛克显影。
+fn is_raw_embed_request(ext: &str, size: u16) -> bool {
+    size > 2048 && is_raw_ext(ext)
+}
+
 /// 取（或生成）缩略图缓存文件路径。无法生成返回 None。
 /// `db_dir` = 库 dbDir（缓存根）；源文件只读不动。
 pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
-    let size = snap_size(size);
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
     if !DECODABLE_EXTS.contains(&ext.as_str()) && !is_raw_ext(&ext) {
         return None; // 视频等永久不支持
     }
-    if is_raw_ext(&ext) {
-        // RAW：内嵌预览提取路径（同一缓存规则/同一超时与并发许可）
-        let meta = fs::metadata(src).ok()?;
-        if !meta.is_file() {
-            return None;
-        }
-        let mtime = meta.modified().ok()?;
-        let cache = cache_path(db_dir, src, size, mtime);
-        if cache.exists() {
-            return Some(cache.to_string_lossy().into_owned());
-        }
-        let svc = service();
-        let cell = svc.cell_for(&cache);
-        let result = cell.get_or_init(|| generate(&cache, src, size));
-        svc.remove(&cache);
-        return result.as_ref().map(|p| p.to_string_lossy().into_owned());
-    }
+    // 内嵌直出档不 snap（>2048 是语义标记而非目标边长）
+    let size = if is_raw_embed_request(&ext, size) {
+        size
+    } else {
+        snap_size(size)
+    };
     let meta = fs::metadata(src).ok()?;
     if !meta.is_file() {
         return None;
@@ -183,7 +182,12 @@ fn is_raw_ext(ext: &str) -> bool {
 /// 缓存命中探测（不生成、不阻塞）：命中返回缓存文件绝对路径，未命中/
 /// 不可解码/源缺失返回 None。按需管线（asset_thumb_get(asset_id)）的快路径。
 pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
-    let size = snap_size(size);
+    let ext = src.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+    let size = if is_raw_embed_request(&ext, size) {
+        size
+    } else {
+        snap_size(size)
+    };
     if !is_decodable(src) {
         return None;
     }
@@ -207,8 +211,17 @@ fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBu
     let tier = src
         .extension()
         .and_then(|e| e.to_str())
-        .filter(|ext| size == 2048 && is_raw_ext(ext))
-        .map(|_| "2048-raw-full-v1".to_string())
+        .filter(|ext| is_raw_ext(ext))
+        .map(|ext| {
+            if is_raw_embed_request(ext, size) {
+                "raw-embed-v1".to_string() // 内嵌全幅直出（相机渲染，零显影）
+            } else if size == 2048 {
+                "2048-raw-full-v1".to_string() // rawler 显影（无内嵌预览机型兜底）
+            } else {
+                // 低档带源代际：升代际自动失效重建
+                format!("raw-{size}-v{RAW_THUMB_GENERATION}")
+            }
+        })
         .unwrap_or_else(|| size.to_string());
     db_dir
         .join("thumbs")
@@ -223,10 +236,12 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
 
     let (tx, rx) = mpsc::channel();
     let src_display = src.display().to_string();
+    // 仅 2048 显影档走重管护（单飞锁 + 60s 超时）；内嵌直出档是纯 IO
+    // （orientation=1 零重编码）或一次常规解码转正，普通超时即可
     let full_raw = src
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|ext| size >= 2048 && is_raw_ext(ext));
+        .is_some_and(|ext| size == 2048 && is_raw_ext(ext));
     let timeout = if full_raw {
         RAW_FULL_DECODE_TIMEOUT
     } else {
@@ -276,10 +291,24 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
     // EXIF Orientation 生成时一次性转正（缓存里存的就是正的，前端零改动）
     let orientation = orientation_from_file(src).unwrap_or(1);
+    if is_raw_embed_request(&ext, size) {
+        // 内嵌全幅直出：最大内嵌 JPEG。orientation=1 零重编码原样落盘
+        // （毫秒级）；带方向才解码转正重编 q92（一次性的全幅解码+编码）。
+        let preview = raw_preview_jpeg(src)?;
+        if orientation == 1 {
+            return Some(preview);
+        }
+        let img = full_decode_bytes(&preview)?;
+        let img = apply_orientation(img, orientation);
+        let mut jpeg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 92);
+        img.write_with_encoder(encoder).ok()?;
+        return Some(jpeg);
+    }
     let thumb: image::RgbImage = if is_raw_ext(&ext) {
-        if size >= 2048 {
-            // 查看器高清档：完整解码、去马赛克和色彩显影；失败时仍回退相机
-            // 内嵌 JPEG，保证不因少数未支持机型失去预览。
+        if size == 2048 {
+            // 显影兜底档（无内嵌预览机型）：完整解码、去马赛克和色彩显影；
+            // 失败时仍回退相机内嵌 JPEG，保证不因少数未支持机型失去预览。
             develop_raw_resize(src, size).or_else(|| {
                 let preview = raw_preview_jpeg(src)?;
                 Some(
@@ -288,7 +317,7 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
                 )
             })?
         } else {
-            // 低清档优先内嵌 JPEG，快速给出首帧。
+            // 低清档优先内嵌 JPEG（最大段），快速给出首帧。
             let preview = raw_preview_jpeg(src)?;
             jpeg_scaled_bytes(&preview, size)
                 .unwrap_or_else(|| full_decode_bytes_resize(&preview, size))
@@ -454,13 +483,26 @@ fn full_decode_bytes_resize(data: &[u8], size: u16) -> image::RgbImage {
     }
 }
 
+/// 全量解码字节源（原尺寸，内嵌直出档转正重编用）。
+fn full_decode_bytes(data: &[u8]) -> Option<image::RgbImage> {
+    let img = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.decode().ok())?;
+    if img.width() == 0 || img.height() == 0 {
+        return None;
+    }
+    Some(img.to_rgb8())
+}
+
 /// RAW 内嵌预览提取上限（预览 JPEG 通常 <5MB；留足余量）。
 const RAW_SCAN_LIMIT: u64 = 256 * 1024 * 1024;
 
-/// 在 RAW 文件字节里定位第一段「结构完整」的内嵌 JPEG：
-/// SOI(FFD8FF) → 段链走到 SOS → 熵编码后首个 FFD9 即 EOI（熵数据中
-/// FF00 转义保证 FFD9 不会出现在内部）。找到 SOF（尺寸>0）才算有效。
-/// 找不到/结构坏返回 None（前端占位兜底）。
+/// 在 RAW 文件字节里定位**最大**的一段「结构完整」内嵌 JPEG：
+/// 逐个 SOI(FFD8FF) 候选走段链验证（SOF 尺寸>0 才有效），按像素数取最大。
+/// NEF/ARW 里第一段常是 160px 小缩略图，全幅预览在后——取第一段会让整条
+/// 缩略图管线建立在最糊的源上（真机踩坑 2026-09-20）。候选扫描上限 16、
+/// 文件 256MB 上限；找不到/结构坏返回 None（前端占位兜底）。
 pub fn raw_preview_jpeg(src: &Path) -> Option<Vec<u8>> {
     let meta = fs::metadata(src).ok()?;
     if meta.len() > RAW_SCAN_LIMIT {
@@ -468,25 +510,36 @@ pub fn raw_preview_jpeg(src: &Path) -> Option<Vec<u8>> {
     }
     let data = fs::read(src).ok()?;
     let mut from = 0usize;
+    let mut best: Option<(u64, usize, usize)> = None; // (pixels, soi, len)
+    let mut candidates = 0usize;
     while let Some(rel) = data[from..]
         .windows(3)
         .position(|w| w == [0xFF, 0xD8, 0xFF])
     {
         let soi = from + rel;
-        if let Some(end) = jpeg_segment_end(&data[soi..]) {
-            return Some(data[soi..soi + end].to_vec());
+        if let Some((end, w, h)) = jpeg_segment_end(&data[soi..]) {
+            let pixels = u64::from(w) * u64::from(h);
+            if best.is_none_or(|(p, _, _)| pixels > p) {
+                best = Some((pixels, soi, end));
+            }
         }
         from = soi + 2;
         if from + 3 > data.len() {
-            return None;
+            break;
+        }
+        candidates += 1;
+        if candidates >= 16 {
+            break; // 结构异常文件防御：不无限扫
         }
     }
-    None
+    best.map(|(_, soi, end)| data[soi..soi + end].to_vec())
 }
 
-/// 从 SOI 起走段链：返回含 EOI 的完整 JPEG 长度；结构非法返回 None。
-fn jpeg_segment_end(buf: &[u8]) -> Option<usize> {
+/// 从 SOI 起走段链：返回 (含 EOI 的完整 JPEG 长度, SOF 宽, SOF 高)；
+/// 结构非法返回 None。
+fn jpeg_segment_end(buf: &[u8]) -> Option<(usize, u16, u16)> {
     let mut i = 2usize; // 跳过 SOI
+    let mut sof = (0u16, 0u16);
     for _ in 0..256 {
         while i + 1 < buf.len() && buf[i] == 0xFF && buf[i + 1] == 0xFF {
             i += 1; // 填充
@@ -498,13 +551,13 @@ fn jpeg_segment_end(buf: &[u8]) -> Option<usize> {
         match marker {
             0x01 | 0xD0..=0xD7 => i += 2,
             0xD8 => return None,        // 嵌套 SOI：坏结构
-            0xD9 => return Some(i + 2), // EOI
+            0xD9 => return Some((i + 2, sof.0, sof.1)), // EOI
             0xDA => {
                 // SOS：其后熵编码内不会有 FFD9（FF00 转义），线性找 EOI
                 let mut j = i + 2 + seg_len_u16(buf, i)?;
                 while j + 1 < buf.len() {
                     if buf[j] == 0xFF && buf[j + 1] == 0xD9 {
-                        return Some(j + 2);
+                        return Some((j + 2, sof.0, sof.1));
                     }
                     j += 1;
                 }
@@ -512,7 +565,7 @@ fn jpeg_segment_end(buf: &[u8]) -> Option<usize> {
             }
             0xC4 | 0xC8 | 0xCC => i += 2 + seg_len_u16(buf, i)?,
             0xC0..=0xCF => {
-                // SOF：粗验尺寸>0
+                // SOF：粗验尺寸>0（记录尺寸供调用方选最大段）
                 let len = seg_len_u16(buf, i)?;
                 if len < 7 || i + 2 + len > buf.len() {
                     return None;
@@ -522,6 +575,7 @@ fn jpeg_segment_end(buf: &[u8]) -> Option<usize> {
                 if w == 0 || h == 0 {
                     return None;
                 }
+                sof = (w, h);
                 i += 2 + len;
             }
             _ => i += 2 + seg_len_u16(buf, i)?,

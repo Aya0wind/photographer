@@ -91,6 +91,9 @@ pub fn run() {
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
+                // RAW 缩略图源代际升级自愈（v1 取第一段小预览 → v2 取最大段）：
+                // 一次性重排 RAW thumb 任务重建（dbDir 标记文件防重入）
+                index::refresh_raw_thumbs_for_generation(db_dir.clone(), &bus, &supervisor_handle);
                 if enable_clip {
                     ai::semantic::kick_semantic_if_ready(
                         db_dir.clone(),

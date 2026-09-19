@@ -175,28 +175,62 @@ describe("查看器：打开与图片来源", () => {
     await waitFor(() => expect(screen.getByTestId("viewer-loading")).toBeInTheDocument());
   });
 
-  it("RAW 先显示内嵌 JPEG，后台完整显影完成后替换为 2048 高清图", async () => {
+  it("RAW 先显示 512 内嵌 JPEG，内嵌全幅直出就绪后替换变清晰（Windows 照片同款）", async () => {
     const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    let resolveFull: ((path: string) => void) | undefined;
-    thumbMock.mockImplementation((id, size) =>
-      size === 2048
-        ? new Promise<string>((resolve) => {
-            if (id === 7) resolveFull = resolve;
-          })
-        : Promise.resolve("C:\\thumbs\\512\\img7.jpg"),
-    );
+    let resolveEmbed: ((path: string) => void) | undefined;
+    thumbMock.mockImplementation((id, size) => {
+      if (size === 6000) {
+        // 内嵌全幅直出档（>2048 为后端语义标记）在途
+        return new Promise<string>((resolve) => {
+          if (id === 7) resolveEmbed = resolve;
+        });
+      }
+      return Promise.resolve("C:\\thumbs\\512\\img7.jpg");
+    });
     renderViewer(rawAssets);
 
-    // 首帧不等完整 RAW 显影，立即显示相机内嵌 JPEG。
+    // 首帧不等全幅提取，立即显示 512 档。
     const img = await screen.findByTestId("viewer-img");
     expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\512\\img7.jpg");
     expect(img).toHaveAttribute("data-fallback", "thumb");
     expect(convertMock).not.toHaveBeenCalledWith(rawAssets[0].path);
     expect(thumbMock).toHaveBeenCalledWith(7, 1280);
-    expect(thumbMock).toHaveBeenCalledWith(7, 2048);
+    expect(thumbMock).toHaveBeenCalledWith(7, 6000);
+    // 主路径未失败前不请求 2048 显影兜底
+    expect(thumbMock).not.toHaveBeenCalledWith(7, 2048);
 
-    // 后台显影结束后保持旧图兜底，并把新高清图叠加替换。
+    // 内嵌全幅就绪：叠加替换变清晰。
+    act(() => resolveEmbed?.("C:\\thumbs\\raw-embed-v1\\img7.jpg"));
+    await waitFor(() => {
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute(
+        "src",
+        "asset://C:\\thumbs\\raw-embed-v1\\img7.jpg",
+      );
+    });
+    expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "raw-embed");
+  });
+
+  it("RAW 无内嵌预览（embed 结算 null）→ 才回落 2048 rawler 显影兜底", async () => {
+    const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    let resolveFull: ((path: string) => void) | undefined;
+    thumbMock.mockImplementation((id, size) => {
+      if (size === 6000) return Promise.resolve(null); // 无内嵌预览
+      if (size === 2048) {
+        return new Promise<string>((resolve) => {
+          if (id === 7) resolveFull = resolve;
+        });
+      }
+      return Promise.resolve("C:\\thumbs\\512\\img7.jpg");
+    });
+    renderViewer(rawAssets);
+
+    const img = await screen.findByTestId("viewer-img");
+    expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\512\\img7.jpg");
+    // embed 失败结算后显影兜底才被请求
+    await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(7, 2048));
+
     act(() => resolveFull?.("C:\\thumbs\\2048-raw-full-v1\\img7.jpg"));
     await waitFor(() => {
       expect(screen.getByTestId("viewer-img")).toHaveAttribute(
@@ -476,17 +510,17 @@ describe("查看器：旋转（90° 步进）", () => {
     }
   });
 
-  it("胶片条当前格自动滚入可视区（scrollIntoView inline nearest）", async () => {
+  it("胶片条选中项自动滚动居中（切换照片时 scrollToIndex center + smooth）", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    const calls: Array<Record<string, unknown>> = [];
     class FakeImage {
       src = "";
     }
     vi.stubGlobal("Image", FakeImage);
-    const original = HTMLElement.prototype.scrollIntoView;
-    HTMLElement.prototype.scrollIntoView = function (arg?: unknown) {
+    const calls: Array<Record<string, unknown>> = [];
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    HTMLElement.prototype.scrollTo = function (arg?: unknown) {
       calls.push((arg ?? {}) as Record<string, unknown>);
-    } as typeof HTMLElement.prototype.scrollIntoView;
+    } as typeof HTMLElement.prototype.scrollTo;
     try {
       function StatefulViewer() {
         const [index, setIdx] = useState(0);
@@ -505,14 +539,18 @@ describe("查看器：旋转（90° 步进）", () => {
       }
       render(<StatefulViewer />);
       expect(await screen.findByTestId("viewer")).toBeInTheDocument();
+      const before = calls.length;
 
       fireEvent.click(screen.getByTestId("viewer-next"));
+      // 切换后胶片条平滑滚动到新选中项（居中对齐）
       await waitFor(() => {
+        expect(calls.length).toBeGreaterThan(before);
         const last = calls[calls.length - 1];
-        expect(last).toMatchObject({ block: "nearest", inline: "nearest" });
+        expect(last).toMatchObject({ behavior: "smooth" });
+        expect(last).toHaveProperty("left");
       });
     } finally {
-      HTMLElement.prototype.scrollIntoView = original;
+      HTMLElement.prototype.scrollTo = originalScrollTo;
       vi.unstubAllGlobals();
     }
   });

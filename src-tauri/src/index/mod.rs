@@ -26,8 +26,11 @@ use crate::db::Db;
 use crate::events::{AppEvent, EventBus};
 use crate::thumbs::SIZE_TIERS;
 
-/// 缩略图任务：三档全部生成才算 done；任一档失败 → 资产
+/// 缩略图任务：生成全部低清档才算 done；任一档失败 → 资产
 /// thumb_state=2（permanent-none，前端占位兜底）+ 任务按 attempts 策略重试。
+/// RAW 只跑 256/512（内嵌 JPEG 源，快）；查看器高清走 raw-embed 直出档
+/// （毫秒级 IO），2048 显影档改为查看器按需兜底——索引期不再为每张 RAW
+/// 花 3-8s 去马赛克（33 张 RAW 的库索引被拖慢数分钟的根因）。
 fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
     let Some((path, kind)) = asset_thumb_target(db, asset_id) else {
         // 资产已被删除（级联应清任务，防御性兜底）：按完成收尾
@@ -39,7 +42,12 @@ fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
         return true;
     }
     let src = PathBuf::from(&path);
-    for tier in SIZE_TIERS {
+    let tiers: &[u16] = if kind == "raw" {
+        &[256, 512]
+    } else {
+        SIZE_TIERS
+    };
+    for tier in tiers {
         if crate::thumbs::thumb_file(db_dir, &src, *tier).is_none() {
             let _ = db.set_thumb_state(asset_id, 2);
             return false;
@@ -141,11 +149,48 @@ pub fn resume_and_kick(
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
     let bus = bus.clone();
-    let _ = supervisor.spawn_unique("index", "index-worker-pool".into(), move |_| {
+    supervisor.spawn("index", "index-resume".into(), move |_| {
         let pending = resume_pending(&db_dir);
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
         }
         run_pending(&db_dir, worker_count());
+    });
+}
+
+/// RAW 缩略图源代际自愈（开发期直改数据，不留兼容包袱）：v1（第一段
+/// 小预览）→ v2（最大段）后存量 RAW 缩略图全部偏糊，重排 thumb 任务重建。
+/// dbDir 标记文件防每次启动重排；旧档位缓存文件成为孤儿（开发期不管，
+/// 必要时手删 thumbs 目录整体重建）。
+pub fn refresh_raw_thumbs_for_generation(
+    db_dir: PathBuf,
+    bus: &EventBus,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+) {
+    let marker = db_dir.join(format!(
+        "thumbs-raw-gen-{}.marker",
+        crate::thumbs::RAW_THUMB_GENERATION
+    ));
+    if marker.is_file() {
+        return;
+    }
+    let bus = bus.clone();
+    supervisor.spawn("index", "raw-thumbs-regen".into(), move |_| {
+        let pending = std::fs::create_dir_all(&db_dir)
+            .ok()
+            .and_then(|_| {
+                crate::ipc::open_library_db(&db_dir)
+                    .ok()
+                    .and_then(|db| db.requeue_thumb_tasks_for_raw().ok())
+            })
+            .unwrap_or(0);
+        let _ = std::fs::write(&db_dir.join(format!(
+            "thumbs-raw-gen-{}.marker",
+            crate::thumbs::RAW_THUMB_GENERATION
+        )), b"");
+        if pending > 0 {
+            bus.publish(AppEvent::IndexTaskResumed { pending });
+            run_pending(&db_dir, worker_count());
+        }
     });
 }

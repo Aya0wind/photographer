@@ -28,6 +28,8 @@ import { formatBytes } from "@/lib/format";
  */
 
 const VIEWER_MID_SIZE = 2048; // 中间档（后端加 2048 档后生效）：原图渲染失败时的清晰回退
+/** RAW 内嵌全幅直出档（后端语义：RAW && size > 2048 = 提取最大内嵌 JPEG 原样直出） */
+const VIEWER_RAW_EMBED_SIZE = 6000;
 const VIEWER_THUMB_SIZE = 1280; // 名义边长；后端 snap 512 档就近
 const FILM_THUMB_SIZE = 240; // 与网格同档，共享会话缓存
 const MIN_SCALE = 1;
@@ -193,7 +195,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // --- 大图来源（按 kind，分级回退链） -------------------------------------------------
   // photo：原图 → 中间档缩略图（名义 2048，后端加 2048 档）→ 512 档。WebView2 对
   // 大尺寸/无压缩 TIF 等原生渲染失败，onError 逐级降档，而不是一步到 512 模糊图。
-  // raw：先显示 512 内嵌 JPEG，后台完成 2048 全量 RAW 显影后无缝替换；video：恒占位。
+  // raw（Windows 照片同款方案）：512 内嵌 JPEG 秒出 → 最大内嵌全幅 JPEG（raw-embed
+  // 直出档，毫秒级 IO）替换变清晰 → 仅当相机没存内嵌预览时才回落 2048 rawler 显影。
   const originalUrl = useMemo(
     () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
     [asset.kind, asset.path],
@@ -204,10 +207,18 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [asset.id, originalUrl]);
   const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
   const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
+  // 内嵌全幅直出档（>2048 为后端语义标记）：RAW 主显示路径
+  const rawEmbed = useAssetThumbUrl(
+    asset.id,
+    VIEWER_RAW_EMBED_SIZE,
+    asset.kind === "raw",
+    "high",
+  );
+  // rawler 2048 显影：仅在「无内嵌预览」（embed 结算为 null）时才启用兜底
   const rawFull = useAssetThumbUrl(
     asset.id,
     VIEWER_MID_SIZE,
-    asset.kind === "raw",
+    asset.kind === "raw" && rawEmbed.settled && rawEmbed.url === null,
     "high",
   );
   // 中间档仅 photo 且原图已失败时才请求（2048 档后端就位后生效；未就位时 settled null → 继续降 512）
@@ -227,12 +238,19 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     mainSrc = originalUrl; // img onError → 降档；渲染失败前不作无图判定
   } else if (asset.kind === "photo" && stage === "mid") {
     mainSrc = mid.url; // 在途 null → 走加载提示；确定无图由下方自动降档
+  } else if (asset.kind === "raw") {
+    // 512 秒出 → 内嵌全幅替换变清晰；无内嵌预览 → 2048 显影兜底
+    mainSrc = rawEmbed.url ?? rawFull.url ?? thumb.url;
+    mainFailed =
+      rawEmbed.settled &&
+      rawEmbed.url === null &&
+      rawFull.settled &&
+      rawFull.url === null &&
+      thumb.settled &&
+      thumb.url === null;
   } else {
-    // photo 降到 512 档；RAW 先用内嵌预览，完整显影完成后直接替换。
-    mainSrc = asset.kind === "raw" ? rawFull.url ?? thumb.url : thumb.url;
-    mainFailed = asset.kind === "raw"
-      ? rawFull.settled && thumb.settled && rawFull.url === null && thumb.url === null
-      : thumb.settled && thumb.url === null;
+    mainSrc = thumb.url;
+    mainFailed = thumb.settled && thumb.url === null;
   }
   // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档
   useEffect(() => {
@@ -304,7 +322,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         warmImageDecode(url);
       });
       if (neighbor.kind === "raw") {
-        void fetchAssetThumb(neighbor.id, VIEWER_MID_SIZE, "high").then((url) => {
+        // RAW 相邻预热内嵌全幅直出档（毫秒级 IO，取最大内嵌 JPEG）
+        void fetchAssetThumb(neighbor.id, VIEWER_RAW_EMBED_SIZE, "high").then((url) => {
           warmImageDecode(url);
         });
       }
@@ -370,13 +389,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     horizontal: true,
     overscan: 8,
   });
-  // 当前项滚动入可视区（jsdom 无 scrollIntoView，静默跳过）
+  // 当前项滚动到胶片条中央（切换照片时自动跟随；jsdom 无 scrollTo 静默跳过）
   useEffect(() => {
-    const el = stripRef.current?.querySelector(`[data-asset-id="${asset.id}"]`);
-    if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const el = stripRef.current;
+    if (el && typeof el.scrollTo === "function") {
+      stripVirtualizer.scrollToIndex(index, { align: "center", behavior: "smooth" });
     }
-  }, [asset.id, stripVirtualizer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index, asset.id]);
 
   return (
     <div
@@ -503,11 +523,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 data-fallback={
                   incoming.src === originalUrl
                     ? "original"
-                    : incoming.src === rawFull.url && asset.kind === "raw"
-                      ? "raw-full"
-                      : incoming.src === mid.url
-                        ? "mid"
-                        : "thumb"
+                    : incoming.src === rawEmbed.url && asset.kind === "raw"
+                      ? "raw-embed"
+                      : incoming.src === rawFull.url && asset.kind === "raw"
+                        ? "raw-full"
+                        : incoming.src === mid.url
+                          ? "mid"
+                          : "thumb"
                 }
                 className={`max-h-full max-w-full select-none object-contain transition-opacity duration-150 ${
                   incomingReady ? "opacity-100" : "opacity-0"

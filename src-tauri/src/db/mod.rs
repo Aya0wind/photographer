@@ -860,6 +860,27 @@ impl Db {
         Ok(count as u64)
     }
 
+    /// RAW 缩略图源代际升级自愈：重排全部 RAW 的 thumb 任务（done/failed
+    /// 复位 pending + 为无任务行的新建），返回待处理数。照片任务不动。
+    pub fn requeue_thumb_tasks_for_raw(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1 \
+             WHERE kind = 'thumb' AND state != 'pending' \
+             AND asset_id IN (SELECT id FROM assets WHERE kind = 'raw')",
+            params![now],
+        )?;
+        self.0.execute(
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             SELECT 'thumb', a.id, 'pending', 0, ?1, ?1 FROM assets a \
+             WHERE a.kind = 'raw' \
+               AND NOT EXISTS (SELECT 1 FROM index_tasks t \
+                               WHERE t.kind = 'thumb' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        self.pending_index_task_count("thumb")
+    }
+
     /// 手动“立即索引”重试：复用已有失败任务，不再为同一资产重复插行。
     /// 历史版本可能已经为同一资产制造多条 failed，先压成每资产一条；
     /// attempts 清零后仍沿用单轮最多三次的坏文件熔断策略。
