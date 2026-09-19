@@ -1,3 +1,4 @@
+mod ai;
 mod db;
 mod devices;
 mod events;
@@ -58,6 +59,11 @@ pub fn run() {
             // supervisor：统一后台任务框架（panic 捕获 + 命名 + 软取消）。
             let supervisor = tasks::TaskSupervisor::new(bus.clone());
             let supervisor_handle = std::sync::Arc::clone(&supervisor);
+            let ai = ai::ModelManager::new(
+                config_dir.join("models"),
+                bus.clone(),
+                std::sync::Arc::clone(&supervisor),
+            );
             app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
@@ -67,6 +73,7 @@ pub fn run() {
                 supervisor,
                 thumb_queue: ipc::thumb::ThumbQueue::new(),
                 migrations: Mutex::new(std::collections::HashSet::new()),
+                ai,
             }));
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
@@ -134,6 +141,10 @@ pub fn run() {
             ipc::thumb::thumb_get_by_path,
             ipc::migrate::db_dir_migrate,
             ipc::migrate::photo_root_switch,
+            ipc::ai::ai_models_status,
+            ipc::ai::ai_model_download,
+            ipc::ai::ai_model_cancel,
+            ipc::ai::ai_model_delete,
             ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())

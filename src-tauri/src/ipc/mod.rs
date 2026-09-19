@@ -1,6 +1,7 @@
 //! IPC 命令层，按命名空间拆分模块。 AppState + 可测的核心编排函数
 //! （命令层只做 tauri 参数/返回值的薄包装）。
 
+pub mod ai;
 pub mod assets;
 pub mod device;
 pub mod device_manager;
@@ -71,10 +72,12 @@ pub struct AppState {
     pub active_import: Mutex<Option<ActiveImport>>,
     /// 统一后台任务框架（扫描/导入等长活线程的派发/panic 捕获/命名）。
     pub supervisor: std::sync::Arc<crate::tasks::TaskSupervisor>,
-    /// 按需缩略图生成队列（thumb_get(asset_id) 未命中路径）。
+    /// 按需缩略图生成队列（asset_thumb_get(asset_id) 未命中路径）。
     pub thumb_queue: thumb::ThumbQueue,
     /// 目录迁移守卫（库 id 集合）：迁移期间该库拒绝新导入/新迁移。
     pub migrations: Mutex<HashSet<String>>,
+    /// AI 模型下载管理器（models 目录固定在 app 配置目录下）。
+    pub ai: crate::ai::ModelManager,
 }
 
 /// 活跃库迁移守卫检查：迁移中返回 Err（导入/迁移入口共用）。

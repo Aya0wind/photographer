@@ -1,7 +1,7 @@
 //! 缩略图服务（M3 管线提前的核心块，2026-09-18 真机反馈：前端原图全量
 //! 解码 30-60MB/张的 A7R5 JPG 导致卡顿）。
 //!
-//! 契约：`thumb_get(path, size)` 返回**缓存文件绝对路径**（前端经 asset
+//! 契约：`thumb_get_by_path(path, size)` 返回**缓存文件绝对路径**（前端经 asset
 //! 协议加载）；无法生成（RAW/视频/读取失败/超时）返回 null。
 //!
 //! - 可解码集：image crate 支持的位图格式（JPG/PNG/WEBP/BMP/GIF/TIFF）；
@@ -150,7 +150,7 @@ pub fn is_decodable(src: &Path) -> bool {
 }
 
 /// 缓存命中探测（不生成、不阻塞）：命中返回缓存文件绝对路径，未命中/
-/// 不可解码/源缺失返回 None。按需管线（thumb_get(asset_id)）的快路径。
+/// 不可解码/源缺失返回 None。按需管线（asset_thumb_get(asset_id)）的快路径。
 pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let size = snap_size(size);
     if !is_decodable(src) {

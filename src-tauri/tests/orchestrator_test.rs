@@ -2,7 +2,9 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
+pub use common::{
+    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+};
 
 use std::fs;
 

@@ -1,10 +1,12 @@
-//! 按需缩略图管线（M3）：thumb_get(asset_id) 缓存命中直返 / 未命中入队
+//! 按需缩略图管线（M3）：asset_thumb_get(asset_id) 缓存命中直返 / 未命中入队
 //! 后台生成 + ThumbnailReady 事件、同 (asset,size) 去抖、有界队列满丢弃、
 //! RAW/缺资产不入队、队列 Drop 停工。
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
+pub use common::{
+    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

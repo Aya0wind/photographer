@@ -41,6 +41,9 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 sha2 = "0.10"
+# M4 模型在线下载：阻塞式 HTTP(S) 客户端（rustls；supervisor 线程内用，
+# Content-Range 断点续传 + 流式写 .part）
+ureq = "2"
 walkdir = "2"
 kamadak-exif = "0.6"
 

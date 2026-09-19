@@ -5,7 +5,9 @@
 
 mod common;
 
-pub use common::{db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
+pub use common::{
+    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+};
 
 use std::time::Duration;
 
@@ -418,7 +420,11 @@ fn real_library_contract_smoke() {
         .unwrap();
     let nulls: i64 = database
         .0
-        .query_row("SELECT COUNT(*) FROM assets WHERE captured_at IS NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE captured_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     let groups = database.asset_group_dates().unwrap();
     let dated = groups.iter().filter(|g| g.date != "unknown").count();
@@ -426,13 +432,18 @@ fn real_library_contract_smoke() {
     eprintln!("真实库: 总数 {total}，NULL {nulls}，日期组 {dated}，unknown {unknown:?}");
     assert_eq!(total, 117, "资产总数");
     assert_eq!(nulls, 5, "NULL captured_at 数");
-    assert_eq!(dated, 5, "本地日期组数（UTC 为 4：06-28 晚间 UTC 拍摄跨入本地 06-29）");
+    assert_eq!(
+        dated, 5,
+        "本地日期组数（UTC 为 4：06-28 晚间 UTC 拍摄跨入本地 06-29）"
+    );
     assert!(unknown.is_some_and(|g| g.count == 5), "unknown 组 count=5");
     assert!(
         groups.iter().all(|g| g.cover_asset_id > 0),
         "每组 cover 必须有效"
     );
     // 首页 NULL 优先：分页第一页首个必为 NULL 资产
-    let page = database.assets_page(0, 5, &db::AssetFilters::default()).unwrap();
+    let page = database
+        .assets_page(0, 5, &db::AssetFilters::default())
+        .unwrap();
     assert!(page[0].captured_at.is_none(), "NULL 资产排最前");
 }

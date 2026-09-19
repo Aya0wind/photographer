@@ -5,12 +5,13 @@
 
 mod common;
 
-pub use common::{ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs};
+pub use common::{
+    ai, db, devices, events, import, ipc, metadata, migrate, settings, tasks, thumbs,
+};
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,8 +25,7 @@ use sha2::{Digest, Sha256};
 
 struct TestServer {
     base: String,
-    hits: Arc<AtomicU64>,
-    /// 每路径请求计数（断言镜像回退/重试次数）
+    /// 每路径请求计数（断言镜像回退/重试次数）。
     counts: Arc<Mutex<std::collections::HashMap<String, u64>>>,
 }
 
@@ -34,9 +34,7 @@ impl TestServer {
     fn start(body: Vec<u8>, wrong: Vec<u8>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let hits = Arc::new(AtomicU64::new(0));
         let counts = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let h2 = Arc::clone(&hits);
         let c2 = Arc::clone(&counts);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -63,8 +61,8 @@ impl TestServer {
                     .next()
                     .unwrap_or("/")
                     .to_string();
-                h2.fetch_add(1, Ordering::SeqCst);
-                c2.lock().unwrap()
+                c2.lock()
+                    .unwrap()
                     .entry(path.clone())
                     .and_modify(|n| *n += 1)
                     .or_insert(1);
@@ -89,11 +87,8 @@ impl TestServer {
                         // 只给前 64 字节就断开（模拟连接中断）
                         let n = 64.min(body.len());
                         let _ = stream.write_all(
-                            format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                                body.len()
-                            )
-                            .as_bytes(),
+                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                                .as_bytes(),
                         );
                         let _ = stream.write_all(&body[..n]);
                         continue; // 直接 close
@@ -110,11 +105,8 @@ impl TestServer {
                     "/slow" => {
                         let start = range_start.unwrap_or(0);
                         let _ = stream.write_all(
-                            format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                                body.len()
-                            )
-                            .as_bytes(),
+                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len())
+                                .as_bytes(),
                         );
                         // 滴流：每块 1KB 间隔 20ms（给 cancel 观察窗口）
                         for chunk in body[start..].chunks(1024) {
@@ -144,8 +136,7 @@ impl TestServer {
         });
         Self {
             base: format!("http://127.0.0.1:{port}"),
-            hits: Arc::clone(&h2),
-            counts: Arc::clone(&c2),
+            counts: Arc::clone(&counts),
         }
     }
 
@@ -237,13 +228,22 @@ fn downloads_full_body_verifies_sha_and_installs() {
     let server = TestServer::start(body.clone(), payload(1));
     let root = tempfile::tempdir().unwrap();
     let mgr = manager(root.path());
-    let e = entry("m1", &format!("{}/ok", server.base), &format!("{}/ok", server.base), &body);
+    let e = entry(
+        "m1",
+        &format!("{}/ok", server.base),
+        &format!("{}/ok", server.base),
+        &body,
+    );
 
     mgr.download(e.clone()).unwrap();
     let finished = wait_finished(&mgr, "m1");
     assert!(matches!(
         finished,
-        AppEvent::AiModelDownloadFinished { ok: true, error: None, .. }
+        AppEvent::AiModelDownloadFinished {
+            ok: true,
+            error: None,
+            ..
+        }
     ));
     let final_path = root.path().join("m1.onnx");
     assert!(final_path.is_file(), "落位文件必须在 models 根下");
@@ -287,15 +287,18 @@ fn network_drop_falls_back_to_mirror_and_resumes_from_part() {
 #[test]
 fn sha_mismatch_retries_once_then_fails_without_part() {
     let body = payload(32 * 1024);
-    let wrong = payload(32 * 1024 + 7); // 永远校验不过
-    let server = TestServer::start(body, wrong.clone());
+    // 同长度不同内容（长度差会走短读网络分支，测不到 SHA 路径）
+    let mut wrong = body.clone();
+    wrong[0] ^= 0xFF;
+    wrong[100] ^= 0xFF;
+    let server = TestServer::start(body.clone(), wrong.clone());
     let root = tempfile::tempdir().unwrap();
     let mgr = manager(root.path());
     let e = entry(
         "m3",
         &format!("{}/bad", server.base),
         &format!("{}/bad", server.base),
-        &wrong,
+        &body,
     );
 
     mgr.download(e.clone()).unwrap();
@@ -307,7 +310,10 @@ fn sha_mismatch_retries_once_then_fails_without_part() {
     assert!(error.is_some(), "失败要带原因");
     // 首次 + 重试 = 主/镜像各两轮（或至少两次请求），且 .part 不留
     assert!(server.hits_of("/bad") >= 2, "必须重试至少一次");
-    assert!(!root.path().join("m3.onnx.part").exists(), "失败后 .part 必须清理");
+    assert!(
+        !root.path().join("m3.onnx.part").exists(),
+        "失败后 .part 必须清理"
+    );
     let status = mgr.status(&e).unwrap();
     assert_eq!(status.state, "failed");
     assert!(!status.installed);
@@ -378,7 +384,12 @@ fn status_starts_idle_and_delete_flips_installed() {
     let server = TestServer::start(body.clone(), payload(1));
     let root = tempfile::tempdir().unwrap();
     let mgr = manager(root.path());
-    let e = entry("m6", &format!("{}/ok", server.base), &format!("{}/ok", server.base), &body);
+    let e = entry(
+        "m6",
+        &format!("{}/ok", server.base),
+        &format!("{}/ok", server.base),
+        &body,
+    );
 
     let initial = mgr.status(&e).unwrap();
     assert_eq!(initial.state, "idle");
@@ -397,7 +408,12 @@ fn status_starts_idle_and_delete_flips_installed() {
     assert!(!after.installed, "delete 后 installed 翻 false");
     assert!(!root.path().join("m6.onnx").exists());
     // 下载中 delete 被拒
-    let e2 = entry("m7", &format!("{}/slow", server.base), &format!("{}/slow", server.base), &body);
+    let e2 = entry(
+        "m7",
+        &format!("{}/slow", server.base),
+        &format!("{}/slow", server.base),
+        &body,
+    );
     mgr.download(e2).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while mgr.active_count() == 0 {
@@ -407,18 +423,22 @@ fn status_starts_idle_and_delete_flips_installed() {
     mgr.cancel("m7").unwrap();
     wait_finished(&mgr, "m7");
     // 未知模型
-    assert!(mgr.download(ai::ModelEntry {
-        id: "ghost".into(),
-        url: "http://127.0.0.1:1/x".into(),
-        mirror_url: "http://127.0.0.1:1/y".into(),
-        sha256: "0".repeat(64),
-        bytes_total: 1,
-        version: "v1".into(),
-        feature: "face".into(),
-    })
-    .is_ok()); // 派发成功但下载必然失败 → failed 事件
+    assert!(mgr
+        .download(ai::ModelEntry {
+            id: "ghost".into(),
+            url: "http://127.0.0.1:1/x".into(),
+            mirror_url: "http://127.0.0.1:1/y".into(),
+            sha256: "0".repeat(64),
+            bytes_total: 1,
+            version: "v1".into(),
+            feature: "face".into(),
+        })
+        .is_ok()); // 派发成功但下载必然失败 → failed 事件
     let finished = wait_finished(&mgr, "ghost");
-    assert!(matches!(finished, AppEvent::AiModelDownloadFinished { ok: false, .. }));
+    assert!(matches!(
+        finished,
+        AppEvent::AiModelDownloadFinished { ok: false, .. }
+    ));
 }
 
 #[test]
@@ -465,7 +485,12 @@ fn progress_events_throttled_to_1s_and_carry_totals() {
     let root = tempfile::tempdir().unwrap();
     let mgr = manager(root.path());
     let mut rx = mgr.bus().subscribe();
-    let e = entry("m8", &format!("{}/ok", server.base), &format!("{}/ok", server.base), &body);
+    let e = entry(
+        "m8",
+        &format!("{}/ok", server.base),
+        &format!("{}/ok", server.base),
+        &body,
+    );
 
     mgr.download(e).unwrap();
     wait_finished(&mgr, "m8");
@@ -478,4 +503,26 @@ fn progress_events_throttled_to_1s_and_carry_totals() {
     // 本地全量秒下：进度事件至多 1-2 条（1s 节流），且 total 恒为 bytes_total
     assert!(progresses.len() <= 2, "1s 节流下不应刷屏: {progresses:?}");
     assert!(progresses.iter().all(|t| *t == body.len() as u64));
+}
+
+/// 真实 HuggingFace 连通 smoke：主源 + 镜像 HEAD 可达且 Content-Length
+/// 与清单 bytesTotal 一致（不下载全量）。默认忽略，手动跑：
+/// `cargo test --test ai_download_test real_hf -- --ignored --nocapture`
+#[test]
+#[ignore = "依赖外网（HuggingFace/hf-mirror 连通）"]
+fn real_hf_urls_reachable_and_sizes_match() {
+    for m in ai::catalog() {
+        for url in [m.url.as_str(), m.mirror_url.as_str()] {
+            let resp = ureq::head(url).call().expect("{url} HEAD 失败");
+            let len: u64 = resp
+                .header("Content-Length")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
+            // HF resolve 经 302 到 CDN；重定向后 Content-Length 应等于文件大小
+            assert_eq!(
+                len, m.bytes_total,
+                "{url} Content-Length 与清单不符（可能远端已更新，需重新 pin）"
+            );
+        }
+    }
 }

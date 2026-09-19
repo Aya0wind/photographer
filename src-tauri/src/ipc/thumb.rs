@@ -1,6 +1,6 @@
 //! thumb 命令与按需生成队列（M3）。
 //!
-//! - `thumb_get(asset_id, size)`（画廊主通道）：缓存命中立即返回绝对路径；
+//! - `asset_thumb_get(asset_id, size)`（画廊主通道）：缓存命中立即返回绝对路径；
 //!   未命中把**已解析完整**的生成任务（asset 路径 + dbDir，worker 不回查
 //!   AppState，避免 Arc 环）压入有界队列并返回 null——生成完成后经
 //!   `AppEvent::ThumbnailReady` 回执，前端收到后重试即命中。

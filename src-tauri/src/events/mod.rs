@@ -193,7 +193,7 @@ pub enum AppEvent {
     },
 
     // 缩略图按需管线（M3）
-    /// 后台缩略图生成完成（thumb_get 未命中入队后的回执）：path 为缓存文件
+    /// 后台缩略图生成完成（asset_thumb_get 未命中入队后的回执）：path 为缓存文件
     /// 绝对路径；生成失败（超时/不可解码）为 null——前端据此停止等待重试。
     ThumbnailReady {
         asset_id: i64,
@@ -229,6 +229,20 @@ pub enum AppEvent {
     MigrationFinished {
         ok: bool,
         failed: u64,
+    },
+
+    // AI 模型在线下载（M4 前置）
+    /// 下载进度（1s 节流）。
+    AiModelDownloadProgress {
+        id: String,
+        done_bytes: u64,
+        total_bytes: u64,
+    },
+    /// 下载收尾：ok + 失败原因（取消/校验失败/两源不可用）。
+    AiModelDownloadFinished {
+        id: String,
+        ok: bool,
+        error: Option<String>,
     },
 
     // 错误

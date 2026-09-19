@@ -1,4 +1,4 @@
-//! 缩略图服务测试（thumb_get 的核心 `thumbs::thumb_file`）：生成/命中/尺寸分档/
+//! 缩略图服务测试（thumb_get_by_path 的核心 `thumbs::thumb_file`）：生成/命中/尺寸分档/
 //! RAW 拒绝/坏文件不写缓存/mtime 重生成/并发合并（同 path+size 只解码一次）。
 //! 缓存落库 dbDir/thumbs，不污染源目录。
 

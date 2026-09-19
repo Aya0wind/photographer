@@ -8,6 +8,8 @@
 
 #![allow(dead_code)] // 各测试文件按需取用 fixture 子集
 
+#[path = "../../src/ai/mod.rs"]
+pub mod ai;
 #[path = "../../src/db/mod.rs"]
 pub mod db;
 #[path = "../../src/devices/mod.rs"]
@@ -321,13 +323,15 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
     };
     let mut devices_map = HashMap::new();
     devices_map.insert(source.id(), DeviceEntry::ready(source, snapshot));
+    let supervisor = tasks::TaskSupervisor::new(EventBus::new());
     AppState {
         settings: Mutex::new(settings),
         config_dir: db_dir.join("config"),
         bus: EventBus::new(),
         devices: Mutex::new(devices_map),
         active_import: Mutex::new(None),
-        supervisor: tasks::TaskSupervisor::new(EventBus::new()),
+        ai: ai::ModelManager::new(db_dir.join("models"), EventBus::new(), supervisor.clone()),
+        supervisor,
         thumb_queue: ipc::thumb::ThumbQueue::new(),
         migrations: Mutex::new(Default::default()),
     }
