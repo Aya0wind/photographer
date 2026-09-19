@@ -8,6 +8,8 @@ import {
   type IndexStatus,
 } from "@/ipc/api";
 
+let indexStatusRequest = 0;
+
 /**
  * AI 模型/索引状态（M4）：设置页 AI tab 与语义搜索共用。
  * - models：ai_models_status 快照（refresh 拉取；事件 aiModelDownloadFinished 后重拉）
@@ -61,7 +63,10 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   refreshIndexStatus: async () => {
-    set({ indexStatus: await indexStatus() });
+    const request = ++indexStatusRequest;
+    const status = await indexStatus();
+    // 高频进度事件会并发重拉；较早的慢响应不能覆盖较新的完成快照。
+    if (request === indexStatusRequest) set({ indexStatus: status });
   },
 
   handleAppEvent: (event) => {
@@ -103,6 +108,7 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   resetForTests: () => {
+    indexStatusRequest = 0;
     set({
       models: [],
       modelsLoaded: false,

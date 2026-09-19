@@ -53,10 +53,8 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("link", { name: "设置" }));
 
-    // AnimatePresence mode="wait"：旧页退出动画（180ms）完成后才挂载新页，需异步等待
-    expect(
-      await screen.findByText("OUTLET_SETTINGS", {}, { timeout: 2000 }),
-    ).toBeInTheDocument();
+    // 页面直接替换，不等待退场动画。
+    expect(screen.getByText("OUTLET_SETTINGS")).toBeInTheDocument();
     expect(screen.queryByText("OUTLET_GALLERY")).not.toBeInTheDocument();
   });
 

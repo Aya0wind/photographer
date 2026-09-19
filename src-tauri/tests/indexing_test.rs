@@ -295,6 +295,8 @@ fn index_status_counts_by_kind_and_state() {
         [a0],
     )
     .unwrap();
+    db.0.execute("UPDATE assets SET thumb_state = 1 WHERE id = ?1", [a0])
+        .unwrap();
     let a1 = db.asset_id_by_path("X:/p/1.jpg").unwrap().unwrap();
     db.0.execute(
         "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
@@ -306,6 +308,11 @@ fn index_status_counts_by_kind_and_state() {
     db.0.execute(
         "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
              VALUES ('ai', ?1, 'done', 0, '2026', '2026')",
+        [a2],
+    )
+    .unwrap();
+    db.0.execute(
+        "UPDATE assets SET ai_indexed_at = '2026' WHERE id = ?1",
         [a2],
     )
     .unwrap();
@@ -330,7 +337,8 @@ fn index_status_counts_by_kind_and_state() {
         status.thumb.total, 3,
         "可索引资产 = photo/raw 数（video 不计）"
     );
-    assert_eq!(status.exif.pending, 0, "exif 通道 v1 无任务");
+    assert_eq!(status.exif.pending, 0, "EXIF 随导入同步完成，无后台待办");
+    assert_eq!(status.exif.done, 3, "已入库资产的 EXIF 应计为已完成");
     assert_eq!(status.ai.pending, 0);
     assert_eq!(status.ai.running, 1);
     assert_eq!(status.ai.done, 1);

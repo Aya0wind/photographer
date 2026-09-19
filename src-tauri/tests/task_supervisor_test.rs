@@ -139,3 +139,34 @@ fn spawns_concurrent_named_tasks() {
     // 句柄携带 kind/name（观测/日志上下文）
     assert!(handles.iter().all(|h| h.kind() == "scan"));
 }
+
+#[test]
+fn unique_spawn_coalesces_automatic_and_manual_triggers() {
+    let supervisor = TaskSupervisor::new(EventBus::new());
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran_first = Arc::clone(&ran);
+    let first = supervisor
+        .spawn_unique("index", "semantic-backfill".into(), move |_| {
+            ran_first.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(80));
+        })
+        .expect("首次触发应启动任务");
+
+    let ran_duplicate = Arc::clone(&ran);
+    let duplicate = supervisor.spawn_unique("index", "semantic-backfill".into(), move |_| {
+        ran_duplicate.fetch_add(1, Ordering::SeqCst);
+    });
+    assert!(duplicate.is_none(), "同一管线运行中时应合并重复触发");
+
+    assert!(tasks::wait_done(&first, Duration::from_secs(1)));
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+    let ran_again = Arc::clone(&ran);
+    let again = supervisor
+        .spawn_unique("index", "semantic-backfill".into(), move |_| {
+            ran_again.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("前一任务结束后应允许再次触发");
+    assert!(tasks::wait_done(&again, Duration::from_secs(1)));
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+}

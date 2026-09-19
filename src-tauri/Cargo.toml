@@ -23,6 +23,8 @@ image = "0.25"
 # vendored 自带 libjpeg-turbo 源码构建（需 cmake，已验证本机可用）；
 # "image" feature 直接解到 image::RgbImage。
 turbojpeg = { version = "1", features = ["image"] }
+# RAW 完整显影（查看器先显示内嵌 JPEG，后台生成 2048px 高质量 JPEG 后替换）。
+rawler = "=0.8.0"
 
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"

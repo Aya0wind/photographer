@@ -48,6 +48,9 @@ export interface Settings {
     indexSchedule: "idleOnly" | "afterImport" | "manual";
     cpuLimitPercent: number;
     useGpu: boolean;
+    /** 语义检索相似度阈值（cos 0..1）；低于该分的结果过滤，0 = 不过滤。
+     *  与 Rust 侧 AiSettings.semantic_min_score 同名映射（camelCase） */
+    semanticMinScore: number;
   };
   system: {
     launchAtLogin: boolean;
@@ -83,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
     indexSchedule: "idleOnly",
     cpuLimitPercent: 50,
     useGpu: true,
+    semanticMinScore: 0.09,
   },
   system: {
     launchAtLogin: false,

@@ -386,7 +386,8 @@ describe("搜索：语义模式", () => {
     expect(screen.queryByTestId("semantic-input")).not.toBeInTheDocument();
 
     await switchToSemantic(user);
-    expect(screen.getByTestId("semantic-input")).toBeInTheDocument();
+    expect(screen.getByTestId("semantic-input")).toHaveAttribute("rows", "1");
+    expect(screen.getByTestId("semantic-input").className).toContain("h-8");
     expect(screen.getByTestId("semantic-run")).toBeInTheDocument();
     expect(screen.queryByTestId("search-kind")).not.toBeInTheDocument();
     expect(screen.queryByTestId("search-from")).not.toBeInTheDocument();

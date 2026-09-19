@@ -29,6 +29,7 @@ import {
   importRetryFailed,
   importStart,
   isIpcAvailable,
+  peopleList,
   resetIpcAvailable,
   subscribeAppEvents,
   type ImportPlan,
@@ -68,6 +69,18 @@ describe("IPC 契约封装", () => {
 
     await expect(deviceList()).resolves.toEqual(devices);
     expect(isIpcAvailable()).toBe(true);
+  });
+
+  it("peopleList 将后端 PersonRow.id 归一为 clusterId，过滤损坏条目", async () => {
+    invokeMock.mockResolvedValueOnce([
+      { id: 7, name: null, faceCount: 12, coverAssetId: 101 },
+      { id: "bad", name: "损坏", faceCount: 1, coverAssetId: 102 },
+    ]);
+
+    await expect(peopleList()).resolves.toEqual([
+      { clusterId: 7, name: null, faceCount: 12, coverAssetId: 101 },
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith("people_list", undefined);
   });
 
   it("deviceScan 传 id 参数", async () => {

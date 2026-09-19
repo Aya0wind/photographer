@@ -175,19 +175,36 @@ describe("查看器：打开与图片来源", () => {
     await waitFor(() => expect(screen.getByTestId("viewer-loading")).toBeInTheDocument());
   });
 
-  it("RAW 无原图：直接用大档缩略图（512 档），不尝试原图 asset 协议与 2048 中间档", async () => {
+  it("RAW 先显示内嵌 JPEG，后台完整显影完成后替换为 2048 高清图", async () => {
     const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    thumbMock.mockResolvedValue("C:\\thumbs\\512\\img7.jpg");
+    let resolveFull: ((path: string) => void) | undefined;
+    thumbMock.mockImplementation((id, size) =>
+      size === 2048
+        ? new Promise<string>((resolve) => {
+            if (id === 7) resolveFull = resolve;
+          })
+        : Promise.resolve("C:\\thumbs\\512\\img7.jpg"),
+    );
     renderViewer(rawAssets);
 
-    // 不尝试原图（CR3 无 inline 提取），直接大档缩略图
+    // 首帧不等完整 RAW 显影，立即显示相机内嵌 JPEG。
     const img = await screen.findByTestId("viewer-img");
     expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\512\\img7.jpg");
     expect(img).toHaveAttribute("data-fallback", "thumb");
     expect(convertMock).not.toHaveBeenCalledWith(rawAssets[0].path);
     expect(thumbMock).toHaveBeenCalledWith(7, 1280);
-    expect(thumbMock).not.toHaveBeenCalledWith(7, 2048);
+    expect(thumbMock).toHaveBeenCalledWith(7, 2048);
+
+    // 后台显影结束后保持旧图兜底，并把新高清图叠加替换。
+    act(() => resolveFull?.("C:\\thumbs\\2048-raw-full-v1\\img7.jpg"));
+    await waitFor(() => {
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute(
+        "src",
+        "asset://C:\\thumbs\\2048-raw-full-v1\\img7.jpg",
+      );
+    });
+    expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "raw-full");
   });
 
   it("RAW 无缩略图（后端恒 None 的兜底）：永久占位不崩溃", async () => {
@@ -200,6 +217,35 @@ describe("查看器：打开与图片来源", () => {
 // --- 切换与关闭 ---------------------------------------------------------------------
 
 describe("查看器：左右切换与关闭", () => {
+  it("图片缩放后点击左右箭头仍能切图，不被拖拽捕获拦截", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    function StatefulViewer() {
+      const [index, setIndex] = useState(0);
+      const group = groupAssetsByDate(GROUP_ASSETS)[0];
+      return (
+        <I18nextProvider i18n={i18n}>
+          <ViewerOverlay
+            asset={GROUP_ASSETS[index]}
+            group={group}
+            index={index}
+            onNavigate={setIndex}
+            onClose={() => {}}
+          />
+        </I18nextProvider>
+      );
+    }
+    render(<StatefulViewer />);
+
+    const stage = await screen.findByTestId("viewer-stage");
+    fireEvent.wheel(stage, { deltaY: -100 });
+    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.20"));
+
+    const next = screen.getByTestId("viewer-next");
+    fireEvent.pointerDown(next, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.click(next);
+    expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0002.JPG");
+  });
+
   it("箭头按钮/键盘同组切换；首尾禁用（有状态容器驱动 index）", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     let setIndex: ((i: number) => void) | undefined;
@@ -251,6 +297,27 @@ describe("查看器：左右切换与关闭", () => {
     await waitFor(() =>
       expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg) scale(1)"),
     );
+  });
+
+  it("顶栏拖拽层不会吞掉旋转、详细信息和关闭按钮点击", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const { onClose } = renderViewer();
+
+    for (const testId of [
+      "viewer-rotate-ccw",
+      "viewer-rotate-cw",
+      "viewer-exif-toggle",
+      "viewer-close",
+    ]) {
+      expect(screen.getByTestId(testId).className).toContain("pointer-events-auto");
+    }
+
+    fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
+    fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
+    expect(await screen.findByTestId("viewer-exif")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("viewer-close"));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it("胶片条点击跳转；Esc 关闭返回画廊", async () => {
@@ -317,17 +384,29 @@ describe("查看器：旋转（90° 步进）", () => {
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "180");
-    // 逆时针回退；继续逆时针从 0 回绕到 270
+    // 逆时针回退；角度保持连续，不在一圈边界归一化
     fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
     fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
     fireEvent.click(screen.getByTestId("viewer-rotate-ccw"));
-    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "270");
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "-90");
 
     // 双击复位：缩放/平移/旋转全部归零
     fireEvent.dblClick(screen.getByTestId("viewer-stage"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "0");
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
+  });
+
+  it("连续向左旋转四次保持同向补间并到达 -360°", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderViewer();
+    await screen.findByTestId("viewer-stage");
+
+    const rotateLeft = screen.getByTestId("viewer-rotate-ccw");
+    for (let i = 0; i < 4; i += 1) fireEvent.click(rotateLeft);
+
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "-360");
+    expect(screen.getByTestId("viewer-img").style.transform).toContain("rotate(-360deg)");
   });
 
   it("键盘 . , R 旋转（./R=顺时针，,=逆时针）", async () => {
@@ -600,10 +679,12 @@ describe("查看器：EXIF 面板", () => {
     expect(within(rows).getByText("相机").nextSibling).toHaveTextContent("—");
   });
 
-  it("assetDetail 失败（后端不可用）：面板显示降级文案", async () => {
+  it("assetDetail 失败时保留资产基础信息，不切换成加载动画或空面板", async () => {
     detailMock.mockResolvedValue(null);
     renderViewer();
 
-    expect(await screen.findByTestId("viewer-exif-unavailable")).toHaveTextContent("不可用");
+    const rows = await screen.findByTestId("viewer-exif-rows");
+    expect(rows).toHaveTextContent(GROUP_ASSETS[0].path);
+    expect(screen.queryByTestId("viewer-exif-loading")).not.toBeInTheDocument();
   });
 });

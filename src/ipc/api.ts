@@ -710,7 +710,7 @@ export async function personDelete(clusterId: number): Promise<boolean> {
 
 // --- 索引任务（缩略图/EXIF/语义）：状态与手动触发 -------------------------------------
 
-export type IndexKind = "thumb" | "exif" | "ai";
+export type IndexKind = "thumb" | "exif" | "ai" | "face";
 
 /**
  * 单通道任务计数（index_status，对应后端 IndexKindStatus）。与后端持久化
@@ -730,6 +730,8 @@ export interface IndexStatus {
   thumb: IndexCounters;
   exif: IndexCounters;
   ai: IndexCounters;
+  /** 新后端始终返回；可选仅用于兼容旧版本/测试夹具。 */
+  face?: IndexCounters;
 }
 
 /** 索引状态快照；失败/负载异常返回 null（调用方隐藏/降级区块） */

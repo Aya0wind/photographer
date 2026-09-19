@@ -8,12 +8,15 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import i18n from "@/i18n";
 import ImportProgressCard, { FINISHED_LINGER_MS } from "./ImportProgressCard";
 import { resetImportStoreForTests, useImportStore } from "@/stores/importStore";
+import { useAiStore } from "@/stores/aiStore";
 import {
   importCancel,
   importPause,
   importResume,
+  indexStatus,
   type AppEvent,
   type ImportStats,
+  type IndexStatus,
 } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -23,12 +26,14 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     importPause: vi.fn(),
     importResume: vi.fn(),
     importCancel: vi.fn(),
+    indexStatus: vi.fn(),
   };
 });
 
 const pauseMock = vi.mocked(importPause);
 const resumeMock = vi.mocked(importResume);
 const cancelMock = vi.mocked(importCancel);
+const indexStatusMock = vi.mocked(indexStatus);
 
 function GalleryProbe() {
   return <div data-testid="gallery-probe" />;
@@ -98,9 +103,11 @@ function seedFinishedJob(): void {
 
 beforeEach(() => {
   resetImportStoreForTests();
+  useAiStore.getState().resetForTests();
   pauseMock.mockReset().mockResolvedValue(undefined);
   resumeMock.mockReset().mockResolvedValue(undefined);
   cancelMock.mockReset().mockResolvedValue(undefined);
+  indexStatusMock.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -113,6 +120,30 @@ describe("渲染与空态", () => {
 
     expect(screen.queryByTestId("import-card")).not.toBeInTheDocument();
     expect(screen.queryByTestId("import-card-error")).not.toBeInTheDocument();
+  });
+
+  it("右下角统一展示各类后台索引任务", async () => {
+    const counters = (pending: number, running: number, done: number, total: number) => ({
+      pending,
+      running,
+      done,
+      failed: 0,
+      total,
+    });
+    const status: IndexStatus = {
+      thumb: counters(2, 1, 7, 10),
+      exif: counters(0, 0, 10, 10),
+      ai: counters(4, 1, 5, 10),
+      face: counters(0, 1, 9, 10),
+    };
+    indexStatusMock.mockResolvedValue(status);
+
+    renderCard();
+
+    expect(await screen.findByTestId("background-index-card-thumb")).toBeInTheDocument();
+    expect(screen.getByTestId("background-index-card-ai")).toHaveTextContent("正在建立语义索引");
+    expect(screen.getByTestId("background-index-card-face")).toHaveTextContent("正在识别人脸");
+    expect(screen.queryByTestId("background-index-card-exif")).not.toBeInTheDocument();
   });
 
   it("挂载前已存在的旧错误不再弹出（只响应新到达的 appError）", () => {
@@ -327,4 +358,3 @@ describe("错误卡（appError）", () => {
     // 收起：活跃卡消失（AnimatePresence 150ms 退场，按工程约定 waitFor 断言）
     await waitFor(() => expect(screen.queryByTestId("import-card")).not.toBeInTheDocument());
   });
-

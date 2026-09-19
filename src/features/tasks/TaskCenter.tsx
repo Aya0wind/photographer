@@ -65,30 +65,47 @@ function FileNameTicker({ text }: { text: string }) {
  *  计数快照进页面拉一次，indexTaskProgress 事件经 aiStore 驱动重拉。 */
 function IndexTaskCard() {
   const { t } = useTranslation();
-  const indexPending = useImportStore((s) => s.indexPending);
+  const resumedPending = useImportStore((s) => s.indexPending);
   const status = useAiStore((s) => s.indexStatus);
   const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+  const [kicking, setKicking] = useState<Set<IndexKind>>(() => new Set());
 
   useEffect(() => {
     void refreshIndexStatus();
   }, [refreshIndexStatus]);
 
-  if (indexPending === null) return null;
+  if (!status && resumedPending === null) return null;
+
+  const channels = status ? [status.thumb, status.exif, status.ai, status.face].filter(
+    (channel): channel is NonNullable<typeof channel> => channel !== undefined,
+  ) : [];
+  const indexPending = status
+    ? channels.reduce((sum, channel) => sum + channel.pending + channel.running, 0)
+    : resumedPending ?? 0;
 
   // 有待办的索引类型才给「立即开始」（indexKickNow 幂等；失败静默——计数以快照/事件为准）
-  const kickable: IndexKind[] = status
-    ? ([
-        status.thumb.pending > 0 ? "thumb" : null,
-        status.exif.pending > 0 ? "exif" : null,
-        status.ai.total > 0 && status.ai.done < status.ai.total ? "ai" : null,
-      ].filter((kind): kind is IndexKind => kind !== null))
-    : [];
+  const kickable: IndexKind[] = status ? ([
+    status.thumb.running === 0 && (status.thumb.pending > 0 || status.thumb.failed > 0) ? "thumb" : null,
+    status.exif.running === 0 && (status.exif.pending > 0 || status.exif.failed > 0) ? "exif" : null,
+    status.ai.running === 0 && status.ai.total > 0 && status.ai.done < status.ai.total ? "ai" : null,
+    status.face && status.face.running === 0 && status.face.total > 0 && status.face.done < status.face.total
+      ? "face"
+      : null,
+  ].filter((kind): kind is IndexKind => kind !== null)) : [];
 
   async function kick(kind: IndexKind): Promise<void> {
+    if (kicking.has(kind)) return;
+    setKicking((current) => new Set(current).add(kind));
     try {
       await indexKickNow(kind);
     } catch {
       return; // ai 模型未就绪等业务错误：任务中心静默，设置页 AI tab 有引导
+    } finally {
+      setKicking((current) => {
+        const next = new Set(current);
+        next.delete(kind);
+        return next;
+      });
     }
     void refreshIndexStatus();
   }
@@ -118,7 +135,8 @@ function IndexTaskCard() {
                 t("tasks.index.statusThumb", { ...status.thumb }),
                 t("tasks.index.statusExif", { ...status.exif }),
                 t("tasks.index.statusAi", { ...status.ai }),
-              ].join("　")}
+                status.face ? t("tasks.index.statusFace", { ...status.face }) : null,
+              ].filter(Boolean).join("　")}
             </span>
           )}
         </div>
@@ -128,8 +146,9 @@ function IndexTaskCard() {
           <button
             key={kind}
             type="button"
+            disabled={kicking.has(kind)}
             onClick={() => void kick(kind)}
-            className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+            className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid={`task-index-kick-${kind}`}
           >
             {t("tasks.index.kick")}

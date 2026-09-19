@@ -38,13 +38,25 @@ const KINDS: [&str; 4] = ["thumb", "exif", "ai", "face"];
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
     let db = super::active_library_db(state)?;
     let counts = db.index_task_state_counts().map_err(|e| e.to_string())?;
-    let total_assets =
+    let (total_assets, thumb_done, ai_done, face_done) =
         db.0.query_row(
-            "SELECT COUNT(*) FROM assets WHERE kind IN ('photo', 'raw')",
+            "SELECT COUNT(*), \
+                    COUNT(CASE WHEN thumb_state != 0 THEN 1 END), \
+                    COUNT(CASE WHEN ai_indexed_at IS NOT NULL THEN 1 END), \
+                    COUNT(CASE WHEN face_indexed_at IS NOT NULL THEN 1 END) \
+             FROM assets WHERE kind IN ('photo', 'raw')",
             [],
-            |r| r.get::<_, i64>(0),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
         )
-        .map_err(|e| e.to_string())? as u64;
+        .map_err(|e| e.to_string())?;
+    let total_assets = total_assets as u64;
     let mut by_kind: HashMap<String, [u64; 4]> = HashMap::new();
     for (kind, state_name, count) in counts {
         let slot = match state_name.as_str() {
@@ -71,6 +83,20 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
             total: total_assets,
         };
     }
+    // 缩略图完成态以 assets.thumb_state 为持久真值；旧版本可能清理 done
+    // 任务行，直接数 index_tasks 会把已经生成的 119 张误报成 0。
+    dto.thumb.done = thumb_done as u64;
+    // AI 与人脸也以资产级完成标记为真值。按钮是否可点只取决于是否仍有
+    // 未索引资产，不受历史任务行是否保留、失败行是否清理影响。
+    dto.ai.done = ai_done as u64;
+    dto.face.done = face_done as u64;
+    // EXIF 在导入流读取首段时已同步提取并随资产一起落库，不会另建
+    // index_tasks 行。把这些资产计为已完成，避免 UI 误报 0 / total；若未来
+    // 存在显式 EXIF 任务，则仍以任务账为准。
+    if dto.exif.pending == 0 && dto.exif.running == 0 && dto.exif.done == 0 && dto.exif.failed == 0
+    {
+        dto.exif.done = total_assets;
+    }
     Ok(dto)
 }
 
@@ -95,6 +121,10 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
         "thumb" | "exif" => {
+            if kind == "thumb" {
+                db.create_thumb_tasks_for_unindexed()
+                    .map_err(|e| format!("创建缩略图任务失败: {e}"))?;
+            }
             db.retry_failed_index_tasks(kind)
                 .map_err(|e| format!("重试失败索引任务失败: {e}"))?;
             crate::index::kick(db_dir, &supervisor);

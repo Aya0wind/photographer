@@ -762,6 +762,21 @@ impl Db {
 
     // —— 索引任务（index_tasks）——
 
+    /// 为缩略图状态仍未完成、但任务账缺失的资产补种待办。旧版本清理过
+    /// done 行，因此不能只依赖 index_tasks 判断是否已经生成。
+    pub fn create_thumb_tasks_for_unindexed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             SELECT 'thumb', a.id, 'pending', 0, ?1, ?1 FROM assets a \
+             WHERE a.thumb_state = 0 AND a.kind IN ('photo', 'raw') \
+               AND NOT EXISTS (SELECT 1 FROM index_tasks t \
+                               WHERE t.kind = 'thumb' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
     /// 认领一条 pending 任务（原子置 running；多 worker 并发认领不重不漏，
     /// SQLite 写锁串行化保证单行独占）。无待办返回 None。
     pub fn claim_index_task(&self, kind: &str) -> Result<Option<IndexTaskRow>> {
@@ -803,6 +818,18 @@ impl Db {
         Ok(())
     }
 
+    /// 语义索引的持久化进度（已记账资产 / 可索引资产）。手动与自动触发共用
+    /// 同一张任务账和资产账，事件进度必须从这里的基线继续累加。
+    pub fn ai_index_progress(&self) -> Result<(u64, u64)> {
+        let (done, total): (i64, i64) = self.0.query_row(
+            "SELECT COUNT(CASE WHEN ai_indexed_at IS NOT NULL THEN 1 END), COUNT(*) \
+             FROM assets WHERE kind IN ('photo', 'raw')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((done as u64, total as u64))
+    }
+
     /// 语义检索 join：资产是否存在且可检索（photo/raw）。
     pub fn asset_searchable(&self, id: i64) -> Result<bool> {
         let ok: i64 = self.0.query_row(
@@ -834,8 +861,15 @@ impl Db {
     }
 
     /// 手动“立即索引”重试：复用已有失败任务，不再为同一资产重复插行。
+    /// 历史版本可能已经为同一资产制造多条 failed，先压成每资产一条；
     /// attempts 清零后仍沿用单轮最多三次的坏文件熔断策略。
     pub fn retry_failed_index_tasks(&self, kind: &str) -> Result<usize> {
+        self.0.execute(
+            "DELETE FROM index_tasks WHERE kind = ?1 AND state = 'failed' \
+             AND id NOT IN (SELECT MAX(id) FROM index_tasks \
+                            WHERE kind = ?1 AND state = 'failed' GROUP BY asset_id)",
+            params![kind],
+        )?;
         self.0.execute(
             "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?2 \
              WHERE kind = ?1 AND state = 'failed'",
@@ -1088,9 +1122,9 @@ impl Db {
 
     /// 各通道任务状态计数（(kind, state, count)，index_status IPC 数据源）。
     pub fn index_task_state_counts(&self) -> Result<Vec<(String, String, u64)>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT kind, state, COUNT(*) FROM index_tasks GROUP BY kind, state")?;
+        let mut stmt = self.0.prepare(
+            "SELECT kind, state, COUNT(DISTINCT asset_id) FROM index_tasks GROUP BY kind, state",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,

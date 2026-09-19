@@ -186,11 +186,13 @@ type T = ReturnType<typeof useTranslation>["t"];
 
 /** 行计数文案（thumb/exif：待处理/已完成/失败；ai：待处理 + 已索引 N/M + 失败） */
 function countersText(kind: IndexKind, status: IndexStatus, t: T): string {
-  if (kind === "ai") {
+  if (kind === "ai" || kind === "face") {
+    const c = kind === "ai" ? status.ai : status.face;
+    if (!c) return "—";
     return [
-      t("settings.ai.index.pending", { count: status.ai.pending }),
-      t("settings.ai.index.aiProgress", { done: status.ai.done, total: status.ai.total }),
-      status.ai.failed > 0 ? t("settings.ai.index.failed", { count: status.ai.failed }) : null,
+      t("settings.ai.index.pending", { count: c.pending }),
+      t("settings.ai.index.aiProgress", { done: c.done, total: c.total }),
+      c.failed > 0 ? t("settings.ai.index.failed", { count: c.failed }) : null,
     ]
       .filter((part): part is string => part !== null)
       .join(" · ");
@@ -210,6 +212,7 @@ function IndexStatusSection() {
   const status = useAiStore((s) => s.indexStatus);
   const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
   const [error, setError] = useState<string | null>(null);
+  const [kicking, setKicking] = useState<Set<IndexKind>>(() => new Set());
 
   // 进 tab 拉一次；此后 indexTaskProgress/indexTaskResumed 事件经 aiStore 驱动重拉
   useEffect(() => {
@@ -218,6 +221,8 @@ function IndexStatusSection() {
 
   const kick = useCallback(
     async (kind: IndexKind) => {
+      if (kicking.has(kind)) return;
+      setKicking((current) => new Set(current).add(kind));
       setError(null);
       try {
         await indexKickNow(kind);
@@ -225,13 +230,19 @@ function IndexStatusSection() {
         // 后端 Err 文案透传（如 ai 模型未就绪「请先在设置中下载模型」）
         setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
         return;
+      } finally {
+        setKicking((current) => {
+          const next = new Set(current);
+          next.delete(kind);
+          return next;
+        });
       }
       void refreshIndexStatus();
     },
-    [refreshIndexStatus],
+    [kicking, refreshIndexStatus],
   );
 
-  const rows: IndexKind[] = ["thumb", "exif", "ai"];
+  const rows: IndexKind[] = status?.face ? ["thumb", "exif", "ai", "face"] : ["thumb", "exif", "ai"];
 
   return (
     <>
@@ -247,7 +258,9 @@ function IndexStatusSection() {
           // 切页重挂载/应用重启后快照重拉，按钮状态随之恢复——
           // 本地 state 派生会在重挂载时丢失（真机修复 2026-09-19）
           const c = status[kind];
-          const running = c.pending > 0 || c.running > 0;
+          if (!c) return null;
+          const running = kicking.has(kind) || c.pending > 0 || c.running > 0;
+          const complete = c.total === 0 || (c.done >= c.total && c.failed === 0);
           return (
             <div
               key={kind}
@@ -263,16 +276,20 @@ function IndexStatusSection() {
               </div>
               <button
                 type="button"
-                disabled={running}
+                disabled={running || complete}
                 onClick={() => void kick(kind)}
                 className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  running
+                  running || complete
                     ? "cursor-default bg-panel text-text-muted"
                     : "bg-accent text-black hover:brightness-110"
                 }`}
                 data-testid={`index-kick-${kind}`}
               >
-                {running ? t("settings.ai.index.running") : t("settings.ai.index.kick")}
+                {running
+                  ? t("settings.ai.index.running")
+                  : complete
+                    ? t("settings.ai.index.complete")
+                    : t("settings.ai.index.kick")}
               </button>
             </div>
           );
@@ -359,6 +376,41 @@ export default function AiTab() {
           label={t("settings.ai.scene")}
           onChange={() => {}}
         />
+      </SettingRow>
+      {/* 语义相似度阈值：低于该分的结果过滤（0 = 不过滤）。
+          实测 SigLIP2 cos 区间压缩：无关内容 top≈0.087、相关簇≈0.099+，
+          阈值过高全灭、过低任何查询返回 top-N≈全库（进哪个智能相册都是
+          全部照片的真机复现根因） */}
+      <SettingRow
+        label={t("settings.ai.semanticThreshold")}
+        desc={t("settings.ai.semanticThresholdDesc")}
+      >
+        <span className="flex items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={settings.ai.semanticMinScore}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) {
+                commit({ ai: { semanticMinScore: Math.min(1, Math.max(0, v)) } });
+              }
+            }}
+            aria-label={t("settings.ai.semanticThreshold")}
+            className="w-20 rounded border border-edge bg-bg px-2 py-1 font-mono text-xs text-text-primary outline-none focus:border-accent"
+            data-testid="ai-semantic-threshold"
+          />
+          <button
+            type="button"
+            onClick={() => commit({ ai: { semanticMinScore: 0.09 } })}
+            className="rounded border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="ai-semantic-threshold-reset"
+          >
+            {t("settings.ai.semanticThresholdReset")}
+          </button>
+        </span>
       </SettingRow>
 
       {/* 调度 / 资源 */}

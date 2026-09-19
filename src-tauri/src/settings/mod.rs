@@ -172,6 +172,10 @@ pub struct AiSettings {
     pub index_schedule: IndexSchedule,
     pub cpu_limit_percent: u32,
     pub use_gpu: bool,
+    /// 语义检索相似度阈值（cos，0..1）：低于该分的结果过滤；0 = 不过滤。
+    /// 默认 0.09——SigLIP2 cos 分数区间压缩（实测无关内容 top≈0.087，
+    /// 相关簇 ≈0.099+），过高全灭、过低「进哪个相册都是全部照片」。
+    pub semantic_min_score: f32,
 }
 
 impl Default for AiSettings {
@@ -183,6 +187,7 @@ impl Default for AiSettings {
             index_schedule: IndexSchedule::IdleOnly,
             cpu_limit_percent: 50,
             use_gpu: true,
+            semantic_min_score: 0.09,
         }
     }
 }

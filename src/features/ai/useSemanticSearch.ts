@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   assetsByIds,
@@ -89,7 +89,22 @@ export function useSemanticSearch() {
 
 /** 语义索引进行中（indexTaskProgress kind="ai"，done<total；null=未在进行） */
 export function useAiIndexingProgress(): { done: number; total: number } | null {
+  const indexStatus = useAiStore((s) => s.indexStatus);
   const indexProgress = useAiStore((s) => s.indexProgress);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+
+  // 搜索页/智能相册挂载时都读取同一份持久化任务账；即使索引在别的页面
+  // 或上次应用运行中完成，也不会被旧的瞬时事件永久留在“正在建立”。
+  useEffect(() => {
+    void refreshIndexStatus();
+  }, [refreshIndexStatus]);
+
+  if (indexStatus !== null) {
+    const ai = indexStatus.ai;
+    if (ai.pending === 0 && ai.running === 0) return null;
+    if (ai.done >= ai.total) return null;
+    return { done: ai.done, total: ai.total };
+  }
   if (indexProgress === null || indexProgress.done >= indexProgress.total) return null;
   return { done: indexProgress.done, total: indexProgress.total };
 }

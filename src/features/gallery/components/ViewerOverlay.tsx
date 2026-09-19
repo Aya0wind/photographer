@@ -33,6 +33,21 @@ const FILM_THUMB_SIZE = 240; // 与网格同档，共享会话缓存
 const MIN_SCALE = 1;
 const MAX_SCALE = 4;
 
+/** 切图首帧即可显示的基础信息；完整 EXIF 返回后在原位补齐，不切成骨架屏。 */
+function detailFromAsset(asset: AssetDto): AssetDetailDto {
+  return {
+    id: asset.id,
+    path: asset.path,
+    filename: asset.name,
+    size: asset.sizeBytes,
+    kind: asset.kind,
+    capturedAt: asset.capturedAt,
+    camera: asset.camera,
+    createdAt: null,
+    dupCount: 0,
+  };
+}
+
 /** 路径 → asset 协议 URL（非 Tauri 环境抛错回退 null） */
 function safeConvert(path: string): string | null {
   try {
@@ -81,7 +96,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
   /** 90° 步进旋转（负=逆时针）；触发拖拽/缩放之外的独立维度 */
   const rotate = (delta: number) =>
-    setView((v) => ({ ...v, rotation: (((v.rotation + delta) % 360) + 360) % 360 }));
+    // 保留连续角度，确保 -270 -> -360 的过渡继续向左，而不是归零后反向补间。
+    setView((v) => ({ ...v, rotation: v.rotation + delta }));
 
   // wheel 缩放：原生非 passive 监听（React 合成 wheel 为 passive，无法 preventDefault）
   useEffect(() => {
@@ -109,6 +125,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const dragRef = useRef<{ x: number; y: number } | null>(null);
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>): void {
     if (view.scale <= MIN_SCALE) return;
+    // 箭头/工具按钮是操作控件，缩放状态下不能被舞台的 pointer capture 抢走点击。
+    if (e.target instanceof Element && e.target.closest("button")) return;
     dragRef.current = { x: e.clientX, y: e.clientY };
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -175,7 +193,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // --- 大图来源（按 kind，分级回退链） -------------------------------------------------
   // photo：原图 → 中间档缩略图（名义 2048，后端加 2048 档）→ 512 档。WebView2 对
   // 大尺寸/无压缩 TIF 等原生渲染失败，onError 逐级降档，而不是一步到 512 模糊图。
-  // raw：直接大档缩略图（内嵌预览的缩放版）；video：恒占位。
+  // raw：先显示 512 内嵌 JPEG，后台完成 2048 全量 RAW 显影后无缝替换；video：恒占位。
   const originalUrl = useMemo(
     () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
     [asset.kind, asset.path],
@@ -186,6 +204,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [asset.id, originalUrl]);
   const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
   const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
+  const rawFull = useAssetThumbUrl(
+    asset.id,
+    VIEWER_MID_SIZE,
+    asset.kind === "raw",
+    "high",
+  );
   // 中间档仅 photo 且原图已失败时才请求（2048 档后端就位后生效；未就位时 settled null → 继续降 512）
   const mid = useAssetThumbUrl(
     asset.id,
@@ -204,9 +228,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   } else if (asset.kind === "photo" && stage === "mid") {
     mainSrc = mid.url; // 在途 null → 走加载提示；确定无图由下方自动降档
   } else {
-    // photo 降到 512 档 / raw 直达大档缩略图
-    mainSrc = thumb.url;
-    mainFailed = thumb.settled && thumb.url === null;
+    // photo 降到 512 档；RAW 先用内嵌预览，完整显影完成后直接替换。
+    mainSrc = asset.kind === "raw" ? rawFull.url ?? thumb.url : thumb.url;
+    mainFailed = asset.kind === "raw"
+      ? rawFull.settled && thumb.settled && rawFull.url === null && thumb.url === null
+      : thumb.settled && thumb.url === null;
   }
   // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档
   useEffect(() => {
@@ -277,21 +303,25 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((url) => {
         warmImageDecode(url);
       });
+      if (neighbor.kind === "raw") {
+        void fetchAssetThumb(neighbor.id, VIEWER_MID_SIZE, "high").then((url) => {
+          warmImageDecode(url);
+        });
+      }
     }
   }, [index, group.assets]);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
   const [exifOpen, setExifOpen] = useState(true);
-  const [detail, setDetail] = useState<AssetDetailDto | null>(null);
-  const [detailLoading, setDetailLoading] = useState(true);
+  const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
+  const visibleDetail = detail?.id === asset.id ? detail : detailFromAsset(asset);
   useEffect(() => {
     let cancelled = false;
-    setDetailLoading(true);
-    setDetail(null);
     void assetDetail(asset.id).then((d) => {
       if (cancelled) return;
-      setDetail(d);
-      setDetailLoading(false);
+      if (d) {
+        setDetail(d);
+      }
     });
     return () => {
       cancelled = true;
@@ -299,7 +329,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [asset.id]);
 
   const exifRows: Array<[string, React.ReactNode]> = useMemo(() => {
-    if (!detail) return [];
+    const detail = visibleDetail;
     // 核心行：缺失显示「—」（后端字段可能为 null/undefined，均按无值处理）
     const rows: Array<[string, React.ReactNode]> = [
       [t("viewer.camera"), formatValue(detail.camera)],
@@ -326,7 +356,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       </span>,
     ]);
     return rows;
-  }, [detail, t]);
+  }, [visibleDetail, t]);
 
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;
@@ -361,7 +391,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
       <div className="relative flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
         <div className="absolute inset-0" data-tauri-drag-region />
-        <div className="flex min-w-0 items-baseline gap-4">
+        <div className="pointer-events-none relative flex min-w-0 items-baseline gap-4">
           <span className="truncate text-sm font-semibold" title={asset.name} data-testid="viewer-name">
             {asset.name}
           </span>
@@ -372,14 +402,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             {t("viewer.index", { index: index + 1, total: group.assets.length })}
           </span>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="pointer-events-none relative ml-auto flex items-center gap-2">
           {/* 旋转：90° 步进（逆/顺时针），150ms 过渡；随资产切换重置 */}
           <button
             type="button"
             onClick={() => rotate(-90)}
             aria-label={t("viewer.rotateCcw")}
             title={t("viewer.rotateCcw")}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
             data-testid="viewer-rotate-ccw"
           >
             <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -392,7 +422,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             onClick={() => rotate(90)}
             aria-label={t("viewer.rotateCw")}
             title={t("viewer.rotateCw")}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
             data-testid="viewer-rotate-cw"
           >
             <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -404,7 +434,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             type="button"
             onClick={() => setExifOpen((v) => !v)}
             aria-pressed={exifOpen}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
             data-testid="viewer-exif-toggle"
           >
             {t("viewer.exif")}
@@ -413,7 +443,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             type="button"
             onClick={onClose}
             aria-label={t("viewer.close")}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
             data-testid="viewer-close"
           >
             {t("viewer.close")}
@@ -471,7 +501,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 }}
                 data-testid="viewer-img"
                 data-fallback={
-                  incoming.src === originalUrl ? "original" : incoming.src === mid.url ? "mid" : "thumb"
+                  incoming.src === originalUrl
+                    ? "original"
+                    : incoming.src === rawFull.url && asset.kind === "raw"
+                      ? "raw-full"
+                      : incoming.src === mid.url
+                        ? "mid"
+                        : "thumb"
                 }
                 className={`max-h-full max-w-full select-none object-contain transition-opacity duration-150 ${
                   incomingReady ? "opacity-100" : "opacity-0"
@@ -527,10 +563,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             {/* 左右切换 */}
             <button
               type="button"
+              onPointerDown={(event) => event.stopPropagation()}
               onClick={() => onNavigate(index - 1)}
               disabled={!hasPrev}
               aria-label={t("viewer.prev")}
-              className="absolute left-3 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className="pointer-events-auto absolute left-3 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
               data-testid="viewer-prev"
             >
               <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -539,10 +576,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             </button>
             <button
               type="button"
+              onPointerDown={(event) => event.stopPropagation()}
               onClick={() => onNavigate(index + 1)}
               disabled={!hasNext}
               aria-label={t("viewer.next")}
-              className="absolute right-3 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className="pointer-events-auto absolute right-3 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
               data-testid="viewer-next"
             >
               <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -576,26 +614,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             >
               <div className="h-full w-72 overflow-y-auto p-3">
                 <h2 className="mb-2 text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
-                {detailLoading ? (
-                  <div className="space-y-2" data-testid="viewer-exif-loading">
-                    {[0, 1, 2, 3, 4].map((i) => (
-                      <div key={i} className="h-4 animate-pulse rounded bg-panel/70" />
-                    ))}
-                  </div>
-                ) : detail === null ? (
-                  <p className="text-xs leading-relaxed text-text-muted" data-testid="viewer-exif-unavailable">
-                    {t("viewer.exifUnavailable")}
-                  </p>
-                ) : (
-                  <dl className="space-y-1.5" data-testid="viewer-exif-rows">
-                    {exifRows.map(([label, value]) => (
-                      <div key={label} className="flex items-baseline justify-between gap-2 text-xs">
-                        <dt className="shrink-0 text-text-muted">{label}</dt>
-                        <dd className="min-w-0 text-right text-text-secondary">{value}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                )}
+                <dl className="space-y-1.5" data-testid="viewer-exif-rows">
+                  {exifRows.map(([label, value]) => (
+                    <div key={label} className="flex items-baseline justify-between gap-2 text-xs">
+                      <dt className="shrink-0 text-text-muted">{label}</dt>
+                      <dd className="min-w-0 text-right text-text-secondary">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
               </div>
             </motion.aside>
           )}

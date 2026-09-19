@@ -17,6 +17,13 @@ pub struct SearchHitDto {
     pub score: f32,
 }
 
+/// 语义检索阈值合成：显式参数优先，未传回落设置项（ai.semantic_min_score）。
+/// 不设阈值时任何查询都返回 top-N≈全库（119 张库 limit=100 →「进哪个智能
+/// 相册都是全部照片」真机实测复现）。设置 0 = 不过滤。
+pub fn effective_min_score(explicit: Option<f32>, settings_value: f32) -> Option<f32> {
+    explicit.or(Some(settings_value))
+}
+
 /// 语义检索核（模型未齐 → 明确错误）。
 pub fn fetch_search_semantic(
     state: &super::AppState,
@@ -43,13 +50,17 @@ pub fn fetch_search_semantic(
         .ok_or("尚未创建库")?;
     let db_dir = std::path::PathBuf::from(&library.db_dir);
     let db = super::open_library_db(&db_dir)?;
+    let settings_value = {
+        let settings = state.settings.lock().expect("settings mutex poisoned");
+        settings.ai.semantic_min_score
+    };
     let hits = crate::ai::semantic::search(
         &db_dir,
         &db,
         &state.ai,
         query,
         limit.clamp(1, 100),
-        min_score,
+        effective_min_score(min_score, settings_value),
     )?;
     Ok(hits
         .into_iter()

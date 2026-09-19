@@ -229,12 +229,158 @@ fn semantic_backfill_consumes_existing_pending_tasks() {
     assert_eq!(failed, 1);
 }
 
+#[test]
+fn semantic_backfill_persists_in_non_ascii_library_path() {
+    let root = tempfile::tempdir().unwrap();
+    let lib = root.path().join("中文库");
+    std::fs::create_dir_all(&lib).unwrap();
+    let source = root.path().join("source.jpg");
+    image::RgbImage::from_pixel(8, 8, image::Rgb([120, 80, 40]))
+        .save(&source)
+        .unwrap();
+    let database = common::open_db(&lib);
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+             kind, captured_at, camera, source, created_at) \
+             VALUES (1, ?1, 'source.jpg', 1, '2026', 1, x'00', 'photo', \
+             NULL, NULL, 'imported', '2026')",
+            rusqlite::params![source.to_string_lossy()],
+        )
+        .unwrap();
+
+    let done = ai::semantic::run_semantic_backfill(
+        &lib,
+        std::sync::Arc::new(StubEmbedder),
+        &events::EventBus::new(),
+        1,
+    );
+
+    assert_eq!(done, 1);
+    assert!(lib.join("vectors.usearch").is_file());
+    assert_eq!(database.pending_index_task_count("ai").unwrap(), 0);
+
+    // 模拟“向量已保存、SQLite 记账前崩溃”：重放同一 asset_id 应补记账，
+    // 不能因 duplicate key 再次失败。
+    database
+        .0
+        .execute("UPDATE assets SET ai_indexed_at = NULL WHERE id = 1", [])
+        .unwrap();
+    database
+        .0
+        .execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0 WHERE kind = 'ai' AND asset_id = 1",
+            [],
+        )
+        .unwrap();
+    let replayed = ai::semantic::run_semantic_backfill(
+        &lib,
+        std::sync::Arc::new(StubEmbedder),
+        &events::EventBus::new(),
+        1,
+    );
+    assert_eq!(replayed, 1);
+}
+
 /// worker 封顶契约：AI 推理 worker ≤ 4（ort 会话线程重，多 worker × 全核
 /// 会话平方级超订阅——「在跑但极慢」的预防性约束）。
 #[test]
 fn ai_worker_count_capped() {
     let n = ai::semantic::worker_count_for_ai();
     assert!((1..=4).contains(&n), "AI worker 应封顶 4，实际 {n}");
+}
+
+/// 诊断（真机 2026-09-19：主库 119 条 ai 任务 75ms/次快失败）：复现 app 真实
+/// 环境——**中文库路径** + 真模型 + 真实回填链路（thumb → embed → usearch
+/// add/save → 记账）。usearch 是 C++ 库，Windows 下非 ASCII 路径有 ANSI 转换
+/// 失败风险。逐步断言，失败点直接暴露。#[ignore]：依赖已下载模型与样例图。
+#[test]
+#[ignore = "诊断用真机 smoke：需模型与样例图；复现主库中文路径回填失败"]
+fn real_backfill_chinese_dbdir_diagnosis() {
+    let Some(models) = models_dir() else {
+        eprintln!("skip: 模型目录不存在");
+        return;
+    };
+    let jpg = Path::new(r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0177.JPG");
+    if !jpg.is_file() {
+        eprintln!("skip: 样例不存在 {}", jpg.display());
+        return;
+    }
+    // 中文目录名复现主库路径（I:\SmartPhoto\主库）
+    let lib = tempfile::tempdir().unwrap();
+    let db_dir = lib.path().join("主库");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let database = common::open_db(&db_dir);
+    let target = db_dir.join("照片").join("DSC_0177.JPG");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::copy(jpg, &target).unwrap();
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (path, filename, size, mtime, xxhash, sha256, \
+             kind, captured_at, camera, source, created_at) \
+             VALUES (?1, 'DSC_0177.JPG', 1, '2026', 1, x'00', 'photo', \
+             NULL, NULL, 'imported', '2026')",
+            rusqlite::params![target.to_string_lossy()],
+        )
+        .unwrap();
+
+    let manager = ai::ModelManager::new(
+        models,
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    assert!(manager.semantic_ready(), "语义模型应就绪");
+
+    // 逐步拆解链路，失败点在哪一步直接暴露
+    let thumb = thumbs::thumb_file(&db_dir, &target, 256);
+    eprintln!("step1 thumb_file: ok={}", thumb.is_some());
+    assert!(thumb.is_some(), "256 档缩略图生成失败");
+
+    let v = manager.embed_image(&target, &db_dir);
+    match &v {
+        Ok(vec) => eprintln!("step2 embed_image: ok dim={}", vec.len()),
+        Err(e) => eprintln!("step2 embed_image: Err={e}"),
+    }
+    assert!(v.is_ok(), "embed_image 失败");
+    assert_eq!(v.as_ref().unwrap().len(), ai::embed::EMBED_DIM);
+
+    let id: i64 = database
+        .0
+        .query_row("SELECT id FROM assets LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let index = ai::semantic::shared_index(&db_dir);
+    match &index {
+        Ok(_) => eprintln!("step3 shared_index: ok"),
+        Err(e) => eprintln!("step3 shared_index: Err={e}"),
+    }
+    let index = index.unwrap();
+    {
+        let idx = index.lock().unwrap();
+        let add = idx.add(id as u64, v.as_ref().unwrap());
+        eprintln!("step4 usearch add: ok={}", add.is_ok());
+        assert!(add.is_ok());
+        let save_path = db_dir.join("vectors.usearch");
+        let save = idx.save(save_path.to_str().unwrap());
+        eprintln!(
+            "step5 usearch save ({}): ok={} exists={}",
+            save_path.display(),
+            save.is_ok(),
+            save_path.is_file()
+        );
+        assert!(save.is_ok(), "usearch 保存中文路径失败");
+    }
+
+    // 全链路：run_semantic_backfill（含任务建账/消费/记账）
+    let done = ai::semantic::run_semantic_backfill(
+        &db_dir,
+        std::sync::Arc::new(manager),
+        &events::EventBus::new(),
+        1,
+    );
+    eprintln!("step6 run_semantic_backfill done={done}");
+    assert!(done >= 1, "回填应成功至少 1 条（中文库路径）");
 }
 
 // ---------------------------------------------------------------------------
@@ -390,4 +536,17 @@ fn hnsw_10k_insert_knn_correctness() {
             matches.distances[0]
         );
     }
+}
+
+/// 阈值合成（真机修复 2026-09-20「进哪个智能相册都是全部照片」根因）：
+/// 显式参数 > 设置值；不传参数必须回落设置项——此前 None 直通检索层，
+/// 119 张库 limit=100 时任何查询都返回全库。
+#[test]
+fn semantic_min_score_priority() {
+    use common::ipc;
+    assert_eq!(ipc::ai::effective_min_score(None, 0.09), Some(0.09));
+    assert_eq!(ipc::ai::effective_min_score(Some(0.2), 0.09), Some(0.2));
+    // 显式 0 = 用户明确要求不过滤，不能被设置值覆盖
+    assert_eq!(ipc::ai::effective_min_score(Some(0.0), 0.09), Some(0.0));
+    assert!((settings::AiSettings::default().semantic_min_score - 0.09).abs() < 1e-6);
 }

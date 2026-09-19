@@ -141,6 +141,29 @@ impl TaskSupervisor {
     where
         F: FnOnce(TaskControls) + Send + 'static,
     {
+        self.spawn_impl(kind, name, body, false)
+            .expect("non-unique task spawn always returns a handle")
+    }
+
+    /// 按 `(kind, name)` 幂等派发。已有同名任务运行时不再新建线程，调用方
+    /// 可把自动触发与手动触发安全地汇入同一后台管线。
+    pub fn spawn_unique<F>(&self, kind: &'static str, name: String, body: F) -> Option<TaskHandle>
+    where
+        F: FnOnce(TaskControls) + Send + 'static,
+    {
+        self.spawn_impl(kind, name, body, true)
+    }
+
+    fn spawn_impl<F>(
+        &self,
+        kind: &'static str,
+        name: String,
+        body: F,
+        unique: bool,
+    ) -> Option<TaskHandle>
+    where
+        F: FnOnce(TaskControls) + Send + 'static,
+    {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let controls = TaskControls {
             paused: Arc::new(AtomicBool::new(false)),
@@ -155,10 +178,20 @@ impl TaskSupervisor {
             name: name.clone(),
         };
 
-        self.running
-            .lock()
-            .expect("supervisor running mutex poisoned")
-            .insert(id, (kind.to_string(), name.clone()));
+        {
+            let mut running = self
+                .running
+                .lock()
+                .expect("supervisor running mutex poisoned");
+            if unique
+                && running.values().any(|(running_kind, running_name)| {
+                    running_kind == kind && running_name == &name
+                })
+            {
+                return None;
+            }
+            running.insert(id, (kind.to_string(), name.clone()));
+        }
 
         let bus = self.bus.clone();
         let running = Arc::clone(&self.running);
@@ -198,7 +231,7 @@ impl TaskSupervisor {
                 recoverable: true,
             });
         }
-        handle
+        Some(handle)
     }
 
     /// 当前运行中的任务数（观测；集成测试引用）。

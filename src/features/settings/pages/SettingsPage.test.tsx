@@ -344,6 +344,24 @@ describe("AI tab（M4 实化）", () => {
     await switchTab(user, "ai");
   }
 
+  it("语义阈值：默认 0.09 渲染；修改即存并夹取 [0,1]；恢复默认按钮还原", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    const input = screen.getByTestId("ai-semantic-threshold") as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("0.09"));
+
+    // 修改即存（settingsStore 更新 + settings_set 落盘）
+    await user.clear(input);
+    await user.type(input, "0.15");
+    expect(useSettingsStore.getState().settings.ai.semanticMinScore).toBe(0.15);
+
+    // 恢复默认
+    await user.click(screen.getByTestId("ai-semantic-threshold-reset"));
+    expect(useSettingsStore.getState().settings.ai.semanticMinScore).toBe(0.09);
+  });
+
   it("模型状态区：4 行渲染（显示名/体积/状态徽标）", async () => {
     aiModelsStatusMock.mockResolvedValue(allModels());
     const user = userEvent.setup();
@@ -568,9 +586,9 @@ describe("AI tab：索引状态与操作", () => {
     const kickAi = await screen.findByTestId("index-kick-ai");
     await waitFor(() => expect(kickAi).toBeDisabled());
     expect(kickAi).toHaveTextContent("进行中");
-    // thumb/exif 待办为 0 → 不误禁用
+    // thumb 尚未完成可重建；EXIF 已随导入完成，不再提交空任务
     expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
-    expect(screen.getByTestId("index-kick-exif")).toBeEnabled();
+    expect(screen.getByTestId("index-kick-exif")).toBeDisabled();
   });
 
   it("运行态从持久化任务账派生：未点击任何按钮，pending>0 直接「进行中」（切页重挂载不丢）", async () => {

@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import { formatBytes, formatSpeed } from "@/lib/format";
-import type { ImportMode } from "@/ipc/api";
+import type { ImportMode, IndexCounters, IndexKind } from "@/ipc/api";
 import { useImportStore } from "@/stores/importStore";
+import { useAiStore } from "@/stores/aiStore";
 import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
 
 /**
@@ -356,12 +357,77 @@ function ErrorCardView({ message, onDismiss }: { message: string; onDismiss: () 
   );
 }
 
+const EMPTY_INDEX_COUNTERS: IndexCounters = {
+  pending: 0,
+  running: 0,
+  done: 0,
+  failed: 0,
+  total: 0,
+};
+
+/** 与导入卡共用右下角任务栈；状态完全来自后端持久化任务账。 */
+function IndexCardView({ kind, counters }: { kind: IndexKind; counters: IndexCounters }) {
+  const { t } = useTranslation();
+  const total = Math.max(counters.total, counters.done + counters.pending + counters.running);
+  const pct = total > 0 ? Math.min(100, (counters.done / total) * 100) : 0;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.15, ease: "easeOut" }}
+      className="pointer-events-auto rounded-lg border border-edge bg-surface p-3 shadow-lg"
+      data-testid={`background-index-card-${kind}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="truncate text-xs font-semibold text-text-primary">
+          {t(`backgroundTask.index.${kind}`)}
+        </h3>
+        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+          {t("jobStatus.running")}
+        </span>
+      </div>
+      <div
+        className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-panel"
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div className="h-full rounded-full bg-accent transition-[width] duration-150" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] tabular-nums text-text-secondary">
+        <span>{t("backgroundTask.progress", { done: counters.done, total })}</span>
+        <span className="text-text-muted">
+          {t("backgroundTask.queue", { pending: counters.pending, running: counters.running })}
+        </span>
+      </div>
+      {counters.failed > 0 && (
+        <p className="mt-1 text-[10px] text-red-400">
+          {t("settings.ai.index.failed", { count: counters.failed })}
+        </p>
+      )}
+    </motion.div>
+  );
+}
+
 export default function ImportProgressCard() {
   const currentJobId = useImportStore((s) => s.currentJobId);
   const activeJobs = useImportStore((s) => s.activeJobs);
   const jobModes = useImportStore((s) => s.jobModes);
   const summary = useImportStore((s) => s.summary);
   const lastError = useImportStore((s) => s.lastError);
+  const indexStatus = useAiStore((s) => s.indexStatus);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+
+  // 全局任务卡不依赖某个页面是否挂载：定期从后端任务账取统一快照。
+  // 这样自动导入触发与手动触发会自然显示为同一批任务，也不会被漏掉事件。
+  useEffect(() => {
+    void refreshIndexStatus();
+    const timer = window.setInterval(() => void refreshIndexStatus(), 1500);
+    return () => window.clearInterval(timer);
+  }, [refreshIndexStatus]);
 
   // 终态快照：任务进入 done/cancelled 时捕获（summary 同批写入；被关闭后仍可展示）
   const [finished, setFinished] = useState<FinishedCard | null>(null);
@@ -422,12 +488,21 @@ export default function ImportProgressCard() {
     cards.push({ type: "finished", card: finished });
   }
 
+  const indexCards: Array<{ kind: IndexKind; counters: IndexCounters }> = indexStatus
+    ? (["thumb", "exif", "ai", "face"] as const)
+        .map((kind) => ({ kind, counters: indexStatus[kind] ?? EMPTY_INDEX_COUNTERS }))
+        .filter(({ counters }) => counters.pending > 0 || counters.running > 0)
+    : [];
+
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex w-[280px] flex-col gap-2">
+    <div className="pointer-events-none fixed bottom-4 right-4 z-40 flex max-h-[calc(100vh-2rem)] w-[280px] flex-col gap-2 overflow-y-auto">
       <AnimatePresence>
         {showError && lastError && (
           <ErrorCardView key="error" message={lastError.message} onDismiss={() => setDismissedError(lastError)} />
         )}
+        {indexCards.map(({ kind, counters }) => (
+          <IndexCardView key={`index-${kind}`} kind={kind} counters={counters} />
+        ))}
         {cards.map((entry) =>
           entry.type === "active" ? (
             <ActiveCardView

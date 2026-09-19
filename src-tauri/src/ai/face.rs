@@ -746,7 +746,7 @@ pub fn kick_face_if_ready(
     }
     let manager = std::sync::Arc::new(manager.clone());
     let bus = bus.clone();
-    supervisor.spawn("index", "face-backfill".into(), move |_| {
+    let _ = supervisor.spawn_unique("index", "face-backfill".into(), move |_| {
         run_face_backfill(&db_dir, manager, &bus);
     });
 }

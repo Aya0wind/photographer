@@ -9,6 +9,7 @@
 //! cxx 绑定内部自带并发控制，外层 Mutex 串行化 add/save）。
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -42,6 +43,32 @@ fn vectors_path(db_dir: &Path) -> PathBuf {
     db_dir.join(VECTORS_FILE)
 }
 
+/// usearch 的 Windows 高层封装使用窄字符串路径，库目录含中文时 save/view 会
+/// 返回 `No such file or directory`。这类库使用系统临时目录中的纯 ASCII 镜像
+/// 承载 mmap/保存，每次保存后再由 Rust 的 Unicode 文件 API 复制回库目录。
+fn runtime_vectors_path(db_dir: &Path) -> Result<PathBuf, String> {
+    let storage = vectors_path(db_dir);
+    if storage.to_string_lossy().is_ascii() {
+        return Ok(storage);
+    }
+    let mut hasher = DefaultHasher::new();
+    pool_key(db_dir).hash(&mut hasher);
+    let runtime_dir = std::env::temp_dir().join("smart-photo-vectors");
+    std::fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
+    Ok(runtime_dir.join(format!("{:016x}.usearch", hasher.finish())))
+}
+
+fn save_index(index: &Index, db_dir: &Path) -> Result<(), String> {
+    let storage = vectors_path(db_dir);
+    let runtime = runtime_vectors_path(db_dir)?;
+    let runtime_str = runtime.to_str().ok_or("向量运行时路径含非 UTF-8 字符")?;
+    index.save(runtime_str).map_err(|e| e.to_string())?;
+    if runtime != storage {
+        std::fs::copy(&runtime, &storage).map_err(|e| format!("同步向量索引到库目录失败: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 取（或懒加载）某库的共享 HNSW 索引。
 pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     let key = pool_key(db_dir);
@@ -49,11 +76,16 @@ pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     if let Some(idx) = pool.get(&key) {
         return Ok(Arc::clone(idx));
     }
-    let path = vectors_path(db_dir);
-    let index = if path.is_file() {
+    let storage = vectors_path(db_dir);
+    let runtime = runtime_vectors_path(db_dir)?;
+    let index = if storage.is_file() {
+        if runtime != storage {
+            std::fs::copy(&storage, &runtime)
+                .map_err(|e| format!("准备向量索引运行时镜像失败: {e}"))?;
+        }
         // 已有索引文件：view（mmap 零拷贝加载）
         let idx = new_index()?;
-        idx.view(path.to_str().ok_or("库路径含非 UTF-8 字符")?)
+        idx.view(runtime.to_str().ok_or("向量运行时路径含非 UTF-8 字符")?)
             .map_err(|e| e.to_string())?;
         idx
     } else {
@@ -87,40 +119,38 @@ fn ensure_capacity(index: &mut Index, needed: usize) -> Result<(), String> {
 
 /// 单条 ai 任务处理：256 档缩略图 → embed → usearch 插入 → 落盘 → 记账。
 /// 返回成功与否（失败走 attempts 封顶策略）。
-fn process_ai_task(db: &Db, db_dir: &Path, embedder: &dyn SemanticEmbedder, asset_id: i64) -> bool {
+fn process_ai_task(
+    db: &Db,
+    db_dir: &Path,
+    embedder: &dyn SemanticEmbedder,
+    asset_id: i64,
+) -> Result<(), String> {
     let Some((path, _thumb_state)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
-        return false; // 资产已删除（级联清任务前的防御兜底）
+        return Err("资产不存在".into()); // 资产已删除（级联清任务前的防御兜底）
     };
     // 256 档缩略图（缺失则顺手生成；这同时是 embed 的输入）
-    let Some(_) = crate::thumbs::thumb_file(db_dir, Path::new(&path), 256) else {
-        return false;
-    };
-    let vector = match embedder.embed_image(Path::new(&path), db_dir) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let index = match shared_index(db_dir) {
-        Ok(i) => i,
-        Err(_) => return false,
-    };
+    crate::thumbs::thumb_file(db_dir, Path::new(&path), 256)
+        .ok_or_else(|| format!("缩略图生成失败: {path}"))?;
+    let vector = embedder.embed_image(Path::new(&path), db_dir)?;
+    let index = shared_index(db_dir)?;
     let mut idx = index.lock().expect("semantic index mutex poisoned");
+    // save 成功、SQLite 记账前若进程崩溃，重启后任务仍会重放；索引中已有
+    // key 时直接补记账，保证回填幂等而不是报 Duplicate keys。
+    if idx.contains(asset_id as u64) {
+        return db.set_ai_indexed(asset_id).map_err(|e| e.to_string());
+    }
     let needed = idx.size() + 1;
-    if ensure_capacity(&mut idx, needed).is_err() {
-        return false;
-    }
-    if idx.add(asset_id as u64, &vector).is_err() {
-        return false;
-    }
+    ensure_capacity(&mut idx, needed)?;
+    idx.add(asset_id as u64, &vector)
+        .map_err(|e| e.to_string())?;
     // 每条落盘（防崩溃丢账；调用方为批量时由 worker 循环天然降频）
-    let path = vectors_path(db_dir);
-    let Some(path_str) = path.to_str() else {
-        return false;
-    };
-    if idx.save(path_str).is_err() {
-        return false;
+    if let Err(error) = save_index(&idx, db_dir) {
+        // 保存失败必须回滚内存 key，否则本轮自动重试只会得到重复键错误。
+        let _ = idx.remove(asset_id as u64);
+        return Err(error);
     }
     drop(idx);
-    db.set_ai_indexed(asset_id).is_ok()
+    db.set_ai_indexed(asset_id).map_err(|e| e.to_string())
 }
 
 /// 语义回填 + 全核执行（模型齐备 && enable_clip 时由调用方触发）：
@@ -143,16 +173,21 @@ pub fn run_semantic_backfill(
     if let Err(e) = db.create_ai_tasks_for_unindexed() {
         eprintln!("语义回填：补种任务失败: {e}");
     }
-    let total = db.pending_index_task_count("ai").unwrap_or(0);
-    if total == 0 {
+    let pending = db.pending_index_task_count("ai").unwrap_or(0);
+    if pending == 0 {
         return 0;
     }
+    let (indexed_before, total) = db.ai_index_progress().unwrap_or((0, pending));
+    // 所有 worker 共用一个完成计数，并在锁内发布事件，保证事件严格单调；
+    // 不能让每个 worker 各报 1..N，最后把 UI 留在 30/119。
+    let progress_done = Arc::new(Mutex::new(indexed_before));
     let mut done = 0u64;
     let mut handles = Vec::new();
     for n in 0..workers.max(1) {
         let db_dir = db_dir.to_path_buf();
         let bus = bus.clone();
         let embedder = Arc::clone(&embedder);
+        let progress_done = Arc::clone(&progress_done);
         handles.push(
             std::thread::Builder::new()
                 .name(format!("index-ai-{n}"))
@@ -170,14 +205,26 @@ pub fn run_semantic_backfill(
                                 break;
                             }
                         };
-                        let ok = process_ai_task(&db, &db_dir, &*embedder, task.asset_id);
+                        let result = process_ai_task(&db, &db_dir, &*embedder, task.asset_id);
+                        if let Err(error) = &result {
+                            eprintln!("语义索引失败 asset_id={}: {error}", task.asset_id);
+                        }
+                        let ok = result.is_ok();
                         let _ = db.finish_index_task(task.id, ok);
                         count += u64::from(ok);
-                        bus.publish(AppEvent::IndexTaskProgress {
-                            kind: "ai".into(),
-                            done: count,
-                            total,
-                        });
+                        {
+                            let mut global_done = progress_done
+                                .lock()
+                                .expect("semantic progress mutex poisoned");
+                            if ok {
+                                *global_done += 1;
+                            }
+                            bus.publish(AppEvent::IndexTaskProgress {
+                                kind: "ai".into(),
+                                done: *global_done,
+                                total,
+                            });
+                        }
                     }
                     count
                 })
@@ -205,7 +252,7 @@ pub fn kick_semantic_if_ready(
     }
     let embedder: Arc<dyn SemanticEmbedder> = Arc::new(manager.clone());
     let bus = bus.clone();
-    supervisor.spawn("index", "semantic-backfill".into(), move |_| {
+    let _ = supervisor.spawn_unique("index", "semantic-backfill".into(), move |_| {
         run_semantic_backfill(&db_dir, embedder, &bus, worker_count_for_ai());
     });
 }

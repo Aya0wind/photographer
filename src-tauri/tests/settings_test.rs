@@ -381,3 +381,34 @@ fn active_library_lookup_follows_active_id() {
     s.active_library_id = Some("lib-missing".to_string());
     assert!(s.active_library().is_none());
 }
+
+/// 语义阈值默认值（SigLIP2 cos 区间压缩实测标定：无关 top≈0.087 / 相关簇
+/// ≈0.099+；过高全灭、过低任何查询 top-N≈全库）。
+#[test]
+fn ai_settings_default_semantic_min_score() {
+    let ai = AiSettings::default();
+    assert!((ai.semantic_min_score - 0.09).abs() < 1e-6, "默认 0.09");
+}
+
+/// 旧配置缺 semanticMinScore 字段 → serde default 补 0.09（已装用户的
+/// settings.json 升级路径）。
+#[test]
+fn legacy_settings_without_semantic_min_score_gets_default() {
+    let dir = temp_dir();
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "onboardingCompleted": true,
+            "libraries": [],
+            "activeLibraryId": null
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = SettingsManager::load(dir.path()).expect("load legacy settings");
+    assert!(
+        (loaded.ai.semantic_min_score - 0.09).abs() < 1e-6,
+        "缺字段落默认 0.09"
+    );
+}

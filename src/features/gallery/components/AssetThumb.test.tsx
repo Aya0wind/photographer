@@ -74,6 +74,7 @@ describe("AssetThumb 骨架屏（加载中 vs 永久无图）", () => {
 
     const container = await screen.findByTestId("thumb");
     await waitFor(() => expect(container.querySelector("img")).not.toBeNull());
+    expect(container.querySelector("img")).toHaveAttribute("loading", "eager");
     expect(thumbMock).toHaveBeenCalledWith(1, 240);
     expect(container.querySelector('[data-testid="thumb-raw-badge"]')).not.toBeNull();
   });

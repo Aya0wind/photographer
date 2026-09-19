@@ -43,6 +43,7 @@ pub const RAW_EXTS: &[&str] = &[
 pub const SIZE_TIERS: &[u16] = &[256, 512, 2048];
 /// 解码超时（61MP 解码 1-2s 可接受；>10s 视为失败放弃）。
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
+const RAW_FULL_DECODE_TIMEOUT: Duration = Duration::from_secs(60);
 /// 后台解码并发上限（用户定案 2026-09-19：索引任务吃满硬件）：
 /// 物理核心数直通（turbojpeg SIMD 缩放解码近线性扩展；与导入/索引任务
 /// 共享本池——导入优先/主图兜底优先由池的先到先得天然实现，不超发）。
@@ -203,9 +204,15 @@ fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBu
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let tier = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|ext| size == 2048 && is_raw_ext(ext))
+        .map(|_| "2048-raw-full-v1".to_string())
+        .unwrap_or_else(|| size.to_string());
     db_dir
         .join("thumbs")
-        .join(size.to_string())
+        .join(tier)
         .join(format!("{:016x}-{secs}.jpg", xxh.digest()))
 }
 
@@ -216,6 +223,15 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
 
     let (tx, rx) = mpsc::channel();
     let src_display = src.display().to_string();
+    let full_raw = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| size >= 2048 && is_raw_ext(ext));
+    let timeout = if full_raw {
+        RAW_FULL_DECODE_TIMEOUT
+    } else {
+        DECODE_TIMEOUT
+    };
     let src = src.to_path_buf();
     let cache = cache.to_path_buf();
     // 解码线程持有许可：超时放弃后它自行收尾并释放许可（不占死名额）。
@@ -224,6 +240,15 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
         .name("thumb-decode".into())
         .spawn(move || {
             let _permit = permit;
+            // RAW 全量显影单路执行：单张高像素 RAW 的 16-bit 中间缓冲很大，
+            // 多张同时去马赛克会造成内存尖峰；单任务内部仍由 rawler 并行。
+            let _raw_guard = full_raw.then(|| {
+                static RAW_FULL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+                RAW_FULL_LOCK
+                    .get_or_init(|| Mutex::new(()))
+                    .lock()
+                    .expect("raw full decode mutex poisoned")
+            });
             let out = decode_and_encode(&src, size).and_then(|jpeg| {
                 write_atomic(&cache, &jpeg).ok()?;
                 Some(cache.clone())
@@ -234,10 +259,10 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
         .expect("spawn thumb decoder");
     drop(decoder); // 不 join：超时后任其收尾
 
-    match rx.recv_timeout(DECODE_TIMEOUT) {
+    match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("缩略图解码超时（>{DECODE_TIMEOUT:?}），放弃: {src_display}");
+            eprintln!("缩略图解码超时（>{timeout:?}），放弃: {src_display}");
             None
         }
     }
@@ -252,10 +277,22 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     // EXIF Orientation 生成时一次性转正（缓存里存的就是正的，前端零改动）
     let orientation = orientation_from_file(src).unwrap_or(1);
     let thumb: image::RgbImage = if is_raw_ext(&ext) {
-        // RAW：提取内嵌 JPEG 预览 → turbojpeg 缩放解码（复用 JPEG 快路径）
-        let preview = raw_preview_jpeg(src)?;
-        jpeg_scaled_bytes(&preview, size)
-            .unwrap_or_else(|| full_decode_bytes_resize(&preview, size))
+        if size >= 2048 {
+            // 查看器高清档：完整解码、去马赛克和色彩显影；失败时仍回退相机
+            // 内嵌 JPEG，保证不因少数未支持机型失去预览。
+            develop_raw_resize(src, size).or_else(|| {
+                let preview = raw_preview_jpeg(src)?;
+                Some(
+                    jpeg_scaled_bytes(&preview, size)
+                        .unwrap_or_else(|| full_decode_bytes_resize(&preview, size)),
+                )
+            })?
+        } else {
+            // 低清档优先内嵌 JPEG，快速给出首帧。
+            let preview = raw_preview_jpeg(src)?;
+            jpeg_scaled_bytes(&preview, size)
+                .unwrap_or_else(|| full_decode_bytes_resize(&preview, size))
+        }
     } else if matches!(ext.as_str(), "jpg" | "jpeg") {
         jpeg_scaled(src, size).unwrap_or_else(|| full_decode_resize(src, size))
     } else {
@@ -266,6 +303,17 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80);
     thumb.write_with_encoder(encoder).ok()?;
     Some(jpeg)
+}
+
+/// RAW 全量显影为屏幕预览。输出在编码前缩到查看器档位，避免把数千万像素的
+/// 16-bit 中间图继续留在缓存链中；失败由调用方回退内嵌 JPEG。
+fn develop_raw_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
+    use rawler::imgop::develop::RawDevelop;
+
+    let raw = rawler::decode_file(src).ok()?;
+    let developed = RawDevelop::default().develop_intermediate(&raw).ok()?;
+    let image = developed.to_dynamic_image()?;
+    Some(image.thumbnail(size as u32, size as u32).to_rgb8())
 }
 
 /// 从文件头解析 EXIF Orientation（JPEG APP1 / RAW TIFF IFD0 同源）。
