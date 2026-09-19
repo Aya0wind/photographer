@@ -5,7 +5,7 @@
   "identifier": "com.smartphoto.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:2420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -24,7 +24,9 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
