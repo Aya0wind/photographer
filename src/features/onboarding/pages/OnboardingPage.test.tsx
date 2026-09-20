@@ -145,8 +145,8 @@ describe("OnboardingPage 向导", () => {
 
     // 步骤3 → 步骤4：确认摘要后提交
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect(await screen.findByText("开始使用 Smart Photo")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "开始使用 Smart Photo" }));
+    expect(await screen.findByText("开始使用 Photo Hub")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "开始使用 Photo Hub" }));
 
     await waitFor(() => expect(ipcMock).toHaveBeenCalledWith("settings_set", expect.anything()));
     const payload = ipcMock.mock.calls.find(([cmd]) => cmd === "settings_set")?.[1] as {
@@ -213,7 +213,7 @@ describe("OnboardingPage 向导", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
-    fireEvent.click(await screen.findByRole("button", { name: "开始使用 Smart Photo" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始使用 Photo Hub" }));
 
     await waitFor(() => expect(ipcMock).toHaveBeenCalledWith("settings_set", expect.anything()));
     const settings = useSettingsStore.getState().settings;

@@ -62,7 +62,7 @@ describe("TitleBar 结构", () => {
 
     const drag = screen.getByTestId("titlebar-drag-region");
     expect(drag).toHaveAttribute("data-tauri-drag-region");
-    expect(screen.getByText("Smart Photo")).toBeInTheDocument();
+    expect(screen.getByText("Photo Hub")).toBeInTheDocument();
     // 标识与控制钮的容器不拦截拖拽（透传到背景层）
     expect(drag.parentElement).not.toBeNull();
   });

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Smart Photo",
+  "productName": "Photo Hub",
   "version": "0.1.0",
   "identifier": "com.smartphoto.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Smart Photo",
+        "title": "Photo Hub",
         "width": 1280,
         "height": 800,
         "minWidth": 960,

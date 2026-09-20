@@ -142,7 +142,7 @@ describe("菜单栏交互（工业软件惯例）", () => {
     );
   });
 
-  it("禁用菜单项：帮助→关于 Smart Photo 不可点击", async () => {
+  it("禁用菜单项：帮助→关于 Photo Hub 不可点击", async () => {
     renderMenu();
     const user = userEvent.setup();
 
