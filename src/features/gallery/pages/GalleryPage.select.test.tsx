@@ -18,6 +18,7 @@ import {
   assetThumbGet,
   assetsPage,
   clipboardCopyFiles,
+  revealInExplorer,
   type AssetDto,
 } from "@/ipc/api";
 
@@ -37,6 +38,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetRatingSet: vi.fn(),
     assetFlagSet: vi.fn(),
     clipboardCopyFiles: vi.fn(),
+    revealInExplorer: vi.fn(),
   };
 });
 
@@ -57,6 +59,7 @@ const thumbMock = vi.mocked(assetThumbGet);
 const ratingMock = vi.mocked(assetRatingSet);
 const flagMock = vi.mocked(assetFlagSet);
 const copyMock = vi.mocked(clipboardCopyFiles);
+const revealBatchMock = vi.mocked(revealInExplorer);
 const revealMock = vi.mocked(revealItemInDir);
 
 function makeAsset(id: number): AssetDto {
@@ -112,6 +115,7 @@ beforeEach(() => {
   ratingMock.mockReset().mockResolvedValue(undefined);
   flagMock.mockReset().mockResolvedValue(undefined);
   copyMock.mockReset().mockResolvedValue(undefined);
+  revealBatchMock.mockReset().mockResolvedValue(1);
   revealMock.mockReset().mockResolvedValue(undefined);
   resetThumbPipelineForTests();
   clearGallerySnapshotForTests();
@@ -193,7 +197,7 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     });
   });
 
-  it("分享菜单：在资源管理器中显示 = revealItemInDir(path)；复制路径写剪贴板", async () => {
+  it("分享菜单：在资源管理器中显示 = 批量单窗 reveal_in_explorer；复制路径写剪贴板", async () => {
     const user = userEvent.setup();
     // userEvent.setup 会挂自己的 clipboard 桩——对其就地 spy（组件读到的是同一个）
     const writeText = vi
@@ -207,7 +211,7 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
 
     await user.click(screen.getByTestId("selection-share"));
     await user.click(screen.getByTestId("selection-share-reveal"));
-    await waitFor(() => expect(revealMock).toHaveBeenCalledWith(makeAsset(1).path));
+    await waitFor(() => expect(revealBatchMock).toHaveBeenCalledWith([makeAsset(1).path]));
     // reveal 完成后短提示（1.5s 自动消失，断言在窗口内）
     await waitFor(() => expect(screen.getByTestId("selection-toast")).toBeInTheDocument());
 
@@ -233,7 +237,7 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
 // --- 瓦片右键自定义菜单（②：多选语义 + 菜单项 IPC） -----------------------------------
 
 describe("画廊：瓦片右键菜单", () => {
-  it("非多选态右键瓦片：菜单作用于该资产；reveal 调 plugin-opener，菜单关闭", async () => {
+  it("非多选态右键瓦片：菜单作用于该资产；reveal 走批量单窗 IPC，菜单关闭", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
@@ -248,8 +252,8 @@ describe("画廊：瓦片右键菜单", () => {
     );
 
     await user.click(within(menu).getByTestId("asset-context-menu-item-reveal"));
-    await waitFor(() => expect(revealMock).toHaveBeenCalledWith(makeAsset(2).path));
-    expect(revealMock).not.toHaveBeenCalledWith(makeAsset(1).path);
+    await waitFor(() => expect(revealBatchMock).toHaveBeenCalledWith([makeAsset(2).path]));
+    expect(revealMock).not.toHaveBeenCalled();
     // 选择后菜单关闭
     await waitFor(() => expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument());
   });

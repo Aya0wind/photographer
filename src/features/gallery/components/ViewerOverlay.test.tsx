@@ -27,6 +27,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetFlagSet: vi.fn(),
     assetRatingSet: vi.fn(),
     clipboardCopyFiles: vi.fn(),
+    revealInExplorer: vi.fn(),
   };
 });
 
@@ -41,10 +42,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { clipboardCopyFiles } from "@/ipc/api";
+import { clipboardCopyFiles, revealInExplorer } from "@/ipc/api";
 
 const detailMock = vi.mocked(assetDetail);
 const revealItemMock = vi.mocked(revealItemInDir);
+const revealBatchMock = vi.mocked(revealInExplorer);
 const copyFilesMock = vi.mocked(clipboardCopyFiles);
 const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
@@ -119,6 +121,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   revealItemMock.mockReset().mockResolvedValue(undefined);
+  revealBatchMock.mockReset().mockResolvedValue(1);
   copyFilesMock.mockReset().mockResolvedValue(undefined);
   detailMock.mockReset().mockResolvedValue(DETAIL);
   ratingMock.mockReset().mockResolvedValue(undefined);
@@ -1104,7 +1107,8 @@ describe("查看器：大图右键菜单", () => {
         "asset-context-menu-item-reveal",
       ),
     );
-    await waitFor(() => expect(revealItemMock).toHaveBeenCalledWith(GROUP_ASSETS[0].path));
+    await waitFor(() => expect(revealBatchMock).toHaveBeenCalledWith([GROUP_ASSETS[0].path]));
+    expect(revealItemMock).not.toHaveBeenCalled();
 
     fireEvent.contextMenu(screen.getByTestId("viewer-stage"), { clientX: 300, clientY: 200 });
     await user.click(

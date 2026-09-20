@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
-import { assetFlagSet, clipboardCopyFiles, type AssetDto } from "@/ipc/api";
+import { assetFlagSet, clipboardCopyFiles, revealInExplorer, type AssetDto } from "@/ipc/api";
 
 /**
  * 自定义右键菜单（全局 contextmenu 已被 nativeBehaviorGuard 屏蔽）：
@@ -115,11 +115,16 @@ export function AssetContextMenu({
   const { t } = useTranslation();
 
   async function reveal(): Promise<void> {
-    for (const asset of assets) {
-      try {
-        await revealItemInDir(asset.path);
-      } catch {
-        // 非 Tauri 环境静默
+    try {
+      // 批量单窗定位（同目录多文件=1 窗多选）；失败回退逐个定位
+      await revealInExplorer(assets.map((asset) => asset.path));
+    } catch {
+      for (const asset of assets) {
+        try {
+          await revealItemInDir(asset.path);
+        } catch {
+          // 非 Tauri 环境静默
+        }
       }
     }
   }
