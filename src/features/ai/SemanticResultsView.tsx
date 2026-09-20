@@ -21,6 +21,8 @@ export interface SemanticResultsViewProps {
   scores: Map<number, number>;
   /** 结果容器高度撑满（调用方布局内） */
   scrollTestId?: string;
+  /** 点击资产打开查看器（真机修复 2026-09-20：语义结果此前纯展示点不开） */
+  onOpenAsset?: (asset: AssetDto, group: { key: string; date: string | null; assets: AssetDto[] }) => void;
   /** 触发重试（未就绪引导的「重试」入口；可选） */
   onRetry?: () => void;
 }
@@ -84,6 +86,7 @@ export default function SemanticResultsView({
   assets,
   scores,
   scrollTestId = "semantic-grid-scroll",
+  onOpenAsset,
   onRetry,
 }: SemanticResultsViewProps) {
   const { t } = useTranslation();
@@ -173,7 +176,7 @@ export default function SemanticResultsView({
           {t("search.semantic.indexing", { done: indexing.done, total: indexing.total })}
         </div>
       )}
-      <AssetGrid groups={groups} tile={200} scores={scores} scrollTestId={scrollTestId} />
+      <AssetGrid groups={groups} tile={200} scores={scores} onOpenAsset={onOpenAsset} scrollTestId={scrollTestId} />
     </div>
   );
 }

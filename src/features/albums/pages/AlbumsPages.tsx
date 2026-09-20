@@ -6,6 +6,9 @@ import SemanticResultsView, {
   SemanticQueryInput,
 } from "@/features/ai/SemanticResultsView";
 import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
+import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
+import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import { useAlbumCovers } from "../lib/albumCovers";
 import { loadHiddenTags } from "../lib/hiddenTags";
 
@@ -132,6 +135,9 @@ export function AlbumTagPage() {
   const { tag = "" } = useParams();
   const semantic = useSemanticSearch();
   const [lastQuery, setLastQuery] = useState(tag);
+  // 语义结果同样可点开查看器（与画廊/搜索页一致）
+  const groups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
+  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
 
   // 标签变化（含首挂载）→ 自动语义搜索
   useEffect(() => {
@@ -161,9 +167,20 @@ export function AlbumTagPage() {
           status={semantic.status}
           assets={semantic.assets}
           scores={semantic.scores}
+          onOpenAsset={openAsset}
           onRetry={() => void semantic.run(lastQuery)}
         />
       </div>
+
+      {viewer && (
+        <ViewerOverlay
+          asset={viewer.asset}
+          group={viewer.group}
+          index={viewer.index}
+          onNavigate={navigateTo}
+          onClose={closeViewer}
+        />
+      )}
     </div>
   );
 }

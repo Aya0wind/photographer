@@ -489,6 +489,7 @@ export default function SearchPage() {
               status={semantic.status}
               assets={semantic.assets}
               scores={semantic.scores}
+              onOpenAsset={openAsset}
               onRetry={() => void semantic.run(lastQuery)}
             />
           ) : queryState === "loading" && results.length === 0 ? (
