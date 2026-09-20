@@ -690,12 +690,33 @@ describe("查看器：原子切图与胶片条", () => {
       screen.getByTestId("viewer-stage").querySelectorAll("img:not(.invisible)"),
     ).toHaveLength(1);
 
-    // 新图 onLoad 后一次提交：DOM 中只保留第二张可见图，不存在交叉淡入重叠期。
+    // 即使 onLoad 已触发，也必须等浏览器 decode 完成，期间旧图继续显示。
+    let finishDecode: (() => void) | undefined;
+    Object.defineProperty(img2, "decode", {
+      configurable: true,
+      value: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishDecode = resolve;
+          }),
+      ),
+    });
     fireEvent.load(img2);
+    await act(async () => Promise.resolve());
+    expect(screen.getByTestId("viewer-img-prev")).toHaveAttribute("src", url1);
+    expect(img2.className).toContain("invisible");
+
+    // decode 后新图先接管并保留旧图至少一帧，随后才清理旧层。
+    act(() => finishDecode?.());
     await waitFor(() =>
       expect(screen.queryByTestId("viewer-img-prev")).toHaveAttribute("src", url2),
     );
+    // 提交后沿用已经完成解码的同一个 DOM 节点，不把 src 写到另一节点上重新绘制。
+    expect(screen.getByTestId("viewer-img-prev")).toBe(img2);
     expect(screen.queryByTestId("viewer-img")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByTestId("viewer-img-retiring")).not.toBeInTheDocument(),
+    );
   });
 
   it("胶片条横向虚拟化：48 张组只渲染可视区格子（DOM 数远小于组总数）", async () => {
@@ -1002,5 +1023,42 @@ describe("查看器：EXIF 面板切图闪缩修复", () => {
     await waitFor(() =>
       expect(screen.getByTestId("viewer-exif-rows")).toHaveAttribute("data-asset-id", "2"),
     );
+  });
+});
+
+// --- 视频播放（M8：内建 <video> + HEVC 回退） ------------------------------------------
+
+describe("查看器：视频播放（M8）", () => {
+  it("video 资产：渲染内建播放器（不再恒占位），海报缩略图作 poster", async () => {
+    thumbMock.mockReset().mockImplementation((id: number) =>
+      id === 9
+        ? Promise.resolve({ status: "ready", path: "C:/thumbs/video-256-v1/9.jpg" })
+        : Promise.resolve({ status: "pending" }),
+    );
+    convertMock.mockReset().mockImplementation((p: string) => `asset://${p}`);
+    detailMock.mockReset().mockResolvedValue(DETAIL);
+    const videoAsset = { ...makeAsset(9, "video", "C0121.MP4"), path: "Y:/照片/C0121.MP4" };
+    renderViewer([videoAsset], 0);
+
+    const video = await screen.findByTestId("viewer-video");
+    expect(video.tagName).toBe("VIDEO");
+    expect(video).toHaveAttribute("src", "asset://Y:/照片/C0121.MP4");
+    await waitFor(() =>
+      expect(video).toHaveAttribute("poster", "asset://C:/thumbs/video-256-v1/9.jpg"),
+    );
+    // 旧契约「恒占位」已死：占位图形不再出现
+    expect(screen.queryByTestId("viewer-placeholder")).not.toBeInTheDocument();
+  });
+
+  it("video onError：回退卡出现，系统播放按钮可点", async () => {
+    thumbMock.mockReset().mockResolvedValue({ status: "unavailable" });
+    convertMock.mockReset().mockImplementation((p: string) => `asset://${p}`);
+    detailMock.mockReset().mockResolvedValue(DETAIL);
+    const videoAsset = { ...makeAsset(9, "video", "HEVC.MP4"), path: "Y:/照片/HEVC.MP4" };
+    renderViewer([videoAsset], 0);
+
+    fireEvent.error(await screen.findByTestId("viewer-video"));
+    expect(await screen.findByTestId("viewer-video-fallback")).toBeInTheDocument();
+    expect(screen.getByTestId("viewer-video-system")).toBeInTheDocument();
   });
 });

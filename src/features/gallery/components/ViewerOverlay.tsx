@@ -17,6 +17,7 @@ import {
   warmImageDecode,
 } from "../lib/thumbPipeline";
 import AssetThumb from "./AssetThumb";
+import ViewerVideo from "./ViewerVideo";
 import { formatBytes } from "@/lib/format";
 
 /**
@@ -239,7 +240,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   useEffect(() => {
     setStage("original");
   }, [asset.id, originalUrl]);
-  const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
+  const wantsThumb = asset.kind === "photo" || asset.kind === "raw" || asset.kind === "video";
   const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
   // 内嵌全幅直出档（>2048 为后端语义标记）：RAW 主显示路径
   const rawEmbed = useAssetThumbUrl(
@@ -266,8 +267,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   let mainSrc: string | null;
   let mainFailed = false;
   if (asset.kind === "video") {
-    mainSrc = null;
-    mainFailed = true; // 恒占位（播放是后续里程碑）
+    mainSrc = null; // 视频不走图片层：舞台渲染 <ViewerVideo>（M8 内建播放+HEVC 回退）
   } else if (asset.kind === "photo" && stage === "original" && originalUrl !== null) {
     mainSrc = originalUrl; // img onError → 降档；渲染失败前不作无图判定
   } else if (asset.kind === "photo" && stage === "mid") {
@@ -297,27 +297,46 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [asset.kind, stage, originalUrl]);
 
   // --- 无空窗单层切换 ---------------------------------------------------------------
-  // 新图在不可见层完成解码前保留旧图；onLoad 后一次性提交替换。两张图从不同时可见，
-  // 避免透明图片或不同宽高比切换时出现叠图，同时也不会先清空造成黑屏闪烁。
-  const [committed, setCommitted] = useState<string | null>(null);
-  const [incoming, setIncoming] = useState<{ src: string } | null>(null);
+  // 用稳定 key 保留真正已解码的 DOM 图片节点：新图先在不可见层解码，onLoad 后把同一个
+  // 节点提升为可见层并移除旧层。不能只把新 src 写回旧 <img>，否则浏览器仍可能在重新
+  // 绘制该节点时短暂清空画面，表现为切图黑闪。
+  type ImageLayer = { src: string; phase: "active" | "loading" | "retiring" };
+  const [imageLayers, setImageLayers] = useState<ImageLayer[]>([]);
   useEffect(() => {
     if (mainSrc === null) return; // 源在途（等 2048/512 URL）——旧图层继续显示
-    if (mainSrc === committed || mainSrc === incoming?.src) return;
-    setIncoming({ src: mainSrc });
-  }, [mainSrc, committed, incoming]);
+    setImageLayers((previous) => {
+      if (previous.some((layer) => layer.src === mainSrc)) return previous;
+      const active = previous.find((layer) => layer.phase === "active");
+      return active
+        ? [active, { src: mainSrc, phase: "loading" }]
+        : [{ src: mainSrc, phase: "loading" }];
+    });
+  }, [mainSrc]);
+  const hasRetiringLayer = imageLayers.some((layer) => layer.phase === "retiring");
+  useEffect(() => {
+    if (!hasRetiringLayer) return;
+    // 新图至少完整绘制一帧后才移除旧图。这样即使 WebView 合成线程比 React 提交稍慢，
+    // 也始终有上一张作为后备，不会在两个纹理之间露出黑色舞台背景。
+    const frame = requestAnimationFrame(() => {
+      setImageLayers((previous) =>
+        previous.filter((layer) => layer.phase !== "retiring"),
+      );
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [hasRetiringLayer]);
   // 确定无图：清掉残留图层，显示占位
   useEffect(() => {
     if (mainFailed) {
-      setCommitted(null);
-      setIncoming(null);
+      setImageLayers([]);
     }
   }, [mainFailed]);
 
   // 大图加载提示：源在途超过 300ms 才转圈（几十 MB 原图加载慢，避免黑屏误判失败）；
   // 切换期间旧图层兜底显示，仅新图 300ms 仍未 onLoad 才叠加 spinner（快速连按不闪）。
   const [slowLoading, setSlowLoading] = useState(false);
-  const awaitingImage = incoming !== null || (mainSrc === null && !mainFailed);
+  const awaitingImage =
+    imageLayers.some((layer) => layer.phase === "loading") ||
+    (mainSrc === null && !mainFailed);
   useEffect(() => {
     setSlowLoading(false);
     if (!awaitingImage) return;
@@ -674,56 +693,75 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 <path d="M4 4l8 8M12 4l-8 8" />
               </svg>
             </button>
-            {committed !== null && committed !== incoming?.src && (
-              /* 底层：上一张已就绪图——新图 onLoad 前一直保留，切换无空窗 */
-              <img
-                src={committed}
-                alt=""
-                aria-hidden="true"
-                draggable={false}
-                loading="eager"
-                decoding="async"
-                data-testid="viewer-img-prev"
-                className="absolute max-h-full max-w-full select-none object-contain"
-                style={{
-                  transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
-                  transition: dragRef.current ? "none" : "transform 150ms ease-out",
-                }}
-              />
+            {asset.kind === "video" && (
+              <ViewerVideo path={asset.path} posterUrl={thumb.url} />
             )}
-            {incoming !== null && (
-              /* 解码层始终不可见；onLoad 后直接提交为唯一可见图层 */
+            {imageLayers.map((layer) => (
               <img
-                src={incoming.src}
-                alt={asset.name}
+                key={layer.src}
+                src={layer.src}
+                alt={layer.phase === "active" ? asset.name : ""}
+                aria-hidden={layer.phase === "active" ? undefined : "true"}
                 draggable={false}
                 loading="eager"
                 decoding="async"
-                onLoad={() => {
-                  // 只提交当前请求，快速连切时迟到的旧 onLoad 不能覆盖新图。
-                  if (incoming.src !== mainSrc) return;
-                  setCommitted(incoming.src);
-                  setIncoming(null);
-                }}
-                onError={() => {
-                  // 分级降档：原图失败 → 中间档（2048）→ 512 档。
-                  // TIF 等大尺寸/特殊编码原图 WebView2 渲染不动，逐级降而不是一步到 512。
-                  if (asset.kind === "photo" && stage === "original") setStage("mid");
-                  else if (asset.kind === "photo" && stage === "mid") setStage("thumb");
-                }}
-                data-testid="viewer-img"
+                onLoad={
+                  layer.phase === "loading"
+                    ? async (event) => {
+                        const image = event.currentTarget;
+                        // onLoad 只代表资源到达；WebView 的解码/纹理上传可能尚未完成。等待
+                        // decode() 和下一动画帧后再接管，避免先撤旧图再露出黑底。
+                        try {
+                          if (typeof image.decode === "function") await image.decode();
+                        } catch {
+                          // 部分编码器会在可正常显示时仍拒绝 decode；继续交给下一帧绘制。
+                        }
+                        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+                        // 只提交当前请求；快速连切时迟到的旧 onLoad 不能覆盖新图。
+                        if (layer.src !== mainSrc) return;
+                        setImageLayers((previous) => {
+                          const target = previous.find((item) => item.src === layer.src);
+                          if (!target) return previous;
+                          return previous.map((item) =>
+                            item.src === layer.src
+                              ? { ...item, phase: "active" }
+                              : { ...item, phase: "retiring" },
+                          );
+                        });
+                      }
+                    : undefined
+                }
+                onError={
+                  layer.phase === "loading"
+                    ? () => {
+                        // 分级降档：原图失败 → 中间档（2048）→ 512 档。
+                        // TIF 等大尺寸/特殊编码原图 WebView2 渲染不动，逐级降而不是一步到 512。
+                        if (asset.kind === "photo" && stage === "original") setStage("mid");
+                        else if (asset.kind === "photo" && stage === "mid") setStage("thumb");
+                      }
+                    : undefined
+                }
+                data-testid={
+                  layer.phase === "active"
+                    ? "viewer-img-prev"
+                    : layer.phase === "loading"
+                      ? "viewer-img"
+                      : "viewer-img-retiring"
+                }
                 data-fallback={
-                  incoming.src === originalUrl
+                  layer.src === originalUrl
                     ? "original"
-                    : incoming.src === rawEmbed.url && asset.kind === "raw"
+                    : layer.src === rawEmbed.url && asset.kind === "raw"
                       ? "raw-embed"
-                      : incoming.src === rawFull.url && asset.kind === "raw"
+                      : layer.src === rawFull.url && asset.kind === "raw"
                         ? "raw-full"
-                        : incoming.src === mid.url
+                        : layer.src === mid.url
                           ? "mid"
                           : "thumb"
                 }
-                className="invisible max-h-full max-w-full select-none object-contain"
+                className={`${
+                  layer.phase === "loading" ? "invisible " : "absolute "
+                }max-h-full max-w-full select-none object-contain`}
                 style={{
                   // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
                   // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）
@@ -731,8 +769,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                   transition: dragRef.current ? "none" : "transform 150ms ease-out",
                 }}
               />
-            )}
-            {incoming === null && committed === null && mainFailed && (
+            ))}
+            {imageLayers.length === 0 && mainFailed && (
               <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-placeholder">
                 <svg
                   viewBox="0 0 24 24"
