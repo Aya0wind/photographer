@@ -219,6 +219,15 @@ describe("画廊合并：筛选面板", () => {
     const calls = assetsPageMock.mock.calls;
     const payload = calls[calls.length - 1]?.[2] as unknown as Record<string, unknown>;
     expect(payload).not.toHaveProperty("camera");
+
+    // 清除入口属于下拉控件本身，而不是菜单内另设一行按钮。
+    const menu = screen.getByTestId("search-camera-menu");
+    const clear = screen.getByTestId("search-camera-clear");
+    expect(menu).not.toContainElement(clear);
+    expect(screen.getByTestId("search-camera-button").parentElement).toContainElement(clear);
+    fireEvent.click(clear);
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100));
+    expect(screen.queryByTestId("search-camera-clear")).not.toBeInTheDocument();
   });
 
   it("默认收起；展开后条件变更触发筛选查询（防抖 300ms 后单次）", async () => {

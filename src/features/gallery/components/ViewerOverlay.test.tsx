@@ -644,10 +644,10 @@ describe("查看器：旋转（90° 步进）", () => {
   });
 });
 
-// --- 切换交叉淡入与胶片条 ------------------------------------------------------------
+// --- 切换原子提交与胶片条 ------------------------------------------------------------
 
-describe("查看器：交叉淡入与胶片条", () => {
-  it("双图层交叉淡入：旧图层保留至新图 onLoad 提交（切换无空窗）", async () => {
+describe("查看器：原子切图与胶片条", () => {
+  it("新图加载完成前不可见，完成后单层原子替换，避免两张图片叠显", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     let setIndex: ((i: number) => void) | undefined;
     function StatefulViewer() {
@@ -679,14 +679,18 @@ describe("查看器：交叉淡入与胶片条", () => {
       expect(screen.getByTestId("viewer-img-prev")).toHaveAttribute("src", url1),
     );
 
-    // 切到第二张：新图层挂载（未 onLoad 前 opacity-0），旧图层仍在
+    // 切到第二张：新图仅在不可见解码层加载，旧图仍是唯一可见图层。
     act(() => setIndex?.(1));
     const img2 = await screen.findByTestId("viewer-img");
     expect(img2).toHaveAttribute("src", url2);
-    expect(img2.className).toContain("opacity-0");
+    expect(img2.className).toContain("invisible");
     expect(screen.getByTestId("viewer-img-prev")).toHaveAttribute("src", url1);
+    expect(screen.getByTestId("viewer-img-prev").className).not.toContain("invisible");
+    expect(
+      screen.getByTestId("viewer-stage").querySelectorAll("img:not(.invisible)"),
+    ).toHaveLength(1);
 
-    // 新图 onLoad → 150ms 淡入提交：旧图层移除，新图成为底层
+    // 新图 onLoad 后一次提交：DOM 中只保留第二张可见图，不存在交叉淡入重叠期。
     fireEvent.load(img2);
     await waitFor(() =>
       expect(screen.queryByTestId("viewer-img-prev")).toHaveAttribute("src", url2),
