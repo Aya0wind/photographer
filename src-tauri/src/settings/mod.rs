@@ -190,6 +190,13 @@ pub struct AiSettings {
     pub face_cluster_threshold: f32,
     /// AI 索引参数指纹版本（内部）：参数语义变更时递增，强制全通道重建。
     pub index_params_version: u32,
+    /// 连拍分组：相邻照片时间链间隔上限（毫秒，默认 2000）。
+    /// 改参数只重组不重算 pHash。
+    pub burst_gap_ms: u32,
+    /// 连拍分组：pHash 汉明距离上限（默认 10，>此判为场景切换）。
+    pub burst_hamming_max: u8,
+    /// 连拍分组：成组最小成员数（默认 2；单张不成组）。
+    pub burst_min_size: u32,
 }
 
 impl Default for AiSettings {
@@ -206,6 +213,9 @@ impl Default for AiSettings {
             face_detect_threshold: 0.5,
             face_cluster_threshold: 0.4,
             index_params_version: 1,
+            burst_gap_ms: 2000,
+            burst_hamming_max: 10,
+            burst_min_size: 2,
         }
     }
 }

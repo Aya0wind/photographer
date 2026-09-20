@@ -6,7 +6,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -404,6 +404,8 @@ fn dtos_serialize_camel_case() {
         lens: Some("FE 85mm".into()),
         pair_id: None,
         thumb_state: 1,
+        burst_id: None,
+        burst_count: None,
     };
     let json = serde_json::to_value(&dto).unwrap();
     assert_eq!(json["capturedAt"], "2026-01-01T00:00:00.000Z");
@@ -721,7 +723,7 @@ fn camera_list_groups_by_camera_desc() {
         .0
         .execute(
             "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, captured_at, \
-             camera, source, created_at, origin) VALUES ('e.jpg','e.jpg',1,'2026',1,x'00', \
+             camera, source, created_at, origin) VALUES ('e.jpg','e.jpg',1,'2026',1, \
              'photo',NULL,'','imported','2026','imported')",
             [],
         )

@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::path::Path;
@@ -555,7 +555,6 @@ fn semantic_min_score_priority() {
 /// mmap view（只读）时，回填 worker 旧实现复用同一句柄 add →
 /// "Can't add to an immutable index"（71 条任务三连败全灭）。
 /// 修复：写路径独立 writable_index（load 全量可变）。此测试锁定该序列。
-#[test]
 /// 回归（真机 2026-09-20 事故）：vectors.usearch 已存在且池内持有搜索侧
 /// mmap view（只读）时，回填 worker 旧实现复用同一句柄 add →
 /// "Can't add to an immutable index"（71 条任务三连败全灭）。

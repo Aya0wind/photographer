@@ -6,7 +6,7 @@ mod common;
 use xxhash_rust::xxh64::xxh64;
 
 pub use common::{
-    ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;

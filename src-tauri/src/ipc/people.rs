@@ -43,6 +43,8 @@ pub fn fetch_people_assets(
             lens: r.lens,
             pair_id: r.pair_id,
             thumb_state: r.thumb_state,
+            burst_id: r.burst_id,
+            burst_count: None,
         })
         .collect())
 }

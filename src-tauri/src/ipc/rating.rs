@@ -89,10 +89,12 @@ pub fn fetch_recent_assets(
     let rows = db
         .recent_assets_page(after_id, limit.clamp(1, 200))
         .map_err(|e| e.to_string())?;
-    Ok(rows
+    let mut dtos: Vec<_> = rows
         .into_iter()
         .map(super::assets::page_row_to_dto)
-        .collect())
+        .collect();
+    super::assets::attach_burst_counts_pub(&db, &mut dtos);
+    Ok(dtos)
 }
 
 /// 设置评分（0-5；0 = 清除）。成功后 XMP 边车后台同步。
@@ -163,10 +165,12 @@ pub fn fetch_recent_viewed(
     let rows = db
         .recently_viewed(limit.clamp(1, 200))
         .map_err(|e| e.to_string())?;
-    Ok(rows
+    let mut dtos: Vec<_> = rows
         .into_iter()
         .map(super::assets::page_row_to_dto)
-        .collect())
+        .collect();
+    super::assets::attach_burst_counts_pub(&db, &mut dtos);
+    Ok(dtos)
 }
 
 /// 浏览记账（查看器打开照片时调用；幂等刷新时间）。

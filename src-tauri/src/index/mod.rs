@@ -73,18 +73,37 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 fn step(db: &Db, db_dir: &Path) -> bool {
     let task = match db.claim_index_task("exif").ok().flatten() {
         Some(t) => t,
-        None => match db.claim_index_task("thumb") {
-            Ok(Some(t)) => t,
-            Ok(None) | Err(_) => return false,
+        None => match db.claim_index_task("phash").ok().flatten() {
+            Some(t) => t,
+            None => match db.claim_index_task("thumb") {
+                Ok(Some(t)) => t,
+                Ok(None) | Err(_) => return false,
+            },
         },
     };
     let ok = match task.kind.as_str() {
         "thumb" => process_thumb_task(db, db_dir, task.asset_id),
         "exif" => process_exif_task(db, task.asset_id),
+        "phash" => process_phash_task(db, db_dir, task.asset_id),
         _ => false,
     };
     let _ = db.finish_index_task(task.id, ok);
     true
+}
+
+/// pHash 任务（M6 连拍分组前置）：256 档缩略图 → 灰度 → DCT → 64-bit 落库。
+/// 文件消失按完成收尾（不占重试额度）；解码失败走 attempts 封顶。
+fn process_phash_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
+    let Some((path, kind)) = asset_thumb_target(db, asset_id) else {
+        return true; // 资产已删除：防御兜底
+    };
+    if !matches!(kind.as_str(), "photo" | "raw") {
+        return true;
+    }
+    let Some(phash) = crate::metadata::phash::compute_phash(db_dir, Path::new(&path)) else {
+        return false;
+    };
+    db.set_phash(asset_id, phash).is_ok()
 }
 
 /// EXIF 深提取任务（gen-3）：读文件头 ≤1MB → 全量字段落库（深字段 +
@@ -244,6 +263,40 @@ pub fn refresh_raw_thumbs_for_generation(
             bus.publish(AppEvent::IndexTaskResumed { pending });
             run_pending(&db_dir, worker_count());
         }
+    });
+}
+
+/// pHash 代际自愈（gen-1，migration 0012 配套）：存量资产补算 pHash，
+/// 完成后连拍重组（同链触发：导入完成 / 参数指纹变更）。标记防每启动重排。
+pub fn refresh_phash_for_generation(
+    db_dir: PathBuf,
+    bus: &EventBus,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+    params: crate::bursts::BurstParams,
+) {
+    let marker = db_dir.join("phash-gen-1.marker");
+    if marker.is_file() {
+        return;
+    }
+    let bus = bus.clone();
+    let supervisor = std::sync::Arc::clone(supervisor);
+    let spawn_handle = std::sync::Arc::clone(&supervisor);
+    spawn_handle.spawn("index", "phash-gen1-regen".into(), move |_| {
+        let supervisor = std::sync::Arc::clone(&supervisor);
+        let pending = std::fs::create_dir_all(&db_dir)
+            .ok()
+            .and_then(|_| {
+                crate::ipc::open_library_db(&db_dir)
+                    .ok()
+                    .and_then(|db| db.requeue_phash_tasks_for_all().ok())
+            })
+            .unwrap_or(0);
+        let _ = std::fs::write(db_dir.join("phash-gen-1.marker"), b"");
+        if pending > 0 {
+            bus.publish(AppEvent::IndexTaskResumed { pending });
+            run_pending(&db_dir, worker_count());
+        }
+        crate::bursts::regroup_kick(db_dir, params, &bus, &supervisor);
     });
 }
 

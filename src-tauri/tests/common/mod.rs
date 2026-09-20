@@ -10,6 +10,8 @@
 
 #[path = "../../src/ai/mod.rs"]
 pub mod ai;
+#[path = "../../src/bursts/mod.rs"]
+pub mod bursts;
 #[path = "../../src/db/mod.rs"]
 pub mod db;
 #[path = "../../src/devices/mod.rs"]

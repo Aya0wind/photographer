@@ -550,6 +550,9 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_face;
+    let burst_params = crate::bursts::BurstParams::from_settings(
+        &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
@@ -565,12 +568,14 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
             }
             if enable_face {
                 crate::ai::face::kick_face_if_ready(
-                    index_db_dir,
+                    index_db_dir.clone(),
                     &ai_manager,
                     &ai_bus,
                     &index_supervisor,
                 );
             }
+            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
+            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id,
@@ -632,6 +637,9 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_face;
+    let burst_params = crate::bursts::BurstParams::from_settings(
+        &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
@@ -647,12 +655,14 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
             }
             if enable_face {
                 crate::ai::face::kick_face_if_ready(
-                    index_db_dir,
+                    index_db_dir.clone(),
                     &ai_manager,
                     &ai_bus,
                     &index_supervisor,
                 );
             }
+            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
+            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id,
@@ -786,6 +796,9 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
         .expect("settings mutex poisoned")
         .ai
         .enable_face;
+    let burst_params = crate::bursts::BurstParams::from_settings(
+        &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
     let handle = state
         .supervisor
         .spawn("import", format!("job-{new_id}"), move |_| {
@@ -801,12 +814,14 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
             }
             if enable_face {
                 crate::ai::face::kick_face_if_ready(
-                    index_db_dir,
+                    index_db_dir.clone(),
                     &ai_manager,
                     &ai_bus,
                     &index_supervisor,
                 );
             }
+            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
+            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
     *active = Some(ActiveImport {
         job_id: new_id,

@@ -1,4 +1,5 @@
 mod ai;
+mod bursts;
 mod db;
 mod devices;
 mod events;
@@ -71,6 +72,7 @@ pub fn run() {
             );
             // settings/ai 在 manage(move) 前先取启动自愈所需快照
             let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
+            let burst_params = crate::bursts::BurstParams::from_settings(&settings.ai);
             // AI 索引参数投影到推理层（embed 输入档位 / 人脸阈值）
             ai.set_ai_params(crate::ai::AiIndexParams {
                 embed_input_size: settings.ai.embed_input_size,
@@ -104,6 +106,14 @@ pub fn run() {
                 // EXIF 深提取代际自愈（gen-2 / migration 0008）：存量资产
                 // 补齐方向/闪光/GPS 等 10 列（dbDir 标记文件防重入）
                 index::refresh_exif_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算
+                // pHash + 完成后连拍重组
+                index::refresh_phash_for_generation(
+                    db_dir.clone(),
+                    &bus,
+                    &supervisor_handle,
+                    burst_params,
+                );
                 if enable_clip {
                     ai::semantic::kick_semantic_if_ready(
                         db_dir.clone(),
@@ -201,6 +211,7 @@ pub fn run() {
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
             ipc::assets::camera_list,
+            ipc::assets::burst_stats,
             ipc::assets::lens_list,
             ipc::assets::format_list,
             ipc::assets::assets_by_ids,

@@ -17,6 +17,9 @@ mod events;
 #[path = "../src/metadata/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树（db::update_asset_deep_exif 引用）
 mod metadata;
+#[path = "../src/thumbs/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树（metadata::phash 引用）
+mod thumbs;
 
 #[path = "../src/db/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树
@@ -114,15 +117,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 11);
+        assert_eq!(user_version(&db), 12);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 11, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 12, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 11);
+    assert_eq!(user_version(&db), 12);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -140,8 +143,8 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 9,
-        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，migration 0007）"
+        indexes, 10,
+        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，0007）+ burst 1（0012）"
     );
 }
 
@@ -178,6 +181,13 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
             .unwrap();
         db.0.execute("ALTER TABLE job_files ADD COLUMN sha256 BLOB", [])
             .unwrap();
+        // 0012 同理：phash/burst_id/bursts 均不可重放，回卷前摘除
+        db.0.execute("DROP INDEX idx_assets_burst", []).unwrap();
+        db.0.execute("ALTER TABLE assets DROP COLUMN burst_id", [])
+            .unwrap();
+        db.0.execute("ALTER TABLE assets DROP COLUMN phash", [])
+            .unwrap();
+        db.0.execute("DROP TABLE bursts", []).unwrap();
         for col in [
             "orientation",
             "flash",
@@ -199,7 +209,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 11);
+    assert_eq!(user_version(&db), 12);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

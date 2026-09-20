@@ -32,7 +32,7 @@ pub struct IndexStatusDto {
     pub face: IndexKindStatus,
 }
 
-const KINDS: [&str; 4] = ["thumb", "exif", "ai", "face"];
+const KINDS: [&str; 5] = ["thumb", "exif", "ai", "face", "phash"];
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
@@ -120,10 +120,17 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
-        "thumb" | "exif" => {
-            if kind == "thumb" {
-                db.create_thumb_tasks_for_unindexed()
-                    .map_err(|e| format!("创建缩略图任务失败: {e}"))?;
+        "thumb" | "exif" | "phash" => {
+            match kind {
+                "thumb" => {
+                    db.create_thumb_tasks_for_unindexed()
+                        .map_err(|e| format!("创建缩略图任务失败: {e}"))?;
+                }
+                "phash" => {
+                    db.create_phash_tasks_for_unindexed()
+                        .map_err(|e| format!("创建 pHash 任务失败: {e}"))?;
+                }
+                _ => {}
             }
             db.retry_failed_index_tasks(kind)
                 .map_err(|e| format!("重试失败索引任务失败: {e}"))?;
@@ -365,6 +372,21 @@ pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     hash
 }
 
+/// 连拍分组指纹（版本 + gap/hamming/min——改参数只重组不重算 pHash）。
+pub fn burst_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in [
+        ai.index_params_version as u64,
+        u64::from(ai.burst_gap_ms),
+        u64::from(ai.burst_hamming_max),
+        u64::from(ai.burst_min_size),
+    ] {
+        hash ^= part;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// 参数指纹落盘名（dbDir 下）。
 const PARAMS_MARKER: &str = "index-params.marker";
 
@@ -377,16 +399,23 @@ pub fn check_params_and_rebuild(
     db_dir: &std::path::Path,
     ai: &crate::settings::AiSettings,
 ) {
-    let (want_sem, want_face) = (semantic_params_fingerprint(ai), face_params_fingerprint(ai));
+    let (want_sem, want_face, want_burst) = (
+        semantic_params_fingerprint(ai),
+        face_params_fingerprint(ai),
+        burst_params_fingerprint(ai),
+    );
     let marker = db_dir.join(PARAMS_MARKER);
     // 首跑（marker 不存在）：视参数为「一直就是当前值」，只写标记不重建
     // （真机事故：首跑误判参数变更触发语义重建，与启动回填竞态致 71 条失败）
     if !marker.is_file() {
         std::fs::write(
             &marker,
-            format!("semantic={want_sem}
+            format!(
+                "semantic={want_sem}
 face={want_face}
-"),
+burst={want_burst}
+"
+            ),
         )
         .ok();
         return;
@@ -400,6 +429,10 @@ face={want_face}
         .lines()
         .find_map(|l| l.strip_prefix("face="))
         .and_then(|v| v.parse::<u64>().ok());
+    let stored_burst = content
+        .lines()
+        .find_map(|l| l.strip_prefix("burst="))
+        .and_then(|v| v.parse::<u64>().ok());
 
     let mut rebuilt_sem = false;
     if stored_sem != Some(want_sem) && ai.enable_clip && state.ai.semantic_ready() {
@@ -412,6 +445,17 @@ face={want_face}
         eprintln!("[params] 人脸参数变更（{stored_face:?} → {want_face}），自动重建");
         run_rebuild(state, db_dir, "face");
         rebuilt_face = true;
+    }
+    // 连拍参数变更：只重组不重算（pHash 与参数无关）。旧 marker 无 burst 行
+    //（0012 前创建）视作「从未分组」——一次重组后对齐。
+    let mut regrouped_burst = false;
+    if stored_burst != Some(want_burst) {
+        eprintln!("[params] 连拍参数变更（{stored_burst:?} → {want_burst}），重组");
+        let params = crate::bursts::BurstParams::from_settings(ai);
+        let bus = state.bus.clone();
+        let supervisor = std::sync::Arc::clone(&state.supervisor);
+        crate::bursts::regroup_kick(db_dir.to_path_buf(), params, &bus, &supervisor);
+        regrouped_burst = true;
     }
     // 只把「已重建或已对齐」的通道写回标记；被门槛挡下的通道保留旧指纹
     let sem_line = format!(
@@ -430,12 +474,21 @@ face={want_face}
             stored_face.unwrap_or(want_face)
         }
     );
+    let burst_line = format!(
+        "burst={}",
+        if regrouped_burst || stored_burst == Some(want_burst) {
+            want_burst
+        } else {
+            stored_burst.unwrap_or(want_burst)
+        }
+    );
     let _ = std::fs::create_dir_all(db_dir);
     let _ = std::fs::write(
         &marker,
         format!(
             "{sem_line}
 {face_line}
+{burst_line}
 "
         ),
     );

@@ -16,6 +16,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0009_RATING_AND_FLAG,
     MIGRATION_0010_VIEW_HISTORY,
     MIGRATION_0011_DROP_SHA256,
+    MIGRATION_0012_BURSTS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -257,4 +258,40 @@ const MIGRATION_0011_DROP_SHA256: &str = r#"
 DROP INDEX idx_assets_sha256;
 ALTER TABLE assets DROP COLUMN sha256;
 ALTER TABLE job_files DROP COLUMN sha256;
+"#;
+
+/// 0012（M6 连拍分组）：pHash 感知指纹（u64 按 i64 位型存，NULL=未算）
+/// + bursts 连拍组表 + assets.burst_id 归属（组重算时整体重写）。
+///
+/// 分组双因子 = 时间链（captured_at 间隔）× 场景链（pHash 汉明距离），
+/// 参数见 settings.ai.burst_*。
+const MIGRATION_0012_BURSTS: &str = r#"
+ALTER TABLE assets ADD COLUMN phash INTEGER;
+
+CREATE TABLE bursts (
+    id          INTEGER PRIMARY KEY,
+    asset_count INTEGER NOT NULL,
+    started_at  TEXT,
+    ended_at    TEXT
+);
+
+ALTER TABLE assets ADD COLUMN burst_id INTEGER REFERENCES bursts (id) ON DELETE SET NULL;
+CREATE INDEX idx_assets_burst ON assets (burst_id);
+
+-- kind 扩 'phash' 通道（整表重建，同 0006 手法；0007 唯一索引随表重建）
+CREATE TABLE index_tasks_new (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL CHECK (kind IN ('thumb', 'exif', 'ai', 'face', 'phash')),
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+INSERT INTO index_tasks_new (id, kind, asset_id, state, attempts, created_at, updated_at)
+    SELECT id, kind, asset_id, state, attempts, created_at, updated_at FROM index_tasks;
+DROP TABLE index_tasks;
+ALTER TABLE index_tasks_new RENAME TO index_tasks;
+CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
+CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 "#;

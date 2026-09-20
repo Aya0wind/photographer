@@ -38,6 +38,10 @@ pub struct AssetDto {
     pub pair_id: Option<i64>,
     /// 缩略图状态 0 pending / 1 done / 2 permanent-none。
     pub thumb_state: i32,
+    /// 连拍组 id（M6；未入组 null）。
+    pub burst_id: Option<i64>,
+    /// 连拍组成员数（仅入组资产有值；页内批量装配免 N+1）。
+    pub burst_count: Option<u32>,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -158,6 +162,27 @@ pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
         lens: r.lens,
         pair_id: r.pair_id,
         thumb_state: r.thumb_state,
+        burst_id: r.burst_id,
+        burst_count: None,
+    }
+}
+
+/// 页内批量装配 burstCount（单条 IN 查询，免 N+1）。
+pub fn attach_burst_counts_pub(db: &crate::db::Db, dtos: &mut [AssetDto]) {
+    attach_burst_counts(db, dtos)
+}
+fn attach_burst_counts(db: &crate::db::Db, dtos: &mut [AssetDto]) {
+    let ids: Vec<i64> = dtos.iter().filter_map(|d| d.burst_id).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let Ok(counts) = db.burst_counts(&ids) else {
+        return;
+    };
+    for dto in dtos.iter_mut() {
+        if let Some(id) = dto.burst_id {
+            dto.burst_count = counts.get(&id).copied();
+        }
     }
 }
 
@@ -208,7 +233,9 @@ pub fn fetch_assets_page(
     let rows = db
         .assets_page(after_id, limit.clamp(1, 200), &filters)
         .map_err(|e| e.to_string())?;
-    Ok(rows.into_iter().map(page_row_to_dto).collect())
+    let mut dtos: Vec<AssetDto> = rows.into_iter().map(page_row_to_dto).collect();
+    attach_burst_counts(&db, &mut dtos);
+    Ok(dtos)
 }
 
 /// 本地时区日期分组（降序；unknown 组置顶）。
@@ -363,6 +390,31 @@ pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<FormatCountDto>,
         .collect())
 }
 
+/// 连拍分组统计（设置页展示）：{groups, photosInBursts}（camelCase）。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BurstStatsDto {
+    pub groups: u64,
+    pub photos_in_bursts: u64,
+}
+
+/// 连拍统计核。
+pub fn fetch_burst_stats(state: &super::AppState) -> Result<BurstStatsDto, String> {
+    let db = super::active_library_db(state)?;
+    let (groups, photos) = db.burst_stats().map_err(|e| e.to_string())?;
+    Ok(BurstStatsDto {
+        groups,
+        photos_in_bursts: photos,
+    })
+}
+
+/// 连拍分组统计（DB 查询 → 后台线程）。
+#[tauri::command]
+pub async fn burst_stats(state: State<'_, SharedState>) -> Result<BurstStatsDto, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_burst_stats).await
+}
+
 /// 格式聚合（DB 查询 → 后台线程）。
 #[tauri::command]
 pub async fn format_list(state: State<'_, SharedState>) -> Result<Vec<FormatCountDto>, String> {
@@ -393,6 +445,8 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 lens: asset.lens,
                 pair_id: asset.pair_asset_id,
                 thumb_state: asset.thumb_state,
+                burst_id: None,
+                burst_count: None,
             });
         }
     }

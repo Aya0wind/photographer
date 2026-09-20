@@ -378,7 +378,12 @@ pub struct AssetPageRow {
     pub pair_id: Option<i64>,
     /// 缩略图状态（0 pending / 1 done / 2 permanent-none）。
     pub thumb_state: i32,
+    /// 连拍组 id（M6；未入组 None）。
+    pub burst_id: Option<i64>,
 }
+
+/// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
+pub type BurstScanRow = (i64, i64, Option<String>, String, Option<i64>);
 
 /// 相机聚合行（搜索页相机勾选数据源）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -795,10 +800,12 @@ impl Db {
         // 过滤条件作用于内层（可引用 assets 全列），游标/排序用外层投影列
         let mut stmt = self.0.prepare(&format!(
             "SELECT id, path, filename, size, kind, captured_at, camera, \
-             width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state FROM \
+             width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
+             thumb_state, burst_id FROM \
              (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
               a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
-              a.pair_asset_id, a.thumb_state, COALESCE(a.captured_at, {sentinel_slot}) AS k \
+              a.pair_asset_id, a.thumb_state, a.burst_id, \
+              COALESCE(a.captured_at, {sentinel_slot}) AS k \
               FROM assets a WHERE {all}) \
              WHERE ({cursor_id_slot} = 0 OR k < {cursor_key_slot} \
                     OR (k = {cursor_key_slot} AND id < {cursor_id_slot})) \
@@ -826,10 +833,11 @@ impl Db {
         };
         let mut stmt = self.0.prepare(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
              FROM (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
                     a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, \
-                    a.lens, a.pair_asset_id, a.thumb_state, a.created_at AS ck FROM assets a) \
+                    a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, \
+                    a.created_at AS ck FROM assets a) \
              WHERE (?1 = 0 OR ck < ?2 OR (ck = ?2 AND id < ?1)) \
              ORDER BY ck DESC, id DESC LIMIT ?3",
         )?;
@@ -1393,10 +1401,10 @@ impl Db {
     pub fn assets_by_cluster(&self, cluster_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
              FROM (SELECT DISTINCT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
                     a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, \
-                    a.focal_length, a.lens, a.pair_asset_id, a.thumb_state, \
+                    a.focal_length, a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, \
                     COALESCE(a.captured_at, ?2) AS k \
                    FROM assets a JOIN faces f ON f.asset_id = a.id \
                    WHERE f.cluster_id = ?1) \
@@ -1589,10 +1597,126 @@ impl Db {
     /// 最近浏览资产（viewed_at DESC；复用画廊分页行结构）。
     pub fn recently_viewed(&self, limit: u32) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
+            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state, a.burst_id              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], map_asset_page)?;
         rows.collect()
+    }
+
+    /// 连拍扫描行：(id, phash, captured_at, kind, pair_asset_id)——
+    /// 已算 pHash 的 photo/raw 按 (camera, captured_at, id) 升序。
+    pub fn burst_scan_rows(&self) -> Result<Vec<BurstScanRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, phash, captured_at, kind, pair_asset_id FROM assets              WHERE phash IS NOT NULL AND kind IN ('photo', 'raw')              ORDER BY camera ASC, captured_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+        rows.collect()
+    }
+
+    /// 连拍组整体重写（事务：清旧组 + burst_id 复位 → 建组 + 回填归属）。
+    /// members = 每组 (asset_id, captured_at) 列表（组内有序）。
+    pub fn write_bursts(&self, groups: &[Vec<(i64, Option<String>)>]) -> Result<()> {
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE assets SET burst_id = NULL WHERE burst_id IS NOT NULL",
+            [],
+        )?;
+        tx.execute("DELETE FROM bursts", [])?;
+        for members in groups {
+            let (started, ended) = (
+                members.first().and_then(|m| m.1.clone()),
+                members.last().and_then(|m| m.1.clone()),
+            );
+            tx.execute(
+                "INSERT INTO bursts (asset_count, started_at, ended_at) VALUES (?1, ?2, ?3)",
+                params![members.len() as i64, started, ended],
+            )?;
+            let burst_id = tx.last_insert_rowid();
+            for (asset_id, _) in members {
+                tx.execute(
+                    "UPDATE assets SET burst_id = ?2 WHERE id = ?1",
+                    params![asset_id, burst_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 连拍统计（设置页/调试）：(组数, 入组资产数)。
+    pub fn burst_stats(&self) -> Result<(u64, u64)> {
+        let (groups, photos): (i64, i64) = self.0.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(asset_count), 0) FROM bursts",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((groups as u64, photos as u64))
+    }
+
+    /// 批量取组员数（页内 burstId → burstCount 装配，免 N+1）。
+    pub fn burst_counts(&self, burst_ids: &[i64]) -> Result<HashMap<i64, u32>> {
+        let mut out = HashMap::new();
+        let ids: Vec<i64> = {
+            let mut seen = std::collections::HashSet::new();
+            burst_ids
+                .iter()
+                .copied()
+                .filter(|id| seen.insert(*id))
+                .collect()
+        };
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT b.id, b.asset_count FROM bursts b WHERE b.id IN ({slots})");
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u32))
+        })?;
+        for row in rows {
+            let (id, count) = row?;
+            out.insert(id, count);
+        }
+        Ok(out)
+    }
+
+    /// pHash 写入（worker 成果）。
+    pub fn set_phash(&self, id: i64, phash: u64) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET phash = ?2 WHERE id = ?1",
+            params![id, phash as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 为 pHash 回填建任务：phash IS NULL 的 photo/raw 且无未完成 phash 任务。
+    /// RAW+JPG 孪生两边都算（分组时才跳孪生；查重也要用）。
+    pub fn create_phash_tasks_for_unindexed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'phash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.phash IS NULL AND a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'phash' AND t.asset_id = a.id                                AND t.state IN ('pending', 'running'))",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
+    /// phash 通道代际重排（既有复位 pending + 无任务行新建）。
+    pub fn requeue_phash_tasks_for_all(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1              WHERE kind = 'phash' AND state != 'pending'",
+            params![now],
+        )?;
+        self.0.execute(
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'phash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'phash' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        self.pending_index_task_count("phash")
     }
 
     /// 收藏旗标写入（0/1；资产不存在返回 false）。
@@ -1792,6 +1916,7 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         lens: row.get(13)?,
         pair_id: row.get(14)?,
         thumb_state: row.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
+        burst_id: row.get(16)?,
     })
 }
 
