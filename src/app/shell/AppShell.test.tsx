@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -8,6 +8,16 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import i18n from "@/i18n";
 import AppShell from "./AppShell";
 import { resetImportStoreForTests, useImportStore } from "@/stores/importStore";
+import { clone, DEFAULT_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
+
+/** 设置态复位（外观开关等用例隔离） */
+function resetSettingsForShell(): void {
+  useSettingsStore.setState({
+    settings: clone(DEFAULT_SETTINGS),
+    loaded: true,
+    libraryChosen: false,
+  });
+}
 
 function renderShell(initialPath: string) {
   return render(
@@ -83,5 +93,55 @@ describe("AppShell", () => {
     await user.click(screen.getByTestId("taskdrawer-toggle"));
     const drawer = await screen.findByTestId("taskdrawer");
     expect(within(drawer).getByText("复制任务 #7")).toBeInTheDocument();
+  });
+});
+
+// --- M4.5 wave-3：动画开关与快捷键弹窗 ---------------------------------------------------
+
+describe("AppShell：界面动画开关（no-motion）", () => {
+  it("默认开：根节点无 no-motion；设置关闭后挂类", () => {
+    resetSettingsForShell();
+    renderShell("/gallery");
+    // 根节点 = AppShell 最外 div（包含 titlebar）
+    const root = screen.getByTestId("titlebar").parentElement as HTMLElement;
+    expect(root.className).not.toContain("no-motion");
+
+    act(() => {
+      useSettingsStore.setState((s) => ({
+        settings: { ...s.settings, appearance: { animations: false } },
+      }));
+    });
+    expect(root.className).toContain("no-motion");
+  });
+});
+
+describe("AppShell：? 键快捷键速查弹窗", () => {
+  it("? 键开关弹窗（三组分组渲染）；Esc 关闭", async () => {
+    resetSettingsForShell();
+    const user = userEvent.setup();
+    renderShell("/gallery");
+
+    expect(screen.queryByTestId("shortcuts-modal")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "?" });
+    const modal = await screen.findByTestId("shortcuts-modal");
+    expect(within(modal).getAllByTestId("shortcuts-group")).toHaveLength(3);
+    expect(modal).toHaveTextContent("快捷键");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("shortcuts-modal")).not.toBeInTheDocument(),
+    );
+    void user;
+  });
+
+  it("输入框内按 ? 不触发弹窗", async () => {
+    resetSettingsForShell();
+    renderShell("/gallery");
+
+    const input = await screen.findByTestId("globalsearch-input");
+    fireEvent.keyDown(input, { key: "?" });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByTestId("shortcuts-modal")).not.toBeInTheDocument();
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
@@ -26,29 +26,44 @@ import {
   useGalleryTileSize,
 } from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
+import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import { recordSemanticQuery } from "@/features/ai/semanticHistory";
+import { SemanticQueryInput } from "@/features/ai/SemanticResultsView";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
-import DateChipBar from "../components/DateChipBar";
+import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import YearRail from "../components/YearRail";
+import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
+import {
+  FilterChipsRow,
+  FilterPanel,
+  buildChips,
+  buildFilters,
+  hasActiveFilters,
+  parseInputs,
+  serializeInputs,
+  EMPTY_INPUTS,
+} from "../FilterPanel";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { motionInitial, useMotionOn } from "@/lib/motion";
 
 /**
- * 画廊页（B 风格 Google Photos 深色沉浸，M3 主体；M4.5 A4 justify 网格）：
- * - 日期分组照片墙（AssetGrid justify：统一行高按宽高比分配宽、无尺寸 4:3 兜底、
- *   虚拟化 + 缩略图管线）；组头=日期+数量，滚动时当前组日期覆盖条吸顶；
- *   右侧年份吸顶条（滚动联动高亮、点击跳年首个日期组）
- * - 无限滚动：尾部哨兵 IntersectionObserver（提前 800px）触发 assetsPage 下一页
- *   （keyset afterId=已加载最后一条 id，limit 100）
- * - 顶部：日期 chips（含「未知」组）+ 日历按钮（年月下拉跳转，v1 不做整月历——
- *   chips 覆盖已加载组的快速跳转，日历覆盖任意月份的补页跳转）+ 三档尺寸切换
- * - RAW+JPG 合并展示（设置 gallery.mergeRawJpg，默认开）：pairId 成对的合并为
- *   一张卡（代表=JPG），角标「RAW+JPG」；点击进查看器即 JPG 版
- * - 状态：首屏骨架行 / 空库引导（去导入）/ IPC 不可用降级提示（可重试）
- * - 内容区水平居中 + 对称 padding（max-w 容器），chips 条与网格同宽对齐
- * - 查看器：/gallery?asset=<id>（组件不卸载，Esc 返回后滚动位置保留）
+ * 画廊页（M4.5 wave-3：画廊+搜索合并，搜索页已并入）：
+ * - 顶部工具条：语义查询输入（全局搜索框的页内版）+「筛选」按钮（展开 FilterPanel，
+ *   激活条件计数徽标）+「选择」多选开关 + 计数 + 三档尺寸
+ * - 三种数据态：默认（全部资产，keyset 补页 + 会话快照 revalidate）/ 筛选
+ *   （assetsPage filters，快照不落盘）/ 语义（searchSemantic 结果同网格带分数角标，
+ *   无分页）；修改筛选自动退出语义态
+ * - 日期组头折叠（AssetGrid）；右侧年份吸顶条承担日期跳转（chips 条与日历按钮已删）
+ * - 多选（M4.5）：选择按钮 / Ctrl+点击 / 长按进入；浮动操作条（收藏/旗标/分享/取消），
+ *   Esc 退出；单选=多选下的 N=1
+ * - URL 协议：?mode=semantic&q=…（语义直达）、?kind=photo|raw|video（预置类型）
+ * - 快照缓存：仅默认态落盘（筛选/语义态不落）；? 键快捷键速查见 AppShell
  */
 
 const PAGE_LIMIT = 100;
+const DEBOUNCE_MS = 300;
 /** 组头完全滚出视口后显示吸顶条（低于此偏移视为仍在组头处） */
 const STICKY_MIN_SCROLL = 48;
 
@@ -63,12 +78,70 @@ function yearRange(dates: AssetGroupDate[]): number[] {
   return [...years].sort((a, b) => b - a);
 }
 
+type GalleryMode = "default" | "filters" | "semantic";
+
 export default function GalleryPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const motionOn = useMotionOn();
 
-  // 会话快照（模块级，见 galleryCache.ts）：重挂载立即渲染缓存内容，
-  // 后台静默 revalidate——此前每次挂载从零拉数据，切页回来全体资产回到加载态
+  // --- 三态：语义（useSemanticSearch）+ 筛选输入（序列化键防抖） ----------------------
+  const semantic = useSemanticSearch();
+  const [inputs, setInputs] = useState<SearchInputsShim>(EMPTY_INPUTS);
+  const patchInputs = useCallback((patch: Partial<SearchInputsShim>) => {
+    setInputs((prev) => ({ ...prev, ...patch }));
+  }, []);
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  const rawKey = serializeInputs(inputs);
+  const debouncedKey = useDebouncedValue(rawKey, DEBOUNCE_MS);
+  const appliedFilters = useMemo(() => buildFilters(parseInputs(debouncedKey)), [debouncedKey]);
+  const filtersActive = useMemo(() => hasActiveFilters(parseInputs(debouncedKey)), [debouncedKey]);
+  const appliedKeyRef = useRef(debouncedKey);
+  appliedKeyRef.current = debouncedKey;
+
+  const semanticMode = semantic.status !== "idle";
+  const mode: GalleryMode = semanticMode ? "semantic" : filtersActive ? "filters" : "default";
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
+  function runSemantic(query: string): void {
+    recordSemanticQuery(query); // 语义历史（最近 5 条，localStorage）
+    void semantic.run(query);
+  }
+
+  /** 修改筛选 = 退出语义态回筛选/默认（语义结果与条件筛选互斥） */
+  function patchFilters(patch: Partial<SearchInputsShim>): void {
+    semantic.reset();
+    patchInputs(patch);
+  }
+
+  const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
+
+  // --- URL 协议（全局搜索框 / 媒体类型页跳入）：?mode=semantic&q= / ?kind= -------------
+  const urlQuery = searchParams.get("q") ?? "";
+  const appliedUrlQueryRef = useRef<string | null>(null);
+  const appliedUrlKindRef = useRef<string | null>(null);
+  useEffect(() => {
+    const urlMode = searchParams.get("mode");
+    if (urlMode === "semantic" && urlQuery !== "" && appliedUrlQueryRef.current !== urlQuery) {
+      appliedUrlQueryRef.current = urlQuery;
+      runSemantic(urlQuery);
+    }
+    const urlKind = searchParams.get("kind");
+    if (urlKind === "photo" || urlKind === "raw" || urlKind === "video") {
+      if (appliedUrlKindRef.current !== urlKind) {
+        appliedUrlKindRef.current = urlKind;
+        setInputs((prev) => (prev.kind === urlKind ? prev : { ...prev, kind: urlKind }));
+      }
+    } else if (urlKind === null) {
+      appliedUrlKindRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, urlQuery]);
+
+  // --- 数据管线（默认/筛选共用 keyset；快照仅默认态） --------------------------------
   const cachedAtMount = gallerySnapshot();
   const [assets, setAssets] = useState<AssetDto[]>(() => cachedAtMount?.assets ?? []);
   /** 已加载资产（与 state 同步维护，供补页循环同步读取） */
@@ -92,8 +165,9 @@ export default function GalleryPage() {
     group: null,
   });
 
-  /** 快照落盘（加载/补页/日期更新后调用；滚动位置由视口回调实时维护） */
+  /** 快照落盘（仅默认态：筛选/语义态不落，避免脏缓存）；滚动位置由视口回调实时维护 */
   const persistSnapshot = useCallback(() => {
+    if (modeRef.current !== "default") return;
     saveGallerySnapshot({
       assets: assetsRef.current,
       dates: datesRef.current,
@@ -102,17 +176,6 @@ export default function GalleryPage() {
       savedAt: Date.now(),
     });
   }, []);
-
-  // RAW+JPG 合并展示（设置项；旧 settings 数据缺 gallery 分组时兜底为开）
-  const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
-  const { cards, badges } = useMemo(
-    () => mergeRawJpgCards(assets, mergeEnabled),
-    [assets, mergeEnabled],
-  );
-  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
-
-  // 三档方格尺寸（localStorage 全局共享，画廊与搜索一致）
-  const [tileSize, setTileSize] = useGalleryTileSize();
 
   /** 追加下一页（keyset）；返回本页结果供补页循环判断 */
   const appendPage = useCallback(async (): Promise<AssetDto[]> => {
@@ -123,7 +186,10 @@ export default function GalleryPage() {
     const afterId = assetsRef.current.length > 0
       ? assetsRef.current[assetsRef.current.length - 1].id
       : 0;
-    const page = await assetsPage(afterId, PAGE_LIMIT);
+    const key = appliedKeyRef.current;
+    const page = hasActiveFilters(parseInputs(key))
+      ? await assetsPage(afterId, PAGE_LIMIT, buildFilters(parseInputs(key)))
+      : await assetsPage(afterId, PAGE_LIMIT);
     if (seq !== loadSeqRef.current) return page; // 已有更新的加载，丢弃本页渲染（数据保留待下轮）
     if (page.length > 0) {
       const seen = new Set(assetsRef.current.map((a) => a.id));
@@ -138,32 +204,48 @@ export default function GalleryPage() {
     return page;
   }, [persistSnapshot]);
 
-  /** 首屏（重试共用）：有会话快照则静默 revalidate——首页与缓存前缀一致
-   *  （库未变）保留已加载全量，首页变化（新导入/删除）才重置；无快照常规 loading。 */
-  const initialLoad = useCallback(async () => {
-    const cached = gallerySnapshot();
-    if (!cached) setStatus("loading");
+  /** 首屏/条件变化（防抖后）：默认态有会话快照则静默 revalidate；筛选态常规重置 */
+  useEffect(() => {
+    if (semanticMode) return; // 语义结果不走此管线
+    let cancelled = false;
+    const seq = ++loadSeqRef.current;
+    // 默认态已有快照数据 → 静默 revalidate（不闪骨架）；筛选态/空库常规 loading
+    if (filtersActive || assets.length === 0) setStatus("loading");
     hasMoreRef.current = true;
     loadingRef.current = false;
-    const seq = ++loadSeqRef.current;
-    const page = await assetsPage(0, PAGE_LIMIT);
-    if (seq !== loadSeqRef.current) return;
-    const samePrefix =
-      cached !== null &&
-      cached.assets.length >= page.length &&
-      page.every((a, i) => cached.assets[i].id === a.id);
-    if (!samePrefix) {
-      assetsRef.current = page;
-      setAssets(page);
-    }
-    if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
-    setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
-    persistSnapshot();
-  }, [persistSnapshot]);
+    const fetchFirstPage = filtersActive
+      ? () => assetsPage(0, PAGE_LIMIT, appliedFilters)
+      : () => assetsPage(0, PAGE_LIMIT);
+    void fetchFirstPage().then((page) => {
+      if (cancelled || seq !== loadSeqRef.current) return;
+      if (filtersActive) {
+        assetsRef.current = page;
+        setAssets(page);
+      } else {
+        // 默认态 revalidate：首页与缓存前缀一致（库未变）保留已加载全量
+        const cached = gallerySnapshot();
+        const samePrefix =
+          cached !== null &&
+          cached.assets.length >= page.length &&
+          page.every((a, i) => cached.assets[i].id === a.id);
+        if (!samePrefix) {
+          assetsRef.current = page;
+          setAssets(page);
+        }
+      }
+      if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
+      setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
+      persistSnapshot();
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedFilters, debouncedKey, semanticMode, filtersActive]);
 
   useEffect(() => {
+    if (semanticMode) return;
     let cancelled = false;
-    void initialLoad();
     void assetGroupDates().then((result) => {
       if (cancelled) return;
       datesRef.current = result;
@@ -174,12 +256,12 @@ export default function GalleryPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialLoad, persistSnapshot]);
+  }, [semanticMode, persistSnapshot]);
 
-  // 无限滚动：哨兵进入视口（提前 800px 预载）
+  // 无限滚动：哨兵进入视口（提前 800px 预载）——默认/筛选态
   useEffect(() => {
     const el = sentinelRef.current;
-    if (!el || status !== "ready" || typeof IntersectionObserver === "undefined") return;
+    if (!el || status !== "ready" || semanticMode || typeof IntersectionObserver === "undefined") return;
     const io = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) void appendPage();
@@ -188,11 +270,9 @@ export default function GalleryPage() {
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [status, appendPage, assets.length]);
+  }, [status, appendPage, assets.length, semanticMode]);
 
-  /** 日期跳转：组已加载直接滚；未加载顺序补页直到出现（keyset 下无法随机访问）。
-   *  判定用 assetsRef（appendPage 内同步更新）；滚动经 pendingJumpKey 在渲染提交后
-   *  执行——补页刚 setState 时 AssetGrid 的 rows/测量还是旧值，直接命令式滚动会 miss。 */
+  /** 日期跳转（年份条）：组已加载直接滚；未加载顺序补页直到出现（keyset 无随机访问） */
   const [pendingJumpKey, setPendingJumpKey] = useState<string | null>(null);
   useEffect(() => {
     if (pendingJumpKey === null) return;
@@ -202,6 +282,7 @@ export default function GalleryPage() {
 
   const jumpToDate = useCallback(
     async (date: string | null) => {
+      if (semanticMode) return;
       const key = groupKeyOfDate(date);
       const loaded = () => assetsRef.current.some((a) => groupKeyOfDate(a.capturedAt) === key);
       let guard = 0;
@@ -212,19 +293,19 @@ export default function GalleryPage() {
       }
       setPendingJumpKey(key);
     },
-    [appendPage],
+    [appendPage, semanticMode],
   );
 
-  // 重挂载滚动恢复：快照有位置且首次 ready（数据已渲染）后立即还原
+  // 重挂载滚动恢复（仅默认态）：快照有位置且首次 ready 后立即还原
   const scrollRestoredRef = useRef(false);
   useEffect(() => {
-    if (scrollRestoredRef.current || status !== "ready") return;
+    if (scrollRestoredRef.current || status !== "ready" || mode !== "default") return;
     const snap = gallerySnapshot();
     if (snap && snap.scrollTop > 0) {
       scrollRestoredRef.current = true;
       gridRef.current?.restoreScroll(snap.scrollTop);
     }
-  }, [status, assets.length]);
+  }, [status, mode, assets.length]);
 
   /** 视口回调：上报吸顶/日期之外，滚动位置实时记入快照（切页保留） */
   const handleViewportChange = useCallback((info: ViewportInfo) => {
@@ -232,37 +313,72 @@ export default function GalleryPage() {
     setViewport(info);
   }, []);
 
-  /** 月份跳转（日历面板）：补页直到该月有资产，滚到该月最新一天所在组 */
-  const jumpToMonth = useCallback(
-    async (year: number, month: number) => {
-      const prefix = `${year}-${String(month).padStart(2, "0")}`;
-      const inMonth = () => assetsRef.current.find((a) => (a.capturedAt ?? "").startsWith(prefix));
-      let guard = 0;
-      let hit = inMonth();
-      while (!hit && hasMoreRef.current && guard < 200) {
-        guard += 1;
-        const page = await appendPage();
-        if (page.length === 0) break;
-        hit = inMonth();
+  // --- 多选（M4.5 选择模式） ----------------------------------------------------------
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<number[]>([]);
+  const toggleSelected = useCallback((asset: AssetDto) => {
+    setSelected((prev) =>
+      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
+    );
+  }, []);
+  const ctrlSelect = useCallback((asset: AssetDto) => {
+    setSelecting(true);
+    setSelected((prev) =>
+      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
+    );
+  }, []);
+  const exitSelection = useCallback(() => {
+    setSelecting(false);
+    setSelected([]);
+  }, []);
+
+  // Esc 退出选择模式（查看器打开时不抢：选择模式下瓦片点击不打开查看器）
+  useEffect(() => {
+    if (!selecting) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        exitSelection();
       }
-      if (hit) setPendingJumpKey(groupKeyOfDate(hit.capturedAt));
-    },
-    [appendPage],
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selecting, exitSelection]);
+
+  // --- 展示分组与查看器 ---------------------------------------------------------------
+  const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
+  const { cards, badges } = useMemo(
+    () => mergeRawJpgCards(assets, mergeEnabled),
+    [assets, mergeEnabled],
+  );
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+  const semanticGroups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
+  const activeGroups = semanticMode ? semanticGroups : groups;
+  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(activeGroups);
+
+  /** 选中资产对象（当前态分组内查找；跨态选不中的自动忽略） */
+  const loadedById = useMemo(() => {
+    const map = new Map<number, AssetDto>();
+    for (const group of activeGroups) {
+      for (const asset of group.assets) map.set(asset.id, asset);
+    }
+    return map;
+  }, [activeGroups]);
+  const selectedAssets = useMemo(
+    () => selected.map((id) => loadedById.get(id)).filter((a): a is AssetDto => a !== undefined),
+    [selected, loadedById],
   );
 
-  // 日历弹层：年/月下拉（v1 取年月跳转，不做整月历栅格）
-  const [calendarOpen, setCalendarOpen] = useState(false);
-  const [calYear, setCalYear] = useState(new Date().getFullYear());
-  const [calMonth, setCalMonth] = useState(new Date().getMonth() + 1);
+  // 三档尺寸（justify 行高）
+  const [tileSize, setTileSize] = useGalleryTileSize();
   const years = useMemo(() => yearRange(dates), [dates]);
-
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
 
   const currentGroup = viewport.group;
   const showSticky =
     currentGroup !== null && viewport.scrollTop > STICKY_MIN_SCROLL && viewer === null;
 
-  if (status === "loading") {
+  // 语义态不阻塞于资产管线（两条管线独立；语义结果有自己的 loading/空态）
+  if (status === "loading" && !semanticMode) {
     return (
       <div className="flex h-full flex-col px-3 pt-2" data-testid="gallery-skeleton">
         {[0, 1, 2].map((row) => (
@@ -279,13 +395,27 @@ export default function GalleryPage() {
     );
   }
 
-  if (status === "degraded") {
+  if (status === "degraded" && !semanticMode) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center" data-testid="gallery-degraded">
         <p className="text-sm text-text-secondary">{t("gallery.ipcUnavailable")}</p>
         <button
           type="button"
-          onClick={() => void initialLoad()}
+          onClick={() => {
+            setInputs(EMPTY_INPUTS);
+            semantic.reset();
+            setStatus("loading");
+            hasMoreRef.current = true;
+            const seq = ++loadSeqRef.current;
+            void assetsPage(0, PAGE_LIMIT).then((page) => {
+              if (seq !== loadSeqRef.current) return;
+              assetsRef.current = page;
+              setAssets(page);
+              if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
+              setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
+              persistSnapshot();
+            });
+          }}
           className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
         >
           {t("gallery.retry")}
@@ -294,38 +424,7 @@ export default function GalleryPage() {
     );
   }
 
-  if (assets.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center" data-testid="gallery-empty">
-        <svg
-          viewBox="0 0 24 24"
-          width="48"
-          height="48"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="text-text-muted"
-          aria-hidden="true"
-        >
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <path d="M3 15l4.5-4.5 3.5 3.5 3-3L21 17" />
-          <circle cx="8.5" cy="9" r="1.5" />
-        </svg>
-        <h2 className="text-sm font-semibold text-text-primary">{t("gallery.empty.title")}</h2>
-        <p className="max-w-sm text-xs leading-relaxed text-text-muted">{t("gallery.empty.desc")}</p>
-        <button
-          type="button"
-          onClick={() => navigate("/import")}
-          className="mt-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition-colors hover:brightness-110"
-          data-testid="gallery-empty-import"
-        >
-          {t("gallery.empty.goImport")}
-        </button>
-      </div>
-    );
-  }
+  const gridEmpty = activeGroups.length === 0 || activeGroups.every((g) => g.assets.length === 0);
 
   return (
     <div className="h-full" data-testid="gallery-page">
@@ -334,115 +433,194 @@ export default function GalleryPage() {
         className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
         data-testid="gallery-content"
       >
-        {/* 顶部：日期 chips + 日历跳转 + 尺寸切换 */}
-        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-edge">
-          <span className="shrink-0 text-xs font-medium text-text-secondary">{t("gallery.title")}</span>
-          {dates.length > 0 && (
-            <DateChipBar dates={dates} currentKey={viewport.group?.key ?? null} onJump={(d) => void jumpToDate(d)} />
-          )}
-          {/* 日历按钮 → 年月跳转弹层 */}
-          <div className="relative shrink-0">
-            <button
-              type="button"
-              onClick={() => setCalendarOpen((v) => !v)}
-              aria-label={t("gallery.calendar.button")}
-              aria-expanded={calendarOpen}
-              className={`rounded-md border p-1 transition-colors ${
-                calendarOpen
-                  ? "border-accent text-accent"
-                  : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
-              }`}
-              data-testid="gallery-calendar-button"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                width="14"
-                height="14"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
+        {/* 顶部工具条：语义查询 + 筛选 + 选择 + 计数 + 尺寸 */}
+        <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge" data-testid="gallery-toolbar">
+          <SemanticQueryInput
+            busy={semantic.status === "loading"}
+            onRun={runSemantic}
+            initialQuery={urlQuery}
+          />
+
+          {/* 筛选按钮：展开/收起面板；激活条件计数徽标 */}
+          <button
+            type="button"
+            onClick={() => setPanelOpen((v) => !v)}
+            aria-expanded={panelOpen}
+            className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+              panelOpen || chips.length > 0
+                ? "border-accent text-accent"
+                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+            }`}
+            data-testid="search-filter-toggle"
+          >
+            {t("search.filter")}
+            {chips.length > 0 && (
+              <span
+                className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black"
+                data-testid="search-filter-count"
               >
-                <rect x="2" y="3" width="12" height="11" rx="1.5" />
-                <path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" />
-              </svg>
-            </button>
-            {calendarOpen && (
-              <div
-                className="absolute right-0 top-9 z-20 flex items-center gap-1.5 rounded-lg border border-edge bg-surface p-2 shadow-lg"
-                data-testid="gallery-calendar-panel"
-              >
-                <select
-                  value={calYear}
-                  onChange={(e) => setCalYear(Number(e.target.value))}
-                  aria-label={t("gallery.calendar.year")}
-                  className="rounded border border-edge bg-bg px-1.5 py-1 font-mono text-[11px] text-text-primary outline-none focus:border-accent"
-                  data-testid="gallery-calendar-year"
-                >
-                  {years.map((y) => (
-                    <option key={y} value={y}>{y}</option>
-                  ))}
-                </select>
-                <select
-                  value={calMonth}
-                  onChange={(e) => setCalMonth(Number(e.target.value))}
-                  aria-label={t("gallery.calendar.month")}
-                  className="rounded border border-edge bg-bg px-1.5 py-1 font-mono text-[11px] text-text-primary outline-none focus:border-accent"
-                  data-testid="gallery-calendar-month"
-                >
-                  {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                    <option key={m} value={m}>{t("gallery.calendar.monthN", { month: m })}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCalendarOpen(false);
-                    void jumpToMonth(calYear, calMonth);
-                  }}
-                  className="rounded bg-accent px-2 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
-                  data-testid="gallery-calendar-jump"
-                >
-                  {t("gallery.calendar.jump")}
-                </button>
-              </div>
+                {chips.length}
+              </span>
             )}
-          </div>
-          <div className="ml-auto shrink-0">
+            <svg
+              viewBox="0 0 16 16"
+              width="9"
+              height="9"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={`transition-transform ${panelOpen ? "rotate-180" : ""}`}
+              aria-hidden="true"
+            >
+              <path d="M3.5 6l4.5 4.5L12.5 6" />
+            </svg>
+          </button>
+
+          {/* 选择按钮（多选开关） */}
+          <button
+            type="button"
+            onClick={() => (selecting ? exitSelection() : setSelecting(true))}
+            aria-pressed={selecting}
+            className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+              selecting
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+            }`}
+            data-testid="gallery-select-toggle"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="11"
+              height="11"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="2" y="2" width="12" height="12" rx="2" />
+              <path d="M5 8.5l2 2 4-4.5" />
+            </svg>
+            {t("gallery.select")}
+          </button>
+
+          {/* 计数徽标 */}
+          <span
+            className="ml-auto shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
+            data-testid="search-count"
+          >
+            {semanticMode
+              ? t("search.count", { count: semantic.assets.length })
+              : t("search.count", { count: assets.length })}
+          </span>
+
+          <div className="shrink-0">
             <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           </div>
         </div>
 
-        {/* 照片墙（justify 布局：统一行高、按宽高比分配宽）+ 吸顶当前日期 + 年份条 */}
-        <div className="relative min-h-0 flex-1">
-          <AssetGrid
-            ref={gridRef}
-            groups={groups}
-            onOpenAsset={openAsset}
-            sentinelRef={sentinelRef}
-            onViewportChange={handleViewportChange}
-            layout="justify"
-            tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
-            badges={badges}
-          />
-          {/* 右侧年份吸顶条：点击跳该年首个日期组 */}
-          <YearRail
-            years={years}
-            currentYear={
-              viewport.group?.date != null ? Number(viewport.group.date.slice(0, 4)) : null
-            }
-            onJumpYear={(year) => {
-              const hit = dates.find((d) => d.date != null && d.date.startsWith(String(year)));
-              if (hit) void jumpToDate(hit.date);
+        {/* 筛选面板（默认收起；修改筛选自动退出语义态） */}
+        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} />}
+
+        {/* 激活条件 chips */}
+        {!semanticMode && (
+          <FilterChipsRow
+            chips={chips}
+            onPatch={(next) => {
+              semantic.reset();
+              setInputs(next);
+            }}
+            onClearAll={() => {
+              semantic.reset();
+              setInputs(EMPTY_INPUTS);
             }}
           />
+        )}
+
+        {/* 照片墙（justify 布局）+ 吸顶当前日期 + 年份条 */}
+        <div className="relative min-h-0 flex-1">
+          {gridEmpty ? (
+            semanticMode ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="semantic-empty">
+                <p className="text-sm text-text-secondary">{t("search.semantic.empty")}</p>
+                <p className="text-xs text-text-muted">{t("search.semantic.emptyHint")}</p>
+              </div>
+            ) : filtersActive ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="search-empty">
+                <p className="text-sm text-text-secondary">{t("search.empty")}</p>
+                <p className="text-xs text-text-muted">{t("search.emptyHint")}</p>
+              </div>
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center" data-testid="gallery-empty">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="48"
+                  height="48"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-text-muted"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="5" width="18" height="14" rx="2" />
+                  <path d="M3 15l4.5-4.5 3.5 3.5 3-3L21 17" />
+                  <circle cx="8.5" cy="9" r="1.5" />
+                </svg>
+                <h2 className="text-sm font-semibold text-text-primary">{t("gallery.empty.title")}</h2>
+                <p className="max-w-sm text-xs leading-relaxed text-text-muted">{t("gallery.empty.desc")}</p>
+                <button
+                  type="button"
+                  onClick={() => navigate("/import")}
+                  className="mt-1 rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition-colors hover:brightness-110"
+                  data-testid="gallery-empty-import"
+                >
+                  {t("gallery.empty.goImport")}
+                </button>
+              </div>
+            )
+          ) : (
+            <AssetGrid
+              ref={gridRef}
+              groups={activeGroups}
+              onOpenAsset={openAsset}
+              onCtrlClick={ctrlSelect}
+              onLongPress={ctrlSelect}
+              selection={
+                selecting
+                  ? { active: true, selected, onToggle: toggleSelected }
+                  : undefined
+              }
+              sentinelRef={semanticMode ? undefined : sentinelRef}
+              onViewportChange={handleViewportChange}
+              layout="justify"
+              tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
+              badges={semanticMode ? undefined : badges}
+              scores={semanticMode ? semantic.scores : undefined}
+            />
+          )}
+          {/* 右侧年份吸顶条：点击跳该年首个日期组（语义结果态隐藏——库级年份与结果集不一致） */}
+          {!semanticMode && (
+            <YearRail
+              years={years}
+              currentYear={
+                viewport.group?.date != null ? Number(viewport.group.date.slice(0, 4)) : null
+              }
+              onJumpYear={(year) => {
+                const hit = dates.find((d) => d.date != null && d.date.startsWith(String(year)));
+                if (hit) void jumpToDate(hit.date);
+              }}
+            />
+          )}
           <AnimatePresence initial={false}>
             {showSticky && (
               <motion.div
                 key="sticky-date"
-                initial={{ opacity: 0, y: -8 }}
+                initial={motionInitial(motionOn, { opacity: 0, y: -8 })}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.15, ease: "easeOut" }}
@@ -452,7 +630,7 @@ export default function GalleryPage() {
                 <AnimatePresence mode="wait" initial={false}>
                   <motion.span
                     key={currentGroup.key}
-                    initial={{ opacity: 0, y: 4 }}
+                    initial={motionInitial(motionOn, { opacity: 0, y: 4 })}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
                     transition={{ duration: 0.15, ease: "easeOut" }}
@@ -472,14 +650,26 @@ export default function GalleryPage() {
         </div>
 
         {/* 底部加载指示（无限滚动补页中） */}
-        {loadingMore && (
+        {loadingMore && !semanticMode && (
           <div className="flex h-7 shrink-0 items-center justify-center text-[11px] text-text-muted" data-testid="gallery-loading-more">
             {t("gallery.loadingMore")}
           </div>
         )}
       </div>
 
-      {/* 全屏查看器（/gallery?asset=<id>） */}
+      {/* 多选浮动操作条（已选 N | 收藏/旗标/分享/取消） */}
+      {selecting && (
+        <SelectionBar
+          count={selectedAssets.length}
+          assets={selectedAssets}
+          onDone={exitSelection}
+        />
+      )}
+
+      {/* 首次进画廊：快捷键一次性提示条 */}
+      <ShortcutsHint />
+
+      {/* 全屏查看器 */}
       {viewer && (
         <ViewerOverlay
           asset={viewer.asset}
@@ -492,3 +682,6 @@ export default function GalleryPage() {
     </div>
   );
 }
+
+/** SearchInputs 形（FilterPanel 导出类型的本地别名，避免循环 import 噪音） */
+type SearchInputsShim = ReturnType<typeof parseInputs>;

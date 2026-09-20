@@ -12,7 +12,7 @@ import { peopleList } from "@/ipc/api";
  * - 组织：相册（/albums 标签墙总览）、人物、媒体类型（/media）、标签（/albums#tags
  *   同路由锚点，v1 与相册同区块）
  * - 工具：相似照片（F8 占位禁用——pHash 近似重复检查，组内对比保留最优；
- *   完全一样的重复图导入时已由查重策略处理）、导入、任务
+ *   完全一样的重复图导入时已由查重策略处理）、导入（任务并入右侧抽屉，M4.5）
  * - 系统：设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
  * 人物入口 faceCount 总数徽标保留。
@@ -121,14 +121,6 @@ const ICONS = {
     </>,
     "import",
   ),
-  tasks: icon(
-    <>
-      <path d="M5.5 3.5h-2A1.5 1.5 0 0 0 2 5v7a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 14 12V5a1.5 1.5 0 0 0-1.5-1.5h-2" />
-      <rect x="5.5" y="1.5" width="5" height="3" rx="1" />
-      <path d="M4.8 8.6l1.4 1.4 2.6-2.6M11 8.5h1.5M11 11h1.5" />
-    </>,
-    "tasks",
-  ),
   settings: icon(
     <>
       <path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13" />
@@ -160,10 +152,7 @@ const SECTIONS: NavSection[] = [
   },
   {
     titleKey: "nav.section.tools",
-    items: [
-      { to: "/import", labelKey: "nav.import", icon: ICONS.import },
-      { to: "/tasks", labelKey: "nav.tasks", icon: ICONS.tasks },
-    ],
+    items: [{ to: "/import", labelKey: "nav.import", icon: ICONS.import }],
   },
   {
     titleKey: "nav.section.system",

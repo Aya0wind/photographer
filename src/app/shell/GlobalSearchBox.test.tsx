@@ -27,8 +27,7 @@ function renderBox() {
       <MemoryRouter initialEntries={["/gallery"]}>
         <GlobalSearchBox />
         <Routes>
-          <Route path="/gallery" element={<div data-testid="gallery-probe" />} />
-          <Route path="/search" element={<LocationProbe />} />
+          <Route path="/gallery" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -59,7 +58,7 @@ describe("顶部全局搜索框（M4.5 A1）", () => {
     expect(screen.getByTestId("globalsearch-filter")).toBeInTheDocument();
 
     fireEvent.keyDown(screen.getByTestId("globalsearch-input"), { key: "Enter" });
-    expect(await screen.findByTestId("loc")).toHaveTextContent("/search");
+    expect(await screen.findByTestId("loc")).toHaveTextContent("/gallery");
   });
 
   it("输入描述回车 → /search?mode=semantic&q=（URL 编码）", async () => {
@@ -69,9 +68,9 @@ describe("顶部全局搜索框（M4.5 A1）", () => {
     await user.type(screen.getByTestId("globalsearch-input"), "海边 日落");
     fireEvent.keyDown(screen.getByTestId("globalsearch-input"), { key: "Enter" });
 
-    // 回车跳 /search?mode=semantic&q=（URL 编码）
+    // 回车跳 /gallery?mode=semantic&q=（URL 编码；画廊+搜索合并）
     expect(await screen.findByTestId("loc")).toHaveTextContent(
-      "/search?mode=semantic&q=%E6%B5%B7%E8%BE%B9%20%E6%97%A5%E8%90%BD",
+      "/gallery?mode=semantic&q=%E6%B5%B7%E8%BE%B9%20%E6%97%A5%E8%90%BD",
     );
   });
 

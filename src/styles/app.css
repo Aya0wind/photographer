@@ -101,3 +101,14 @@ body {
     background-image: none;
   }
 }
+
+/* 界面动画关闭（settings.appearance.animations=false，AppShell 根节点挂载）：
+   全局灭 transition/animation（0.01ms 保守值兼容必经的一次性状态）；motion 组件
+   侧另由 useMotionOn() 决定 initial=false（不进过渡路径）。 */
+.no-motion *,
+.no-motion *::before,
+.no-motion *::after {
+  transition-duration: 0.01ms !important;
+  animation: none !important;
+  animation-duration: 0.01ms !important;
+}

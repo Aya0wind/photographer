@@ -6,9 +6,9 @@ import { useAiStore } from "@/stores/aiStore";
 
 /**
  * 顶部全局搜索框（M4.5 A1，TitleBar 动作位常驻）：
- * - 圆角输入框，占位「输入一段描述搜索照片…」；回车 → /search?mode=semantic&q=…
+ * - 圆角输入框，占位「输入一段描述搜索照片…」；回车 → /gallery?mode=semantic&q=…
  *   （搜索页按 URL 协议预填并自动执行语义搜索）
- * - 右侧过滤图标 → /search（条件筛选完整视图）
+ * - 右侧过滤图标 → /gallery（条件筛选在画廊工具条）
  * - 语义索引未就绪（aiStore indexStatus ai.done<total）：输入框下细提示条
  *   （不阻塞输入；数据源与任务抽屉的常驻轮询同源）
  */
@@ -23,7 +23,7 @@ export default function GlobalSearchBox() {
 
   function submit(): void {
     const q = value.trim();
-    navigate(q ? `/search?mode=semantic&q=${encodeURIComponent(q)}` : "/search");
+    navigate(q ? `/gallery?mode=semantic&q=${encodeURIComponent(q)}` : "/gallery");
   }
 
   return (
@@ -61,7 +61,7 @@ export default function GlobalSearchBox() {
       {/* 右侧过滤图标：跳条件筛选视图 */}
       <button
         type="button"
-        onClick={() => navigate("/search")}
+        onClick={() => navigate("/gallery")}
         aria-label={t("globalsearch.filter")}
         title={t("globalsearch.filter")}
         data-testid="globalsearch-filter"

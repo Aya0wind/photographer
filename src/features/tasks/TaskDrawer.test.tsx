@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import { TaskDrawerPanel, TaskDrawerToggle, countRunningTasks } from "./TaskDrawer";
+import SummaryModalHost from "./SummaryModal";
 import { resetImportStoreForTests, useImportStore } from "@/stores/importStore";
 import { useAiStore } from "@/stores/aiStore";
 import {
   importCancel,
+  importJobDelete,
+  importJobsPage,
+  importLogsPage,
   importPause,
   importResume,
   indexKickNow,
@@ -19,6 +23,7 @@ import {
   type AppEvent,
   type ImportStats,
   type IndexStatus,
+  type JobRow,
 } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -28,6 +33,9 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     importPause: vi.fn(),
     importResume: vi.fn(),
     importCancel: vi.fn(),
+    importJobsPage: vi.fn(),
+    importJobDelete: vi.fn(),
+    importLogsPage: vi.fn(),
     indexStatus: vi.fn(),
     indexKickNow: vi.fn(),
     indexTaskPause: vi.fn(),
@@ -40,13 +48,12 @@ const cancelMock = vi.mocked(importCancel);
 const indexStatusMock = vi.mocked(indexStatus);
 const kickMock = vi.mocked(indexKickNow);
 const indexPauseMock = vi.mocked(indexTaskPause);
+const jobsPageMock = vi.mocked(importJobsPage);
+const jobDeleteMock = vi.mocked(importJobDelete);
+const logsPageMock = vi.mocked(importLogsPage);
 
 function GalleryProbe() {
   return <div data-testid="gallery-probe" />;
-}
-
-function TasksProbe() {
-  return <div data-testid="tasks-probe" />;
 }
 
 /** 抽屉常开（AppShell 持开合状态；测试直接驱动面板） */
@@ -57,7 +64,7 @@ function renderDrawer(open = true) {
         <TaskDrawerPanel open={open} onClose={() => {}} />
         <Routes>
           <Route path="/gallery" element={<GalleryProbe />} />
-          <Route path="/tasks" element={<TasksProbe />} />
+          <Route path="/import" element={<div data-testid="import-probe" />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -95,6 +102,9 @@ beforeEach(() => {
   indexStatusMock.mockReset().mockResolvedValue(null);
   kickMock.mockReset().mockResolvedValue(undefined);
   indexPauseMock.mockReset().mockResolvedValue(undefined);
+  jobsPageMock.mockReset().mockResolvedValue([]);
+  jobDeleteMock.mockReset().mockResolvedValue(undefined);
+  logsPageMock.mockReset().mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -196,7 +206,7 @@ describe("任务抽屉：开合", () => {
 
     expect(await screen.findByTestId("taskdrawer-empty")).toHaveTextContent("暂无进行中的任务");
     await user.click(screen.getByTestId("taskdrawer-empty").querySelector("button") as HTMLButtonElement);
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    expect(await screen.findByTestId("import-probe")).toBeInTheDocument();
   });
 });
 
@@ -270,7 +280,7 @@ describe("任务抽屉：导入任务行", () => {
 // --- 导入任务行（终态） ---------------------------------------------------------------
 
 describe("任务抽屉：导入终态行", () => {
-  it("sessionFinished：完成样式 + 计数行；点击跳任务中心（总结弹窗在那里）", async () => {
+  it("sessionFinished：完成样式 + 计数行；总结快照留在 store（弹窗全局挂载）", async () => {
     renderDrawer();
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
     emit({ type: "importSessionFinished", jobId: 7, stats: finishedStats() });
@@ -281,10 +291,6 @@ describe("任务抽屉：导入终态行", () => {
     expect(row).toHaveTextContent("#7");
     expect(screen.getByTestId("taskdrawer-import-counts")).toHaveTextContent("成功 7 · 跳过 2 · 失败 1");
     expect(useImportStore.getState().summary?.jobId).toBe(7);
-
-    const user = userEvent.setup();
-    await user.click(screen.getByTestId("taskdrawer-import-summary"));
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
   });
 
   it("移动任务完成：计数行为已移动", async () => {
@@ -413,16 +419,12 @@ describe("任务抽屉：索引通道行", () => {
 // --- 错误行（appError） ---------------------------------------------------------------
 
 describe("任务抽屉：错误行", () => {
-  it("appError：红字行展示消息；查看任务跳任务中心", async () => {
+  it("appError：红字行展示消息（任务页已删，无跳转按钮）", async () => {
     renderDrawer();
     emit({ type: "appError", level: "error", message: "磁盘写入失败", recoverable: true });
 
     const err = await screen.findByTestId("taskdrawer-error");
     expect(err).toHaveTextContent("磁盘写入失败");
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "查看任务" }));
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
   });
 
   it("× 收起错误行且同一错误不再弹出；挂载前的旧错误不打扰", async () => {
@@ -433,5 +435,148 @@ describe("任务抽屉：错误行", () => {
     await user.click(await screen.findByTestId("taskdrawer-error-dismiss"));
     await waitFor(() => expect(screen.queryByTestId("taskdrawer-error")).not.toBeInTheDocument());
     expect(useImportStore.getState().lastError).not.toBeNull();
+  });
+});
+
+
+// --- 历史区（M4.5 wave-3 第 8 项） -----------------------------------------------------
+
+function jobRow(id: number, status: JobRow["status"] = "done"): JobRow {
+  const startedAt = new Date(2026, 8, 18, 12, 0, 0).getTime();
+  return {
+    id,
+    kind: "import",
+    deviceId: "E:",
+    deviceName: "SanDisk 64G",
+    status,
+    totalFiles: 120,
+    totalBytes: 4_000_000_000,
+    statsJson: JSON.stringify({ doneFiles: 117, skippedDuplicates: 2, failedFiles: 1 }),
+    startedAt,
+    finishedAt: startedAt + 150_000,
+  };
+}
+
+describe("任务抽屉：历史区", () => {
+  it("打开抽屉拉 importJobsPage(0, 50)；行渲染任务名/统计/日志与删除入口", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3), jobRow(2)]);
+    renderDrawer();
+
+    const rows = await screen.findAllByTestId("taskdrawer-history-row");
+    expect(rows).toHaveLength(2);
+    expect(jobsPageMock).toHaveBeenCalledWith(0, 50);
+    expect(rows[0]).toHaveTextContent("SanDisk 64G");
+    expect(rows[0]).toHaveTextContent("成功 117 · 跳过 2 · 失败 1");
+    expect(within(rows[0]).getByTestId("taskdrawer-history-logs")).toBeInTheDocument();
+    expect(within(rows[0]).getByTestId("taskdrawer-history-delete")).toBeInTheDocument();
+  });
+
+  it("加载更多：afterId=最后一行 id；短页隐藏按钮", async () => {
+    jobsPageMock.mockResolvedValueOnce(Array.from({ length: 50 }, (_, i) => jobRow(100 - i)))
+      .mockResolvedValueOnce([jobRow(5)]);
+    const user = userEvent.setup();
+    renderDrawer();
+    await screen.findAllByTestId("taskdrawer-history-row");
+
+    await user.click(screen.getByTestId("taskdrawer-history-more"));
+    await waitFor(() => expect(jobsPageMock).toHaveBeenLastCalledWith(51, 50));
+    await waitFor(() => expect(screen.getAllByTestId("taskdrawer-history-row")).toHaveLength(51));
+    // 第二页短页 → 按钮消失
+    await waitFor(() =>
+      expect(screen.queryByTestId("taskdrawer-history-more")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("× 删除成功：importJobDelete(id)，行动画退场", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3)]);
+    const user = userEvent.setup();
+    renderDrawer();
+    await screen.findAllByTestId("taskdrawer-history-row");
+
+    await user.click(screen.getByTestId("taskdrawer-history-delete"));
+    await waitFor(() => expect(jobDeleteMock).toHaveBeenCalledWith(3));
+    await waitFor(() =>
+      expect(screen.queryByTestId("taskdrawer-history-row")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("× 删除命令失败：乐观移除回滚（行恢复）", async () => {
+    jobDeleteMock.mockRejectedValue(new Error("locked"));
+    jobsPageMock.mockResolvedValue([jobRow(4)]);
+    const user = userEvent.setup();
+    renderDrawer();
+    await screen.findAllByTestId("taskdrawer-history-row");
+
+    await user.click(screen.getByTestId("taskdrawer-history-delete"));
+    await waitFor(() => expect(jobDeleteMock).toHaveBeenCalledWith(4));
+    await waitFor(() => expect(screen.getByTestId("taskdrawer-history-row")).toBeInTheDocument());
+  });
+
+  it("查看日志：打开 LogViewer 弹层并加载该任务日志", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3)]);
+    const user = userEvent.setup();
+    renderDrawer();
+    await screen.findAllByTestId("taskdrawer-history-row");
+
+    await user.click(screen.getByTestId("taskdrawer-history-logs"));
+    expect(await screen.findByTestId("taskdrawer-logs-modal")).toBeInTheDocument();
+    expect(importLogsPage).toHaveBeenCalledWith(3, 0, 50);
+    await user.click(screen.getByTestId("taskdrawer-logs-close"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("taskdrawer-logs-modal")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("清除已完成：批量 importJobDelete 历史行 + 隐藏本地终态行", async () => {
+    jobsPageMock.mockResolvedValue([jobRow(3), jobRow(2)]);
+    const user = userEvent.setup();
+    renderDrawer();
+    emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
+    emit({ type: "importSessionFinished", jobId: 7, stats: finishedStats() });
+
+    await screen.findAllByTestId("taskdrawer-history-row");
+    expect(await screen.findByTestId("taskdrawer-import")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("taskdrawer-clear-done"));
+
+    await waitFor(() => {
+      expect(jobDeleteMock).toHaveBeenCalledWith(3);
+      expect(jobDeleteMock).toHaveBeenCalledWith(2);
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("taskdrawer-import")).not.toBeInTheDocument(),
+    );
+    expect(useImportStore.getState().activeJobs[7]).toBeDefined();
+  });
+});
+
+// --- 全局总结弹窗（M4.5 wave-3 第 8 项：从任务页挪到 AppShell 全局挂载） -----------------
+
+describe("总结弹窗（SummaryModalHost 全局）", () => {
+  it("importSessionFinished 后任何页面弹出三卡片；关闭出队", async () => {
+    const user = userEvent.setup();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={["/gallery"]}>
+          <SummaryModalHost />
+          <Routes>
+            <Route path="/gallery" element={<GalleryProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    expect(screen.queryByTestId("summary-modal")).not.toBeInTheDocument();
+    emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
+    emit({ type: "importSessionFinished", jobId: 7, stats: finishedStats() });
+
+    const modal = await screen.findByTestId("summary-modal");
+    expect(modal).toHaveTextContent("导入完成");
+    expect(within(modal).getByTestId("summary-done")).toHaveTextContent("7");
+    expect(within(modal).getByTestId("summary-skipped")).toHaveTextContent("2");
+    expect(within(modal).getByTestId("summary-failed")).toHaveTextContent("1");
+
+    await user.click(within(modal).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByTestId("summary-modal")).not.toBeInTheDocument());
   });
 });

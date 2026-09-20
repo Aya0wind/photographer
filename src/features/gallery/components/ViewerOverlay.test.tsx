@@ -9,7 +9,13 @@ import i18n from "@/i18n";
 import ViewerOverlay from "./ViewerOverlay";
 import { groupAssetsByDate, type AssetGroup } from "../lib/assetGroups";
 import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
-import { assetDetail, assetThumbGet, type AssetDetailDto, type AssetDto } from "@/ipc/api";
+import {
+  assetDetail,
+  assetRatingSet,
+  assetThumbGet,
+  type AssetDetailDto,
+  type AssetDto,
+} from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -17,6 +23,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     assetDetail: vi.fn(),
     assetThumbGet: vi.fn(),
+    assetRatingSet: vi.fn(),
   };
 });
 
@@ -30,6 +37,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 const detailMock = vi.mocked(assetDetail);
 const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
+const ratingMock = vi.mocked(assetRatingSet);
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -99,6 +107,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   detailMock.mockReset().mockResolvedValue(DETAIL);
+  ratingMock.mockReset().mockResolvedValue(undefined);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
@@ -800,5 +809,92 @@ describe("查看器：EXIF 面板", () => {
     const rows = await screen.findByTestId("viewer-exif-rows");
     expect(rows).toHaveTextContent(GROUP_ASSETS[0].path);
     expect(screen.queryByTestId("viewer-exif-loading")).not.toBeInTheDocument();
+  });
+});
+
+// --- 星标条与切图闪缩（M4.5 wave-3） -----------------------------------------------------
+
+describe("查看器：星标条", () => {
+  it("详情 rating 驱动星级；点星调 assetRatingSet(id, n)，再点同星=清除（0）", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, rating: 3 });
+    const user = userEvent.setup();
+    renderViewer();
+
+    const bar = await screen.findByTestId("viewer-rating");
+    const stars = within(bar).getAllByTestId("viewer-rating-star");
+    expect(stars).toHaveLength(5);
+    expect(stars[2]).toHaveAttribute("data-filled", "true");
+    expect(stars[3]).toHaveAttribute("data-filled", "false");
+
+    await user.click(stars[4]);
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 5));
+    // 乐观 UI：第 5 星点亮
+    await waitFor(() => expect(within(bar).getAllByTestId("viewer-rating-star")[4]).toHaveAttribute("data-filled", "true"));
+
+    // 再点当前星（5）= 清除
+    await user.click(within(bar).getAllByTestId("viewer-rating-star")[4]);
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 0));
+  });
+
+  it("详情无 rating：全灰；点第 1 星 → rating 1", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL });
+    const user = userEvent.setup();
+    renderViewer();
+
+    const bar = await screen.findByTestId("viewer-rating");
+    for (const star of within(bar).getAllByTestId("viewer-rating-star")) {
+      expect(star).toHaveAttribute("data-filled", "false");
+    }
+    await user.click(within(bar).getAllByTestId("viewer-rating-star")[0]);
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 1));
+  });
+});
+
+describe("查看器：EXIF 面板切图闪缩修复", () => {
+  it("切图时保留上一份详情行结构（不回退基础行集），新详情到达后仅值变", async () => {
+    // 用 StatefulViewer 驱动切换（与既有用例同模式）
+    let setIndex: ((i: number) => void) | undefined;
+    let resolveSecond: ((d: AssetDetailDto) => void) | undefined;
+    detailMock.mockImplementation(async (id: number) => {
+      if (id === 1) return { ...DETAIL, width: 8192, height: 5464, iso: 400 };
+      return new Promise<AssetDetailDto>((resolve) => {
+        resolveSecond = resolve;
+      });
+    });
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+
+    function StatefulViewer() {
+      const [index, setIdx] = useState(0);
+      setIndex = setIdx;
+      const group = groupAssetsByDate(GROUP_ASSETS)[0];
+      return (
+        <I18nextProvider i18n={i18n}>
+          <ViewerOverlay
+            asset={GROUP_ASSETS[index]}
+            group={group}
+            index={index}
+            onNavigate={setIdx}
+            onClose={() => {}}
+          />
+        </I18nextProvider>
+      );
+    }
+    render(<StatefulViewer />);
+    await screen.findByTestId("viewer");
+    // 第一张完整详情到达（图像组存在）
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-exif-group-image")).toBeInTheDocument(),
+    );
+
+    // 切到第二张：新详情挂起——行结构保持（图像组不消失，显示的是上一份的值）
+    act(() => setIndex?.(1));
+    await waitFor(() => expect(screen.getByTestId("viewer-exif-rows")).toHaveAttribute("data-asset-id", "1"));
+    expect(screen.getByTestId("viewer-exif-group-image")).toBeInTheDocument();
+
+    // 新详情到达：仅值/结构一次更新（data-asset-id 翻到 2）
+    act(() => resolveSecond?.({ ...DETAIL, id: 2 }));
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-exif-rows")).toHaveAttribute("data-asset-id", "2"),
+    );
   });
 });

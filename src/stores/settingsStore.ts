@@ -51,6 +51,16 @@ export interface Settings {
     /** 语义检索相似度阈值（cos 0..1）；低于该分的结果过滤，0 = 不过滤。
      *  与 Rust 侧 AiSettings.semantic_min_score 同名映射（camelCase） */
     semanticMinScore: number;
+    /** 嵌入输入边长（px；Rust 侧 serde camelCase 对齐 embed_input_size） */
+    embedInputSize: number;
+    /** 人脸检测阈值（0..1，scrfd 置信度门限） */
+    faceDetectThreshold: number;
+    /** 人脸聚类阈值（0..1，arcface 余弦距离门限） */
+    faceClusterThreshold: number;
+  };
+  /** 外观（M4.5）：界面动画开关 */
+  appearance: {
+    animations: boolean;
   };
   system: {
     launchAtLogin: boolean;
@@ -87,6 +97,12 @@ export const DEFAULT_SETTINGS: Settings = {
     cpuLimitPercent: 50,
     useGpu: true,
     semanticMinScore: 0.09,
+    embedInputSize: 256,
+    faceDetectThreshold: 0.5,
+    faceClusterThreshold: 0.4,
+  },
+  appearance: {
+    animations: true,
   },
   system: {
     launchAtLogin: false,

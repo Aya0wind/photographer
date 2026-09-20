@@ -24,7 +24,7 @@ const peopleListMock = vi.mocked(peopleList);
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
   { section: "浏览", links: ["图库", "最近浏览"], disabled: ["收藏"] },
   { section: "组织", links: ["相册", "人物", "媒体类型", "标签"], disabled: [] },
-  { section: "工具", links: ["导入", "任务"], disabled: ["相似照片"] },
+  { section: "工具", links: ["导入"], disabled: ["相似照片"] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
 

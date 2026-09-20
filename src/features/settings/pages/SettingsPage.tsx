@@ -18,10 +18,11 @@ import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/sett
  * 新建库走可复用 NewLibraryDialog（顶部菜单共用）。
  */
 
-type SettingsTab = "general" | "gallery" | "import" | "libraries" | "ai";
+type SettingsTab = "general" | "appearance" | "gallery" | "import" | "libraries" | "ai";
 
 const TABS: { key: SettingsTab; labelKey: string }[] = [
   { key: "general", labelKey: "settings.tab.general" },
+  { key: "appearance", labelKey: "settings.tab.appearance" },
   { key: "gallery", labelKey: "settings.tab.gallery" },
   { key: "import", labelKey: "settings.tab.import" },
   { key: "libraries", labelKey: "settings.tab.libraries" },
@@ -252,6 +253,24 @@ export default function SettingsPage() {
                 >
                   <option value="zh">{t("settings.languageZh")}</option>
                 </select>
+              </SettingRow>
+            </>
+          )}
+
+          {tab === "appearance" && (
+            <>
+              <SectionTitle>{t("settings.section.appearance")}</SectionTitle>
+              <SettingRow
+                label={t("settings.appearance.animations")}
+                desc={t("settings.appearance.animationsDesc")}
+                testId="settings-row-animations"
+              >
+                <Toggle
+                  checked={settings.appearance?.animations ?? true}
+                  label={t("settings.appearance.animations")}
+                  testId="settings-animations"
+                  onChange={(next) => commit({ appearance: { animations: next } })}
+                />
               </SettingRow>
             </>
           )}

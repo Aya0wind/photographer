@@ -4,7 +4,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { assetDetail, type AssetDetailDto, type AssetDto } from "@/ipc/api";
+import { assetDetail, assetRatingSet, type AssetDetailDto, type AssetDto } from "@/ipc/api";
+import { motionInitial, useMotionOn } from "@/lib/motion";
 import type { AssetGroup } from "../lib/assetGroups";
 import {
   fetchAssetThumb,
@@ -141,6 +142,7 @@ interface ViewerOverlayProps {
 
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose }: ViewerOverlayProps) {
   const { t } = useTranslation();
+  const motionOn = useMotionOn();
   const stageRef = useRef<HTMLDivElement | null>(null);
 
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
@@ -384,7 +386,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // --- EXIF 面板 ---------------------------------------------------------------------
   const [exifOpen, setExifOpen] = useState(true);
   const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
-  const visibleDetail = detail?.id === asset.id ? detail : detailFromAsset(asset);
+  // 切图闪缩修复（M4.5）：切换资产时不回退「基础行集」（行数骤减→面板高度跳变），
+  // 保留上一份完整详情的行结构直到新详情到达（值随后一次更新，行不重挂）。
+  const visibleDetail = detail ?? detailFromAsset(asset);
   useEffect(() => {
     let cancelled = false;
     void assetDetail(asset.id).then((d) => {
@@ -397,6 +401,21 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       cancelled = true;
     };
   }, [asset.id]);
+
+  // --- 星标条（M4.5）：详情面板顶部 0-5 星点选（assetRatingSet；再点同星=清除） ---
+  const [ratingDraft, setRatingDraft] = useState<number | null>(null);
+  useEffect(() => {
+    setRatingDraft(null);
+  }, [asset.id]);
+  const currentRating = Math.max(
+    0,
+    Math.min(5, Math.round(ratingDraft ?? detail?.rating ?? 0)),
+  );
+  async function applyRating(value: number): Promise<void> {
+    const next = currentRating === value ? 0 : value; // 再点同一星=清除
+    setRatingDraft(next);
+    await assetRatingSet(asset.id, next);
+  }
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -730,21 +749,49 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           </p>
         </div>
 
-        {/* 右侧 EXIF 面板（可收起） */}
+        {/* 右侧 EXIF 面板（可收起；transform 滑出——不动画 width，避免布局抖动） */}
         <AnimatePresence initial={false}>
           {exifOpen && (
             <motion.aside
               key="exif"
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 288, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
+              initial={motionInitial(motionOn, { x: 288, opacity: 0 })}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 288, opacity: 0 }}
               transition={{ duration: 0.15, ease: "easeOut" }}
-              className="h-full shrink-0 overflow-hidden border-l border-edge bg-surface/95"
+              className="absolute right-0 top-0 z-10 h-full w-72 overflow-hidden border-l border-edge bg-surface/95 shadow-2xl"
               data-testid="viewer-exif"
             >
-              <div className="h-full w-72 overflow-y-auto p-3" data-testid="viewer-exif-scroll">
+              <div className="h-full overflow-y-auto p-3" data-testid="viewer-exif-scroll">
                 <h2 className="mb-1 text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
-                <div data-testid="viewer-exif-rows">
+                {/* 星标条：0-5 星点选（再点同星=清除） */}
+                <div
+                  className="mb-2 flex items-center gap-1 border-b border-edge/60 pb-2"
+                  role="radiogroup"
+                  aria-label={t("viewer.rating")}
+                  data-testid="viewer-rating"
+                >
+                  {[1, 2, 3, 4, 5].map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={currentRating === value}
+                      aria-label={`${t("viewer.rating")} ${value}`}
+                      onClick={() => void applyRating(value)}
+                      className={`rounded p-0.5 transition-colors ${
+                        value <= currentRating ? "text-accent" : "text-text-muted hover:text-text-secondary"
+                      }`}
+                      data-testid="viewer-rating-star"
+                      data-value={value}
+                      data-filled={value <= currentRating}
+                    >
+                      <svg viewBox="0 0 16 16" width="15" height="15" fill={value <= currentRating ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M8 1.8l1.8 3.7 4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4L2.2 6.1l4-.6z" />
+                      </svg>
+                    </button>
+                  ))}
+                </div>
+                <div data-testid="viewer-exif-rows" data-asset-id={visibleDetail.id}>
                   {exifSections.map((section) => (
                     <section key={section.key} data-testid={`viewer-exif-group-${section.key}`}>
                       <h3 className="mb-1.5 mt-3 text-[10px] font-semibold uppercase tracking-wider text-text-muted first:mt-1">

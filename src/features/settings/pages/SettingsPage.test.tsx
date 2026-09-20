@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -21,6 +21,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     aiFaceDataClear: vi.fn(),
     indexStatus: vi.fn(),
     indexKickNow: vi.fn(),
+    indexRebuild: vi.fn(),
   };
 });
 import {
@@ -29,6 +30,7 @@ import {
   aiModelDownload,
   aiModelsStatus,
   indexKickNow,
+  indexRebuild,
   indexStatus,
 } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
@@ -41,6 +43,7 @@ const aiModelDeleteMock = vi.mocked(aiModelDelete);
 const aiFaceDataClearMock = vi.mocked(aiFaceDataClear);
 const indexStatusMock = vi.mocked(indexStatus);
 const indexKickNowMock = vi.mocked(indexKickNow);
+const indexRebuildMock = vi.mocked(indexRebuild);
 
 function aiModel(
   id: string,
@@ -642,6 +645,94 @@ describe("AI tab：索引状态与操作", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 0"),
+    );
+  });
+});
+
+// --- 外观 tab（M4.5 wave-3：界面动画开关） -----------------------------------------------
+
+describe("外观 tab：界面动画", () => {
+  it("开关改即存（settings_set 带 appearance.animations）", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "appearance");
+
+    const toggle = screen.getByTestId("settings-animations");
+    expect(toggle).toBeChecked(); // 默认开
+
+    await user.click(toggle);
+    expect(useSettingsStore.getState().settings.appearance.animations).toBe(false);
+    expect(ipcMock).toHaveBeenLastCalledWith(
+      "settings_set",
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          appearance: expect.objectContaining({ animations: false }),
+        }),
+      }),
+    );
+  });
+});
+
+// --- AI tab：索引参数与重建（M4.5 wave-3 第 7 项） ----------------------------------------
+
+describe("AI tab：索引参数与重建", () => {
+  beforeEach(() => {
+    indexRebuildMock.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("三参数输入改即存（钳制区间）；偏离默认出现「恢复默认」", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-param-embed-input-size")).toHaveValue(256);
+    expect(screen.getByTestId("ai-param-face-detect-threshold")).toHaveValue(0.5);
+    expect(screen.getByTestId("ai-param-face-cluster-threshold")).toHaveValue(0.4);
+    expect(screen.queryByTestId("ai-param-embed-input-size-reset")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByTestId("ai-param-embed-input-size"));
+    await user.type(screen.getByTestId("ai-param-embed-input-size"), "384");
+    fireEvent.blur(screen.getByTestId("ai-param-embed-input-size")); // 失焦提交（编辑期走本地草稿）
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.ai.embedInputSize).toBe(384),
+    );
+    expect(screen.getByTestId("ai-param-embed-input-size-reset")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("ai-param-embed-input-size-reset"));
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.ai.embedInputSize).toBe(256),
+    );
+  });
+
+  it("重建：二次红色确认 → indexRebuild(kind)；取消不发", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-rebuild-semantic")).toBeInTheDocument();
+    await user.click(screen.getByTestId("ai-rebuild-semantic"));
+    expect(screen.getByTestId("ai-rebuild-confirm-semantic")).toBeInTheDocument();
+
+    // 取消路径
+    await user.click(screen.getByTestId("ai-rebuild-cancel-semantic"));
+    expect(indexRebuildMock).not.toHaveBeenCalled();
+
+    // 确认路径
+    await user.click(screen.getByTestId("ai-rebuild-semantic"));
+    await user.click(screen.getByTestId("ai-rebuild-confirm-semantic"));
+    await waitFor(() => expect(indexRebuildMock).toHaveBeenCalledWith("semantic"));
+  });
+
+  it("重建失败（模型未下载等）：后端 Err 文案透传", async () => {
+    indexRebuildMock.mockRejectedValue("请先在设置中下载模型");
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    await user.click(await screen.findByTestId("ai-rebuild-face"));
+    await user.click(screen.getByTestId("ai-rebuild-confirm-face"));
+    expect(await screen.findByTestId("ai-rebuild-error")).toHaveTextContent(
+      "请先在设置中下载模型",
     );
   });
 });

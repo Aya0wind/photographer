@@ -17,13 +17,11 @@
   "nav.tags": "标签",
   "nav.media": "媒体类型",
   "nav.similar": "相似照片",
-
   "recent.title": "最近浏览",
   "recent.desc": "按最后浏览时间倒序",
   "recent.loading": "正在读取…",
   "recent.empty": "还没有浏览记录",
   "recent.emptyHint": "打开过的照片会出现在这里。",
-
   "media.title": "媒体类型",
   "media.desc": "按类型浏览照片库",
   "media.photo": "照片",
@@ -31,25 +29,20 @@
   "media.video": "视频",
   "media.count": "{{count}} 张",
   "media.empty": "库内还没有照片（后端未连接时同样显示）。",
-
   "titlebar.minimize": "最小化",
   "titlebar.maximize": "最大化",
   "titlebar.restore": "还原",
   "titlebar.close": "关闭",
-
   "taskdrawer.title": "任务",
   "taskdrawer.open": "任务",
   "taskdrawer.close": "关闭",
   "taskdrawer.pauseAll": "全部暂停",
   "taskdrawer.clearDone": "清除已完成",
   "taskdrawer.empty": "暂无进行中的任务",
-
   "globalsearch.placeholder": "输入一段描述搜索照片…",
   "globalsearch.filter": "条件筛选",
   "globalsearch.indexHint": "语义索引建立中，搜索结果可能不全",
-
   "gallery.yearRail": "按年份跳转",
-
   "menu.file": "文件",
   "menu.view": "查看",
   "menu.tools": "工具",
@@ -65,7 +58,6 @@
   "menu.tools.taskCenter": "任务中心",
   "menu.tools.importLogs": "导入日志",
   "menu.help.about": "关于 Smart Photo",
-
   "pages.gallery.title": "照片画廊（M4 交付）",
   "pages.gallery.desc": "缩略图虚拟网格、看图与评分浏览将在里程碑 M4 于此交付。",
   "pages.search.title": "照片搜索（M3 交付）",
@@ -80,13 +72,11 @@
   "pages.settings.libraryRoot": "照片存储目录",
   "pages.settings.dbDir": "数据库目录",
   "pages.settings.libraryRootUnset": "未设置",
-
   "settings.libraries.title": "库",
   "settings.libraries.goPicker": "前往库选择器",
   "settings.libraries.importRoot": "导入收纳区",
   "settings.libraries.template": "目录模板",
   "settings.libraries.active": "使用中",
-
   "settings.tab.general": "常规",
   "settings.tab.import": "导入",
   "settings.tab.libraries": "库",
@@ -143,7 +133,6 @@
   "settings.ai.faceClear": "一键清除人脸数据",
   "settings.ai.faceClearConfirm": "确认清除全部人脸数据？不可恢复",
   "settings.ai.faceClearGo": "确认清除",
-
   "people.title": "人物",
   "people.desc": "人脸聚类将在索引完成后自动生成",
   "people.placeholderName": "待索引",
@@ -158,13 +147,11 @@
   "people.deleteConfirmYes": "确认删除",
   "people.back": "返回",
   "people.assetsEmpty": "该人物暂无照片",
-
   "albums.title": "相册",
   "albums.desc": "预置标签的语义搜索快捷入口",
   "albums.tagTitle": "智能相册 · {{tag}}",
   "albums.allHidden": "所有标签已隐藏，可在设置 → 画廊中恢复",
   "albums.tagsTitle": "智能分类标签",
-
   "search.mode": "搜索模式",
   "search.mode.filters": "条件",
   "search.mode.semantic": "语义",
@@ -182,12 +169,10 @@
   "search.semantic.history": "最近搜索",
   "search.semantic.indexBuilding": "语义索引建立中（{{done}}/{{total}}），完成后即可搜索",
   "settings.ai.semanticModelHint": "语义搜索需要图像与文本两个模型",
-
   "newLib.title": "新建库",
   "newLib.hint": "创建后进入配置向导，补完整理规则与 AI 设置。",
   "newLib.create": "创建",
   "newLib.streamsDesc": "复制/移动文件的并行数（相机 MTP 恒为 1）",
-
   "picker.title": "选择要打开的库",
   "picker.subtitle": "双击库卡片，或选中后点“打开”进入；每次启动都会先到这里。",
   "picker.lastActive": "上次使用",
@@ -196,13 +181,11 @@
   "picker.emptyTitle": "创建你的第一个库",
   "picker.createFirst": "新建库",
   "picker.unconfigured": "配置未完成",
-
   "onboarding.title": "欢迎使用 Smart Photo",
   "onboarding.step.library": "库位置",
   "onboarding.step.scheme": "库的整理规则",
   "onboarding.step.ai": "AI 功能",
   "onboarding.step.done": "完成",
-
   "onboarding.library.name": "库名称",
   "onboarding.library.nameDesc": "每个库是独立的数据单元，可建多个（如“主库”“工作库”）。",
   "onboarding.library.dbDir": "数据库目录",
@@ -212,7 +195,6 @@
   "onboarding.library.importSubdir": "导入子目录",
   "onboarding.library.importSubdirDesc": "应用写入区（相对照片存储目录）。默认 SmartPhoto，留空表示直接写入照片目录。",
   "onboarding.library.browse": "浏览…",
-
   "onboarding.scheme.template": "目录命名模板",
   "onboarding.scheme.templateDesc": "可用令牌：{YYYY} {MM} {DD} {原文件名} {相机} 等",
   "onboarding.scheme.storageNote": "卡/相机或已有文件夹导入的照片统一整理到「照片目录\\SmartPhoto」（可改名）；导入时可选择保留原文件（复制）或移动收纳。",
@@ -223,7 +205,6 @@
   "onboarding.scheme.dup.rename": "重命名导入（追加 _1 后缀）",
   "onboarding.scheme.dup.ask": "每次询问",
   "onboarding.scheme.notify": "导入里程碑进度通知（25%/50%/75%/完成）",
-
   "onboarding.ai.choice.all": "全部开启（推荐）",
   "onboarding.ai.choice.allDesc": "语义搜索 + 人脸识别 + 场景标签。GPU 加速，全部本地运行。",
   "onboarding.ai.choice.semantic": "仅语义搜索",
@@ -231,7 +212,6 @@
   "onboarding.ai.choice.none": "全部关闭",
   "onboarding.ai.choice.noneDesc": "不影响导入与浏览，之后可在设置中随时开启。",
   "onboarding.ai.note": "所有 AI 处理 100% 在本机完成，不上传任何照片与数据。",
-
   "onboarding.done.library": "库",
   "onboarding.done.dbDir": "数据库目录",
   "onboarding.done.template": "目录模板",
@@ -240,13 +220,11 @@
   "onboarding.done.ai": "AI 功能",
   "onboarding.done.note": "以上设置均可随时在设置中修改；目录变更支持自动迁移。",
   "onboarding.done.start": "开始使用 Smart Photo",
-
   "common.back": "上一步",
   "common.next": "下一步",
   "common.done": "完成",
   "common.close": "关闭",
   "common.cancel": "取消",
-
   "deviceDialog.title": "发现新设备",
   "deviceDialog.kind.reader": "读卡器",
   "deviceDialog.kind.camera": "相机",
@@ -259,7 +237,6 @@
   "deviceDialog.startImport": "开始导入",
   "deviceDialog.ignore": "忽略",
   "deviceDialog.waiting": "还有 {{count}} 台设备待处理",
-
   "wizard.title": "导入向导",
   "wizard.ipcUnavailable": "后端未连接（预览模式）",
   "wizard.leftPane": "设备与源文件",
@@ -339,13 +316,11 @@
   "wizard.start": "开始导入",
   "wizard.starting": "正在启动…",
   "wizard.startError": "启动失败：后端未连接或命令暂不可用。",
-
   "jobStatus.running": "进行中",
   "jobStatus.paused": "已暂停",
   "jobStatus.done": "已完成",
   "jobStatus.cancelled": "已取消",
   "jobStatus.failed": "失败",
-
   "importCard.dismissHint": "收起（导入继续后台执行）",
   "importCard.jobCopy": "复制任务 #{{id}}",
   "importCard.jobMove": "移动任务 #{{id}}",
@@ -355,7 +330,6 @@
   "importCard.viewTasks": "查看任务",
   "importCard.errorTitle": "发生错误",
   "importCard.dismiss": "收起",
-
   "tasks.title": "任务中心",
   "tasks.idle": "暂无进行中的任务",
   "tasks.currentJob": "导入任务 #{{id}}",
@@ -376,7 +350,6 @@
   "tasks.columnStartedAt": "开始时间",
   "tasks.loadMore": "加载更多",
   "tasks.loading": "加载中…",
-
   "summary.title": "导入完成",
   "summary.titleMove": "移动完成",
   "summary.done": "成功",
@@ -391,18 +364,14 @@
   "summary.retryError": "重试失败：后端不可用。",
   "summary.retryCreated": "已创建重试任务 #{{id}}",
   "summary.close": "关闭",
-
   "logs.filter": "级别",
   "logs.count": "{{count}} 条",
   "logs.empty": "暂无日志",
   "logs.loadMore": "加载更多",
   "logs.allLoaded": "已全部加载",
-
   "tasks.columnActions": "操作",
-
   "tasks.index.pending": "索引任务：{{count}} 项待处理",
   "tasks.index.pause": "暂停",
-
   "importCard.indexingNote": "缩略图与详细索引正在后台生成",
   "backgroundTask.index.thumb": "正在生成缩略图索引",
   "backgroundTask.index.exif": "正在提取图片详细信息",
@@ -410,7 +379,6 @@
   "backgroundTask.index.face": "正在识别人脸",
   "backgroundTask.progress": "已完成 {{done}} / {{total}}",
   "backgroundTask.queue": "待处理 {{pending}} · 运行中 {{running}}",
-
   "clean.entry": "清理源文件…",
   "clean.entryShort": "清理源文件",
   "clean.title": "清理源文件",
@@ -427,7 +395,6 @@
   "clean.failedCount": "失败",
   "clean.freed": "已释放",
   "clean.failedList": "失败清单（{{count}}）",
-
   "gallery.title": "画廊",
   "gallery.unknownDate": "未知日期",
   "gallery.groupCount": "{{count}} 张",
@@ -447,7 +414,6 @@
   "gallery.calendar.month": "月份",
   "gallery.calendar.monthN": "{{month}} 月",
   "gallery.calendar.jump": "跳转",
-
   "viewer.exif": "详细信息",
   "viewer.exifLoading": "正在读取…",
   "viewer.exifUnavailable": "详细信息不可用（后端未连接）。",
@@ -491,7 +457,6 @@
   "viewer.rotateCcw": "逆时针旋转 90°",
   "viewer.zoomHint": "滚轮缩放 · 拖拽平移 · 双击复位",
   "viewer.noPreview": "暂无预览",
-
   "search.kind": "类型",
   "search.kind.all": "全部",
   "search.kind.photo": "照片",
@@ -536,7 +501,6 @@
   "search.loading": "搜索中…",
   "search.empty": "没有匹配的照片",
   "search.emptyHint": "试试放宽日期范围或清除相机筛选。",
-
   "settings.tab.gallery": "画廊",
   "settings.section.gallery": "画廊展示",
   "settings.gallery.mergeRawJpg": "RAW+JPG 合并展示",
@@ -544,7 +508,6 @@
   "settings.section.albums": "智能相册",
   "settings.albums.visibleTags": "智能相册显示的标签",
   "settings.albums.visibleTagsDesc": "勾选的标签显示在智能相册页，取消勾选即隐藏。",
-
   "settings.ai.indexSection": "索引状态与操作",
   "settings.ai.index.thumb": "缩略图索引",
   "settings.ai.index.exif": "详细信息索引（EXIF）",
@@ -565,5 +528,57 @@
   "tasks.index.statusExif": "详细信息：待处理 {{pending}} · 已完成 {{done}} · 失败 {{failed}}",
   "tasks.index.statusAi": "语义：已索引 {{done}} / {{total}}",
   "tasks.index.statusFace": "人脸：已索引 {{done}} / {{total}}",
-  "tasks.index.kick": "立即开始"
+  "tasks.index.kick": "立即开始",
+  "shortcuts.title": "快捷键",
+  "shortcuts.hint": "按 ? 查看快捷键",
+  "shortcuts.group.global": "全局",
+  "shortcuts.group.gallery": "画廊",
+  "shortcuts.group.viewer": "查看器",
+  "shortcuts.global.help": "快捷键速查",
+  "shortcuts.global.esc": "关闭弹窗 / 退出当前操作",
+  "shortcuts.gallery.move": "移动高亮",
+  "shortcuts.gallery.open": "打开高亮照片",
+  "shortcuts.gallery.select": "进入多选并选中",
+  "shortcuts.gallery.exitSelect": "退出多选",
+  "shortcuts.viewer.nav": "上一张 / 下一张",
+  "shortcuts.viewer.zoom": "缩放 / 平移 / 复位",
+  "shortcuts.viewer.rotate": "旋转（顺/逆）",
+  "shortcuts.viewer.homeEnd": "跳组首 / 组尾",
+  "shortcuts.viewer.close": "关闭查看器",
+  "gallery.select": "选择",
+  "selection.count": "已选 {{count}} 张",
+  "selection.favorite": "收藏",
+  "selection.flag": "旗标",
+  "selection.share": "分享",
+  "selection.reveal": "在资源管理器中显示",
+  "selection.copyPath": "复制文件路径",
+  "selection.cancel": "取消",
+  "selection.done": "已完成",
+  "selection.copied": "路径已复制",
+  "selection.copyFailed": "复制失败",
+  "selection.revealUnavailable": "资源管理器不可用（预览模式）",
+  "viewer.rating": "评分",
+  "settings.tab.appearance": "外观",
+  "settings.section.appearance": "界面",
+  "settings.appearance.animations": "界面动画",
+  "settings.appearance.animationsDesc": "关闭后停用界面过渡与动效（功能不受影响）。",
+  "settings.ai.paramsSection": "索引参数",
+  "settings.ai.param.embedInputSize": "语义嵌入输入尺寸",
+  "settings.ai.param.faceDetectThreshold": "人脸检测阈值",
+  "settings.ai.param.faceClusterThreshold": "人脸聚类阈值",
+  "settings.ai.param.rebuildHint": "修改后对应索引会在后台自动重建",
+  "settings.ai.param.resetDefault": "恢复默认",
+  "settings.ai.rebuildSection": "重建索引",
+  "settings.ai.rebuild.run": "重建",
+  "settings.ai.rebuild.confirm": "将清空缓存重跑，确认？",
+  "settings.ai.rebuild.confirmYes": "确认重建",
+  "settings.ai.rebuild.thumb": "缩略图索引",
+  "settings.ai.rebuild.exif": "详细信息索引",
+  "settings.ai.rebuild.semantic": "语义索引",
+  "settings.ai.rebuild.face": "人脸索引",
+  "taskdrawer.history": "历史任务",
+  "taskdrawer.loadMore": "加载更多",
+  "taskdrawer.viewLogs": "日志",
+  "taskdrawer.deleteJob": "删除记录",
+  "taskdrawer.logsTitle": "任务 #{{id}} 日志"
 }

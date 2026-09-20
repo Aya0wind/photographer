@@ -18,7 +18,7 @@ import AssetThumb from "@/features/gallery/components/AssetThumb";
  *   RAW=NEF+ARW…、视频=MP4…）——后端不可用时计数 0，卡片仍渲染
  * - 封面：assetsPage(0, 1, {kinds}) 取该类首张 → AssetThumb 模糊背景（blur-2xl
  *   毛玻璃）+ 图标 + 计数；无资产时渐变底
- * - 点击 → /search?kind=photo|raw|video（搜索页 URL 协议预置 kinds 筛选）
+ * - 点击 → /gallery?kind=photo|raw|video（画廊 URL 协议预置 kinds 筛选）
  */
 
 /** 三大卡的类型定义与展示序 */
@@ -185,7 +185,7 @@ export default function MediaPage() {
               label={t(labelKey)}
               count={counts[kind]}
               cover={covers[kind] ?? null}
-              onClick={() => navigate(`/search?kind=${kind}`)}
+              onClick={() => navigate(`/gallery?kind=${kind}`)}
             />
           ))}
         </div>

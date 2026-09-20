@@ -59,7 +59,7 @@ function renderMedia() {
       <MemoryRouter initialEntries={["/media"]}>
         <Routes>
           <Route path="/media" element={<MediaPage />} />
-          <Route path="/search" element={<LocationProbe />} />
+          <Route path="/gallery" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -132,7 +132,7 @@ describe("媒体类型页", () => {
     const cards = await screen.findAllByTestId("media-card");
     await user.click(cards[1]);
 
-    expect(await screen.findByTestId("loc")).toHaveTextContent("/search?kind=raw");
+    expect(await screen.findByTestId("loc")).toHaveTextContent("/gallery?kind=raw");
   });
 
   it("该类无资产 → 渐变封面占位（不请求缩略图）", async () => {
@@ -163,6 +163,6 @@ describe("媒体类型页", () => {
     expect(await screen.findByTestId("media-empty")).toBeInTheDocument();
 
     await user.click(cards[2]);
-    expect(await screen.findByTestId("loc")).toHaveTextContent("/search?kind=video");
+    expect(await screen.findByTestId("loc")).toHaveTextContent("/gallery?kind=video");
   });
 });

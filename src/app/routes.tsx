@@ -1,4 +1,9 @@
-import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
+import {
+  createBrowserRouter,
+  Navigate,
+  RouterProvider,
+  useSearchParams,
+} from "react-router";
 
 import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
@@ -7,11 +12,9 @@ import MediaPage from "@/features/media/pages/MediaPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
-import SearchPage from "@/features/search/pages/SearchPage";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import { AlbumsIndexPage, AlbumTagPage } from "@/features/albums/pages/AlbumsPages";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
-import TasksPage from "@/features/tasks/pages/TasksPage";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
@@ -33,6 +36,13 @@ export function GatedShell() {
   return <AppShell />;
 }
 
+/** /search → /gallery 重定向（M4.5 画廊+搜索合并；参数原样透传） */
+export function SearchRedirect() {
+  const [params] = useSearchParams();
+  const query = params.toString();
+  return <Navigate to={query ? `/gallery?${query}` : "/gallery"} replace />;
+}
+
 export const router = createBrowserRouter([
   // 启动首屏：库选择器（达芬奇式，每次启动先选库）
   { path: "/library-picker", element: <LibraryPickerPage /> },
@@ -46,12 +56,11 @@ export const router = createBrowserRouter([
       { path: "gallery", element: <GalleryPage /> },
       { path: "recent", element: <RecentPage /> },
       { path: "media", element: <MediaPage /> },
-      { path: "search", element: <SearchPage /> },
+      { path: "search", element: <SearchRedirect /> },
       { path: "people", element: <PeoplePage /> },
       { path: "albums", element: <AlbumsIndexPage /> },
       { path: "albums/:tag", element: <AlbumTagPage /> },
       { path: "import", element: <ImportPage /> },
-      { path: "tasks", element: <TasksPage /> },
       { path: "settings", element: <SettingsPage /> },
     ],
   },

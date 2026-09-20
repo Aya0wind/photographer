@@ -37,7 +37,6 @@ interface MenuDef {
 const VIEW_ITEMS: { key: string; to: string; shortcut?: string }[] = [
   { key: "gallery", to: "/gallery", shortcut: "Ctrl+1" },
   { key: "search", to: "/search", shortcut: "Ctrl+2" },
-  { key: "tasks", to: "/tasks", shortcut: "Ctrl+4" },
   { key: "settings", to: "/settings", shortcut: "Ctrl+5" },
 ];
 
@@ -46,7 +45,6 @@ const CTRL_NAV: Record<string, string> = {
   "1": "/gallery",
   "2": "/search",
   "3": "/import",
-  "4": "/tasks",
   "5": "/settings",
 };
 
@@ -188,10 +186,8 @@ export default function MenuBar() {
     {
       key: "tools",
       entries: [
-        { kind: "item", key: "taskCenter", onSelect: () => navigate("/tasks") },
         { kind: "separator", key: "tools-sep" },
         // v1 先落任务中心页；日志锚点（#logs）待任务中心拆分后接入
-        { kind: "item", key: "importLogs", onSelect: () => navigate("/tasks") },
       ],
     },
     {

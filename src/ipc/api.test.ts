@@ -16,6 +16,10 @@ import {
   assetsByIds,
   assetsPage,
   assetViewMark,
+  assetFlagSet,
+  assetRatingSet,
+  importJobDelete,
+  indexRebuild,
   cameraList,
   formatList,
   lensList,
@@ -376,6 +380,8 @@ describe("M3 画廊命令", () => {
       gpsLat: null,
       gpsLon: null,
       format: null,
+      rating: null,
+      flagged: null,
     });
     expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
   });
@@ -450,6 +456,8 @@ describe("M3 画廊命令", () => {
       gpsLat: null,
       gpsLon: null,
       format: null,
+      rating: null,
+      flagged: null,
     });
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
@@ -487,6 +495,38 @@ describe("M3 画廊命令", () => {
     await expect(cameraList()).resolves.toEqual([]);
     invokeMock.mockResolvedValueOnce(null);
     await expect(cameraList()).resolves.toEqual([]);
+  });
+
+  it("indexRebuild：index_rebuild 负载（thumb/exif/semantic/face）；失败透传", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(indexRebuild("semantic")).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("index_rebuild", { kind: "semantic" });
+
+    invokeMock.mockRejectedValueOnce("请先在设置中下载模型");
+    await expect(indexRebuild("face")).rejects.toBe("请先在设置中下载模型");
+  });
+
+  it("assetRatingSet / assetFlagSet：负载 + 失败静默", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(assetRatingSet(3, 5)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("asset_rating_set", { assetId: 3, rating: 5 });
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetRatingSet(3, 0)).resolves.toBeUndefined();
+
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(assetFlagSet(3, true)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("asset_flag_set", { assetId: 3, flagged: true });
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetFlagSet(3, false)).resolves.toBeUndefined();
+  });
+
+  it("importJobDelete：import_job_delete 负载；失败透传", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(importJobDelete(7)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("import_job_delete", { jobId: 7 });
+
+    invokeMock.mockRejectedValueOnce(new Error("locked"));
+    await expect(importJobDelete(7)).rejects.toThrow("locked");
   });
 
   it("recentAssets：recent_assets keyset 负载；失败/非数组回退空数组", async () => {

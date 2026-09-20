@@ -271,6 +271,10 @@ export interface AssetDetailDto {
   gpsLon?: number | null;
   /** 文件格式（扩展名大写，如 "NEF"） */
   format?: string | null;
+  /** 评分 0-5（0=未评；查看器星标条） */
+  rating?: number | null;
+  /** 旗标（待整理标记） */
+  flagged?: boolean | null;
 }
 
 // --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
@@ -785,6 +789,8 @@ const numOf = (v: unknown): number | null =>
       gpsLat: numOf(r.gpsLat ?? r.gps_lat),
       gpsLon: numOf(r.gpsLon ?? r.gps_lon),
       format: strOf(r.format),
+      rating: numOf(r.rating),
+      flagged: typeof r.flagged === "boolean" ? r.flagged : null,
     };
   } catch {
     return null;
@@ -911,6 +917,40 @@ export async function indexStatus(): Promise<IndexStatus | null> {
  *  如「请先在设置中下载模型」）由调用方提示；传输失败经 ipc() 统一置不可用标志 */
 export async function indexKickNow(kind: IndexKind): Promise<void> {
   await ipc<void>("index_kick_now", { kind });
+}
+
+// --- 索引重建 / 资产标记（M5） --------------------------------------------------------
+
+/** 重建索引的通道（index_rebuild；语义通道在重建命令里叫 semantic，与 IndexKind 的 ai 区分） */
+export type RebuildKind = "thumb" | "exif" | "semantic" | "face";
+
+/** 重建指定索引（index_rebuild：清缓存/任务账重跑）。不 catch：失败文案透传给调用方 */
+export async function indexRebuild(kind: RebuildKind): Promise<void> {
+  await ipc<void>("index_rebuild", { kind });
+}
+
+/** 资产评分（asset_rating_set；0=清除，1-5 星）。命令失败静默（乐观 UI 由调用方回滚） */
+export async function assetRatingSet(assetId: number, rating: number): Promise<void> {
+  try {
+    await ipc<void>("asset_rating_set", { assetId, rating });
+  } catch {
+    // 静默
+  }
+}
+
+/** 资产旗标（asset_flag_set；红旗标记/待整理）。命令失败静默 */
+export async function assetFlagSet(assetId: number, flagged: boolean): Promise<void> {
+  try {
+    await ipc<void>("asset_flag_set", { assetId, flagged });
+  } catch {
+    // 静默
+  }
+}
+
+/** 删除历史任务记录（import_job_delete；任务抽屉历史区 × 按钮）。不 catch：
+ *  失败文案透传给调用方提示 */
+export async function importJobDelete(jobId: number): Promise<void> {
+  await ipc<void>("import_job_delete", { jobId });
 }
 
 // --- 事件订阅 ----------------------------------------------------------------

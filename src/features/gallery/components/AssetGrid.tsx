@@ -25,20 +25,26 @@ import AssetThumb from "./AssetThumb";
  *
  * 布局双模式（M4.5 A4）：
  * - square（默认，兼容视图）：等宽方格（tile×tile），搜索/人物页等继续使用
- * - justify（画廊新默认）：统一行高的 justify 网格——行内按 width/height 宽高比
+ * - justify（画廊默认）：统一行高的 justify 网格——行内按 width/height 宽高比
  *   分配宽度（经典贪心算法：逐项累加，行高跌破目标即封行；组尾行不足整行按
- *   目标行高左对齐），无尺寸资产按 4:3 兜底；tile 语义变为「目标行高」。
+ *   目标行高左对齐），无尺寸资产按 4:3 兜底；tile 语义变为「目标行高」
  *
- * 虚拟化：TanStack Virtual 行模型（组头行 40px + 内容行自带高度），行划分与
- * 行高在 useMemo 重算（justify 行高逐行精确，estimateSize 即实高）。
- * 吸顶组头由上层以覆盖条实现；本组件通过 onViewportChange 上报
- * 「视口首行所属组 + scrollTop」。
+ * 组头折叠（M4.5）：chevron 点击折叠为一行 36px 头（再点展开）；状态存组件本地。
+ *
+ * 多选（M4.5）：selection.active 时点击瓦片=切换选中（高亮描边+左上角序号角标）；
+ * Ctrl/Cmd+点击随时进入多选（onCtrlClick）；长按 500ms 同理（onLongPress）。
+ *
+ * 虚拟化：TanStack Virtual 行模型（组头行 40px/折叠 36px + 内容行自带高度），
+ * 行划分与行高在 useMemo 重算。吸顶组头由上层以覆盖条实现；本组件通过
+ * onViewportChange 上报「视口首行所属组 + scrollTop」。
  */
 
 /** 默认方格边长（中档；三档切换见 useGalleryTileSize） */
 const TILE = 200;
 const GAP = 4;
 const HEADER_H = 40;
+/** 折叠态组头高度 */
+const COLLAPSED_HEADER_H = 36;
 /** 内容区水平内边距（px-3 两侧）；justify 可用宽需扣除 */
 const H_PADDING = 24;
 /** 无尺寸资产的宽高比兜底（4:3） */
@@ -47,6 +53,8 @@ export const ASPECT_FALLBACK = 4 / 3;
 export const STICKY_OFFSET = 44;
 /** 网格缩略图名义边长（后端 snap 到 256 档就近） */
 export const GRID_THUMB_SIZE = 240;
+/** 长按进入多选的阈值 */
+export const LONG_PRESS_MS = 500;
 
 export type GridLayout = "square" | "justify";
 
@@ -109,7 +117,7 @@ export function justifyItems(
 }
 
 type GridRow =
-  | { type: "header"; group: AssetGroup }
+  | { type: "header"; group: AssetGroup; collapsed: boolean }
   | { type: "tiles"; group: AssetGroup; assets: AssetDto[]; height: number; widths: number[] };
 
 export interface AssetGridHandle {
@@ -125,10 +133,23 @@ export interface ViewportInfo {
   group: AssetGroup | null;
 }
 
+/** 多选支持（M4.5）：active 时点击=切换选中；selected 为选中序（角标序号=index+1） */
+export interface GridSelection {
+  active: boolean;
+  selected: readonly number[];
+  onToggle: (asset: AssetDto) => void;
+}
+
 interface AssetGridProps {
   groups: AssetGroup[];
   /** 点击资产块（打开查看器）；省略时块为纯展示 */
   onOpenAsset?: (asset: AssetDto, group: AssetGroup) => void;
+  /** Ctrl/Cmd+点击（进入多选并选中该资产）；省略时不响应 */
+  onCtrlClick?: (asset: AssetDto) => void;
+  /** 长按瓦片 500ms（进入多选并选中该资产）；省略时不响应 */
+  onLongPress?: (asset: AssetDto) => void;
+  /** 多选状态 */
+  selection?: GridSelection;
   /** 无限滚动哨兵节点（挂在本网格滚动容器内、全部内容之后） */
   sentinelRef?: Ref<HTMLDivElement>;
   /** 视口变化上报（吸顶组头/滚动状态用；仅组键或 scrollTop 显著变化时触发） */
@@ -148,6 +169,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   {
     groups,
     onOpenAsset,
+    onCtrlClick,
+    onLongPress,
+    selection,
     sentinelRef,
     onViewportChange,
     tile = TILE,
@@ -161,6 +185,17 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
+
+  // --- 组头折叠（组件本地状态；切页/刷新不保留） -----------------------------------
+  const [collapsedKeys, setCollapsedKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleCollapsed = useCallback((key: string) => {
+    setCollapsedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // 容器宽自适应（offsetWidth 读初值 + ResizeObserver 跟踪；jsdom 下 RO 不触发但
   // offsetWidth 已被测试 mock 为非零）
@@ -186,13 +221,14 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     ),
   );
 
-  // 行划分（useMemo 重算）：square 按列数切片等宽；justify 按宽高比贪心切行
+  // 行划分（useMemo 重算）：折叠组只保留头行；square 按列数切片等宽；justify 按宽高比贪心切行
   const rows = useMemo<GridRow[]>(() => {
     const out: GridRow[] = [];
     for (const group of groups) {
-      out.push({ type: "header", group });
+      const collapsed = collapsedKeys.has(group.key);
+      out.push({ type: "header", group, collapsed });
+      if (collapsed || group.assets.length === 0) continue;
       if (layout === "justify") {
-        if (group.assets.length === 0) continue;
         for (const row of justifyItems(group.assets, usableWidth, tile)) {
           out.push({ type: "tiles", group, ...row });
         }
@@ -204,12 +240,17 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       }
     }
     return out;
-  }, [groups, columns, layout, usableWidth, tile]);
+  }, [groups, columns, layout, usableWidth, tile, collapsedKeys]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : rows[i].height + GAP),
+    estimateSize: (i) =>
+      rows[i].type === "header"
+        ? rows[i].collapsed
+          ? COLLAPSED_HEADER_H
+          : HEADER_H
+        : rows[i].height + GAP,
     overscan: 6,
   });
 
@@ -249,6 +290,10 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       if (cursor === null) return;
       const asset = flatAssets[cursor];
       if (asset && onOpenAsset) {
+        if (selection?.active) {
+          selection.onToggle(asset);
+          return;
+        }
         const owner = groups.find((g) => g.assets.includes(asset));
         if (owner) onOpenAsset(asset, owner);
       }
@@ -303,6 +348,51 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     [rows, virtualizer],
   );
 
+  // --- 长按（进入多选）：pointerdown 起 500ms 计时，抬起/离开/滚动取消 ----------------
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFired = useRef(false);
+  const clearLongPress = useCallback(() => {
+    if (longPressTimer.current !== null) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }, []);
+  useEffect(() => clearLongPress, [clearLongPress]);
+
+  function handleTilePointerDown(asset: AssetDto): void {
+    if (selection?.active || !onLongPress) return; // 已在多选或调用方不支持
+    longPressFired.current = false;
+    clearLongPress();
+    longPressTimer.current = setTimeout(() => {
+      longPressTimer.current = null;
+      longPressFired.current = true;
+      onLongPress(asset);
+    }, LONG_PRESS_MS);
+  }
+
+  function handleTileClick(asset: AssetDto, group: AssetGroup, ctrl: boolean): void {
+    if (longPressFired.current) {
+      // 长按刚触发：吞掉本次 click（多选已切换）
+      longPressFired.current = false;
+      return;
+    }
+    if (selection?.active) {
+      selection.onToggle(asset);
+      return;
+    }
+    if (ctrl && onCtrlClick) {
+      onCtrlClick(asset);
+      return;
+    }
+    onOpenAsset?.(asset, group);
+  }
+
+  const selectedRank = useMemo(() => {
+    const map = new Map<number, number>();
+    selection?.selected.forEach((id, i) => map.set(id, i + 1));
+    return map;
+  }, [selection?.selected]);
+
   return (
     <div
       ref={scrollRef}
@@ -329,12 +419,44 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
             >
               {row.type === "header" ? (
                 <div
-                  className="flex h-[40px] items-center gap-2"
+                  // 组头=折叠开关（M4.5）：点击折叠为一行 36px 头，再点展开
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={!row.collapsed}
+                  onClick={() => toggleCollapsed(row.group.key)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      toggleCollapsed(row.group.key);
+                    }
+                  }}
+                  className={`flex cursor-pointer select-none items-center gap-2 ${
+                    row.collapsed ? "h-[36px]" : "h-[40px]"
+                  }`}
                   data-testid={row.group.key === UNKNOWN_GROUP_KEY ? "gallery-group-unknown" : "gallery-group"}
                   data-group-key={row.group.key}
                   data-count={row.group.assets.length}
+                  data-collapsed={row.collapsed}
                 >
-                  <h2 className="text-[13px] font-semibold text-text-primary">
+                  {/* 折叠 chevron：展开朝下 / 折叠朝右 */}
+                  <svg
+                    viewBox="0 0 16 16"
+                    width="10"
+                    height="10"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={`shrink-0 text-text-muted transition-transform duration-150 ${
+                      row.collapsed ? "-rotate-90" : ""
+                    }`}
+                    aria-hidden="true"
+                    data-testid="gallery-group-collapse"
+                  >
+                    <path d="M3.5 6l4.5 4.5L12.5 6" />
+                  </svg>
+                  <h2 className="truncate text-[13px] font-semibold text-text-primary">
                     {row.group.date === null
                       ? t("gallery.unknownDate")
                       : formatDateLabel(row.group.date)}
@@ -353,6 +475,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const badge = badges?.get(asset.id) ?? null;
                     const score = scores?.get(asset.id);
                     const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
+                    const isSelected = selection?.active && selectedRank.has(asset.id);
                     const inner = (
                       <>
                         <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
@@ -375,23 +498,40 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             {Math.round(score * 100)}%
                           </span>
                         )}
+                        {isSelected && (
+                          <span
+                            className="absolute left-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 font-mono text-[10px] font-bold leading-none text-black"
+                            data-testid="gallery-tile-select-badge"
+                          >
+                            {selectedRank.get(asset.id)}
+                          </span>
+                        )}
                       </>
                     );
                     const itemWidth = row.widths[itemIndex];
-                    return onOpenAsset ? (
+                    const selectionClass = isSelected
+                      ? "outline outline-2 -outline-offset-2 outline-accent"
+                      : selection?.active
+                        ? "outline outline-1 -outline-offset-2 outline-transparent hover:outline-edge"
+                        : "";
+                    return onOpenAsset || selection?.active || onCtrlClick || onLongPress ? (
                       <button
                         key={asset.id}
                         type="button"
-                        onClick={() => onOpenAsset(asset, row.group)}
-                        className={`relative overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge ${
+                        onClick={(e) => handleTileClick(asset, row.group, e.ctrlKey || e.metaKey)}
+                        onPointerDown={() => handleTilePointerDown(asset)}
+                        onPointerUp={clearLongPress}
+                        onPointerLeave={clearLongPress}
+                        className={`relative touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
-                        }`}
+                        } ${selectionClass}`}
                         style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
                         data-cursor={isCursor}
+                        data-selected={isSelected}
                       >
                         {inner}
                       </button>
@@ -400,13 +540,14 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         key={asset.id}
                         className={`relative overflow-hidden rounded-md bg-panel/40 ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
-                        }`}
+                        } ${selectionClass}`}
                         style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
                         data-kind={asset.kind}
                         data-cursor={isCursor}
+                        data-selected={isSelected}
                       >
                         {inner}
                       </div>

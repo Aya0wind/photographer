@@ -15,7 +15,6 @@ import {
   assetsPage,
   isIpcAvailable,
   type AssetDto,
-  type AssetGroupDate,
 } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 
@@ -383,72 +382,7 @@ describe("画廊：空态与降级", () => {
 
 // --- 日期 chips 与跳转 --------------------------------------------------------------
 
-describe("画廊：日期 chips 条", () => {
-  const dates: AssetGroupDate[] = [
-    { date: "2026-09-18", count: 3, coverAssetId: 1 },
-    { date: "2026-09-17", count: 2, coverAssetId: 4 },
-    { date: null, count: 5, coverAssetId: 9 },
-  ];
-
-  it("chips 来自 assetGroupDates，含「未知」chip 且沉底（最新日期在前）", async () => {
-    assetsPageMock.mockResolvedValue(makePage(3, "2026-09-18", 3));
-    groupDatesMock.mockResolvedValue(dates);
-    renderGallery();
-
-    const known = await screen.findAllByTestId("gallery-chip");
-    expect(known).toHaveLength(2);
-    const unknown = screen.getByTestId("gallery-chip-unknown");
-    expect(unknown).toHaveTextContent("未知");
-    expect(unknown).toHaveTextContent("5");
-    // 未知 chip 在所有已知日期 chip 之后
-    expect(known[1].compareDocumentPosition(unknown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(known[0]).toHaveAttribute("data-date", "2026-09-18");
-    expect(known[1]).toHaveAttribute("data-date", "2026-09-17");
-  });
-
-  it("点击 chip 滚动到对应组（scrollTop 对齐组头）", async () => {
-    assetsPageMock.mockResolvedValue([
-      ...makePage(6, "2026-09-18", 20),
-      ...makePage(6, "2026-09-17", 10),
-    ]);
-    groupDatesMock.mockResolvedValue(dates);
-    const user = userEvent.setup();
-    renderGallery();
-
-    await screen.findAllByTestId("gallery-tile");
-    const scroll = screen.getByTestId("gallery-grid-scroll");
-    expect(scroll.scrollTop).toBe(0);
-
-    // 第二个日期 chip（09-17，DOM 顺序在 09-18 之后）
-    await user.click(screen.getAllByTestId("gallery-chip")[1]);
-
-    await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
-    const headers = screen.getAllByTestId("gallery-group");
-    expect(headers[0]).toHaveTextContent("2026年9月18日");
-    expect(headers[1]).toHaveTextContent("2026年9月17日");
-  });
-
-  it("目标组未加载时顺序补页直到出现再滚动", async () => {
-    // 首页整页 100 条（09-18）；chip 目标 09-16 在第二页（短页）
-    assetsPageMock.mockImplementation(async (afterId: number) => {
-      if (afterId === 0) return makePage(100, "2026-09-18", 200);
-      if (afterId === 101) return makePage(2, "2026-09-16", 10);
-      return [];
-    });
-    groupDatesMock.mockResolvedValue([
-      { date: "2026-09-18", count: 100, coverAssetId: 200 },
-      { date: "2026-09-16", count: 2, coverAssetId: 10 },
-    ]);
-    const user = userEvent.setup();
-    renderGallery();
-
-    await screen.findAllByTestId("gallery-tile");
-    expect(screen.queryByText("2026年9月16日")).not.toBeInTheDocument();
-
-    await user.click(screen.getAllByTestId("gallery-chip")[1]);
-    await waitFor(() => expect(screen.getByText("2026年9月16日")).toBeInTheDocument());
-    expect(assetsPageMock).toHaveBeenCalledWith(101, 100);
-  });
+describe("画廊：年份吸顶条与日期跳转", () => {
 
   it("点击年份跳该年首个日期组（M4.5 A4 年份吸顶条）", async () => {
     // 两组：2026-09（首屏）+ 2025-05（视口外）
@@ -481,46 +415,8 @@ describe("画廊：日期 chips 条", () => {
     await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
     expect(screen.getByText("2025年5月10日")).toBeInTheDocument();
   });
-
-  it("日历按钮：年月下拉弹层 + 跳转滚动到该月最新组并收起（v1 年月跳转）", async () => {
-    // 两组：2026-09（首屏）+ 2025-05（视口外）；跳 2025-05 需要真实滚动
-    assetsPageMock.mockResolvedValue([
-      ...makePage(6, "2026-09-18", 20),
-      ...makePage(6, "2025-05-10", 10),
-    ]);
-    groupDatesMock.mockResolvedValue([
-      { date: "2026-09-18", count: 6, coverAssetId: 20 },
-      { date: "2025-05-10", count: 6, coverAssetId: 10 },
-    ]);
-    const user = userEvent.setup();
-    renderGallery();
-
-    await screen.findAllByTestId("gallery-tile");
-    const scroll = screen.getByTestId("gallery-grid-scroll");
-    expect(scroll.scrollTop).toBe(0);
-
-    await user.click(screen.getByTestId("gallery-calendar-button"));
-    const panel = screen.getByTestId("gallery-calendar-panel");
-    expect(within(panel).getByTestId("gallery-calendar-year")).toBeInTheDocument();
-    expect(within(panel).getByTestId("gallery-calendar-month")).toBeInTheDocument();
-
-    // 选 2025 年 5 月 → 跳转到该月最新组（2025-05-10）
-    fireEvent.change(within(panel).getByTestId("gallery-calendar-year"), {
-      target: { value: "2025" },
-    });
-    fireEvent.change(within(panel).getByTestId("gallery-calendar-month"), {
-      target: { value: "5" },
-    });
-    await user.click(screen.getByTestId("gallery-calendar-jump"));
-
-    await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
-    await waitFor(() =>
-      expect(screen.queryByTestId("gallery-calendar-panel")).not.toBeInTheDocument(),
-    );
-  });
 });
 
-// --- RAW+JPG 合并展示 --------------------------------------------------------------
 
 describe("RAW+JPG 合并展示", () => {
   function pairAssets(): AssetDto[] {

@@ -1,34 +1,42 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import {
+  importJobDelete,
+  importJobsPage,
   indexKickNow,
   indexTaskPause,
   type IndexCounters,
   type IndexKind,
   type IndexStatus,
+  type JobRow,
 } from "@/ipc/api";
-import { formatBytes, formatSpeed } from "@/lib/format";
+import { formatBytes, formatDateTime, formatSpeed } from "@/lib/format";
+import { motionInitial, useMotionOn } from "@/lib/motion";
 import { useImportStore, type ActiveJob } from "@/stores/importStore";
 import { useAiStore } from "@/stores/aiStore";
 import CleanCardDialogLayer from "@/features/import/CleanCardDialog";
+import LogViewer from "./LogViewer";
 
 /**
- * 右侧任务抽屉（M4.5 A2，替代右下角浮动进度卡的唯一任务入口）：
+ * 右侧任务抽屉（M4.5：任务 UI 唯一入口——独立任务页已删除）：
  * - TitleBar 任务图标（运行中任务数徽标 = 运行中导入 + 有活儿的索引通道）→ 右侧
  *   滑出 360px 抽屉（surface 底、motion 动画、Esc/背板关闭）
- * - 任务流水：导入任务首行（复用 useImportStore：进度条/速度/当前文件/暂停/继续/取消；
- *   终态行保留「清理源文件」入口与跳任务中心）+ 缩略图/EXIF/语义/人脸索引行
- *   （indexStatus 计数 + 进度条 + indexTaskPause/indexKickNow 暂停继续）+ 失败红字计数
- * - 顶部「全部暂停 / 清除已完成」；appError 新错误红行（查看任务/×）
- * - indexStatus 1.5s 轮询（抽屉常驻挂载，全局搜索框的索引提示同源消费）
- * - importSessionFinished 总结弹窗保留在任务中心（终态行点击跳转触发）
+ * - 进行中区：导入任务行（进度/速度/当前文件/暂停/继续/取消；终态行保留清卡入口）
+ *   + 缩略图/EXIF/语义/人脸索引行（计数+进度条+暂停/继续）+ 失败红字 + appError 红行
+ * - 历史区（下半部可滚动）：importJobsPage(afterId, 50) 分页 +「加载更多」；
+ *   每行任务名/时间/终态统计 + 查看日志（LogViewer 弹层）+ × 删除
+ *   （importJobDelete，动画退场，本地删除集防重拉回显）
+ * - 顶部「全部暂停 / 清除已完成」（批量 importJobDelete 历史行 + 隐藏本地终态行）
+ * - indexStatus 1.5s 轮询；总结弹窗全局挂在 AppShell（SummaryModalHost）
  */
 
 /** 索引状态轮询间隔（后端任务账快照；事件驱动之外的自愈兜底） */
 const INDEX_POLL_MS = 1500;
+/** 历史区分页大小 */
+const HISTORY_PAGE_SIZE = 50;
 
 /** 抽屉内索引通道展示序 */
 const INDEX_KINDS: readonly IndexKind[] = ["thumb", "exif", "ai", "face"];
@@ -227,7 +235,7 @@ function ImportActiveRow({ job }: { job: ActiveJob }) {
   );
 }
 
-/** 导入任务行（终态 done/cancelled）：计数行 + 跳任务中心（总结弹窗在那里）+ 清卡入口 */
+/** 导入任务行（终态 done/cancelled）：计数行 + 清卡入口（总结弹窗全局自动弹出） */
 function ImportFinishedRow({
   job,
   onClean,
@@ -236,7 +244,6 @@ function ImportFinishedRow({
   onClean: (jobId: number) => void;
 }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const jobModes = useImportStore((s) => s.jobModes);
   const jobSources = useImportStore((s) => s.jobSources);
   const summary = useImportStore((s) => s.summary);
@@ -255,39 +262,31 @@ function ImportFinishedRow({
       data-testid="taskdrawer-import"
       data-phase={cancelled ? "cancelled" : "done"}
     >
-      <button
-        type="button"
-        onClick={() => navigate("/tasks")}
-        className="block w-full text-left"
-        data-testid="taskdrawer-import-summary"
-      >
-        <div className="flex items-center gap-2">
-          <span
-            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] ${
-              cancelled ? "bg-panel text-text-muted" : "bg-emerald-400/15 text-emerald-400"
-            }`}
-            aria-hidden="true"
-          >
-            {cancelled ? "×" : "✓"}
-          </span>
-          <h3 className="truncate text-xs font-semibold text-text-primary">
-            {cancelled
-              ? t("jobStatus.cancelled")
-              : t(mode === "move" ? "summary.titleMove" : "summary.title")}
-            <span className="ml-1 font-mono text-[10px] font-normal text-text-muted">#{job.jobId}</span>
-          </h3>
-        </div>
-        {!cancelled && (
-          <p className="mt-1.5 text-[11px] text-text-secondary tabular-nums" data-testid="taskdrawer-import-counts">
-            {t(mode === "move" ? "importCard.countRowMove" : "importCard.countRow", {
-              done,
-              skipped,
-              failed,
-            })}
-          </p>
-        )}
-        <p className="mt-1 text-[10px] text-text-muted">{t("importCard.viewSummary")}</p>
-      </button>
+      <div className="flex items-center gap-2">
+        <span
+          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] ${
+            cancelled ? "bg-panel text-text-muted" : "bg-emerald-400/15 text-emerald-400"
+          }`}
+          aria-hidden="true"
+        >
+          {cancelled ? "×" : "✓"}
+        </span>
+        <h3 className="truncate text-xs font-semibold text-text-primary">
+          {cancelled
+            ? t("jobStatus.cancelled")
+            : t(mode === "move" ? "summary.titleMove" : "summary.title")}
+          <span className="ml-1 font-mono text-[10px] font-normal text-text-muted">#{job.jobId}</span>
+        </h3>
+      </div>
+      {!cancelled && (
+        <p className="mt-1.5 text-[11px] text-text-secondary tabular-nums" data-testid="taskdrawer-import-counts">
+          {t(mode === "move" ? "importCard.countRowMove" : "importCard.countRow", {
+            done,
+            skipped,
+            failed,
+          })}
+        </p>
+      )}
       {cleanable && (
         <button
           type="button"
@@ -380,10 +379,9 @@ function IndexTaskRow({ kind, counters }: { kind: IndexKind; counters: IndexCoun
   );
 }
 
-/** appError 新错误行：消息 + 查看任务 + × */
+/** appError 新错误行：消息 + ×（任务页已删，日志经历史区查看） */
 function ErrorRow({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   return (
     <div
       className="rounded-lg border border-red-400/40 bg-bg/60 p-2.5"
@@ -412,15 +410,115 @@ function ErrorRow({ message, onDismiss }: { message: string; onDismiss: () => vo
       <p className="mt-1.5 line-clamp-2 break-all text-[11px] text-text-secondary" title={message}>
         {message}
       </p>
-      <button
-        type="button"
-        onClick={() => navigate("/tasks")}
-        className="mt-2 w-full rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-      >
-        {t("importCard.viewTasks")}
-      </button>
     </div>
   );
+}
+
+/** 历史任务行：任务名/时间/终态统计 + 查看日志 + ×（删除，动画退场） */
+function HistoryRow({
+  row,
+  onDelete,
+  onOpenLogs,
+}: {
+  row: JobRow;
+  onDelete: (jobId: number) => void;
+  onOpenLogs: (jobId: number) => void;
+}) {
+  const { t } = useTranslation();
+  // statsJson = ImportStats JSON（游标分页行内自带）；解析失败静默空统计
+  let stats: { doneFiles?: number; skippedDuplicates?: number; failedFiles?: number } = {};
+  try {
+    stats = JSON.parse(row.statsJson) as typeof stats;
+  } catch {
+    // 兼容旧数据/异常 JSON
+  }
+  return (
+    <motion.div
+      key={row.id}
+      initial={false}
+      exit={{ opacity: 0, x: 24 }}
+      transition={{ duration: 0.15, ease: "easeOut" }}
+      className="flex items-center gap-2 rounded-lg border border-edge/40 bg-bg/30 px-2.5 py-2"
+      data-testid="taskdrawer-history-row"
+      data-job-id={row.id}
+      data-status={row.status}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[11px] font-medium text-text-primary" title={row.deviceName}>
+          {row.deviceName}
+          <span className="ml-1.5 font-mono text-[10px] font-normal text-text-muted">#{row.id}</span>
+        </p>
+        <p className="mt-0.5 truncate font-mono text-[10px] tabular-nums text-text-muted">
+          {formatDateTime(row.startedAt)}
+          {stats.doneFiles !== undefined && (
+            <span className="ml-2">
+              {t("importCard.countRow", {
+                done: stats.doneFiles ?? 0,
+                skipped: stats.skippedDuplicates ?? 0,
+                failed: stats.failedFiles ?? 0,
+              })}
+            </span>
+          )}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={() => onOpenLogs(row.id)}
+        className="shrink-0 rounded-md border border-edge px-1.5 py-1 text-[10px] text-text-muted transition-colors hover:border-accent hover:text-accent"
+        data-testid="taskdrawer-history-logs"
+      >
+        {t("taskdrawer.viewLogs")}
+      </button>
+      <button
+        type="button"
+        onClick={() => onDelete(row.id)}
+        aria-label={t("taskdrawer.deleteJob")}
+        title={t("taskdrawer.deleteJob")}
+        className="shrink-0 rounded-md p-1 text-text-muted transition-colors hover:bg-red-400/10 hover:text-red-400"
+        data-testid="taskdrawer-history-delete"
+      >
+        <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.7 6.8v4.4M9.3 6.8v4.4" />
+        </svg>
+      </button>
+    </motion.div>
+  );
+}
+
+// --- 历史区 -------------------------------------------------------------------------
+
+/** 历史任务分页（importJobsPage keyset；打开抽屉时刷新首页） */
+function useHistory(deletedIds: ReadonlySet<number>) {
+  const [rows, setRows] = useState<JobRow[]>([]);
+  const [exhausted, setExhausted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const cursorRef = useRef<number>(0);
+
+  const loadFirst = useCallback(async () => {
+    setLoading(true);
+    const page = await importJobsPage(0, HISTORY_PAGE_SIZE);
+    cursorRef.current = page.length > 0 ? page[page.length - 1].id : 0;
+    setRows(page);
+    setExhausted(page.length < HISTORY_PAGE_SIZE);
+    setLoading(false);
+  }, []);
+
+  const loadMore = useCallback(async () => {
+    if (loading || exhausted) return;
+    setLoading(true);
+    const page = await importJobsPage(cursorRef.current, HISTORY_PAGE_SIZE);
+    if (page.length > 0) {
+      cursorRef.current = page[page.length - 1].id;
+      setRows((prev) => {
+        const seen = new Set(prev.map((r) => r.id));
+        return [...prev, ...page.filter((r) => !seen.has(r.id))];
+      });
+    }
+    if (page.length < HISTORY_PAGE_SIZE) setExhausted(true);
+    setLoading(false);
+  }, [loading, exhausted]);
+
+  return { rows: rows.filter((r) => !deletedIds.has(r.id)), exhausted, loading, loadFirst, loadMore, setRows };
 }
 
 // --- 抽屉面板 -----------------------------------------------------------------------
@@ -428,6 +526,7 @@ function ErrorRow({ message, onDismiss }: { message: string; onDismiss: () => vo
 export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const motionOn = useMotionOn();
   // 常驻轮询（组件在 AppShell 永不卸载，仅开合内容）：徽标计数与全局搜索框的
   // 索引提示同源消费（M4.5 A1/A2 共用）
   useIndexStatusPolling();
@@ -437,24 +536,39 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
   const lastError = useImportStore((s) => s.lastError);
   const indexStatus = useAiStore((s) => s.indexStatus);
 
-  // 「清除已完成」：本地隐藏终态导入行（后端任务账不动）
+  // 「清除已完成」：本地隐藏终态导入行 + 批量删除历史行
   const [clearedJobs, setClearedJobs] = useState<Set<number>>(() => new Set());
   // 错误行只响应新到达的 appError（挂载前的旧错误不打扰）
   const [dismissedError, setDismissedError] = useState(lastError);
   const showError = lastError !== null && lastError !== dismissedError;
 
-  // Esc 关闭
+  // 历史区：删除集（防重拉回显）+ 日志弹层
+  const [deletedIds, setDeletedIds] = useState<Set<number>>(() => new Set());
+  const [logJobId, setLogJobId] = useState<number | null>(null);
+  const history = useHistory(deletedIds);
+
+  // 打开抽屉时刷新历史首页（含删除集清空——重新以任务账为准）
+  useEffect(() => {
+    if (open) {
+      setDeletedIds(new Set());
+      void history.loadFirst();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Esc 关闭（日志弹层打开时优先关弹层）
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        onClose();
+        if (logJobId !== null) setLogJobId(null);
+        else onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, logJobId]);
 
   /** 活跃（running/paused）导入行 + 终态行（未清除的 done/cancelled） */
   const { active, finished } = useMemo(() => {
@@ -476,8 +590,8 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
     );
   }, [indexStatus]);
 
-  const hasContent =
-    active.length > 0 || finished.length > 0 || indexRows.length > 0 || showError;
+  const hasRunning =
+    active.length > 0 || indexRows.length > 0;
 
   /** 全部暂停：运行中导入逐个暂停 + 索引通道暂停 */
   async function pauseAll(): Promise<void> {
@@ -486,6 +600,33 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
     }
     if (indexRows.length > 0) await indexTaskPause();
     void useAiStore.getState().refreshIndexStatus();
+  }
+
+  /** 清除已完成：隐藏本地终态行 + 批量删除历史行（importJobDelete 循环；失败静默跳过） */
+  async function clearDone(): Promise<void> {
+    setClearedJobs(new Set(Object.keys(activeJobs).map(Number)));
+    if (lastError !== null) setDismissedError(lastError);
+    for (const row of history.rows) {
+      try {
+        await importJobDelete(row.id);
+        setDeletedIds((prev) => new Set(prev).add(row.id));
+      } catch {
+        // 单行删除失败静默（下次打开抽屉重新拉取可见）
+      }
+    }
+  }
+
+  async function deleteJob(jobId: number): Promise<void> {
+    setDeletedIds((prev) => new Set(prev).add(jobId)); // 乐观移除 + 动画退场
+    try {
+      await importJobDelete(jobId);
+    } catch {
+      setDeletedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(jobId);
+        return next;
+      });
+    }
   }
 
   // 清卡对话框（终态行入口）
@@ -497,7 +638,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
         <>
           <motion.div
             key="backdrop"
-            initial={{ opacity: 0 }}
+            initial={motionInitial(motionOn, { opacity: 0 })}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
@@ -507,7 +648,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
           />
           <motion.aside
             key="panel"
-            initial={{ x: 360 }}
+            initial={motionInitial(motionOn, { x: 360 })}
             animate={{ x: 0 }}
             exit={{ x: 360 }}
             transition={{ duration: 0.18, ease: "easeOut" }}
@@ -520,28 +661,25 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
             <div className="flex h-10 shrink-0 items-center gap-2 border-b border-edge px-3">
               <h2 className="text-xs font-semibold text-text-primary">{t("taskdrawer.title")}</h2>
               <div className="ml-auto flex items-center gap-1.5">
-                {hasContent && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void pauseAll()}
-                      className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                      data-testid="taskdrawer-pause-all"
-                    >
-                      {t("taskdrawer.pauseAll")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setClearedJobs(new Set(Object.keys(activeJobs).map(Number)));
-                        if (lastError !== null) setDismissedError(lastError);
-                      }}
-                      className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                      data-testid="taskdrawer-clear-done"
-                    >
-                      {t("taskdrawer.clearDone")}
-                    </button>
-                  </>
+                {hasRunning && (
+                  <button
+                    type="button"
+                    onClick={() => void pauseAll()}
+                    className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    data-testid="taskdrawer-pause-all"
+                  >
+                    {t("taskdrawer.pauseAll")}
+                  </button>
+                )}
+                {(finished.length > 0 || history.rows.length > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => void clearDone()}
+                    className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    data-testid="taskdrawer-clear-done"
+                  >
+                    {t("taskdrawer.clearDone")}
+                  </button>
                 )}
                 <button
                   type="button"
@@ -557,16 +695,19 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
               </div>
             </div>
 
-            {/* 任务流水 */}
-            <div className="sp-scroll min-h-0 flex-1 space-y-2 overflow-y-auto p-3" data-testid="taskdrawer-list">
-              {!hasContent && (
-                <div className="flex flex-col items-center gap-2 px-4 py-10 text-center" data-testid="taskdrawer-empty">
+            {/* 任务流水：进行中（导入/索引/错误） */}
+            <div
+              className="sp-scroll max-h-[55%] shrink-0 space-y-2 overflow-y-auto border-b border-edge/60 p-3"
+              data-testid="taskdrawer-list"
+            >
+              {active.length === 0 && indexRows.length === 0 && !showError && finished.length === 0 && (
+                <div className="flex flex-col items-center gap-2 px-4 py-6 text-center" data-testid="taskdrawer-empty">
                   <p className="text-xs text-text-muted">{t("taskdrawer.empty")}</p>
                   <button
                     type="button"
                     onClick={() => {
                       onClose();
-                      navigate("/tasks");
+                      navigate("/import");
                     }}
                     className="rounded-md border border-edge px-3 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
                   >
@@ -583,11 +724,86 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
               {active.map((job) => (
                 <ImportActiveRow key={job.jobId} job={job} />
               ))}
-              {finished.map((job) => (
-                <ImportFinishedRow key={job.jobId} job={job} onClean={setCleanJobId} />
-              ))}
+              <AnimatePresence initial={false}>
+                {finished.map((job) => (
+                  <ImportFinishedRow key={job.jobId} job={job} onClean={setCleanJobId} />
+                ))}
+              </AnimatePresence>
+            </div>
+
+            {/* 历史（下半部可滚动；分页 + 删除 + 日志） */}
+            <div className="sp-scroll min-h-0 flex-1 overflow-y-auto p-3" data-testid="taskdrawer-history">
+              <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                {t("taskdrawer.history")}
+              </h3>
+              {history.rows.length === 0 && !history.loading ? (
+                <p className="px-1 py-3 text-[11px] text-text-muted" data-testid="taskdrawer-history-empty">
+                  {t("tasks.historyEmpty")}
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  <AnimatePresence initial={false}>
+                    {history.rows.map((row) => (
+                      <HistoryRow
+                        key={row.id}
+                        row={row}
+                        onDelete={(id) => void deleteJob(id)}
+                        onOpenLogs={setLogJobId}
+                      />
+                    ))}
+                  </AnimatePresence>
+                  {!history.exhausted && (
+                    <button
+                      type="button"
+                      disabled={history.loading}
+                      onClick={() => void history.loadMore()}
+                      className="w-full rounded-md border border-edge px-2 py-1.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+                      data-testid="taskdrawer-history-more"
+                    >
+                      {history.loading ? t("tasks.loading") : t("taskdrawer.loadMore")}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </motion.aside>
+
+          {/* 日志弹层（历史行「查看日志」） */}
+          {logJobId !== null && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+              role="dialog"
+              aria-modal="true"
+              aria-label={t("taskdrawer.logsTitle", { id: logJobId })}
+              data-testid="taskdrawer-logs-modal"
+              onClick={() => setLogJobId(null)}
+            >
+              <div
+                className="flex max-h-[76vh] w-[560px] flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex h-9 shrink-0 items-center justify-between border-b border-edge px-3">
+                  <h3 className="text-xs font-semibold text-text-primary">
+                    {t("taskdrawer.logsTitle", { id: logJobId })}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setLogJobId(null)}
+                    aria-label={t("common.close")}
+                    data-testid="taskdrawer-logs-close"
+                    className="rounded-md p-1 text-text-muted transition-colors hover:bg-panel hover:text-text-primary"
+                  >
+                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+                      <path d="M4 4l8 8M12 4l-8 8" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  <LogViewer jobId={logJobId} />
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
       <CleanCardDialogLayer

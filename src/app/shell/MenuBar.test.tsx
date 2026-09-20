@@ -211,14 +211,13 @@ describe("菜单导航", () => {
     expect(screen.getByTestId("menu-panel-view").querySelectorAll("svg").length).toBe(1);
   });
 
-  it("工具→任务中心 / 导入日志 均到 /tasks", async () => {
+  it("工具菜单：任务入口已移除（任务 UI 收敛到右侧抽屉，M4.5）", async () => {
     renderMenu();
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("button", { name: "工具" }));
-    expect(screen.getByRole("separator")).toBeInTheDocument();
-    await user.click(screen.getByTestId("menu-item-taskCenter"));
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("menu-item-taskCenter")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("menu-item-importLogs")).not.toBeInTheDocument();
   });
 
   it("文件→退出 调 window.close()（后端按 closeToTray 决定）", async () => {
@@ -286,7 +285,6 @@ describe("菜单快捷键提示与全局导航绑定（巡检 #9）", () => {
     await user.click(screen.getByTestId("menu-button-view"));
     expect(screen.getByTestId("menu-item-gallery")).toHaveTextContent("Ctrl+1");
     expect(screen.getByTestId("menu-item-search")).toHaveTextContent("Ctrl+2");
-    expect(screen.getByTestId("menu-item-tasks")).toHaveTextContent("Ctrl+4");
     expect(screen.getByTestId("menu-item-settings")).toHaveTextContent("Ctrl+5");
 
     await user.click(screen.getByTestId("menu-button-file"));
@@ -305,8 +303,9 @@ describe("菜单快捷键提示与全局导航绑定（巡检 #9）", () => {
     fireEvent.keyDown(window, { key: "3", ctrlKey: true });
     expect(await screen.findByTestId("import-probe")).toBeInTheDocument();
 
+    // Ctrl+4 任务页已删：不导航（仍停 import）
     fireEvent.keyDown(window, { key: "4", ctrlKey: true });
-    expect(await screen.findByTestId("tasks-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "5", ctrlKey: true });
     expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();

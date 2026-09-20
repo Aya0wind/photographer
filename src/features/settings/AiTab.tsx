@@ -7,9 +7,11 @@ import {
   aiModelDelete,
   aiModelDownload,
   indexKickNow,
+  indexRebuild,
   type AiModelStatus,
   type IndexKind,
   type IndexStatus,
+  type RebuildKind,
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
 import { useAiStore } from "@/stores/aiStore";
@@ -180,6 +182,195 @@ function ModelRow({ model }: { model: AiModelStatus }) {
   );
 }
 
+// --- 索引参数与重建区（M4.5 wave-3 第 7 项） -------------------------------------------
+
+/** 数值参数行：改即存（钳制到合法区间）；偏离默认时给「恢复默认」 */
+function AiParamRow({
+  label,
+  desc,
+  value,
+  defaultValue,
+  min,
+  max,
+  step,
+  testId,
+  onCommit,
+}: {
+  label: string;
+  desc: string;
+  value: number;
+  defaultValue: number;
+  min: number;
+  max: number;
+  step: number;
+  testId: string;
+  onCommit: (next: number) => void;
+}) {
+  const { t } = useTranslation();
+  // 编辑期本地草稿（受控值不逐键回写——钳制会造成光标跳动/吞字）；失焦/回车提交
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? String(value);
+  function commitDraft(): void {
+    if (draft === null) return;
+    const n = Number(draft);
+    if (Number.isFinite(n)) onCommit(Math.min(max, Math.max(min, n)));
+    setDraft(null);
+  }
+  return (
+    <SettingRow label={label} desc={desc} testId={`settings-row-${testId}`}>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          value={shown}
+          min={min}
+          max={max}
+          step={step}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitDraft();
+            }
+          }}
+          aria-label={label}
+          className="w-24 rounded-md border border-edge bg-bg px-2 py-1 text-right font-mono text-xs tabular-nums text-text-primary outline-none transition-colors focus:border-accent"
+          data-testid={testId}
+        />
+        {value !== defaultValue && (
+          <button
+            type="button"
+            onClick={() => onCommit(defaultValue)}
+            className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-accent hover:text-accent"
+            data-testid={`${testId}-reset`}
+          >
+            {t("settings.ai.param.resetDefault")}
+          </button>
+        )}
+      </div>
+    </SettingRow>
+  );
+}
+
+/** 重建行：二次红色确认 → indexRebuild(kind)；失败文案透传（模型未下载等） */
+const REBUILD_KINDS: ReadonlyArray<{ kind: RebuildKind; labelKey: string }> = [
+  { kind: "thumb", labelKey: "settings.ai.rebuild.thumb" },
+  { kind: "exif", labelKey: "settings.ai.rebuild.exif" },
+  { kind: "semantic", labelKey: "settings.ai.rebuild.semantic" },
+  { kind: "face", labelKey: "settings.ai.rebuild.face" },
+];
+
+function RebuildRow({ kind, labelKey }: { kind: RebuildKind; labelKey: string }) {
+  const { t } = useTranslation();
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+
+  async function rebuild(): Promise<void> {
+    setConfirming(false);
+    setError(null);
+    try {
+      await indexRebuild(kind);
+    } catch (err) {
+      // 后端 Err 文案透传（如「请先在设置中下载模型」）
+      setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
+      return;
+    }
+    // 进行中态由任务抽屉（IndexTaskResumed/Progress 事件）反映；此处刷新计数快照
+    void refreshIndexStatus();
+  }
+
+  return (
+    <SettingRow label={t(labelKey)} testId={`settings-row-rebuild-${kind}`}>
+      {confirming ? (
+        <span className="flex items-center gap-1.5">
+          <span className="text-[11px] text-red-400">{t("settings.ai.rebuild.confirm")}</span>
+          <button
+            type="button"
+            onClick={() => void rebuild()}
+            className="rounded-md bg-red-500/90 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
+            data-testid={`ai-rebuild-confirm-${kind}`}
+          >
+            {t("settings.ai.rebuild.confirmYes")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary"
+            data-testid={`ai-rebuild-cancel-${kind}`}
+          >
+            {t("common.cancel")}
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+          data-testid={`ai-rebuild-${kind}`}
+        >
+          {t("settings.ai.rebuild.run")}
+        </button>
+      )}
+      {error !== null && (
+        <span className="ml-2 max-w-[160px] truncate text-[11px] text-red-400" title={error} data-testid="ai-rebuild-error">
+          {error}
+        </span>
+      )}
+    </SettingRow>
+  );
+}
+
+function AiParamsAndRebuildSection() {
+  const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
+  const rebuildHint = t("settings.ai.param.rebuildHint");
+
+  return (
+    <>
+      <SectionTitle>{t("settings.ai.paramsSection")}</SectionTitle>
+      <AiParamRow
+        label={t("settings.ai.param.embedInputSize")}
+        desc={rebuildHint}
+        value={settings.ai.embedInputSize ?? 256}
+        defaultValue={256}
+        min={128}
+        max={512}
+        step={1}
+        testId="ai-param-embed-input-size"
+        onCommit={(embedInputSize) => commit({ ai: { embedInputSize } })}
+      />
+      <AiParamRow
+        label={t("settings.ai.param.faceDetectThreshold")}
+        desc={rebuildHint}
+        value={settings.ai.faceDetectThreshold ?? 0.5}
+        defaultValue={0.5}
+        min={0.1}
+        max={0.9}
+        step={0.05}
+        testId="ai-param-face-detect-threshold"
+        onCommit={(faceDetectThreshold) => commit({ ai: { faceDetectThreshold } })}
+      />
+      <AiParamRow
+        label={t("settings.ai.param.faceClusterThreshold")}
+        desc={rebuildHint}
+        value={settings.ai.faceClusterThreshold ?? 0.4}
+        defaultValue={0.4}
+        min={0.1}
+        max={0.9}
+        step={0.05}
+        testId="ai-param-face-cluster-threshold"
+        onCommit={(faceClusterThreshold) => commit({ ai: { faceClusterThreshold } })}
+      />
+
+      <SectionTitle>{t("settings.ai.rebuildSection")}</SectionTitle>
+      {REBUILD_KINDS.map(({ kind, labelKey }) => (
+        <RebuildRow key={kind} kind={kind} labelKey={labelKey} />
+      ))}
+    </>
+  );
+}
+
 // --- 索引状态与操作区 ---------------------------------------------------------------
 
 type T = ReturnType<typeof useTranslation>["t"];
@@ -342,6 +533,9 @@ export default function AiTab() {
 
       {/* 索引状态与操作区（三类计数 + 立即索引） */}
       <IndexStatusSection />
+
+      {/* 索引参数与重建（三参数 + 四通道重建） */}
+      <AiParamsAndRebuildSection />
 
       {/* 功能开关（模型门控） */}
       <SectionTitle>{t("settings.section.aiFeatures")}</SectionTitle>
