@@ -297,6 +297,12 @@ impl FromSql for AssetKind {
 /// 退化为 (k, id) 二元组比较（真机契约 2026-09-19：117 资产 5 NULL）。
 pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 
+/// 那年今天的筛选口径（列表与侧栏计数共用，防两处漂移）：本地时区
+/// 同月日的 photo/raw（captured_at 为 RFC3339；'localtime' 把 UTC 存储
+/// 转本地后取 %m-%d）。
+const ON_THIS_DAY_WHERE: &str = "kind IN ('photo', 'raw') AND captured_at IS NOT NULL \
+     AND strftime('%m-%d', captured_at, 'localtime') = ?1";
+
 /// 资产分页过滤（IPC 载荷，camelCase）。日期为 RFC3339 字符串或纯日期
 /// `YYYY-MM-DD`（IPC 层归一定宽 UTC：纯日期 after=当日 00:00、before=当日
 /// 23:59:59.999 本地时区），字典序比较即时间序；任一日期过滤出现时
@@ -1907,17 +1913,39 @@ impl Db {
     }
 
     /// 那年今天：本地时区同月日的 photo/raw，年份 DESC、年内时间 ASC。
+    /// WHERE 片段抽成常量——列表与 sidebar 计数两处共用，杜绝口径漂移。
     pub fn assets_on_this_day(&self, month_day: &str) -> Result<Vec<AssetPageRow>> {
-        let mut stmt = self.0.prepare(
+        let mut stmt = self.0.prepare(&format!(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
              f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
              FROM assets \
-             WHERE kind IN ('photo', 'raw') AND captured_at IS NOT NULL \
-               AND strftime('%m-%d', captured_at, 'localtime') = ?1 \
+             WHERE {ON_THIS_DAY_WHERE} \
              ORDER BY substr(captured_at, 1, 4) DESC, captured_at ASC, id ASC",
-        )?;
+        ))?;
         let rows = stmt.query_map(params![month_day], map_asset_page)?;
         rows.collect()
+    }
+
+    /// 那年今天的计数口径（列表 assets_on_this_day 与侧栏计数共用；
+    /// month_day 为本地时区 "%m-%d"）。
+    pub fn count_on_this_day(&self, month_day: &str) -> Result<i64> {
+        self.0.query_row(
+            &format!("SELECT COUNT(*) FROM assets WHERE {ON_THIS_DAY_WHERE}"),
+            params![month_day],
+            |r| r.get(0),
+        )
+    }
+
+    /// 侧栏计数（2026-09-21）：库内资产总数（全 kind——侧栏「照片」即画廊
+    /// 全量）与浏览历史行数。纯 COUNT，毫秒级。
+    pub fn sidebar_assets_count(&self) -> Result<i64> {
+        self.0
+            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+    }
+
+    pub fn sidebar_viewed_count(&self) -> Result<i64> {
+        self.0
+            .query_row("SELECT COUNT(*) FROM view_history", [], |r| r.get(0))
     }
 
     /// 器材统计桶计数（单遍 SQL：子查询把 exposure_time 展示串解析成秒，

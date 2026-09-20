@@ -90,6 +90,111 @@ fn on_this_day_selects_local_month_day_across_years() {
 }
 
 // ---------------------------------------------------------------------------
+// 侧栏一次性计数（2026-09-21）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sidebar_counts_empty_library() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
+    assert_eq!(counts.assets, 0);
+    assert_eq!(counts.recent_viewed, 0);
+    assert_eq!(counts.on_this_day, 0);
+    // 标签墙/相册 = 预置词表全量（v1 相册页即标签墙）
+    assert_eq!(counts.tags, ipc::insights::SMART_ALBUM_TAG_COUNT);
+    assert_eq!(counts.albums, ipc::insights::SMART_ALBUM_TAG_COUNT);
+}
+
+/// 当前本地年（闰日 2/29 场景 md 内部自回落）。
+fn today_year() -> i32 {
+    use chrono::Datelike;
+    chrono::Local::now().year()
+}
+
+#[test]
+fn sidebar_counts_semantics_and_tz_boundary() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let db = open_db(db_dir.path());
+
+    // 本地时区今天 "%m-%d"（与实现同口径）
+    let today = chrono::Local::now().format("%m-%d").to_string();
+    let md = |y: i32| {
+        // 本地时区今天 12:00 的历年同月日（带本地偏移的 RFC3339——SQLite
+        // 先归 UTC 再经 'localtime' 回本地，口径闭环）。闰日 2/29 在非闰
+        // 年回落到 2024（闰年，必有 2/29）
+        use chrono::{Datelike, TimeZone};
+        let now = chrono::Local::now();
+        let (m, d) = (now.month(), now.day());
+        let year = if chrono::NaiveDate::from_ymd_opt(y, m, d).is_some() {
+            y
+        } else {
+            2024
+        };
+        chrono::Local
+            .with_ymd_and_hms(year, m, d, 12, 0, 0)
+            .single()
+            .unwrap()
+            .to_rfc3339()
+    };
+    // 3 条历年同月日 + 1 条他日 + 1 条今天但 video（on_this_day 排除、
+    // assets 计入）+ 1 条本地今天 00:30 的时区边界样本（其 UTC 日期在
+    // 东八区落在前一天——SQL 必须经 'localtime' 才能命中）
+    for (path, captured) in [
+        ("X:/p/y2020.jpg", Some(md(2020))),
+        ("X:/p/y2021.jpg", Some(md(2021))),
+        ("X:/p/yThisYear.jpg", Some(md(today_year()))),
+        ("X:/p/other.jpg", Some("2020-01-01T10:00:00.000Z".into())),
+        ("X:/p/boundary.jpg", {
+            let now = chrono::Local::now();
+            now.date_naive()
+                .and_hms_opt(0, 30, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .single()
+                .map(|t| t.to_rfc3339())
+        }),
+    ] {
+        db.insert_asset(&asset(path, captured.as_deref())).unwrap();
+    }
+    let mut video = asset("X:/p/today.mp4", Some(&md(2020)));
+    video.kind = AssetKind::Video;
+    db.insert_asset(&video).unwrap();
+    // 浏览历史 2 行
+    db.mark_asset_viewed(1).unwrap();
+    db.mark_asset_viewed(2).unwrap();
+
+    let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
+    assert_eq!(counts.assets, 6, "全 kind 计入资产总数");
+    assert_eq!(counts.recent_viewed, 2);
+    // 3 历年 + 1 边界（本地口径今天）= 4；video 与他日不计
+    assert_eq!(
+        counts.on_this_day, 4,
+        "本地时区同月日（含 UTC 落前一天的边界样本）: {today}"
+    );
+    assert_eq!(counts.tags, 40);
+    assert_eq!(counts.albums, 40);
+
+    // 列表与计数同口径（共用的 WHERE 片段）：列表行数 == 计数
+    let list = db.assets_on_this_day(&today).unwrap();
+    assert_eq!(list.len() as i64, counts.on_this_day);
+}
+
+#[test]
+fn sidebar_counts_library_not_open_is_error() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    // 撤掉活动库（模拟引导向导前的侧栏拉取）
+    *state.settings.lock().unwrap() = settings::Settings::default();
+    let err = ipc::insights::fetch_sidebar_counts(&state).unwrap_err();
+    assert!(!err.is_empty(), "库未开必须明确报错而非全 0: {err}");
+}
+
+// ---------------------------------------------------------------------------
 // F9 器材统计
 // ---------------------------------------------------------------------------
 

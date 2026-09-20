@@ -184,3 +184,57 @@ pub async fn gear_stats(state: State<'_, SharedState>) -> Result<Option<GearStat
     let shared = state.inner().clone();
     run_blocking(shared, fetch_gear_stats).await
 }
+
+// ---------------------------------------------------------------------------
+// 侧栏一次性计数（2026-09-21）：五项纯 COUNT/常量，绝不拉资产行
+// ---------------------------------------------------------------------------
+
+/// 预置标签墙词表规模（与前端 AlbumsPages.tsx 的 SMART_ALBUM_TAGS 对齐
+/// ——40 个中文标签；v1 词表是前端常量而非 DB 数据，改词表时两处同步）。
+/// 标签墙同时就是相册页（/albums#tags 同页同区块），albums 与 tags 同源
+/// 同值；前端本地隐藏（localStorage）的标签由前端自行扣减，后端计全量。
+pub const SMART_ALBUM_TAG_COUNT: i64 = 40;
+
+/// 侧栏计数载荷（camelCase；全 i64）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SidebarCountsDto {
+    /// 库内资产总数（全 kind——侧栏「照片」即画廊全量）。
+    pub assets: i64,
+    /// 浏览历史行数（view_history，每资产至多一行）。
+    pub recent_viewed: i64,
+    /// 那年今天条数（与 on_this_day 列表同口径：本地时区同月日的
+    /// photo/raw；WHERE 片段在 db 层共用，无两处漂移）。
+    pub on_this_day: i64,
+    /// 标签墙标签数（预置词表全量，见 SMART_ALBUM_TAG_COUNT）。
+    pub tags: i64,
+    /// 相册数（v1 相册页=标签墙，同 tags 口径）。
+    pub albums: i64,
+}
+
+/// 侧栏计数核：三条 COUNT + 一条常量。库未开 → Err（与洞察命令的
+/// active_library_db 透传语义一致——前端侧栏在库开前后都有明确状态）。
+pub fn fetch_sidebar_counts(state: &super::AppState) -> Result<SidebarCountsDto, String> {
+    let db = super::active_library_db(state)?;
+    let assets = db.sidebar_assets_count().map_err(|e| e.to_string())?;
+    let recent_viewed = db.sidebar_viewed_count().map_err(|e| e.to_string())?;
+    // 日期窗口与 fetch_on_this_day 同源：本地时区今天 "%m-%d"
+    let month_day = chrono::Local::now().format("%m-%d").to_string();
+    let on_this_day = db
+        .count_on_this_day(&month_day)
+        .map_err(|e| e.to_string())?;
+    Ok(SidebarCountsDto {
+        assets,
+        recent_viewed,
+        on_this_day,
+        tags: SMART_ALBUM_TAG_COUNT,
+        albums: SMART_ALBUM_TAG_COUNT,
+    })
+}
+
+/// 侧栏一次性计数（snake_case 命令；无事件推送，前端按需拉取）。
+#[tauri::command]
+pub async fn sidebar_counts(state: State<'_, SharedState>) -> Result<SidebarCountsDto, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_sidebar_counts).await
+}
