@@ -53,7 +53,7 @@ const KIND_OPTIONS: ReadonlyArray<{ value: "all" | "photo" | "video"; labelKey: 
 ];
 
 type OrientationFilter = "all" | "landscape" | "portrait";
-type FlashFilter = "all" | "on" | "off";
+type FlashFilter = "all" | "on" | "off" | "unknown";
 type GpsFilter = "all" | "yes" | "no";
 
 const ORIENTATION_OPTIONS: ReadonlyArray<{ value: OrientationFilter; labelKey: string }> = [
@@ -65,6 +65,7 @@ const FLASH_OPTIONS: ReadonlyArray<{ value: FlashFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.flash.all" },
   { value: "on", labelKey: "search.flash.on" },
   { value: "off", labelKey: "search.flash.off" },
+  { value: "unknown", labelKey: "search.flash.unknown" },
 ];
 const GPS_OPTIONS: ReadonlyArray<{ value: GpsFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.gps.all" },
@@ -196,7 +197,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (inputs.lenses.length > 0) filters.lenses = inputs.lenses;
   if (inputs.formats.length > 0) filters.formats = inputs.formats;
   if (inputs.orientation !== "all") filters.orientation = inputs.orientation;
-  if (inputs.flash !== "all") filters.hasFlash = inputs.flash === "on";
+  if (inputs.flash !== "all") filters.flash = inputs.flash;
   if (inputs.gps !== "all") filters.hasGps = inputs.gps === "yes";
   const focalMin = numOrUndefined(inputs.focalMin);
   if (focalMin !== undefined) filters.focalMin = focalMin;

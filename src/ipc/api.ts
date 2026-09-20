@@ -197,7 +197,8 @@ export interface AssetFilters {
   shutterMin?: number;
   shutterMax?: number;
   /** 闪光灯是否闪光（true=开/false=关；省略=不过滤） */
-  hasFlash?: boolean;
+  /** 闪光灯三态："on"=闪光 | "off"=已知未闪光 | "unknown"=无信息 */
+  flash?: "on" | "off" | "unknown";
   /** 拍摄方向（按 EXIF orientation 归类）；省略=不过滤 */
   orientation?: "landscape" | "portrait";
   /** 是否有 GPS 坐标（true=有/false=无；省略=不过滤） */

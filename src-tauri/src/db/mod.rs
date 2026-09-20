@@ -303,9 +303,9 @@ pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 /// # M5 扩展（数值/布尔条件）与 NULL 语义（统一约定）
 /// 数值范围条件对列为 NULL 的行**不匹配**——「未知」不冒充任何区间
 /// （如 focal_length NULL 的资产在任何 focalMin/focalMax 组合下都排除）。
-/// 布尔条件同理只在已知值上判定：hasFlash=true → flash 归 "fired" 族；
-/// hasFlash=false → flash 已知且非 fired 族；flash NULL（未提取/无 EXIF）
-/// 在 true/false 下都排除。hasGps 按 gps_lat IS NOT NULL。orientation 的
+/// 布尔条件同理只在已知值上判定：flash="on" → flash 归 "fired" 族；
+/// flash="off" → flash 已知且非 fired 族；flash="unknown" → flash IS NULL。
+/// hasGps 按 gps_lat IS NOT NULL。orientation 的
 /// landscape/portrait 按 width/height 数值比较（任一 NULL 排除）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -331,8 +331,9 @@ pub struct AssetFilters {
     /// 对 "1/250" 展示串按写入格式解析为秒后比较）。
     pub shutter_min: Option<f64>,
     pub shutter_max: Option<f64>,
-    /// 闪光灯：true → fired 族；false → 已知未闪光；None → 不过滤。
-    pub has_flash: Option<bool>,
+    /// 闪光灯三态："on" → fired 族；"off" → 已知未闪光；"unknown" →
+    /// flash IS NULL（无 EXIF/未提取）；None → 不过滤。其他值容错不过滤。
+    pub flash: Option<String>,
     /// "landscape"（width>height）| "portrait"（height>width）。
     pub orientation: Option<String>,
     /// GPS：true → gps_lat 非空；false → gps_lat 为空。
@@ -719,16 +720,21 @@ impl Db {
         );
 
         // —— 布尔 / 方向 / GPS ——
-        if let Some(fired) = filters.has_flash {
+        if let Some(state) = &filters.flash {
             // flash token 族见 exif_lite 映射：fired 族均含 "fired" 子串，
-            // no_flash 族前缀 "no_flash"。false 显式排除 NULL（未知 ≠ 未闪光）。
-            let (pattern, extra) = if fired {
-                ("%fired%".to_string(), "")
-            } else {
-                ("no_flash%".to_string(), " AND flash IS NOT NULL")
-            };
-            let s = slot(&mut params_vec, V::from(pattern));
-            conds.push(format!("flash LIKE {s}{extra}"));
+            // no_flash 族前缀 "no_flash"；"unknown" 显式取 NULL（未知 ≠ 未闪光）。
+            match state.as_str() {
+                "on" => {
+                    let s = slot(&mut params_vec, V::from("%fired%".to_string()));
+                    conds.push(format!("flash LIKE {s}"));
+                }
+                "off" => {
+                    let s = slot(&mut params_vec, V::from("no_flash%".to_string()));
+                    conds.push(format!("(flash LIKE {s} AND flash IS NOT NULL)"));
+                }
+                "unknown" => conds.push("flash IS NULL".to_string()),
+                _ => {} // 未知 token 容错：不过滤
+            }
         }
         match filters.orientation.as_deref() {
             // width/height 任一 NULL → 比较为 NULL → 排除

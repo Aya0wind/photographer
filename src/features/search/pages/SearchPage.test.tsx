@@ -731,7 +731,7 @@ describe("搜索：筛选面板", () => {
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
         orientation: "landscape",
-        hasFlash: true,
+        flash: "on",
         hasGps: false,
         focalMin: 24,
         focalMax: 70,
@@ -769,7 +769,7 @@ describe("搜索：筛选面板", () => {
     fireEvent.change(screen.getByTestId("search-focal-min"), { target: { value: "24" } });
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
-        hasFlash: true,
+        flash: "on",
         hasGps: true,
         focalMin: 24,
       }),
