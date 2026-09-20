@@ -474,11 +474,11 @@ describe("M3 画廊命令", () => {
     await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "unavailable" });
   });
 
-  it("cameraList 返回相机计数清单（cameras_list）；失败/非数组回退空数组", async () => {
+  it("cameraList 返回相机计数清单（camera_list）；失败/非数组回退空数组", async () => {
     const list = [{ camera: "Canon EOS R5", count: 12 }];
     invokeMock.mockResolvedValueOnce(list);
     await expect(cameraList()).resolves.toEqual(list);
-    expect(invokeMock).toHaveBeenCalledWith("cameras_list", undefined);
+    expect(invokeMock).toHaveBeenCalledWith("camera_list", undefined);
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
     await expect(cameraList()).resolves.toEqual([]);

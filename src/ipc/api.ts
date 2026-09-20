@@ -153,6 +153,8 @@ export interface AssetDto {
   width?: number | null;
   /** 像素高（同上） */
   height?: number | null;
+  /** 入库时间（ISO 8601；recent_assets 用于「最近添加」范围过滤，assets_page 不带） */
+  createdAt?: string | null;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
@@ -531,7 +533,7 @@ export async function assetGroupDates(): Promise<AssetGroupDate[]> {
 /** 库内相机型号清单（搜索页相机勾选；按 count 降序）；失败/非数组回退 [] */
 export async function cameraList(): Promise<AssetCameraCount[]> {
   try {
-    const list = await ipc<AssetCameraCount[] | null>("cameras_list");
+    const list = await ipc<AssetCameraCount[] | null>("camera_list");
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
@@ -552,6 +554,17 @@ export async function lensList(): Promise<AssetLensCount[]> {
 export async function formatList(): Promise<AssetFormatCount[]> {
   try {
     const list = await ipc<AssetFormatCount[] | null>("format_list");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 最近添加的资产（recent_assets；created_at DESC keyset：afterId=上一页最后一条 id，
+ *  首页传 0）。后端就绪前命令失败/非数组回退 []——UI 自然降级空态。 */
+export async function recentAssets(afterId: number, limit: number): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("recent_assets", { afterId, limit });
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
