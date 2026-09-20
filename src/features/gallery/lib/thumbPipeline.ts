@@ -17,7 +17,8 @@ import {
  *   真机 RAW 查看器 219ms 即回落显影兜底的根因，2026-09-20 契约改造）。
  * - 会话缓存 `${assetId}:${size}` → asset URL；in-flight 去重；
  *   信号量并发 ≤6（与后端缩略图生成对齐，快速滚动时不打满 IPC）。
- * - pending → 骨架等待事件；unavailable → 调用方按「确定无图」占位。
+ * - pending → 骨架等待事件重试 + 周期兜底重拉（事件丢失自愈，见 PENDING_RETRY_MS）；
+ *   unavailable → 调用方按「确定无图」占位。
  */
 
 const CONCURRENCY = 6;
@@ -182,8 +183,19 @@ export interface AssetThumbState {
 }
 
 /**
+ * pending 兜底重拉间隔。thumbnailReady 事件可能丢失且无任何回执：
+ * - 后端生成队列满时直接丢任务**不发事件**（thumb.rs 注释明言依赖
+ *   「前端滚动重试自愈」——查看器大图不滚动，必须自己兜底）；
+ * - 事件可能先于命令响应到达：重查被 in-flight 去重吞并，之后无人再问；
+ * - 事件可能早于本 hook 订阅（Tauri listen 异步注册窗口）发出。
+ * pending 态周期重拉直至 settled（ready/failed），是上述全部场景的统一自愈。
+ */
+export const PENDING_RETRY_MS = 2500;
+
+/**
  * 单资产缩略图（enabled=false 时不请求不订阅——video 短路占位用）。
- * pending → 保持 loading 等 thumbnailReady 事件重试；unavailable → failed。
+ * pending → 保持 loading 等 thumbnailReady 事件重试 + 周期兜底重拉
+ * （PENDING_RETRY_MS，事件丢失时自愈）；unavailable → failed。
  */
 export function useAssetThumbUrl(
   assetId: number,
@@ -199,20 +211,39 @@ export function useAssetThumbUrl(
       return;
     }
     let cancelled = false;
+    let retryTimer: number | null = null;
     setState({ url: null, status: "loading" });
     const apply = (result: ThumbResult) => {
       if (cancelled) return;
       if (result.kind === "url") setState({ url: result.url, status: "ready" });
       else if (result.kind === "failed") setState({ url: null, status: "failed" });
-      // pending：保持 loading（事件重试）
+      // pending：保持 loading——事件重试之外再排一次周期兜底重拉
+      else schedulePendingRetry();
     };
-    void fetchAssetThumb(assetId, size, priority).then(apply);
+    const retry = () => {
+      void fetchAssetThumb(assetId, size, priority).then(apply);
+    };
+    const schedulePendingRetry = () => {
+      if (retryTimer !== null) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        retry();
+      }, PENDING_RETRY_MS);
+    };
+    retry();
     const off = onAssetEvent((event) => {
       if (event.type !== "thumbnailReady" || event.assetId !== assetId) return;
-      void fetchAssetThumb(assetId, size, priority).then(apply);
+      // 同资产任一档位就绪：立即重查（多数情况此处即命中缓存）；
+      // 若仍 pending（如事件属于另一档位/被在途去重吞并），周期兜底接管。
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      retry();
     });
     return () => {
       cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
       off();
     };
   }, [assetId, size, enabled, priority]);

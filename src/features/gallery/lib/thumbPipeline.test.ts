@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
-import { resetThumbPipelineForTests, fetchAssetThumb, warmImageDecode } from "./thumbPipeline";
+import {
+  resetThumbPipelineForTests,
+  fetchAssetThumb,
+  useAssetThumbUrl,
+  warmImageDecode,
+  PENDING_RETRY_MS,
+  emitAssetEventForTests,
+} from "./thumbPipeline";
 import { assetThumbGet, type ThumbGetResult } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -124,6 +132,160 @@ describe("warmImageDecode（解码预热）", () => {
       expect(created[0].src).toBe("asset://C:\\t\\a.jpg");
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+// --- pending 兜底重拉（RAW 远图大图升级停滞的根因回归） ------------------------------
+//
+// thumbnailReady 事件可丢失且无回执：后端生成队列满时直接丢任务不发事件
+// （thumb.rs 明言依赖「前端滚动重试自愈」——查看器不滚动）；事件也可能
+// 先于命令响应到达（重查被 in-flight 去重吞并）或早于 hook 订阅发出。
+// 修复：pending 态每 PENDING_RETRY_MS 重拉直至 settled。
+
+describe("useAssetThumbUrl：pending 周期兜底重拉", () => {
+  it("事件永远不到（后端队满丢任务）：pending 周期重拉直至 ready", async () => {
+    vi.useFakeTimers();
+    try {
+      thumbMock.mockReset();
+      thumbMock
+        .mockResolvedValueOnce({ status: "pending" })
+        .mockResolvedValueOnce({ status: "ready", path: "C:\\t\\raw-embed\\701.jpg" });
+      const { result } = renderHook(() => useAssetThumbUrl(701, 6000, true, "high"));
+
+      // 首次请求 pending；不发任何事件（模拟回执丢失）
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.status).toBe("loading");
+      expect(thumbMock).toHaveBeenCalledTimes(1);
+
+      // 事件永不到达 → 2.5s 兜底重拉命中缓存 → ready（不再依赖切图自救）
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS);
+      });
+      expect(result.current.status).toBe("ready");
+      expect(result.current.url).toContain("701");
+      expect(thumbMock).toHaveBeenCalledTimes(2);
+
+      // settled 后停止重拉
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS * 3);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("事件早于 hook 订阅发出（挂载前错过）：重查无门，周期兜底自愈", async () => {
+    vi.useFakeTimers();
+    try {
+      thumbMock.mockReset();
+      thumbMock
+        .mockResolvedValueOnce({ status: "pending" })
+        .mockResolvedValueOnce({ status: "ready", path: "C:\\t\\raw-embed\\702.jpg" });
+
+      // 事件在 hook 挂载订阅之前已发出——监听集合里还没有人，直接丢
+      act(() => {
+        emitAssetEventForTests({
+          type: "thumbnailReady",
+          assetId: 702,
+          size: 2048,
+          path: "C:\\t\\512\\702.jpg",
+        });
+      });
+
+      const { result } = renderHook(() => useAssetThumbUrl(702, 6000, true, "high"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.status).toBe("loading");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS);
+      });
+      expect(result.current.status).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("事件先于命令响应到达：重查被 in-flight 去重吞并，周期兜底仍到达 ready", async () => {
+    vi.useFakeTimers();
+    try {
+      thumbMock.mockReset();
+      // 首请求悬挂（手动放行）：事件到达时首请求未结算，重查共享同一在途 Promise
+      let resolveFirst!: (r: ThumbGetResult) => void;
+      thumbMock
+        .mockImplementationOnce(
+          () => new Promise<ThumbGetResult>((resolve) => (resolveFirst = resolve)),
+        )
+        .mockResolvedValueOnce({ status: "ready", path: "C:\\t\\raw-embed\\703.jpg" });
+
+      const { result } = renderHook(() => useAssetThumbUrl(703, 6000, true, "high"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(1);
+
+      // 事件先到：触发重查，但被 in-flight 去重吞并（仍只有 1 次后端请求）
+      act(() => {
+        emitAssetEventForTests({
+          type: "thumbnailReady",
+          assetId: 703,
+          size: 2048,
+          path: "C:\\t\\512\\703.jpg",
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(1);
+
+      // 首请求结算为 pending：旧实现从此无人再问（停滞根因）
+      await act(async () => {
+        resolveFirst({ status: "pending" });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.status).toBe("loading");
+
+      // 周期兜底发起新请求 → 命中缓存 → ready
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS);
+      });
+      expect(result.current.status).toBe("ready");
+      expect(thumbMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("failed 结算即停止重拉；enabled=false 不请求不轮询", async () => {
+    vi.useFakeTimers();
+    try {
+      thumbMock.mockReset().mockResolvedValue({ status: "unavailable" });
+      const { result } = renderHook(() => useAssetThumbUrl(704, 6000, true, "high"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.status).toBe("failed");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS * 3);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(1); // failed 缓存拦截，无重拉
+
+      const disabled = renderHook((props: { enabled: boolean }) =>
+        useAssetThumbUrl(705, 6000, props.enabled, "high"),
+        { initialProps: { enabled: false } },
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS * 3);
+      });
+      expect(disabled.result.current.status).toBe("loading");
+      expect(thumbMock).toHaveBeenCalledTimes(1); // 未发过请求
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

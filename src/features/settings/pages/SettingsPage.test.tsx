@@ -71,6 +71,7 @@ function allModels(
   const base = [
     aiModel("siglip2-visual", "done", "semantic"),
     aiModel("siglip2-text", "done", "semantic", 250 * 1024 * 1024),
+    aiModel("siglip2-tokenizer", "done", "semantic", 34 * 1024 * 1024),
     aiModel("scrfd", "idle", "face", 2 * 1024 * 1024),
     aiModel("arcface", "idle", "face", 230 * 1024 * 1024),
   ];
@@ -369,19 +370,32 @@ describe("AI tab（M4 实化）", () => {
     expect(useSettingsStore.getState().settings.ai.semanticMinScore).toBe(0.09);
   });
 
-  it("模型状态区：4 行渲染（显示名/体积/状态徽标）", async () => {
+  it("模型状态区：按能力分组渲染 5 行（组头 + 显示名/体积/状态徽标）", async () => {
     aiModelsStatusMock.mockResolvedValue(allModels());
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
 
     const rows = await screen.findAllByTestId("ai-model-row");
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(5);
     expect(rows[0]).toHaveTextContent("语义 · 图像编码");
     expect(rows[0]).toHaveTextContent("已安装");
-    expect(rows[2]).toHaveTextContent("人脸 · 检测");
-    expect(rows[2]).toHaveTextContent("2.0 MB");
-    expect(rows[2]).toHaveTextContent("未下载");
+    // 语义组三件：visual / text / tokenizer（分组依据=后端清单 feature 字段）
+    expect(rows[2]).toHaveTextContent("语义 · 分词器");
+    expect(rows[3]).toHaveTextContent("人脸 · 检测");
+    expect(rows[3]).toHaveTextContent("2.0 MB");
+    expect(rows[3]).toHaveTextContent("未下载");
+
+    // 组头：组名 + 聚合进度（已装 N/M）
+    const semanticGroup = screen.getByTestId("ai-model-group-semantic");
+    expect(semanticGroup).toHaveAttribute("data-installed", "3");
+    expect(semanticGroup).toHaveAttribute("data-total", "3");
+    expect(screen.getByTestId("ai-model-group-count-semantic")).toHaveTextContent(
+      "已安装 3/3",
+    );
+    expect(screen.getByTestId("ai-model-group-count-face")).toHaveTextContent("已安装 0/2");
+    expect(screen.getByText("语义搜索模型")).toBeInTheDocument();
+    expect(screen.getByText("人脸识别模型")).toBeInTheDocument();
   });
 
   it("下载：idle 行点击下载 → ai_model_download；状态翻 downloading 后进度条随事件增长", async () => {
@@ -433,6 +447,102 @@ describe("AI tab（M4 实化）", () => {
     await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
     await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
     expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-visual");
+  });
+
+  it("删除后状态即时刷新：ai_model_delete 结算后重拉，不切选项卡卡片即翻未下载", async () => {
+    // 真机根因：删除命令无事件回执，旧实现发起后立刻 refresh（后端尚未删除，
+    // 快照仍是 done），此后无人再拉——要切走选项卡再切回才变
+    let deleted = false;
+    aiModelDeleteMock.mockImplementation(async () => {
+      deleted = true;
+    });
+    aiModelsStatusMock.mockImplementation(async () =>
+      allModels([{ id: "siglip2-visual", state: deleted ? "idle" : "done" }]),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    const row = await waitFor(() => {
+      const el = document.querySelector('[data-model-id="siglip2-visual"]');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(row).toHaveAttribute("data-state", "done");
+
+    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
+    await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
+
+    // 不切选项卡：删除结算 → refresh → 卡片即时翻 idle
+    await waitFor(() =>
+      expect(document.querySelector('[data-model-id="siglip2-visual"]')).toHaveAttribute(
+        "data-state",
+        "idle",
+      ),
+    );
+    // 挂载一次 + 删除后一次
+    expect(aiModelsStatusMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("一键下载：组内未装模型批量发起（done/downloading 不重复发起）", async () => {
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "siglip2-text", state: "idle" },
+        { id: "siglip2-tokenizer", state: "failed" },
+      ]),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await user.click(await screen.findByTestId("ai-model-group-download-semantic"));
+    // 组内未装两件（idle + failed）都发起；已装的 visual 不重复发起
+    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-text");
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-tokenizer");
+    expect(aiModelDownloadMock).not.toHaveBeenCalledWith("siglip2-visual");
+    expect(screen.getByTestId("ai-model-group-count-semantic")).toHaveTextContent("已安装 1/3");
+  });
+
+  it("一键下载错误隔离：单个模型发起失败不中断其余", async () => {
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "siglip2-visual", state: "idle" },
+        { id: "siglip2-text", state: "idle" },
+        { id: "siglip2-tokenizer", state: "idle" },
+      ]),
+    );
+    // 第二个模型发起抛错（如未知模型 id）：其余仍要发起
+    aiModelDownloadMock.mockImplementation(async (id: string) => {
+      if (id === "siglip2-text") throw new Error("boom");
+    });
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await user.click(await screen.findByTestId("ai-model-group-download-semantic"));
+    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(3));
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-visual");
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-tokenizer");
+  });
+
+  it("组内全装后一键下载按钮消失", async () => {
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "siglip2-tokenizer", state: "idle" },
+        { id: "scrfd", state: "done" },
+        { id: "arcface", state: "done" },
+      ]),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    await screen.findAllByTestId("ai-model-row");
+    expect(screen.getByTestId("ai-model-group-count-face")).toHaveTextContent("已安装 2/2");
+    expect(screen.queryByTestId("ai-model-group-download-face")).not.toBeInTheDocument();
+    // 语义组未装全（分词器缺）：按钮仍在
+    expect(screen.getByTestId("ai-model-group-download-semantic")).toBeInTheDocument();
   });
 
   it("功能门控：两个 siglip2 未 done → 语义开关禁用+「先下载模型」；都 done → 开启写设置", async () => {
@@ -677,17 +787,59 @@ describe("外观 tab：界面动画", () => {
   });
 });
 
-// --- AI tab：索引参数与重建（M4.5 wave-3 第 7 项） ----------------------------------------
+// --- AI tab：索引参数与重建（M4.5 wave-3 第 7 项；④ 起收进「高级」折叠分组） --------------
 
 describe("AI tab：索引参数与重建", () => {
   beforeEach(() => {
     indexRebuildMock.mockReset().mockResolvedValue(undefined);
   });
 
+  /** 勾选「开发人员配置」展开高级调参区（默认收起） */
+  async function enableAdvanced(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.click(await screen.findByTestId("ai-advanced-toggle"));
+  }
+
+  it("高级参数默认收起：勾选「开发人员配置」才显示；语义阈值留在明面", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    // 默认收起：调参输入不在 DOM（连拍阈值/间隔、人脸检测与聚类阈值等）
+    expect(await screen.findByTestId("ai-advanced-toggle")).not.toBeChecked();
+    expect(screen.queryByTestId("ai-advanced-params")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-param-burst-hamming-max")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-param-burst-gap-ms")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-param-face-detect-threshold")).not.toBeInTheDocument();
+    // 语义阈值是常用项：不受开关影响
+    expect(screen.getByTestId("ai-semantic-threshold")).toBeInTheDocument();
+
+    await enableAdvanced(user);
+    expect(screen.getByTestId("ai-advanced-params")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-param-burst-hamming-max")).toBeInTheDocument();
+    // 开关状态持久化 localStorage
+    expect(localStorage.getItem("smartphoto.settings.ai.advanced")).toBe("1");
+
+    // 取消勾选即收起
+    await user.click(screen.getByTestId("ai-advanced-toggle"));
+    expect(screen.queryByTestId("ai-advanced-params")).not.toBeInTheDocument();
+    expect(localStorage.getItem("smartphoto.settings.ai.advanced")).toBe("0");
+  });
+
+  it("「开发人员配置」开关跨会话记忆：localStorage 预置 1 → 进 tab 直接展开", async () => {
+    localStorage.setItem("smartphoto.settings.ai.advanced", "1");
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-param-embed-input-size")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-advanced-toggle")).toBeChecked();
+  });
+
   it("三参数输入改即存（钳制区间）；偏离默认出现「恢复默认」", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
+    await enableAdvanced(user);
 
     expect(await screen.findByTestId("ai-param-embed-input-size")).toHaveValue(256);
     expect(screen.getByTestId("ai-param-face-detect-threshold")).toHaveValue(0.5);
@@ -743,11 +895,16 @@ describe("AI tab：索引参数与重建", () => {
 
 // --- AI tab：连拍分组（M6） ------------------------------------------------------------
 
-describe("AI tab：连拍分组", () => {
+describe("AI tab：连拍分组（④ 起位于「高级」折叠分组内）", () => {
+  async function enableAdvanced(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.click(await screen.findByTestId("ai-advanced-toggle"));
+  }
+
   it("三参数带默认值与「重新分组」说明；草稿失焦提交入库，恢复默认回滚", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
+    await enableAdvanced(user);
 
     expect(await screen.findByTestId("ai-param-burst-gap-ms")).toHaveValue(2000);
     expect(screen.getByTestId("ai-param-burst-hamming-max")).toHaveValue(10);
@@ -774,6 +931,7 @@ describe("AI tab：连拍分组", () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
+    await enableAdvanced(user);
 
     expect(await screen.findByTestId("ai-burst-stats")).toHaveTextContent("12 组 · 共 47 张");
   });
@@ -783,6 +941,7 @@ describe("AI tab：连拍分组", () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
+    await enableAdvanced(user);
 
     expect(await screen.findByTestId("ai-param-burst-min-size")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-burst-stats")).not.toBeInTheDocument();

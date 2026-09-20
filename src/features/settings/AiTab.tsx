@@ -9,6 +9,7 @@ import {
   indexKickNow,
   indexRebuild,
   burstStats,
+  type AiFeature,
   type AiModelStatus,
   type IndexKind,
   type IndexStatus,
@@ -26,13 +27,19 @@ import {
 
 /**
  * 设置页 AI tab（M4 实化）：
- * - 模型状态区：4 行（siglip2-visual/text、scrfd、arcface）名称/体积/状态/操作
- *   （下载/取消/重试/删除释放磁盘），下载进度条走 aiModelDownloadProgress 事件
+ * - 模型状态区：按能力分组（分组依据=后端清单 feature 字段，src-tauri
+ *   src/ai/mod.rs CATALOG_JSON——语义=visual/text/tokenizer 三件，人脸=
+ *   scrfd/arcface 两件）；每组带「一键下载」（组内未装模型批量发起，
+ *   逐模型错误隔离）与聚合进度（已装 N/M）；组内行显示名称/体积/状态/
+ *   操作，下载进度条走 aiModelDownloadProgress 事件
  * - 索引状态与操作区：三类索引（缩略图/EXIF/语义）计数 + 立即索引（indexKickNow，
  *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
  *   indexTaskProgress 事件驱动重拉（aiStore）。运行态从持久化 indexStatus
  *   派生（pending/running>0）——切页重挂载/重启后状态保留，不丢「进行中」
- * - 功能开关门控：语义=两个 siglip2 都 done；人脸=scrfd+arcface 都 done
+ * - 高级调参区（索引参数/连拍分组）：收进「高级」折叠分组，勾选「开发人员
+ *   配置」才显示（localStorage 持久化）；语义阈值 semanticMinScore 是常用
+ *   项，留在功能开关区明面
+ * - 功能开关门控：语义=feature=semantic 组全部 done；人脸=face 组全部 done
  * - 调度/CPU 滑条（仅用于 AI 推理）/GPU（DirectML 自动回退）
  * - 人脸数据一键清除（红色强确认，两步确认防误触）
  */
@@ -48,9 +55,13 @@ function commit(partial: DeepPartial<Settings>): void {
 const MODEL_NAMES: Record<string, string> = {
   "siglip2-visual": "语义 · 图像编码",
   "siglip2-text": "语义 · 文本编码",
+  "siglip2-tokenizer": "语义 · 分词器",
   scrfd: "人脸 · 检测",
   arcface: "人脸 · 识别",
 };
+
+/** 能力分组展示顺序（分组依据=后端清单 feature 字段，非前端硬编码集合） */
+const FEATURE_ORDER: AiFeature[] = ["semantic", "face"];
 
 /** 状态徽标（含色） */
 function StateBadge({ model }: { model: AiModelStatus }) {
@@ -149,9 +160,11 @@ function ModelRow({ model }: { model: AiModelStatus }) {
             <span className="flex items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   setConfirmDelete(false);
-                  void aiModelDelete(model.id);
+                  // 删除无事件回执：必须等命令结算后重拉状态，否则快照仍是
+                  // 已安装（要切走选项卡再切回才刷新的真机根因）
+                  await aiModelDelete(model.id);
                   void refresh();
                 }}
                 className="rounded-md bg-red-500/90 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
@@ -179,6 +192,64 @@ function ModelRow({ model }: { model: AiModelStatus }) {
             </button>
           ))}
       </div>
+    </div>
+  );
+}
+
+// --- 能力分组（③：按后端清单 feature 字段分组，一键下载 + 聚合进度） -------------------
+
+/** 能力分组：组头（组名 + 已装 N/M + 一键下载）+ 组内模型行 */
+function ModelGroup({ feature, models }: { feature: AiFeature; models: AiModelStatus[] }) {
+  const { t } = useTranslation();
+  const refresh = useAiStore((s) => s.refresh);
+  const installed = models.filter((m) => m.state === "done").length;
+  const allDone = models.length > 0 && installed === models.length;
+
+  async function downloadAll(): Promise<void> {
+    // 组内未装模型批量发起。逐模型错误隔离：单个发起失败不中断其余，
+    // 失败项在行内仍可独立重试；去重/断点续传/镜像回退由后端按模型负责
+    // （ai_model_download 同模型在队直接返回）。
+    for (const model of models) {
+      if (model.state !== "idle" && model.state !== "failed") continue;
+      try {
+        await aiModelDownload(model.id);
+      } catch {
+        // 隔离：继续下一个模型
+      }
+    }
+    void refresh();
+  }
+
+  return (
+    <div
+      data-testid={`ai-model-group-${feature}`}
+      data-installed={installed}
+      data-total={models.length}
+    >
+      <div className="flex min-h-[36px] items-center justify-between gap-4 border-b border-edge/40 py-2">
+        <div className="flex min-w-0 items-center gap-2 text-xs text-text-primary">
+          <span className="font-medium">{t(`settings.ai.group.${feature}`)}</span>
+          <span
+            className="font-mono text-[11px] tabular-nums text-text-muted"
+            data-testid={`ai-model-group-count-${feature}`}
+          >
+            {t("settings.ai.group.installedCount", { installed, total: models.length })}
+          </span>
+        </div>
+        {!allDone && (
+          <button
+            type="button"
+            onClick={() => void downloadAll()}
+            className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+            data-testid={`ai-model-group-download-${feature}`}
+          >
+            {t("settings.ai.group.downloadAll")}
+          </button>
+        )}
+      </div>
+      {models.map((model) => (
+        <ModelRow key={model.id} model={model} />
+      ))}
     </div>
   );
 }
@@ -570,10 +641,66 @@ function IndexStatusSection() {
           {t("settings.ai.index.kickError", { error })}
         </p>
       )}
-      <SectionTitle>{t("settings.ai.paramsSection")}</SectionTitle>
-      <AiParamsSection />
-      <SectionTitle>{t("settings.ai.burstSection")}</SectionTitle>
-      <BurstSection />
+    </>
+  );
+}
+
+// --- 高级调参折叠分组（④） -------------------------------------------------------------
+
+/** 「开发人员配置」开关持久化 key（localStorage，与智能相册标签同款简化存储） */
+const AI_ADVANCED_KEY = "smartphoto.settings.ai.advanced";
+
+function loadAiAdvanced(): boolean {
+  try {
+    return localStorage.getItem(AI_ADVANCED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveAiAdvanced(on: boolean): void {
+  try {
+    localStorage.setItem(AI_ADVANCED_KEY, on ? "1" : "0");
+  } catch {
+    // 隐私模式等：仅本次会话生效
+  }
+}
+
+/**
+ * 高级分组：连拍阈值/间隔、人脸检测与聚类阈值等调参输入收进可折叠区，
+ * 勾选「开发人员配置」才显示（localStorage 持久化）。语义阈值是常用项，
+ * 留在功能开关区明面，不进本组。
+ */
+function AdvancedSection() {
+  const { t } = useTranslation();
+  const [advanced, setAdvanced] = useState(loadAiAdvanced);
+
+  function toggleAdvanced(next: boolean): void {
+    setAdvanced(next);
+    saveAiAdvanced(next);
+  }
+
+  return (
+    <>
+      <SectionTitle>{t("settings.ai.advancedSection")}</SectionTitle>
+      <SettingRow
+        label={t("settings.ai.advancedToggle")}
+        desc={t("settings.ai.advancedToggleDesc")}
+        testId="settings-row-ai-advanced"
+      >
+        <Toggle
+          checked={advanced}
+          label={t("settings.ai.advancedToggle")}
+          testId="ai-advanced-toggle"
+          onChange={toggleAdvanced}
+        />
+      </SettingRow>
+      {advanced && (
+        <div data-testid="ai-advanced-params">
+          <AiParamsSection />
+          <BurstSection />
+        </div>
+      )}
     </>
   );
 }
@@ -590,10 +717,20 @@ export default function AiTab() {
     void refresh();
   }, [refresh]);
 
-  const byId = new Map(models.map((m) => [m.id, m]));
-  const semanticReady =
-    byId.get("siglip2-visual")?.state === "done" && byId.get("siglip2-text")?.state === "done";
-  const faceReady = byId.get("scrfd")?.state === "done" && byId.get("arcface")?.state === "done";
+  // 按能力分组（分组依据=后端清单 feature 字段：语义三件/人脸两件）
+  const byFeature = new Map<AiFeature, AiModelStatus[]>(
+    FEATURE_ORDER.map((feature) => [feature, [] as AiModelStatus[]]),
+  );
+  for (const model of models) {
+    byFeature.get(model.feature)?.push(model);
+  }
+  /** 组就绪=组内全部模型 done（空组=后端清单缺失，视为未就绪） */
+  const groupReady = (feature: AiFeature): boolean => {
+    const list = byFeature.get(feature) ?? [];
+    return list.length > 0 && list.every((m) => m.state === "done");
+  };
+  const semanticReady = groupReady("semantic");
+  const faceReady = groupReady("face");
 
   // 人脸数据清除：两步强确认
   const [faceConfirm, setFaceConfirm] = useState(false);
@@ -603,19 +740,24 @@ export default function AiTab() {
     <>
       <SectionTitle>{t("settings.section.ai")}</SectionTitle>
 
-      {/* 模型状态区 */}
+      {/* 模型状态区（按能力分组） */}
       <div data-testid="ai-model-list">
         {!modelsLoaded ? (
           <p className="py-3 text-[11px] text-text-muted">{t("settings.ai.model.loading")}</p>
         ) : models.length === 0 ? (
           <p className="py-3 text-[11px] text-text-muted">{t("gallery.ipcUnavailable")}</p>
         ) : (
-          models.map((model) => <ModelRow key={model.id} model={model} />)
+          FEATURE_ORDER.map((feature) => (
+            <ModelGroup key={feature} feature={feature} models={byFeature.get(feature) ?? []} />
+          ))
         )}
       </div>
 
-      {/* 单一区块：状态、立即索引、重建与索引参数 */}
+      {/* 区块：状态、立即索引、重建 */}
       <IndexStatusSection />
+
+      {/* 高级调参（折叠分组，开发人员配置开关门控） */}
+      <AdvancedSection />
 
       {/* 功能开关（模型门控） */}
       <SectionTitle>{t("settings.section.aiFeatures")}</SectionTitle>

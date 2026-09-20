@@ -267,6 +267,52 @@ describe("查看器：打开与图片来源", () => {
     await screen.findByTestId("viewer-placeholder");
     expect(document.querySelector("img[data-testid='viewer-img']")).toBeNull();
   });
+
+  it("RAW 远图事件回执丢失（后端队满/事件先于订阅）：pending 周期兜底重拉仍升级大图", async () => {
+    // 真机复现：点击未预加载的远处照片 → 512 秒出，rawEmbed(6000) pending 后
+    // thumbnailReady 丢失 → 旧实现永停 512，切图再切回才出。修复后 hook 周期
+    // 重拉，rawEmbed 链最终到达 ready。
+    vi.useFakeTimers();
+    try {
+      const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
+      convertMock.mockImplementation((p: string) => `asset://${p}`);
+      let embedCalls = 0;
+      thumbMock.mockImplementation(async (id: number, size: number) => {
+        if (size === 6000 && id === 7) {
+          embedCalls += 1;
+          // 第一次 pending（生成排队/任务被丢，无回执事件）；兜底重拉时已就绪
+          return embedCalls === 1
+            ? { status: "pending" }
+            : { status: "ready", path: "C:\\thumbs\\raw-embed-v1\\img7.jpg" };
+        }
+        return Promise.resolve({ status: "ready", path: `C:\\thumbs\\512\\img${id}.jpg` });
+      });
+      renderViewer(rawAssets);
+
+      // 首帧：512 档立即显示，rawEmbed 在途
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const img = screen.getByTestId("viewer-img");
+      expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\512\\img7.jpg");
+      expect(img).toHaveAttribute("data-fallback", "thumb");
+      expect(embedCalls).toBe(1);
+
+      // 不发任何 thumbnailReady 事件（回执丢失）→ 2.5s 兜底重拉 → 大图升级
+      //（fake timers 下不用 waitFor：其内部 interval 也被冻结，须直接断言）
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2600);
+      });
+      expect(embedCalls).toBe(2);
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "raw-embed");
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute(
+        "src",
+        "asset://C:\\thumbs\\raw-embed-v1\\img7.jpg",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // --- 切换与关闭 ---------------------------------------------------------------------

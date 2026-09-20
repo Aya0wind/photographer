@@ -138,9 +138,11 @@ export default function GalleryPage() {
       }
     } else if (urlKind === null && appliedUrlKindRef.current !== null) {
       // 参数消失（同路径无参导航，如侧栏图库链接）：同步撤筛选——
-      // 此前只清 ref 不清 state，?kind 进入的筛选会永久滞留且 UI 无从察觉
+      // 此前只清 ref 不清 state，?kind 进入的筛选会永久滞留且 UI 无从察觉。
+      // 清回规范空值 "all"（chips/筛选面板以 !== "all" 判定；置 undefined 会
+      // 产生幽灵 chip 且类型不合法）
       appliedUrlKindRef.current = null;
-      setInputs((prev) => (prev.kind === undefined ? prev : { ...prev, kind: undefined }));
+      setInputs((prev) => (prev.kind === "all" ? prev : { ...prev, kind: "all" }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, urlQuery]);
