@@ -1,0 +1,215 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { I18nextProvider } from "react-i18next";
+import { MemoryRouter, Route, Routes } from "react-router";
+
+import i18n from "@/i18n";
+import SimilarPage from "./SimilarPage";
+import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
+import {
+  assetThumbGet,
+  duplicateDelete,
+  duplicatesList,
+  type AssetDto,
+  type DuplicateGroupDto,
+} from "@/ipc/api";
+
+vi.mock("@/ipc/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/ipc/api")>();
+  return {
+    ...actual,
+    duplicatesList: vi.fn(),
+    duplicateDelete: vi.fn(),
+    assetThumbGet: vi.fn(),
+  };
+});
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue(undefined),
+  convertFileSrc: vi.fn(),
+}));
+
+const listMock = vi.mocked(duplicatesList);
+const deleteMock = vi.mocked(duplicateDelete);
+const thumbMock = vi.mocked(assetThumbGet);
+
+// --- 工具 ---------------------------------------------------------------------------
+
+function makeAsset(id: number): AssetDto {
+  const file = `IMG_${String(id).padStart(4, "0")}.JPG`;
+  return {
+    id,
+    path: `Y:\\照片\\SmartPhoto\\2026\\${file}`,
+    name: file,
+    kind: "photo",
+    capturedAt: "2026-09-18T10:00:00",
+    camera: "Canon EOS R5",
+    sizeBytes: 1024,
+  };
+}
+
+function groupOf(ids: number[], kind: "exact" | "similar" = "similar"): DuplicateGroupDto {
+  return { kind, assets: ids.map(makeAsset) };
+}
+
+function renderSimilar() {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <MemoryRouter initialEntries={["/similar"]}>
+        <Routes>
+          <Route path="/similar" element={<SimilarPage />} />
+        </Routes>
+      </MemoryRouter>
+    </I18nextProvider>,
+  );
+}
+
+beforeEach(() => {
+  listMock.mockReset().mockResolvedValue([]);
+  deleteMock.mockReset().mockResolvedValue(0);
+  thumbMock.mockReset().mockResolvedValue({ status: "pending" });
+  resetThumbPipelineForTests();
+});
+
+// --- Tab 与组渲染 -------------------------------------------------------------------
+
+describe("相似照片：Tab 与组渲染", () => {
+  it("默认完全重复档：组卡片列表 + 组头「N 张 · 完全重复」；切档重新拉取", async () => {
+    listMock.mockResolvedValue([
+      { kind: "exact", assets: [makeAsset(1), makeAsset(2), makeAsset(3)] },
+      { kind: "exact", assets: [makeAsset(4), makeAsset(5)] },
+    ]);
+    const user = userEvent.setup();
+    renderSimilar();
+
+    const cards = await screen.findAllByTestId("similar-group");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveAttribute("data-kind", "exact");
+    expect(cards[0]).toHaveTextContent("3 张");
+    expect(cards[0]).toHaveTextContent("完全重复");
+    expect(within(cards[0]).getAllByTestId("similar-asset").map((a) => a.getAttribute("data-asset-id"))).toEqual(
+      ["1", "2", "3"],
+    );
+    expect(listMock).toHaveBeenCalledWith("exact", 0, 20);
+
+    // 切到相似照片档：kind 参数变化、列表重拉
+    await user.click(screen.getByTestId("similar-tab-similar"));
+    await waitFor(() => expect(listMock).toHaveBeenCalledWith("similar", 0, 20));
+    expect(screen.getByTestId("similar-tab-similar")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("该 kind 无重复 → 正面空态文案（两档各验）", async () => {
+    listMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderSimilar();
+
+    const empty = await screen.findByTestId("similar-empty");
+    expect(empty).toHaveTextContent("没有完全重复的照片");
+    expect(screen.queryByTestId("similar-group")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("similar-tab-similar"));
+    await waitFor(() =>
+      expect(screen.getByTestId("similar-empty")).toHaveTextContent("没有相似的照片"),
+    );
+  });
+});
+
+// --- 勾选 + 删除确认流 ----------------------------------------------------------------
+
+describe("相似照片：勾选删除", () => {
+  it("点选组内照片 → 删除所选（按钮带计数）→ 二次确认 → duplicateDelete → 组内剔除 + 已删除反馈", async () => {
+    listMock.mockResolvedValue([
+      { kind: "similar", assets: [makeAsset(1), makeAsset(2), makeAsset(3)] },
+    ]);
+    deleteMock.mockResolvedValue(2);
+    const user = userEvent.setup();
+    renderSimilar();
+
+    const card = (await screen.findAllByTestId("similar-group"))[0];
+    const deleteButton = within(card).getByTestId("similar-group-delete");
+    expect(deleteButton).toBeDisabled();
+
+    // 勾选两张
+    const tiles = within(card).getAllByTestId("similar-asset");
+    await user.click(tiles[1]);
+    await user.click(tiles[2]);
+    expect(tiles[1]).toHaveAttribute("data-selected", "true");
+    expect(tiles[0]).not.toHaveAttribute("data-selected");
+    expect(deleteButton).toHaveTextContent("删除所选（2）");
+
+    // 确认弹窗（红色二次确认）→ 取消不发
+    await user.click(deleteButton);
+    const dialog = screen.getByTestId("similar-confirm");
+    expect(dialog).toHaveTextContent("将永久删除所选 2 张");
+    await user.click(screen.getByTestId("similar-confirm-cancel"));
+    expect(deleteMock).not.toHaveBeenCalled();
+
+    // 确认路径：ids 传选中两张；组内剔除后剩 1 张（组卡移除）；行内反馈
+    await user.click(within(card).getByTestId("similar-group-delete"));
+    await user.click(screen.getByTestId("similar-confirm-yes"));
+    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith([2, 3]));
+    expect(await screen.findByTestId("similar-feedback")).toHaveTextContent("已删除 2 张");
+    await waitFor(() => expect(screen.queryByTestId("similar-group")).not.toBeInTheDocument());
+  });
+
+  it("删除失败（后端 Err 文案透传），组不变", async () => {
+    listMock.mockResolvedValue([{ kind: "similar", assets: [makeAsset(1), makeAsset(2)] }]);
+    deleteMock.mockRejectedValue("未选择活动库");
+    const user = userEvent.setup();
+    renderSimilar();
+
+    const card = (await screen.findAllByTestId("similar-group"))[0];
+    await user.click(within(card).getAllByTestId("similar-asset")[0]);
+    await user.click(within(card).getByTestId("similar-group-delete"));
+    await user.click(screen.getByTestId("similar-confirm-yes"));
+
+    expect(await screen.findByTestId("similar-error")).toHaveTextContent("未选择活动库");
+    expect(screen.getByTestId("similar-group")).toBeInTheDocument();
+  });
+});
+
+// --- 分页游标 ------------------------------------------------------------------------
+
+describe("相似照片：分页游标", () => {
+  it("满页出现「加载更多」；after=已取组数（0 基组偏移）；短页到底按钮消失", async () => {
+    const page1 = Array.from({ length: 20 }, (_, i) => groupOf([100 + i * 2, 101 + i * 2]));
+    const page2 = Array.from({ length: 3 }, (_, i) => groupOf([200 + i * 2, 201 + i * 2]));
+    listMock.mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
+    const user = userEvent.setup();
+    renderSimilar();
+
+    expect(await screen.findAllByTestId("similar-group")).toHaveLength(20);
+    await user.click(screen.getByTestId("similar-load-more"));
+
+    await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(23));
+    // 游标 = 首页组数（skip 计数，非组 id）
+    expect(listMock).toHaveBeenLastCalledWith("exact", 20, 20);
+    // 短页（3 < 20）→ 到底
+    expect(screen.queryByTestId("similar-load-more")).not.toBeInTheDocument();
+  });
+
+  it("删除使整组消失后游标同步收缩：加载更多 after=19（不跳组）", async () => {
+    const page1 = Array.from({ length: 20 }, (_, i) => groupOf([100 + i * 2, 101 + i * 2]));
+    listMock.mockResolvedValueOnce(page1).mockResolvedValueOnce([groupOf([300, 301])]);
+    deleteMock.mockResolvedValue(2);
+    const user = userEvent.setup();
+    renderSimilar();
+
+    expect(await screen.findAllByTestId("similar-group")).toHaveLength(20);
+
+    // 删除第一组全部两张 → 组卡移除，seen 20→19
+    const first = screen.getAllByTestId("similar-group")[0];
+    for (const tile of within(first).getAllByTestId("similar-asset")) {
+      await user.click(tile);
+    }
+    await user.click(within(first).getByTestId("similar-group-delete"));
+    await user.click(screen.getByTestId("similar-confirm-yes"));
+    await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(19));
+
+    await user.click(screen.getByTestId("similar-load-more"));
+    await waitFor(() => expect(listMock).toHaveBeenLastCalledWith("exact", 19, 20));
+    await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(20));
+  });
+});

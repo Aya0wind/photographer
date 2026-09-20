@@ -10,10 +10,10 @@ import { peopleList } from "@/ipc/api";
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
  * - 浏览：图库、最近浏览（/recent）、那年今天（/memories，M7 F6）、
  *   收藏（F5 数据未就绪——禁用 +「即将支持」）
- * - 组织：相册（/albums 标签墙总览）、人物、媒体类型（/media）、
- *   器材统计（/gear，M7 F9）、标签（/albums#tags 同路由锚点，v1 与相册同区块）
- * - 工具：相似照片（F8 占位禁用——pHash 近似重复检查，组内对比保留最优；
- *   完全一样的重复图导入时已由查重策略处理）、导入（任务并入右侧抽屉，M4.5）
+ * - 组织：相册（/albums 标签墙总览）、人物、器材统计（/gear，M7 F9）、
+ *   标签（/albums#tags 同路由锚点，v1 与相册同区块）
+ * - 工具：导入（任务并入右侧抽屉，M4.5）、相似照片（/similar，M7 F8 两级
+ *   去重：完全重复 + pHash 近似，组内勾选清理）
  * - 系统：设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
  * 人物入口 faceCount 总数徽标保留。
@@ -101,14 +101,6 @@ const ICONS = {
     </>,
     "people",
   ),
-  media: icon(
-    <>
-      <rect x="1.5" y="3.5" width="7" height="6" rx="1" />
-      <rect x="9.5" y="6.5" width="5" height="6" rx="1" />
-      <path d="M3.5 12.5h3" />
-    </>,
-    "media",
-  ),
   gear: icon(
     <>
       <path d="M5.5 4.5l1-1.7h3l1 1.7" />
@@ -164,14 +156,16 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
-      { to: "/media", labelKey: "nav.media", icon: ICONS.media },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
       { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags },
     ],
   },
   {
     titleKey: "nav.section.tools",
-    items: [{ to: "/import", labelKey: "nav.import", icon: ICONS.import }],
+    items: [
+      { to: "/import", labelKey: "nav.import", icon: ICONS.import },
+      { to: "/similar", labelKey: "nav.similar", icon: ICONS.similar },
+    ],
   },
   {
     titleKey: "nav.section.system",
@@ -179,10 +173,9 @@ const SECTIONS: NavSection[] = [
   },
 ];
 
-/** 禁用占位项（数据/功能未就绪）：收藏（F5）、相似照片（F8 pHash 近似重复） */
+/** 禁用占位项（数据/功能未就绪）：收藏（F5） */
 const DISABLED_ITEMS: Array<{ section: string; item: DisabledItem }> = [
   { section: "nav.section.browse", item: { labelKey: "nav.favorites", icon: ICONS.favorites } },
-  { section: "nav.section.tools", item: { labelKey: "nav.similar", icon: ICONS.similar } },
 ];
 
 /** 禁用占位行：不可点 + 「即将支持」小字 */

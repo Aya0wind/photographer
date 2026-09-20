@@ -19,6 +19,8 @@ import {
   burstStats,
   gearStats,
   onThisDay,
+  duplicateDelete,
+  duplicatesList,
   assetFlagSet,
   assetRatingSet,
   importJobDelete,
@@ -714,5 +716,43 @@ describe("M4 AI 命令", () => {
     await expect(gearStats()).resolves.toBeNull();
     invokeMock.mockResolvedValueOnce({ ...stats, isoBuckets: "nope" });
     await expect(gearStats()).resolves.toBeNull();
+  });
+
+  it("duplicatesList 传 kind/after/limit（0 基组偏移游标）；失败/非数组回退 []，坏组项剔除", async () => {
+    const groups = [
+      { kind: "exact", assets: [{ id: 1, path: "P", name: "A.JPG", kind: "photo", capturedAt: null, camera: null, sizeBytes: 1 }] },
+      { kind: "similar", assets: [{ id: 2, path: "P", name: "B.JPG", kind: "photo", capturedAt: null, camera: null, sizeBytes: 1 }] },
+    ];
+    invokeMock.mockResolvedValueOnce(groups);
+    await expect(duplicatesList("exact", 20, 20)).resolves.toEqual(groups);
+    expect(invokeMock).toHaveBeenCalledWith("duplicates_list", { kind: "exact", after: 20, limit: 20 });
+
+    // 默认参数：after=0 / limit=20
+    invokeMock.mockResolvedValueOnce([]);
+    await duplicatesList("similar");
+    expect(invokeMock).toHaveBeenLastCalledWith("duplicates_list", { kind: "similar", after: 0, limit: 20 });
+
+    invokeMock.mockRejectedValueOnce(new Error("command not found"));
+    await expect(duplicatesList("exact")).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(duplicatesList("exact")).resolves.toEqual([]);
+
+    // 组项形状异常（未知 kind / assets 非数组）剔除，保留合法组
+    invokeMock.mockResolvedValueOnce([
+      { kind: "nope", assets: [] },
+      { kind: 7 },
+      groups[0],
+    ]);
+    await expect(duplicatesList("exact")).resolves.toEqual([groups[0]]);
+  });
+
+  it("duplicateDelete 传 assetIds 返回实际删除数；业务错误原样抛出", async () => {
+    invokeMock.mockResolvedValueOnce(2);
+    await expect(duplicateDelete([4, 5])).resolves.toBe(2);
+    expect(invokeMock).toHaveBeenCalledWith("duplicate_delete", { assetIds: [4, 5] });
+
+    // 后端 Err（如未选库）透传给调用方展示
+    invokeMock.mockRejectedValueOnce("未选择活动库");
+    await expect(duplicateDelete([4])).rejects.toBe("未选择活动库");
   });
 });

@@ -693,6 +693,48 @@ export async function gearStats(): Promise<GearStats | null> {
   }
 }
 
+// --- 两级去重（M7 F8：完全重复 exact / 近似 similar） -----------------------------------
+
+/** 去重档位：exact = (size, xxhash) 完全相同；similar = pHash 汉明 ≤6 近似
+ *  （RAW+JPG 孪生已被后端排除；连拍组内不排除——正是挑片场景） */
+export type DuplicateKind = "exact" | "similar";
+
+/** 重复组（duplicates_list 返回）：组内 created_at 升序（首张=最早入库） */
+export interface DuplicateGroupDto {
+  kind: DuplicateKind;
+  assets: AssetDto[];
+}
+
+/**
+ * 重复组列表（duplicates_list）。游标语义（对齐 src-tauri duplicates.rs）：
+ * after = 上一页末组**序号**（0 基组偏移，skip 计数——不是组 id），首页传
+ * 0/省略；limit 限组数（后端默认 50、上限 100）。组序：组大小降序。
+ * 失败/非数组回退 []，组项形状异常剔除。
+ */
+export async function duplicatesList(
+  kind: DuplicateKind,
+  after = 0,
+  limit = 20,
+): Promise<DuplicateGroupDto[]> {
+  try {
+    const list = await ipc<DuplicateGroupDto[] | null>("duplicates_list", { kind, after, limit });
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      (g): g is DuplicateGroupDto =>
+        typeof g?.kind === "string" && (g.kind === "exact" || g.kind === "similar") && Array.isArray(g.assets),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 批量删除资产（duplicate_delete：文件 + 库行级联，幂等容忍文件缺失）。
+ *  返回实际删除数；业务错误（如未选库）原样抛给调用方展示。 */
+export async function duplicateDelete(assetIds: number[]): Promise<number> {
+  const deleted = await ipc<number>("duplicate_delete", { assetIds });
+  return typeof deleted === "number" ? deleted : 0;
+}
+
 /** 标记资产被浏览（asset_view_mark；查看器打开/切图时调用，fire-and-forget）。
  *  命令失败静默——浏览打点不阻塞查看。 */
 export async function assetViewMark(assetId: number): Promise<void> {

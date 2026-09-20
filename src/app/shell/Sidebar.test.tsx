@@ -23,8 +23,8 @@ const peopleListMock = vi.mocked(peopleList);
 /** 分组 → 导航项（含禁用占位）的期望结构 */
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
   { section: "浏览", links: ["图库", "最近浏览", "那年今天"], disabled: ["收藏"] },
-  { section: "组织", links: ["相册", "人物", "媒体类型", "器材统计", "标签"], disabled: [] },
-  { section: "工具", links: ["导入"], disabled: ["相似照片"] },
+  { section: "组织", links: ["相册", "人物", "器材统计", "标签"], disabled: [] },
+  { section: "工具", links: ["导入", "相似照片"], disabled: [] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
 
@@ -38,10 +38,10 @@ function renderSidebar(initialPath: string) {
           <Route path="/recent" element={<div>RECENT_CONTENT</div>} />
           <Route path="/memories" element={<div>MEMORIES_CONTENT</div>} />
           <Route path="/gear" element={<div>GEAR_CONTENT</div>} />
+          <Route path="/similar" element={<div>SIMILAR_CONTENT</div>} />
           <Route path="/albums" element={<div>ALBUMS_CONTENT</div>} />
           <Route path="/albums/:tag" element={<div>TAG_CONTENT</div>} />
           <Route path="/people" element={<div>PEOPLE_CONTENT</div>} />
-          <Route path="/media" element={<div>MEDIA_CONTENT</div>} />
           <Route path="/import" element={<div>IMPORT_CONTENT</div>} />
           <Route path="/tasks" element={<div>TASKS_CONTENT</div>} />
           <Route path="/settings" element={<div>SETTINGS_CONTENT</div>} />
@@ -80,11 +80,11 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     expect(screen.queryByRole("link", { name: "搜索" })).not.toBeInTheDocument();
   });
 
-  it("禁用占位（收藏/重复检查）：不可导航 + 「即将支持」小字", () => {
+  it("禁用占位（收藏）：不可导航 + 「即将支持」小字", () => {
     renderSidebar("/gallery");
 
     const disabled = screen.getAllByTestId("nav-disabled");
-    expect(disabled).toHaveLength(2);
+    expect(disabled).toHaveLength(1);
     for (const item of disabled) {
       expect(item).toHaveAttribute("aria-disabled", "true");
       expect(item.querySelector("a")).toBeNull(); // 无链接——不可导航
@@ -103,15 +103,12 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     }
   });
 
-  it("点击导航项跳转对应路由（含新路由 /recent 与 /media）", async () => {
+  it("点击导航项跳转对应路由", async () => {
     renderSidebar("/gallery");
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("link", { name: /最近浏览/ }));
     expect(screen.getByText("RECENT_CONTENT")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("link", { name: /媒体类型/ }));
-    expect(screen.getByText("MEDIA_CONTENT")).toBeInTheDocument();
 
     await user.click(screen.getByRole("link", { name: /相册/ }));
     expect(screen.getByText("ALBUMS_CONTENT")).toBeInTheDocument();
@@ -132,6 +129,20 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     expect(screen.getByText("MEMORIES_CONTENT")).toBeInTheDocument();
     await user.click(gear);
     expect(screen.getByText("GEAR_CONTENT")).toBeInTheDocument();
+  });
+
+  it("F8 相似照片入口已启用（工具组，指 /similar，不再是占位禁用）", async () => {
+    renderSidebar("/gallery");
+    const user = userEvent.setup();
+
+    const similar = screen.getByRole("link", { name: /相似照片/ });
+    const tools = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("工具"));
+    expect(tools).toContain(similar);
+    expect(similar).toHaveAttribute("href", "/similar");
+    expect(similar).not.toHaveAttribute("aria-disabled");
+
+    await user.click(similar);
+    expect(screen.getByText("SIMILAR_CONTENT")).toBeInTheDocument();
   });
 
   it("「标签」入口指向 /albums#tags（与相册同路由锚点）", async () => {

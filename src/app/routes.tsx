@@ -9,9 +9,9 @@ import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
 import RecentPage from "@/features/gallery/pages/RecentPage";
 import MemoriesPage from "@/features/memories/pages/MemoriesPage";
-import MediaPage from "@/features/media/pages/MediaPage";
 import GearPage from "@/features/gear/pages/GearPage";
 import ImportPage from "@/features/import/pages/ImportPage";
+import SimilarPage from "@/features/similar/pages/SimilarPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import PeoplePage from "@/features/people/pages/PeoplePage";
@@ -58,9 +58,9 @@ export const router = createBrowserRouter([
       { path: "gallery", element: <GalleryPage /> },
       { path: "recent", element: <RecentPage /> },
       { path: "memories", element: <MemoriesPage /> },
-      { path: "media", element: <MediaPage /> },
       { path: "gear", element: <GearPage /> },
       { path: "search", element: <SearchRedirect /> },
+      { path: "similar", element: <SimilarPage /> },
       { path: "people", element: <PeoplePage /> },
       { path: "albums", element: <AlbumsIndexPage /> },
       { path: "albums/:tag", element: <AlbumTagPage /> },
