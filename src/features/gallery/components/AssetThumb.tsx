@@ -7,8 +7,9 @@ import { useAssetThumbUrl } from "../lib/thumbPipeline";
  * 库内资产缩略图单元（网格块/查看器胶片条共用）：
  * - photo/raw：进缩略图管线（assetThumbGet→convertFileSrc；未命中占位，
  *   thumbnailReady 重试；RAW 走后端内嵌预览提取，可能较慢——占位期间有水印角标）
- * - video：后端恒无缩略图——永久 kind 占位（不请求不订阅）
+ * - video（M8）：进管线取 ffmpeg 海报；提取失败回退 kind 占位（胶片图形）
  * - RAW 恒叠右上角 RAW 水印角标（半透明深底白字；有真实缩略图后仍可一眼区分）
+ * - video 有海报时叠播放角标（半透明圆底三角），一眼区分可播内容
  * - img onLoad 150ms 淡入；解码失败（缓存文件丢失等）回退占位
  */
 
@@ -110,8 +111,8 @@ export default function AssetThumb({
   priority = "low",
   testId,
 }: AssetThumbProps) {
-  // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线；video 恒占位（不请求）
-  const { url, status } = useAssetThumbUrl(asset.id, size, asset.kind !== "video", priority);
+  // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线；video 走 ffmpeg 海报（M8）
+  const { url, status } = useAssetThumbUrl(asset.id, size, true, priority);
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -130,9 +131,7 @@ export default function AssetThumb({
 
   const showImg = url !== null && !failed;
   // 加载中（请求在途/排队生成/缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
-  // video 不进管线（status 恒 loading）：静态占位，不吃骨架。
-  const loading =
-    skeleton && asset.kind !== "video" && (status === "loading" || (showImg && !loaded));
+  const loading = skeleton && (status === "loading" || (showImg && !loaded));
   return (
     <div
       className={`relative overflow-hidden ${loading ? "sp-skeleton" : "bg-panel/40"} ${className}`}
@@ -168,6 +167,20 @@ export default function AssetThumb({
           data-testid="thumb-raw-badge"
         >
           RAW
+        </span>
+      )}
+      {/* video 播放角标：有海报时居中半透明圆底三角（与 RAW 角标同层语义） */}
+      {asset.kind === "video" && showImg && (
+        <span
+          className="absolute inset-0 flex items-center justify-center"
+          data-testid="thumb-video-play"
+          aria-hidden="true"
+        >
+          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/55">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="white">
+              <path d="M9 7.5l8 4.5-8 4.5v-9z" />
+            </svg>
+          </span>
         </span>
       )}
     </div>

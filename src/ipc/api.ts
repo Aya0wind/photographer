@@ -1099,6 +1099,12 @@ export async function importJobDelete(jobId: number): Promise<void> {
   await ipc<void>("import_job_delete", { jobId });
 }
 
+/** 用系统默认程序打开文件（open_with_system；视频 HEVC 缺解码器时的回退播放）。
+ *  不 catch：失败文案透传给调用方提示 */
+export async function openWithSystem(path: string): Promise<void> {
+  await ipc<void>("open_with_system", { path });
+}
+
 // --- 事件订阅 ----------------------------------------------------------------
 
 /**
