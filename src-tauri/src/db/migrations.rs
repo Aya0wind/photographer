@@ -18,6 +18,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0011_DROP_SHA256,
     MIGRATION_0012_BURSTS,
     MIGRATION_0013_SIMILAR_BUCKET,
+    MIGRATION_0014_HASH_CHANNEL,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -308,4 +309,26 @@ CREATE TABLE similar_bucket (
     asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
     PRIMARY KEY (segment, seg_val, asset_id)
 );
+"#;
+
+/// 0014（M8-② 后台哈希通道）：同卷 rename 快道跳过流式复制，无内联
+/// xxhash → assets.xxhash 写 0 哨兵（=待补算），index_tasks 加 kind='hash'
+/// 通道由 CPU worker 补算（重放安全：整表重建从当前数据复制）。精确查重
+/// 层 (size, xxhash) 对哨兵行跳过，补算后自动就位。
+const MIGRATION_0014_HASH_CHANNEL: &str = r#"
+CREATE TABLE index_tasks_new (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL CHECK (kind IN ('thumb', 'exif', 'ai', 'face', 'phash', 'hash')),
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+INSERT INTO index_tasks_new (id, kind, asset_id, state, attempts, created_at, updated_at)
+    SELECT id, kind, asset_id, state, attempts, created_at, updated_at FROM index_tasks;
+DROP TABLE index_tasks;
+ALTER TABLE index_tasks_new RENAME TO index_tasks;
+CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
+CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 "#;

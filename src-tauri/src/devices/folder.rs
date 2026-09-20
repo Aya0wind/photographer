@@ -96,6 +96,10 @@ impl DeviceSource for LocalFolderSource {
         self.inner.stream(id)
     }
 
+    fn local_path(&self, id: &str) -> Option<std::path::PathBuf> {
+        self.inner.local_path(id)
+    }
+
     fn delete(&self, id: &str) -> DeviceResult<()> {
         self.inner.delete(id)
     }

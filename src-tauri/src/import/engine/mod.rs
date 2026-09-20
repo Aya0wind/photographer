@@ -25,6 +25,7 @@
 mod dedup;
 mod fsutil;
 mod pipeline;
+mod samevol;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -438,6 +439,7 @@ impl Engine {
                         &*source,
                         &part_dir,
                         seq,
+                        self.plan.mode == ImportMode::Move,
                         &entry,
                         &target_root,
                         &dir_template,
@@ -468,20 +470,26 @@ impl Engine {
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
                             // move：journal verified + assets 入库之后删源
-                            //（删源失败≠导入失败：warn 日志 + 独立计数）
+                            //（删源失败≠导入失败：warn 日志 + 独立计数）。
+                            // rename 快道：源已是 .part 并随主路落位——无源
+                            // 可删，直接计移动成功。
                             if self.plan.mode == ImportMode::Move {
-                                match self.source.delete(&entry.id) {
-                                    Ok(()) => counters.moved += 1,
-                                    Err(err) => {
-                                        counters.source_delete_failed += 1;
-                                        let _ = self.db.append_log(
-                                            "warn",
-                                            Some(job_id),
-                                            &format!(
-                                                "移动后删源失败（文件已安全导入）: {}: {err}",
-                                                entry.rel_path
-                                            ),
-                                        );
+                                if copied.fast_moved {
+                                    counters.moved += 1;
+                                } else {
+                                    match self.source.delete(&entry.id) {
+                                        Ok(()) => counters.moved += 1,
+                                        Err(err) => {
+                                            counters.source_delete_failed += 1;
+                                            let _ = self.db.append_log(
+                                                "warn",
+                                                Some(job_id),
+                                                &format!(
+                                                    "移动后删源失败（文件已安全导入）: {}: {err}",
+                                                    entry.rel_path
+                                                ),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -737,17 +745,43 @@ impl Engine {
     }
 
     /// §查重②③：精确复核 + 路径冲突处理 + 原子 rename + 入库 + journal。
+    /// Skip 落盘前的清理：常规路径删 .part 拷贝即可；rename 快道的 .part
+    /// 是源文件本体——尽力 rename 回源，回不去（源目录消失等）保留 .part
+    /// 并告警。跳过（duplicate=skip）绝不吞掉源数据。
+    fn skip_discard(&self, job_id: i64, copied: &CopiedFile) {
+        if !copied.fast_moved {
+            copied.discard_parts();
+            return;
+        }
+        let restored = self
+            .source
+            .local_path(&copied.entry.id)
+            .and_then(|src| fs::rename(&copied.part, &src).ok());
+        if restored.is_none() {
+            let _ = self.db.append_log(
+                "warn",
+                Some(job_id),
+                &format!(
+                    "快道跳过撤回失败，源数据保留在暂存: {}",
+                    copied.part.display()
+                ),
+            );
+        }
+    }
+
     /// 双目的地：两路都落位才算成功（任一失败按单文件失败，主路已落位的
     /// 撤回删除，不留半套拷贝）；journal 双记录（dst + dst2）。
     /// 返回 (终态, 最终目标路径)。
     fn finish_copy(&self, job_id: i64, copied: &CopiedFile) -> Result<(FileState, String), String> {
         let entry = &copied.entry;
 
-        // ② 全量 (size, xxhash) 精确复核
+        // ② 全量 (size, xxhash) 精确复核（xxh=0 哨兵 = rename 快道未哈希，
+        // 精确层跳过——hash 通道补算后此层对后续导入自动就位）
         if self.plan.skip_imported
+            && copied.xxh != 0
             && exact_hit(&self.db, entry.size, copied.xxh).map_err(|e| e.to_string())?
         {
-            copied.discard_parts();
+            self.skip_discard(job_id, copied);
             self.upsert(job_id, entry, "", FileState::Skipped, copied);
             return Ok((FileState::Skipped, String::new()));
         }
@@ -765,7 +799,7 @@ impl Engine {
                     final_dst = unique_path(&parent, &name);
                 }
                 DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
-                    copied.discard_parts();
+                    self.skip_discard(job_id, copied);
                     self.upsert(job_id, entry, "", FileState::Skipped, copied);
                     return Ok((FileState::Skipped, String::new()));
                 }
@@ -783,7 +817,7 @@ impl Engine {
                     final_dst2 = Some(unique_path(&parent, &name));
                 }
                 DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
-                    copied.discard_parts();
+                    self.skip_discard(job_id, copied);
                     self.upsert(job_id, entry, "", FileState::Skipped, copied);
                     return Ok((FileState::Skipped, String::new()));
                 }
@@ -854,6 +888,13 @@ impl Engine {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.upsert_dst2(job_id, entry, &dst, &dst2, FileState::Verified, copied);
+        // rename 快道：xxh=0 哨兵 → 登记 hash 后台补算任务（幂等）
+        if copied.fast_moved {
+            let id = self.db.asset_id_by_path(&dst).ok().flatten();
+            if let Some(id) = id {
+                let _ = self.db.create_hash_task_for(id);
+            }
+        }
         Ok((FileState::Verified, dst))
     }
 

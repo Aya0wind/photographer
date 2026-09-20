@@ -71,6 +71,11 @@ pub trait DeviceSource: Send + Sync {
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>>;
     /// 全文件流（复制用）。调用方负责读完或 drop。
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn Read + Send>>;
+    /// 源文件的本地绝对路径（同卷 rename 快道用）。非本地源（WPD/MTP）
+    /// 返回 None → 引擎走流式复制。
+    fn local_path(&self, _id: &str) -> Option<std::path::PathBuf> {
+        None
+    }
     /// 删除源文件（M2 move 模式：校验入册后删源）。
     /// 默认不支持（仅实现该能力的源可参与移动导入）。
     fn delete(&self, _id: &str) -> DeviceResult<()> {

@@ -351,6 +351,9 @@ impl DeviceSource for ArcSource {
     fn stream(&self, id: &str) -> crate::devices::DeviceResult<Box<dyn std::io::Read + Send>> {
         self.0.stream(id)
     }
+    fn local_path(&self, id: &str) -> Option<std::path::PathBuf> {
+        self.0.local_path(id)
+    }
     fn delete(&self, id: &str) -> crate::devices::DeviceResult<()> {
         self.0.delete(id)
     }

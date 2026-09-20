@@ -29,6 +29,10 @@ pub fn settings_set(
     settings: Settings,
 ) -> Result<(), String> {
     SettingsManager::save(&settings, &state.config_dir).map_err(|err| err.to_string())?;
+    // 缩略图缓存上限即时生效（M8-③）
+    crate::thumbs::set_thumb_cache_cap_bytes(
+        u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
+    );
     // AI 索引参数投影（推理层即时读新值）
     state.ai.set_ai_params(crate::ai::AiIndexParams {
         embed_input_size: settings.ai.embed_input_size,

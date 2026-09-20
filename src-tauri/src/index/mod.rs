@@ -68,23 +68,22 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 }
 
 /// 消费一条任务（认领 → 处理 → 收尾）。返回 false 表示队列已空。
-/// exif 通道（gen-2 深提取回填）与 thumb 同走 CPU 全核池：文件不重叠处理
-/// （每 worker 一次认领一条），exif 任务优先消费——量小且解锁筛选 UI。
+/// 认领优先级：exif（量小且解锁筛选 UI）→ hash（毫秒级，解锁精确查重
+/// 层）→ phash → thumb（数量大头）。每 worker 一次认领一条，认领经
+/// SQLite 写锁串行化，不重不漏。
 fn step(db: &Db, db_dir: &Path) -> bool {
-    let task = match db.claim_index_task("exif").ok().flatten() {
-        Some(t) => t,
-        None => match db.claim_index_task("phash").ok().flatten() {
-            Some(t) => t,
-            None => match db.claim_index_task("thumb") {
-                Ok(Some(t)) => t,
-                Ok(None) | Err(_) => return false,
-            },
-        },
+    let task = ["exif", "hash", "phash"]
+        .iter()
+        .find_map(|kind| db.claim_index_task(kind).ok().flatten())
+        .or_else(|| db.claim_index_task("thumb").ok().flatten());
+    let Some(task) = task else {
+        return false;
     };
     let ok = match task.kind.as_str() {
         "thumb" => process_thumb_task(db, db_dir, task.asset_id),
         "exif" => process_exif_task(db, task.asset_id),
         "phash" => process_phash_task(db, db_dir, task.asset_id),
+        "hash" => process_hash_task(db, task.asset_id),
         _ => false,
     };
     let _ = db.finish_index_task(task.id, ok);
@@ -152,6 +151,39 @@ fn read_head(path: &str) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(256 * 1024);
     file.by_ref().take(1024 * 1024).read_to_end(&mut head)?;
     Ok(head)
+}
+
+/// 哈希补算任务（M8-②）：rename 快道/历史遗留的 xxhash=0 哨兵 → 全文件
+/// 流式 xxh64 补齐（精确查重层 (size, xxhash) 随之就位）。文件消失按完成
+/// 收尾；读失败走 attempts 封顶。
+fn process_hash_task(db: &Db, asset_id: i64) -> bool {
+    let Some((path, xxhash)) =
+        db.0.query_row(
+            "SELECT path, xxhash FROM assets WHERE id = ?1",
+            [asset_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok()
+    else {
+        return true; // 资产已删除：防御兜底
+    };
+    if xxhash != 0 {
+        return true; // 已补算（幂等）
+    }
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return true; // 文件不可读（外部库被移走等）：不再重试
+    };
+    use std::io::Read;
+    let mut hasher = xxhash_rust::xxh64::Xxh64::new(0);
+    let mut chunk = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&chunk[..n]),
+            Err(_) => return false,
+        }
+    }
+    db.set_xxhash(asset_id, hasher.digest()).is_ok()
 }
 
 /// 单 worker 循环：跑到队列空，返回处理数。
@@ -301,6 +333,35 @@ pub fn refresh_phash_for_generation(
             run_pending(&db_dir, worker_count());
         }
         crate::bursts::regroup_kick(db_dir, params, &bus, &supervisor);
+    });
+}
+
+/// 哈希补算代际自愈（gen-1，migration 0014 配套）：xxhash=0 哨兵的存量
+/// 资产（rename 快道遗留/历史）一次性补算。标记防每启动重排。
+pub fn refresh_hash_for_generation(
+    db_dir: PathBuf,
+    bus: &EventBus,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+) {
+    let marker = db_dir.join("hash-gen-1.marker");
+    if marker.is_file() {
+        return;
+    }
+    let bus = bus.clone();
+    supervisor.spawn("index", "hash-gen1-regen".into(), move |_| {
+        let pending = std::fs::create_dir_all(&db_dir)
+            .ok()
+            .and_then(|_| {
+                crate::ipc::open_library_db(&db_dir)
+                    .ok()
+                    .and_then(|db| db.requeue_hash_tasks_for_all().ok())
+            })
+            .unwrap_or(0);
+        let _ = std::fs::write(db_dir.join("hash-gen-1.marker"), b"");
+        if pending > 0 {
+            bus.publish(AppEvent::IndexTaskResumed { pending });
+            run_pending(&db_dir, worker_count());
+        }
     });
 }
 

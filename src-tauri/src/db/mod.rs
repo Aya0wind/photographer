@@ -1722,6 +1722,49 @@ impl Db {
         self.pending_index_task_count("phash")
     }
 
+    /// xxhash 补算写入（hash worker 成果）。
+    pub fn set_xxhash(&self, id: i64, xxhash: u64) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET xxhash = ?2 WHERE id = ?1",
+            params![id, xxhash as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 为哈希补算建任务：xxhash = 0 哨兵（rename 快道遗留）且无未完成
+    /// hash 任务的资产（全 kind——视频等同样参与查重）。
+    pub fn create_hash_tasks_for_unhashed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id                                AND t.state IN ('pending', 'running'))",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
+    /// hash 通道代际重排（既有复位 + 无任务行新建；对齐 requeue_* 家族）。
+    pub fn requeue_hash_tasks_for_all(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1              WHERE kind = 'hash' AND state != 'pending'",
+            params![now],
+        )?;
+        self.0.execute(
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        self.pending_index_task_count("hash")
+    }
+
+    /// 单资产 hash 任务登记（rename 快道入库后即时建；幂等）。
+    pub fn create_hash_task_for(&self, asset_id: i64) -> Result<()> {
+        self.0.execute(
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              VALUES ('hash', ?1, 'pending', 0, ?2, ?2)",
+            params![asset_id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     /// pHash 指纹的 4 段 16-bit 分桶插入（phash 任务成功后增量维护）。
     pub fn insert_similar_buckets(&self, id: i64, phash: u64) -> Result<()> {
         let p = phash as i64;

@@ -27,6 +27,8 @@ pub struct Settings {
     pub import: ImportSettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
+    /// 存储与缓存策略（M8-③：缩略图缓存 LRU 上限等）。
+    pub storage: StorageSettings,
     /// 监视文件夹（F4：后台轮询发现新文件自动入册；绝对路径形态）。
     /// v1 默认空；旧 settings.json 缺字段由 serde default 容错填充。
     pub watch_folders: Vec<String>,
@@ -111,6 +113,7 @@ impl Default for Settings {
             import: ImportSettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),
+            storage: StorageSettings::default(),
             watch_folders: Vec::new(),
         }
     }
@@ -235,6 +238,23 @@ impl Default for SystemSettings {
             launch_at_login: false,
             close_to_tray: true,
             language: "zh".to_string(),
+        }
+    }
+}
+
+/// 存储与缓存策略。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StorageSettings {
+    /// 缩略图缓存总量上限（GB；默认 20，0 = 不限）。命中 touch mtime 续命，
+    /// 超限后台 LRU 淘汰（跳过 60s 内新写入的文件）。
+    pub thumb_cache_max_gb: u32,
+}
+
+impl Default for StorageSettings {
+    fn default() -> Self {
+        Self {
+            thumb_cache_max_gb: 20,
         }
     }
 }

@@ -32,7 +32,7 @@ pub struct IndexStatusDto {
     pub face: IndexKindStatus,
 }
 
-const KINDS: [&str; 5] = ["thumb", "exif", "ai", "face", "phash"];
+const KINDS: [&str; 6] = ["thumb", "exif", "ai", "face", "phash", "hash"];
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
@@ -120,7 +120,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
-        "thumb" | "exif" | "phash" => {
+        "thumb" | "exif" | "phash" | "hash" => {
             match kind {
                 "thumb" => {
                     db.create_thumb_tasks_for_unindexed()
@@ -129,6 +129,11 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
                 "phash" => {
                     db.create_phash_tasks_for_unindexed()
                         .map_err(|e| format!("创建 pHash 任务失败: {e}"))?;
+                }
+                // M8-②：xxhash=0 哨兵（rename 快道/历史遗留）手动补算入口
+                "hash" => {
+                    db.create_hash_tasks_for_unhashed()
+                        .map_err(|e| format!("创建哈希补算任务失败: {e}"))?;
                 }
                 _ => {}
             }
@@ -165,7 +170,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     }
 }
 
-/// 手动触发索引（kind = "thumb" | "exif" | "ai" | "face"；幂等）。
+/// 手动触发索引（kind = "thumb" | "exif" | "ai" | "face" | "phash" | "hash"；幂等）。
 #[tauri::command]
 pub async fn index_kick_now(state: State<'_, SharedState>, kind: String) -> Result<(), String> {
     let shared = state.inner().clone();

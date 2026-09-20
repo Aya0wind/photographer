@@ -118,6 +118,10 @@ impl DeviceSource for VolumeSource {
         Ok(Box::new(self.open_file(id)?))
     }
 
+    fn local_path(&self, id: &str) -> Option<PathBuf> {
+        self.resolve(id).ok()
+    }
+
     /// 删源（move 模式）：删除卷内文件。目录不随之清理（引擎负责空目录清理）。
     fn delete(&self, id: &str) -> DeviceResult<()> {
         Ok(fs::remove_file(self.resolve(id)?)?)

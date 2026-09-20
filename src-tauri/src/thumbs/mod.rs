@@ -155,6 +155,7 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let mtime = meta.modified().ok()?;
     let cache = cache_path(db_dir, src, size, mtime);
     if cache.exists() {
+        touch_lru(&cache); // 命中续命（LRU：mtime 即热度账）
         return Some(cache.to_string_lossy().into_owned()); // 命中，不重解码
     }
 
@@ -163,7 +164,134 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let cell = svc.cell_for(&cache);
     let result = cell.get_or_init(|| generate(&cache, src, size));
     svc.remove(&cache);
+    if result.is_some() {
+        note_generation(db_dir); // 每 N 次生成机会式触发 LRU 淘汰检查
+    }
     result.as_ref().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 缓存 mtime 续命（touch）。失败静默（LRU 只是优化，非正确性依赖）。
+fn touch_lru(cache: &Path) {
+    if let Ok(file) = fs::File::options().write(true).open(cache) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LRU 缓存上限（M8-③）
+// ---------------------------------------------------------------------------
+
+/// 缓存上限（字节；0 = 不限）。启动/settings_set 时刷新。
+static THUMB_CACHE_CAP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(20 * 1024 * 1024 * 1024);
+/// 机会式检查步长：每 N 次生成检查一次（淘汰本身再退线程，不阻塞生成）。
+const EVICT_CHECK_EVERY: u64 = 16;
+/// 淘汰时正在写入的保护窗（秒）：60s 内新 mtime 的文件跳过。
+const EVICT_MIN_AGE_SECS: u64 = 60;
+
+/// 刷新缓存上限（settings 加载 / settings_set 调用；gb=0 不限）。
+pub fn set_thumb_cache_cap_bytes(bytes: u64) {
+    THUMB_CACHE_CAP.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前上限（字节；0 不限）。
+pub fn thumb_cache_cap_bytes() -> u64 {
+    THUMB_CACHE_CAP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 生成计数：每 EVICT_CHECK_EVERY 次机会式派一次后台淘汰。
+fn note_generation(db_dir: &Path) {
+    use std::sync::atomic::AtomicU64;
+    static COUNT: std::sync::OnceLock<AtomicU64> = std::sync::OnceLock::new();
+    let count = COUNT.get_or_init(|| AtomicU64::new(0));
+    if count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(EVICT_CHECK_EVERY)
+    {
+        kick_evict(db_dir);
+    }
+}
+
+/// 超限则后台线程执行 LRU 淘汰（绝不碰 UI/生成线程——spawn 即返回）。
+fn kick_evict(db_dir: &Path) {
+    let cap = thumb_cache_cap_bytes();
+    if cap == 0 {
+        return; // 不限
+    }
+    let db_dir = db_dir.to_path_buf();
+    std::thread::Builder::new()
+        .name("thumb-lru-evict".into())
+        .spawn(move || {
+            evict_lru(&db_dir, cap, EVICT_MIN_AGE_SECS, SystemTime::now());
+        })
+        .ok();
+}
+
+/// 启动扫一次（后台线程；上限 0 不做）。与 kick_evict 同走裸线程——
+/// 淘汰是幂等 IO 清理，无需 supervisor 生命周期管理（也更利于直连
+/// thumbs 模块的测试编译）。
+pub fn kick_startup_evict(db_dir: PathBuf) {
+    let cap = thumb_cache_cap_bytes();
+    if cap == 0 {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("thumb-lru-startup".into())
+        .spawn(move || {
+            let (deleted, freed) = evict_lru(&db_dir, cap, EVICT_MIN_AGE_SECS, SystemTime::now());
+            if deleted > 0 {
+                eprintln!("[thumbs] LRU 启动清理：删 {deleted} 个缓存，释放 {freed} 字节");
+            }
+        })
+        .ok();
+}
+
+/// LRU 淘汰执行体（可测：min_age/now 可注入）。扫 dbDir/thumbs 递归汇总，
+/// 超上限按 mtime 升序删到 ≤ cap；跳过 mtime 距 now < min_age 的文件
+/// （正在写入/刚生成的保护窗）。返回 (删除文件数, 释放字节)。
+pub fn evict_lru(db_dir: &Path, cap_bytes: u64, min_age_secs: u64, now: SystemTime) -> (u64, u64) {
+    let thumbs = db_dir.join("thumbs");
+    if !thumbs.is_dir() {
+        return (0, 0);
+    }
+    // 汇总（路径, mtime, 大小）
+    let mut entries: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
+    let mut total = 0u64;
+    for item in walkdir::WalkDir::new(&thumbs).into_iter().flatten() {
+        let Ok(meta) = item.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let (Ok(mtime), size) = (meta.modified(), meta.len()) else {
+            continue;
+        };
+        total += size;
+        entries.push((item.into_path(), mtime, size));
+    }
+    if total <= cap_bytes {
+        return (0, 0);
+    }
+    let min_age = std::time::Duration::from_secs(min_age_secs);
+    entries.sort_by_key(|(_, mtime, _)| *mtime); // 最旧先删
+    let mut freed = 0u64;
+    let mut deleted = 0u64;
+    for (path, mtime, size) in entries {
+        if total - freed <= cap_bytes {
+            break;
+        }
+        if now
+            .duration_since(mtime)
+            .map(|d| d < min_age)
+            .unwrap_or(true)
+        {
+            continue; // 保护窗内（mtime 异常按保护处理）
+        }
+        if fs::remove_file(&path).is_ok() {
+            freed += size;
+            deleted += 1;
+        }
+    }
+    (deleted, freed)
 }
 
 /// 源是否可出缩略图（位图直解或 RAW 内嵌预览提取；入队前的廉价否决）。

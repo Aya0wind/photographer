@@ -62,16 +62,16 @@ fn generates_cache_returns_path_and_second_call_hits() {
         "不应过度缩小（1024 宽源应缩到 ~256）: {w}x{h}"
     );
 
-    // 二次调用命中同一缓存文件，且不重写（mtime 不变 = 未重新生成）
+    // 二次调用命中同一缓存文件；M8 起 LRU 命中会 touch 续命（mtime 即
+    // 热度账）——命中 = 路径不变 + mtime 被刷新为当下
     let meta_before = fs::metadata(&cache).unwrap();
     std::thread::sleep(Duration::from_millis(60));
     let second = thumbs::thumb_file(&db, &src, 256).expect("二次调用应命中");
     assert_eq!(PathBuf::from(&second), cache, "命中返回同一缓存路径");
     let meta_after = fs::metadata(&cache).unwrap();
-    assert_eq!(
-        meta_before.modified().unwrap(),
-        meta_after.modified().unwrap(),
-        "命中不得重新生成（mtime 不变）"
+    assert!(
+        meta_after.modified().unwrap() > meta_before.modified().unwrap(),
+        "命中应 touch 续命（mtime 刷新，LRU 热度账）"
     );
 
     // 源文件不被改动（只读管线）
@@ -371,15 +371,15 @@ fn raw_preview_extracted_and_cached_across_tiers() {
         assert!(w.max(h) <= u32::from(tier), "拟合 {tier}: {w}x{h}");
     }
 
-    // 命中：二次调用同路径不重提取（mtime 不变）
+    // 命中：二次调用同路径不重提取；M8 起命中 touch
+    // 续命（mtime 刷新 = LRU 热度账）
     let meta_before = fs::metadata(&cache).unwrap();
     std::thread::sleep(Duration::from_millis(60));
     let second = thumbs::thumb_file(&db, nef, 256).expect("二次应命中");
     assert_eq!(PathBuf::from(&second), cache);
-    assert_eq!(
-        meta_before.modified().unwrap(),
-        fs::metadata(&cache).unwrap().modified().unwrap(),
-        "命中不得重新生成"
+    assert!(
+        fs::metadata(&cache).unwrap().modified().unwrap() > meta_before.modified().unwrap(),
+        "命中应 touch 续命（mtime 刷新）"
     );
 }
 

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use xxhash_rust::xxh64::Xxh64;
 
+use super::samevol;
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
 use crate::events::AssetKind;
 use crate::import::templates::{
@@ -41,6 +42,9 @@ pub(super) enum FileOutcome {
 
 /// 已复制完成（写满 + 长度校验通过）的文件产物；落位/查重/入库由收集端完成。
 pub(super) struct CopiedFile {
+    /// 同卷 rename 快道产物：源已被 rename 成 .part（收集端**跳过删源**；
+    /// xxh 为 0 哨兵 = 待后台哈希通道补算，精确查重层随之跳过）。
+    pub(super) fast_moved: bool,
     pub(super) entry: FileEntry,
     pub(super) kind: AssetKind,
     pub(super) meta: MetaLite,
@@ -170,6 +174,7 @@ pub(super) fn copy_one(
     source: &dyn DeviceSource,
     part_dir: &Path,
     seq: u64,
+    move_mode: bool,
     entry: &FileEntry,
     target_root: &Path,
     dir_template: &str,
@@ -236,6 +241,36 @@ pub(super) fn copy_one(
         None => (None, None),
     };
 
+    // 同卷 rename 快道（M8-①）：move 模式 + 单目的地 + 源/暂存同卷 →
+    // 源直改 .part（大 RAW 毫秒级），跳过流式复制与内联哈希（xxh=0 哨兵，
+    // hash 通道后台补算——见 index::process_hash_task）。目标名已占用时
+    // 不走快道：Skip 策略要保留源数据，流式 .part 才可安全丢弃；rename
+    // 失败（EXDEV/权限/被锁）静默回退流式路径，绝不失败导入。
+    if move_mode && second.is_none() && !dst.exists() {
+        if let Some(src) = source.local_path(&entry.id) {
+            if samevol::same_volume(&src, part_dir) {
+                if let Err(e) = fs::create_dir_all(part_dir) {
+                    return fail(format!("创建暂存目录失败: {e}"));
+                }
+                let part_path = part_dir.join(format!("{seq}.part"));
+                if fs::rename(&src, &part_path).is_ok() {
+                    return FileOutcome::Copied(Box::new(CopiedFile {
+                        entry: entry.clone(),
+                        kind,
+                        meta,
+                        xxh: 0,
+                        fast_moved: true,
+                        part: part_path,
+                        dst,
+                        part2: None,
+                        dst2: None,
+                    }));
+                }
+                // 回退：源未动，走流式
+            }
+        }
+    }
+
     // 写 .part（集中暂存目录，避免同名目标并发冲突；双目的地各建一份）
     let mut sink = match PartSink::create(part_dir, second_part_dir.as_deref(), seq) {
         Ok(sink) => sink,
@@ -271,6 +306,7 @@ pub(super) fn copy_one(
         kind,
         meta,
         xxh: xxh.digest(),
+        fast_moved: false,
         part,
         dst,
         part2,

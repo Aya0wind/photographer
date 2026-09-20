@@ -73,6 +73,10 @@ pub fn run() {
             // settings/ai 在 manage(move) 前先取启动自愈所需快照
             let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
             let burst_params = crate::bursts::BurstParams::from_settings(&settings.ai);
+            // 缩略图缓存 LRU 上限（M8-③；0 = 不限）
+            thumbs::set_thumb_cache_cap_bytes(
+                u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
+            );
             // AI 索引参数投影到推理层（embed 输入档位 / 人脸阈值）
             ai.set_ai_params(crate::ai::AiIndexParams {
                 embed_input_size: settings.ai.embed_input_size,
@@ -106,6 +110,10 @@ pub fn run() {
                 // EXIF 深提取代际自愈（gen-2 / migration 0008）：存量资产
                 // 补齐方向/闪光/GPS 等 10 列（dbDir 标记文件防重入）
                 index::refresh_exif_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // 哈希补算代际自愈（gen-1 / migration 0014）：xxh=0 哨兵补齐
+                index::refresh_hash_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）
+                thumbs::kick_startup_evict(db_dir.clone());
                 // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算
                 // pHash + 完成后连拍重组
                 index::refresh_phash_for_generation(
