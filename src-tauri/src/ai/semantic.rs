@@ -69,7 +69,13 @@ fn save_index(index: &Index, db_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 取（或懒加载）某库的共享 HNSW 索引。
+/// 取（或懒加载）某库的共享 HNSW 索引（读写同一把柄，互斥串行）。
+///
+/// 设计取舍（2026-09-20 两起真机事故后定案）：**load（全量读入，可变），
+/// 不用 mmap view**——①view 只读，回填 add 报 immutable；②Windows 下
+/// 活着的 view mmap 会挡住另一句柄对同文件的写（Permission denied）。
+/// 搜索与回填共享同一互斥把柄（搜索毫秒级、写低频，争用可忽略）；
+/// 20 万库 ~600MB 驻留的优化届时再议（分库 mmap+COW 或量化压缩）。
 pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     let key = pool_key(db_dir);
     let mut pool = pool().lock().expect("semantic pool mutex poisoned");
@@ -78,31 +84,41 @@ pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     }
     let storage = vectors_path(db_dir);
     let runtime = runtime_vectors_path(db_dir)?;
+    let index = new_index()?;
     let index = if storage.is_file() {
         if runtime != storage {
             std::fs::copy(&storage, &runtime)
-                .map_err(|e| format!("准备向量索引运行时镜像失败: {e}"))?;
+                .map_err(|e| format!(
+                    "准备向量索引运行时镜像失败: {}",
+                    e
+                ))?;
         }
-        // 已有索引文件：view（mmap 零拷贝加载）
-        let idx = new_index()?;
-        idx.view(runtime.to_str().ok_or("向量运行时路径含非 UTF-8 字符")?)
-            .map_err(|e| e.to_string())?;
-        idx
+        let mut loaded = index;
+        loaded
+            .load(runtime.to_str().ok_or(
+                "向量运行时路径含非 UTF-8 字符",
+            )?)
+            .map_err(|e| format!("加载向量索引失败: {}", e))?;
+        loaded
     } else {
-        new_index()?
+        index
     };
     let shared = Arc::new(Mutex::new(index));
     pool.insert(key.clone(), Arc::clone(&shared));
     Ok(Arc::clone(pool.get(&key).expect("just inserted")))
 }
 
-/// 索引缓存失效（语义重建删 vectors.usearch 后调用：池内 mmap 的旧索引
-/// 必须逐出，否则后续 add/search 命中已删除文件的旧视图）。
+/// 索引缓存失效（语义重建删 vectors.usearch 后调用：搜索 view 池与
+/// 可写池一并逐出，否则后续 add/search 命中已删除文件的旧句柄）。
 pub fn invalidate_index(db_dir: &Path) {
     pool()
         .lock()
         .expect("semantic pool mutex poisoned")
         .remove(&pool_key(db_dir));
+}
+
+pub fn writable_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
+    shared_index(db_dir)
 }
 
 fn new_index() -> Result<Index, String> {
@@ -141,7 +157,7 @@ fn process_ai_task(
     crate::thumbs::thumb_file(db_dir, Path::new(&path), 256)
         .ok_or_else(|| format!("缩略图生成失败: {path}"))?;
     let vector = embedder.embed_image(Path::new(&path), db_dir)?;
-    let index = shared_index(db_dir)?;
+    let index = writable_index(db_dir)?;
     let mut idx = index.lock().expect("semantic index mutex poisoned");
     // save 成功、SQLite 记账前若进程崩溃，重启后任务仍会重放；索引中已有
     // key 时直接补记账，保证回填幂等而不是报 Duplicate keys。
@@ -245,6 +261,9 @@ pub fn run_semantic_backfill(
             done += n;
         }
     }
+    // 收尾逐出双池：搜索 view 从最新落盘重映射（否则检索读旧 mmap）；
+    // 可写池释放全量驻留内存（下次回填按需再 load）
+    invalidate_index(db_dir);
     done
 }
 

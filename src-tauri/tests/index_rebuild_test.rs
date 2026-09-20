@@ -331,13 +331,14 @@ fn params_fingerprint_triggers_channel_rebuild_once() {
     db.set_ai_indexed(1).unwrap();
     db.set_face_indexed(1).unwrap();
 
-    // 首轮：marker 不存在 → 两通道都重建 + marker 落盘
+    // 首轮（marker 不存在）：只写标记**不重建**——真机事故修正（2026-09-20）：
+    // 首跑误判参数变更触发语义重建，与启动回填竞态致 71 条 immutable 失败
     let ai = ai_settings(256, 0.5, 0.4);
     check_params_and_rebuild(&state, &db_dir, &ai);
     let marker = db_dir.join("index-params.marker");
     assert!(marker.is_file(), "指纹 marker 落盘");
-    assert_eq!(task_rows(&db, "ai"), 1, "语义通道重排");
-    assert_eq!(task_rows(&db, "face"), 1, "人脸通道重排");
+    assert_eq!(task_rows(&db, "ai"), 0, "首跑不重排语义");
+    assert_eq!(task_rows(&db, "face"), 0, "首跑不重排人脸");
     let content = std::fs::read_to_string(&marker).unwrap();
     assert!(content.contains(&format!("semantic={}", semantic_params_fingerprint(&ai))));
 

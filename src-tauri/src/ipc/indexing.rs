@@ -182,12 +182,14 @@ pub fn rebuild_channel_core(
 ) -> Result<u64, String> {
     match kind {
         "semantic" => {
-            // 向量真值（usearch 文件）+ 时间账 + 任务账；池内 mmap 旧视图逐出
+            // 向量真值（usearch 文件）+ 时间账 + 任务账；先逐出双池再删文件
+            // （真机事故 2026-09-20：先删后逐出时，重建+回填竞态下 worker 持
+            // 旧 view 句柄 add → immutable 报错；先逐出则后续取柄必为新建可变）
+            crate::ai::semantic::invalidate_index(db_dir);
             let vectors = db_dir.join("vectors.usearch");
             if vectors.exists() {
                 std::fs::remove_file(&vectors).map_err(|e| format!("删除向量索引失败: {e}"))?;
             }
-            crate::ai::semantic::invalidate_index(db_dir);
             db.0
                 .execute_batch(
                     "UPDATE assets SET ai_indexed_at = NULL;                      DELETE FROM index_tasks WHERE kind = 'ai';",
@@ -377,6 +379,18 @@ pub fn check_params_and_rebuild(
 ) {
     let (want_sem, want_face) = (semantic_params_fingerprint(ai), face_params_fingerprint(ai));
     let marker = db_dir.join(PARAMS_MARKER);
+    // 首跑（marker 不存在）：视参数为「一直就是当前值」，只写标记不重建
+    // （真机事故：首跑误判参数变更触发语义重建，与启动回填竞态致 71 条失败）
+    if !marker.is_file() {
+        std::fs::write(
+            &marker,
+            format!("semantic={want_sem}
+face={want_face}
+"),
+        )
+        .ok();
+        return;
+    }
     let content = std::fs::read_to_string(&marker).unwrap_or_default();
     let stored_sem = content
         .lines()

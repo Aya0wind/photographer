@@ -550,3 +550,65 @@ fn semantic_min_score_priority() {
     assert_eq!(ipc::ai::effective_min_score(Some(0.0), 0.09), Some(0.0));
     assert!((settings::AiSettings::default().semantic_min_score - 0.09).abs() < 1e-6);
 }
+
+/// 回归（真机 2026-09-20 事故）：vectors.usearch 已存在且池内持有搜索侧
+/// mmap view（只读）时，回填 worker 旧实现复用同一句柄 add →
+/// "Can't add to an immutable index"（71 条任务三连败全灭）。
+/// 修复：写路径独立 writable_index（load 全量可变）。此测试锁定该序列。
+#[test]
+/// 回归（真机 2026-09-20 事故）：vectors.usearch 已存在且池内持有搜索侧
+/// mmap view（只读）时，回填 worker 旧实现复用同一句柄 add →
+/// "Can't add to an immutable index"（71 条任务三连败全灭）。
+/// 修复：写路径独立 writable_index（load 全量可变）。此测试锁定该序列。
+#[test]
+fn backfill_survives_pooled_immutable_view() {
+    let lib = tempfile::tempdir().unwrap();
+    let database = common::open_db(lib.path());
+    // 真实 JPEG 资产（process_ai_task 先生成 256 档缩略图——假路径过不了这关）
+    let seed = |name: &str| {
+        let path = lib.path().join(name);
+        let img = image::RgbImage::new(64, 64);
+        let mut jpg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
+        image::DynamicImage::ImageRgb8(img)
+            .write_with_encoder(encoder)
+            .unwrap();
+        std::fs::write(&path, jpg).unwrap();
+        database
+            .0
+            .execute(
+                "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, captured_at, \
+                 camera, source, created_at) VALUES (?1, ?1, 1, '2026', 1, 'photo', \
+                 NULL, NULL, 'imported', '2026')",
+                rusqlite::params![path.to_string_lossy()],
+            )
+            .unwrap();
+    };
+    seed("a.jpg");
+    // 第一轮回填落盘 vectors.usearch
+    let done1 = ai::semantic::run_semantic_backfill(
+        lib.path(),
+        std::sync::Arc::new(StubEmbedder),
+        &events::EventBus::new(),
+        1,
+    );
+    assert_eq!(done1, 1, "第一轮应成功");
+    assert!(lib.path().join("vectors.usearch").is_file());
+
+    // 复现事故前置：池逐出后搜索侧重进（文件在 → mmap view 只读句柄入池）
+    ai::semantic::invalidate_index(lib.path());
+    let _search_handle = ai::semantic::shared_index(lib.path()).unwrap();
+
+    // 新资产 + 回填：旧实现在此处拿 view add 报 immutable
+    seed("b.jpg");
+    let done2 = ai::semantic::run_semantic_backfill(
+        lib.path(),
+        std::sync::Arc::new(StubEmbedder),
+        &events::EventBus::new(),
+        1,
+    );
+    assert_eq!(done2, 1, "池内 view 存在时回填必须照常成功（可写句柄路径）");
+    let idx = ai::semantic::shared_index(lib.path()).unwrap();
+    let locked = idx.lock().unwrap();
+    assert_eq!(locked.size(), 2, "两轮向量都应在索引里");
+}
