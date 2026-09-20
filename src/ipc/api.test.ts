@@ -15,9 +15,12 @@ import {
   assetThumbGet,
   assetsByIds,
   assetsPage,
+  assetViewMark,
   cameraList,
   formatList,
   lensList,
+  recentAssets,
+  recentViewed,
   searchSemantic,
   deviceList,
   deviceScan,
@@ -484,6 +487,39 @@ describe("M3 画廊命令", () => {
     await expect(cameraList()).resolves.toEqual([]);
     invokeMock.mockResolvedValueOnce(null);
     await expect(cameraList()).resolves.toEqual([]);
+  });
+
+  it("recentAssets：recent_assets keyset 负载；失败/非数组回退空数组", async () => {
+    const list = [{ id: 3, path: "P", name: "A.JPG", kind: "photo", capturedAt: null, camera: null, sizeBytes: 1 }];
+    invokeMock.mockResolvedValueOnce(list);
+    await expect(recentAssets(101, 100)).resolves.toEqual(list);
+    expect(invokeMock).toHaveBeenCalledWith("recent_assets", { afterId: 101, limit: 100 });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(recentAssets(0, 100)).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(recentAssets(0, 100)).resolves.toEqual([]);
+  });
+
+  it("recentViewed：recent_viewed(limit) 负载（最后浏览时间 DESC）；失败/非数组回退空数组", async () => {
+    const list = [{ id: 3, path: "P", name: "A.JPG", kind: "photo", capturedAt: null, camera: null, sizeBytes: 1 }];
+    invokeMock.mockResolvedValueOnce(list);
+    await expect(recentViewed(200)).resolves.toEqual(list);
+    expect(invokeMock).toHaveBeenCalledWith("recent_viewed", { limit: 200 });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(recentViewed(200)).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(recentViewed(200)).resolves.toEqual([]);
+  });
+
+  it("assetViewMark：asset_view_mark 负载；命令失败静默（打点不阻塞查看）", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+    await expect(assetViewMark(7)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("asset_view_mark", { assetId: 7 });
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(assetViewMark(7)).resolves.toBeUndefined();
   });
 
   it("lensList 返回镜头计数清单（lens_list）；失败/非数组回退空数组", async () => {

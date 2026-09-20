@@ -830,6 +830,20 @@ describe("搜索页 URL 协议", () => {
     expect(screen.getByTestId("search-mode-filters")).toHaveAttribute("aria-checked", "true");
   });
 
+  it("?kind=raw|photo|video → 预置类型筛选（raw 单列档；面板内 RAW 分段）", async () => {
+    renderSearch("/search?kind=raw");
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
+    );
+
+    // 切 photo：照片=photo+raw 合集档
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    fireEvent.click(screen.getByTestId("search-kind-photo"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["photo", "raw"] }),
+    );
+  });
+
   it("无参数 → 默认条件模式不自动执行语义搜索", async () => {
     renderSearch();
 

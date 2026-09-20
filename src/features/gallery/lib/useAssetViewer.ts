@@ -2,6 +2,7 @@ import { useSearchParams } from "react-router";
 
 import type { AssetDto } from "@/ipc/api";
 import type { AssetGroup } from "./assetGroups";
+import { markAssetViewed } from "./viewMark";
 
 /**
  * 查看器路由接线（画廊/搜索共用）：
@@ -11,6 +12,9 @@ import type { AssetGroup } from "./assetGroups";
  * 为什么不用 /gallery/:assetId 子路由：画廊是 keyset 分页（按 afterId 顺序加载），
  * 无法直接跳到任意资产的位置；路由内状态让画廊页保持挂载，返回时滚动位置与
  * 已加载页完整保留。
+ *
+ * 浏览打点（M4.5）：openAsset/navigateTo 打开资产即 markAssetViewed（30s 去抖，
+ * 后端 recent_viewed 数据源）；打点失败静默，不阻塞查看。
  */
 
 export interface AssetViewerTarget {
@@ -40,16 +44,20 @@ export function useAssetViewer(groups: AssetGroup[]) {
   return {
     viewer,
     openAsset: (asset: AssetDto) => {
+      markAssetViewed(asset.id);
       setSearchParams({ asset: String(asset.id) });
     },
     closeViewer: () => {
       setSearchParams({});
     },
-    /** 同组内切换（查看器左右键/胶片条点击） */
+    /** 同组内切换（查看器左右键/胶片条点击）；切图同样算一次浏览 */
     navigateTo: (index: number) => {
       if (!viewer) return;
       const next = viewer.group.assets[index];
-      if (next) setSearchParams({ asset: String(next.id) });
+      if (next) {
+        markAssetViewed(next.id);
+        setSearchParams({ asset: String(next.id) });
+      }
     },
   };
 }

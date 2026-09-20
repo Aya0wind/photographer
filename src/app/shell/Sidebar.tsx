@@ -2,12 +2,36 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
 import { useTranslation } from "react-i18next";
 
+import type { ReactElement } from "react";
+
 import { peopleList } from "@/ipc/api";
 
-import type { ReactElement } from "react";
+/**
+ * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
+ * - 浏览：图库、收藏（F5 数据未就绪——禁用 +「即将支持」）、最近添加（/recent）
+ * - 组织：相册（/albums 标签墙总览）、人物、媒体类型（/media）、标签（/albums#tags
+ *   同路由锚点，v1 与相册同区块）
+ * - 工具：相似照片（F8 占位禁用——pHash 近似重复检查，组内对比保留最优；
+ *   完全一样的重复图导入时已由查重策略处理）、导入、任务
+ * - 系统：设置
+ * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
+ * 人物入口 faceCount 总数徽标保留。
+ */
 
 interface NavItem {
   to: string;
+  labelKey: string;
+  icon: ReactElement;
+  /** 人物入口徽标（聚类人脸总数） */
+  badge?: "people";
+}
+
+interface NavSection {
+  titleKey: string;
+  items: NavItem[];
+}
+
+interface DisabledItem {
   labelKey: string;
   icon: ReactElement;
 }
@@ -32,95 +56,154 @@ function icon(path: ReactElement | ReactElement[], label: string): ReactElement 
   );
 }
 
-const NAV_ITEMS: NavItem[] = [
+const ICONS = {
+  gallery: icon(
+    <>
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <circle cx="5.5" cy="6" r="1.1" />
+      <path d="M1.5 11l3.6-3.2a1 1 0 0 1 1.3 0L10.5 11.5M9 9.2l1.8-1.6a1 1 0 0 1 1.3 0l2.4 2.1" />
+    </>,
+    "gallery",
+  ),
+  favorites: icon(
+    <>
+      <path d="M8 2.5l1.7 3.4 3.8.5-2.8 2.7.7 3.8L8 11.2l-3.4 1.7.7-3.8L2.5 6.4l3.8-.5z" />
+    </>,
+    "favorites",
+  ),
+  recent: icon(
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.8V8l2.4 1.6" />
+    </>,
+    "recent",
+  ),
+  albums: icon(
+    <>
+      <rect x="1.5" y="3" width="13" height="10.5" rx="1.5" />
+      <path d="M1.5 6h13M5 1.5h6" />
+    </>,
+    "albums",
+  ),
+  people: icon(
+    <>
+      <circle cx="8" cy="5.5" r="2.6" />
+      <path d="M2.8 13.5c1-2.8 2.9-4.2 5.2-4.2s4.2 1.4 5.2 4.2" />
+    </>,
+    "people",
+  ),
+  media: icon(
+    <>
+      <rect x="1.5" y="3.5" width="7" height="6" rx="1" />
+      <rect x="9.5" y="6.5" width="5" height="6" rx="1" />
+      <path d="M3.5 12.5h3" />
+    </>,
+    "media",
+  ),
+  tags: icon(
+    <>
+      <path d="M2 2.5h5l6 6-3.5 3.5-6-6z" />
+      <circle cx="5" cy="5" r="0.9" />
+    </>,
+    "tags",
+  ),
+  similar: icon(
+    <>
+      <rect x="2" y="2" width="7.5" height="7.5" rx="1" />
+      <rect x="6.5" y="6.5" width="7.5" height="7.5" rx="1" />
+    </>,
+    "similar",
+  ),
+  import: icon(
+    <>
+      <path d="M8 1.5v8M4.8 6.6L8 9.8l3.2-3.2" />
+      <path d="M1.5 11v2a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-2" />
+    </>,
+    "import",
+  ),
+  tasks: icon(
+    <>
+      <path d="M5.5 3.5h-2A1.5 1.5 0 0 0 2 5v7a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 14 12V5a1.5 1.5 0 0 0-1.5-1.5h-2" />
+      <rect x="5.5" y="1.5" width="5" height="3" rx="1" />
+      <path d="M4.8 8.6l1.4 1.4 2.6-2.6M11 8.5h1.5M11 11h1.5" />
+    </>,
+    "tasks",
+  ),
+  settings: icon(
+    <>
+      <path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13" />
+      <circle cx="5" cy="4.5" r="1.4" />
+      <circle cx="10.8" cy="8" r="1.4" />
+      <circle cx="6.2" cy="11.5" r="1.4" />
+    </>,
+    "settings",
+  ),
+};
+
+/** 分组导航结构（浏览/组织/工具/系统） */
+const SECTIONS: NavSection[] = [
   {
-    to: "/gallery",
-    labelKey: "nav.gallery",
-    icon: icon(
-      <>
-        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-        <circle cx="5.5" cy="6" r="1.1" />
-        <path d="M1.5 11l3.6-3.2a1 1 0 0 1 1.3 0L10.5 11.5M9 9.2l1.8-1.6a1 1 0 0 1 1.3 0l2.4 2.1" />
-      </>,
-      "gallery",
-    ),
+    titleKey: "nav.section.browse",
+    items: [
+      { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery },
+      { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent },
+    ],
   },
   {
-    to: "/search",
-    labelKey: "nav.search",
-    icon: icon(
-      <>
-        <circle cx="7" cy="7" r="4.5" />
-        <path d="M10.5 10.5L14.5 14.5" />
-      </>,
-      "search",
-    ),
+    titleKey: "nav.section.organize",
+    items: [
+      { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums },
+      { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
+      { to: "/media", labelKey: "nav.media", icon: ICONS.media },
+      { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags },
+    ],
   },
   {
-    to: "/import",
-    labelKey: "nav.import",
-    icon: icon(
-      <>
-        <path d="M8 1.5v8M4.8 6.6L8 9.8l3.2-3.2" />
-        <path d="M1.5 11v2a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-2" />
-      </>,
-      "import",
-    ),
+    titleKey: "nav.section.tools",
+    items: [
+      { to: "/import", labelKey: "nav.import", icon: ICONS.import },
+      { to: "/tasks", labelKey: "nav.tasks", icon: ICONS.tasks },
+    ],
   },
   {
-    to: "/people",
-    labelKey: "nav.people",
-    icon: icon(
-      <>
-        <circle cx="8" cy="5.5" r="2.6" />
-        <path d="M2.8 13.5c1-2.8 2.9-4.2 5.2-4.2s4.2 1.4 5.2 4.2" />
-      </>,
-      "people",
-    ),
-  },
-  {
-    to: "/albums",
-    labelKey: "nav.albums",
-    icon: icon(
-      <>
-        <rect x="1.5" y="3" width="13" height="10.5" rx="1.5" />
-        <path d="M1.5 6h13M5 1.5h6" />
-      </>,
-      "albums",
-    ),
-  },
-  {
-    to: "/tasks",
-    labelKey: "nav.tasks",
-    icon: icon(
-      <>
-        <path d="M5.5 3.5h-2A1.5 1.5 0 0 0 2 5v7a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 14 12V5a1.5 1.5 0 0 0-1.5-1.5h-2" />
-        <rect x="5.5" y="1.5" width="5" height="3" rx="1" />
-        <path d="M4.8 8.6l1.4 1.4 2.6-2.6M11 8.5h1.5M11 11h1.5" />
-      </>,
-      "tasks",
-    ),
-  },
-  {
-    to: "/settings",
-    labelKey: "nav.settings",
-    icon: icon(
-      <>
-        <path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13" />
-        <circle cx="5" cy="4.5" r="1.4" />
-        <circle cx="10.8" cy="8" r="1.4" />
-        <circle cx="6.2" cy="11.5" r="1.4" />
-      </>,
-      "settings",
-    ),
+    titleKey: "nav.section.system",
+    items: [{ to: "/settings", labelKey: "nav.settings", icon: ICONS.settings }],
   },
 ];
 
+/** 禁用占位项（数据/功能未就绪）：收藏（F5）、相似照片（F8 pHash 近似重复） */
+const DISABLED_ITEMS: Array<{ section: string; item: DisabledItem }> = [
+  { section: "nav.section.browse", item: { labelKey: "nav.favorites", icon: ICONS.favorites } },
+  { section: "nav.section.tools", item: { labelKey: "nav.similar", icon: ICONS.similar } },
+];
+
+/** 禁用占位行：不可点 + 「即将支持」小字 */
+function DisabledNavRow({ item }: { item: DisabledItem }) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="relative flex cursor-not-allowed items-center gap-3 rounded-md px-3.5 py-2 text-sm text-text-muted/60"
+      aria-disabled="true"
+      data-testid="nav-disabled"
+      data-nav={item.labelKey}
+      title={t("settings.comingSoon")}
+    >
+      {item.icon}
+      <span>{t(item.labelKey)}</span>
+      <span
+        className="ml-auto shrink-0 rounded bg-panel/60 px-1 py-0.5 text-[9px] leading-none text-text-muted"
+        data-testid="nav-disabled-soon"
+      >
+        {t("settings.comingSoon")}
+      </span>
+    </div>
+  );
+}
+
 export default function Sidebar() {
   const { t } = useTranslation();
-  // 人物入口徽标：聚类人脸总数（进 app 拉一次；v1 无事件，人物页操作后以此页刷新为准）
+  // 人物入口徽标：聚类人脸总数（进 app 拉一次；失败静默 0——后端未就绪不显示）
   const [peopleFaces, setPeopleFaces] = useState(0);
-
   useEffect(() => {
     let cancelled = false;
     void peopleList().then((list) => {
@@ -133,44 +216,54 @@ export default function Sidebar() {
   }, []);
 
   return (
-    <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-edge bg-surface">
-      {/* 品牌区已让位整窗顶部标题栏；导航从顶部开始 */}
-      {/* 主导航 */}
-      <nav className="mt-3 flex flex-col gap-0.5 px-2" aria-label="primary">
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }: { isActive: boolean }) =>
-              [
-                "relative flex items-center gap-3 rounded-md px-3.5 py-2 text-sm transition-colors duration-150",
-                isActive
-                  ? "bg-panel/60 text-accent"
-                  : "text-text-secondary hover:bg-panel/40 hover:text-text-primary",
-              ].join(" ")
-            }
-          >
-            {({ isActive }: { isActive: boolean }) => (
-              <>
-                {isActive && (
-                  <span
-                    className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent"
-                    aria-hidden="true"
-                  />
-                )}
-                {item.icon}
-                <span>{t(item.labelKey)}</span>
-                {item.to === "/people" && peopleFaces > 0 && (
-                  <span
-                    className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
-                    data-testid="sidebar-people-badge"
-                  >
-                    {peopleFaces}
-                  </span>
-                )}
-              </>
-            )}
-          </NavLink>
+    <aside className="sp-scroll flex h-full w-[220px] shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface">
+      <nav className="mt-2 flex flex-col gap-2 px-2 pb-3" aria-label="primary">
+        {SECTIONS.map((section) => (
+          <div key={section.titleKey} data-testid="nav-section" data-section={section.titleKey}>
+            <h3 className="px-3.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+              {t(section.titleKey)}
+            </h3>
+            <div className="flex flex-col gap-0.5">
+              {section.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  className={({ isActive }: { isActive: boolean }) =>
+                    [
+                      "relative flex items-center gap-3 rounded-md px-3.5 py-2 text-sm transition-colors duration-150",
+                      isActive
+                        ? "bg-panel/60 text-accent"
+                        : "text-text-secondary hover:bg-panel/40 hover:text-text-primary",
+                    ].join(" ")
+                  }
+                >
+                  {({ isActive }: { isActive: boolean }) => (
+                    <>
+                      {isActive && (
+                        <span
+                          className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent"
+                          aria-hidden="true"
+                        />
+                      )}
+                      {item.icon}
+                      <span>{t(item.labelKey)}</span>
+                      {item.badge === "people" && peopleFaces > 0 && (
+                        <span
+                          className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
+                          data-testid="sidebar-people-badge"
+                        >
+                          {peopleFaces}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </NavLink>
+              ))}
+              {DISABLED_ITEMS.filter((d) => d.section === section.titleKey).map((d) => (
+                <DisabledNavRow key={d.item.labelKey} item={d.item} />
+              ))}
+            </div>
+          </div>
         ))}
       </nav>
     </aside>

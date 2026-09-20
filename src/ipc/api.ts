@@ -561,13 +561,37 @@ export async function formatList(): Promise<AssetFormatCount[]> {
 }
 
 /** 最近添加的资产（recent_assets；created_at DESC keyset：afterId=上一页最后一条 id，
- *  首页传 0）。后端就绪前命令失败/非数组回退 []——UI 自然降级空态。 */
+ *  首页传 0）。后端就绪前命令失败/非数组回退 []——UI 自然降级空态。
+ *  注：M4.5 改向后「最近浏览」页走 recentViewed；本封装保留（IPC 仍存在）。 */
 export async function recentAssets(afterId: number, limit: number): Promise<AssetDto[]> {
   try {
     const list = await ipc<AssetDto[] | null>("recent_assets", { afterId, limit });
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+// --- 最近浏览（M4.5：查看器打开/切图打点，最近浏览页数据源） ---------------------------
+
+/** 最近浏览的资产（recent_viewed；按最后浏览时间 DESC，同资产取最新一次，上限 200）。
+ *  后端就绪前命令失败/非数组回退 []——UI 自然降级空态。 */
+export async function recentViewed(limit: number): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("recent_viewed", { limit });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 标记资产被浏览（asset_view_mark；查看器打开/切图时调用，fire-and-forget）。
+ *  命令失败静默——浏览打点不阻塞查看。 */
+export async function assetViewMark(assetId: number): Promise<void> {
+  try {
+    await ipc<void>("asset_view_mark", { assetId });
+  } catch {
+    // 静默
   }
 }
 

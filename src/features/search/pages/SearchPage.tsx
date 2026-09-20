@@ -49,10 +49,13 @@ import SemanticResultsView, {
 const PAGE_LIMIT = 100;
 const DEBOUNCE_MS = 300;
 
-/** 类型两档（M3 二轮）：RAW 归入「照片」档（RAW 也是照片），不再单列 */
-const KIND_OPTIONS: ReadonlyArray<{ value: "all" | "photo" | "video"; labelKey: string }> = [
+/** 类型档位（M4.5 加 RAW 单列档：媒体类型页 /search?kind=raw 直达）；
+ *  「照片」仍=photo+raw 合集档 */
+type KindFilter = "all" | "photo" | "raw" | "video";
+const KIND_OPTIONS: ReadonlyArray<{ value: KindFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.kind.all" },
   { value: "photo", labelKey: "search.kind.photo" },
+  { value: "raw", labelKey: "search.kind.raw" },
   { value: "video", labelKey: "search.kind.video" },
 ];
 
@@ -79,7 +82,7 @@ const GPS_OPTIONS: ReadonlyArray<{ value: GpsFilter; labelKey: string }> = [
 
 /** 筛选面板全部输入（数字区间为原始字符串，构建 filters 时校验）；序列化键即防抖键 */
 export interface SearchInputs {
-  kind: "all" | "photo" | "video";
+  kind: KindFilter;
   from: string;
   to: string;
   cameras: string[];
@@ -123,9 +126,10 @@ const EMPTY_INPUTS: SearchInputs = {
   sizeMax: "",
 };
 
-/** UI 档位 → filters.kinds（照片=photo+raw；视频=video；全部=不传） */
-function kindsOf(kind: "all" | "photo" | "video"): AssetKind[] | undefined {
+/** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；视频=video；全部=不传） */
+function kindsOf(kind: KindFilter): AssetKind[] | undefined {
   if (kind === "photo") return ["photo", "raw"];
+  if (kind === "raw") return ["raw"];
   if (kind === "video") return ["video"];
   return undefined;
 }
@@ -562,9 +566,11 @@ export default function SearchPage() {
   }
 
   // URL 协议（M4.5 A1）：?mode=semantic&q=… → 切语义模式、预填并自动执行（同 q 不重复）
-  // 已挂载时参数变化同样响应（全局搜索框在 /search 页内再次提交）
+  // URL 协议（M4.5 媒体类型页）：?kind=photo|raw|video → 预置类型筛选（条件模式）
+  // 已挂载时参数变化同样响应（全局搜索框/媒体卡片在 /search 页内再次跳转）
   const urlQuery = searchParams.get("q") ?? "";
   const appliedUrlQueryRef = useRef<string | null>(null);
+  const appliedUrlKindRef = useRef<KindFilter | null>(null);
   useEffect(() => {
     const urlMode = searchParams.get("mode");
     if (urlMode === "semantic") {
@@ -576,8 +582,18 @@ export default function SearchPage() {
     } else if (urlMode === "filters") {
       setMode("filters");
     }
+    const urlKind = searchParams.get("kind");
+    if (urlKind === "photo" || urlKind === "raw" || urlKind === "video") {
+      if (appliedUrlKindRef.current !== urlKind) {
+        appliedUrlKindRef.current = urlKind;
+        setInputs((prev) => (prev.kind === urlKind ? prev : { ...prev, kind: urlKind }));
+      }
+    } else if (urlKind === null) {
+      // 参数被清除（如查看器 ?asset= 覆写）：不回退已选类型，避免误清用户选择
+      appliedUrlKindRef.current = null;
+    }
     // runSemantic 依赖 semantic.run（稳定 useCallback）与记录函数（模块级）；
-    // 仅在 mode/q 参数实际变化时执行
+    // 仅在 mode/q/kind 参数实际变化时执行
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, urlQuery]);
 

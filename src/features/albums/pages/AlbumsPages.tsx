@@ -13,14 +13,17 @@ import { useAlbumCovers } from "../lib/albumCovers";
 import { loadHiddenTags } from "../lib/hiddenTags";
 
 /**
- * 智能相册（M4 v1）：预置标签（硬编码中文）作为语义搜索快捷入口。
- * /albums → 标签网格（封面=该词首条语义命中的缩略图，进页面后台并发 3 预取；
- * 失败/未命中静默占位）；/albums/:tag → 该词语义搜索结果（与搜索页语义模式同管线）。
+ * 智能相册（M4 v1 → M4.5 B1 标签卡片墙）：预置标签（40 个中文，飞牛词表对齐）
+ * 作为语义搜索快捷入口。/albums → 标签卡片墙（封面=该词首条语义命中的缩略图，
+ * 进页面后台并发 3 预取、失败/未命中静默渐变底+标签名）；/albums/:tag → 该词
+ * 语义搜索结果（与搜索页语义模式同管线）。
  * 标签可见性：设置页画廊 tab 多选（localStorage smartphoto.albums.hiddenTags）。
+ * #tags 锚点：侧栏「标签」入口指向 /albums#tags（v1 与相册同页同区块）。
  */
 
-/** v1 预置标签（硬编码中文；后续可由索引统计生成） */
+/** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
 export const SMART_ALBUM_TAGS: readonly string[] = [
+  // 原 11 个
   "人像",
   "风景",
   "夜景",
@@ -32,9 +35,39 @@ export const SMART_ALBUM_TAGS: readonly string[] = [
   "雪",
   "日落",
   "黑白",
+  // 飞牛词表补充（共 29 个，总 40）
+  "天空云彩",
+  "公园",
+  "山",
+  "湖泊",
+  "海洋",
+  "海滩",
+  "森林",
+  "桥",
+  "河流",
+  "日出日落",
+  "广场",
+  "街道",
+  "花",
+  "烟花",
+  "猫",
+  "狗",
+  "鸟",
+  "合影",
+  "儿童",
+  "城市",
+  "乡村",
+  "道路",
+  "车",
+  "自行车",
+  "飞机",
+  "火车",
+  "船",
+  "雨",
+  "雾",
 ];
 
-/** 标签封面块（img / 占位） */
+/** 标签封面块（img / 渐变底+标签名占位） */
 function TagCover({ url, tag }: { url: string | null | undefined; tag: string }) {
   if (url) {
     return (
@@ -51,14 +84,14 @@ function TagCover({ url, tag }: { url: string | null | undefined; tag: string })
   }
   return (
     <div
-      className="flex h-full w-full items-center justify-center bg-panel/40"
+      className="flex h-full w-full flex-col items-center justify-center gap-1 bg-gradient-to-br from-panel via-bg to-bg"
       data-testid="albums-tag-cover-fallback"
       data-tag={tag}
     >
       <svg
         viewBox="0 0 24 24"
-        width="18"
-        height="18"
+        width="16"
+        height="16"
         fill="none"
         stroke="currentColor"
         strokeWidth="1.3"
@@ -67,10 +100,10 @@ function TagCover({ url, tag }: { url: string | null | undefined; tag: string })
         className="text-text-muted"
         aria-hidden="true"
       >
-        <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-        <circle cx="9" cy="10" r="1.8" />
-        <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
+        <path d="M4 8.5l4-4 4 4 4-4 4 4" />
+        <path d="M4 15.5l4-4 4 4 4-4 4 4" />
       </svg>
+      <span className="px-1 text-center text-[10px] leading-tight text-text-muted">{tag}</span>
     </div>
   );
 }
@@ -98,31 +131,41 @@ export function AlbumsIndexPage() {
             {t("albums.allHidden")}
           </p>
         ) : (
-          <div
-            className="mt-4 grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2.5 pb-6"
-            data-testid="albums-tag-grid"
+          /* 标签卡片墙（#tags 锚点：侧栏「标签」入口指向 /albums#tags） */
+          <section
+            id="tags"
+            className="mt-4 scroll-mt-2"
+            data-testid="albums-tags-section"
           >
-            {visibleTags.map((tag) => (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => navigate(`/albums/${encodeURIComponent(tag)}`)}
-                className="overflow-hidden rounded-lg border border-edge bg-surface text-center transition-colors hover:border-accent"
-                data-testid="albums-tag"
-                data-tag={tag}
-              >
-                <span className="block h-20 w-full border-b border-edge/60">
-                  <TagCover url={covers[tag]} tag={tag} />
-                </span>
-                <span
-                  className="block px-2 py-2 text-sm text-text-secondary transition-colors group-hover:text-accent"
-                  data-testid="albums-tag-label"
+            <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+              {t("albums.tagsTitle")}
+            </h2>
+            <div
+              className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2.5 pb-6"
+              data-testid="albums-tag-grid"
+            >
+              {visibleTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => navigate(`/albums/${encodeURIComponent(tag)}`)}
+                  className="overflow-hidden rounded-lg border border-edge bg-surface text-center transition-colors hover:border-accent"
+                  data-testid="albums-tag"
+                  data-tag={tag}
                 >
-                  {tag}
-                </span>
-              </button>
-            ))}
-          </div>
+                  <span className="block h-20 w-full border-b border-edge/60">
+                    <TagCover url={covers[tag]} tag={tag} />
+                  </span>
+                  <span
+                    className="block px-2 py-2 text-sm text-text-secondary transition-colors group-hover:text-accent"
+                    data-testid="albums-tag-label"
+                  >
+                    {tag}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
         )}
       </div>
     </div>

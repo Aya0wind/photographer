@@ -82,7 +82,7 @@ beforeEach(() => {
 });
 
 describe("M4 路由与侧栏", () => {
-  it("侧栏新增「人物」「智能相册」入口，点击导航对应路由", async () => {
+  it("侧栏「人物」「相册」入口，点击导航对应路由", async () => {
     const user = userEvent.setup();
     renderRoutes("/gallery");
 
@@ -91,7 +91,7 @@ describe("M4 路由与侧栏", () => {
     await user.click(peopleLink);
     expect(await screen.findByTestId("people-page")).toBeInTheDocument();
 
-    const albumsLink = within(nav).getByRole("link", { name: /智能相册/ });
+    const albumsLink = within(nav).getByRole("link", { name: /相册/ });
     await user.click(albumsLink);
     expect(await screen.findByTestId("albums-page")).toBeInTheDocument();
   });
@@ -104,13 +104,18 @@ describe("M4 路由与侧栏", () => {
     expect(screen.getAllByTestId("people-placeholder-card").length).toBeGreaterThanOrEqual(6);
   });
 
-  it("智能相册索引页：渲染预置标签（11 个），点击跳 /albums/:tag", async () => {
+  it("标签卡片墙：渲染 40 个预置标签（M4.5 B1），点击跳 /albums/:tag", async () => {
     const user = userEvent.setup();
     renderRoutes("/albums");
 
     const tags = await screen.findAllByTestId("albums-tag");
-    expect(tags).toHaveLength(SMART_ALBUM_TAGS.length);
+    expect(SMART_ALBUM_TAGS).toHaveLength(40); // 词表扩到 40（含原 11 个）
+    expect(tags).toHaveLength(40);
     expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("日落");
+    expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("猫");
+    expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("森林");
+    // #tags 锚点区块（侧栏「标签」入口指向 /albums#tags）
+    expect(screen.getByTestId("albums-tags-section")).toHaveAttribute("id", "tags");
 
     await user.click(screen.getAllByTestId("albums-tag")[0]);
     expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
@@ -184,6 +189,10 @@ describe("智能相册标签封面", () => {
       ),
     );
     expect(screen.queryByTestId("albums-tag-cover-img")).not.toBeInTheDocument();
+    // 渐变底占位带标签名（无封面也能识别）
+    const fallbacks = screen.getAllByTestId("albums-tag-cover-fallback");
+    expect(fallbacks[0].className).toContain("bg-gradient-to-br");
+    expect(fallbacks[0]).toHaveTextContent(String(fallbacks[0].getAttribute("data-tag")));
   });
 });
 

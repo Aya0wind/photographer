@@ -2,6 +2,8 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router";
 
 import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
+import RecentPage from "@/features/gallery/pages/RecentPage";
+import MediaPage from "@/features/media/pages/MediaPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
@@ -42,6 +44,8 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <Navigate to="/gallery" replace /> },
       { path: "gallery", element: <GalleryPage /> },
+      { path: "recent", element: <RecentPage /> },
+      { path: "media", element: <MediaPage /> },
       { path: "search", element: <SearchPage /> },
       { path: "people", element: <PeoplePage /> },
       { path: "albums", element: <AlbumsIndexPage /> },
