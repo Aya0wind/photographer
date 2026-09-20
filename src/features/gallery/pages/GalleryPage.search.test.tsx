@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
 
 import i18n from "@/i18n";
 import GalleryPage from "./GalleryPage";
@@ -191,6 +191,42 @@ describe("画廊合并：URL 协议", () => {
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
     );
+  });
+
+  it("?kind 撤离：同路径无参导航清筛选回默认态（回归：URL 进入的筛选永久滞留）", async () => {
+    assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    function NavClean() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" data-testid="nav-clean" onClick={() => navigate("/gallery")}>
+          go
+        </button>
+      );
+    }
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={["/gallery?kind=raw"]}>
+          <Routes>
+            <Route
+              path="/gallery"
+              element={
+                <>
+                  <GalleryPage />
+                  <NavClean />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
+    );
+    // 同路径去掉 ?kind（侧栏图库链接等）：筛选必须同步撤销回默认查询
+    fireEvent.click(screen.getByTestId("nav-clean"));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100));
   });
 });
 

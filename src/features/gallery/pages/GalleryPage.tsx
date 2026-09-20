@@ -120,7 +120,7 @@ export default function GalleryPage() {
 
   const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
 
-  // --- URL 协议（全局搜索框 / 媒体类型页跳入）：?mode=semantic&q= / ?kind= -------------
+  // --- URL 协议（全局搜索框 / 类型筛选直达）：?mode=semantic&q= / ?kind= ----------------
   const urlQuery = searchParams.get("q") ?? "";
   const appliedUrlQueryRef = useRef<string | null>(null);
   const appliedUrlKindRef = useRef<string | null>(null);
@@ -136,8 +136,11 @@ export default function GalleryPage() {
         appliedUrlKindRef.current = urlKind;
         setInputs((prev) => (prev.kind === urlKind ? prev : { ...prev, kind: urlKind }));
       }
-    } else if (urlKind === null) {
+    } else if (urlKind === null && appliedUrlKindRef.current !== null) {
+      // 参数消失（同路径无参导航，如侧栏图库链接）：同步撤筛选——
+      // 此前只清 ref 不清 state，?kind 进入的筛选会永久滞留且 UI 无从察觉
       appliedUrlKindRef.current = null;
+      setInputs((prev) => (prev.kind === undefined ? prev : { ...prev, kind: undefined }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, urlQuery]);
