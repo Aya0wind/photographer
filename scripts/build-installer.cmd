@@ -1,51 +1,38 @@
 @echo off
-chcp 65001 >nul
+REM ============================================================
+REM  Smart Photo Windows installer build script
+REM  Output: NSIS exe (currentUser, no admin) + WiX msi
+REM  Artifacts: installer-output\
+REM  Usage: scripts\build-installer.cmd [--nopause]
+REM  Notes: first run downloads NSIS/WiX toolchain to %LOCALAPPDATA%\tauri
+REM         and ffmpeg sidecar (gyan.dev release-essentials) if missing
+REM  IMPORTANT: keep this file ASCII-only and keep the ffmpeg download
+REM  logic in a subroutine (parsing parenthesized blocks with redirects
+REM  inside is fragile in cmd.exe).
+REM ============================================================
 setlocal enabledelayedexpansion
-REM ============================================================
-REM  Smart Photo Windows 安装包构建脚本
-REM  产物: NSIS exe (currentUser 免管理员) + WiX msi 双格式
-REM  输出: installer-output\ 目录
-REM  用法: scripts\build-installer.cmd [--nopause]
-REM  说明: 首次打包会自动下载 NSIS/WiX 工具链到 %LOCALAPPDATA%\tauri
-REM        ffmpeg 侧车缺失时自动下载（gyan.dev release-essentials）
-REM ============================================================
 set PATH=%USERPROFILE%\.local\nodejs;%USERPROFILE%\.cargo\bin;%PATH%
 cd /d "%~dp0.."
 
-echo [1/5] 检查工具链...
-where node >nul 2>nul || (echo [失败] 未找到 node（预期 %USERPROFILE%\.local\nodejs）& goto :fail)
-where cargo >nul 2>nul || (echo [失败] 未找到 cargo（预期 %USERPROFILE%\.cargo\bin）& goto :fail)
+echo [1/5] toolchain check...
+where node >nul 2>nul || (echo [FAIL] node not found, expected %USERPROFILE%\.local\nodejs & goto :fail)
+where cargo >nul 2>nul || (echo [FAIL] cargo not found, expected %USERPROFILE%\.cargo\bin & goto :fail)
 
-echo [2/5] 前端依赖...
-if not exist node_modules (
-  call npm install --no-audit --no-fund || goto :fail
-) else (
-  echo        node_modules 已存在，跳过
-)
+echo [2/5] frontend deps...
+if not exist node_modules call npm install --no-audit --no-fund || goto :fail
 
-echo [3/5] ffmpeg 侧车（externalBin，缺失自动下载，幂等）...
+echo [3/5] ffmpeg sidecar (externalBin, auto-download if missing)...
 if exist "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe" (
-  echo        侧车已存在，跳过
+  echo        sidecar exists, skip
 ) else (
-  if not exist src-tauri\binaries mkdir src-tauri\binaries
-  set FFMPEG_ZIP=%TEMP%\ffmpeg-release-essentials.zip
-  set FFMPEG_EXTRACT=%TEMP%\ffmpeg-essentials-extract
-  echo        下载 gyan.dev ffmpeg-release-essentials（约 110MB，含重试）...
-  curl -L --retry 3 --retry-delay 2 -C - -o "%FFMPEG_ZIP%" "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" || goto :fail_ffmpeg
-  if exist "%FFMPEG_EXTRACT%" rmdir /s /q "%FFMPEG_EXTRACT%"
-  powershell -NoProfile -Command "Expand-Archive -Force '%TEMP%\ffmpeg-release-essentials.zip' '%TEMP%\ffmpeg-essentials-extract'" || goto :fail_ffmpeg
-  set FFMPEG_FOUND=0
-  for /r "%FFMPEG_EXTRACT%" %%F in (ffmpeg.exe) do (
-    copy /y "%%~fF" "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe" >nul && set FFMPEG_FOUND=1
-  )
-  if not %FFMPEG_FOUND%==1 goto :fail_ffmpeg
-  echo        侧车就位: src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+  call :ensure_ffmpeg
+  if errorlevel 1 goto :fail_ffmpeg
 )
 
-echo [4/5] Tauri 构建（release 编译 + NSIS exe + WiX msi）...
+echo [4/5] Tauri build (release + NSIS exe + WiX msi^)...
 call npm run tauri build || goto :fail
 
-echo [5/5] 收集产物...
+echo [5/5] collect artifacts...
 set OUTDIR=installer-output
 if not exist %OUTDIR% mkdir %OUTDIR%
 set FOUND=0
@@ -58,26 +45,46 @@ for %%F in ("src-tauri\target\release\bundle\msi\*.msi") do (
   echo        msi: %%~nxF
 )
 if %FOUND%==0 (
-  echo [失败] 未找到任何安装包产物
+  echo [FAIL] no installer artifacts found
   goto :fail
 )
 echo.
-echo 完成！安装包在 %CD%\%OUTDIR%\
+echo DONE. Installers at %CD%\%OUTDIR%\
 dir /b %OUTDIR%
 
 if not "%1"=="--nopause" pause
 exit /b 0
 
+:ensure_ffmpeg
+if not exist src-tauri\binaries mkdir src-tauri\binaries
+echo        downloading gyan.dev ffmpeg-release-essentials (~110MB, with retry^)...
+curl -L --retry 3 --retry-delay 2 -C - -o "%TEMP%\ffmpeg-release-essentials.zip" "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+if errorlevel 1 exit /b 1
+if exist "%TEMP%\ffmpeg-essentials-extract" rmdir /s /q "%TEMP%\ffmpeg-essentials-extract"
+powershell -NoProfile -Command "Expand-Archive -Force '%TEMP%\ffmpeg-release-essentials.zip' '%TEMP%\ffmpeg-essentials-extract'"
+if errorlevel 1 exit /b 1
+set FFMPEG_FOUND=0
+for /r "%TEMP%\ffmpeg-essentials-extract" %%F in (ffmpeg.exe) do (
+  copy /y "%%~fF" "src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe" >nul
+  set FFMPEG_FOUND=1
+)
+if not "%FFMPEG_FOUND%"=="1" (
+  echo [FAIL] ffmpeg.exe not found inside extracted archive
+  exit /b 1
+)
+echo        sidecar ready: src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+exit /b 0
+
 :fail
 echo.
-echo [构建失败]
+echo [BUILD FAILED]
 if not "%1"=="--nopause" pause
 exit /b 1
 
 :fail_ffmpeg
 echo.
-echo [失败] ffmpeg 侧车下载/解压失败——可手动下载
-echo        https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-echo        解压出 bin\ffmpeg.exe 改名放到 src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+echo [FAIL] ffmpeg sidecar download/extract failed. Manual steps:
+echo        download https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+echo        extract bin\ffmpeg.exe, rename to src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
 if not "%1"=="--nopause" pause
 exit /b 1
