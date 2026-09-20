@@ -49,6 +49,15 @@ fn ins(
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()
@@ -521,6 +530,15 @@ fn base_row() -> AssetRow {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
     }
 }
 

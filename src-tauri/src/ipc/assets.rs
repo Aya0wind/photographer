@@ -51,13 +51,92 @@ pub struct DateGroupDto {
 }
 
 /// 资产详情 DTO：AssetRow 全字段（flatten）+ id + 库内同指纹重复计数
-/// （(size, xxh) 相同的**其他**资产数，不含自身）。
+/// （(size, xxh) 相同的**其他**资产数，不含自身）+ M5 计算字段
+/// （format/megapixels/aspect/pairId 显式别名，flatten 内同值字段为
+/// pairAssetId——两者并存，前端按新契约取 pairId）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AssetDetailDto {
     pub id: i64,
     #[serde(flatten)]
     pub asset: crate::db::AssetRow,
     pub duplicate_count: u64,
+    /// 文件格式（路径扩展名大写，如 "NEF"；无扩展名 null）。
+    pub format: Option<String>,
+    /// 百万像素（保留 1 位小数，如 24.2）。
+    pub megapixels: Option<f64>,
+    /// 宽高比：常见比归约（"3:2"/"16:9"…），否则 "W:H" 小数（"1.37:1"）。
+    /// orientation 5-8（含 90° 旋转）时按显示方向取比。
+    pub aspect: Option<String>,
+    /// RAW/JPG 配对资产 id（无配对 null；flatten 内 pairAssetId 同值）。
+    pub pair_id: Option<i64>,
+}
+
+/// 扩展名（最后一个点后的部分大写；无点 → None）。
+fn format_of(path: &str) -> Option<String> {
+    let ext = path.rsplit(['/', '\\']).next()?;
+    let (_, ext) = ext.rsplit_once('.')?;
+    (!ext.is_empty()).then(|| ext.to_ascii_uppercase())
+}
+
+/// 百万像素（1 位小数）。
+fn megapixels_of(width: Option<u32>, height: Option<u32>) -> Option<f64> {
+    let w = width? as f64;
+    let h = height? as f64;
+    Some(((w * h / 1_000_000.0) * 10.0).round() / 10.0)
+}
+
+/// 宽高比字符串：常见比（±1% 容差）归约为标准 token；否则整数比约分
+/// （分母 ≤ 50）或 "x.xx:1" 小数比。orientation 5-8 交换宽高（显示方向）。
+fn aspect_of(width: Option<u32>, height: Option<u32>, orientation: Option<i64>) -> Option<String> {
+    let (mut w, mut h) = (width? as f64, height? as f64);
+    if matches!(orientation, Some(5..=8)) {
+        std::mem::swap(&mut w, &mut h);
+    }
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    const COMMON: &[(&str, f64)] = &[
+        ("1:1", 1.0),
+        ("5:4", 5.0 / 4.0),
+        ("4:3", 4.0 / 3.0),
+        ("3:2", 3.0 / 2.0),
+        ("16:10", 16.0 / 10.0),
+        ("16:9", 16.0 / 9.0),
+        ("21:9", 21.0 / 9.0),
+        ("2:3", 2.0 / 3.0),
+        ("3:4", 3.0 / 4.0),
+        ("9:16", 9.0 / 16.0),
+    ];
+    let ratio = w / h;
+    if let Some((token, _)) = COMMON.iter().find(|(_, r)| (ratio - r).abs() / r <= 0.01) {
+        return Some(token.to_string());
+    }
+    // 整数比约分（gcd），分母不大时人类可读
+    let (iw, ih) = (w.round() as u64, h.round() as u64);
+    if iw > 0 && ih > 0 {
+        let gcd = gcd(iw, ih);
+        let (rw, rh) = (iw / gcd, ih / gcd);
+        if rh <= 50 && rw <= 200 {
+            return Some(format!("{rw}:{rh}"));
+        }
+    }
+    // 兜底：以高为 1 的小数比（去尾零）
+    let mut text = format!("{ratio:.2}");
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+    Some(format!("{text}:1"))
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 /// 日期过滤值归一：转与库内 captured_at 同构的定宽 UTC 字符串
@@ -144,7 +223,7 @@ pub fn fetch_asset_group_dates(state: &super::AppState) -> Result<Vec<DateGroupD
         .collect())
 }
 
-/// 资产详情：全字段 + 同指纹重复计数；不存在返回 None。
+/// 资产详情：全字段 + 同指纹重复计数 + 计算字段；不存在返回 None。
 pub fn fetch_asset_detail(
     state: &super::AppState,
     id: i64,
@@ -158,8 +237,12 @@ pub fn fetch_asset_detail(
         .map_err(|e| e.to_string())?;
     Ok(Some(AssetDetailDto {
         id,
-        asset,
+        format: format_of(&asset.path),
+        megapixels: megapixels_of(asset.width, asset.height),
+        aspect: aspect_of(asset.width, asset.height, asset.orientation),
+        pair_id: asset.pair_asset_id,
         duplicate_count,
+        asset,
     }))
 }
 
@@ -224,6 +307,47 @@ pub fn fetch_camera_list(state: &super::AppState) -> Result<Vec<CameraCountDto>,
 pub async fn camera_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_camera_list).await
+}
+
+/// 镜头聚合（lens 非空分组计数降序；搜索页镜头勾选数据源）。
+pub fn fetch_lens_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
+    let db = super::active_library_db(state)?;
+    let rows = db.lens_list().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CameraCountDto {
+            camera: r.camera,
+            count: r.count,
+        })
+        .collect())
+}
+
+/// 镜头聚合（DB 查询 → 后台线程）。
+#[tauri::command]
+pub async fn lens_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_lens_list).await
+}
+
+/// 格式聚合（路径扩展名大写分组计数降序；搜索页格式勾选数据源）。
+/// `camera` 字段承载格式名（与 camera_list 同构载荷，前端复用同一组件）。
+pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
+    let db = super::active_library_db(state)?;
+    let rows = db.format_list().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CameraCountDto {
+            camera: r.camera,
+            count: r.count,
+        })
+        .collect())
+}
+
+/// 格式聚合（DB 查询 → 后台线程）。
+#[tauri::command]
+pub async fn format_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_format_list).await
 }
 
 /// 按 id 批量取资产（语义检索命中→画廊瓦片解析；保持入参顺序，失效 id 跳过）。

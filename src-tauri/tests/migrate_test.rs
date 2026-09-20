@@ -57,6 +57,15 @@ fn build_library_dir(db_dir: &Path) -> db::Db {
             lens: None,
             pair_asset_id: None,
             thumb_state: 0,
+            orientation: None,
+            flash: None,
+            metering_mode: None,
+            white_balance: None,
+            exposure_program: None,
+            software: None,
+            artist: None,
+            gps_lat: None,
+            gps_lon: None,
         })
         .unwrap();
     std::fs::create_dir_all(db_dir.join("thumbs").join("256")).unwrap();
@@ -323,6 +332,15 @@ fn build_photo_library(old_root: &Path, db_dir: &Path) {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
     };
     database
         .insert_asset(&row(

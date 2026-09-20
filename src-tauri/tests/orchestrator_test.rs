@@ -82,6 +82,15 @@ fn skip_imported_deducts_loose_matched_assets() {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
     })
     .unwrap();
 

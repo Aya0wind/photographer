@@ -68,18 +68,49 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 }
 
 /// 消费一条任务（认领 → 处理 → 收尾）。返回 false 表示队列已空。
+/// exif 通道（gen-2 深提取回填）与 thumb 同走 CPU 全核池：文件不重叠处理
+/// （每 worker 一次认领一条），exif 任务优先消费——量小且解锁筛选 UI。
 fn step(db: &Db, db_dir: &Path) -> bool {
-    let task = match db.claim_index_task("thumb") {
-        Ok(Some(t)) => t,
-        Ok(None) => return false,
-        Err(_) => return false,
+    let task = match db.claim_index_task("exif").ok().flatten() {
+        Some(t) => t,
+        None => match db.claim_index_task("thumb") {
+            Ok(Some(t)) => t,
+            Ok(None) | Err(_) => return false,
+        },
     };
     let ok = match task.kind.as_str() {
         "thumb" => process_thumb_task(db, db_dir, task.asset_id),
+        "exif" => process_exif_task(db, task.asset_id),
         _ => false,
     };
     let _ = db.finish_index_task(task.id, ok);
     true
+}
+
+/// EXIF 深提取任务（gen-2）：读文件头 ≤1MB → 深提取字段落库。
+/// 文件消失（外部库被移走/导入源清理）按完成收尾不占重试额度；
+/// 解码失败走 attempts 封顶策略（与 thumb 一致）。
+fn process_exif_task(db: &Db, asset_id: i64) -> bool {
+    let Some((path, kind)) = asset_thumb_target(db, asset_id) else {
+        return true; // 资产已删除：级联应清任务，防御兜底
+    };
+    if !matches!(kind.as_str(), "photo" | "raw") {
+        return true; // 视频/其他无 EXIF 深提取可言
+    }
+    let Ok(head) = read_head(&path) else {
+        return true; // 文件不可读（外部库被移走等）：不再重试
+    };
+    let meta = crate::metadata::exif_lite::parse(&head);
+    db.update_asset_deep_exif(asset_id, &meta.deep).is_ok()
+}
+
+/// 读文件头（≤1MB，与导入管线 HEAD_MAX 同口径）。
+fn read_head(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut head = Vec::with_capacity(256 * 1024);
+    file.by_ref().take(1024 * 1024).read_to_end(&mut head)?;
+    Ok(head)
 }
 
 /// 单 worker 循环：跑到队列空，返回处理数。
@@ -184,10 +215,44 @@ pub fn refresh_raw_thumbs_for_generation(
                     .and_then(|db| db.requeue_thumb_tasks_for_raw().ok())
             })
             .unwrap_or(0);
-        let _ = std::fs::write(&db_dir.join(format!(
-            "thumbs-raw-gen-{}.marker",
-            crate::thumbs::RAW_THUMB_GENERATION
-        )), b"");
+        let _ = std::fs::write(
+            db_dir.join(format!(
+                "thumbs-raw-gen-{}.marker",
+                crate::thumbs::RAW_THUMB_GENERATION
+            )),
+            b"",
+        );
+        if pending > 0 {
+            bus.publish(AppEvent::IndexTaskResumed { pending });
+            run_pending(&db_dir, worker_count());
+        }
+    });
+}
+
+/// EXIF 深提取代际自愈（gen-2，migration 0008 配套）：0008 新增的 10 列
+/// 存量资产全空，启动时一次性重排全部 photo/raw 的 exif 任务回填
+/// （导入管线只对新导入生效）。dbDir 标记 `exif-gen-2.marker` 防每次
+/// 启动重排；新导入资产不走此链（入库时已带深提取字段）。
+pub fn refresh_exif_for_generation(
+    db_dir: PathBuf,
+    bus: &EventBus,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+) {
+    let marker = db_dir.join("exif-gen-2.marker");
+    if marker.is_file() {
+        return;
+    }
+    let bus = bus.clone();
+    supervisor.spawn("index", "exif-gen2-regen".into(), move |_| {
+        let pending = std::fs::create_dir_all(&db_dir)
+            .ok()
+            .and_then(|_| {
+                crate::ipc::open_library_db(&db_dir)
+                    .ok()
+                    .and_then(|db| db.requeue_exif_tasks_for_all().ok())
+            })
+            .unwrap_or(0);
+        let _ = std::fs::write(db_dir.join("exif-gen-2.marker"), b"");
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
             run_pending(&db_dir, worker_count());

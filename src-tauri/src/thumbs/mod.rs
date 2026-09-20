@@ -182,7 +182,10 @@ fn is_raw_ext(ext: &str) -> bool {
 /// 缓存命中探测（不生成、不阻塞）：命中返回缓存文件绝对路径，未命中/
 /// 不可解码/源缺失返回 None。按需管线（asset_thumb_get(asset_id)）的快路径。
 pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
-    let ext = src.extension().and_then(|e| e.to_str())?.to_ascii_lowercase();
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
     let size = if is_raw_embed_request(&ext, size) {
         size
     } else {
@@ -563,7 +566,7 @@ fn read_at<R: std::io::Read + std::io::Seek>(r: &mut R, off: u64, len: u64) -> O
 
 /// JPEG 头部尺寸解析（走到 SOS 即可，无需 EOI；范围读候选的廉价验证）。
 pub fn jpeg_header_dims(buf: &[u8]) -> Option<(u32, u32)> {
-    if buf.len() < 4 || &buf[..3] != [0xFF, 0xD8, 0xFF] {
+    if buf.len() < 4 || buf[..3] != [0xFF, 0xD8, 0xFF] {
         return None;
     }
     let mut i = 2usize;
@@ -697,7 +700,10 @@ fn tiff_jpeg_blocks<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<Vec<T
         // 本 IFD 的 JPEG 数据段
         if let (Some(off), Some(len)) = (jpg_off, jpg_len) {
             if len > 0 && len <= 64 * 1024 * 1024 {
-                blocks.push(TiffJpegBlock { parts: vec![(off, len)], total: len });
+                blocks.push(TiffJpegBlock {
+                    parts: vec![(off, len)],
+                    total: len,
+                });
             }
         } else if compression == Some(6) || compression == Some(7) {
             let parts: Vec<(u64, u64)> = strip_offsets
@@ -762,7 +768,9 @@ pub fn preview_via_tiff<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<V
     for block in &blocks {
         let (off, len) = block.parts[0];
         let window = read_at(r, off, len.min(256 * 1024))?;
-        let Some((w, h)) = jpeg_header_dims(&window) else { continue };
+        let Some((w, h)) = jpeg_header_dims(&window) else {
+            continue;
+        };
         let pixels = u64::from(w) * u64::from(h);
         if best.is_none_or(|(p, _)| pixels > p) {
             best = Some((pixels, block));
@@ -793,7 +801,7 @@ fn jpeg_segment_end(buf: &[u8]) -> Option<(usize, u16, u16)> {
         let marker = buf[i + 1];
         match marker {
             0x01 | 0xD0..=0xD7 => i += 2,
-            0xD8 => return None,        // 嵌套 SOI：坏结构
+            0xD8 => return None,                        // 嵌套 SOI：坏结构
             0xD9 => return Some((i + 2, sof.0, sof.1)), // EOI
             0xDA => {
                 // SOS：其后熵编码内不会有 FFD9（FF00 转义），线性找 EOI

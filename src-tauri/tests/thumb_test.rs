@@ -11,7 +11,7 @@ mod thumbs;
 mod metadata;
 
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -505,7 +505,10 @@ fn raw_develop_timing() {
     use std::time::Instant;
 
     let samples = [
-        ("本地NEF", r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF"),
+        (
+            "本地NEF",
+            r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF",
+        ),
         ("NAS-ARW", r"Y:\照片\SmartPhoto\2026\08-30\DSC08115.ARW"),
     ];
     for (label, path) in samples {
@@ -523,7 +526,6 @@ fn raw_develop_timing() {
             }
         };
         let t1 = Instant::now();
-        let raw = raw; // (dim 信息打点)
         eprintln!(
             "{label}: decode={:?} 尺寸={:?}x{:?}",
             t1 - t0,
@@ -543,7 +545,12 @@ fn raw_develop_timing() {
         let t4 = Instant::now();
         let img = developed.to_dynamic_image().unwrap();
         let t5 = Instant::now();
-        eprintln!("{label}: to_image={:?} ({}x{})", t5 - t4, img.width(), img.height());
+        eprintln!(
+            "{label}: to_image={:?} ({}x{})",
+            t5 - t4,
+            img.width(),
+            img.height()
+        );
         let t6 = Instant::now();
         let small = img.thumbnail(2048, 2048).to_rgb8();
         let t7 = Instant::now();
@@ -552,7 +559,10 @@ fn raw_develop_timing() {
         let mut jpeg = Vec::new();
         let _enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88);
         image::DynamicImage::ImageRgb8(small)
-            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
             .ok();
         let t9 = Instant::now();
         eprintln!("{label}: encode={:?} total={:?}", t9 - t8, t9 - t0);
@@ -563,13 +573,9 @@ fn rawler_probe_decode(src: &Path) -> Option<rawler::RawImage> {
     rawler::decode_file(src).ok()
 }
 
-fn rawler_probe_develop(
-    raw: &rawler::RawImage,
-) -> Option<rawler::imgop::develop::Intermediate> {
+fn rawler_probe_develop(raw: &rawler::RawImage) -> Option<rawler::imgop::develop::Intermediate> {
     use rawler::imgop::develop::RawDevelop;
-    RawDevelop::default()
-        .develop_intermediate(raw)
-        .ok()
+    RawDevelop::default().develop_intermediate(raw).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -662,11 +668,7 @@ fn raw_embed_tier_orientation_reencodes_upright() {
     let db = db_dir();
     let src = dir.path().join("DSC_9999.ARW");
     // 容器 Orientation=6（顺时针 90°）：直出档解码转正重编
-    fs::write(
-        &src,
-        raw_with_two_embeds((160, 120), (2400, 1600), 6),
-    )
-    .unwrap();
+    fs::write(&src, raw_with_two_embeds((160, 120), (2400, 1600), 6)).unwrap();
 
     let out = thumbs::thumb_file(&db, &src, 6000).expect("直出档应生成");
     let (w, h) = image::image_dimensions(Path::new(&out)).unwrap();
@@ -683,7 +685,8 @@ fn raw_low_tiers_use_generation_dir() {
     for size in [256u16, 512] {
         let out = thumbs::thumb_file(&db, &src, size).expect("低档应生成");
         assert!(
-            out.replace('/', "\\").contains(&format!("raw-{size}-v{}", thumbs::RAW_THUMB_GENERATION)),
+            out.replace('/', "\\")
+                .contains(&format!("raw-{size}-v{}", thumbs::RAW_THUMB_GENERATION)),
             "RAW 低档应落代际目录: {out}"
         );
     }
@@ -708,7 +711,10 @@ struct CountingCursor {
 }
 impl CountingCursor {
     fn new(data: Vec<u8>) -> Self {
-        Self { inner: std::io::Cursor::new(data), read_bytes: 0 }
+        Self {
+            inner: std::io::Cursor::new(data),
+            read_bytes: 0,
+        }
     }
 }
 impl std::io::Read for CountingCursor {
@@ -729,7 +735,7 @@ fn tiff_raw_with_referenced_jpegs(small: &[u8], large: &[u8]) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(b"II*\0");
     b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 @ 8
-    // 占位：先算好偏移再填——布局：IFD0(2+2*12+4=30) + IFD1(30) + small + filler + large
+                                              // 占位：先算好偏移再填——布局：IFD0(2+2*12+4=30) + IFD1(30) + small + filler + large
     let ifd0 = 8usize;
     let ifd1 = ifd0 + 30;
     let small_off = ifd1 + 30;
@@ -747,7 +753,7 @@ fn tiff_raw_with_referenced_jpegs(small: &[u8], large: &[u8]) -> Vec<u8> {
     b.extend_from_slice(&1u32.to_le_bytes());
     b.extend_from_slice(&(small.len() as u32).to_le_bytes());
     b.extend_from_slice(&(ifd1 as u32).to_le_bytes()); // NextIFD
-    // IFD1：引用 large
+                                                       // IFD1：引用 large
     b.extend_from_slice(&2u16.to_le_bytes());
     b.extend_from_slice(&0x0201u16.to_le_bytes());
     b.extend_from_slice(&4u16.to_le_bytes());
@@ -772,7 +778,9 @@ fn test_jpeg(w: u32, h: u32) -> Vec<u8> {
     }
     let mut jpg = Vec::new();
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90);
-    DynamicImage::ImageRgb8(img).write_with_encoder(encoder).unwrap();
+    DynamicImage::ImageRgb8(img)
+        .write_with_encoder(encoder)
+        .unwrap();
     jpg
 }
 
@@ -830,8 +838,16 @@ fn raw_preview_tiff_dirty_pointer_falls_back_to_scan() {
 #[ignore = "真机样例 smoke：本地 NEF 与 NAS ARW；交付验证用"]
 fn real_raw_tiff_route_matches_full_scan() {
     let samples = [
-        ("NEF", r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF", (6048u32, 4032u32)),
-        ("ARW", r"Y:\照片\SmartPhoto\2026\08-30\DSC08115.ARW", (9504, 6336)),
+        (
+            "NEF",
+            r"I:\SmartPhoto-test-e2e\收纳\2025\06-07\DSC_0176.NEF",
+            (6048u32, 4032u32),
+        ),
+        (
+            "ARW",
+            r"Y:\照片\SmartPhoto\2026\08-30\DSC08115.ARW",
+            (9504, 6336),
+        ),
     ];
     for (label, path, expect_dims) in samples {
         let src = Path::new(path);
@@ -841,9 +857,8 @@ fn real_raw_tiff_route_matches_full_scan() {
         }
         let total = fs::metadata(src).unwrap().len() as usize;
         let mut reader = CountingCursor::new(fs::read(src).unwrap());
-        let via_tiff = thumbs::preview_via_tiff(&mut reader).unwrap_or_else(|| {
-            panic!("{label}: TIFF 指针路线应命中（真实相机文件）")
-        });
+        let via_tiff = thumbs::preview_via_tiff(&mut reader)
+            .unwrap_or_else(|| panic!("{label}: TIFF 指针路线应命中（真实相机文件）"));
         let (w, h) = thumbs::jpeg_header_dims(&via_tiff).unwrap();
         assert_eq!(
             (w, h),
@@ -868,11 +883,7 @@ fn raw_embed_orientation_uses_lossless_transform_when_perfect() {
     let db = db_dir();
     let src = dir.path().join("DSC_9998.ARW");
     // 尺寸整除 16（4:2:0 MCU）：无损变换应成功；容器 Orientation=8
-    fs::write(
-        &src,
-        raw_with_two_embeds((160, 120), (2400, 1600), 8),
-    )
-    .unwrap();
+    fs::write(&src, raw_with_two_embeds((160, 120), (2400, 1600), 8)).unwrap();
 
     let out = thumbs::thumb_file(&db, &src, 6000).expect("直出档应生成");
     let (w, h) = image::image_dimensions(Path::new(&out)).unwrap();

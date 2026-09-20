@@ -94,6 +94,9 @@ pub fn run() {
                 // RAW 缩略图源代际升级自愈（v1 取第一段小预览 → v2 取最大段）：
                 // 一次性重排 RAW thumb 任务重建（dbDir 标记文件防重入）
                 index::refresh_raw_thumbs_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // EXIF 深提取代际自愈（gen-2 / migration 0008）：存量资产
+                // 补齐方向/闪光/GPS 等 10 列（dbDir 标记文件防重入）
+                index::refresh_exif_for_generation(db_dir.clone(), &bus, &supervisor_handle);
                 if enable_clip {
                     ai::semantic::kick_semantic_if_ready(
                         db_dir.clone(),
@@ -169,6 +172,8 @@ pub fn run() {
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
             ipc::assets::camera_list,
+            ipc::assets::lens_list,
+            ipc::assets::format_list,
             ipc::assets::assets_by_ids,
             ipc::thumb::asset_thumb_get,
             ipc::thumb::thumb_get_by_path,

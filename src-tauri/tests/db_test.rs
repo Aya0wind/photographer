@@ -14,6 +14,9 @@ mod devices;
 #[path = "../src/events/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树
 mod events;
+#[path = "../src/metadata/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树（db::update_asset_deep_exif 引用）
+mod metadata;
 
 #[path = "../src/db/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树
@@ -82,6 +85,15 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
     }
 }
 
@@ -102,15 +114,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 7);
+        assert_eq!(user_version(&db), 8);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 7, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 8, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 7);
+    assert_eq!(user_version(&db), 8);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -153,12 +165,28 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
             [asset_id],
         )
         .unwrap();
+        // 0008 的 ALTER ADD COLUMN 不可重放：回卷版本前先摘掉 0008 列
+        //（迁移会原样补回，语义不变）
+        for col in [
+            "orientation",
+            "flash",
+            "metering_mode",
+            "white_balance",
+            "exposure_program",
+            "software",
+            "artist",
+            "gps_lat",
+            "gps_lon",
+        ] {
+            db.0.execute(&format!("ALTER TABLE assets DROP COLUMN {col}"), [])
+                .unwrap();
+        }
         db.0.pragma_update(None, "user_version", 6).unwrap();
     }
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 7);
+    assert_eq!(user_version(&db), 8);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

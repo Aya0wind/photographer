@@ -841,6 +841,15 @@ impl Engine {
             lens: copied.meta.lens.clone(),
             pair_asset_id: None,
             thumb_state: 0,
+            orientation: copied.meta.deep.orientation,
+            flash: copied.meta.deep.flash.clone(),
+            metering_mode: copied.meta.deep.metering_mode.clone(),
+            white_balance: copied.meta.deep.white_balance.clone(),
+            exposure_program: copied.meta.deep.exposure_program.clone(),
+            software: copied.meta.deep.software.clone(),
+            artist: copied.meta.deep.artist.clone(),
+            gps_lat: copied.meta.deep.gps_lat,
+            gps_lon: copied.meta.deep.gps_lon,
         });
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2

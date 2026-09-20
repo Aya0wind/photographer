@@ -30,6 +30,31 @@ pub struct MetaLite {
     pub focal_length: Option<String>,
     /// 镜头型号 LensModel(0xA434)。
     pub lens: Option<String>,
+    /// 深提取字段（0008 列，gen-2 回填链）。
+    pub deep: DeepExif,
+}
+
+/// EXIF 深提取字段（assets 0008 列同构；全部可缺失）。
+/// token 映射（写库契约，筛选/展示两侧共用）：
+/// - flash：EXIF Flash(0x9209) bit0（是否闪光）→ "fired" / "no_flash"
+///   （强制开/自动未亮等细分折叠，筛选用 `LIKE '%fired%'` / `'no_flash%'`）
+/// - metering_mode：average/center_weighted/spot/multi_spot/pattern/partial/other
+/// - white_balance：auto/manual
+/// - exposure_program：manual/aperture_priority/shutter_priority/creative/
+///   action/portrait/landscape
+/// - orientation：EXIF 1-8（1=正常；5-8 含 90° 旋转）
+/// - gps：十进制度（deg + min/60 + sec/3600；南纬/西经取负）
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DeepExif {
+    pub orientation: Option<i64>,
+    pub flash: Option<String>,
+    pub metering_mode: Option<String>,
+    pub white_balance: Option<String>,
+    pub exposure_program: Option<String>,
+    pub software: Option<String>,
+    pub artist: Option<String>,
+    pub gps_lat: Option<f64>,
+    pub gps_lon: Option<f64>,
 }
 
 /// 从文件头部字节（建议 ≥1MB）解析 EXIF-lite。永不返回 Err，也绝不 panic。
@@ -57,7 +82,126 @@ pub fn parse(head: &[u8]) -> MetaLite {
         exposure_time: rational_field(&exif, 0x829A).and_then(format_exposure_time),
         focal_length: rational_field(&exif, 0x920A).and_then(format_focal_length),
         lens: ascii_value(&exif, exif::Tag::LensModel).filter(|s| !s.is_empty()),
+        deep: deep_exif(&exif),
     }
+}
+
+/// 深提取字段集合（0008 列）：方向 / 闪光 / 测光 / 白平衡 / 曝光程序 /
+/// 软件 / 作者 / GPS。JPEG（APP1）与 RAW（TIFF IFD0 + GPS IFD）都经
+/// kamadak-exif 统一解析，字段在 In::PRIMARY 平面查询。
+fn deep_exif(exif: &exif::Exif) -> DeepExif {
+    DeepExif {
+        orientation: orientation_field(exif),
+        flash: flash_token(exif),
+        metering_mode: token_by_code(
+            uint_field(exif, 0x9207).map(u32::from),
+            &[
+                (1, "average"),
+                (2, "center_weighted"),
+                (3, "spot"),
+                (4, "multi_spot"),
+                (5, "pattern"),
+                (6, "partial"),
+                (255, "other"),
+            ],
+        ),
+        white_balance: token_by_code(
+            uint_field(exif, 0xA403).map(u32::from),
+            &[(0, "auto"), (1, "manual")],
+        ),
+        exposure_program: token_by_code(
+            uint_field(exif, 0x8822).map(u32::from),
+            &[
+                (1, "manual"),
+                (2, "aperture_priority"),
+                (3, "shutter_priority"),
+                (4, "creative"),
+                (5, "action"),
+                (6, "portrait"),
+                (7, "landscape"),
+            ],
+        ),
+        software: ascii_value(exif, exif::Tag::Software).filter(|s| !s.is_empty()),
+        artist: ascii_value(exif, exif::Tag::Artist).filter(|s| !s.is_empty()),
+        gps_lat: gps_coordinate(
+            exif,
+            exif::Tag::GPSLatitude,
+            exif::Tag::GPSLatitudeRef,
+            false,
+        ),
+        gps_lon: gps_coordinate(
+            exif,
+            exif::Tag::GPSLongitude,
+            exif::Tag::GPSLongitudeRef,
+            true,
+        ),
+    }
+}
+
+/// 拍摄方向 Orientation(0x0112，IFD0/TIFF 上下文)，EXIF 1-8；缺失/非法 None。
+fn orientation_field(exif: &exif::Exif) -> Option<i64> {
+    let value = &exif
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value;
+    let raw = match value {
+        exif::Value::Short(list) => list.first().copied().map(u32::from),
+        exif::Value::Long(list) => list.first().copied(),
+        _ => None,
+    }?;
+    (1..=8).contains(&raw).then_some(raw as i64)
+}
+
+/// 闪光 token：Flash(0x9209) bit0 = 是否闪光（任一 fired 复合值都算
+/// "fired"；0x00/强制关(0x10)/自动未亮(0x18) 等 → "no_flash"）。
+fn flash_token(exif: &exif::Exif) -> Option<String> {
+    let value = &exif
+        .get_field(exif::Tag(exif::Context::Exif, 0x9209), exif::In::PRIMARY)?
+        .value;
+    let raw = match value {
+        exif::Value::Short(list) => list.first().copied().map(u32::from),
+        exif::Value::Long(list) => list.first().copied(),
+        _ => None,
+    }?;
+    Some(if raw & 1 == 1 { "fired" } else { "no_flash" }.to_string())
+}
+
+/// 数值枚举 → token（0 = 未定义 → None；未知码 → None）。
+fn token_by_code(code: Option<u32>, map: &[(u32, &str)]) -> Option<String> {
+    let code = code?;
+    map.iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, token)| token.to_string())
+}
+
+/// GPS 坐标（十进制度）：GPSLatitude/GPSLongitude 1-3 个 RATIONAL
+///（deg [min] [sec]）+ Ref（N/S 或 E/W）。值不完整/缺 Ref → None；
+/// 南纬（S）/西经（W）取负。
+fn gps_coordinate(
+    exif: &exif::Exif,
+    coord_tag: exif::Tag,
+    ref_tag: exif::Tag,
+    _is_lon: bool,
+) -> Option<f64> {
+    let dms = match &exif.get_field(coord_tag, exif::In::PRIMARY)?.value {
+        exif::Value::Rational(list) if !list.is_empty() && list.len() <= 3 => {
+            list.iter().map(|r| r.to_f64()).collect::<Vec<f64>>()
+        }
+        _ => return None,
+    };
+    let reference = ascii_value(exif, ref_tag)?;
+    let negative = match reference.trim_start_matches('\u{0}') {
+        "S" | "W" => true,
+        "N" | "E" => false,
+        _ => return None,
+    };
+    let mut degrees = dms.first().copied()?;
+    if let Some(minutes) = dms.get(1) {
+        degrees += minutes / 60.0;
+    }
+    if let Some(seconds) = dms.get(2) {
+        degrees += seconds / 3600.0;
+    }
+    Some(if negative { -degrees } else { degrees })
 }
 
 /// 读取 ASCII 字段并去除首尾空白（kamadak-exif 解析时已剥离尾部 NUL）。

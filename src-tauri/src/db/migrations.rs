@@ -12,6 +12,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0005_SEMANTIC_LEDGER,
     MIGRATION_0006_FACES_AND_PEOPLE,
     MIGRATION_0007_UNIQUE_INDEX_TASKS,
+    MIGRATION_0008_DEEP_EXIF,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -206,4 +207,22 @@ WHERE id NOT IN (
 );
 
 CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
+"#;
+
+/// 0008（M5 深提取）：assets 拍摄参数扩展列（全可空，存量资产经
+/// exif-gen-2 代际回填补齐——见 index::refresh_exif_for_generation）。
+/// orientation = EXIF 1-8；flash/metering_mode/white_balance/exposure_program
+/// 为规范化 token（见 metadata::exif_lite 映射表）；gps_lat/gps_lon 为十进
+/// 制度（南纬/西经为负）。数值范围筛选（focal/f_number/exposure_time 等）
+/// 对 NULL 行不匹配——「未知」不冒充任何区间。
+const MIGRATION_0008_DEEP_EXIF: &str = r#"
+ALTER TABLE assets ADD COLUMN orientation INTEGER;
+ALTER TABLE assets ADD COLUMN flash TEXT;
+ALTER TABLE assets ADD COLUMN metering_mode TEXT;
+ALTER TABLE assets ADD COLUMN white_balance TEXT;
+ALTER TABLE assets ADD COLUMN exposure_program TEXT;
+ALTER TABLE assets ADD COLUMN software TEXT;
+ALTER TABLE assets ADD COLUMN artist TEXT;
+ALTER TABLE assets ADD COLUMN gps_lat REAL;
+ALTER TABLE assets ADD COLUMN gps_lon REAL;
 "#;
