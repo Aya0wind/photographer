@@ -1,5 +1,5 @@
 //! 断点恢复语义：软取消返回部分统计、暂停恢复无损续跑、中断后 resume
-//! 只重做 pending（`.part` 残留清扫）。
+//! 只重做 pending（`.part` 残留清扫）、启动时孤儿 running/paused 任务终老。
 
 mod common;
 
@@ -149,4 +149,67 @@ fn resume_after_interruption_redoes_pending_only() {
         .into_iter()
         .all(|s| s == FileState::Verified));
     assert_eq!(job_status(&open_db(db_dir.path()), job_id), "done");
+}
+
+/// 启动自愈（2026-09-21 bug②）：进程重启后引擎会话清零，jobs 表遗留的
+/// running/paused 是跨会话死任务（真库 job 18 running 挂 3 天、任务抽屉
+/// 删不掉）——启动核对无活跃引擎会话即终老为 cancelled + 日志；journal
+/// 保留（设备回连后 resume 仍可续传）；幂等；终态任务不动。
+#[test]
+fn startup_reaps_orphan_running_and_paused_jobs() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = open_db(db_dir.path());
+
+    // 模拟进程死亡：job 建好后 run 永未收尾——status 停在 running；
+    // paused 是设备失联自动暂停后进程退出的遗留；done 是正常终态
+    let running = db
+        .create_job_with_plan("import", "vol:X", "SD Card", 3, 300, "{}")
+        .unwrap();
+    let paused = db
+        .create_job_with_plan("import", "vol:Y", "SD Card 2", 2, 200, "{}")
+        .unwrap();
+    db.finish_job(paused, "paused", "{}").unwrap();
+    let done = db
+        .create_job_with_plan("import", "vol:Z", "SD Card 3", 1, 100, "{}")
+        .unwrap();
+    db.finish_job(done, "done", "{}").unwrap();
+    // running 任务的 journal（进程死时已结算 1 文件、余 2 pending）
+    db.0.execute(
+        "INSERT INTO job_files (job_id, src, dst, size, state) VALUES \
+             (?1, 'a.jpg', 'X:/a.jpg', 100, 'verified'), \
+             (?1, 'b.jpg', '', 100, 'pending')",
+        [running],
+    )
+    .unwrap();
+
+    // 启动核对：无活跃引擎会话（进程刚起，天然没有）→ 孤儿终老
+    let reaped = db.reap_orphan_import_jobs().unwrap();
+    assert_eq!(reaped.len(), 2, "running + paused 各一：{reaped:?}");
+    assert_eq!(job_status(&db, running), "cancelled");
+    assert_eq!(job_status(&db, paused), "cancelled");
+    assert_eq!(job_status(&db, done), "done", "终态任务不得被改动");
+
+    // 每个终老任务落一行 warn 日志（可观测性：任务抽屉能解释去向）
+    let logged: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM logs WHERE job_id = ?1 AND level = 'warn' \
+             AND message LIKE '%孤儿任务%'",
+            [running],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(logged, 1);
+
+    // journal 保留：恢复语义不毁（设备回连后 resume 仍可续传 pending）
+    let states = journal_states(&db, running);
+    assert!(
+        states.contains(&FileState::Pending),
+        "journal 不动: {states:?}"
+    );
+
+    // 幂等：二次启动无孤儿
+    assert!(db.reap_orphan_import_jobs().unwrap().is_empty());
+
+    // 任务抽屉的可删性恢复（bug② 直接痛点：running 态 import_job_delete 拒删）
+    assert!(matches!(db.delete_job_history(running).unwrap(), Ok(true)));
 }

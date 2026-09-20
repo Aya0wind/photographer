@@ -368,21 +368,24 @@ pub fn refresh_hash_for_generation(
     });
 }
 
-/// EXIF 深提取代际自愈（gen-2，migration 0008 配套）：0008 新增的 10 列
-/// 存量资产全空，启动时一次性重排全部 photo/raw 的 exif 任务回填
-/// （导入管线只对新导入生效）。dbDir 标记 `exif-gen-2.marker` 防每次
-/// 启动重排；新导入资产不走此链（入库时已带深提取字段）。
+/// EXIF 深提取代际自愈（gen-2，migration 0008 配套；gen-5 宽高分层修复
+/// 2026-09-21）：0008 新增的 10 列存量资产全空，启动时一次性重排全部
+/// photo/raw 的 exif 任务回填（导入管线只对新导入生效）。gen-5 一并重排
+/// ——尼康 NEF 存量宽高是内嵌缩略图尺寸（640×424），新策略从 SubIFD
+/// 主图 IFD 取本体尺寸（6064×4040），COALESCE 覆盖旧错值。
+/// dbDir 标记 `exif-gen-5.marker` 防每次启动重排；新导入资产不走此链
+/// （入库时已带深提取字段）。
 pub fn refresh_exif_for_generation(
     db_dir: PathBuf,
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    let marker = db_dir.join("exif-gen-4.marker");
+    let marker = db_dir.join("exif-gen-5.marker");
     if marker.is_file() {
         return;
     }
     let bus = bus.clone();
-    supervisor.spawn("index", "exif-gen2-regen".into(), move |_| {
+    supervisor.spawn("index", "exif-gen5-regen".into(), move |_| {
         let pending = std::fs::create_dir_all(&db_dir)
             .ok()
             .and_then(|_| {
@@ -391,7 +394,7 @@ pub fn refresh_exif_for_generation(
                     .and_then(|db| db.requeue_exif_tasks_for_all().ok())
             })
             .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("exif-gen-4.marker"), b"");
+        let _ = std::fs::write(db_dir.join("exif-gen-5.marker"), b"");
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
             run_pending(&db_dir, worker_count());

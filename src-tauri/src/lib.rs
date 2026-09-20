@@ -105,6 +105,25 @@ pub fn run() {
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
+                // 孤儿导入任务终老（2026-09-21）：进程重启后引擎会话清零，
+                // 遗留 running/paused 是跨会话死任务（任务抽屉挂死 +
+                // import_job_delete 拒删）。统一转 cancelled + 日志；
+                // journal 保留，设备回连后 resume 仍可手动续传。
+                {
+                    let db_dir = db_dir.clone();
+                    supervisor_handle.spawn("import", "orphan-jobs-reap".into(), move |_| {
+                        if let Ok(db) = ipc::open_library_db(&db_dir) {
+                            match db.reap_orphan_import_jobs() {
+                                Ok(reaped) => {
+                                    for id in reaped {
+                                        eprintln!("启动自愈：孤儿导入任务 {id} 已终老为 cancelled");
+                                    }
+                                }
+                                Err(e) => eprintln!("启动自愈：孤儿任务清理失败: {e}"),
+                            }
+                        }
+                    });
+                }
                 // RAW 缩略图源代际升级自愈（v1 取第一段小预览 → v2 取最大段）：
                 // 一次性重排 RAW thumb 任务重建（dbDir 标记文件防重入）
                 index::refresh_raw_thumbs_for_generation(db_dir.clone(), &bus, &supervisor_handle);

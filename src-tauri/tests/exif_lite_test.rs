@@ -174,11 +174,41 @@ fn garbage_empty_truncated_input_yields_all_none() {
     // 合法 TIFF 的截断头部
     let good = build_tiff("A", "B", Some("2026:01:02 03:04:05"), None);
     assert_eq!(parse(&good[..10]), MetaLite::default());
-    // ExifIFD 指针越界（指向文件末尾之外）
+    // ExifIFD 指针越界（指向文件末尾之外）：gen-5 容错解析下单字段越界
+    // 只丢该子树——IFD0 的 Make/Model 照常返回（旧严格模式全 None）
     let mut broken = good.clone();
     let ptr_value_at = 8 + 2 + 12 * 2 + 8; // IFD0 内第 3 条（ExifIFD 指针）的值偏移
     broken[ptr_value_at..ptr_value_at + 4].copy_from_slice(&0xFFFF_FF00u32.to_le_bytes());
-    assert_eq!(parse(&broken), MetaLite::default());
+    let meta = parse(&broken);
+    assert_eq!(meta.camera.as_deref(), Some("A B"));
+    assert_eq!(meta.captured_at, None); // EXIF 子树丢失：DateTimeOriginal 不可达
+}
+
+/// gen-5 容错韧性：TIFF 条目值落在截取窗之外（RAW 的条带数据/MakerNote
+/// 超 1MB head 场景）只丢该字段，其余照常解析（严格模式会全 None——
+/// 尼康/适马等大 MakerNote 的 RAW 最易触发）。
+#[test]
+fn truncated_out_of_window_field_does_not_kill_exif() {
+    // 手工小 TIFF：IFD0[Make(值在缓冲内), 巨型条目(值偏移 4000 超出缓冲)]
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II\x2a\x00");
+    buf.extend_from_slice(&8u32.to_le_bytes()); // IFD0 偏移
+    buf.extend_from_slice(&2u16.to_le_bytes()); // 2 条目
+                                                // 条目 1：Make(0x010F) ASCII "Nikon\0" → 值偏移 38（IFD0 止于 38）
+    buf.extend_from_slice(&0x010Fu16.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(&6u32.to_le_bytes());
+    buf.extend_from_slice(&38u32.to_le_bytes());
+    // 条目 2：0x0201 BYTE×8000 → 值偏移 4000（缓冲只有 44 字节）
+    buf.extend_from_slice(&0x0201u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&8000u32.to_le_bytes());
+    buf.extend_from_slice(&4000u32.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 下一 IFD = 0
+    buf.extend_from_slice(b"Nikon\0"); // 38..44
+    assert_eq!(buf.len(), 44);
+    let meta = parse(&buf);
+    assert_eq!(meta.camera.as_deref(), Some("Nikon"), "越界字段只丢自己");
 }
 
 /// 真实文件冒烟（直连已知样例路径，不做目录遍历——真实数据测试禁止全量扫描，
@@ -491,9 +521,12 @@ fn dimensions_from_sof2_progressive_and_from_tiff_tags() {
     assert_eq!(meta.height, Some(5504));
 }
 
+/// gen-5 契约：TIFF 基 RAW 的内嵌 preview JPEG 不再作为尺寸源——
+/// 旧策略扫 SOI 把缩略图尺寸当本体（NEF 真机 6064×4040 → 640×424）。
 #[test]
-fn dimensions_from_embedded_preview_in_raw_head() {
-    // RAW TIFF 头 + 头部后段的内嵌预览 JPEG（SOI…SOF0…EOI）
+fn raw_tiff_ignores_embedded_preview_dimensions() {
+    // RAW TIFF 头（无任何尺寸层：IFD0 无尺寸、无 EXIF 像素维度、无 SubIFD）
+    // + 头部后段的内嵌预览 JPEG（SOI…SOF0 1616×1080…EOI）→ 宁缺毋错
     let mut raw = build_full_tiff(None, None, None, None, None, None, None, None, None);
     raw.extend_from_slice(&[0u8; 512]); // TIFF 数据与预览间填充
     let mut preview = Vec::new();
@@ -502,8 +535,155 @@ fn dimensions_from_embedded_preview_in_raw_head() {
     preview.extend_from_slice(&[0xFF, 0xD9]);
     raw.extend_from_slice(&preview);
     let meta = parse(&raw);
-    assert_eq!(meta.width, Some(1616));
-    assert_eq!(meta.height, Some(1080));
+    assert_eq!(meta.width, None, "预览 JPEG 的 SOF 不得冒充本体尺寸");
+    assert_eq!(meta.height, None);
+}
+
+/// 构造 NEF 形态的最小 TIFF（gen-5 真机结构复刻，小端）：
+/// IFD0[NewSubfileType=1（缩略图层，无尺寸 tag）， ExifIFD→拍摄参数
+/// （ISO；exif_pixel=Some 时另带 0xA002/0xA003）， SubIFD(0x014A)→全尺寸
+/// 主图 IFD（NewSubfileType=0 + 6064×4040）] + 尾部内嵌缩略图 JPEG(640×424)。
+/// 真机 DSC_0176.NEF（Z5）实测同构：IFD0=缩略图、EXIF 无 0xA002、
+/// 全尺寸在 SubIFD#1、IFD0 内嵌 640×424 JPEG（2026-09-21）。
+fn build_nef_like(exif_pixel: Option<(u32, u32)>) -> Vec<u8> {
+    let mut exif_ents = vec![ent(0x8827, 3, 7200u16.to_le_bytes().to_vec())];
+    if let Some((w, h)) = exif_pixel {
+        exif_ents.push(ent(0xA002, 4, w.to_le_bytes().to_vec()));
+        exif_ents.push(ent(0xA003, 4, h.to_le_bytes().to_vec()));
+    }
+    exif_ents.sort_by_key(|e| e.tag);
+    // 布局：头(8) IFD0(2+3*12+4=42) ExifIFD(2+12n+4) SubIFD(2+3*12+4=42)
+    let ifd0_off = 8;
+    let ifd0_size = 2 + 12 * 3 + 4;
+    let exif_off = ifd0_off + ifd0_size;
+    let exif_size = 2 + 12 * exif_ents.len() + 4;
+    let sub_off = exif_off + exif_size;
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II\x2a\x00");
+    buf.extend_from_slice(&(ifd0_off as u32).to_le_bytes());
+    // IFD0 三条目（tag 升序 0x00FE < 0x014A < 0x8769），值全内联
+    buf.extend_from_slice(&3u16.to_le_bytes());
+    for (tag, value) in [
+        (0x00FEu16, 1u32),            // NewSubfileType=1：缩略图层
+        (0x014Au16, sub_off as u32),  // SubIFD 指针 → 全尺寸主图 IFD
+        (0x8769u16, exif_off as u32), // ExifIFD 指针
+    ] {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes()); // LONG
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes()); // 下一 IFD = 0
+    debug_assert_eq!(buf.len(), exif_off);
+    // ExifIFD：ISO + 可选像素维度
+    let (exif_bytes, _) = encode_ifd(&exif_ents, 0); // 值全内联，数据区空
+    buf.extend_from_slice(&exif_bytes);
+    debug_assert_eq!(buf.len(), sub_off);
+    // SubIFD：主图（NewSubfileType=0）+ 全尺寸
+    let sub_ents = vec![
+        ent(0x00FE, 4, 0u32.to_le_bytes().to_vec()),
+        ent(0x0100, 4, 6064u32.to_le_bytes().to_vec()),
+        ent(0x0101, 4, 4040u32.to_le_bytes().to_vec()),
+    ];
+    let (sub_bytes, _) = encode_ifd(&sub_ents, 0);
+    buf.extend_from_slice(&sub_bytes);
+    // 尾部内嵌缩略图 JPEG（SOI + SOF0 640×424 + EOI）
+    buf.extend_from_slice(&[0xFF, 0xD8]);
+    buf.extend_from_slice(&sof0_segment(640, 424));
+    buf.extend_from_slice(&[0xFF, 0xD9]);
+    buf
+}
+
+/// NEF 主路径：EXIF 无 0xA002 → 全尺寸取 SubIFD 主图 IFD（6064×4040），
+/// 缩略图 JPEG(640×424) 与缩略图层 IFD0（NewSubfileType=1）都被跳过。
+#[test]
+fn nef_dims_from_subifd_primary_not_thumbnail_layer() {
+    let meta = parse(&build_nef_like(None));
+    assert_eq!(meta.width, Some(6064));
+    assert_eq!(meta.height, Some(4040));
+    assert_eq!(meta.iso, Some(7200), "EXIF 子 IFD 拍摄参数照常（本就正确）");
+    assert_ne!(meta.width, Some(640), "绝不回退到内嵌缩略图尺寸");
+}
+
+/// ARW 主路径（gen-4 不回归）：EXIF 0xA002/0xA003 存在时优先于 SubIFD。
+#[test]
+fn exif_pixel_dims_take_priority_over_subifd() {
+    let meta = parse(&build_nef_like(Some((6016, 4016))));
+    assert_eq!(meta.width, Some(6016));
+    assert_eq!(meta.height, Some(4016));
+    assert_eq!(meta.iso, Some(7200));
+}
+
+/// CR3（ISO BMFF 容器，ftyp brand "crx "）：无 EXIF 解析支持
+/// （kamadak 只认 HEIF 系 mif1/msf1 brand）——契约是**不误读**：
+/// 内嵌 JPEG 预览的尺寸绝不冒充本体，宽高/相机全 None；待真机样本
+/// 接入后再开 CR3 专用提取路径。
+#[test]
+fn cr3_isobmff_preview_not_misread_as_body() {
+    let mut head = Vec::new();
+    // 最小 ftyp box：size 0x18 + "ftyp" + major "crx " + minor 0 + compat "crx "
+    head.extend_from_slice(&24u32.to_be_bytes());
+    head.extend_from_slice(b"ftyp");
+    head.extend_from_slice(b"crx ");
+    head.extend_from_slice(&0u32.to_be_bytes());
+    head.extend_from_slice(b"crx ");
+    // 内嵌 JPEG 预览（SOI + SOF0 640×424 + EOI）
+    head.extend_from_slice(&[0xFF, 0xD8]);
+    head.extend_from_slice(&sof0_segment(640, 424));
+    head.extend_from_slice(&[0xFF, 0xD9]);
+    let meta = parse(&head);
+    assert_eq!(meta.width, None, "CR3 内嵌预览尺寸不得冒充本体");
+    assert_eq!(meta.height, None);
+    assert_eq!(meta.camera, None);
+    assert_eq!(meta.iso, None);
+}
+
+/// 真实文件冒烟（直连已知样例路径，不做目录遍历——真实数据测试禁止全量
+/// 扫描，只读头部 1MB 渐进解析；样例缺失时直接跳过）。
+#[test]
+#[ignore = "依赖本机 Y:\\照片 真实照片，需 --ignored 手动运行"]
+fn real_raw_head_smoke() {
+    // (样例, 格式说明)；如换机后失效，更新为任一已知 RAW 全路径即可
+    const SAMPLES: &[(&str, &str)] = &[
+        (r"Y:\照片\20250607团建\DSC_0176.NEF", "尼康 Z5"),
+        (r"Y:\照片\测试\DSC00024..ARW", "索尼"),
+        (
+            r"Y:\照片\20250607团建\DSC_0224-已增强-降噪.dng",
+            "LR 导出 DNG",
+        ),
+    ];
+    for &(sample, vendor) in SAMPLES {
+        let path = Path::new(sample);
+        if !path.is_file() {
+            eprintln!("skip: 样例不存在 {sample}");
+            continue;
+        }
+        let mut head = Vec::new();
+        fs::File::open(path)
+            .expect("failed to open photo")
+            .take(1024 * 1024)
+            .read_to_end(&mut head)
+            .expect("failed to read head");
+        let meta = parse(&head); // 不 panic 即通过
+        eprintln!(
+            "{sample} ({vendor}) -> w={:?} h={:?} iso={:?} focal={:?} camera={:?}",
+            meta.width, meta.height, meta.iso, meta.focal_length, meta.camera
+        );
+        // 核心契约：RAW 分辨率必须是本体级（≥2000px），绝不是缩略图级
+        // （NEF 旧 bug：6064×4040 本体显示成 640×424）
+        let w = meta.width.expect("RAW 应解析出本体宽度");
+        let h = meta.height.expect("RAW 应解析出本体高度");
+        assert!(
+            w >= 2000 && h >= 2000,
+            "{vendor} 分辨率疑似缩略图层: {w}x{h}"
+        );
+        // 拍摄参数层（EXIF 子 IFD）至少有 ISO 或焦段
+        assert!(
+            meta.iso.is_some() || meta.focal_length.is_some(),
+            "{vendor} 拍摄参数缺失"
+        );
+    }
 }
 
 #[test]

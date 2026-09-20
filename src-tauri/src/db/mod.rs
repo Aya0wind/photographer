@@ -2089,6 +2089,40 @@ impl Db {
         Ok(())
     }
 
+    /// 启动自愈：孤儿导入任务终老（2026-09-21）。进程重启后引擎会话天然
+    /// 清零，jobs 表遗留的 running/paused 是跨会话死任务（真库 job 18
+    /// running 挂 3 天、任务抽屉删不掉）——统一转 cancelled、补 finished_at，
+    /// 每任务另写一行日志。journal 行不动：resume_import 不校验终态，设备
+    /// 回连后仍可从 journal 手动续传（终老只清「死状态」，不毁恢复语义）。
+    /// 只动 kind='import'：photo-root-migrate 任务有自己的跨会话续跑语义
+    /// （db_dir_migrate 时显式恢复未完成任务），不得误伤。
+    /// 返回终老的 job id 列表（空 = 无孤儿，幂等）。
+    pub fn reap_orphan_import_jobs(&self) -> Result<Vec<i64>> {
+        let now = now_rfc3339();
+        let tx = self.0.unchecked_transaction()?;
+        let ids: Vec<i64> = {
+            let mut stmt = tx.prepare(
+                "UPDATE jobs SET status = 'cancelled', finished_at = ?1 \
+                 WHERE kind = 'import' AND status IN ('running', 'paused') \
+                 RETURNING id",
+            )?;
+            let rows = stmt.query_map(params![now], |r| r.get(0))?;
+            rows.collect::<std::result::Result<Vec<i64>, _>>()?
+        };
+        for id in &ids {
+            tx.execute(
+                "INSERT INTO logs (ts, level, job_id, message) VALUES (?1, 'warn', ?2, ?3)",
+                params![
+                    now,
+                    id,
+                    "进程重启：孤儿任务无活跃引擎会话，自动终老为 cancelled（journal 保留，设备回连后可手动恢复）"
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// 删除任务历史（用户语义：这条历史连同日志一起消失）。
     /// 非终态（running/paused）拒绝；终态（done/cancelled/failed）删
     /// logs + jobs（job_files 经 FK ON DELETE CASCADE 级联清）。

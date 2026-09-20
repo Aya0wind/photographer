@@ -1,8 +1,14 @@
 //! M1 EXIF-lite（spec §5.3 / T6），M3.5 扩展拍摄参数：captured_at / 相机 /
 //! 宽高 / ISO / 光圈 / 快门 / 焦距 / 镜头。容器解析交给 kamadak-exif
 //! （JPEG APP1、TIFF 系 II*/MM*——即多数 NEF/ARW/CR2/DNG/ORF——另有
-//! HEIF/PNG/WebP 附赠支持）；宽高优先 JPEG SOF0..SOF3 帧段（含 RAW 内嵌
-//! 预览的 SOI 扫描），TIFF 形态回退 IFD0 ImageWidth/ImageLength。
+//! HEIF/PNG/WebP 附赠支持），解析容错（continue_on_error）：head 截断导致
+//! 个别 IFD 值越界只丢该字段，主 IFD 链其余字段照常返回。
+//! 宽高取主图帧，分层（gen-5，2026-09-21 尼康 NEF 修复）：
+//! EXIF PixelX/YDimension(0xA002/0xA003) > TIFF 主 IFD 链 + SubIFD(0x014A)
+//! 主图尺寸（NewSubfileType=0 优先）> JPEG（SOI 起始）SOF0..SOF3 帧段。
+//! 内嵌 preview JPEG（RAW 容器里的缩略图层）一律不作为尺寸源——尼康 NEF
+//! 的 IFD0 是缩略图 IFD 且 EXIF 不写 PixelX/YDimension，旧策略回退到内嵌
+//! 缩略图 SOF 曾把 Z5 的 6064×4040 本体显示成 640×424（2026-09-21）。
 //! 任何失败（垃圾/空/截断）静默返回全 None——绝不 Err、绝不 panic。
 
 use std::io::Cursor;
@@ -59,22 +65,16 @@ pub struct DeepExif {
 
 /// 从文件头部字节（建议 ≥1MB）解析 EXIF-lite。永不返回 Err，也绝不 panic。
 pub fn parse(head: &[u8]) -> MetaLite {
-    let exif = exif::Reader::new()
-        .read_from_container(&mut Cursor::new(head))
-        .ok();
-    let dims = jpeg_sof_dimensions(head).or_else(|| tiff_ifd0_dimensions(head));
+    let exif = read_exif(head);
+    let dims = pixel_dimensions(head, exif.as_ref());
     let Some(exif) = exif else {
-        // EXIF 容器失败（纯 JPEG 无 APP1 / 损坏）：宽高仍可从 SOF 提取
+        // EXIF 容器失败（纯 JPEG 无 APP1 / 损坏）：宽高仍可从主图帧提取
         return MetaLite {
             width: dims.map(|d| d.0),
             height: dims.map(|d| d.1),
             ..MetaLite::default()
         };
     };
-    // 宽高优先级：EXIF 像素维度（0xA002/0xA003，拍摄设备的真实输出尺寸）
-    // > SOF/TIFF——ARW 的 IFD0 ImageWidth 是内嵌缩略图尺寸（真机 61MP ARW
-    // 被写成 160×120，2026-09-20）
-    let dims = exif_pixel_dimensions(&exif).or(dims);
     MetaLite {
         captured_at: datetime_field(&exif, exif::Tag::DateTimeOriginal)
             .or_else(|| datetime_field(&exif, exif::Tag::DateTime)),
@@ -88,6 +88,38 @@ pub fn parse(head: &[u8]) -> MetaLite {
         lens: ascii_value(&exif, exif::Tag::LensModel).filter(|s| !s.is_empty()),
         deep: deep_exif(&exif),
     }
+}
+
+/// EXIF 容器解析（容错模式）：continue_on_error 使 head 截断导致的单字段
+/// 越界（如 RAW 的 MakerNote/条带数据落在截取窗之外）只丢该字段；严格
+/// 模式下任一字段截断会废掉整个解析（EXIF 全 None）。部分结果经
+/// `distill_partial_result` 蒸馏，硬错误（非 EXIF 容器等）照旧 None。
+fn read_exif(head: &[u8]) -> Option<exif::Exif> {
+    exif::Reader::new()
+        .continue_on_error(true)
+        .read_from_container(&mut Cursor::new(head))
+        .or_else(|e| e.distill_partial_result(|_| {}))
+        .ok()
+}
+
+/// 宽高分层（gen-5）：EXIF PixelX/YDimension（拍摄设备真实输出尺寸，
+/// ARW 真机 61MP 修复沿用）> 容器主图帧——TIFF 基 RAW 走主 IFD 链 +
+/// SubIFD 主图（绝不读内嵌 preview JPEG：那是缩略图层，NEF 真机曾把
+/// 6064×4040 本体显示成 640×424）；真 JPEG（SOI 起始）走 SOF 帧段；
+/// 其余容器（CR3 的 ISO BMFF / HEIC / PNG / WebP）无主图帧支持——
+/// 宁缺毋错，绝不把内嵌预览尺寸冒充本体。
+fn pixel_dimensions(head: &[u8], exif: Option<&exif::Exif>) -> Option<(u32, u32)> {
+    let exif_dims = exif.and_then(exif_pixel_dimensions);
+    if is_tiff_container(head) {
+        exif_dims.or_else(|| tiff_raw_dimensions(head))
+    } else {
+        exif_dims.or_else(|| jpeg_sof_dimensions(head))
+    }
+}
+
+/// TIFF 容器判定（II*/MM* 魔数）：NEF/ARW/CR2/DNG/ORF/RW2 等 TIFF 基 RAW。
+fn is_tiff_container(head: &[u8]) -> bool {
+    head.starts_with(b"II\x2a\x00") || head.starts_with(b"MM\x00\x2a")
 }
 
 /// 深提取字段集合（0008 列）：方向 / 闪光 / 测光 / 白平衡 / 曝光程序 /
@@ -240,9 +272,7 @@ fn datetime_field(exif: &exif::Exif, tag: exif::Tag) -> Option<DateTime<Utc>> {
 #[doc(hidden)]
 #[allow(dead_code)] // exif_lite_test 单文件编译场景下无调用方
 pub fn parse_orientation(head: &[u8]) -> Option<u32> {
-    let exif = exif::Reader::new()
-        .read_from_container(&mut Cursor::new(head))
-        .ok()?;
+    let exif = read_exif(head)?;
     let value = &exif
         .get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
         .value;
@@ -316,25 +346,18 @@ fn format_focal_length(r: (u32, u32)) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// 宽高：JPEG SOF 帧段扫描（含 RAW 内嵌预览）+ TIFF IFD0 尺寸回退
+// 宽高：JPEG SOF 帧段（仅真 JPEG 容器）+ TIFF 主 IFD 链/SubIFD（TIFF 基 RAW）
 // ---------------------------------------------------------------------------
 
-/// 扫描缓冲内所有 SOI（0xFFD8），对每个候选走 marker 链找 SOF0..SOF3 帧头；
-/// JPEG 第一个 SOI 即主图，RAW（TIFF 容器）则命中内嵌预览的 SOI。
-/// 任一步骤越界/结构非法即换下一候选；全失败返回 None。绝不 panic。
+/// JPEG（SOI 起始）的 SOF0..SOF3 帧段尺寸。非 JPEG 容器直接 None——
+/// RAW/CR3 等容器内嵌的 JPEG 是预览/缩略图层，扫到也不代表本体尺寸
+/// （NEF 真机坑：6064×4040 本体被写成 640×424 缩略图尺寸，2026-09-21）。
+/// 结构非法返回 None。绝不 panic。
 fn jpeg_sof_dimensions(head: &[u8]) -> Option<(u32, u32)> {
-    let mut from = 0usize;
-    while let Some(rel) = head[from..].windows(2).position(|w| w == [0xFF, 0xD8]) {
-        let soi = from + rel;
-        if let Some(dims) = walk_jpeg_markers(head, soi + 2) {
-            return Some(dims);
-        }
-        from = soi + 2;
-        if from + 4 > head.len() {
-            return None;
-        }
+    if !head.starts_with(&[0xFF, 0xD8]) {
+        return None; // 非 JPEG 容器：内嵌 JPEG 属预览层，不冒充本体帧
     }
-    None
+    walk_jpeg_markers(head, 2)
 }
 
 /// 从 `i` 起走 JPEG marker 链：SOF0..SOF3（跳过 C4/C8/CC 非帧段）解析
@@ -379,9 +402,45 @@ fn seg_len(head: &[u8], i: usize) -> Option<usize> {
     Some(usize::from(u16::from_be_bytes([hi, lo])))
 }
 
-/// TIFF 形态（RAW 容器）回退：IFD0 的 ImageWidth(0x0100)/ImageLength(0x0101)
-/// （SHORT/LONG）。容器非法/缺 tag 返回 None。
-fn tiff_ifd0_dimensions(head: &[u8]) -> Option<(u32, u32)> {
+/// TIFF 按端序读 16 位无符号整数（越界 None）。
+fn tiff_u16(head: &[u8], i: usize, le: bool) -> Option<u16> {
+    let b = [*head.get(i)?, *head.get(i + 1)?];
+    Some(if le {
+        u16::from_le_bytes(b)
+    } else {
+        u16::from_be_bytes(b)
+    })
+}
+
+/// TIFF 按端序读 32 位无符号整数（越界 None）。
+fn tiff_u32(head: &[u8], i: usize, le: bool) -> Option<u32> {
+    let b = [
+        *head.get(i)?,
+        *head.get(i + 1)?,
+        *head.get(i + 2)?,
+        *head.get(i + 3)?,
+    ];
+    Some(if le {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    })
+}
+
+/// IFD 尺寸候选：(是否主图, w, h)。主图 = NewSubfileType(0x00FE) 缺失或 0
+/// ——TIFF 基 RAW 的 IFD0 常是缩略图层（NEF/ARW 的 NewSubfileType=1 甚至
+/// 不带尺寸 tag），全尺寸住在 SubIFD(0x014A) 的主图 IFD 里。
+type IfdDims = (bool, u32, u32);
+
+/// TIFF 基 RAW 的主图尺寸兜底（gen-5）：IFD0 → next-IFD 链（同 kamadak
+/// 上限 8 层）→ 各级 SubIFD(0x014A)，收集全部 (NewSubfileType, w, h)
+/// 候选后取**主图（NewSubfileType=0）中面积最大**者，无主图再退全体最大
+/// ——RAW 的全尺寸 IFD 永远是最大的一层，缩略图/预览 IFD 天然靠后。
+/// 真机样本（2026-09-21）：Z5 NEF 的 IFD0 无尺寸、EXIF 无 0xA002，全尺寸
+/// 6064×4040 在 SubIFD#1（NewSubfileType=0）；LR 导出 DNG 的 IFD0 是
+/// 256×171 缩略图，全尺寸在 SubIFD#0；ARW 走 EXIF 0xA002 优先，不到此层。
+/// 容器非法/无候选返回 None；环/垃圾偏移防御（visited 去重 + 数量上限）。
+fn tiff_raw_dimensions(head: &[u8]) -> Option<(u32, u32)> {
     if head.len() < 8 {
         return None;
     }
@@ -390,62 +449,85 @@ fn tiff_ifd0_dimensions(head: &[u8]) -> Option<(u32, u32)> {
         b"MM\x00\x2a" => false,
         _ => return None,
     };
-    let u16_at = |i: usize| -> Option<u16> {
-        let b = [head.get(i)?, head.get(i + 1)?];
-        let b = [*b[0], *b[1]];
-        Some(if le {
-            u16::from_le_bytes(b)
-        } else {
-            u16::from_be_bytes(b)
-        })
-    };
-    let u32_at = |i: usize| -> Option<u32> {
-        let b = [
-            head.get(i)?,
-            head.get(i + 1)?,
-            head.get(i + 2)?,
-            head.get(i + 3)?,
-        ];
-        let b = [*b[0], *b[1], *b[2], *b[3]];
-        Some(if le {
-            u32::from_le_bytes(b)
-        } else {
-            u32::from_be_bytes(b)
-        })
-    };
-    let ifd0 = u32_at(4)? as usize;
-    let count = u16_at(ifd0)? as usize;
-    let mut width = None;
-    let mut height = None;
-    for n in 0..count {
-        let entry = ifd0 + 2 + n * 12;
-        let tag = u16_at(entry)?;
-        let typ = u16_at(entry + 2)?;
-        // 值 ≤4 字节内联（SHORT/LONG count=1 皆内联）
-        let value = u32_at(entry + 8)?;
-        let value = match (tag, typ) {
-            (0x0100, 3) | (0x0101, 3) => {
-                // SHORT 内联：按端序取低/高端 2 字节
-                let b = value.to_le_bytes();
-                Some(u32::from(if le {
-                    u16::from_le_bytes([b[0], b[1]])
-                } else {
-                    u16::from_be_bytes([b[2], b[3]])
-                }))
-            }
-            (0x0100, 4) | (0x0101, 4) => Some(value),
+    /// 单个 IFD 的尺寸值（SHORT/LONG 均内联；SHORT 按 TIFF 规范左对齐
+    /// 存于 4 字节值字段的前 2 字节）。
+    fn dim_value(head: &[u8], entry: usize, le: bool) -> Option<u32> {
+        match tiff_u16(head, entry + 2, le)? {
+            3 => tiff_u16(head, entry + 8, le).map(u32::from), // SHORT
+            4 => tiff_u32(head, entry + 8, le),                // LONG
             _ => None,
-        };
-        match tag {
-            0x0100 => width = value,
-            0x0101 => height = value,
-            _ => {}
-        }
-        if width.is_some() && height.is_some() {
-            break;
         }
     }
-    Some((width?, height?))
+    let ifd0 = tiff_u32(head, 4, le)? as usize;
+    let mut queue = vec![ifd0];
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut candidates: Vec<IfdDims> = Vec::new();
+    while let Some(off) = queue.pop() {
+        if off < 8 || off + 2 > head.len() || !visited.insert(off) || visited.len() > 32 {
+            continue; // 越界/重复/超量：环与垃圾防御
+        }
+        // 条目数上限：真机 IFD 最多几十条，超界即垃圾
+        let Some(count) = tiff_u16(head, off, le) else {
+            continue;
+        };
+        if count > 512 {
+            continue;
+        }
+        let mut width = None;
+        let mut height = None;
+        let mut subfile: Option<u32> = None;
+        for n in 0..count as usize {
+            let entry = off + 2 + n * 12;
+            if entry + 12 > head.len() {
+                break; // 截断：已收集的前缀仍可用
+            }
+            let Some(tag) = tiff_u16(head, entry, le) else {
+                break;
+            };
+            match tag {
+                0x0100 => width = dim_value(head, entry, le),
+                0x0101 => height = dim_value(head, entry, le),
+                0x00FE => subfile = tiff_u32(head, entry + 8, le),
+                // SubIFD 指针（LONG/IFD 型）：count=1 内联，多数组存偏移
+                0x014A => {
+                    let (typ, cnt) = (
+                        tiff_u16(head, entry + 2, le).unwrap_or(0),
+                        tiff_u32(head, entry + 4, le).unwrap_or(0) as usize,
+                    );
+                    if matches!(typ, 4 | 13) && cnt > 0 {
+                        if cnt == 1 {
+                            if let Some(p) = tiff_u32(head, entry + 8, le) {
+                                queue.push(p as usize);
+                            }
+                        } else if let Some(base) = tiff_u32(head, entry + 8, le) {
+                            for k in 0..cnt.min(16) {
+                                if let Some(p) = tiff_u32(head, base as usize + k * 4, le) {
+                                    queue.push(p as usize);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(w), Some(h)) = (width, height) {
+            candidates.push((subfile.unwrap_or(0) == 0, w, h));
+        }
+        // next-IFD 链（与 kamadak 一致：主链即 IFD0/IFD1/…）
+        let next_at = off + 2 + count as usize * 12;
+        if next_at + 4 <= head.len() {
+            if let Some(next) = tiff_u32(head, next_at, le).filter(|n| *n != 0) {
+                queue.push(next as usize);
+            }
+        }
+    }
+    // 尺寸合法域过滤（1..=10 万像素），主图优先、面积最大者胜出
+    candidates
+        .iter()
+        .filter(|(_, w, h)| *w > 0 && *h > 0 && *w <= 100_000 && *h <= 100_000)
+        .max_by_key(|&&(primary, w, h)| (primary, u64::from(w) * u64::from(h)))
+        .map(|&(_, w, h)| (w, h))
 }
 
 /// camera = Make + " " + Model，缺失一侧则用另一侧，多余空格折叠为一个。
