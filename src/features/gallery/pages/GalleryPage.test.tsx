@@ -9,6 +9,7 @@ import i18n from "@/i18n";
 import GalleryPage from "./GalleryPage";
 import { resetThumbPipelineForTests, emitAssetEventForTests } from "../lib/thumbPipeline";
 import { clearGallerySnapshotForTests } from "../lib/galleryCache";
+import { loadGalleryTileSize } from "../lib/useGalleryTileSize";
 import {
   assetGroupDates,
   assetThumbGet,
@@ -476,7 +477,7 @@ describe("画廊工具条：居中与尺寸", () => {
     expect(content.className).toContain("px-6");
   });
 
-  it("三档尺寸（justify 行高）：默认中档 220；切大 280 并写 localStorage", async () => {
+  it("两档尺寸（justify 行高）：默认大档 220；切小 160 并写 localStorage；无第三档", async () => {
     assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
     const user = userEvent.setup();
     renderGallery();
@@ -486,10 +487,17 @@ describe("画廊工具条：居中与尺寸", () => {
     expect(tiles[0].style.height).toBe("220px");
     expect(tiles[0].style.width).toBe("293px");
 
-    await user.click(screen.getByTestId("gallery-tile-size-large"));
-    expect(screen.getAllByTestId("gallery-tile")[0].style.height).toBe("280px");
-    expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("373px");
-    expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("large");
+    await user.click(screen.getByTestId("gallery-tile-size-small"));
+    expect(screen.getAllByTestId("gallery-tile")[0].style.height).toBe("160px");
+    expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("213px");
+    expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("small");
+    // 历史三档的 large 已删：切换器只有两档
+    expect(screen.queryByTestId("gallery-tile-size-large")).not.toBeInTheDocument();
+  });
+
+  it("旧存值 large 归并到大档（不因历史值崩）", () => {
+    localStorage.setItem("smartphoto.gallery.tileSize", "large");
+    expect(loadGalleryTileSize()).toBe("medium");
   });
 
   it("localStorage 预设小档 → 首渲染 160px 行高（画廊/搜索跨页共享）", async () => {

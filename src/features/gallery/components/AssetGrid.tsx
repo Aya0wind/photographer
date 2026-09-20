@@ -39,7 +39,7 @@ import AssetThumb from "./AssetThumb";
  * onViewportChange 上报「视口首行所属组 + scrollTop」。
  */
 
-/** 默认方格边长（中档；三档切换见 useGalleryTileSize） */
+/** 默认方格边长（大档；两档切换见 useGalleryTileSize） */
 const TILE = 200;
 const GAP = 4;
 const HEADER_H = 40;

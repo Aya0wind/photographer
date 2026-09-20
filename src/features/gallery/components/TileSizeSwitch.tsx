@@ -6,13 +6,13 @@ import {
 } from "../lib/useGalleryTileSize";
 
 /**
- * 缩略图尺寸切换（三档图标，参照向导 tile 档位交互）：
- * 小 120 / 中 200 / 大 280，localStorage 全局共享（画廊与搜索一致）。
+ * 缩略图尺寸切换（两档图标）：小 120 / 大 200，localStorage 全局共享（画廊与搜索一致）。
+ * （历史三档的 280 已删——网格缩略图实际只有 256 一档请求，最大档纯摆设）
  */
 
-const ORDER: readonly GalleryTileSize[] = ["small", "medium", "large"];
+const ORDER: readonly GalleryTileSize[] = ["small", "medium"];
 /** 档位图标：居中方块边长（12 viewBox 内） */
-const ICON: Record<GalleryTileSize, number> = { small: 6, medium: 9, large: 12 };
+const ICON: Record<GalleryTileSize, number> = { small: 6, medium: 11 };
 
 export default function TileSizeSwitch({
   value,
