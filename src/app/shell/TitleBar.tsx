@@ -116,7 +116,15 @@ function TitleBarButton({ label, onClick, testId, danger = false, children }: Ti
   );
 }
 
-export default function TitleBar({ children }: { children?: ReactNode }) {
+export default function TitleBar({
+  children,
+  actions,
+}: {
+  /** 菜单位（主壳传 MenuBar；选择器/向导传空） */
+  children?: ReactNode;
+  /** 右侧动作位（主壳传全局搜索框/任务抽屉开关等；渲染在弹性空区与窗口控制钮之间） */
+  actions?: ReactNode;
+}) {
   const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
 
@@ -174,6 +182,11 @@ export default function TitleBar({ children }: { children?: ReactNode }) {
 
       {/* 弹性空区：透传拖拽 */}
       <div className="pointer-events-none relative flex-1" />
+
+      {/* 右侧动作位（全局搜索框 / 任务抽屉开关；控件自身 pointer-events-auto） */}
+      <div className="pointer-events-none relative flex items-center gap-1.5 pr-1">
+        {actions}
+      </div>
 
       {/* 窗口控制三钮 */}
       <div className="pointer-events-none relative flex items-stretch">

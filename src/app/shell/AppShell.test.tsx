@@ -58,11 +58,15 @@ describe("AppShell", () => {
     expect(screen.queryByText("OUTLET_GALLERY")).not.toBeInTheDocument();
   });
 
-  it("全局导入进度卡随壳挂载：有活跃任务时任意页面可见", async () => {
+  it("任务抽屉随壳常驻：TitleBar 开关徽标，打开后任意页面可见导入行（M4.5 A2）", async () => {
     resetImportStoreForTests();
     renderShell("/gallery");
 
+    // 浮动进度卡已废除：无 import-card
     expect(screen.queryByTestId("import-card")).not.toBeInTheDocument();
+    // 无任务：抽屉内容不显示（面板未开）
+    expect(screen.queryByTestId("taskdrawer")).not.toBeInTheDocument();
+
     act(() => {
       useImportStore.getState().handleAppEvent({
         type: "importSessionStarted",
@@ -72,8 +76,12 @@ describe("AppShell", () => {
       });
     });
 
-    const card = await screen.findByTestId("import-card");
-    expect(card).toBeInTheDocument();
-    expect(within(card).getByText("复制任务 #7")).toBeInTheDocument();
+    // 开关徽标出现（运行中 1）
+    expect(await screen.findByTestId("taskdrawer-count")).toHaveTextContent("1");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("taskdrawer-toggle"));
+    const drawer = await screen.findByTestId("taskdrawer");
+    expect(within(drawer).getByText("复制任务 #7")).toBeInTheDocument();
   });
 });

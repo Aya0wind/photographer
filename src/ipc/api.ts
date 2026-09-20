@@ -149,6 +149,10 @@ export interface AssetDto {
   sizeBytes: number;
   /** RAW+JPG 配对 id（同一拍摄的两格式同值）；后端契约扩展中，缺省/单条均不成对 */
   pairId?: number | null;
+  /** 像素宽（EXIF 深提取回填，~95% 资产有值）；缺失时前端 justify 网格按 4:3 兜底 */
+  width?: number | null;
+  /** 像素高（同上） */
+  height?: number | null;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */

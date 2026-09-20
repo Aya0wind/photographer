@@ -21,30 +21,96 @@ import {
 import AssetThumb from "./AssetThumb";
 
 /**
- * 日期分组照片墙（画廊/搜索共用，M3）：
+ * 日期分组照片墙（画廊/搜索/人物页共用）：
  *
- * 布局选择——v1 等宽方格（200×200，行高基准 200px）：AssetDto 契约不携带宽高，
- * 按宽高比排布的统一行高 justify 网格需要逐资产尺寸数据（M4 元数据补全后升级），
- * 等宽方格在无尺寸信息下零成本保密度，且与虚拟化行模型天然契合。
+ * 布局双模式（M4.5 A4）：
+ * - square（默认，兼容视图）：等宽方格（tile×tile），搜索/人物页等继续使用
+ * - justify（画廊新默认）：统一行高的 justify 网格——行内按 width/height 宽高比
+ *   分配宽度（经典贪心算法：逐项累加，行高跌破目标即封行；组尾行不足整行按
+ *   目标行高左对齐），无尺寸资产按 4:3 兜底；tile 语义变为「目标行高」。
  *
- * 虚拟化：TanStack Virtual 行模型（组头行 40px + 方格行 200px+gap），列数随容器宽
- * 自适应（ResizeObserver），支撑 2 万+ 资产。吸顶组头由上层以覆盖条实现（虚拟行内
- * 做 CSS sticky 需要逐行 transform 对齐，覆盖条是虚拟化下更稳的形态），本组件通过
- * onViewportChange 上报「视口首行所属组 + scrollTop」。
+ * 虚拟化：TanStack Virtual 行模型（组头行 40px + 内容行自带高度），行划分与
+ * 行高在 useMemo 重算（justify 行高逐行精确，estimateSize 即实高）。
+ * 吸顶组头由上层以覆盖条实现；本组件通过 onViewportChange 上报
+ * 「视口首行所属组 + scrollTop」。
  */
 
 /** 默认方格边长（中档；三档切换见 useGalleryTileSize） */
 const TILE = 200;
 const GAP = 4;
 const HEADER_H = 40;
+/** 内容区水平内边距（px-3 两侧）；justify 可用宽需扣除 */
+const H_PADDING = 24;
+/** 无尺寸资产的宽高比兜底（4:3） */
+export const ASPECT_FALLBACK = 4 / 3;
 /** 日期跳转预留的吸顶条高度（scrollToGroup 对齐补偿） */
 export const STICKY_OFFSET = 44;
 /** 网格缩略图名义边长（后端 snap 到 256 档就近） */
 export const GRID_THUMB_SIZE = 240;
 
+export type GridLayout = "square" | "justify";
+
+/** 资产宽高比（width/height）；缺失/非法 → 4:3 兜底 */
+function aspectOf(asset: AssetDto): number {
+  const w = asset.width;
+  const h = asset.height;
+  if (typeof w === "number" && typeof h === "number" && w > 0 && h > 0) return w / h;
+  return ASPECT_FALLBACK;
+}
+
+/** justify 切好的内容行（宽度取整，行高精确） */
+interface JustifyRow {
+  assets: AssetDto[];
+  height: number;
+  widths: number[];
+}
+
+/**
+ * 经典贪心 justify：逐项累加，加入下一项后行高（可用宽/宽高比和）跌破目标即封行；
+ * 组尾不足整行按目标行高左对齐（不拉伸）。导出供测试对齐断言。
+ */
+export function justifyItems(
+  assets: AssetDto[],
+  containerWidth: number,
+  targetHeight: number,
+  gap = GAP,
+): JustifyRow[] {
+  const rows: JustifyRow[] = [];
+  let current: AssetDto[] = [];
+  let aspectSum = 0;
+
+  const rowHeightOf = (count: number, sum: number): number =>
+    count > 0 ? (containerWidth - (count - 1) * gap) / sum : targetHeight;
+
+  for (const asset of assets) {
+    current.push(asset);
+    aspectSum += aspectOf(asset);
+    const height = rowHeightOf(current.length, aspectSum);
+    if (height <= targetHeight) {
+      // 封行：以当前行高精确分配各项宽度（取整，±几 px 由 flex 收缩吸收）
+      rows.push({
+        assets: current,
+        height: Math.round(height),
+        widths: current.map((a) => Math.round(aspectOf(a) * height)),
+      });
+      current = [];
+      aspectSum = 0;
+    }
+  }
+  // 组尾余量：目标行高左对齐（不足整行不拉伸）
+  if (current.length > 0) {
+    rows.push({
+      assets: current,
+      height: targetHeight,
+      widths: current.map((a) => Math.round(aspectOf(a) * targetHeight)),
+    });
+  }
+  return rows;
+}
+
 type GridRow =
   | { type: "header"; group: AssetGroup }
-  | { type: "tiles"; group: AssetGroup; assets: AssetDto[] };
+  | { type: "tiles"; group: AssetGroup; assets: AssetDto[]; height: number; widths: number[] };
 
 export interface AssetGridHandle {
   /** 滚动到指定组（组头对齐吸顶条下缘）；组不存在时静默 */
@@ -67,8 +133,10 @@ interface AssetGridProps {
   sentinelRef?: Ref<HTMLDivElement>;
   /** 视口变化上报（吸顶组头/滚动状态用；仅组键或 scrollTop 显著变化时触发） */
   onViewportChange?: (info: ViewportInfo) => void;
-  /** 方格边长（三档 120/200/280，默认 200；行模型按此重算） */
+  /** square=方格边长；justify=目标行高（三档切换见调用方） */
   tile?: number;
+  /** 布局模式（默认 square 兼容旧视图；画廊用 justify） */
+  layout?: GridLayout;
   /** 合并卡角标（RAW+JPG）：代表资产 id → 文案；无合并时不传 */
   badges?: Map<number, string>;
   /** 相似度角标（语义搜索）：assetId → 0..1，右下角百分比 */
@@ -83,6 +151,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     sentinelRef,
     onViewportChange,
     tile = TILE,
+    layout = "square",
     badges,
     scores,
     scrollTestId = "gallery-grid-scroll",
@@ -93,7 +162,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
 
-  // 列数：容器宽自适应（offsetWidth 读初值 + ResizeObserver 跟踪；jsdom 下 RO 不触发但
+  // 容器宽自适应（offsetWidth 读初值 + ResizeObserver 跟踪；jsdom 下 RO 不触发但
   // offsetWidth 已被测试 mock 为非零）
   useEffect(() => {
     const el = scrollRef.current;
@@ -106,23 +175,41 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     return () => ro.disconnect();
   }, []);
 
-  const columns = Math.max(1, Math.floor((width + GAP) / (tile + GAP)));
+  // 键盘导航的近似列数：square=按方格宽；justify=按目标行高的 4:3 均值估
+  const usableWidth = Math.max(0, width - H_PADDING);
+  const columns = Math.max(
+    1,
+    Math.floor(
+      layout === "justify"
+        ? usableWidth / (tile * ASPECT_FALLBACK + GAP)
+        : (width + GAP) / (tile + GAP),
+    ),
+  );
 
+  // 行划分（useMemo 重算）：square 按列数切片等宽；justify 按宽高比贪心切行
   const rows = useMemo<GridRow[]>(() => {
     const out: GridRow[] = [];
     for (const group of groups) {
       out.push({ type: "header", group });
-      for (let i = 0; i < group.assets.length; i += columns) {
-        out.push({ type: "tiles", group, assets: group.assets.slice(i, i + columns) });
+      if (layout === "justify") {
+        if (group.assets.length === 0) continue;
+        for (const row of justifyItems(group.assets, usableWidth, tile)) {
+          out.push({ type: "tiles", group, ...row });
+        }
+      } else {
+        for (let i = 0; i < group.assets.length; i += columns) {
+          const assets = group.assets.slice(i, i + columns);
+          out.push({ type: "tiles", group, assets, height: tile, widths: assets.map(() => tile) });
+        }
       }
     }
     return out;
-  }, [groups, columns]);
+  }, [groups, columns, layout, usableWidth, tile]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : tile + GAP),
+    estimateSize: (i) => (rows[i].type === "header" ? HEADER_H : rows[i].height + GAP),
     overscan: 6,
   });
 
@@ -223,6 +310,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       onKeyDown={handleGridKeyDown}
       className="sp-scroll h-full overflow-y-auto outline-none"
       data-testid={scrollTestId}
+      data-layout={layout}
     >
       <div className="px-3 pb-6" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((vi) => {
@@ -256,8 +344,12 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                   </span>
                 </div>
               ) : (
-                <div className="flex flex-wrap gap-1 pb-1">
-                  {row.assets.map((asset) => {
+                <div
+                  className="flex flex-nowrap gap-1 pb-1"
+                  style={{ height: row.height }}
+                  data-testid="gallery-row"
+                >
+                  {row.assets.map((asset, itemIndex) => {
                     const badge = badges?.get(asset.id) ?? null;
                     const score = scores?.get(asset.id);
                     const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
@@ -285,6 +377,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                       </>
                     );
+                    const itemWidth = row.widths[itemIndex];
                     return onOpenAsset ? (
                       <button
                         key={asset.id}
@@ -293,7 +386,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         className={`relative overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent hover:outline hover:outline-1 hover:outline-edge ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         }`}
-                        style={{ width: tile, height: tile }}
+                        style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
@@ -308,7 +401,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         className={`relative overflow-hidden rounded-md bg-panel/40 ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         }`}
-                        style={{ width: tile, height: tile }}
+                        style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}

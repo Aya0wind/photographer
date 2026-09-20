@@ -73,10 +73,10 @@ function SettingsProbe() {
   return <div data-testid="settings-probe">SETTINGS</div>;
 }
 
-function renderSearch() {
+function renderSearch(initialEntry = "/search") {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={["/search"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/search" element={<SearchPage />} />
           <Route path="/settings" element={<SettingsProbe />} />
@@ -795,5 +795,46 @@ describe("搜索：筛选面板", () => {
 
     fireEvent.click(screen.getByTestId("search-format-button"));
     expect(screen.getByTestId("search-format-menu")).toHaveTextContent("库内还没有格式信息");
+  });
+});
+
+// --- URL 协议（M4.5 A1：全局搜索框跳入） ---------------------------------------------
+
+describe("搜索页 URL 协议", () => {
+  it("?mode=semantic&q=… → 语义模式 + 预填 + 自动执行（记入历史）", async () => {
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.9 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderSearch("/search?mode=semantic&q=%E6%B5%B7%E8%BE%B9%E6%97%A5%E8%90%BD");
+
+    // 语义模式自动激活，无需手动切换
+    expect(await screen.findByTestId("semantic-input")).toBeInTheDocument();
+    // q 预填
+    expect(screen.getByTestId("semantic-input")).toHaveValue("海边日落");
+    // 自动执行（searchSemantic 负载）
+    await waitFor(() =>
+      expect(searchSemantic).toHaveBeenCalledWith("海边日落", 100, undefined),
+    );
+    // 记入查询历史
+    await waitFor(() =>
+      expect(screen.getAllByTestId("semantic-history-item").map((c) => c.textContent)).toContain(
+        "海边日落",
+      ),
+    );
+  });
+
+  it("?mode=filters → 条件模式（语义控件不出现）", async () => {
+    renderSearch("/search?mode=filters");
+
+    await screen.findByTestId("search-page");
+    expect(screen.queryByTestId("semantic-input")).not.toBeInTheDocument();
+    expect(screen.getByTestId("search-mode-filters")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("无参数 → 默认条件模式不自动执行语义搜索", async () => {
+    renderSearch();
+
+    await screen.findByTestId("search-page");
+    await waitFor(() => expect(assetsPageMock).toHaveBeenCalledWith(0, 100, {}));
+    expect(vi.mocked(searchSemantic)).not.toHaveBeenCalled();
   });
 });

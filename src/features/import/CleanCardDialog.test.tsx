@@ -7,7 +7,7 @@ import { MemoryRouter } from "react-router";
 
 import i18n from "@/i18n";
 import CleanCardDialogLayer from "./CleanCardDialog";
-import ImportProgressCard from "./ImportProgressCard";
+import { TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import { resetImportStoreForTests, useImportStore } from "@/stores/importStore";
 import { cleanApply, cleanCandidates, type AppEvent, type CleanCandidateDto } from "@/ipc/api";
 
@@ -221,12 +221,12 @@ describe("进度卡完成态入口（volume/MTP 才显示）", () => {
     render(
       <I18nextProvider i18n={i18n}>
         <MemoryRouter>
-          <ImportProgressCard />
+          <TaskDrawerPanel open onClose={() => {}} />
         </MemoryRouter>
       </I18nextProvider>,
     );
 
-    await user.click(await screen.findByTestId("import-card-clean"));
+    await user.click(await screen.findByTestId("taskdrawer-import-clean"));
     expect(await screen.findByTestId("clean-dialog")).toBeInTheDocument();
     expect(candidatesMock).toHaveBeenCalledWith(7);
   });
@@ -255,12 +255,12 @@ describe("进度卡完成态入口（volume/MTP 才显示）", () => {
     render(
       <I18nextProvider i18n={i18n}>
         <MemoryRouter>
-          <ImportProgressCard />
+          <TaskDrawerPanel open onClose={() => {}} />
         </MemoryRouter>
       </I18nextProvider>,
     );
 
-    await screen.findByTestId("import-card");
-    await waitFor(() => expect(screen.queryByTestId("import-card-clean")).not.toBeInTheDocument());
+    await screen.findByTestId("taskdrawer-import");
+    await waitFor(() => expect(screen.queryByTestId("taskdrawer-import-clean")).not.toBeInTheDocument());
   });
 });

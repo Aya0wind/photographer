@@ -21,17 +21,22 @@ import {
   gallerySnapshot,
   saveGallerySnapshot,
 } from "../lib/galleryCache";
-import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
+import {
+  GALLERY_JUSTIFY_ROW_PX,
+  useGalleryTileSize,
+} from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import DateChipBar from "../components/DateChipBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
+import YearRail from "../components/YearRail";
 import ViewerOverlay from "../components/ViewerOverlay";
 
 /**
- * 画廊页（B 风格 Google Photos 深色沉浸，M3 主体）：
- * - 日期分组照片墙（AssetGrid：虚拟化方格 + 缩略图管线）；组头=日期+数量，
- *   滚动时当前组日期覆盖条吸顶（150ms 切换动画）
+ * 画廊页（B 风格 Google Photos 深色沉浸，M3 主体；M4.5 A4 justify 网格）：
+ * - 日期分组照片墙（AssetGrid justify：统一行高按宽高比分配宽、无尺寸 4:3 兜底、
+ *   虚拟化 + 缩略图管线）；组头=日期+数量，滚动时当前组日期覆盖条吸顶；
+ *   右侧年份吸顶条（滚动联动高亮、点击跳年首个日期组）
  * - 无限滚动：尾部哨兵 IntersectionObserver（提前 800px）触发 assetsPage 下一页
  *   （keyset afterId=已加载最后一条 id，limit 100）
  * - 顶部：日期 chips（含「未知」组）+ 日历按钮（年月下拉跳转，v1 不做整月历——
@@ -410,7 +415,7 @@ export default function GalleryPage() {
           </div>
         </div>
 
-        {/* 照片墙 + 吸顶当前日期 */}
+        {/* 照片墙（justify 布局：统一行高、按宽高比分配宽）+ 吸顶当前日期 + 年份条 */}
         <div className="relative min-h-0 flex-1">
           <AssetGrid
             ref={gridRef}
@@ -418,8 +423,20 @@ export default function GalleryPage() {
             onOpenAsset={openAsset}
             sentinelRef={sentinelRef}
             onViewportChange={handleViewportChange}
-            tile={GALLERY_TILE_PX[tileSize]}
+            layout="justify"
+            tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
             badges={badges}
+          />
+          {/* 右侧年份吸顶条：点击跳该年首个日期组 */}
+          <YearRail
+            years={years}
+            currentYear={
+              viewport.group?.date != null ? Number(viewport.group.date.slice(0, 4)) : null
+            }
+            onJumpYear={(year) => {
+              const hit = dates.find((d) => d.date != null && d.date.startsWith(String(year)));
+              if (hit) void jumpToDate(hit.date);
+            }}
           />
           <AnimatePresence initial={false}>
             {showSticky && (

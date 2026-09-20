@@ -14,6 +14,19 @@
   "titlebar.restore": "还原",
   "titlebar.close": "关闭",
 
+  "taskdrawer.title": "任务",
+  "taskdrawer.open": "任务",
+  "taskdrawer.close": "关闭",
+  "taskdrawer.pauseAll": "全部暂停",
+  "taskdrawer.clearDone": "清除已完成",
+  "taskdrawer.empty": "暂无进行中的任务",
+
+  "globalsearch.placeholder": "输入一段描述搜索照片…",
+  "globalsearch.filter": "条件筛选",
+  "globalsearch.indexHint": "语义索引建立中，搜索结果可能不全",
+
+  "gallery.yearRail": "按年份跳转",
+
   "menu.file": "文件",
   "menu.view": "查看",
   "menu.tools": "工具",

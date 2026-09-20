@@ -450,6 +450,38 @@ describe("画廊：日期 chips 条", () => {
     expect(assetsPageMock).toHaveBeenCalledWith(101, 100);
   });
 
+  it("点击年份跳该年首个日期组（M4.5 A4 年份吸顶条）", async () => {
+    // 两组：2026-09（首屏）+ 2025-05（视口外）
+    assetsPageMock.mockResolvedValue([
+      ...makePage(6, "2026-09-18", 20),
+      ...makePage(6, "2025-05-10", 10),
+    ]);
+    groupDatesMock.mockResolvedValue([
+      { date: "2026-09-18", count: 6, coverAssetId: 20 },
+      { date: "2025-05-10", count: 6, coverAssetId: 10 },
+    ]);
+    const user = userEvent.setup();
+    renderGallery();
+
+    await screen.findAllByTestId("gallery-tile");
+    const rail = await screen.findByTestId("gallery-year-rail");
+    // 年份降序，来自 asset_group_dates（未知日期组不含年份）
+    const years = within(rail).getAllByTestId("gallery-year");
+    expect(years.map((y) => y.getAttribute("data-year"))).toEqual(["2026", "2025"]);
+    // 初始视口在 2026-09 组 → 2026 高亮
+    expect(years[0]).toHaveAttribute("data-active", "true");
+    expect(years[1]).toHaveAttribute("data-active", "false");
+
+    const scroll = screen.getByTestId("gallery-grid-scroll");
+    expect(scroll.scrollTop).toBe(0);
+    await user.click(years[1]);
+
+    // 跳到 2025 首个日期组（组头对齐吸顶条下缘；高亮联动依赖视口首行，
+    // -44 偏移下首行仍是上一组尾部——与 chips/日历跳转同语义，不单独断言）
+    await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
+    expect(screen.getByText("2025年5月10日")).toBeInTheDocument();
+  });
+
   it("日历按钮：年月下拉弹层 + 跳转滚动到该月最新组并收起（v1 年月跳转）", async () => {
     // 两组：2026-09（首屏）+ 2025-05（视口外）；跳 2025-05 需要真实滚动
     assetsPageMock.mockResolvedValue([
@@ -548,26 +580,30 @@ describe("画廊工具条：居中与尺寸", () => {
     expect(content.className).toContain("px-6");
   });
 
-  it("三档尺寸：默认中档 200px；切大 280px 并写 localStorage", async () => {
+  it("三档尺寸（justify 行高）：默认中档 220；切大 280 并写 localStorage", async () => {
     assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
     const user = userEvent.setup();
     renderGallery();
 
     const tiles = await screen.findAllByTestId("gallery-tile");
-    expect(tiles[0].style.width).toBe("200px");
+    // justify：无尺寸资产 4:3 兜底 → 高=目标行高、宽=行高×4/3
+    expect(tiles[0].style.height).toBe("220px");
+    expect(tiles[0].style.width).toBe("293px");
 
     await user.click(screen.getByTestId("gallery-tile-size-large"));
-    expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("280px");
+    expect(screen.getAllByTestId("gallery-tile")[0].style.height).toBe("280px");
+    expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("373px");
     expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("large");
   });
 
-  it("localStorage 预设小档 → 首渲染 120px（画廊/搜索跨页共享）", async () => {
+  it("localStorage 预设小档 → 首渲染 160px 行高（画廊/搜索跨页共享）", async () => {
     localStorage.setItem("smartphoto.gallery.tileSize", "small");
     assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
     renderGallery();
 
     const tiles = await screen.findAllByTestId("gallery-tile");
-    expect(tiles[0].style.width).toBe("120px");
+    expect(tiles[0].style.height).toBe("160px");
+    expect(tiles[0].style.width).toBe("213px");
   });
 
   it("键盘导航：→ 移动高亮（outline accent），Enter 打开查看器，Home 跳首格", async () => {

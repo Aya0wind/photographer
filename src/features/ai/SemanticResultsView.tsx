@@ -181,16 +181,19 @@ export default function SemanticResultsView({
   );
 }
 
-/** 语义查询输入（大文本框 + 搜索按钮）；搜索页语义模式专用布局，回车触发 */
+/** 语义查询输入（大文本框 + 搜索按钮）；搜索页语义模式专用布局，回车触发。
+ *  initialQuery：URL 协议预填（/search?mode=semantic&q=…，全局搜索框跳入） */
 export function SemanticQueryInput({
   onRun,
   busy,
+  initialQuery = "",
 }: {
   onRun: (query: string) => void;
   busy: boolean;
+  initialQuery?: string;
 }) {
   const { t } = useTranslation();
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialQuery);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // 卸载/重挂不保留（每次进入语义模式为空起点）

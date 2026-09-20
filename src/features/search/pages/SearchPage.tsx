@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -40,6 +41,9 @@ import SemanticResultsView, {
  * - 激活条件 chips 显示在筛选条下（每个可单独 ×，一键清空全部）
  * - 条件变更即时查询（300ms 防抖，序列化键防抖）；结果 keyset 追加加载
  * - RAW+JPG 合并展示与画廊同开关；语义模式（输入/历史/角标）保持不变
+ * - URL 协议（M4.5 A1，全局搜索框跳入）：?mode=semantic&q=… 预填并自动执行
+ *   语义搜索（q 记入历史）；?mode=filters 切条件模式；参数变化实时响应
+ *   （查看器 ?asset= 会清掉 q/mode——组件内模式态保持，不回跳）
  */
 
 const PAGE_LIMIT = 100;
@@ -540,9 +544,12 @@ function buildChips(inputs: SearchInputs, t: (key: string) => string): ActiveChi
 
 export default function SearchPage() {
   const { t } = useTranslation();
+  const [searchParams] = useSearchParams();
 
-  // 模式：条件（元数据筛选）/ 语义（自然语言）
-  const [mode, setMode] = useState<"filters" | "semantic">("filters");
+  // 模式：条件（元数据筛选）/ 语义（自然语言）；URL ?mode= 优先初始化
+  const [mode, setMode] = useState<"filters" | "semantic">(() =>
+    searchParams.get("mode") === "semantic" ? "semantic" : "filters",
+  );
   const semantic = useSemanticSearch();
   const [lastQuery, setLastQuery] = useState("");
   // 语义查询历史（最近 5 条，localStorage；run 即记录——去重置顶）
@@ -553,6 +560,26 @@ export default function SearchPage() {
     setHistory(recordSemanticQuery(query));
     void semantic.run(query);
   }
+
+  // URL 协议（M4.5 A1）：?mode=semantic&q=… → 切语义模式、预填并自动执行（同 q 不重复）
+  // 已挂载时参数变化同样响应（全局搜索框在 /search 页内再次提交）
+  const urlQuery = searchParams.get("q") ?? "";
+  const appliedUrlQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    const urlMode = searchParams.get("mode");
+    if (urlMode === "semantic") {
+      setMode("semantic");
+      if (urlQuery !== "" && appliedUrlQueryRef.current !== urlQuery) {
+        appliedUrlQueryRef.current = urlQuery;
+        runSemantic(urlQuery);
+      }
+    } else if (urlMode === "filters") {
+      setMode("filters");
+    }
+    // runSemantic 依赖 semantic.run（稳定 useCallback）与记录函数（模块级）；
+    // 仅在 mode/q 参数实际变化时执行
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, urlQuery]);
 
   // 全部筛选输入（单对象；序列化键防抖）+ 面板开合
   const [inputs, setInputs] = useState<SearchInputs>(EMPTY_INPUTS);
@@ -718,6 +745,7 @@ export default function SearchPage() {
               <SemanticQueryInput
                 busy={semantic.status === "loading"}
                 onRun={runSemantic}
+                initialQuery={urlQuery}
               />
               <span
                 className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"

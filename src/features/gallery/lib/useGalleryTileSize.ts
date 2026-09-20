@@ -17,6 +17,14 @@ export const GALLERY_TILE_PX: Record<GalleryTileSize, number> = {
   large: 280,
 };
 
+/** justify 网格目标行高（px，M4.5 A4）：画廊专用三档（~160/220/280）；
+ *  搜索等 square 视图继续用 GALLERY_TILE_PX */
+export const GALLERY_JUSTIFY_ROW_PX: Record<GalleryTileSize, number> = {
+  small: 160,
+  medium: 220,
+  large: 280,
+};
+
 export function loadGalleryTileSize(): GalleryTileSize {
   try {
     const value = localStorage.getItem(GALLERY_TILE_SIZE_KEY);
