@@ -162,6 +162,8 @@ interface AssetGridProps {
   badges?: Map<number, string>;
   /** 相似度角标（语义搜索）：assetId → 0..1，右下角百分比 */
   scores?: Map<number, number>;
+  /** 连拍堆叠角标（M6）：封面 assetId → 连拍张数 N（含封面） */
+  burstBadges?: Map<number, number>;
   scrollTestId?: string;
 }
 
@@ -178,6 +180,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     layout = "square",
     badges,
     scores,
+    burstBadges,
     scrollTestId = "gallery-grid-scroll",
   },
   ref,
@@ -462,7 +465,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                       : formatDateLabel(row.group.date)}
                   </h2>
                   <span className="text-xs text-text-muted">
-                    {t("gallery.groupCount", { count: row.group.assets.length })}
+                    {t("gallery.groupCount", {
+                      count: row.group.totalCount ?? row.group.assets.length,
+                    })}
                   </span>
                 </div>
               ) : (
@@ -509,6 +514,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                       </>
                     );
                     const itemWidth = row.widths[itemIndex];
+                    const burstCount = burstBadges?.get(asset.id);
                     const selectionClass = isSelected
                       ? "outline outline-2 -outline-offset-2 outline-accent"
                       : selection?.active
@@ -522,7 +528,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         onPointerDown={() => handleTilePointerDown(asset)}
                         onPointerUp={clearLongPress}
                         onPointerLeave={clearLongPress}
-                        className={`relative touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
+                        className={`relative isolate touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         } ${selectionClass}`}
                         style={{ width: itemWidth, height: row.height }}
@@ -532,8 +538,31 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-kind={asset.kind}
                         data-cursor={isCursor}
                         data-selected={isSelected}
+                        data-burst={burstCount !== undefined ? burstCount : undefined}
                       >
+                        {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
+                        {burstCount !== undefined && (
+                          <>
+                            <span
+                              className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-md border border-edge/50 bg-panel/50"
+                              aria-hidden="true"
+                              data-testid="gallery-burst-layer"
+                            />
+                            <span
+                              className="absolute inset-0 translate-x-[10px] translate-y-[10px] rounded-md border border-edge/30 bg-panel/30"
+                              aria-hidden="true"
+                            />
+                          </>
+                        )}
                         {inner}
+                        {burstCount !== undefined && (
+                          <span
+                            className="absolute bottom-1 right-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            data-testid="gallery-burst-badge"
+                          >
+                            {t("gallery.burstBadge", { count: burstCount })}
+                          </span>
+                        )}
                       </button>
                     ) : (
                       <div
@@ -548,8 +577,31 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-kind={asset.kind}
                         data-cursor={isCursor}
                         data-selected={isSelected}
+                        data-burst={burstCount !== undefined ? burstCount : undefined}
                       >
+                        {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
+                        {burstCount !== undefined && (
+                          <>
+                            <span
+                              className="absolute inset-0 translate-x-[5px] translate-y-[5px] rounded-md border border-edge/50 bg-panel/50"
+                              aria-hidden="true"
+                              data-testid="gallery-burst-layer"
+                            />
+                            <span
+                              className="absolute inset-0 translate-x-[10px] translate-y-[10px] rounded-md border border-edge/30 bg-panel/30"
+                              aria-hidden="true"
+                            />
+                          </>
+                        )}
                         {inner}
+                        {burstCount !== undefined && (
+                          <span
+                            className="absolute bottom-1 right-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            data-testid="gallery-burst-badge"
+                          >
+                            {t("gallery.burstBadge", { count: burstCount })}
+                          </span>
+                        )}
                       </div>
                     );
                   })}

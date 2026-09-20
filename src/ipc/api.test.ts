@@ -16,6 +16,7 @@ import {
   assetsByIds,
   assetsPage,
   assetViewMark,
+  burstStats,
   assetFlagSet,
   assetRatingSet,
   importJobDelete,
@@ -655,5 +656,20 @@ describe("M4 AI 命令", () => {
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
     await expect(assetsByIds([3])).resolves.toEqual([]);
+  });
+
+  it("burstStats 返回分组统计；null/失败/字段缺失静默回 null", async () => {
+    invokeMock.mockResolvedValueOnce({ groups: 12, photosInBursts: 47 });
+    await expect(burstStats()).resolves.toEqual({ groups: 12, photosInBursts: 47 });
+    expect(invokeMock).toHaveBeenCalledWith("burst_stats", undefined);
+
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(burstStats()).resolves.toBeNull();
+
+    invokeMock.mockRejectedValueOnce(new Error("command not found"));
+    await expect(burstStats()).resolves.toBeNull();
+
+    invokeMock.mockResolvedValueOnce({ groups: 12 }); // photosInBursts 缺失
+    await expect(burstStats()).resolves.toBeNull();
   });
 });

@@ -57,6 +57,12 @@ export interface Settings {
     faceDetectThreshold: number;
     /** 人脸聚类阈值（0..1，arcface 余弦距离门限） */
     faceClusterThreshold: number;
+    /** 连拍分组：相邻照片时间间隔上限（毫秒，时间链因子） */
+    burstGapMs: number;
+    /** 连拍分组：pHash 汉明距离上限（0-63，指纹因子） */
+    burstHammingMax: number;
+    /** 连拍分组：最小组员数（低于此不成组） */
+    burstMinSize: number;
   };
   /** 外观（M4.5）：界面动画开关 */
   appearance: {
@@ -100,6 +106,9 @@ export const DEFAULT_SETTINGS: Settings = {
     embedInputSize: 256,
     faceDetectThreshold: 0.5,
     faceClusterThreshold: 0.4,
+    burstGapMs: 2000,
+    burstHammingMax: 10,
+    burstMinSize: 2,
   },
   appearance: {
     animations: true,

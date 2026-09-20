@@ -11,6 +11,7 @@ import { groupAssetsByDate, type AssetGroup } from "../lib/assetGroups";
 import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import {
   assetDetail,
+  assetFlagSet,
   assetRatingSet,
   assetThumbGet,
   type AssetDetailDto,
@@ -23,6 +24,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     assetDetail: vi.fn(),
     assetThumbGet: vi.fn(),
+    assetFlagSet: vi.fn(),
     assetRatingSet: vi.fn(),
   };
 });
@@ -38,6 +40,7 @@ const detailMock = vi.mocked(assetDetail);
 const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
 const ratingMock = vi.mocked(assetRatingSet);
+const flagMock = vi.mocked(assetFlagSet);
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -108,6 +111,7 @@ beforeAll(() => {
 beforeEach(() => {
   detailMock.mockReset().mockResolvedValue(DETAIL);
   ratingMock.mockReset().mockResolvedValue(undefined);
+  flagMock.mockReset().mockResolvedValue(undefined);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
@@ -288,7 +292,7 @@ describe("查看器：左右切换与关闭", () => {
     render(<StatefulViewer />);
 
     const stage = await screen.findByTestId("viewer-stage");
-    fireEvent.wheel(stage, { deltaY: -100 });
+    fireEvent.wheel(stage, { deltaY: -100, ctrlKey: true });
     await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.20"));
 
     const next = screen.getByTestId("viewer-next");
@@ -366,7 +370,7 @@ describe("查看器：左右切换与关闭", () => {
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(await screen.findByTestId("viewer-exif")).toBeInTheDocument();
+    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
     fireEvent.click(screen.getByTestId("viewer-close"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -383,6 +387,35 @@ describe("查看器：左右切换与关闭", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("提供明确退出按钮；详情抽屉与预览画布并列且可从抽屉内收起", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const { onClose } = renderViewer();
+
+    const preview = screen.getByTestId("viewer-preview-pane");
+    const leftPane = screen.getByTestId("viewer-left-pane");
+    const filmstrip = screen.getByTestId("viewer-filmstrip");
+    const drawer = await screen.findByTestId("viewer-exif");
+    expect(preview.parentElement).toBe(leftPane);
+    expect(filmstrip.parentElement).toBe(leftPane);
+    expect(leftPane.parentElement).toBe(drawer.parentElement);
+    expect(drawer.className).toContain("shrink-0");
+    expect(drawer.className).not.toContain("absolute");
+    const close = screen.getByTestId("viewer-close");
+    expect(close.parentElement).toBe(screen.getByTestId("viewer-stage"));
+    expect(close.className).toContain("rounded-full");
+
+    fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
+    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
+    expect(screen.getByTestId("viewer-exif").className).toContain("w-10");
+    expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
+    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "true");
+    expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
+
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("相邻预取：512 回退档高优先预热（缩略管线）", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer(GROUP_ASSETS, 1);
@@ -395,13 +428,51 @@ describe("查看器：左右切换与关闭", () => {
 // --- 缩放/平移 ---------------------------------------------------------------------
 
 describe("查看器：缩放与复位", () => {
+  it("主预览滚轮始终只缩放，不触发前后翻页", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const { onNavigate } = renderViewer(GROUP_ASSETS, 1);
+    const stage = await screen.findByTestId("viewer-stage");
+
+    fireEvent.wheel(stage, { deltaY: 100 });
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(stage).toHaveAttribute("data-scale", "1.00");
+
+    fireEvent.wheel(stage, { deltaY: -100 });
+    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.20"));
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.wheel(stage, { deltaY: -100 });
+    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.44"));
+  });
+
+  it("底部缩略图条滚轮直接切换当前图片，单次手势最多跨 8 张而不滚动列表", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const manyAssets = Array.from({ length: 15 }, (_, i) =>
+      makeAsset(i + 1, "photo", `IMG_${String(i + 1).padStart(4, "0")}.JPG`),
+    );
+    const { onNavigate } = renderViewer(manyAssets, 1);
+    const filmstrip = await screen.findByTestId("viewer-filmstrip");
+    filmstrip.scrollLeft = 0;
+
+    fireEvent.wheel(filmstrip, { deltaY: 10_000 });
+    expect(onNavigate).toHaveBeenLastCalledWith(9);
+    expect(filmstrip.scrollLeft).toBe(0);
+
+    // 同一方向手势已到上限，后续惯性事件不会继续跳；反向视为新手势。
+    fireEvent.wheel(filmstrip, { deltaY: 200 });
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    fireEvent.wheel(filmstrip, { deltaY: -10_000 });
+    expect(onNavigate).toHaveBeenLastCalledWith(0);
+    expect(filmstrip.scrollLeft).toBe(0);
+  });
+
   it("wheel 放大至 1.2x（钳制 1x-4x），双击复位", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer();
     const stage = await screen.findByTestId("viewer-stage");
     expect(stage).toHaveAttribute("data-scale", "1.00");
 
-    fireEvent.wheel(stage, { deltaY: -100 });
+    fireEvent.wheel(stage, { deltaY: -100, ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.20"));
 
     // 连续放大钳制 4x
@@ -691,9 +762,11 @@ describe("查看器：EXIF 面板", () => {
     expect(screen.queryByText("焦距")).not.toBeInTheDocument();
     expect(rows.textContent).not.toContain("undefined");
 
-    // 收起（AnimatePresence 退场 → waitFor）
+    // 收起后保留仅容纳折叠图标的窄轨
     await user.click(screen.getByTestId("viewer-exif-toggle"));
-    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
+    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
+    expect(screen.getByTestId("viewer-exif").className).toContain("w-10");
+    expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("viewer-exif-toggle"));
     expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
@@ -815,6 +888,35 @@ describe("查看器：EXIF 面板", () => {
 // --- 星标条与切图闪缩（M4.5 wave-3） -----------------------------------------------------
 
 describe("查看器：星标条", () => {
+  it("LR 风格快捷键：0-5 评分、P/U 旗标、[ ] 旋转、Z 缩放、I 开关详情", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderViewer();
+    await screen.findByTestId("viewer-exif");
+
+    fireEvent.keyDown(window, { key: "4" });
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 4));
+    fireEvent.keyDown(window, { key: "0" });
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 0));
+
+    fireEvent.keyDown(window, { key: "P" });
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(1, true));
+    fireEvent.keyDown(window, { key: "U" });
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(1, false));
+
+    fireEvent.keyDown(window, { key: "[" });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "-90");
+    fireEvent.keyDown(window, { key: "]" });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "0");
+
+    fireEvent.keyDown(window, { key: "Z" });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "2.00");
+    fireEvent.keyDown(window, { key: "Z" });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
+
+    fireEvent.keyDown(window, { key: "I" });
+    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
+  });
+
   it("详情 rating 驱动星级；点星调 assetRatingSet(id, n)，再点同星=清除（0）", async () => {
     detailMock.mockResolvedValue({ ...DETAIL, rating: 3 });
     const user = userEvent.setup();

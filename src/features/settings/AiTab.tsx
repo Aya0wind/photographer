@@ -8,6 +8,7 @@ import {
   aiModelDownload,
   indexKickNow,
   indexRebuild,
+  burstStats,
   type AiModelStatus,
   type IndexKind,
   type IndexStatus,
@@ -252,15 +253,8 @@ function AiParamRow({
   );
 }
 
-/** 重建行：二次红色确认 → indexRebuild(kind)；失败文案透传（模型未下载等） */
-const REBUILD_KINDS: ReadonlyArray<{ kind: RebuildKind; labelKey: string }> = [
-  { kind: "thumb", labelKey: "settings.ai.rebuild.thumb" },
-  { kind: "exif", labelKey: "settings.ai.rebuild.exif" },
-  { kind: "semantic", labelKey: "settings.ai.rebuild.semantic" },
-  { kind: "face", labelKey: "settings.ai.rebuild.face" },
-];
-
-function RebuildRow({ kind, labelKey }: { kind: RebuildKind; labelKey: string }) {
+/** 与每个索引状态行并列的重建按钮：二次红色确认后重跑同一后台管线。 */
+function RebuildButton({ kind }: { kind: RebuildKind }) {
   const { t } = useTranslation();
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -281,7 +275,7 @@ function RebuildRow({ kind, labelKey }: { kind: RebuildKind; labelKey: string })
   }
 
   return (
-    <SettingRow label={t(labelKey)} testId={`settings-row-rebuild-${kind}`}>
+    <span className="flex items-center gap-1.5" data-testid={`settings-rebuild-${kind}`}>
       {confirming ? (
         <span className="flex items-center gap-1.5">
           <span className="text-[11px] text-red-400">{t("settings.ai.rebuild.confirm")}</span>
@@ -313,22 +307,21 @@ function RebuildRow({ kind, labelKey }: { kind: RebuildKind; labelKey: string })
         </button>
       )}
       {error !== null && (
-        <span className="ml-2 max-w-[160px] truncate text-[11px] text-red-400" title={error} data-testid="ai-rebuild-error">
+        <span className="max-w-[160px] truncate text-[11px] text-red-400" title={error} data-testid="ai-rebuild-error">
           {error}
         </span>
       )}
-    </SettingRow>
+    </span>
   );
 }
 
-function AiParamsAndRebuildSection() {
+function AiParamsSection() {
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
   const rebuildHint = t("settings.ai.param.rebuildHint");
 
   return (
-    <>
-      <SectionTitle>{t("settings.ai.paramsSection")}</SectionTitle>
+    <div className="mt-2" data-testid="ai-index-params">
       <AiParamRow
         label={t("settings.ai.param.embedInputSize")}
         desc={rebuildHint}
@@ -363,11 +356,82 @@ function AiParamsAndRebuildSection() {
         onCommit={(faceClusterThreshold) => commit({ ai: { faceClusterThreshold } })}
       />
 
-      <SectionTitle>{t("settings.ai.rebuildSection")}</SectionTitle>
-      {REBUILD_KINDS.map(({ kind, labelKey }) => (
-        <RebuildRow key={kind} kind={kind} labelKey={labelKey} />
-      ))}
-    </>
+    </div>
+  );
+}
+
+// --- 连拍分组区（M6） -----------------------------------------------------------------
+
+/** 连拍分组参数 + burstStats 展示行（与索引参数同款：草稿失焦提交 + 恢复默认） */
+function BurstSection() {
+  const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
+  const [stats, setStats] = useState<{ groups: number; photosInBursts: number } | null>(null);
+  const rebuildHint = t("settings.ai.param.burstRebuildHint");
+
+  // 进 tab 拉一次统计（后端不可用为 null——展示行隐藏）
+  useEffect(() => {
+    let cancelled = false;
+    void burstStats().then((result) => {
+      if (!cancelled) setStats(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="mt-2" data-testid="ai-burst-params">
+      <AiParamRow
+        label={t("settings.ai.param.burstGapMs")}
+        desc={rebuildHint}
+        value={settings.ai.burstGapMs ?? 2000}
+        defaultValue={2000}
+        min={500}
+        max={10000}
+        step={100}
+        testId="ai-param-burst-gap-ms"
+        onCommit={(burstGapMs) => commit({ ai: { burstGapMs } })}
+      />
+      <AiParamRow
+        label={t("settings.ai.param.burstHammingMax")}
+        desc={rebuildHint}
+        value={settings.ai.burstHammingMax ?? 10}
+        defaultValue={10}
+        min={4}
+        max={24}
+        step={1}
+        testId="ai-param-burst-hamming-max"
+        onCommit={(burstHammingMax) => commit({ ai: { burstHammingMax } })}
+      />
+      <AiParamRow
+        label={t("settings.ai.param.burstMinSize")}
+        desc={rebuildHint}
+        value={settings.ai.burstMinSize ?? 2}
+        defaultValue={2}
+        min={2}
+        max={10}
+        step={1}
+        testId="ai-param-burst-min-size"
+        onCommit={(burstMinSize) => commit({ ai: { burstMinSize } })}
+      />
+      {stats !== null && (
+        <SettingRow
+          label={t("settings.ai.burstStats")}
+          testId="settings-row-burst-stats"
+        >
+          <span
+            className="font-mono text-xs tabular-nums text-text-secondary"
+            data-testid="ai-burst-stats"
+          >
+            {t("settings.ai.burstStatsValue", {
+              groups: stats.groups,
+              photos: stats.photosInBursts,
+            })}
+          </span>
+        </SettingRow>
+      )}
+    </div>
   );
 }
 
@@ -439,9 +503,21 @@ function IndexStatusSection() {
     <>
       <SectionTitle>{t("settings.ai.indexSection")}</SectionTitle>
       {status === null ? (
-        <p className="py-2 text-[11px] text-text-muted" data-testid="index-status-unavailable">
-          {t("settings.ai.index.unavailable")}
-        </p>
+        <>
+          <p className="py-2 text-[11px] text-text-muted" data-testid="index-status-unavailable">
+            {t("settings.ai.index.unavailable")}
+          </p>
+          {(["thumb", "exif", "ai", "face"] as const).map((kind) => (
+            <div
+              key={kind}
+              className="flex min-h-[36px] items-center justify-between gap-8 border-b border-edge/40 py-2"
+              data-testid={`index-rebuild-row-${kind}`}
+            >
+              <div className="text-xs text-text-primary">{t(`settings.ai.index.${kind}`)}</div>
+              <RebuildButton kind={kind === "ai" ? "semantic" : kind} />
+            </div>
+          ))}
+        </>
       ) : (
         rows.map((kind) => {
           const label = t(`settings.ai.index.${kind}`);
@@ -465,23 +541,26 @@ function IndexStatusSection() {
                   {countersText(kind, status, t)}
                 </div>
               </div>
-              <button
-                type="button"
-                disabled={running || complete}
-                onClick={() => void kick(kind)}
-                className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  running || complete
-                    ? "cursor-default bg-panel text-text-muted"
-                    : "bg-accent text-black hover:brightness-110"
-                }`}
-                data-testid={`index-kick-${kind}`}
-              >
-                {running
-                  ? t("settings.ai.index.running")
-                  : complete
-                    ? t("settings.ai.index.complete")
-                    : t("settings.ai.index.kick")}
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  disabled={running || complete}
+                  onClick={() => void kick(kind)}
+                  className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    running || complete
+                      ? "cursor-default bg-panel text-text-muted"
+                      : "bg-accent text-black hover:brightness-110"
+                  }`}
+                  data-testid={`index-kick-${kind}`}
+                >
+                  {running
+                    ? t("settings.ai.index.running")
+                    : complete
+                      ? t("settings.ai.index.complete")
+                      : t("settings.ai.index.kick")}
+                </button>
+                <RebuildButton kind={kind === "ai" ? "semantic" : kind} />
+              </div>
             </div>
           );
         })
@@ -491,6 +570,10 @@ function IndexStatusSection() {
           {t("settings.ai.index.kickError", { error })}
         </p>
       )}
+      <SectionTitle>{t("settings.ai.paramsSection")}</SectionTitle>
+      <AiParamsSection />
+      <SectionTitle>{t("settings.ai.burstSection")}</SectionTitle>
+      <BurstSection />
     </>
   );
 }
@@ -531,11 +614,8 @@ export default function AiTab() {
         )}
       </div>
 
-      {/* 索引状态与操作区（三类计数 + 立即索引） */}
+      {/* 单一区块：状态、立即索引、重建与索引参数 */}
       <IndexStatusSection />
-
-      {/* 索引参数与重建（三参数 + 四通道重建） */}
-      <AiParamsAndRebuildSection />
 
       {/* 功能开关（模型门控） */}
       <SectionTitle>{t("settings.section.aiFeatures")}</SectionTitle>

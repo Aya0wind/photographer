@@ -500,7 +500,8 @@ function useHistory(deletedIds: ReadonlySet<number>) {
 
   const loadFirst = useCallback(async () => {
     setLoading(true);
-    const page = await importJobsPage(0, HISTORY_PAGE_SIZE);
+    const result = await importJobsPage(0, HISTORY_PAGE_SIZE).catch(() => []);
+    const page = Array.isArray(result) ? result : [];
     cursorRef.current = page.length > 0 ? page[page.length - 1].id : 0;
     setRows(page);
     setExhausted(page.length < HISTORY_PAGE_SIZE);
@@ -510,7 +511,8 @@ function useHistory(deletedIds: ReadonlySet<number>) {
   const loadMore = useCallback(async () => {
     if (loading || exhausted) return;
     setLoading(true);
-    const page = await importJobsPage(cursorRef.current, HISTORY_PAGE_SIZE);
+    const result = await importJobsPage(cursorRef.current, HISTORY_PAGE_SIZE).catch(() => []);
+    const page = Array.isArray(result) ? result : [];
     if (page.length > 0) {
       cursorRef.current = page[page.length - 1].id;
       setRows((prev) => {

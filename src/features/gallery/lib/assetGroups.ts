@@ -17,6 +17,8 @@ export interface AssetGroup {
   /** ISO 日期（截取前 10 位）；未知组为 null */
   date: string | null;
   assets: AssetDto[];
+  /** 组内照片总数（组头计数口径；连拍折叠展示时 assets 只含封面，此字段保留真实数） */
+  totalCount?: number;
 }
 
 /** capturedAt → 组键（null/空串/短于日期 → 未知组） */

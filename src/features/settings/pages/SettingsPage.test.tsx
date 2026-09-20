@@ -22,6 +22,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     indexStatus: vi.fn(),
     indexKickNow: vi.fn(),
     indexRebuild: vi.fn(),
+    burstStats: vi.fn(),
   };
 });
 import {
@@ -29,6 +30,7 @@ import {
   aiModelDelete,
   aiModelDownload,
   aiModelsStatus,
+  burstStats,
   indexKickNow,
   indexRebuild,
   indexStatus,
@@ -44,6 +46,7 @@ const aiFaceDataClearMock = vi.mocked(aiFaceDataClear);
 const indexStatusMock = vi.mocked(indexStatus);
 const indexKickNowMock = vi.mocked(indexKickNow);
 const indexRebuildMock = vi.mocked(indexRebuild);
+const burstStatsMock = vi.mocked(burstStats);
 
 function aiModel(
   id: string,
@@ -138,6 +141,7 @@ beforeEach(() => {
   // AiTab 索引状态区默认不可用（各用例按需覆写）
   indexStatusMock.mockReset().mockResolvedValue(null);
   indexKickNowMock.mockReset().mockResolvedValue(undefined);
+  burstStatsMock.mockReset().mockResolvedValue(null);
   useAiStore.getState().resetForTests();
   localStorage.clear();
 });
@@ -734,5 +738,53 @@ describe("AI tab：索引参数与重建", () => {
     expect(await screen.findByTestId("ai-rebuild-error")).toHaveTextContent(
       "请先在设置中下载模型",
     );
+  });
+});
+
+// --- AI tab：连拍分组（M6） ------------------------------------------------------------
+
+describe("AI tab：连拍分组", () => {
+  it("三参数带默认值与「重新分组」说明；草稿失焦提交入库，恢复默认回滚", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-param-burst-gap-ms")).toHaveValue(2000);
+    expect(screen.getByTestId("ai-param-burst-hamming-max")).toHaveValue(10);
+    expect(screen.getByTestId("ai-param-burst-min-size")).toHaveValue(2);
+    expect(screen.getAllByText("修改后自动重新分组（不重算指纹）")).toHaveLength(3);
+    expect(screen.queryByTestId("ai-param-burst-gap-ms-reset")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByTestId("ai-param-burst-gap-ms"));
+    await user.type(screen.getByTestId("ai-param-burst-gap-ms"), "3500");
+    fireEvent.blur(screen.getByTestId("ai-param-burst-gap-ms"));
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.ai.burstGapMs).toBe(3500),
+    );
+    expect(screen.getByTestId("ai-param-burst-gap-ms-reset")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("ai-param-burst-gap-ms-reset"));
+    await waitFor(() =>
+      expect(useSettingsStore.getState().settings.ai.burstGapMs).toBe(2000),
+    );
+  });
+
+  it("burstStats 有值时展示「N 组 · 共 M 张」；null 隐藏该行", async () => {
+    burstStatsMock.mockResolvedValue({ groups: 12, photosInBursts: 47 });
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-burst-stats")).toHaveTextContent("12 组 · 共 47 张");
+  });
+
+  it("burstStats 为 null（后端未实现/无数据）时统计行隐藏", async () => {
+    burstStatsMock.mockResolvedValue(null);
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    expect(await screen.findByTestId("ai-param-burst-min-size")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-burst-stats")).not.toBeInTheDocument();
   });
 });

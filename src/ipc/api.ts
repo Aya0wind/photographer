@@ -155,6 +155,10 @@ export interface AssetDto {
   height?: number | null;
   /** 入库时间（ISO 8601；recent_assets 用于「最近添加」范围过滤，assets_page 不带） */
   createdAt?: string | null;
+  /** 连拍组 id（M6：时间链×pHash 聚类；同组连续资产在画廊折叠为堆叠卡） */
+  burstId?: number | null;
+  /** 连拍组员数（照片数，含封面；仅 ≥2 时携带） */
+  burstCount?: number | null;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
@@ -586,6 +590,28 @@ export async function recentViewed(limit: number): Promise<AssetDto[]> {
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+// --- 连拍分组（M6） -------------------------------------------------------------------
+
+/** 连拍统计（burst_stats 返回；后端不可用/失败为 null——UI 隐藏展示行） */
+export interface BurstStats {
+  groups: number;
+  photosInBursts: number;
+}
+
+/** 连拍分组统计快照；命令失败/负载异常静默 null */
+export async function burstStats(): Promise<BurstStats | null> {
+  try {
+    const stats = await ipc<BurstStats | null>("burst_stats");
+    if (stats === null || typeof stats !== "object") return null;
+    const s = stats as Partial<BurstStats>;
+    return typeof s.groups === "number" && typeof s.photosInBursts === "number"
+      ? (stats as BurstStats)
+      : null;
+  } catch {
+    return null;
   }
 }
 

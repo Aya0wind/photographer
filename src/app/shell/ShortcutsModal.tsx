@@ -35,8 +35,11 @@ const GROUPS: ReadonlyArray<ShortcutGroup> = [
     titleKey: "shortcuts.group.viewer",
     items: [
       { keys: "← →", labelKey: "shortcuts.viewer.nav" },
-      { keys: "滚轮 / 拖拽 / 双击", labelKey: "shortcuts.viewer.zoom" },
-      { keys: ". , R", labelKey: "shortcuts.viewer.rotate" },
+      { keys: "滚轮 / Z / 双击", labelKey: "shortcuts.viewer.zoom" },
+      { keys: "[ ] / , . / R", labelKey: "shortcuts.viewer.rotate" },
+      { keys: "1–5 / 0", labelKey: "shortcuts.viewer.rating" },
+      { keys: "P / U", labelKey: "shortcuts.viewer.flag" },
+      { keys: "I", labelKey: "shortcuts.viewer.info" },
       { keys: "Home / End", labelKey: "shortcuts.viewer.homeEnd" },
       { keys: "Esc", labelKey: "shortcuts.viewer.close" },
     ],

@@ -141,14 +141,22 @@ export default function MediaPage() {
   // 计数：formatList 归并一次；封面：每类取首张（limit=1）
   useEffect(() => {
     let cancelled = false;
-    void formatList().then((formats) => {
-      if (!cancelled) setCounts(countsByKind(formats));
-    });
-    for (const { kind } of KIND_CARDS) {
-      void assetsPage(0, 1, { kinds: [kind] }).then((page) => {
-        if (cancelled) return;
-        setCovers((prev) => ({ ...prev, [kind]: page[0] ?? null }));
+    void formatList()
+      .then((formats) => {
+        if (!cancelled) setCounts(countsByKind(formats));
+      })
+      .catch(() => {
+        if (!cancelled) setCounts({ photo: 0, raw: 0, video: 0 });
       });
+    for (const { kind } of KIND_CARDS) {
+      void assetsPage(0, 1, { kinds: [kind] })
+        .then((page) => {
+          if (cancelled) return;
+          setCovers((prev) => ({ ...prev, [kind]: page[0] ?? null }));
+        })
+        .catch(() => {
+          if (!cancelled) setCovers((prev) => ({ ...prev, [kind]: null }));
+        });
     }
     return () => {
       cancelled = true;

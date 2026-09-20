@@ -17,6 +17,7 @@ import {
   formatDateLabel,
 } from "../lib/assetGroups";
 import { mergeRawJpgCards } from "../lib/mergeRawJpg";
+import { collapseBursts } from "../lib/burstStacks";
 import {
   gallerySnapshot,
   saveGallerySnapshot,
@@ -353,8 +354,27 @@ export default function GalleryPage() {
   );
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const semanticGroups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
-  const activeGroups = semanticMode ? semanticGroups : groups;
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(activeGroups);
+
+  // 连拍堆叠折叠（M6）：仅画廊资产管线（语义结果不折叠）；查看器/胶片条仍用
+  // 未折叠全量组（点击堆叠卡打开封面，胶片条天然顺序翻完整组）。折叠在
+  // RAW+JPG 合并之后——判定用合并后代表资产的 burstId。
+  const { displayGroups, burstBadges } = useMemo(() => {
+    if (semanticMode) return { displayGroups: semanticGroups, burstBadges: undefined };
+    const badges = new Map<number, number>();
+    const display = groups.map((group) => {
+      const collapsed = collapseBursts(group.assets);
+      for (const [coverId, count] of collapsed.badges) badges.set(coverId, count);
+      return collapsed.totalCount === collapsed.assets.length
+        ? group
+        : { ...group, assets: collapsed.assets, totalCount: collapsed.totalCount };
+    });
+    return { displayGroups: display, burstBadges: badges.size > 0 ? badges : undefined };
+  }, [groups, semanticGroups, semanticMode]);
+
+  // 查看器/选中查找用全量组；网格/视口/吸顶用折叠展示组
+  const viewerGroups = semanticMode ? semanticGroups : groups;
+  const activeGroups = semanticMode ? semanticGroups : displayGroups;
+  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(viewerGroups);
 
   /** 选中资产对象（当前态分组内查找；跨态选不中的自动忽略） */
   const loadedById = useMemo(() => {
@@ -601,6 +621,7 @@ export default function GalleryPage() {
               tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
               badges={semanticMode ? undefined : badges}
               scores={semanticMode ? semantic.scores : undefined}
+              burstBadges={semanticMode ? undefined : burstBadges}
             />
           )}
           {/* 右侧年份吸顶条：点击跳该年首个日期组（语义结果态隐藏——库级年份与结果集不一致） */}

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AnimatePresence, motion } from "motion/react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { assetDetail, assetRatingSet, type AssetDetailDto, type AssetDto } from "@/ipc/api";
-import { motionInitial, useMotionOn } from "@/lib/motion";
+import {
+  assetDetail,
+  assetFlagSet,
+  assetRatingSet,
+  type AssetDetailDto,
+  type AssetDto,
+} from "@/ipc/api";
 import type { AssetGroup } from "../lib/assetGroups";
 import {
   fetchAssetThumb,
@@ -142,7 +146,6 @@ interface ViewerOverlayProps {
 
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose }: ViewerOverlayProps) {
   const { t } = useTranslation();
-  const motionOn = useMotionOn();
   const stageRef = useRef<HTMLDivElement | null>(null);
 
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
@@ -157,7 +160,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     // 保留连续角度，确保 -270 -> -360 的过渡继续向左，而不是归零后反向补间。
     setView((v) => ({ ...v, rotation: v.rotation + delta }));
 
-  // wheel 缩放：原生非 passive 监听（React 合成 wheel 为 passive，无法 preventDefault）
+  // 主预览滚轮始终只负责缩放；前后翻页统一由左右箭头/键盘/胶片条承担。
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
@@ -221,32 +224,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       if (hintTimerRef.current !== null) clearTimeout(hintTimerRef.current);
     };
   }, [showHint]);
-
-  // 键盘：Esc 返回画廊；←/→ 同组切换；Home/End 跳组首/尾；. , R 旋转；? 唤出操作提示
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      } else if (e.key === "ArrowLeft" && index > 0) {
-        onNavigate(index - 1);
-      } else if (e.key === "ArrowRight" && index < group.assets.length - 1) {
-        onNavigate(index + 1);
-      } else if (e.key === "Home") {
-        onNavigate(0);
-      } else if (e.key === "End") {
-        onNavigate(group.assets.length - 1);
-      } else if (e.key === "." || e.key === "r" || e.key === "R") {
-        rotate(90);
-      } else if (e.key === ",") {
-        rotate(-90);
-      } else if (e.key === "?") {
-        showHint();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [index, group.assets.length, onNavigate, onClose, showHint]);
 
   // --- 大图来源（按 kind，分级回退链） -------------------------------------------------
   // photo：原图 → 中间档缩略图（名义 2048，后端加 2048 档）→ 512 档。WebView2 对
@@ -411,11 +388,70 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     0,
     Math.min(5, Math.round(ratingDraft ?? detail?.rating ?? 0)),
   );
-  async function applyRating(value: number): Promise<void> {
-    const next = currentRating === value ? 0 : value; // 再点同一星=清除
+  async function applyRating(value: number, toggleSame = true): Promise<void> {
+    const next = toggleSame && currentRating === value ? 0 : value; // 鼠标再点同一星=清除
     setRatingDraft(next);
     await assetRatingSet(asset.id, next);
   }
+
+  const [flagDraft, setFlagDraft] = useState<boolean | null>(null);
+  useEffect(() => {
+    setFlagDraft(null);
+  }, [asset.id]);
+  const currentFlagged = flagDraft ?? detail?.flagged ?? false;
+  async function applyFlagged(flagged: boolean): Promise<void> {
+    setFlagDraft(flagged);
+    await assetFlagSet(asset.id, flagged);
+  }
+
+  // LR 风格查看器快捷键：方向键导航、[]/,./R 旋转、0-5 评分、P/U 旗标、
+  // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "ArrowLeft" && index > 0) {
+        onNavigate(index - 1);
+      } else if (e.key === "ArrowRight" && index < group.assets.length - 1) {
+        onNavigate(index + 1);
+      } else if (e.key === "Home") {
+        onNavigate(0);
+      } else if (e.key === "End") {
+        onNavigate(group.assets.length - 1);
+      } else if ([".", "]", "r", "R"].includes(e.key)) {
+        rotate(90);
+      } else if ([",", "["].includes(e.key)) {
+        rotate(-90);
+      } else if (/^[0-5]$/.test(e.key)) {
+        e.preventDefault();
+        void applyRating(Number(e.key), false);
+      } else if (e.key === "p" || e.key === "P") {
+        void applyFlagged(true);
+      } else if (e.key === "u" || e.key === "U") {
+        void applyFlagged(false);
+      } else if (e.key === "z" || e.key === "Z") {
+        setView((v) =>
+          v.scale > MIN_SCALE
+            ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
+            : { ...v, scale: 2, x: 0, y: 0 },
+        );
+      } else if (e.key === "i" || e.key === "I") {
+        setExifOpen((open) => !open);
+      } else if (e.key === "?") {
+        showHint();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [asset.id, currentRating, group.assets.length, index, onClose, onNavigate, showHint]);
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -509,6 +545,44 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
 
   // 胶片条横向虚拟化：格宽 64 + 间距 6；可视区外不渲染不请求
   const stripRef = useRef<HTMLDivElement | null>(null);
+  const stripWheelGestureRef = useRef({
+    lastAt: 0,
+    direction: 0,
+    baseIndex: 0,
+    accumulated: 0,
+    appliedSteps: 0,
+    targetIndex: 0,
+  });
+  function handleFilmstripWheel(event: React.WheelEvent<HTMLDivElement>): void {
+    const rawDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    if (rawDelta === 0) return;
+    event.preventDefault();
+
+    const now = performance.now();
+    const direction = Math.sign(rawDelta);
+    const gesture = stripWheelGestureRef.current;
+    // 180ms 无输入或反向滚动视为新手势；一次连续手势最多切换 8 张。
+    if (now - gesture.lastAt > 180 || gesture.direction !== direction) {
+      gesture.direction = direction;
+      gesture.baseIndex = index;
+      gesture.accumulated = 0;
+      gesture.appliedSteps = 0;
+      gesture.targetIndex = index;
+    }
+    gesture.lastAt = now;
+    // 约一个标准滚轮刻度切一张；高分辨率触控板的小 delta 会累积后再切换。
+    gesture.accumulated += Math.abs(rawDelta);
+    const requestedSteps = Math.min(8, Math.floor(gesture.accumulated / 80));
+    if (requestedSteps <= gesture.appliedSteps) return;
+    gesture.appliedSteps = requestedSteps;
+    const target = Math.max(
+      0,
+      Math.min(group.assets.length - 1, gesture.baseIndex + direction * requestedSteps),
+    );
+    if (target === gesture.targetIndex) return;
+    gesture.targetIndex = target;
+    onNavigate(target);
+  }
   const stripVirtualizer = useVirtualizer({
     count: group.assets.length,
     getScrollElement: () => stripRef.current,
@@ -577,30 +651,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               <path d="M12.8 3.2v3.3H9.5" />
             </svg>
           </button>
-          <button
-            type="button"
-            onClick={() => setExifOpen((v) => !v)}
-            aria-pressed={exifOpen}
-            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="viewer-exif-toggle"
-          >
-            {t("viewer.exif")}
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("viewer.close")}
-            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="viewer-close"
-          >
-            {t("viewer.close")}
-          </button>
         </div>
       </div>
 
       <div className="flex min-h-0 flex-1">
+        {/* 左栏整体随详情抽屉伸缩：主图与底部胶片条始终保持同一宽度。 */}
+        <div className="flex min-w-0 flex-1 flex-col" data-testid="viewer-left-pane">
         {/* 主区：大图 + 左右切换 */}
-        <div className="relative min-w-0 flex-1">
+        <div className="relative min-h-0 flex-1" data-testid="viewer-preview-pane">
           <div
             ref={stageRef}
             className="absolute inset-0 flex touch-none items-center justify-center overflow-hidden"
@@ -614,6 +672,20 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             data-rotation={view.rotation}
             style={{ cursor: view.scale > 1 ? "grab" : "default" }}
           >
+            {/* 浏览器图片预览式退出入口：固定在左侧预览区右上角，不占顶栏文字空间。 */}
+            <button
+              type="button"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={onClose}
+              aria-label={t("viewer.exit")}
+              title={t("viewer.exit")}
+              className="pointer-events-auto absolute right-3 top-3 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+              data-testid="viewer-close"
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
             {committed !== null && committed !== incoming?.src && (
               /* 底层：上一张已就绪图——新图 onLoad 前一直保留，切换无空窗 */
               <img
@@ -749,20 +821,76 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           </p>
         </div>
 
-        {/* 右侧 EXIF 面板（可收起；transform 滑出——不动画 width，避免布局抖动） */}
-        <AnimatePresence initial={false}>
-          {exifOpen && (
-            <motion.aside
-              key="exif"
-              initial={motionInitial(motionOn, { x: 288, opacity: 0 })}
-              animate={{ x: 0, opacity: 1 }}
-              exit={{ x: 288, opacity: 0 }}
-              transition={{ duration: 0.15, ease: "easeOut" }}
-              className="absolute right-0 top-0 z-10 h-full w-72 overflow-hidden border-l border-edge bg-surface/95 shadow-2xl"
+        {/* 底部胶片条属于左侧预览栏；在其上滚轮直接切换当前照片，当前项随后自动居中。 */}
+        <div
+          ref={stripRef}
+          onWheel={handleFilmstripWheel}
+          className="sp-scroll flex h-[76px] shrink-0 items-center overflow-x-auto border-t border-edge px-3"
+          data-testid="viewer-filmstrip"
+        >
+          <div className="relative h-full" style={{ width: stripVirtualizer.getTotalSize() }}>
+            {stripVirtualizer.getVirtualItems().map((vi) => {
+              const item = group.assets[vi.index];
+              const current = vi.index === index;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onNavigate(vi.index)}
+                  aria-label={item.name}
+                  aria-current={current}
+                  className={`absolute top-0 flex h-16 w-16 overflow-hidden rounded-md border-2 transition-colors ${
+                    current ? "border-accent" : "border-transparent hover:border-edge"
+                  }`}
+                  style={{ transform: `translateX(${vi.start}px)` }}
+                  data-testid="viewer-filmthumb"
+                  data-asset-id={item.id}
+                  data-current={current}
+                >
+                  <AssetThumb
+                    asset={item}
+                    size={FILM_THUMB_SIZE}
+                    className="h-full w-full"
+                    skeleton={false}
+                    miniLabel={String(vi.index + 1)}
+                    testId="viewer-filmthumb-cell"
+                  />
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        </div>
+
+        {/* 右侧详情是常驻窄轨抽屉：收起后只保留折叠图标宽度。 */}
+            <aside
+              className={`h-full shrink-0 overflow-hidden border-l border-edge bg-surface ${
+                exifOpen ? "w-72" : "w-10"
+              }`}
               data-testid="viewer-exif"
+              data-open={exifOpen}
             >
-              <div className="h-full overflow-y-auto p-3" data-testid="viewer-exif-scroll">
-                <h2 className="mb-1 text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
+              <div className={`h-full overflow-y-auto ${exifOpen ? "p-3" : "p-1"}`} data-testid="viewer-exif-scroll">
+                <div className={`mb-1 flex items-center gap-2 ${exifOpen ? "justify-between" : "justify-center"}`}>
+                  {exifOpen && <h2 className="text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>}
+                  <button
+                    type="button"
+                    onClick={() => setExifOpen((open) => !open)}
+                    aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")}
+                    title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")}
+                    aria-pressed={exifOpen}
+                    className="pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-panel hover:text-text-primary"
+                    data-testid="viewer-exif-toggle"
+                  >
+                    <svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="2.5" y="3" width="13" height="12" rx="1.5" />
+                      <path d="M11.5 3v12" />
+                      <path d={exifOpen ? "M9 6.5L6.5 9 9 11.5" : "M13 6.5L15.5 9 13 11.5"} />
+                    </svg>
+                  </button>
+                </div>
+                {exifOpen && (
+                <>
                 {/* 星标条：0-5 星点选（再点同星=清除） */}
                 <div
                   className="mb-2 flex items-center gap-1 border-b border-edge/60 pb-2"
@@ -790,6 +918,18 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                       </svg>
                     </button>
                   ))}
+                  <button
+                    type="button"
+                    onClick={() => void applyFlagged(!currentFlagged)}
+                    aria-pressed={currentFlagged}
+                    title={currentFlagged ? t("viewer.flagClear") : t("viewer.flagSet")}
+                    className={`ml-auto rounded px-1.5 py-0.5 text-[11px] ${
+                      currentFlagged ? "bg-accent text-black" : "text-text-muted hover:text-text-primary"
+                    }`}
+                    data-testid="viewer-flag"
+                  >
+                    ⚑
+                  </button>
                 </div>
                 <div data-testid="viewer-exif-rows" data-asset-id={visibleDetail.id}>
                   {exifSections.map((section) => (
@@ -808,52 +948,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                     </section>
                   ))}
                 </div>
+                </>
+                )}
               </div>
-            </motion.aside>
-          )}
-        </AnimatePresence>
+            </aside>
       </div>
 
-      {/* 底部胶片条：当前组缩略图。横向虚拟化（只渲染可视区 ±overscan）——
-          整组几十格同时入队会挤占缩略图信号量、拖慢主图回退档；滚动按需请求。
-          格子未加载期间为静态迷你序号占位（skeleton=false，几十个一起闪很难看）。 */}
-      <div
-        ref={stripRef}
-        className="sp-scroll flex h-[76px] shrink-0 items-center overflow-x-auto border-t border-edge px-3"
-        data-testid="viewer-filmstrip"
-      >
-        <div className="relative h-full" style={{ width: stripVirtualizer.getTotalSize() }}>
-          {stripVirtualizer.getVirtualItems().map((vi) => {
-            const item = group.assets[vi.index];
-            const current = vi.index === index;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onNavigate(vi.index)}
-                aria-label={item.name}
-                aria-current={current}
-                className={`absolute top-0 flex h-16 w-16 overflow-hidden rounded-md border-2 transition-colors ${
-                  current ? "border-accent" : "border-transparent hover:border-edge"
-                }`}
-                style={{ transform: `translateX(${vi.start}px)` }}
-                data-testid="viewer-filmthumb"
-                data-asset-id={item.id}
-                data-current={current}
-              >
-                <AssetThumb
-                  asset={item}
-                  size={FILM_THUMB_SIZE}
-                  className="h-full w-full"
-                  skeleton={false}
-                  miniLabel={String(vi.index + 1)}
-                  testId="viewer-filmthumb-cell"
-                />
-              </button>
-            );
-          })}
-        </div>
-      </div>
     </div>
   );
 }
