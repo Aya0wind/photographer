@@ -310,34 +310,52 @@ pub async fn camera_list(state: State<'_, SharedState>) -> Result<Vec<CameraCoun
 }
 
 /// 镜头聚合（lens 非空分组计数降序；搜索页镜头勾选数据源）。
-pub fn fetch_lens_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
+pub fn fetch_lens_list(state: &super::AppState) -> Result<Vec<LensCountDto>, String> {
     let db = super::active_library_db(state)?;
     let rows = db.lens_list().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|r| CameraCountDto {
-            camera: r.camera,
+        .map(|r| LensCountDto {
+            lens: r.camera,
             count: r.count,
         })
         .collect())
 }
 
+/// 镜头聚合 DTO（camelCase；与前端 AssetLensCount 契约对齐——此前复用
+/// CameraCountDto 的 `camera` 字段承载镜头名，前端读 `lens` 全 undefined，
+/// 真机 2026-09-20 验收抓出）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LensCountDto {
+    pub lens: String,
+    pub count: u64,
+}
+
+/// 格式聚合 DTO（同上，`format` 承载扩展名大写）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatCountDto {
+    pub format: String,
+    pub count: u64,
+}
+
 /// 镜头聚合（DB 查询 → 后台线程）。
 #[tauri::command]
-pub async fn lens_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
+pub async fn lens_list(state: State<'_, SharedState>) -> Result<Vec<LensCountDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_lens_list).await
 }
 
 /// 格式聚合（路径扩展名大写分组计数降序；搜索页格式勾选数据源）。
 /// `camera` 字段承载格式名（与 camera_list 同构载荷，前端复用同一组件）。
-pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
+pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<FormatCountDto>, String> {
     let db = super::active_library_db(state)?;
     let rows = db.format_list().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|r| CameraCountDto {
-            camera: r.camera,
+        .map(|r| FormatCountDto {
+            format: r.camera,
             count: r.count,
         })
         .collect())
@@ -345,7 +363,7 @@ pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<CameraCountDto>,
 
 /// 格式聚合（DB 查询 → 后台线程）。
 #[tauri::command]
-pub async fn format_list(state: State<'_, SharedState>) -> Result<Vec<CameraCountDto>, String> {
+pub async fn format_list(state: State<'_, SharedState>) -> Result<Vec<FormatCountDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_format_list).await
 }
