@@ -17,12 +17,14 @@ import {
   assetRatingSet,
   assetThumbGet,
   assetsPage,
+  clipboardCopyFiles,
   type AssetDto,
 } from "@/ipc/api";
 
 /**
- * 画廊选择模式（M4.5）：进出选择态、多选计数/序号角标、收藏/旗标负载、Esc 退出、
- * Ctrl+点击进入；快捷键一次性提示条。
+ * 画廊选择模式（M4.5；③ 起入口=瓦片左上 check 圆钮，工具条「选择」按钮已删）：
+ * 进出选择态、多选高亮、收藏/旗标负载、Esc 退出、Ctrl+点击/长按进入；
+ * 瓦片右键自定义菜单（含多选语义）。
  */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -34,6 +36,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetThumbGet: vi.fn(),
     assetRatingSet: vi.fn(),
     assetFlagSet: vi.fn(),
+    clipboardCopyFiles: vi.fn(),
   };
 });
 
@@ -53,6 +56,7 @@ const groupDatesMock = vi.mocked(assetGroupDates);
 const thumbMock = vi.mocked(assetThumbGet);
 const ratingMock = vi.mocked(assetRatingSet);
 const flagMock = vi.mocked(assetFlagSet);
+const copyMock = vi.mocked(clipboardCopyFiles);
 const revealMock = vi.mocked(revealItemInDir);
 
 function makeAsset(id: number): AssetDto {
@@ -72,6 +76,11 @@ function tileOf(id: number): HTMLElement {
   const tile = screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === String(id));
   if (!tile) throw new Error(`tile ${id} not rendered`);
   return tile;
+}
+
+/** 瓦片左上 check 圆钮 */
+function checkOf(id: number): HTMLElement {
+  return within(tileOf(id)).getByTestId("tile-check");
 }
 
 function renderGallery() {
@@ -102,6 +111,7 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   ratingMock.mockReset().mockResolvedValue(undefined);
   flagMock.mockReset().mockResolvedValue(undefined);
+  copyMock.mockReset().mockResolvedValue(undefined);
   revealMock.mockReset().mockResolvedValue(undefined);
   resetThumbPipelineForTests();
   clearGallerySnapshotForTests();
@@ -111,31 +121,31 @@ beforeEach(() => {
 
 // --- 进出选择态与多选 -----------------------------------------------------------------
 
-describe("画廊：选择模式", () => {
-  it("「选择」按钮进入；点击瓦片=切换选中（高亮+序号角标），不打开查看器", async () => {
+describe("画廊：选择模式（check 圆钮入口）", () => {
+  it("工具条无「选择」按钮；点瓦片 check 圆钮进入多选并选中该张，不打开查看器", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
-    await user.click(screen.getByTestId("gallery-select-toggle"));
-    expect(screen.getByTestId("gallery-select-toggle")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "0");
+    // ③ 选择按钮已删；瓦片带 check 圆钮
+    expect(screen.queryByTestId("gallery-select-toggle")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("tile-check")).toHaveLength(3);
 
-    await user.click(tileOf(1));
-    await user.click(tileOf(3));
-
-    const selected = screen.getAllByTestId("gallery-tile").filter((t) => t.getAttribute("data-selected") === "true");
-    expect(selected).toHaveLength(2);
-    // 序号角标（选中序：先点 id1=1，再点 id3=2；DOM 序与 id 无关按 tile 断言）
-    expect(within(tileOf(1)).getByTestId("gallery-tile-select-badge")).toHaveTextContent("1");
-    expect(within(tileOf(3)).getByTestId("gallery-tile-select-badge")).toHaveTextContent("2");
-    // 操作条计数
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张");
-    // 不打开查看器
+    await user.click(checkOf(1));
+    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "1");
+    // 实心勾：选中瓦片圆钮 data-selected=true
+    expect(checkOf(1)).toHaveAttribute("data-selected", "true");
+    expect(checkOf(3)).toHaveAttribute("data-selected", "false");
+    // 点击圆钮不触发瓦片本身（未打开查看器）
     expect(screen.queryByTestId("viewer")).not.toBeInTheDocument();
 
-    // 再点已选瓦片 = 取消选中
-    await user.click(tileOf(1));
+    await user.click(tileOf(3));
+    const selected = screen.getAllByTestId("gallery-tile").filter((t) => t.getAttribute("data-selected") === "true");
+    expect(selected).toHaveLength(2);
+    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张");
+
+    // 再点已选瓦片圆钮 = 取消选中
+    await user.click(checkOf(1));
     expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
   });
 
@@ -150,10 +160,12 @@ describe("画廊：选择模式", () => {
     const selected = screen.getAllByTestId("gallery-tile").filter((t) => t.getAttribute("data-selected") === "true");
     expect(selected).toHaveLength(1);
 
-    // Esc 退出并清空
+    // Esc 退出并清空（圆钮回落未选中）
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
-    expect(screen.queryByTestId("gallery-tile-select-badge")).not.toBeInTheDocument();
+    for (const check of screen.getAllByTestId("tile-check")) {
+      expect(check).toHaveAttribute("data-selected", "false");
+    }
     // 退出后点击恢复打开查看器
     await userEvent.click(tileOf(1));
     expect(await screen.findByTestId("viewer")).toBeInTheDocument();
@@ -164,8 +176,7 @@ describe("画廊：选择模式", () => {
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
-    await user.click(screen.getByTestId("gallery-select-toggle"));
-    await user.click(tileOf(1));
+    await user.click(checkOf(1));
     await user.click(tileOf(2));
 
     await user.click(screen.getByTestId("selection-favorite"));
@@ -191,8 +202,7 @@ describe("画廊：选择模式", () => {
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
-    await user.click(screen.getByTestId("gallery-select-toggle"));
-    await user.click(tileOf(1));
+    await user.click(checkOf(1));
     expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "1");
 
     await user.click(screen.getByTestId("selection-share"));
@@ -212,12 +222,110 @@ describe("画廊：选择模式", () => {
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
-    await user.click(screen.getByTestId("gallery-select-toggle"));
-    await user.click(tileOf(1));
+    await user.click(checkOf(1));
     expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
 
     await user.click(screen.getByTestId("selection-cancel"));
     await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
+  });
+});
+
+// --- 瓦片右键自定义菜单（②：多选语义 + 菜单项 IPC） -----------------------------------
+
+describe("画廊：瓦片右键菜单", () => {
+  it("非多选态右键瓦片：菜单作用于该资产；reveal 调 plugin-opener，菜单关闭", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    fireEvent.contextMenu(tileOf(2), { clientX: 200, clientY: 150 });
+    const menu = await screen.findByTestId("asset-context-menu");
+    expect(within(menu).getByTestId("asset-context-menu-item-reveal")).toHaveTextContent(
+      "在资源管理器中显示",
+    );
+    expect(within(menu).getByTestId("asset-context-menu-item-copy")).toHaveTextContent(
+      "复制文件到剪贴板",
+    );
+
+    await user.click(within(menu).getByTestId("asset-context-menu-item-reveal"));
+    await waitFor(() => expect(revealMock).toHaveBeenCalledWith(makeAsset(2).path));
+    expect(revealMock).not.toHaveBeenCalledWith(makeAsset(1).path);
+    // 选择后菜单关闭
+    await waitFor(() => expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument());
+  });
+
+  it("菜单项：复制文件调 clipboard_copy_files IPC；旗标调 assetFlagSet", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    fireEvent.contextMenu(tileOf(3), { clientX: 100, clientY: 100 });
+    const menu = await screen.findByTestId("asset-context-menu");
+    await user.click(within(menu).getByTestId("asset-context-menu-item-copy"));
+    await waitFor(() => expect(copyMock).toHaveBeenCalledWith([makeAsset(3).path]));
+
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    await user.click(
+      within(await screen.findByTestId("asset-context-menu")).getByTestId(
+        "asset-context-menu-item-flag",
+      ),
+    );
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(1, true));
+  });
+
+  it("多选语义：右键选中瓦片 → 菜单作用于全部选中（旗标逐个）", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(1));
+    await user.click(checkOf(2));
+    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张");
+
+    // 右键选中集中的瓦片 1：作用于全部选中（1、2）
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    const menu = await screen.findByTestId("asset-context-menu");
+    await user.click(within(menu).getByTestId("asset-context-menu-item-flag"));
+    await waitFor(() => {
+      expect(flagMock).toHaveBeenCalledWith(1, true);
+      expect(flagMock).toHaveBeenCalledWith(2, true);
+    });
+    expect(flagMock).not.toHaveBeenCalledWith(3, true);
+  });
+
+  it("多选语义：右键未选中瓦片 → 先切换选中集为该图（Windows 语义），菜单作用于它", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(1));
+    await user.click(checkOf(2));
+
+    // 右键不在选中集的瓦片 3：选中集切为 [3]
+    fireEvent.contextMenu(tileOf(3), { clientX: 100, clientY: 100 });
+    const menu = await screen.findByTestId("asset-context-menu");
+    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张"));
+    expect(checkOf(3)).toHaveAttribute("data-selected", "true");
+    expect(checkOf(1)).toHaveAttribute("data-selected", "false");
+
+    await user.click(within(menu).getByTestId("asset-context-menu-item-copy"));
+    await waitFor(() => expect(copyMock).toHaveBeenCalledWith([makeAsset(3).path]));
+  });
+
+  it("点击外部 / Esc 关闭菜单；Esc 不退出多选（菜单层消费）", async () => {
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    expect(await screen.findByTestId("asset-context-menu")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    expect(await screen.findByTestId("asset-context-menu")).toBeInTheDocument();
+    fireEvent.mouseDown(document.body);
+    await waitFor(() => expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument());
   });
 });
 

@@ -26,8 +26,13 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetThumbGet: vi.fn(),
     assetFlagSet: vi.fn(),
     assetRatingSet: vi.fn(),
+    clipboardCopyFiles: vi.fn(),
   };
 });
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
@@ -35,8 +40,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { clipboardCopyFiles } from "@/ipc/api";
 
 const detailMock = vi.mocked(assetDetail);
+const revealItemMock = vi.mocked(revealItemInDir);
+const copyFilesMock = vi.mocked(clipboardCopyFiles);
 const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
 const ratingMock = vi.mocked(assetRatingSet);
@@ -109,6 +118,8 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  revealItemMock.mockReset().mockResolvedValue(undefined);
+  copyFilesMock.mockReset().mockResolvedValue(undefined);
   detailMock.mockReset().mockResolvedValue(DETAIL);
   ratingMock.mockReset().mockResolvedValue(undefined);
   flagMock.mockReset().mockResolvedValue(undefined);
@@ -1069,6 +1080,55 @@ describe("查看器：EXIF 面板切图闪缩修复", () => {
     await waitFor(() =>
       expect(screen.getByTestId("viewer-exif-rows")).toHaveAttribute("data-asset-id", "2"),
     );
+  });
+});
+
+// --- 大图右键菜单（②：与瓦片同款，作用于当前资产） ---------------------------------------
+
+describe("查看器：大图右键菜单", () => {
+  it("右键舞台出菜单；旗标调 assetFlagSet(当前资产)；reveal/copy 调对应通道", async () => {
+    const user = userEvent.setup();
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const { onClose } = renderViewer();
+
+    fireEvent.contextMenu(screen.getByTestId("viewer-stage"), { clientX: 300, clientY: 200 });
+    const menu = await screen.findByTestId("asset-context-menu");
+    expect(within(menu).getByTestId("asset-context-menu-item-reveal")).toBeInTheDocument();
+
+    await user.click(within(menu).getByTestId("asset-context-menu-item-flag"));
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(1, true));
+
+    fireEvent.contextMenu(screen.getByTestId("viewer-stage"), { clientX: 300, clientY: 200 });
+    await user.click(
+      within(await screen.findByTestId("asset-context-menu")).getByTestId(
+        "asset-context-menu-item-reveal",
+      ),
+    );
+    await waitFor(() => expect(revealItemMock).toHaveBeenCalledWith(GROUP_ASSETS[0].path));
+
+    fireEvent.contextMenu(screen.getByTestId("viewer-stage"), { clientX: 300, clientY: 200 });
+    await user.click(
+      within(await screen.findByTestId("asset-context-menu")).getByTestId(
+        "asset-context-menu-item-copy",
+      ),
+    );
+    await waitFor(() => expect(copyFilesMock).toHaveBeenCalledWith([GROUP_ASSETS[0].path]));
+    void onClose;
+  });
+
+  it("菜单打开时 Esc 关菜单不关查看器", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    const { onClose } = renderViewer();
+
+    fireEvent.contextMenu(screen.getByTestId("viewer-stage"), { clientX: 300, clientY: 200 });
+    expect(await screen.findByTestId("asset-context-menu")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("viewer")).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

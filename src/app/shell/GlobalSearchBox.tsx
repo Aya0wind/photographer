@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { useAiStore } from "@/stores/aiStore";
@@ -7,19 +7,28 @@ import { useSemanticGate } from "@/features/ai/useSemanticSearch";
 import { SemanticGateNotice } from "@/features/ai/SemanticResultsView";
 
 /**
- * 顶部全局搜索框（M4.5 A1，TitleBar 动作位常驻）：
+ * 顶部全局搜索框（M4.5 A1，TitleBar 动作位常驻；唯一语义搜索入口）：
  * - 圆角输入框，占位「输入一段描述搜索照片…」；回车 → /gallery?mode=semantic&q=…
- *   （搜索页按 URL 协议预填并自动执行语义搜索）
+ *   （画廊按 URL 协议自动执行语义搜索；语义态下改词回车=按新词重搜）
+ * - 回显：画廊语义态的查询词（URL q）同步回输入框；退出语义态/清空回车
+ *   → /gallery 无参，画廊随之退出语义态、输入框清空
  * - 右侧过滤图标 → /gallery（条件筛选在画廊工具条）
  * - 语义搜索前置门禁（模型未齐/索引从未建立）：回车不导航不发查询，输入文字
- *   保留；输入框下拉行内提示（带一键跳设置 AI tab），条件解除自动消失
+ *   保留，输入框下拉行内提示（带一键跳设置 AI tab）
  * - 语义索引未就绪（aiStore indexStatus ai.done<total）：输入框下细提示条
  *   （不阻塞输入；数据源与任务抽屉的常驻轮询同源）
  */
 export default function GlobalSearchBox() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [value, setValue] = useState("");
+  const [searchParams] = useSearchParams();
+  // 画廊语义态查询词（URL 协议）：全局框唯一入口的回显真值
+  const urlQuery =
+    searchParams.get("mode") === "semantic" ? (searchParams.get("q") ?? "") : "";
+  const [value, setValue] = useState(urlQuery);
+  useEffect(() => {
+    setValue(urlQuery);
+  }, [urlQuery]);
   const indexStatus = useAiStore((s) => s.indexStatus);
   const gate = useSemanticGate();
   const [gateBlocked, setGateBlocked] = useState(false);

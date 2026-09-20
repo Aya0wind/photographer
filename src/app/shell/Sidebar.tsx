@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ReactElement } from "react";
 
-import { peopleList } from "@/ipc/api";
+import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
 
 /**
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
@@ -16,15 +16,20 @@ import { peopleList } from "@/ipc/api";
  *   去重：完全重复 + pHash 近似，组内勾选清理）
  * - 系统：设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
- * 人物入口 faceCount 总数徽标保留。
+ * 计数徽标：图库/最近浏览/那年今天/相册/标签走 sidebar_counts（一次性纯
+ * COUNT，挂载拉一次 + 导入会话完成事件后重拉——最小事件集，不上轮询；
+ * 0 或后端不可用不显示）；人物走 peopleList 聚类人脸总数（照旧）。
  */
+
+/** sidebar_counts 键 → 徽标数据源 */
+type CountBadge = Exclude<keyof SidebarCounts, never>;
 
 interface NavItem {
   to: string;
   labelKey: string;
   icon: ReactElement;
-  /** 人物入口徽标（聚类人脸总数） */
-  badge?: "people";
+  /** 徽标：people=聚类人脸总数；其余=sidebar_counts 对应键 */
+  badge?: "people" | CountBadge;
 }
 
 interface NavSection {
@@ -141,23 +146,23 @@ const ICONS = {
   ),
 };
 
-/** 分组导航结构（浏览/组织/工具/系统） */
+/** 分组导航结构（浏览/组织/工具/系统）；badge=sidebar_counts 键 */
 const SECTIONS: NavSection[] = [
   {
     titleKey: "nav.section.browse",
     items: [
-      { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery },
-      { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent },
-      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories },
+      { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery, badge: "assets" },
+      { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent, badge: "recentViewed" },
+      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories, badge: "onThisDay" },
     ],
   },
   {
     titleKey: "nav.section.organize",
     items: [
-      { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums },
+      { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums, badge: "albums" },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
-      { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags },
+      { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags, badge: "tags" },
     ],
   },
   {
@@ -216,6 +221,41 @@ export default function Sidebar() {
     };
   }, []);
 
+  // 计数徽标（sidebar_counts 一次性纯 COUNT）：挂载拉一次；导入会话完成后
+  // 重拉（资产/标签/相册/最近浏览都可能变——最小事件集，不上轮询）。
+  // 后端命令在途/不可用 → null，徽标不显示。
+  const [counts, setCounts] = useState<SidebarCounts | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    const pull = () => {
+      void sidebarCounts().then((next) => {
+        if (!cancelled && next !== null) setCounts(next);
+      });
+    };
+    pull();
+    void subscribeAppEvents((event) => {
+      if (event.type === "importSessionFinished") pull();
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /** 行徽标值（people 走聚类总数；其余走 sidebar_counts；0/缺数据=不显示） */
+  function badgeValueOf(badge: NonNullable<NavItem["badge"]>): number {
+    if (badge === "people") return peopleFaces;
+    return counts ? counts[badge] : 0;
+  }
+
   return (
     <aside className="sp-scroll flex h-full w-[220px] shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface">
       <nav className="mt-2 flex flex-col gap-2 px-2 pb-3" aria-label="primary">
@@ -248,12 +288,15 @@ export default function Sidebar() {
                       )}
                       {item.icon}
                       <span>{t(item.labelKey)}</span>
-                      {item.badge === "people" && peopleFaces > 0 && (
+                      {item.badge && badgeValueOf(item.badge) > 0 && (
                         <span
                           className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
-                          data-testid="sidebar-people-badge"
+                          data-testid={
+                            item.badge === "people" ? "sidebar-people-badge" : "sidebar-count-badge"
+                          }
+                          data-kind={item.badge}
                         >
-                          {peopleFaces}
+                          {badgeValueOf(item.badge)}
                         </span>
                       )}
                     </>

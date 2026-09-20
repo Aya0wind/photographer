@@ -16,6 +16,7 @@ import {
   useAssetThumbUrl,
   warmImageDecode,
 } from "../lib/thumbPipeline";
+import { AssetContextMenu } from "./ContextMenu";
 import AssetThumb from "./AssetThumb";
 import ViewerVideo from "./ViewerVideo";
 import { formatBytes } from "@/lib/format";
@@ -149,6 +150,9 @@ interface ViewerOverlayProps {
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement | null>(null);
+
+  // 大图右键菜单（与瓦片同款：reveal/复制文件/旗标，作用于当前资产）
+  const [ctxAt, setCtxAt] = useState<{ x: number; y: number } | null>(null);
 
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
   const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
@@ -412,7 +416,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }
 
   // LR 风格查看器快捷键：方向键导航、[]/,./R 旋转、0-5 评分、P/U 旗标、
-  // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键。
+  // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键；
+  // 右键菜单打开时 Esc 让给菜单（不关查看器）。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target;
@@ -423,6 +428,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         return;
       }
       if (e.key === "Escape") {
+        if (ctxAt !== null) return; // 菜单自身的 Esc 监听负责关闭
         e.preventDefault();
         onClose();
       } else if (e.key === "ArrowLeft" && index > 0) {
@@ -458,7 +464,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [asset.id, currentRating, group.assets.length, index, onClose, onNavigate, showHint]);
+  }, [asset.id, ctxAt, currentRating, group.assets.length, index, onClose, onNavigate, showHint]);
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -674,6 +680,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
+            onContextMenu={(e) => {
+              // 大图右键：自定义资产菜单（原生菜单已被全局 guard 屏蔽，此处兜底）
+              e.preventDefault();
+              setCtxAt({ x: e.clientX, y: e.clientY });
+            }}
             data-testid="viewer-stage"
             data-scale={view.scale.toFixed(2)}
             data-rotation={view.rotation}
@@ -981,6 +992,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             </aside>
       </div>
 
+      {/* 大图右键菜单（作用于当前资产；Esc/点击外部关闭，期间查看器 Esc 让位） */}
+      {ctxAt !== null && (
+        <AssetContextMenu at={ctxAt} assets={[asset]} onClose={() => setCtxAt(null)} />
+      )}
     </div>
   );
 }

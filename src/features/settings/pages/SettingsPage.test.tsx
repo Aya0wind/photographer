@@ -182,9 +182,9 @@ describe("选项卡", () => {
     expect(screen.getByTestId("ai-model-list")).toBeInTheDocument();
     expect(screen.getByText(/所有 AI 处理 100% 在本机完成/)).toBeInTheDocument();
     expect(screen.getByText("模型管理")).toBeInTheDocument();
-    // M4：GPU/调度已实化（可操作），场景标签仍待后续里程碑
-    expect(screen.getByLabelText("GPU 加速")).toBeEnabled();
-    expect(screen.getByTestId("ai-schedule")).toBeEnabled();
+    // ④：GPU/调度收进「高级」（默认收起）；场景标签仍待后续里程碑
+    expect(screen.queryByLabelText("GPU 加速")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-schedule")).not.toBeInTheDocument();
     expect(screen.getByLabelText("场景标签")).toBeDisabled();
   });
 
@@ -376,10 +376,11 @@ describe("AI tab（M4 实化）", () => {
     await switchTab(user, "ai");
   }
 
-  it("语义阈值：默认 0.09 渲染；修改即存并夹取 [0,1]；恢复默认按钮还原", async () => {
+  it("语义阈值（④ 起位于「高级」内）：默认 0.09 渲染；修改即存并夹取 [0,1]；恢复默认还原", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
+    await user.click(await screen.findByTestId("ai-advanced-toggle"));
 
     const input = screen.getByTestId("ai-semantic-threshold") as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("0.09"));
@@ -866,23 +867,27 @@ describe("AI tab：索引参数与重建", () => {
     await user.click(await screen.findByTestId("ai-advanced-toggle"));
   }
 
-  it("高级参数默认收起：勾选「开发人员配置」才显示；语义阈值留在明面", async () => {
+  it("高级参数默认收起：勾选「开发人员配置」才显示（④ 扩围：语义阈值 + 调度/资源）", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
 
-    // 默认收起：调参输入不在 DOM（连拍阈值/间隔、人脸检测与聚类阈值等）
+    // 默认收起：调参输入不在 DOM（语义阈值、调度/资源、连拍阈值/间隔、人脸阈值等）
     expect(await screen.findByTestId("ai-advanced-toggle")).not.toBeChecked();
     expect(screen.queryByTestId("ai-advanced-params")).not.toBeInTheDocument();
     expect(screen.queryByTestId("ai-param-burst-hamming-max")).not.toBeInTheDocument();
     expect(screen.queryByTestId("ai-param-burst-gap-ms")).not.toBeInTheDocument();
     expect(screen.queryByTestId("ai-param-face-detect-threshold")).not.toBeInTheDocument();
-    // 语义阈值是常用项：不受开关影响
-    expect(screen.getByTestId("ai-semantic-threshold")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-semantic-threshold")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-schedule")).not.toBeInTheDocument();
 
     await enableAdvanced(user);
     expect(screen.getByTestId("ai-advanced-params")).toBeInTheDocument();
     expect(screen.getByTestId("ai-param-burst-hamming-max")).toBeInTheDocument();
+    // ④ 扩围项：语义阈值与调度/资源组进高级
+    expect(screen.getByTestId("ai-semantic-threshold")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-schedule")).toBeInTheDocument();
+    expect(screen.getByLabelText("GPU 加速")).toBeEnabled();
     // 开关状态持久化 localStorage
     expect(localStorage.getItem("smartphoto.settings.ai.advanced")).toBe("1");
 

@@ -189,14 +189,17 @@ beforeEach(() => {
 // --- 工具条与默认态 -------------------------------------------------------------------
 
 describe("画廊合并：工具条与默认态", () => {
-  it("工具条含语义输入/筛选/选择/尺寸；默认态查询 assetsPage(0,100)（无 filters）", async () => {
+  it("工具条含筛选/计数/尺寸（语义输入与选择按钮已删）；默认态查询 assetsPage(0,100)（无 filters）", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
     renderGallery();
 
     await screen.findAllByTestId("gallery-tile");
-    expect(screen.getByTestId("semantic-input")).toBeInTheDocument();
     expect(screen.getByTestId("search-filter-toggle")).toBeInTheDocument();
-    expect(screen.getByTestId("gallery-select-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("search-count")).toBeInTheDocument();
+    // ⑤ 语义输入框移除（唯一入口=TitleBar 全局搜索框）；③ 选择按钮移除（入口=瓦片 check 圆钮）
+    expect(screen.queryByTestId("semantic-input")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("gallery-select-toggle")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("tile-check")).toHaveLength(1);
     await waitFor(() => expect(assetsPageMock).toHaveBeenCalledWith(0, 100));
     expect(assetsPageMock.mock.calls[0]).toHaveLength(2); // 默认态不传 filters
   });
@@ -233,8 +236,28 @@ describe("画廊合并：URL 协议", () => {
     expect(tiles).toHaveLength(2);
     expect(searchSemantic).toHaveBeenCalledWith("日落", 100, undefined);
     expect(within(tiles[0]).getByTestId("search-score-badge")).toHaveTextContent("87%");
-    // 语义输入预填
-    expect(screen.getByTestId("semantic-input")).toHaveValue("日落");
+    // ⑤ 语义态状态头（本地输入框已删）：查询词 + 结果数 + 退出按钮
+    const header = screen.getByTestId("semantic-status-header");
+    expect(header).toHaveTextContent("“日落”");
+    expect(header).toHaveTextContent("2 个结果");
+    expect(screen.getByTestId("semantic-exit")).toBeInTheDocument();
+  });
+
+  it("语义态退出按钮：退出语义回默认画廊（结果清空、语义头消失）", async () => {
+    assetsPageMock.mockResolvedValue([]);
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.9 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderGallery("/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD");
+
+    await screen.findAllByTestId("gallery-tile");
+    expect(screen.getByTestId("semantic-status-header")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("semantic-exit"));
+    // 退出后：语义头消失、回默认态（默认空态引导，非语义空态）
+    await waitFor(() =>
+      expect(screen.queryByTestId("semantic-status-header")).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(screen.getByTestId("gallery-empty")).toBeInTheDocument());
   });
 
   it("?kind=raw → 预置 RAW 类型筛选（kinds=[raw]）", async () => {
@@ -422,22 +445,19 @@ describe("画廊合并：三态切换", () => {
 // --- 语义搜索前置门禁 + 索引建立中提示条 ------------------------------------------------
 
 describe("画廊：语义搜索门禁与索引提示条", () => {
-  it("门禁·模型未齐：输入框回车不发查询，工具条下提示 + 文字保留", async () => {
+  it("门禁·模型未齐：URL 直达也不发查询，工具条下提示（唯一入口=全局搜索框）", async () => {
     aiModelsStatusMock.mockResolvedValue(gatedModels());
     // 同步预置：挂载即拦（不等异步 refresh）
     act(() =>
       useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() }),
     );
-    renderGallery();
-
-    const input = await screen.findByTestId("semantic-input");
-    fireEvent.change(input, { target: { value: "海边" } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    renderGallery("/gallery?mode=semantic&q=%E6%B5%B7%E8%BE%B9");
 
     expect(searchSemantic).not.toHaveBeenCalled();
-    expect(screen.getByTestId("gallery-semantic-gate")).toHaveTextContent("语义模型未下载");
+    expect(await screen.findByTestId("gallery-semantic-gate")).toHaveTextContent(
+      "语义模型未下载",
+    );
     expect(screen.getByTestId("gallery-semantic-gate-gosettings")).toBeInTheDocument();
-    expect(screen.getByTestId("semantic-input")).toHaveValue("海边");
   });
 
   it("门禁·索引未建立（模型已齐 + ai.total==0 + 库内有资产）：URL 自动执行也被拦", async () => {
@@ -454,33 +474,32 @@ describe("画廊：语义搜索门禁与索引提示条", () => {
     expect(searchSemantic).not.toHaveBeenCalled();
   });
 
-  it("门禁解除后放行：模型装齐（事件驱动重拉）→ 同一输入回车正常发查询，提示消失", async () => {
+  it("门禁解除后放行：模型装齐后重新进入同一语义 URL → 正常发查询", async () => {
     aiModelsStatusMock.mockResolvedValueOnce(gatedModels()).mockResolvedValue(readyModels());
     act(() =>
       useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() }),
     );
-    renderGallery();
-
-    const input = await screen.findByTestId("semantic-input");
-    fireEvent.change(input, { target: { value: "海边" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByTestId("gallery-semantic-gate")).toBeInTheDocument();
+    const blocked = renderGallery("/gallery?mode=semantic&q=%E6%B5%B7%E8%BE%B9");
+    expect(await screen.findByTestId("gallery-semantic-gate")).toBeInTheDocument();
     expect(searchSemantic).not.toHaveBeenCalled();
+    blocked.unmount();
+    clearGallerySnapshotForTests();
 
-    // 模型装齐：aiModelDownloadFinished → 重拉 → 门禁开
+    // 模型装齐：aiModelDownloadFinished → 重拉 → 门禁开（事件 refresh 异步，
+    // 同步预置保证第二次挂载时门禁已开——URL 自动执行在挂载 effect 内同步判定）
     act(() => {
       useAiStore.getState().handleAppEvent({
         type: "aiModelDownloadFinished",
         id: "siglip2-text",
         ok: true,
       });
+      useAiStore.setState({ models: readyModels() });
     });
+    renderGallery("/gallery?mode=semantic&q=%E6%B5%B7%E8%BE%B9");
+    await waitFor(() => expect(searchSemantic).toHaveBeenCalledWith("海边", 100, undefined));
     await waitFor(() =>
       expect(screen.queryByTestId("gallery-semantic-gate")).not.toBeInTheDocument(),
     );
-
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(searchSemantic).toHaveBeenCalledWith("海边", 100, undefined));
   });
 
   it("索引建立中：语义态顶部提示条出现；索引完成自动消失", async () => {

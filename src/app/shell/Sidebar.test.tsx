@@ -1,24 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import Sidebar from "./Sidebar";
-import { peopleList, type PersonCluster } from "@/ipc/api";
+import {
+  peopleList,
+  sidebarCounts,
+  subscribeAppEvents,
+  type AppEvent,
+  type PersonCluster,
+} from "@/ipc/api";
 
-// 人物徽标数据源（默认空清单 → 无徽标，不影响既有用例的可访问名断言）
+// 人物徽标数据源（默认空清单 → 无徽标，不影响既有用例的可访问名断言）；
+// 侧栏计数（sidebar_counts）默认 null → 无徽标；事件订阅捕获 handler 供用例驱动
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
   return {
     ...actual,
     peopleList: vi.fn(),
+    sidebarCounts: vi.fn(),
+    subscribeAppEvents: vi.fn(),
   };
 });
 
 const peopleListMock = vi.mocked(peopleList);
+const sidebarCountsMock = vi.mocked(sidebarCounts);
+const subscribeAppEventsMock = vi.mocked(subscribeAppEvents);
+
+/** 捕获的事件 handler（importSessionFinished 重拉用例驱动） */
+let eventHandlers: Array<(event: AppEvent) => void> = [];
 
 /** 分组 → 导航项（含禁用占位）的期望结构 */
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
@@ -53,6 +67,12 @@ function renderSidebar(initialPath: string) {
 
 beforeEach(() => {
   peopleListMock.mockReset().mockResolvedValue([]);
+  sidebarCountsMock.mockReset().mockResolvedValue(null);
+  eventHandlers = [];
+  subscribeAppEventsMock.mockReset().mockImplementation(async (handler) => {
+    eventHandlers.push(handler);
+    return () => {};
+  });
 });
 
 describe("Sidebar（M4.5 A3 分组信息架构）", () => {
@@ -180,5 +200,87 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     renderSidebar("/gallery");
     await waitFor(() => expect(peopleListMock).toHaveBeenCalled());
     expect(screen.queryByTestId("sidebar-people-badge")).not.toBeInTheDocument();
+  });
+});
+
+
+// --- 侧栏计数徽标（⑥：sidebar_counts 契约铺开） -----------------------------------------
+
+describe("Sidebar：导航计数徽标", () => {
+  it("各入口计数渲染：图库/最近浏览/那年今天/相册/标签 + 人物照旧；0 不显示", async () => {
+    peopleListMock.mockResolvedValue([
+      { clusterId: 1, name: null, faceCount: 93, coverAssetId: 1 },
+    ]);
+    sidebarCountsMock.mockResolvedValue({
+      assets: 1234,
+      recentViewed: 5,
+      onThisDay: 0, // 0 不显示
+      tags: 7,
+      albums: 40,
+    });
+    renderSidebar("/gallery");
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId("sidebar-count-badge").length).toBeGreaterThan(0),
+    );
+    const badges = screen.getAllByTestId("sidebar-count-badge");
+    const byKind = new Map(badges.map((b) => [b.getAttribute("data-kind"), b.textContent]));
+    expect(byKind.get("assets")).toBe("1234"); // 图库
+    expect(byKind.get("recentViewed")).toBe("5"); // 最近浏览
+    expect(byKind.get("tags")).toBe("7"); // 标签
+    expect(byKind.get("albums")).toBe("40"); // 相册
+    expect(byKind.has("onThisDay")).toBe(false); // 0 → 不渲染
+    // 人物徽标照旧（peopleList 数据源）
+    expect(await screen.findByTestId("sidebar-people-badge")).toHaveTextContent("93");
+
+    // 徽标挂在对应导航行内（图库行）
+    const galleryLink = screen.getByRole("link", { name: /图库/ });
+    expect(within(galleryLink).getByTestId("sidebar-count-badge")).toHaveTextContent("1234");
+  });
+
+  it("sidebar_counts 不可用（null）：不显示任何计数徽标", async () => {
+    sidebarCountsMock.mockResolvedValue(null);
+    renderSidebar("/gallery");
+
+    await screen.findAllByRole("link");
+    expect(screen.queryByTestId("sidebar-count-badge")).not.toBeInTheDocument();
+  });
+
+  it("导入会话完成事件 → 重拉计数（挂载一次 + 事件一次）", async () => {
+    sidebarCountsMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ assets: 42, recentViewed: 3, onThisDay: 1, tags: 2, albums: 4 });
+    renderSidebar("/gallery");
+    expect(screen.queryByTestId("sidebar-count-badge")).not.toBeInTheDocument();
+    expect(sidebarCountsMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      for (const handler of eventHandlers) {
+        handler({
+          type: "importSessionFinished",
+          jobId: 1,
+          stats: {
+            totalFiles: 1,
+            doneFiles: 1,
+            skippedDuplicates: 0,
+            failedFiles: 0,
+            totalBytes: 1,
+            doneBytes: 1,
+            elapsedMs: 1,
+            bytesPerSec: 1,
+            moved: 0,
+            sourceDeleteFailed: 0,
+          },
+        });
+      }
+    });
+
+    await waitFor(() => expect(sidebarCountsMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      const assets = screen
+        .getAllByTestId("sidebar-count-badge")
+        .find((b) => b.getAttribute("data-kind") === "assets");
+      expect(assets).toHaveTextContent("42");
+    });
   });
 });

@@ -31,9 +31,13 @@ function LocationProbe() {
 }
 
 function renderBox() {
+  return renderBoxAt("/gallery");
+}
+
+function renderBoxAt(entry: string) {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={["/gallery"]}>
+      <MemoryRouter initialEntries={[entry]}>
         <GlobalSearchBox />
         <Routes>
           <Route path="/gallery" element={<LocationProbe />} />
@@ -235,5 +239,37 @@ describe("语义搜索前置门禁（模型未齐/索引未建 → 拦截 + 行�
     expect(await screen.findByTestId("loc")).toHaveTextContent(
       "/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD",
     );
+  });
+});
+
+
+describe("全局搜索框回显（⑤：唯一语义入口）", () => {
+  it("画廊语义态（URL 直达）→ 回显当前查询词", async () => {
+    renderBoxAt("/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD");
+    expect(await screen.findByTestId("globalsearch-input")).toHaveValue("日落");
+  });
+
+  it("语义态改词回车 = 按新词重搜（URL 协议）；清空回车 = 退出语义态回默认画廊", async () => {
+    const user = userEvent.setup();
+    renderBoxAt("/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD");
+    const input = await screen.findByTestId("globalsearch-input");
+    expect(input).toHaveValue("日落");
+
+    await user.clear(input);
+    await user.type(input, "海边");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByTestId("loc")).toHaveTextContent(
+      "/gallery?mode=semantic&q=%E6%B5%B7%E8%BE%B9",
+    );
+
+    // 清空回车 → 无参 /gallery（画廊随之退出语义态、回显清空）
+    await user.clear(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByTestId("loc")).toHaveTextContent("/gallery");
+  });
+
+  it("非语义路由不回显（保持空起点）", async () => {
+    renderBoxAt("/gallery?kind=raw");
+    expect(await screen.findByTestId("globalsearch-input")).toHaveValue("");
   });
 });

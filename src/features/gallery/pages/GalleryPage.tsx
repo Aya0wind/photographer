@@ -30,10 +30,10 @@ import { useAssetViewer } from "../lib/useAssetViewer";
 import { useSemanticSearch, useSemanticGate, useAiIndexingProgress } from "@/features/ai/useSemanticSearch";
 import { recordSemanticQuery } from "@/features/ai/semanticHistory";
 import {
-  SemanticQueryInput,
   SemanticGateNotice,
   SemanticIndexingBanner,
 } from "@/features/ai/SemanticResultsView";
+import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
@@ -116,16 +116,29 @@ export default function GalleryPage() {
   const semanticIndexing = useAiIndexingProgress();
   /** 被门禁拦截过：工具条下方行内提示（成功放行或改走筛选即消） */
   const [semanticGateNotice, setSemanticGateNotice] = useState(false);
+  /** 当前语义查询词（状态头展示；本地语义输入框已删，入口唯一=全局搜索框） */
+  const [semanticQuery, setSemanticQuery] = useState("");
 
   function runSemantic(query: string): void {
     if (semanticGate.blocked) {
-      // 门禁拦截：不发查询（URL 自动执行与输入框回车共用此口）；输入文字保留
+      // 门禁拦截：不发查询（URL 自动执行共用此口）
       setSemanticGateNotice(true);
       return;
     }
     setSemanticGateNotice(false);
+    setSemanticQuery(query);
     recordSemanticQuery(query); // 语义历史（最近 5 条，localStorage）
     void semantic.run(query);
+  }
+
+  /** 退出语义态：重置结果 + 撤 URL 参数（全局框随 URL 清空回显），回默认画廊 */
+  function exitSemanticMode(): void {
+    setSemanticGateNotice(false);
+    semantic.reset();
+    appliedUrlQueryRef.current = null; // 允许同词稍后再次进入
+    if (searchParams.get("mode") === "semantic") {
+      navigate("/gallery", { replace: true });
+    }
   }
 
   /** 修改筛选 = 退出语义态回筛选/默认（语义结果与条件筛选互斥）；门禁提示一并撤下 */
@@ -146,6 +159,13 @@ export default function GalleryPage() {
     if (urlMode === "semantic" && urlQuery !== "" && appliedUrlQueryRef.current !== urlQuery) {
       appliedUrlQueryRef.current = urlQuery;
       runSemantic(urlQuery);
+    } else if (
+      (urlMode !== "semantic" || urlQuery === "") &&
+      appliedUrlQueryRef.current !== null
+    ) {
+      // 语义参数撤离（全局框清空回车/退出按钮）：同步退出语义态
+      appliedUrlQueryRef.current = null;
+      semantic.reset();
     }
     const urlKind = searchParams.get("kind");
     if (urlKind === "photo" || urlKind === "raw" || urlKind === "video") {
@@ -398,6 +418,46 @@ export default function GalleryPage() {
   const activeGroups = semanticMode ? semanticGroups : displayGroups;
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(viewerGroups);
 
+  // Esc 退出语义态（查看器打开时不抢——查看器自身 Esc 优先；多选退出走独立监听）
+  useEffect(() => {
+    if (!semanticMode || viewer) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        exitSemanticMode();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [semanticMode, viewer]);
+
+  // --- 瓦片右键菜单（自定义 ContextMenu；原生菜单已被全局 guard 屏蔽） -----------------
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(
+    null,
+  );
+  const assetsById = useMemo(() => {
+    const map = new Map<number, AssetDto>();
+    for (const group of viewerGroups) for (const a of group.assets) map.set(a.id, a);
+    return map;
+  }, [viewerGroups]);
+
+  /** 瓦片右键目标集：非多选=该资产；多选+已选瓦片=全部选中；
+   *  多选+未选瓦片=先切换选中集为该图（Windows 语义），再作用于它。 */
+  function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
+    if (selecting) {
+      if (selected.includes(asset.id)) {
+        const targets = selected
+          .map((id) => assetsById.get(id))
+          .filter((a): a is AssetDto => a !== undefined);
+        setCtxMenu({ ...at, assets: targets });
+        return;
+      }
+      setSelected([asset.id]); // 选中集切换为该图（保持多选态）
+    }
+    setCtxMenu({ ...at, assets: [asset] });
+  }
+
   /** 选中资产对象（当前态分组内查找；跨态选不中的自动忽略） */
   const loadedById = useMemo(() => {
     const map = new Map<number, AssetDto>();
@@ -475,14 +535,9 @@ export default function GalleryPage() {
         className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
         data-testid="gallery-content"
       >
-        {/* 顶部工具条：语义查询 + 筛选 + 选择 + 计数 + 尺寸 */}
+        {/* 顶部工具条：筛选 + 计数 + 尺寸（语义入口唯一=TitleBar 全局搜索框；
+            多选入口=瓦片左上 check 圆钮 / Ctrl+点击 / 长按） */}
         <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge" data-testid="gallery-toolbar">
-          <SemanticQueryInput
-            busy={semantic.status === "loading"}
-            onRun={runSemantic}
-            initialQuery={urlQuery}
-          />
-
           {/* 筛选按钮：展开/收起面板；激活条件计数徽标 */}
           <button
             type="button"
@@ -520,35 +575,6 @@ export default function GalleryPage() {
             </svg>
           </button>
 
-          {/* 选择按钮（多选开关） */}
-          <button
-            type="button"
-            onClick={() => (selecting ? exitSelection() : setSelecting(true))}
-            aria-pressed={selecting}
-            className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
-              selecting
-                ? "border-accent bg-accent/10 text-accent"
-                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
-            }`}
-            data-testid="gallery-select-toggle"
-          >
-            <svg
-              viewBox="0 0 16 16"
-              width="11"
-              height="11"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <rect x="2" y="2" width="12" height="12" rx="2" />
-              <path d="M5 8.5l2 2 4-4.5" />
-            </svg>
-            {t("gallery.select")}
-          </button>
-
           {/* 计数徽标 */}
           <span
             className="ml-auto shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
@@ -563,6 +589,34 @@ export default function GalleryPage() {
             <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           </div>
         </div>
+
+        {/* 语义态状态头：查询词 + 结果数 + 退出（本地语义输入框已删，入口唯一=
+            TitleBar 全局搜索框；本行保证语义态一眼可识别、可退出） */}
+        {semanticMode && (
+          <div
+            className="flex h-9 shrink-0 items-center gap-3 border-b border-edge/60"
+            data-testid="semantic-status-header"
+          >
+            <span className="min-w-0 truncate text-xs text-text-secondary">
+              {semantic.status === "loading" ? (
+                t("search.semantic.loadingStatus", { query: semanticQuery })
+              ) : (
+                t("gallery.semanticStatus", {
+                  query: semanticQuery,
+                  count: semantic.assets.length,
+                })
+              )}
+            </span>
+            <button
+              type="button"
+              onClick={exitSemanticMode}
+              className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid="semantic-exit"
+            >
+              {t("gallery.semanticExit")}
+            </button>
+          </div>
+        )}
 
         {/* 语义门禁拦截提示（模型未下载/索引未建立）：行内 + 一键跳设置 */}
         {semanticGateNotice && semanticGate.reason !== null && (
@@ -641,6 +695,8 @@ export default function GalleryPage() {
               onOpenAsset={openAsset}
               onCtrlClick={ctrlSelect}
               onLongPress={ctrlSelect}
+              onCheckClick={ctrlSelect}
+              onAssetContextMenu={handleTileContextMenu}
               selection={
                 selecting
                   ? { active: true, selected, onToggle: toggleSelected }
@@ -715,6 +771,15 @@ export default function GalleryPage() {
           count={selectedAssets.length}
           assets={selectedAssets}
           onDone={exitSelection}
+        />
+      )}
+
+      {/* 瓦片右键菜单（自定义；多选态作用于全部选中） */}
+      {ctxMenu && (
+        <AssetContextMenu
+          at={{ x: ctxMenu.x, y: ctxMenu.y }}
+          assets={ctxMenu.assets}
+          onClose={() => setCtxMenu(null)}
         />
       )}
 

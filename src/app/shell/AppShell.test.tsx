@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -143,5 +143,64 @@ describe("AppShell：? 键快捷键速查弹窗", () => {
     fireEvent.keyDown(input, { key: "?" });
     await new Promise((r) => setTimeout(r, 30));
     expect(screen.queryByTestId("shortcuts-modal")).not.toBeInTheDocument();
+  });
+});
+
+// --- 顶部菜单栏移除（①）与原生行为屏蔽（②） --------------------------------------------
+
+describe("AppShell：菜单栏移除与原生行为屏蔽", () => {
+  it("顶部菜单栏已移除：无 menubar 结构；标题栏/侧栏仍在", () => {
+    renderShell("/gallery");
+
+    expect(screen.queryByTestId("menubar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("titlebar")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "primary" })).toBeInTheDocument();
+  });
+
+  it("Ctrl+1..5 全局导航快捷键保留（原菜单栏能力迁入主壳）", async () => {
+    renderShell("/gallery");
+    expect(screen.getByText("OUTLET_GALLERY")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "5", ctrlKey: true });
+    expect(await screen.findByText("OUTLET_SETTINGS")).toBeInTheDocument();
+  });
+
+  it("全局 contextmenu 被 preventDefault（右键归自定义菜单）", () => {
+    renderShell("/gallery");
+    const target = screen.getByTestId("titlebar");
+    const event = createEvent.contextMenu(target);
+    target.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("开发者工具快捷键被屏蔽：F12 / Ctrl+Shift+I/J/C preventDefault", () => {
+    renderShell("/gallery");
+    for (const init of [
+      { key: "F12" },
+      { key: "I", ctrlKey: true, shiftKey: true },
+      { key: "J", ctrlKey: true, shiftKey: true },
+      { key: "C", ctrlKey: true, shiftKey: true },
+    ]) {
+      const event = createEvent.keyDown(window, { ...init, cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+  });
+
+  it("业务快捷键不受屏蔽误伤：普通按键/方向键不 preventDefault（? 弹窗照常）", async () => {
+    resetSettingsForShell();
+    renderShell("/gallery");
+
+    const plain = createEvent.keyDown(window, { key: "a", cancelable: true });
+    window.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false);
+
+    const arrow = createEvent.keyDown(window, { key: "ArrowLeft", cancelable: true });
+    window.dispatchEvent(arrow);
+    expect(arrow.defaultPrevented).toBe(false);
+
+    // ? 仍打开快捷键速查（AppShell 业务监听未被 guard 干掉）
+    fireEvent.keyDown(window, { key: "?" });
+    expect(await screen.findByTestId("shortcuts-modal")).toBeInTheDocument();
   });
 });

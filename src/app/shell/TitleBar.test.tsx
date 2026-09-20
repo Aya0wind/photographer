@@ -4,7 +4,6 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router";
-import type { ReactNode } from "react";
 
 import i18n from "@/i18n";
 import TitleBar from "./TitleBar";
@@ -43,10 +42,12 @@ function useWindow(win: FakeWindow): void {
   );
 }
 
-function renderBar(children?: ReactNode) {
+function renderBar() {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>{children ? <TitleBar>{children}</TitleBar> : <TitleBar />}</MemoryRouter>
+      <MemoryRouter>
+        <TitleBar />
+      </MemoryRouter>
     </I18nextProvider>,
   );
 }
@@ -135,15 +136,23 @@ describe("窗口控制 API", () => {
   });
 });
 
-describe("children 内容位", () => {
-  it("主壳传入的菜单内容渲染在标题栏内", () => {
-    renderBar(<div data-testid="titlebar-extra">EXTRA</div>);
+describe("动作位（actions）", () => {
+  it("主壳传入的动作内容渲染在标题栏内（全局搜索框等）", () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <TitleBar actions={<div data-testid="titlebar-extra">EXTRA</div>} />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
 
     const bar = screen.getByTestId("titlebar");
     expect(within(bar).getByTestId("titlebar-extra")).toBeInTheDocument();
+    // 顶部菜单栏已移除：无 menubar 结构
+    expect(screen.queryByTestId("menubar")).not.toBeInTheDocument();
   });
 
-  it("无 children（选择器/向导）也可独立渲染", () => {
+  it("无 actions（选择器/向导）也可独立渲染", () => {
     renderBar();
     expect(screen.getByTestId("titlebar")).toBeInTheDocument();
     expect(screen.getByTestId("titlebar-close")).toBeInTheDocument();

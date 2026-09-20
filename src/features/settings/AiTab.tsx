@@ -36,9 +36,8 @@ import {
  *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
  *   indexTaskProgress 事件驱动重拉（aiStore）。运行态从持久化 indexStatus
  *   派生（pending/running>0）——切页重挂载/重启后状态保留，不丢「进行中」
- * - 高级调参区（索引参数/连拍分组）：收进「高级」折叠分组，勾选「开发人员
- *   配置」才显示（localStorage 持久化）；语义阈值 semanticMinScore 是常用
- *   项，留在功能开关区明面
+ * - 高级调参区（④ 扩围）：语义阈值、调度/资源、索引参数、连拍分组全部收进
+ *   「高级」折叠分组，勾选「开发人员配置」才显示（localStorage 持久化）
  * - 功能开关门控：语义=feature=semantic 组全部 done；人脸=face 组全部 done
  * - 调度/CPU 滑条（仅用于 AI 推理）/GPU（DirectML 自动回退）
  * - 人脸数据一键清除（红色强确认，两步确认防误触）
@@ -756,9 +755,8 @@ function saveAiAdvanced(on: boolean): void {
 }
 
 /**
- * 高级分组：连拍阈值/间隔、人脸检测与聚类阈值等调参输入收进可折叠区，
- * 勾选「开发人员配置」才显示（localStorage 持久化）。语义阈值是常用项，
- * 留在功能开关区明面，不进本组。
+ * 高级分组：语义阈值、调度/资源、连拍阈值/间隔、人脸检测与聚类阈值等调参
+ * 输入收进可折叠区，勾选「开发人员配置」才显示（localStorage 持久化）。
  */
 function AdvancedSection() {
   const { t } = useTranslation();
@@ -786,10 +784,108 @@ function AdvancedSection() {
       </SettingRow>
       {advanced && (
         <div data-testid="ai-advanced-params">
+          <SemanticThresholdRow />
+          <ScheduleSection />
           <AiParamsSection />
           <BurstSection />
         </div>
       )}
+    </>
+  );
+}
+
+/** 语义相似度阈值：低于该分的结果过滤（0 = 不过滤）。
+ *  实测 SigLIP2 cos 区间压缩：无关内容 top≈0.087、相关簇≈0.099+，
+ *  阈值过高全灭、过低任何查询返回 top-N≈全库（进哪个智能相册都是
+ *  全部照片的真机复现根因）。④ 起收进「高级」折叠分组。 */
+function SemanticThresholdRow() {
+  const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
+  return (
+    <SettingRow
+      label={t("settings.ai.semanticThreshold")}
+      desc={t("settings.ai.semanticThresholdDesc")}
+    >
+      <span className="flex items-center gap-2">
+        <input
+          type="number"
+          min={0}
+          max={1}
+          step={0.01}
+          value={settings.ai.semanticMinScore}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            if (Number.isFinite(v)) {
+              commit({ ai: { semanticMinScore: Math.min(1, Math.max(0, v)) } });
+            }
+          }}
+          aria-label={t("settings.ai.semanticThreshold")}
+          className="w-20 rounded border border-edge bg-bg px-2 py-1 font-mono text-xs text-text-primary outline-none focus:border-accent"
+          data-testid="ai-semantic-threshold"
+        />
+        <button
+          type="button"
+          onClick={() => commit({ ai: { semanticMinScore: 0.09 } })}
+          className="rounded border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+          data-testid="ai-semantic-threshold-reset"
+        >
+          {t("settings.ai.semanticThresholdReset")}
+        </button>
+      </span>
+    </SettingRow>
+  );
+}
+
+/** 调度 / 资源组（④ 起收进「高级」折叠分组） */
+function ScheduleSection() {
+  const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
+  return (
+    <>
+      <SectionTitle>{t("settings.section.aiSchedule")}</SectionTitle>
+      <SettingRow label={t("settings.ai.schedule")}>
+        <select
+          value={settings.ai.indexSchedule}
+          onChange={(e) =>
+            commit({
+              ai: {
+                indexSchedule: e.target.value as Settings["ai"]["indexSchedule"],
+              },
+            })
+          }
+          aria-label={t("settings.ai.schedule")}
+          className={SELECT_CLASS}
+          data-testid="ai-schedule"
+        >
+          <option value="idleOnly">{t("settings.ai.schedule.idleOnly")}</option>
+          <option value="afterImport">{t("settings.ai.schedule.afterImport")}</option>
+          <option value="manual">{t("settings.ai.schedule.manual")}</option>
+        </select>
+      </SettingRow>
+      <SettingRow label={t("settings.ai.cpu")} desc={t("settings.ai.cpuDesc")}>
+        <input
+          type="range"
+          min={10}
+          max={100}
+          step={10}
+          value={settings.ai.cpuLimitPercent}
+          onChange={(e) => commit({ ai: { cpuLimitPercent: Number(e.target.value) } })}
+          aria-label={t("settings.ai.cpu")}
+          className="w-40 accent-[#F0A83C]"
+          data-testid="ai-cpu-slider"
+        />
+        <span className="ml-2 w-10 font-mono text-xs tabular-nums text-text-secondary">
+          {settings.ai.cpuLimitPercent}%
+        </span>
+      </SettingRow>
+      <SettingRow label={t("settings.ai.gpu")} desc={t("settings.ai.gpuDesc")}>
+        <Toggle
+          checked={settings.ai.useGpu}
+          label={t("settings.ai.gpu")}
+          testId="ai-toggle-gpu"
+          onChange={(next) => commit({ ai: { useGpu: next } })}
+        />
+      </SettingRow>
     </>
   );
 }
@@ -880,87 +976,6 @@ export default function AiTab() {
           disabled
           label={t("settings.ai.scene")}
           onChange={() => {}}
-        />
-      </SettingRow>
-      {/* 语义相似度阈值：低于该分的结果过滤（0 = 不过滤）。
-          实测 SigLIP2 cos 区间压缩：无关内容 top≈0.087、相关簇≈0.099+，
-          阈值过高全灭、过低任何查询返回 top-N≈全库（进哪个智能相册都是
-          全部照片的真机复现根因） */}
-      <SettingRow
-        label={t("settings.ai.semanticThreshold")}
-        desc={t("settings.ai.semanticThresholdDesc")}
-      >
-        <span className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            max={1}
-            step={0.01}
-            value={settings.ai.semanticMinScore}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) {
-                commit({ ai: { semanticMinScore: Math.min(1, Math.max(0, v)) } });
-              }
-            }}
-            aria-label={t("settings.ai.semanticThreshold")}
-            className="w-20 rounded border border-edge bg-bg px-2 py-1 font-mono text-xs text-text-primary outline-none focus:border-accent"
-            data-testid="ai-semantic-threshold"
-          />
-          <button
-            type="button"
-            onClick={() => commit({ ai: { semanticMinScore: 0.09 } })}
-            className="rounded border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="ai-semantic-threshold-reset"
-          >
-            {t("settings.ai.semanticThresholdReset")}
-          </button>
-        </span>
-      </SettingRow>
-
-      {/* 调度 / 资源 */}
-      <SectionTitle>{t("settings.section.aiSchedule")}</SectionTitle>
-      <SettingRow label={t("settings.ai.schedule")}>
-        <select
-          value={settings.ai.indexSchedule}
-          onChange={(e) =>
-            commit({
-              ai: {
-                indexSchedule: e.target.value as Settings["ai"]["indexSchedule"],
-              },
-            })
-          }
-          aria-label={t("settings.ai.schedule")}
-          className={SELECT_CLASS}
-          data-testid="ai-schedule"
-        >
-          <option value="idleOnly">{t("settings.ai.schedule.idleOnly")}</option>
-          <option value="afterImport">{t("settings.ai.schedule.afterImport")}</option>
-          <option value="manual">{t("settings.ai.schedule.manual")}</option>
-        </select>
-      </SettingRow>
-      <SettingRow label={t("settings.ai.cpu")} desc={t("settings.ai.cpuDesc")}>
-        <input
-          type="range"
-          min={10}
-          max={100}
-          step={10}
-          value={settings.ai.cpuLimitPercent}
-          onChange={(e) => commit({ ai: { cpuLimitPercent: Number(e.target.value) } })}
-          aria-label={t("settings.ai.cpu")}
-          className="w-40 accent-[#F0A83C]"
-          data-testid="ai-cpu-slider"
-        />
-        <span className="ml-2 w-10 font-mono text-xs tabular-nums text-text-secondary">
-          {settings.ai.cpuLimitPercent}%
-        </span>
-      </SettingRow>
-      <SettingRow label={t("settings.ai.gpu")} desc={t("settings.ai.gpuDesc")}>
-        <Toggle
-          checked={settings.ai.useGpu}
-          label={t("settings.ai.gpu")}
-          testId="ai-toggle-gpu"
-          onChange={(next) => commit({ ai: { useGpu: next } })}
         />
       </SettingRow>
 

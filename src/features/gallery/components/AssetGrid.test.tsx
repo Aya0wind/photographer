@@ -176,20 +176,64 @@ describe("AssetGrid：多选交互", () => {
     renderGrid({
       groups: groupsOf([asset(1), asset(2)]),
       onOpenAsset,
+      onCheckClick: onToggle,
       selection: { active: true, selected: [2], onToggle },
     });
 
     const tiles = screen.getAllByTestId("gallery-tile");
-    // 初始选中 id2：data-selected + 角标 1
+    // 初始选中 id2：data-selected + 实心勾圆钮（③：check 圆钮替代序号角标）
     const selectedTile = tiles.find((t) => t.getAttribute("data-asset-id") === "2");
     expect(selectedTile).toHaveAttribute("data-selected", "true");
-    expect(selectedTile?.querySelector('[data-testid="gallery-tile-select-badge"]')).toHaveTextContent("1");
+    const checkOf = (id: string) =>
+      tiles.find((t) => t.getAttribute("data-asset-id") === id)?.querySelector(
+        '[data-testid="tile-check"]',
+      ) as HTMLElement;
+    expect(checkOf("2")).toHaveAttribute("data-selected", "true");
+    expect(checkOf("1")).toHaveAttribute("data-selected", "false");
     expect(tiles.find((t) => t.getAttribute("data-asset-id") === "1")).toHaveAttribute("data-selected", "false");
 
     await user.click(tiles.find((t) => t.getAttribute("data-asset-id") === "1") as HTMLElement);
     expect(onToggle).toHaveBeenCalledTimes(1);
     expect(onToggle).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
     expect(onOpenAsset).not.toHaveBeenCalled();
+  });
+
+  it("check 圆钮点击 stopPropagation：只进多选不开查看器；默认 hover 显示、多选态常显", async () => {
+    const onOpenAsset = vi.fn();
+    const onCheckClick = vi.fn();
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const user = userEvent.setup();
+    const first = renderGrid({
+      groups: groupsOf([asset(1), asset(2)]),
+      onOpenAsset,
+      onCheckClick,
+    });
+
+    // 非多选态：圆钮渲染（CSS hover 控制显隐，DOM 恒在且 opacity-0）
+    const checks = screen.getAllByTestId("tile-check");
+    expect(checks).toHaveLength(2);
+    expect(checks[0].className).toContain("opacity-0");
+    expect(checks[0].className).toContain("group-hover:opacity-100");
+
+    await user.click(checks[0]);
+    expect(onCheckClick).toHaveBeenCalledTimes(1);
+    expect(onCheckClick).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+    expect(onOpenAsset).not.toHaveBeenCalled(); // 不触发瓦片本身（不开查看器）
+    first.unmount();
+
+    // 多选态：圆钮常显（opacity-100），选中=实心勾
+    renderGrid({
+      groups: groupsOf([asset(1), asset(2)]),
+      onOpenAsset,
+      onCheckClick,
+      selection: { active: true, selected: [1], onToggle: vi.fn() },
+    });
+    const checkAfter = screen
+      .getAllByTestId("gallery-tile")
+      .find((t) => t.getAttribute("data-asset-id") === "1")
+      ?.querySelector('[data-testid="tile-check"]') as HTMLElement;
+    expect(checkAfter.className).toContain("opacity-100");
+    expect(checkAfter).toHaveAttribute("data-selected", "true");
   });
 
   it("Ctrl+点击（未开多选）→ onCtrlClick；普通点击仍开查看器", async () => {

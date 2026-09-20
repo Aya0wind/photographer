@@ -4,8 +4,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
  * 自绘标题栏（无边框窗口，tauri.conf decorations=false）：整窗最顶部 40px 条
- * （surface 底 + 底边 edge），左侧应用标识 + children 内容位（主壳传菜单栏），
- * 右侧窗口控制三钮（最小化 / 最大化↔还原 / 关闭）。
+ * （surface 底 + 底边 edge），左侧应用标识，右侧动作位（全局搜索框/任务抽屉
+ * 开关）与窗口控制三钮（最小化 / 最大化↔还原 / 关闭）。顶部菜单栏已按用户
+ * 要求移除——原菜单功能入口全部有替代：导航走侧栏、新建/打开库走 设置→库
+ * 与库选择器、退出走窗口关闭钮（Ctrl+1..5 导航快捷键保留在 AppShell）。
  *
  * - 拖拽：背景层带 data-tauri-drag-region；Tauri 注入脚本（window/scripts/drag.js）
  *   处理拖动与双击最大化（internal_toggle_maximize）——前端不再绑 onDoubleClick，
@@ -117,11 +119,8 @@ function TitleBarButton({ label, onClick, testId, danger = false, children }: Ti
 }
 
 export default function TitleBar({
-  children,
   actions,
 }: {
-  /** 菜单位（主壳传 MenuBar；选择器/向导传空） */
-  children?: ReactNode;
   /** 右侧动作位（主壳传全局搜索框/任务抽屉开关等；渲染在弹性空区与窗口控制钮之间） */
   actions?: ReactNode;
 }) {
@@ -174,11 +173,6 @@ export default function TitleBar({
         <span className="h-2.5 w-2.5 rounded-full bg-accent" aria-hidden="true" />
         <span className="text-[13px] font-semibold tracking-wide text-text-primary">Photo Hub</span>
       </div>
-
-      {/* 菜单位（主壳传 MenuBar；选择器/向导传空） */}
-      <nav className="pointer-events-none relative flex items-center" aria-label="menubar">
-        {children}
-      </nav>
 
       {/* 弹性空区：透传拖拽 */}
       <div className="pointer-events-none relative flex-1" />

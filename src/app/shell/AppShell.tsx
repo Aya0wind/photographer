@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { Outlet } from "react-router";
+import { Outlet, useNavigate } from "react-router";
 
-import MenuBar from "./MenuBar";
 import Sidebar from "./Sidebar";
 import TitleBar from "./TitleBar";
 import GlobalSearchBox from "./GlobalSearchBox";
@@ -9,21 +8,50 @@ import ShortcutsModal from "./ShortcutsModal";
 import DeviceDialog from "@/features/import/DeviceDialog";
 import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
+import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
 import { useMotionOn } from "@/lib/motion";
 
 /**
- * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 菜单栏 + 全局搜索框 +
- * 任务抽屉开关 + 窗口控制，无边框窗口拖拽/双击最大化由 Tauri drag-region 处理），
- * 下方左侧固定侧栏 + 内容区。页面切换直接替换，不做退场/进场动画。
+ * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 全局搜索框 +
+ * 任务抽屉开关 + 窗口控制，无边框窗口拖拽/双击最大化由 Tauri drag-region 处理；
+ * 顶部菜单栏已移除——导航走侧栏，Ctrl+1..5 快捷键在本壳保留），下方左侧固定
+ * 侧栏 + 内容区。页面切换直接替换，不做退场/进场动画。
  * DeviceDialog 全局挂载：任何页面下设备扫描完成都会弹出导入提示。
  * 任务抽屉（M4.5 A2）全局挂载：替代右下角浮动进度卡的唯一任务入口，
  * 开关在 TitleBar 动作位（运行中任务数徽标），面板常驻轮询索引状态。
  * 界面动画关闭（settings.appearance.animations=false）时根节点挂 .no-motion。
  */
+
+/** 全局导航快捷键（原菜单栏能力，菜单移除后保留）：Ctrl+1..5 → 主页面 */
+const CTRL_NAV: Record<string, string> = {
+  "1": "/gallery",
+  "2": "/search",
+  "3": "/import",
+  "5": "/settings",
+};
+
 export default function AppShell() {
+  const navigate = useNavigate();
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const motionOn = useMotionOn();
+
+  // 屏蔽 WebView 原生行为：右键菜单（瓦片/图片改用自定义菜单）与开发者
+  // 工具快捷键（F12 / Ctrl+Shift+I/J/C）
+  useNativeBehaviorGuard();
+
+  // Ctrl+1..5：五个主页面（与侧栏导航一一对应；导入页占 Ctrl+3）
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const to = CTRL_NAV[e.key];
+      if (!to) return;
+      e.preventDefault();
+      navigate(to);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
 
   // 全局「?」键：快捷键速查弹窗（shift+/ 产生 ?；输入框内不触发）
   useEffect(() => {
@@ -58,9 +86,7 @@ export default function AppShell() {
             <TaskDrawerToggle open={taskDrawerOpen} onClick={() => setTaskDrawerOpen((v) => !v)} />
           </>
         }
-      >
-        <MenuBar />
-      </TitleBar>
+      />
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="relative min-w-0 flex-1 overflow-y-auto">

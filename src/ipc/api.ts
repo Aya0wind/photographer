@@ -1105,6 +1105,47 @@ export async function openWithSystem(path: string): Promise<void> {
   await ipc<void>("open_with_system", { path });
 }
 
+/** 复制文件到系统剪贴板（clipboard_copy_files：Explorer 可直接粘贴的文件对象；
+ *  后端在途契约——命令未注册时 ipc() 抛错由调用方兜底提示）。不 catch：
+ *  失败文案透传给调用方。 */
+export async function clipboardCopyFiles(paths: string[]): Promise<void> {
+  await ipc<void>("clipboard_copy_files", { paths });
+}
+
+/** 侧栏导航计数（sidebar_counts：一次性纯 COUNT；后端在途契约——
+ *  命令未注册/失败/形状异常静默 null，侧栏不显示徽标） */
+export interface SidebarCounts {
+  /** 图库资产总数 */
+  assets: number;
+  /** 最近浏览条数 */
+  recentViewed: number;
+  /** 那年今天条数 */
+  onThisDay: number;
+  /** 标签数 */
+  tags: number;
+  /** 相册数 */
+  albums: number;
+}
+
+export async function sidebarCounts(): Promise<SidebarCounts | null> {
+  try {
+    const counts = await ipc<SidebarCounts | null>("sidebar_counts");
+    if (counts === null || typeof counts !== "object") return null;
+    const c = counts as Partial<Record<keyof SidebarCounts, unknown>>;
+    const numOf = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? v : 0;
+    return {
+      assets: numOf(c.assets),
+      recentViewed: numOf(c.recentViewed),
+      onThisDay: numOf(c.onThisDay),
+      tags: numOf(c.tags),
+      albums: numOf(c.albums),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // --- 事件订阅 ----------------------------------------------------------------
 
 /**

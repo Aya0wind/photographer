@@ -148,6 +148,10 @@ interface AssetGridProps {
   onCtrlClick?: (asset: AssetDto) => void;
   /** 长按瓦片 500ms（进入多选并选中该资产）；省略时不响应 */
   onLongPress?: (asset: AssetDto) => void;
+  /** 瓦片左上角 check 圆钮点击（进入多选并选中该资产；多选态=切换选中）；省略不渲染 */
+  onCheckClick?: (asset: AssetDto) => void;
+  /** 瓦片右键（自定义菜单；坐标为光标 client 坐标）；省略时不响应 */
+  onAssetContextMenu?: (asset: AssetDto, at: { x: number; y: number }) => void;
   /** 多选状态 */
   selection?: GridSelection;
   /** 无限滚动哨兵节点（挂在本网格滚动容器内、全部内容之后） */
@@ -173,6 +177,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     onOpenAsset,
     onCtrlClick,
     onLongPress,
+    onCheckClick,
+    onAssetContextMenu,
     selection,
     sentinelRef,
     onViewportChange,
@@ -390,12 +396,6 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     onOpenAsset?.(asset, group);
   }
 
-  const selectedRank = useMemo(() => {
-    const map = new Map<number, number>();
-    selection?.selected.forEach((id, i) => map.set(id, i + 1));
-    return map;
-  }, [selection?.selected]);
-
   return (
     <div
       ref={scrollRef}
@@ -480,7 +480,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const badge = badges?.get(asset.id) ?? null;
                     const score = scores?.get(asset.id);
                     const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
-                    const isSelected = selection?.active && selectedRank.has(asset.id);
+                    const isSelected =
+                      selection?.active && selection.selected.includes(asset.id);
                     const inner = (
                       <>
                         <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
@@ -503,12 +504,46 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             {Math.round(score * 100)}%
                           </span>
                         )}
-                        {isSelected && (
+                        {/* 多选 check 圆钮（Google Photos 式，替代序号角标）：默认
+                            hover 显示，点击进入多选并选中该张；多选态常显，
+                            选中=实心勾。点击/右键都 stopPropagation，不触发瓦片。 */}
+                        {onCheckClick && (
                           <span
-                            className="absolute left-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 font-mono text-[10px] font-bold leading-none text-black"
-                            data-testid="gallery-tile-select-badge"
+                            role="checkbox"
+                            aria-checked={isSelected}
+                            aria-label={asset.name}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onCheckClick(asset);
+                            }}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onContextMenu={(e) => e.stopPropagation()}
+                            className={`absolute left-1.5 top-1.5 z-20 flex h-5 w-5 items-center justify-center rounded-full border transition-opacity ${
+                              isSelected
+                                ? "border-accent bg-accent text-black opacity-100"
+                                : "border-white/70 bg-black/45 text-white"
+                            } ${
+                              selection?.active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                            }`}
+                            data-testid="tile-check"
+                            data-asset-id={asset.id}
+                            data-selected={isSelected ? "true" : "false"}
                           >
-                            {selectedRank.get(asset.id)}
+                            {isSelected && (
+                              <svg
+                                viewBox="0 0 16 16"
+                                width="11"
+                                height="11"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M3.5 8.5l3 3 6-6.5" />
+                              </svg>
+                            )}
                           </span>
                         )}
                       </>
@@ -520,7 +555,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                       : selection?.active
                         ? "outline outline-1 -outline-offset-2 outline-transparent hover:outline-edge"
                         : "";
-                    return onOpenAsset || selection?.active || onCtrlClick || onLongPress ? (
+                    return onOpenAsset || selection?.active || onCtrlClick || onLongPress || onCheckClick || onAssetContextMenu ? (
                       <button
                         key={asset.id}
                         type="button"
@@ -528,7 +563,13 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         onPointerDown={() => handleTilePointerDown(asset)}
                         onPointerUp={clearLongPress}
                         onPointerLeave={clearLongPress}
-                        className={`relative isolate touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
+                        onContextMenu={(e) => {
+                          // 右键自定义菜单（原生菜单已被全局 guard 屏蔽，此处兜底）
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onAssetContextMenu?.(asset, { x: e.clientX, y: e.clientY });
+                        }}
+                        className={`group relative isolate touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         } ${selectionClass}`}
                         style={{ width: itemWidth, height: row.height }}
