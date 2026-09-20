@@ -137,35 +137,21 @@ fn ensure_capacity(index: &mut Index, needed: usize) -> Result<(), String> {
     Ok(())
 }
 
-/// 单条 ai 任务处理：256 档缩略图 → embed → usearch 插入 → 落盘 → 记账。
-/// 返回成功与否（失败走 attempts 封顶策略）。
-fn process_ai_task(
-    db: &Db,
-    db_dir: &Path,
-    embedder: &dyn SemanticEmbedder,
-    asset_id: i64,
-) -> Result<(), String> {
-    let Some((path, _thumb_state)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
-        return Err("资产不存在".into()); // 资产已删除（级联清任务前的防御兜底）
-    };
-    // 256 档缩略图（缺失则顺手生成；这同时是 embed 的输入）
-    crate::thumbs::thumb_file(db_dir, Path::new(&path), 256)
-        .ok_or_else(|| format!("缩略图生成失败: {path}"))?;
-    let vector = embedder.embed_image(Path::new(&path), db_dir)?;
+/// 单条向量入库（批内逐条调用）：usearch 插入 → 落盘 → 记账。幂等/回滚
+/// 语义与旧单条路径一致：save 成功、SQLite 记账前崩溃 → 重放任务命中
+/// contains 直接补记账；save 失败回滚内存 key（防重试 Duplicate keys）。
+fn commit_vector(db: &Db, db_dir: &Path, asset_id: i64, vector: &[f32]) -> Result<(), String> {
     let index = writable_index(db_dir)?;
     let mut idx = index.lock().expect("semantic index mutex poisoned");
-    // save 成功、SQLite 记账前若进程崩溃，重启后任务仍会重放；索引中已有
-    // key 时直接补记账，保证回填幂等而不是报 Duplicate keys。
     if idx.contains(asset_id as u64) {
         return db.set_ai_indexed(asset_id).map_err(|e| e.to_string());
     }
     let needed = idx.size() + 1;
     ensure_capacity(&mut idx, needed)?;
-    idx.add(asset_id as u64, &vector)
+    idx.add(asset_id as u64, vector)
         .map_err(|e| e.to_string())?;
-    // 每条落盘（防崩溃丢账；调用方为批量时由 worker 循环天然降频）
+    // 每条落盘（防崩溃丢账；批内逐条调用，锁持有时间 = 单次 save）
     if let Err(error) = save_index(&idx, db_dir) {
-        // 保存失败必须回滚内存 key，否则本轮自动重试只会得到重复键错误。
         let _ = idx.remove(asset_id as u64);
         return Err(error);
     }
@@ -173,10 +159,110 @@ fn process_ai_task(
     db.set_ai_indexed(asset_id).map_err(|e| e.to_string())
 }
 
-/// 语义回填 + 全核执行（模型齐备 && enable_clip 时由调用方触发）：
+/// 一批 ai 任务处理（2026-09-21 批量化，实测单图→批 16 吞吐 2-4x）：
+/// 批内逐条解析资产路径 → **一次 embed_images 批推理**（多图单次
+/// session.run）→ 逐条 commit_vector 入库记账。批推理失败自动降级逐图
+/// 重试——单条坏图（缩略图缺失/解码失败）只废自己，不连坐整批。
+/// 返回批内每条任务的成败（与 tasks 下标对齐）。
+fn process_ai_batch(
+    db: &Db,
+    db_dir: &Path,
+    embedder: &dyn SemanticEmbedder,
+    asset_ids: &[i64],
+) -> Vec<Result<(), String>> {
+    let mut paths: Vec<Option<String>> = Vec::with_capacity(asset_ids.len());
+    for &id in asset_ids {
+        paths.push(db.thumb_info_by_id(id).ok().flatten().map(|(path, _)| path));
+    }
+    let alive: Vec<(usize, &str)> = paths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.as_deref().map(|p| (i, p)))
+        .collect();
+    // 256 档缩略图备齐（缺失生成；失败该条按失败结算，不连坐批）——
+    // 嵌入器契约不保证自带缩略图（桩/自定义实现），此处显式把关
+    let mut thumb_failed = vec![false; asset_ids.len()];
+    for &(i, path) in &alive {
+        if crate::thumbs::thumb_file(db_dir, Path::new(path), 256).is_none() {
+            eprintln!(
+                "语义索引失败 asset_id={}: 缩略图生成失败: {path}",
+                asset_ids[i]
+            );
+            thumb_failed[i] = true;
+        }
+    }
+    let embeddable: Vec<(usize, &str)> = alive
+        .iter()
+        .copied()
+        .filter(|(i, _)| !thumb_failed[*i])
+        .collect();
+    let mut vectors: Vec<Option<Vec<f32>>> = vec![None; asset_ids.len()];
+    if !embeddable.is_empty() {
+        let srcs: Vec<std::path::PathBuf> = embeddable
+            .iter()
+            .map(|&(_, p)| std::path::PathBuf::from(p))
+            .collect();
+        let batch: Result<Vec<Vec<f32>>, String> = embedder.embed_images(&srcs, db_dir);
+        match batch {
+            Ok(rows) => {
+                for ((slot, _), vec) in embeddable.iter().zip(rows) {
+                    vectors[*slot] = Some(vec);
+                }
+            }
+            Err(batch_err) => {
+                // 批失败降级逐图：隔离坏图（解码失败等），其余照常产出向量
+                eprintln!("语义批推理失败，降级逐图: {batch_err}");
+                for &(i, p) in &embeddable {
+                    vectors[i] = embedder
+                        .embed_image(Path::new(p), db_dir)
+                        .map_err(|e| {
+                            eprintln!("语义嵌入失败 asset_id={}: {e}", asset_ids[i]);
+                            e
+                        })
+                        .ok();
+                }
+            }
+        }
+    }
+    (0..asset_ids.len())
+        .map(|i| match (&paths[i], &vectors[i], thumb_failed[i]) {
+            (None, _, _) => Err("资产不存在".into()),
+            (Some(_), _, true) => Err("缩略图生成失败".into()),
+            (Some(_), None, false) => Err("嵌入失败".into()),
+            (Some(_), Some(v), false) => commit_vector(db, db_dir, asset_ids[i], v),
+        })
+        .collect()
+}
+
+/// 语义回填批大小上限（2026-09-21 实测定值，RTX 5070 Ti DML / 24 核）：
+/// **批量只在 DML 激活时启用**（[`super::prefer_batch_inference`]）——
+/// DML：批16 = 24.6 img/s vs 单图 20.0（+23%）；CPU：批16 = 12.5 vs
+/// 单图 14.1（**-12%**，单图 intra-op 已吃满核）→ CPU 走批 1。
+/// 完整矩阵见 tests/dml_bench_test.rs 基准记录。
+pub const AI_BATCH: usize = 16;
+
+/// 语义回填 worker 数（2026-09-21 实测曲线，RTX 5070 Ti DML 批16）：
+/// 1w=24.5 / 2w=43.4 / 4w=57.7 / 6w=66.9 img/s——推理虽经全局会话互斥
+/// （ort rc.13 Session::run 收 &mut self，共享会话并发 Run 不可行），
+/// 但多 worker 的**预处理**（解码+squash，锁外）与 GPU Run 流水线重叠，
+/// 4 worker 到达 6 worker 的 86% 而 embed 会话 intra 线程 4×(核/4)=全核
+/// 不超订；≥16 核取 4，≥8 核取 2，更少取 1（内存/连接footprint 权衡）。
+pub fn worker_count_for_ai() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .map(|n| match n {
+            k if k >= 16 => 4,
+            k if k >= 8 => 2,
+            _ => 1,
+        })
+        .unwrap_or(1)
+}
+
+/// 语义回填 + 并发执行（模型齐备 && enable_clip 时由调用方触发）：
 /// ① 为 `ai_indexed_at IS NULL` 且没有未完成 ai 任务的库内照片建任务
-/// ② 全核 worker 跑 ai 通道，逐条发布 indexTaskProgress{kind:"ai"}。
-/// 返回本轮成功嵌入数。
+/// ② worker 按批认领（DML 激活 = AI_BATCH 条，CPU = 1 条/批）→ 批推理
+///   （单次 session.run）→ 逐条入库记账，逐条发布 indexTaskProgress
+///   {kind:"ai"}（严格单调）。返回本轮成功嵌入数。
 pub fn run_semantic_backfill(
     db_dir: &Path,
     embedder: Arc<dyn SemanticEmbedder>,
@@ -216,34 +302,48 @@ pub fn run_semantic_backfill(
                         return 0;
                     };
                     let mut count = 0u64;
+                    // 批大按 EP 运行态定：DML 激活 = 16（快 23%），CPU = 1
+                    // （批化反而 -12%，见 prefer_batch_inference 注释）；
+                    // DML 中途毒化后后续批次自动落 1
+                    let batch_size = if super::prefer_batch_inference() {
+                        AI_BATCH
+                    } else {
+                        1
+                    };
                     loop {
-                        let task = match db.claim_index_task("ai") {
-                            Ok(Some(t)) => t,
-                            Ok(None) => break,
+                        // 批量认领 → 单次批推理 → 逐条结算
+                        let tasks = match db.claim_index_tasks("ai", batch_size) {
+                            Ok(t) => t,
                             Err(e) => {
                                 eprintln!("语义回填：认领任务失败，worker 退出: {e}");
                                 break;
                             }
                         };
-                        let result = process_ai_task(&db, &db_dir, &*embedder, task.asset_id);
-                        if let Err(error) = &result {
-                            eprintln!("语义索引失败 asset_id={}: {error}", task.asset_id);
+                        if tasks.is_empty() {
+                            break;
                         }
-                        let ok = result.is_ok();
-                        let _ = db.finish_index_task(task.id, ok);
-                        count += u64::from(ok);
-                        {
-                            let mut global_done = progress_done
-                                .lock()
-                                .expect("semantic progress mutex poisoned");
-                            if ok {
-                                *global_done += 1;
+                        let asset_ids: Vec<i64> = tasks.iter().map(|t| t.asset_id).collect();
+                        let results = process_ai_batch(&db, &db_dir, &*embedder, &asset_ids);
+                        for (task, result) in tasks.iter().zip(&results) {
+                            if let Err(error) = result {
+                                eprintln!("语义索引失败 asset_id={}: {error}", task.asset_id);
                             }
-                            bus.publish(AppEvent::IndexTaskProgress {
-                                kind: "ai".into(),
-                                done: *global_done,
-                                total,
-                            });
+                            let ok = result.is_ok();
+                            let _ = db.finish_index_task(task.id, ok);
+                            count += u64::from(ok);
+                            {
+                                let mut global_done = progress_done
+                                    .lock()
+                                    .expect("semantic progress mutex poisoned");
+                                if ok {
+                                    *global_done += 1;
+                                }
+                                bus.publish(AppEvent::IndexTaskProgress {
+                                    kind: "ai".into(),
+                                    done: *global_done,
+                                    total,
+                                });
+                            }
                         }
                     }
                     count
@@ -278,15 +378,6 @@ pub fn kick_semantic_if_ready(
     let _ = supervisor.spawn_unique("index", "semantic-backfill".into(), move |_| {
         run_semantic_backfill(&db_dir, embedder, &bus, worker_count_for_ai());
     });
-}
-
-/// AI 推理 worker 数（测试断言用）：ort 会话内存/线程重，封顶 4——
-/// embed.rs 会话 intra 线程 ≈ 核心数/4，总线程 ≈ 全核不超订。
-pub fn worker_count_for_ai() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(1, 4)
 }
 
 /// 语义分数显示标定（经验锚点，2026-09-21 于 162 张真库实测）：

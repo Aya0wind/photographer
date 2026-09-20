@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use image::RgbImage;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::Session;
 use ort::value::Tensor;
 
 use super::ModelManager;
@@ -106,12 +106,8 @@ impl ModelManager {
         if !path.is_file() {
             return Err("模型 scrfd 未下载（设置页下载后再试）".into());
         }
-        let session = Session::builder()
-            .map_err(|e| e.to_string())?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(&path)
-            .map_err(|e| format!("加载 scrfd 失败: {e}"))?;
+        // EP 序列与 embed 共用（use_gpu → [DML, CPU]；DML 失败自动落 CPU）
+        let session = super::build_session(&path, None, self.ai_params().use_gpu, "scrfd")?;
         slots.det = Some(session);
         Ok(())
     }
@@ -124,12 +120,7 @@ impl ModelManager {
         if !path.is_file() {
             return Err("模型 arcface 未下载（设置页下载后再试）".into());
         }
-        let session = Session::builder()
-            .map_err(|e| e.to_string())?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(&path)
-            .map_err(|e| format!("加载 arcface 失败: {e}"))?;
+        let session = super::build_session(&path, None, self.ai_params().use_gpu, "arcface")?;
         slots.rec = Some(session);
         Ok(())
     }
@@ -167,27 +158,39 @@ pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<Detect
             data.push(px.0[ch] as f32 / 128.0 - 127.5 / 128.0);
         }
     }
-    let tensor = Tensor::from_array((vec![1i64, 3, DET_SIZE as i64, DET_SIZE as i64], data))
-        .map_err(|e| format!("构造检测张量失败: {e}"))?;
-
-    let mut slots = face_slots().lock().expect("face slots mutex poisoned");
-    manager.ensure_det(&mut slots)?;
-    let session = slots.det.as_mut().expect("ensure_det 已保证");
-    let input_name = session
-        .inputs()
-        .first()
-        .map(|i| i.name().to_string())
-        .unwrap_or_else(|| "input".into());
-    let output_names: Vec<String> = session
-        .outputs()
-        .iter()
-        .map(|o| o.name().to_string())
-        .collect();
-    let outputs = session
-        .run(ort::inputs![input_name => tensor])
-        .map_err(|e| format!("SCRFD 推理失败: {e}"))?;
-    let heads = collect_heads(&outputs, &output_names)?;
-    drop(outputs);
+    // DML 运行时故障同 embed 语义：毒化 + 纯 CPU 重建重跑一次
+    let use_gpu = manager.ai_params().use_gpu;
+    let heads = super::run_with_dml_fallback(
+        use_gpu,
+        || {
+            let tensor = Tensor::from_array((
+                vec![1i64, 3, DET_SIZE as i64, DET_SIZE as i64],
+                data.clone(),
+            ))
+            .map_err(|e| format!("构造检测张量失败: {e}"))?;
+            let mut slots = face_slots().lock().expect("face slots mutex poisoned");
+            manager.ensure_det(&mut slots)?;
+            let session = slots.det.as_mut().expect("ensure_det 已保证");
+            let input_name = session
+                .inputs()
+                .first()
+                .map(|i| i.name().to_string())
+                .unwrap_or_else(|| "input".into());
+            let output_names: Vec<String> = session
+                .outputs()
+                .iter()
+                .map(|o| o.name().to_string())
+                .collect();
+            let outputs = session
+                .run(ort::inputs![input_name => tensor])
+                .map_err(|e| format!("SCRFD 推理失败: {e}"))?;
+            collect_heads(&outputs, &output_names)
+        },
+        || {
+            let mut slots = face_slots().lock().expect("face slots mutex poisoned");
+            slots.det = None;
+        },
+    )?;
 
     let (mut boxes, mut kps_all, mut scores) = (Vec::new(), Vec::new(), Vec::new());
     decode_heads(&heads, &mut boxes, &mut kps_all, &mut scores);
@@ -453,44 +456,55 @@ impl ModelManager {
                 data.push(px.0[ch] as f32 / 128.0 - 127.5 / 128.0);
             }
         }
-        let tensor = Tensor::from_array((
-            vec![1i64, ALIGNED_SIZE as i64, ALIGNED_SIZE as i64, 3],
-            data,
-        ))
-        .map_err(|e| format!("构造识别张量失败: {e}"))?;
-        let mut slots = face_slots().lock().expect("face slots mutex poisoned");
-        self.ensure_rec(&mut slots)?;
-        let session = slots.rec.as_mut().expect("ensure_rec 已保证");
-        let input_name = session
-            .inputs()
-            .first()
-            .map(|i| i.name().to_string())
-            .unwrap_or_else(|| "input".into());
-        let output_names: Vec<String> = session
-            .outputs()
-            .iter()
-            .map(|o| o.name().to_string())
-            .collect();
-        let outputs = session
-            .run(ort::inputs![input_name => tensor])
-            .map_err(|e| format!("ArcFace 推理失败: {e}"))?;
-        // 取末维 = 512 的输出（不同导出版本输出名不一，按形状定位最稳）
-        let mut picked: Option<Vec<f32>> = None;
-        for name in &output_names {
-            let Some(value) = outputs.get(name) else {
-                continue;
-            };
-            let (shape, data) = value
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("识别输出 {name} 解析失败: {e}"))?;
-            if shape.last().is_some_and(|d| *d as usize == FACE_EMBED_DIM) {
-                picked = Some(data.to_vec());
-                break;
-            }
-        }
-        let vec = picked.ok_or_else(|| {
-            format!("识别输出缺少 {FACE_EMBED_DIM} 维向量（现有: {output_names:?}）")
-        })?;
+        // DML 运行时故障同 embed/det 语义：毒化 + 纯 CPU 重建重跑一次
+        let use_gpu = self.ai_params().use_gpu;
+        let vec = super::run_with_dml_fallback(
+            use_gpu,
+            || {
+                let tensor = Tensor::from_array((
+                    vec![1i64, ALIGNED_SIZE as i64, ALIGNED_SIZE as i64, 3],
+                    data.clone(),
+                ))
+                .map_err(|e| format!("构造识别张量失败: {e}"))?;
+                let mut slots = face_slots().lock().expect("face slots mutex poisoned");
+                self.ensure_rec(&mut slots)?;
+                let session = slots.rec.as_mut().expect("ensure_rec 已保证");
+                let input_name = session
+                    .inputs()
+                    .first()
+                    .map(|i| i.name().to_string())
+                    .unwrap_or_else(|| "input".into());
+                let output_names: Vec<String> = session
+                    .outputs()
+                    .iter()
+                    .map(|o| o.name().to_string())
+                    .collect();
+                let outputs = session
+                    .run(ort::inputs![input_name => tensor])
+                    .map_err(|e| format!("ArcFace 推理失败: {e}"))?;
+                // 取末维 = 512 的输出（不同导出版本输出名不一，按形状定位最稳）
+                let mut picked: Option<Vec<f32>> = None;
+                for name in &output_names {
+                    let Some(value) = outputs.get(name) else {
+                        continue;
+                    };
+                    let (shape, extracted) = value
+                        .try_extract_tensor::<f32>()
+                        .map_err(|e| format!("识别输出 {name} 解析失败: {e}"))?;
+                    if shape.last().is_some_and(|d| *d as usize == FACE_EMBED_DIM) {
+                        picked = Some(extracted.to_vec());
+                        break;
+                    }
+                }
+                picked.ok_or_else(|| {
+                    format!("识别输出缺少 {FACE_EMBED_DIM} 维向量（现有: {output_names:?}）")
+                })
+            },
+            || {
+                let mut slots = face_slots().lock().expect("face slots mutex poisoned");
+                slots.rec = None;
+            },
+        )?;
         Ok(normalize(vec))
     }
 

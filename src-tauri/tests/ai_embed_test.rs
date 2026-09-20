@@ -284,12 +284,212 @@ fn semantic_backfill_persists_in_non_ascii_library_path() {
     assert_eq!(replayed, 1);
 }
 
-/// worker 封顶契约：AI 推理 worker ≤ 4（ort 会话线程重，多 worker × 全核
-/// 会话平方级超订阅——「在跑但极慢」的预防性约束）。
+/// worker 契约（2026-09-21 批量化后）：≥16 核 4 / ≥8 核 2 / 其余 1——
+/// 多 worker 的预处理与 GPU Run 流水线重叠（实测 1w=24.5→4w=57.7
+/// img/s），embed 会话 intra 线程 4×(核/4)=全核不超订。见 semantic.rs
+/// 注释与 tests/dml_bench_test.rs 基准。
 #[test]
 fn ai_worker_count_capped() {
     let n = ai::semantic::worker_count_for_ai();
-    assert!((1..=4).contains(&n), "AI worker 应封顶 4，实际 {n}");
+    assert!((1..=4).contains(&n), "AI worker 应 ∈ [1,4]，实际 {n}");
+}
+
+// ---------------------------------------------------------------------------
+// 批量认领 + 批推理路径（2026-09-21 并发优化）
+// ---------------------------------------------------------------------------
+
+/// FK 合规的占位资产行（index_tasks.asset_id 外键指向 assets）。
+fn seed_placeholder_assets(database: &db::Db, ids: std::ops::Range<i64>) {
+    for id in ids {
+        database
+            .0
+            .execute(
+                "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
+                 kind, captured_at, camera, source, created_at) \
+                 VALUES (?1, ?2, ?3, 1, '2026', 1, 'photo', \
+                 NULL, NULL, 'imported', '2026')",
+                rusqlite::params![id, format!("X:/p/{id}.jpg"), format!("{id}.jpg")],
+            )
+            .unwrap();
+    }
+}
+
+/// 批量认领：limit 内原子置 running、id 升序；不足 limit 小批；空批为空；
+/// 全部 running 后单条认领也认不出（同表互斥）。
+#[test]
+fn claim_index_tasks_batches_ordered_and_atomic() {
+    let lib = tempfile::tempdir().unwrap();
+    let database = common::open_db(lib.path());
+    seed_placeholder_assets(&database, 1..6);
+    let now = "2026-09-21T00:00:00Z";
+    for id in 1..=5 {
+        database
+            .0
+            .execute(
+                "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+                 VALUES ('ai', ?1, 'pending', 0, ?2, ?2)",
+                rusqlite::params![id, now],
+            )
+            .unwrap();
+    }
+    let first = database.claim_index_tasks("ai", 3).unwrap();
+    assert_eq!(
+        first.iter().map(|t| t.asset_id).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "id 升序小批"
+    );
+    assert!(first.iter().all(|t| t.state == "running"));
+    let second = database.claim_index_tasks("ai", 8).unwrap();
+    assert_eq!(
+        second.iter().map(|t| t.asset_id).collect::<Vec<_>>(),
+        vec![4, 5],
+        "剩余不足 limit 照常小批"
+    );
+    assert!(database.claim_index_tasks("ai", 4).unwrap().is_empty());
+    assert!(database.claim_index_task("ai").unwrap().is_none());
+}
+
+/// 并发批量认领不重不漏（两线程交错抢同 kind，并集=全集、无重复）。
+#[test]
+fn concurrent_batch_claims_are_disjoint() {
+    let lib = tempfile::tempdir().unwrap();
+    {
+        let database = common::open_db(lib.path());
+        seed_placeholder_assets(&database, 1..21);
+        let now = "2026-09-21T00:00:00Z";
+        for id in 1..=20 {
+            database
+                .0
+                .execute(
+                    "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+                     VALUES ('ai', ?1, 'pending', 0, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )
+                .unwrap();
+        }
+    }
+    let path = lib.path().to_path_buf();
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let db = common::open_db(&path);
+                let mut got = Vec::new();
+                loop {
+                    let batch = db.claim_index_tasks("ai", 4).unwrap();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    got.extend(batch.iter().map(|t| t.asset_id));
+                }
+                got
+            })
+        })
+        .collect();
+    let mut all = Vec::new();
+    for h in handles {
+        all.extend(h.join().unwrap());
+    }
+    all.sort_unstable();
+    assert_eq!(all, (1..=20).collect::<Vec<_>>(), "并集=全集");
+    let mut dedup = all.clone();
+    dedup.dedup();
+    assert_eq!(dedup.len(), all.len(), "无重复认领");
+}
+
+/// 批推理失败自动降级逐图 + 坏图只废自己（批内失败隔离）：
+/// 桩的 embed_images 恒失败（模拟批 Run 报错），embed_image 对坏路径
+/// 报错、好路径成功——回填后好资产完成索引，坏资产任务 failed。
+struct FlakyBatchEmbedder {
+    bad_marker: String,
+}
+
+impl SemanticEmbedder for FlakyBatchEmbedder {
+    fn embed_image(&self, src: &Path, _db_dir: &Path) -> Result<Vec<f32>, String> {
+        if src.to_string_lossy().contains(&self.bad_marker) {
+            Err("坏图".into())
+        } else {
+            Ok(StubEmbedder::vector(42))
+        }
+    }
+    fn embed_images(
+        &self,
+        _srcs: &[std::path::PathBuf],
+        _db_dir: &Path,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        Err("批推理炸了（模拟 DML/显存错误）".into())
+    }
+    fn embed_text(&self, _text: &str) -> Result<Vec<f32>, String> {
+        Ok(StubEmbedder::vector(7))
+    }
+}
+
+#[test]
+fn backfill_batch_failure_degrades_to_per_image_and_isolates_bad_apple() {
+    let root = tempfile::tempdir().unwrap();
+    let database = common::open_db(root.path());
+    // 3 个真实图片资产（真 JPEG 才能过缩略图关）+ 1 个坏路径资产
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        let p = root.path().join(format!("ok{n}.jpg"));
+        image::RgbImage::from_pixel(8, 8, image::Rgb([90, 90, 90]))
+            .save(&p)
+            .unwrap();
+        database
+            .0
+            .execute(
+                "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
+                 kind, captured_at, camera, source, created_at) \
+                 VALUES (?1, ?2, ?3, 1, '2026', 1, 'photo', \
+                 NULL, NULL, 'imported', '2026')",
+                rusqlite::params![n + 1, p.to_string_lossy(), format!("ok{n}.jpg")],
+            )
+            .unwrap();
+        ids.push(n + 1);
+    }
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
+             kind, captured_at, camera, source, created_at) \
+             VALUES (9, 'X:/p/bad.jpg', 'bad.jpg', 1, '2026', 1, 'photo', \
+             NULL, NULL, 'imported', '2026')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(database.create_ai_tasks_for_unindexed().unwrap(), 4);
+
+    let done = ai::semantic::run_semantic_backfill(
+        root.path(),
+        std::sync::Arc::new(FlakyBatchEmbedder {
+            bad_marker: "bad.jpg".into(),
+        }),
+        &events::EventBus::new(),
+        1, // 单 worker：一批 4 条（AI_BATCH=16 > 4）走批失败→降级路径
+    );
+    assert_eq!(done, 3, "3 好图经降级逐图成功，坏图只废自己");
+    let failed: i64 = database
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'ai' AND state = 'failed' \
+             AND asset_id = 9",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(failed, 1, "坏图任务 failed");
+    assert_eq!(database.pending_index_task_count("ai").unwrap(), 0);
+    for id in ids {
+        let indexed: Option<String> = database
+            .0
+            .query_row(
+                "SELECT ai_indexed_at FROM assets WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(indexed.is_some(), "asset {id} 应已记账");
+    }
 }
 
 /// 诊断（真机 2026-09-19：主库 119 条 ai 任务 75ms/次快失败）：复现 app 真实
@@ -364,13 +564,16 @@ fn real_backfill_chinese_dbdir_diagnosis() {
         assert!(add.is_ok());
         let save_path = db_dir.join("vectors.usearch");
         let save = idx.save(save_path.to_str().unwrap());
+        // 已知行为（semantic.rs runtime_vectors_path 的存在理由）：usearch
+        // Windows 窄字符串路径对中文目录 save 报错——生产走 save_index 的
+        // ASCII 镜像。此处仅记录不判死（本诊断的价值在 step6 全链路）。
         eprintln!(
-            "step5 usearch save ({}): ok={} exists={}",
+            "step5 usearch 原生 save ({}): ok={} exists={}（预期失败，生产经 save_index 镜像绕开）",
             save_path.display(),
             save.is_ok(),
             save_path.is_file()
         );
-        assert!(save.is_ok(), "usearch 保存中文路径失败");
+        let _ = save;
     }
 
     // 全链路：run_semantic_backfill（含任务建账/消费/记账）
@@ -483,7 +686,7 @@ fn real_semantic_backfill_one_asset() {
         .execute(
             "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
              kind, captured_at, camera, source, created_at) \
-             VALUES (1, ?1, 'DSC_0176.NEF', 1, '2026', 1, x'00', 'raw', \
+             VALUES (1, ?1, 'DSC_0176.NEF', 1, '2026', 1, 'raw', \
              NULL, NULL, 'imported', '2026')",
             rusqlite::params![source.to_string_lossy()],
         )

@@ -43,8 +43,10 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 sha2 = "0.10"
-# M4 AI 推理：ONNX Runtime（默认 CPU EP；DirectML 见 ai/embed.rs 通道说明）
-ort = "2.0.0-rc.13"
+# M4 AI 推理：ONNX Runtime（directml feature = 构建期下载含 DML 的 ms
+# 预编译库；EP 选择在运行时按 settings.ai.use_gpu / env 覆盖——见
+# ai/mod.rs execution_providers，DML 注册失败 ort 自动回落 CPU EP）
+ort = { version = "2.0.0-rc.13", features = ["directml"] }
 # SigLIP2 文本分词（HuggingFace 官方 Rust，加载 tokenizer.json WordPiece 词表）
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # HNSW 向量索引（768 维 cos 距离，dbDir/vectors.usearch）

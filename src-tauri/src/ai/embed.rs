@@ -1,14 +1,17 @@
 //! 语义嵌入推理层（M4）：SigLIP2 双塔 ONNX（vision/text 分离导出，int8
 //! 量化）+ HuggingFace WordPiece 分词器。
 //!
-//! ## 运行时选型（用户定案 2026-09-19 落地说明）
-//! - `ort` 2.0.0-rc.13，默认 feature = 构建期下载 ONNX Runtime 预编译库 +
-//!   **CPU EP**。DirectML：启用 `directml` feature 后在 [`ensure_sessions`]
-//!   的 `apply_gpu_ep` 分支注册 DML EP（`use_gpu=true` 时先试 DML，注册/
-//!   初始化失败自动落 CPU 并发 AppError 提示）——v1 该 feature 未开，
-//!   分支保留为 M4 后期开关。
-//! - 会话全局唯一、互斥串行推理（CPU EP 单会话已吃满 permit 级并行，
-//!   串行化避免争抢；GPU 通道接入后按 kind 分流）。
+//! ## 运行时选型（2026-09-21 DirectML 接入修订）
+//! - `ort` 2.0.0-rc.13 + `directml` feature（构建期下载含 DML 的 ms 预编译
+//!   库）。EP 序列见 [`super::execution_providers`]：`use_gpu=true`（默认）
+//!   → `[DirectML, CPU]`，DML 注册/初始化失败 ort 自动回落 CPU EP；
+//!   `use_gpu=false` → 纯 CPU；env `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖
+//!   （基准 A/B / 现场诊断）。
+//! - 会话全局唯一、互斥串行推理——ort rc.13 的 `Session::run` 收 `&mut
+//!   self`（Rust 侧独占借用），共享会话的并发 Run 必须串行化。索引吞吐
+//!   靠**批量化**（[`ModelManager::embed_images`]：B 图一次 Run）吃满
+//!   intra-op 线程池 / GPU dispatch，而不是并发多 Run；预处理（解码+
+//!   squash）在互斥锁**外**做，多 worker 可重叠。
 //! - 预处理（preprocessor_config.json 实测 pin）：squash resize 256×256、
 //!   RGB、`(px/127.5 - 1)`（mean/std = 0.5）、NCHW f32。图源复用 thumbs
 //!   256 档缩略图（命中缓存零解码原图），再 squash 到正方形。
@@ -19,7 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::Session;
 use ort::value::Tensor;
 
 use super::ModelManager;
@@ -34,6 +37,15 @@ const MAX_TEXT_TOKENS: usize = 64;
 pub trait SemanticEmbedder: Send + Sync {
     /// 图像嵌入：`src` 原图 + `db_dir`（256 档缩略图缓存根，命中免解码原图）。
     fn embed_image(&self, src: &Path, db_dir: &Path) -> Result<Vec<f32>, String>;
+    /// 批量图像嵌入（索引回填主路径，2026-09-21 并发优化）：多图 squash
+    /// 预处理在推理锁外做，组 (B,3,H,W) 张量单次 Run——CPU intra-op 线程
+    /// 与 GPU dispatch 都按批吃满（实测 2-4x）。默认逐图实现（桩/兼容），
+    /// 真实现见 ModelManager。
+    fn embed_images(&self, srcs: &[PathBuf], db_dir: &Path) -> Result<Vec<Vec<f32>>, String> {
+        srcs.iter()
+            .map(|src| self.embed_image(src, db_dir))
+            .collect()
+    }
     /// 文本嵌入。
     fn embed_text(&self, text: &str) -> Result<Vec<f32>, String>;
 }
@@ -83,7 +95,7 @@ impl ModelManager {
         .clamp(1, 8)
     }
 
-    /// 惰性加载 vision 会话（模型缺失 → 明确错误）。
+    /// 惰性加载 vision 会话（模型缺失 → 明确错误；EP 序列按 use_gpu/env）。
     fn ensure_visual(&self, slots: &mut InferSlots) -> Result<(), String> {
         if slots.visual.is_some() {
             return Ok(());
@@ -92,14 +104,12 @@ impl ModelManager {
         if !path.is_file() {
             return Err("模型 siglip2-visual 未下载（设置页下载后再试）".into());
         }
-        let session = Session::builder()
-            .map_err(|e| e.to_string())?
-            .with_intra_threads(Self::embed_intra_threads())
-            .map_err(|e| e.to_string())?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(&path)
-            .map_err(|e| format!("加载 siglip2-visual 失败: {e}"))?;
+        let session = super::build_session(
+            &path,
+            Some(Self::embed_intra_threads()),
+            self.ai_params().use_gpu,
+            "siglip2-visual",
+        )?;
         slots.visual = Some(session);
         Ok(())
     }
@@ -111,14 +121,12 @@ impl ModelManager {
             if !path.is_file() {
                 return Err("模型 siglip2-text 未下载（设置页下载后再试）".into());
             }
-            let session = Session::builder()
-                .map_err(|e| e.to_string())?
-                .with_intra_threads(Self::embed_intra_threads())
-                .map_err(|e| e.to_string())?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| e.to_string())?
-                .commit_from_file(&path)
-                .map_err(|e| format!("加载 siglip2-text 失败: {e}"))?;
+            let session = super::build_session(
+                &path,
+                Some(Self::embed_intra_threads()),
+                self.ai_params().use_gpu,
+                "siglip2-text",
+            )?;
             slots.text = Some(session);
         }
         if slots.tokenizer.is_none() {
@@ -152,6 +160,100 @@ impl ModelManager {
     }
 }
 
+impl ModelManager {
+    /// 缩略图 → squash 预处理张量行（NCHW f32，(px/127.5 - 1)）。
+    /// 在推理互斥锁**外**调用——多 worker 预处理与他人的 Run 重叠。
+    /// squash resize 到 input_size²（SigLIP2 预处理：非保比，直接缩放；
+    /// onnx-community 导出为动态 batch/H/W，改档位即改嵌入——需重建语义索引）。
+    fn preprocess_thumb(&self, thumb_path: &Path) -> Result<Vec<f32>, String> {
+        let input_size = self.ai_params().embed_input_size;
+        let dim = u32::from(input_size);
+        let img = image::ImageReader::open(thumb_path)
+            .ok()
+            .and_then(|r| r.decode().ok())
+            .ok_or_else(|| format!("缩略图解码失败: {}", thumb_path.display()))?
+            .to_rgb8();
+        let img = image::imageops::resize(&img, dim, dim, image::imageops::FilterType::Triangle);
+        let mut data = Vec::with_capacity(3 * input_size as usize * input_size as usize);
+        for ch in 0..3 {
+            for px in img.pixels() {
+                data.push((px.0[ch] as f32 / 127.5) - 1.0);
+            }
+        }
+        Ok(data)
+    }
+
+    /// 批量张量单次 Run → 逐行提取 L2 归一化嵌入（输出 rank-2 [B,768]
+    /// 直接行切；rank-3 为 last_hidden 兜底——按批逐行 mean-pool）。
+    /// DML 运行时故障（如 int8 LayerNormFusion E_INVALIDARG，真机
+    /// 2026-09-21）经 run_with_dml_fallback 一次性回落纯 CPU 重跑。
+    fn embed_batched(&self, batch: usize, data: Vec<f32>) -> Result<Vec<Vec<f32>>, String> {
+        let input_size = u32::from(self.ai_params().embed_input_size);
+        let dim = i64::from(input_size);
+        let input_shape = vec![batch as i64, 3, dim, dim];
+        let use_gpu = self.ai_params().use_gpu;
+        // 锁内完成 run + 张量提取（SessionOutputs 借用会话，不可出锁）
+        let extract = || -> Result<(Vec<i64>, Vec<f32>), String> {
+            let tensor = Tensor::from_array((input_shape.clone(), data.clone()))
+                .map_err(|e| format!("构造图像张量失败: {e}"))?;
+            let mut slots = slots().lock().expect("infer slots mutex poisoned");
+            self.ensure_visual(&mut slots)?;
+            let session = slots.visual.as_mut().expect("ensure_visual 已保证");
+            let out_name =
+                pick_embed_name(session, &["image_embeds", "pooler", "embeds", "hidden"])?;
+            let outputs = session
+                .run(ort::inputs![input_name_pixel_values(session) => tensor])
+                .map_err(|e| format!("vision 推理失败: {e}"))?;
+            let value = outputs
+                .get(out_name.as_str())
+                .ok_or_else(|| format!("输出 {out_name} 不存在"))?;
+            let (shape, flat) = value
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("输出 {out_name} 解析失败: {e}"))?;
+            Ok((shape.to_vec(), flat.to_vec()))
+        };
+        let reset = || {
+            let mut slots = slots().lock().expect("infer slots mutex poisoned");
+            slots.visual = None; // 丢弃 DML 会话：重建走 execution_providers 的 CPU 分支
+        };
+        let (shape, flat) = super::run_with_dml_fallback(use_gpu, extract, reset)?;
+        let (rows, dim_out) = match shape.len() {
+            // [B, 768]：整块按行切
+            2 => (shape[0] as usize, shape[1] as usize),
+            // [B, seq, 768]（last_hidden 兜底）：无 mask 语义，等权 mean-pool
+            3 => (shape[0] as usize, shape[1] as usize * shape[2] as usize),
+            n => return Err(format!("vision 输出形状不支持: rank {n} {shape:?}")),
+        };
+        if flat.len() != rows * dim_out || rows != batch {
+            return Err(format!(
+                "vision 输出行数与批不符（期望 {batch}，得 {rows}；shape {shape:?}）"
+            ));
+        }
+        if shape.len() == 3 {
+            // rank-3：批内逐样本 mean-pool 后归一化
+            let seq = shape[1] as usize;
+            let d = shape[2] as usize;
+            let mut out = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let mut pooled = vec![0f32; d];
+                for t in 0..seq {
+                    for (k, x) in pooled.iter_mut().enumerate() {
+                        *x += flat[r * seq * d + t * d + k];
+                    }
+                }
+                for x in &mut pooled {
+                    *x /= seq as f32;
+                }
+                out.push(Self::normalize(pooled));
+            }
+            return Ok(out);
+        }
+        Ok((0..rows)
+            .map(|r| Self::normalize(flat[r * dim_out..(r + 1) * dim_out].to_vec()))
+            .collect())
+    }
+}
+
 impl SemanticEmbedder for ModelManager {
     fn embed_image(&self, src: &Path, db_dir: &Path) -> Result<Vec<f32>, String> {
         // 图源 = embed_input_size 档缩略图（settings.ai 可配，默认 256；
@@ -163,37 +265,29 @@ impl SemanticEmbedder for ModelManager {
                 src.display()
             )
         })?;
-        let mut slots = slots().lock().expect("infer slots mutex poisoned");
-        self.ensure_visual(&mut slots)?;
-        let session = slots.visual.as_mut().expect("ensure_visual 已保证");
+        let data = self.preprocess_thumb(Path::new(&thumb_path))?;
+        Ok(self.embed_batched(1, data)?.pop().expect("批 1 必有一行"))
+    }
 
-        // squash resize 到 input_size²（SigLIP2 预处理：非保比，直接缩放；
-        // onnx-community 导出为动态 H/W，改档位即改嵌入——需重建语义索引）
-        let img = image::ImageReader::open(&thumb_path)
-            .ok()
-            .and_then(|r| r.decode().ok())
-            .ok_or_else(|| format!("缩略图解码失败: {thumb_path}"))?
-            .to_rgb8();
-        let dim = u32::from(input_size);
-        let img = image::imageops::resize(&img, dim, dim, image::imageops::FilterType::Triangle);
-        // NCHW f32，(px/127.5 - 1)
-        let mut data = Vec::with_capacity(3 * input_size as usize * input_size as usize);
-        for ch in 0..3 {
-            for px in img.pixels() {
-                data.push((px.0[ch] as f32 / 127.5) - 1.0);
-            }
+    fn embed_images(&self, srcs: &[PathBuf], db_dir: &Path) -> Result<Vec<Vec<f32>>, String> {
+        if srcs.is_empty() {
+            return Ok(Vec::new());
         }
-        let tensor = Tensor::from_array((vec![1i64, 3, dim as i64, dim as i64], data))
-            .map_err(|e| format!("构造图像张量失败: {e}"))?;
-        let out_name = pick_embed_name(session, &["image_embeds", "pooler", "embeds", "hidden"])?;
-        let outputs = session
-            .run(ort::inputs![input_name_pixel_values(session) => tensor])
-            .map_err(|e| format!("vision 推理失败: {e}"))?;
-        Ok(Self::normalize(pick_embed(
-            &outputs,
-            out_name.as_str(),
-            None,
-        )?))
+        let input_size = self.ai_params().embed_input_size;
+        // 缩略图备齐（命中缓存毫秒级；缺失顺手生成）+ 预处理（锁外）
+        let unit = 3 * usize::from(input_size) * usize::from(input_size);
+        let mut data = Vec::with_capacity(unit * srcs.len());
+        for src in srcs {
+            let thumb_path =
+                crate::thumbs::thumb_file(db_dir, src, input_size).ok_or_else(|| {
+                    format!(
+                        "缩略图生成失败（RAW 预览提取失败或已损坏）: {}",
+                        src.display()
+                    )
+                })?;
+            data.extend_from_slice(&self.preprocess_thumb(Path::new(&thumb_path))?);
+        }
+        self.embed_batched(srcs.len(), data)
     }
 
     fn embed_text(&self, text: &str) -> Result<Vec<f32>, String> {

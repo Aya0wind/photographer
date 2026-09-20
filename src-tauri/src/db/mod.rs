@@ -1090,6 +1090,21 @@ impl Db {
         }
     }
 
+    /// 批量认领（2026-09-21 语义推理批量化）：一次认领至多 `limit` 条
+    /// pending（id 升序）原子置 running——回填 worker 组批单次
+    /// session.run 的前提。不足 limit 照常小批，空批返回空 Vec。
+    pub fn claim_index_tasks(&self, kind: &str, limit: usize) -> Result<Vec<IndexTaskRow>> {
+        let now = now_rfc3339();
+        let mut stmt = self.0.prepare(
+            "UPDATE index_tasks SET state = 'running', updated_at = ?2 \
+             WHERE id IN (SELECT id FROM index_tasks WHERE state = 'pending' \
+                          AND kind = ?1 ORDER BY id LIMIT ?3) \
+             RETURNING id, kind, asset_id, state, attempts, created_at, updated_at",
+        )?;
+        let rows = stmt.query_map(params![kind, now, limit as i64], map_index_task)?;
+        rows.collect()
+    }
+
     /// 为语义回填建任务：`ai_indexed_at IS NULL` 的库内照片（photo/raw）
     /// 且无未完成 ai 任务的行，逐行插 pending ai 任务；返回建任务数。
     pub fn create_ai_tasks_for_unindexed(&self) -> Result<u64> {

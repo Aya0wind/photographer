@@ -142,6 +142,118 @@ fn agent() -> &'static ureq::Agent {
 }
 
 // ---------------------------------------------------------------------------
+// EP 选择与会话构建（embed/face 共用，2026-09-21 DML 接入）
+// ---------------------------------------------------------------------------
+
+/// DML 运行时故障位（进程级一次）：DML EP **注册**成功但运行时节点报错
+/// （真机 2026-09-21：SigLIP2 int8 的 LayerNormFusion 在 RTX 5070 Ti 的
+/// DML 上 E_INVALIDARG——ort 的逐算子回落只覆盖"不支持"，不覆盖"执行即
+/// 炸"）。置位后本进程所有新会话回落纯 CPU；推理层捕获错误后丢弃 DML
+/// 会话重建（见 run_with_dml_fallback）。
+fn poison_flag() -> &'static std::sync::atomic::AtomicBool {
+    static POISON: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    POISON.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+}
+
+fn dml_poisoned() -> bool {
+    poison_flag().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn poison_dml() {
+    poison_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前意图是否 DML 优先（env 覆盖 > use_gpu；已毒化则否）。
+fn dml_intended(use_gpu: bool) -> bool {
+    match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
+        Ok("dml") => !dml_poisoned(),
+        Ok("cpu") => false,
+        _ => use_gpu && !dml_poisoned(),
+    }
+}
+
+/// EP 序列：`use_gpu=true` → `[DirectML, CPU]`——DML **注册**失败时 ort 记
+/// 警告并回落（CPU EP 恒在队尾兜底，逐算子不支持的也自动回落 CPU）；
+/// `use_gpu=false` 或 DML 已毒化（运行时故障）→ 纯 CPU。env
+/// `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖（"dml" 越过 use_gpu 开关，"cpu"
+/// 压制之）——基准 A/B 与现场诊断用，优先级最高。
+pub(crate) fn execution_providers(use_gpu: bool) -> Vec<ort::ep::ExecutionProviderDispatch> {
+    if dml_intended(use_gpu) {
+        vec![
+            ort::ep::DirectML::default().build(),
+            ort::ep::CPU::default().build(),
+        ]
+    } else {
+        vec![ort::ep::CPU::default().build()]
+    }
+}
+
+/// DML 运行时故障的统一处置：`run` 失败且当前会话确为 DML 优先时——置
+/// 毒化位 + `reset` 丢弃该 DML 会话 + 重跑一次（重建会话经
+/// execution_providers 自动回落纯 CPU）。非 DML 会话 / 二次失败原样上抛。
+pub(crate) fn run_with_dml_fallback<T>(
+    use_gpu: bool,
+    mut run: impl FnMut() -> Result<T, String>,
+    reset: impl FnOnce(),
+) -> Result<T, String> {
+    match run() {
+        Ok(v) => Ok(v),
+        Err(err) => {
+            if dml_intended(use_gpu) {
+                poison_dml();
+                eprintln!("DML 推理运行时故障，本进程回落纯 CPU 并重建会话: {err}");
+                reset();
+                run()
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// 索引推理是否走批量（批大 >1 只在 DML 激活时划算：真机 2026-09-21
+/// RTX 5070 Ti，SigLIP2 vision int8——DML 批16 = 24.6 img/s vs 单图 20.0
+/// （+23%）；CPU 批16 = 12.5 vs 单图 14.1（**-12%**，单图 Run 的 intra-op
+/// 线程已吃满核，批化反而劣化）。CPU/毒化/显式 cpu 一律批 1。
+pub(crate) fn prefer_batch_inference() -> bool {
+    dml_intended(true)
+}
+
+/// ort 会话构建（embed/face 共用）：图优化 + 可选 intra 线程 + EP 序列。
+/// intra=None 用 ORT 默认（全物理核）；embed 传核心数/4（多 worker 不
+/// 超订，见 embed.rs），face 单 worker 用默认。
+/// 图优化档位：**DML 会话自动 Level1**——Level3 的 LayerNormFusion 在
+/// DML 上执行即炸（E_INVALIDARG，真机 2026-09-21），Level1 绕开融合后
+/// SigLIP2 vision 可全跑 DML；CPU 会话保持 Level3（SCRFD 实测 Level1
+/// 比 Level3 慢 ~36%）。env `SMARTPHOTO_AI_OPT=level1|disable` 可强制
+/// 覆盖（诊断用）。
+pub(crate) fn build_session(
+    path: &std::path::Path,
+    intra_threads: Option<usize>,
+    use_gpu: bool,
+    model_label: &str,
+) -> Result<ort::session::Session, String> {
+    use ort::session::builder::GraphOptimizationLevel;
+    let opt_level = match std::env::var("SMARTPHOTO_AI_OPT").as_deref() {
+        Ok("level1") => GraphOptimizationLevel::Level1,
+        Ok("disable") => GraphOptimizationLevel::Disable,
+        _ if dml_intended(use_gpu) => GraphOptimizationLevel::Level1,
+        _ => GraphOptimizationLevel::Level3,
+    };
+    let mut builder = ort::session::Session::builder().map_err(|e| e.to_string())?;
+    if let Some(n) = intra_threads {
+        builder = builder.with_intra_threads(n).map_err(|e| e.to_string())?;
+    }
+    builder
+        .with_optimization_level(opt_level)
+        .map_err(|e| e.to_string())?
+        .with_execution_providers(execution_providers(use_gpu))
+        .map_err(|e| e.to_string())?
+        .commit_from_file(path)
+        .map_err(|e| format!("加载 {model_label} 失败: {e}"))
+}
+
+// ---------------------------------------------------------------------------
 // 管理器
 // ---------------------------------------------------------------------------
 
@@ -164,6 +276,9 @@ pub struct AiIndexParams {
     pub face_detect_threshold: f32,
     /// 在线聚类归簇 cos 阈值。
     pub face_cluster_threshold: f32,
+    /// 允许 GPU（settings.ai.use_gpu 投影）：true 时会话 EP 序列
+    /// [DirectML, CPU]（DML 失败自动落 CPU，见 execution_providers）。
+    pub use_gpu: bool,
 }
 
 impl Default for AiIndexParams {
@@ -172,6 +287,7 @@ impl Default for AiIndexParams {
             embed_input_size: 256,
             face_detect_threshold: 0.5,
             face_cluster_threshold: 0.4,
+            use_gpu: true,
         }
     }
 }

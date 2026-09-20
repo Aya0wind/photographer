@@ -33,11 +33,13 @@ pub fn settings_set(
     crate::thumbs::set_thumb_cache_cap_bytes(
         u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
     );
-    // AI 索引参数投影（推理层即时读新值）
+    // AI 索引参数投影（推理层即时读新值；use_gpu 关掉时新会话回落纯 CPU——
+    // 存量会话重启后生效，v1 不做会话驱逐）
     state.ai.set_ai_params(crate::ai::AiIndexParams {
         embed_input_size: settings.ai.embed_input_size,
         face_detect_threshold: settings.ai.face_detect_threshold,
         face_cluster_threshold: settings.ai.face_cluster_threshold,
+        use_gpu: settings.ai.use_gpu,
     });
     // 参数指纹比对：变更通道后台自动重建（无库/无变更为 no-op）
     let ai_snapshot = settings.ai.clone();
