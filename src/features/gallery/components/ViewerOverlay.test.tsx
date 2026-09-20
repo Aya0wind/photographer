@@ -700,9 +700,9 @@ describe("查看器：EXIF 面板", () => {
       aspect: "3:2",
       orientation: 1,
       iso: 400,
-      aperture: 2.8,
+      aperture: "2.8",
       shutter: "1/250",
-      focalLength: 35,
+      focalLength: "35",
       flash: "未闪光",
       meteringMode: "评价测光",
       whiteBalance: "自动",
@@ -754,9 +754,9 @@ describe("查看器：EXIF 面板", () => {
     detailMock.mockResolvedValue({
       ...DETAIL,
       iso: 400,
-      aperture: 2.8,
+      aperture: "2.8",
       shutter: "1/250",
-      focalLength: 35,
+      focalLength: "35",
     });
     renderViewer();
 

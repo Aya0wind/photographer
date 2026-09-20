@@ -393,7 +393,7 @@ describe("M3 画廊命令", () => {
       iso: 400,
       fNumber: 2.8,
       exposure: "1/250",
-      focalLength: 35,
+      focalLength: "35",
     });
     await expect(assetDetail(4)).resolves.toMatchObject({
       kind: "raw",
@@ -401,9 +401,9 @@ describe("M3 画廊命令", () => {
       width: 8192,
       height: 5464,
       iso: 400,
-      aperture: 2.8,
+      aperture: "2.8",
       shutter: "1/250",
-      focalLength: 35,
+      focalLength: "35",
       capturedAt: null,
       camera: null,
     });

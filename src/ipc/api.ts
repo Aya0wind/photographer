@@ -250,8 +250,9 @@ export interface AssetDetailDto {
   /** 快门（如 "1/250"；面板追加 s 展示） */
   shutter?: string | null;
   /** 光圈 f 值 */
-  aperture?: number | null;
-  focalLength?: number | null;
+  /** 光圈/焦距为展示态字符串（"2.8"/"59"），查看器直接拼 f//mm */
+  aperture?: string | null;
+  focalLength?: string | null;
   iso?: number | null;
   /** 闪光灯（后端翻译后的文案，如「闪光」/「未闪光」） */
   flash?: string | null;
@@ -699,7 +700,15 @@ export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
     const raw = await ipc<unknown>("asset_detail", { id });
     if (raw === null || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
-    const numOf = (v: unknown): number | null =>
+    /** 字符串或有限数字 → 展示态字符串（光圈/快门/焦距双形态兼容） */
+const strNumOf = (v: unknown): string | null =>
+  typeof v === "number" && Number.isFinite(v)
+    ? String(v)
+    : typeof v === "string" && v.length > 0
+      ? v
+      : null;
+
+const numOf = (v: unknown): number | null =>
       typeof v === "number" && Number.isFinite(v) ? v : null;
     const strOf = (v: unknown): string | null =>
       typeof v === "string" && v.length > 0 ? v : null;
@@ -722,9 +731,10 @@ export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
       aspect: strOf(r.aspect),
       orientation: numOf(r.orientation),
       iso: numOf(r.iso),
-      aperture: numOf(r.aperture ?? r.fNumber),
-      shutter: strOf(r.shutter ?? r.exposure),
-      focalLength: numOf(r.focalLength),
+      // 光圈/快门/焦距：展示态字符串（"2.8"/"1/250"/"59"），数字形态兼容转字符串
+      aperture: strNumOf(r.aperture ?? r.fNumber),
+      shutter: strNumOf(r.shutter ?? r.exposureTime ?? r.exposure),
+      focalLength: strNumOf(r.focalLength),
       flash: strOf(r.flash),
       meteringMode: strOf(r.meteringMode ?? r.metering_mode),
       whiteBalance: strOf(r.whiteBalance ?? r.white_balance),

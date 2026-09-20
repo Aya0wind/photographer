@@ -81,6 +81,40 @@ function formatShutter(value: string): string {
   return /s$/i.test(value) ? value : `${value}s`;
 }
 
+/** EXIF 枚举 token → 中文（后端 exif_lite 归一 token 族；未知 token 原样） */
+const FLASH_ZH: Record<string, string> = {
+  fired: "闪光",
+  no_flash: "未闪光",
+  no_flash_function_not_fired: "未闪光（无闪光功能）",
+  flash_fired_compulsory: "闪光（强制）",
+};
+const METERING_ZH: Record<string, string> = {
+  average: "平均测光",
+  center_weighted_average: "中央重点",
+  pattern: "矩阵测光",
+  spot: "点测光",
+  multi_spot: "多点测光",
+  partial: "局部测光",
+};
+const WB_ZH: Record<string, string> = { auto: "自动", manual: "手动" };
+const PROGRAM_ZH: Record<string, string> = {
+  manual: "手动 (M)",
+  program_auto: "程序自动 (P)",
+  aperture_priority: "光圈优先 (A)",
+  shutter_priority: "快门优先 (S)",
+  creative: "创意程序",
+  action: "动作程序",
+  portrait_mode: "人像",
+  landscape_mode: "风景",
+  bulb: "B 门",
+};
+
+/** 枚举字段展示：token 查表，非 token（自由文本）原样，空 → "—" */
+function formatToken(value: string | null | undefined, table: Record<string, string>): string {
+  if (value === null || value === undefined || value === "") return "—";
+  return table[value] ?? value;
+}
+
 /** EXIF orientation（1-8）→ 拍摄方向：5-8 为竖拍（含镜像竖拍），1-4 为横拍 */
 function isPortraitOrientation(orientation: number): boolean {
   return Number.isInteger(orientation) && orientation >= 5 && orientation <= 8;
@@ -424,11 +458,15 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     }
     if (d.shutter) shotRows.push({ label: t("viewer.shutter"), value: formatShutter(d.shutter) });
     if (d.iso != null) shotRows.push({ label: t("viewer.iso"), value: String(d.iso) });
-    if (d.flash) shotRows.push({ label: t("viewer.flash"), value: d.flash });
-    if (d.meteringMode) shotRows.push({ label: t("viewer.meteringMode"), value: d.meteringMode });
-    if (d.whiteBalance) shotRows.push({ label: t("viewer.whiteBalance"), value: d.whiteBalance });
+    if (d.flash) shotRows.push({ label: t("viewer.flash"), value: formatToken(d.flash, FLASH_ZH) });
+    if (d.meteringMode) {
+      shotRows.push({ label: t("viewer.meteringMode"), value: formatToken(d.meteringMode, METERING_ZH) });
+    }
+    if (d.whiteBalance) {
+      shotRows.push({ label: t("viewer.whiteBalance"), value: formatToken(d.whiteBalance, WB_ZH) });
+    }
     if (d.exposureProgram) {
-      shotRows.push({ label: t("viewer.exposureProgram"), value: d.exposureProgram });
+      shotRows.push({ label: t("viewer.exposureProgram"), value: formatToken(d.exposureProgram, PROGRAM_ZH) });
     }
     if (d.software) shotRows.push({ label: t("viewer.software"), value: d.software });
     if (d.artist) shotRows.push({ label: t("viewer.artist"), value: d.artist });

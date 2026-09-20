@@ -239,7 +239,7 @@ pub fn refresh_exif_for_generation(
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    let marker = db_dir.join("exif-gen-3.marker");
+    let marker = db_dir.join("exif-gen-4.marker");
     if marker.is_file() {
         return;
     }
@@ -253,7 +253,7 @@ pub fn refresh_exif_for_generation(
                     .and_then(|db| db.requeue_exif_tasks_for_all().ok())
             })
             .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("exif-gen-3.marker"), b"");
+        let _ = std::fs::write(db_dir.join("exif-gen-4.marker"), b"");
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
             run_pending(&db_dir, worker_count());

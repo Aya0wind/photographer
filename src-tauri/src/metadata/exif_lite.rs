@@ -71,6 +71,10 @@ pub fn parse(head: &[u8]) -> MetaLite {
             ..MetaLite::default()
         };
     };
+    // 宽高优先级：EXIF 像素维度（0xA002/0xA003，拍摄设备的真实输出尺寸）
+    // > SOF/TIFF——ARW 的 IFD0 ImageWidth 是内嵌缩略图尺寸（真机 61MP ARW
+    // 被写成 160×120，2026-09-20）
+    let dims = exif_pixel_dimensions(&exif).or(dims);
     MetaLite {
         captured_at: datetime_field(&exif, exif::Tag::DateTimeOriginal)
             .or_else(|| datetime_field(&exif, exif::Tag::DateTime)),
@@ -213,6 +217,13 @@ fn ascii_value(exif: &exif::Exif, tag: exif::Tag) -> Option<String> {
             .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string()),
         _ => None,
     }
+}
+
+/// EXIF 像素维度 PixelXDimension(0xA002)/PixelYDimension(0xA003)。
+fn exif_pixel_dimensions(exif: &exif::Exif) -> Option<(u32, u32)> {
+    let w = uint_field(exif, 0xA002)?;
+    let h = uint_field(exif, 0xA003)?;
+    (w > 0 && h > 0).then_some((w as u32, h as u32))
 }
 
 /// EXIF 日期格式 `"%Y:%m:%d %H:%M:%S"`，不含时区 → 按待定时间视作 UTC。
