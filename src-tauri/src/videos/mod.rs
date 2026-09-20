@@ -75,6 +75,17 @@ fn locate_ffmpeg() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// 失败收尾：尽力移除本次可能新建的空档目录。严格契约是失败不落任何
+/// 缓存痕迹——空目录也算（thumb_test raw_and_video_return_none_without_cache）；
+/// remove_dir 只删空目录，并发成功写入时天然无害。
+fn cleanup_empty_tier(parent: &Path) {
+    if std::fs::remove_dir(parent).is_ok() {
+        if let Some(grand) = parent.parent() {
+            let _ = std::fs::remove_dir(grand);
+        }
+    }
+}
+
 /// 取（或生成）视频海报缓存。无法生成（侧车缺失/ffmpeg 失败/源不可读）
 /// 返回 None——调用方走既有失败计数契约。
 pub fn video_poster(db_dir: &Path, src: &Path, size: u16) -> Option<PathBuf> {
@@ -101,10 +112,12 @@ pub fn video_poster(db_dir: &Path, src: &Path, size: u16) -> Option<PathBuf> {
     let _ = std::fs::remove_file(&tmp);
     if !extract_with(&exe, src, u32::from(size), &tmp) {
         let _ = std::fs::remove_file(&tmp);
+        cleanup_empty_tier(parent);
         return None;
     }
     if std::fs::rename(&tmp, &cache).is_err() {
         let _ = std::fs::remove_file(&tmp);
+        cleanup_empty_tier(parent);
         return None;
     }
     Some(cache)
