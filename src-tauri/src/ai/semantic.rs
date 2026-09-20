@@ -88,16 +88,11 @@ pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     let index = if storage.is_file() {
         if runtime != storage {
             std::fs::copy(&storage, &runtime)
-                .map_err(|e| format!(
-                    "准备向量索引运行时镜像失败: {}",
-                    e
-                ))?;
+                .map_err(|e| format!("准备向量索引运行时镜像失败: {}", e))?;
         }
-        let mut loaded = index;
+        let loaded = index;
         loaded
-            .load(runtime.to_str().ok_or(
-                "向量运行时路径含非 UTF-8 字符",
-            )?)
+            .load(runtime.to_str().ok_or("向量运行时路径含非 UTF-8 字符")?)
             .map_err(|e| format!("加载向量索引失败: {}", e))?;
         loaded
     } else {
