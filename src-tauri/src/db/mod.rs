@@ -1719,6 +1719,34 @@ impl Db {
         Ok(())
     }
 
+    /// 删除任务历史（用户语义：这条历史连同日志一起消失）。
+    /// 非终态（running/paused）拒绝；终态（done/cancelled/failed）删
+    /// logs + jobs（job_files 经 FK ON DELETE CASCADE 级联清）。
+    /// 返回 Ok(false) = 任务不存在；Err = 进行中。
+    pub fn delete_job_history(&self, job_id: i64) -> Result<Result<bool, String>> {
+        let status: Option<String> = self
+            .0
+            .query_row("SELECT status FROM jobs WHERE id = ?1", [job_id], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        let Some(status) = status else {
+            return Ok(Ok(false)); // 不存在：幂等删除
+        };
+        if !matches!(status.as_str(), "done" | "cancelled" | "failed") {
+            return Ok(Err("任务进行中，无法删除".into()));
+        }
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute("DELETE FROM logs WHERE job_id = ?1", [job_id])?;
+        tx.execute("DELETE FROM jobs WHERE id = ?1", [job_id])?; // job_files 级联
+        tx.commit()?;
+        Ok(Ok(true))
+    }
+
     /// 日志游标分页：job 内 id 严格大于 after_id，升序取 limit 条。
     pub fn logs_page(&self, job_id: i64, after_id: i64, limit: u32) -> Result<Vec<LogRow>> {
         let mut stmt = self.0.prepare(

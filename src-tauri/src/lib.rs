@@ -193,6 +193,7 @@ pub fn run() {
             ipc::import::import_cancel,
             ipc::import::import_jobs_page,
             ipc::import::import_logs_page,
+            ipc::import::import_job_delete,
             ipc::import::import_retry_failed,
             ipc::import::clean_candidates,
             ipc::import::clean_apply,
