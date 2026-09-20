@@ -164,19 +164,64 @@ export default function SemanticResultsView({
 
   return (
     <div className="relative h-full min-h-0">
-      {indexing && (
-        <div
-          className="absolute inset-x-0 top-0 z-10 flex h-7 items-center justify-center gap-2 border-b border-edge/60 bg-bg/85 text-[11px] text-text-secondary backdrop-blur-sm"
-          data-testid="semantic-indexing"
-        >
-          <span
-            className="h-3 w-3 animate-spin rounded-full border border-edge border-t-accent"
-            aria-hidden="true"
-          />
-          {t("search.semantic.indexing", { done: indexing.done, total: indexing.total })}
-        </div>
-      )}
+      <SemanticIndexingBanner progress={indexing} />
       <AssetGrid groups={groups} tile={200} scores={scores} onOpenAsset={onOpenAsset} scrollTestId={scrollTestId} />
+    </div>
+  );
+}
+
+/** 索引建立中细提示条（语义结果视图顶部；索引完成自动消失——progress 派生自
+ *  持久化任务账，非本地瞬时态）。仅语义态渲染，默认画廊不弹。 */
+export function SemanticIndexingBanner({
+  progress,
+}: {
+  progress: { done: number; total: number } | null;
+}) {
+  const { t } = useTranslation();
+  if (!progress) return null;
+  return (
+    <div
+      className="absolute inset-x-0 top-0 z-10 flex h-7 items-center justify-center gap-2 border-b border-edge/60 bg-bg/85 text-[11px] text-text-secondary backdrop-blur-sm"
+      data-testid="semantic-indexing"
+    >
+      <span
+        className="h-3 w-3 animate-spin rounded-full border border-edge border-t-accent"
+        aria-hidden="true"
+      />
+      {t("search.semantic.indexing", { done: progress.done, total: progress.total })}
+    </div>
+  );
+}
+
+/** 门禁拦截提示（行内）：模型未下载/索引未建立 → 原因文案 + 一键跳设置 AI tab。
+ *  各语义入口（全局搜索框/画廊语义输入/智能相册）被拦时渲染；输入文字由
+ *  调用方保留、不发查询。 */
+export function SemanticGateNotice({
+  reason,
+  testId = "semantic-gate-notice",
+}: {
+  reason: "models" | "index";
+  testId?: string;
+}) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  return (
+    <div
+      className="flex min-h-[40px] flex-wrap items-center justify-between gap-3 rounded-md border border-edge bg-surface px-3 py-2"
+      role="alert"
+      data-testid={testId}
+    >
+      <span className="min-w-0 text-xs text-text-secondary">
+        {t(`search.semantic.gate.${reason}`)}
+      </span>
+      <button
+        type="button"
+        onClick={() => navigate("/settings?tab=ai")}
+        className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+        data-testid={`${testId}-gosettings`}
+      >
+        {t("search.semantic.gate.goSettings")}
+      </button>
     </div>
   );
 }

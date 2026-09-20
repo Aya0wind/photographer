@@ -27,11 +27,11 @@ import {
 
 /**
  * 设置页 AI tab（M4 实化）：
- * - 模型状态区：按能力分组（分组依据=后端清单 feature 字段，src-tauri
- *   src/ai/mod.rs CATALOG_JSON——语义=visual/text/tokenizer 三件，人脸=
- *   scrfd/arcface 两件）；每组带「一键下载」（组内未装模型批量发起，
- *   逐模型错误隔离）与聚合进度（已装 N/M）；组内行显示名称/体积/状态/
- *   操作，下载进度条走 aiModelDownloadProgress 事件
+ * - 模型管理两包制：按后端清单 feature 字段分两包（语义=visual/text/tokenizer
+ *   三件，人脸=scrfd/arcface 两件，src-tauri src/ai/mod.rs CATALOG_JSON）。
+ *   操作粒度是包——整包下载（只发起未装模型，逐模型错误隔离，任一失败包卡
+ *   标错可整包重试）、整包取消、整包删除（全部结算后统一刷新）；整包进度
+ *   为包内在途模型字节聚合，包内各模型进度小字显示，单模型不再有独立操作。
  * - 索引状态与操作区：三类索引（缩略图/EXIF/语义）计数 + 立即索引（indexKickNow，
  *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
  *   indexTaskProgress 事件驱动重拉（aiStore）。运行态从持久化 indexStatus
@@ -80,11 +80,10 @@ function StateBadge({ model }: { model: AiModelStatus }) {
   );
 }
 
-function ModelRow({ model }: { model: AiModelStatus }) {
-  const { t } = useTranslation();
+/** 包内单模型紧凑行：名称/状态徽标/体积 + 下载中小字进度。
+ *  两包制：操作粒度在包卡，行内不再放单模型按钮。 */
+function PackageModelLine({ model }: { model: AiModelStatus }) {
   const downloadProgress = useAiStore((s) => s.downloadProgress[model.id]);
-  const refresh = useAiStore((s) => s.refresh);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // 下载中：事件进度优先（节流 1s），无事件时退模型快照字段
   const progress =
@@ -99,116 +98,95 @@ function ModelRow({ model }: { model: AiModelStatus }) {
 
   return (
     <div
-      className="flex min-h-[44px] items-center justify-between gap-4 border-b border-edge/40 py-2"
-      data-testid={`ai-model-row`}
+      className="flex min-h-[32px] items-center justify-between gap-4 py-1"
       data-model-id={model.id}
       data-state={model.state}
     >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 text-xs text-text-primary">
-          <span className="truncate">{MODEL_NAMES[model.id] ?? model.id}</span>
-          <StateBadge model={model} />
-          {model.state === "done" && model.version && (
-            <span className="font-mono text-[10px] text-text-muted">{model.version}</span>
-          )}
-        </div>
-        <div className="mt-0.5 text-[11px] text-text-muted">
-          {formatBytes(model.bytesTotal)}
-          {progress && (
-            <span className="ml-2 font-mono tabular-nums">
-              {formatBytes(progress.doneBytes)} / {formatBytes(progress.totalBytes)}
-            </span>
-          )}
-        </div>
-        {progress && model.state === "downloading" && (
-          <div className="mt-1 h-1 w-48 overflow-hidden rounded bg-panel" data-testid={`ai-model-progress-${model.id}`}>
-            <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${pct}%` }} />
-          </div>
+      <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-secondary">
+        <span className="truncate text-text-primary">{MODEL_NAMES[model.id] ?? model.id}</span>
+        <StateBadge model={model} />
+        {model.state === "done" && model.version && (
+          <span className="font-mono text-[10px] text-text-muted">{model.version}</span>
         )}
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        {(model.state === "idle" || model.state === "failed") && (
-          <button
-            type="button"
-            onClick={() => {
-              void aiModelDownload(model.id);
-              void refresh();
-            }}
-            className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
-            data-testid={`ai-model-download-${model.id}`}
-          >
-            {model.state === "failed"
-              ? t("settings.ai.model.retry")
-              : t("settings.ai.model.download")}
-          </button>
-        )}
-        {model.state === "downloading" && (
-          <button
-            type="button"
-            onClick={() => {
-              void aiModelCancel(model.id);
-              void refresh();
-            }}
-            className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid={`ai-model-cancel-${model.id}`}
-          >
-            {t("settings.ai.model.cancel")}
-          </button>
-        )}
-        {model.state === "done" &&
-          (confirmDelete ? (
-            <span className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={async () => {
-                  setConfirmDelete(false);
-                  // 删除无事件回执：必须等命令结算后重拉状态，否则快照仍是
-                  // 已安装（要切走选项卡再切回才刷新的真机根因）
-                  await aiModelDelete(model.id);
-                  void refresh();
-                }}
-                className="rounded-md bg-red-500/90 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
-                data-testid={`ai-model-delete-confirm-${model.id}`}
-              >
-                {t("settings.ai.model.confirmDelete")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(false)}
-                className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary"
-                data-testid={`ai-model-delete-cancel-${model.id}`}
-              >
-                {t("common.cancel")}
-              </button>
+        {progress ? (
+          <>
+            <span className="font-mono text-[10px] tabular-nums text-text-muted">
+              {formatBytes(progress.doneBytes)} / {formatBytes(progress.totalBytes)}
             </span>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(true)}
-              className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
-              data-testid={`ai-model-delete-${model.id}`}
-            >
-              {t("settings.ai.model.delete")}
-            </button>
-          ))}
+            <div className="h-1 w-24 overflow-hidden rounded bg-panel">
+              <div
+                className="h-full bg-accent transition-[width] duration-300"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </>
+        ) : (
+          <span className="font-mono text-[10px] tabular-nums text-text-muted">
+            {formatBytes(model.bytesTotal)}
+          </span>
+        )}
       </div>
     </div>
   );
 }
 
-// --- 能力分组（③：按后端清单 feature 字段分组，一键下载 + 聚合进度） -------------------
+// --- 模型两包制（按后端清单 feature 字段分两包：整包下载/删除/取消 + 聚合进度） -------
 
-/** 能力分组：组头（组名 + 已装 N/M + 一键下载）+ 组内模型行 */
-function ModelGroup({ feature, models }: { feature: AiFeature; models: AiModelStatus[] }) {
+/** 整包状态（派生自包内模型快照） */
+type PackageState = "downloading" | "ready" | "partialFailed" | "partial" | "none";
+
+function packageState(models: AiModelStatus[]): PackageState {
+  const installed = models.filter((m) => m.state === "done").length;
+  const active = models.some((m) => m.state === "downloading" || m.state === "verifying");
+  const failed = models.some((m) => m.state === "failed");
+  if (active) return "downloading";
+  if (models.length > 0 && installed === models.length) return "ready";
+  if (failed) return "partialFailed";
+  return installed === 0 ? "none" : "partial";
+}
+
+/** 包卡片：语义搜索模型 / 人脸识别模型。操作粒度是包——整包下载（只发起
+ *  未装模型，逐模型错误隔离）、整包取消、整包删除（全部结算后统一刷新）；
+ *  整包进度为包内在下载模型的字节聚合，包内各模型进度以小字展示。 */
+function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiModelStatus[] }) {
   const { t } = useTranslation();
   const refresh = useAiStore((s) => s.refresh);
+  const downloadProgress = useAiStore((s) => s.downloadProgress);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const installed = models.filter((m) => m.state === "done").length;
   const allDone = models.length > 0 && installed === models.length;
+  const activeModels = models.filter(
+    (m) => m.state === "downloading" || m.state === "verifying",
+  );
+  const anyActive = activeModels.length > 0;
+  const anyFailed = models.some((m) => m.state === "failed");
+  const badge = packageState(models);
 
-  async function downloadAll(): Promise<void> {
-    // 组内未装模型批量发起。逐模型错误隔离：单个发起失败不中断其余，
-    // 失败项在行内仍可独立重试；去重/断点续传/镜像回退由后端按模型负责
-    // （ai_model_download 同模型在队直接返回）。
+  // 整包进度：包内在途模型字节聚合（事件进度优先，缺事件退快照字段）
+  const pkgProgress = anyActive
+    ? activeModels.reduce(
+        (acc, m) => {
+          const p =
+            downloadProgress[m.id] ?? {
+              doneBytes: m.downloadedBytes,
+              totalBytes: m.bytesTotal,
+            };
+          return { doneBytes: acc.doneBytes + p.doneBytes, totalBytes: acc.totalBytes + p.totalBytes };
+        },
+        { doneBytes: 0, totalBytes: 0 },
+      )
+    : null;
+  const pkgPct =
+    pkgProgress && pkgProgress.totalBytes > 0
+      ? Math.min(100, (pkgProgress.doneBytes / pkgProgress.totalBytes) * 100)
+      : 0;
+
+  /** 整包下载/重试：只发起未装模型（idle/failed），逐模型错误隔离——
+   *  单个失败不中断其余，失败模型留在包内由整包重试再发起 */
+  async function downloadPackage(): Promise<void> {
     for (const model of models) {
       if (model.state !== "idle" && model.state !== "failed") continue;
       try {
@@ -220,36 +198,147 @@ function ModelGroup({ feature, models }: { feature: AiFeature; models: AiModelSt
     void refresh();
   }
 
+  /** 整包取消：逐个取消包内在途下载 */
+  async function cancelPackage(): Promise<void> {
+    for (const model of activeModels) {
+      try {
+        await aiModelCancel(model.id);
+      } catch {
+        // 已结束的下载后端会 Err，静默跳过
+      }
+    }
+    void refresh();
+  }
+
+  /** 整包删除：删除全部已装模型，全部结算后统一刷新（删除无事件回执，
+   *  不等结算就刷新会拿到过期快照——单模型删除不刷新 bug 的同款时序） */
+  async function deleteInstalled(): Promise<void> {
+    setConfirmDelete(false);
+    for (const model of models) {
+      if (model.state !== "done") continue;
+      try {
+        await aiModelDelete(model.id);
+      } catch {
+        // 隔离：文件被占等单模型失败不阻断其余
+      }
+    }
+    void refresh();
+  }
+
+  const badgeClass: Record<PackageState, string> = {
+    downloading: "bg-accent/15 text-accent",
+    ready: "bg-emerald-400/15 text-emerald-400",
+    partialFailed: "bg-red-400/15 text-red-400",
+    partial: "bg-sky-400/15 text-sky-300",
+    none: "bg-panel text-text-muted",
+  };
+
   return (
     <div
-      data-testid={`ai-model-group-${feature}`}
+      className="mt-2 rounded-lg border border-edge p-3"
+      data-testid={`ai-package-${feature}`}
       data-installed={installed}
       data-total={models.length}
     >
-      <div className="flex min-h-[36px] items-center justify-between gap-4 border-b border-edge/40 py-2">
-        <div className="flex min-w-0 items-center gap-2 text-xs text-text-primary">
-          <span className="font-medium">{t(`settings.ai.group.${feature}`)}</span>
-          <span
-            className="font-mono text-[11px] tabular-nums text-text-muted"
-            data-testid={`ai-model-group-count-${feature}`}
-          >
-            {t("settings.ai.group.installedCount", { installed, total: models.length })}
-          </span>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs text-text-primary">
+            <span className="font-medium">{t(`settings.ai.package.${feature}`)}</span>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${badgeClass[badge]}`}
+              data-testid={`ai-package-badge-${feature}`}
+              data-state={badge}
+            >
+              {t(`settings.ai.package.state.${badge}`, {
+                installed,
+                total: models.length,
+              })}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[11px] text-text-muted">
+            {t("settings.ai.package.modelCount", { count: models.length })} ·{" "}
+            {formatBytes(models.reduce((sum, m) => sum + m.bytesTotal, 0))}
+          </div>
         </div>
-        {!allDone && (
-          <button
-            type="button"
-            onClick={() => void downloadAll()}
-            className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
-            data-testid={`ai-model-group-download-${feature}`}
-          >
-            {t("settings.ai.group.downloadAll")}
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {!allDone && (
+            <button
+              type="button"
+              onClick={() => void downloadPackage()}
+              className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+              data-testid={`ai-package-download-${feature}`}
+            >
+              {anyFailed ? t("settings.ai.package.retry") : t("settings.ai.package.download")}
+            </button>
+          )}
+          {anyActive && (
+            <button
+              type="button"
+              onClick={() => void cancelPackage()}
+              className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid={`ai-package-cancel-${feature}`}
+            >
+              {t("settings.ai.package.cancel")}
+            </button>
+          )}
+          {installed > 0 && !anyActive &&
+            (confirmDelete ? (
+              <span className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void deleteInstalled()}
+                  className="rounded-md bg-red-500/90 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
+                  data-testid={`ai-package-delete-confirm-${feature}`}
+                >
+                  {t("settings.ai.package.confirmDelete")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(false)}
+                  className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary"
+                  data-testid={`ai-package-delete-cancel-${feature}`}
+                >
+                  {t("common.cancel")}
+                </button>
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+                data-testid={`ai-package-delete-${feature}`}
+              >
+                {t("settings.ai.package.delete")}
+              </button>
+            ))}
+        </div>
       </div>
-      {models.map((model) => (
-        <ModelRow key={model.id} model={model} />
-      ))}
+
+      {pkgProgress && (
+        <div className="mt-2">
+          <div className="h-1 overflow-hidden rounded bg-panel" data-testid={`ai-package-progress-${feature}`}>
+            <div
+              className="h-full bg-accent transition-[width] duration-300"
+              style={{ width: `${pkgPct}%` }}
+            />
+          </div>
+          <div className="mt-0.5 font-mono text-[10px] tabular-nums text-text-muted">
+            {formatBytes(pkgProgress.doneBytes)} / {formatBytes(pkgProgress.totalBytes)}
+          </div>
+        </div>
+      )}
+
+      {anyFailed && !anyActive && (
+        <p className="mt-1.5 text-[11px] text-red-400" data-testid={`ai-package-failed-${feature}`}>
+          {t("settings.ai.package.failedHint")}
+        </p>
+      )}
+
+      <div className="mt-2 border-t border-edge/40 pt-1" data-testid={`ai-package-models-${feature}`}>
+        {models.map((model) => (
+          <PackageModelLine key={model.id} model={model} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -740,7 +829,7 @@ export default function AiTab() {
     <>
       <SectionTitle>{t("settings.section.ai")}</SectionTitle>
 
-      {/* 模型状态区（按能力分组） */}
+      {/* 模型状态区（两包制：操作粒度是包） */}
       <div data-testid="ai-model-list">
         {!modelsLoaded ? (
           <p className="py-3 text-[11px] text-text-muted">{t("settings.ai.model.loading")}</p>
@@ -748,7 +837,7 @@ export default function AiTab() {
           <p className="py-3 text-[11px] text-text-muted">{t("gallery.ipcUnavailable")}</p>
         ) : (
           FEATURE_ORDER.map((feature) => (
-            <ModelGroup key={feature} feature={feature} models={byFeature.get(feature) ?? []} />
+            <ModelPackageCard key={feature} feature={feature} models={byFeature.get(feature) ?? []} />
           ))
         )}
       </div>

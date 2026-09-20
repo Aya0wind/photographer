@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { importRootOf } from "@/features/onboarding/onboardingConfig";
@@ -156,7 +156,12 @@ export default function SettingsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const settings = useSettingsStore((s) => s.settings);
-  const [tab, setTab] = useState<SettingsTab>("general");
+  // 深链 ?tab=ai（语义门禁/未就绪引导卡的「去设置」直达；非法值回常规）
+  const [searchParams] = useSearchParams();
+  const urlTab = searchParams.get("tab");
+  const [tab, setTab] = useState<SettingsTab>(
+    TABS.some((item) => item.key === urlTab) ? (urlTab as SettingsTab) : "general",
+  );
   const [newLibOpen, setNewLibOpen] = useState(false);
 
   const library = settings.activeLibraryId

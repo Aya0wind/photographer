@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 
 import SemanticResultsView, {
   SemanticQueryInput,
+  SemanticGateNotice,
 } from "@/features/ai/SemanticResultsView";
-import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import { useSemanticSearch, useSemanticGate } from "@/features/ai/useSemanticSearch";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
@@ -112,6 +113,9 @@ function TagCover({ url, tag }: { url: string | null | undefined; tag: string })
 export function AlbumsIndexPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // 语义门禁：相册即语义查询，模型未齐/索引未建时不进入（行内提示 + 跳设置）
+  const gate = useSemanticGate();
+  const [gateNotice, setGateNotice] = useState(false);
   // 可见标签（挂载时读一次隐藏清单；设置页修改后下次进入生效）
   const visibleTags = useMemo(
     () => SMART_ALBUM_TAGS.filter((tag) => !loadHiddenTags().includes(tag)),
@@ -126,6 +130,11 @@ export function AlbumsIndexPage() {
           <h1 className="text-sm font-semibold text-text-primary">{t("albums.title")}</h1>
           <p className="text-xs text-text-muted">{t("albums.desc")}</p>
         </div>
+        {gateNotice && gate.reason !== null && (
+          <div className="mt-3">
+            <SemanticGateNotice reason={gate.reason} testId="albums-gate-notice" />
+          </div>
+        )}
         {visibleTags.length === 0 ? (
           <p className="mt-6 text-xs text-text-muted" data-testid="albums-all-hidden">
             {t("albums.allHidden")}
@@ -148,7 +157,14 @@ export function AlbumsIndexPage() {
                 <button
                   key={tag}
                   type="button"
-                  onClick={() => navigate(`/albums/${encodeURIComponent(tag)}`)}
+                  onClick={() => {
+                    // 语义门禁：相册即语义查询，被拦时不导航（行内提示 + 跳设置）
+                    if (gate.blocked) {
+                      setGateNotice(true);
+                      return;
+                    }
+                    navigate(`/albums/${encodeURIComponent(tag)}`);
+                  }}
                   className="overflow-hidden rounded-lg border border-edge bg-surface text-center transition-colors hover:border-accent"
                   data-testid="albums-tag"
                   data-tag={tag}
@@ -177,16 +193,18 @@ export function AlbumTagPage() {
   const { t } = useTranslation();
   const { tag = "" } = useParams();
   const semantic = useSemanticSearch();
+  // 语义门禁：被拦时不自动执行、输入框回车不发查询（文字保留）
+  const gate = useSemanticGate();
   const [lastQuery, setLastQuery] = useState(tag);
   // 语义结果同样可点开查看器（与画廊/搜索页一致）
   const groups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
 
-  // 标签变化（含首挂载）→ 自动语义搜索
+  // 标签变化（含首挂载）→ 自动语义搜索（门禁未过不发——直接展示拦截提示）
   useEffect(() => {
     if (tag) {
       setLastQuery(tag);
-      void semantic.run(tag);
+      if (!gate.blocked) void semantic.run(tag);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tag]);
@@ -200,12 +218,18 @@ export function AlbumTagPage() {
         <SemanticQueryInput
           busy={semantic.status === "loading"}
           onRun={(q) => {
+            if (gate.blocked) return; // 门禁：不发查询；输入文字保留
             setLastQuery(q);
             void semantic.run(q);
           }}
         />
       </div>
       <div className="mx-auto min-h-0 w-full max-w-[1600px] flex-1 px-6 pt-3">
+        {gate.reason !== null && (
+          <div className="mb-3">
+            <SemanticGateNotice reason={gate.reason} testId="album-tag-gate-notice" />
+          </div>
+        )}
         <SemanticResultsView
           status={semantic.status}
           assets={semantic.assets}

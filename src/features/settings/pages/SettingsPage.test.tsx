@@ -27,6 +27,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
 });
 import {
   aiFaceDataClear,
+  aiModelCancel,
   aiModelDelete,
   aiModelDownload,
   aiModelsStatus,
@@ -41,6 +42,7 @@ import { HIDDEN_ALBUM_TAGS_KEY } from "@/features/albums/lib/hiddenTags";
 
 const aiModelsStatusMock = vi.mocked(aiModelsStatus);
 const aiModelDownloadMock = vi.mocked(aiModelDownload);
+const aiModelCancelMock = vi.mocked(aiModelCancel);
 const aiModelDeleteMock = vi.mocked(aiModelDelete);
 const aiFaceDataClearMock = vi.mocked(aiFaceDataClear);
 const indexStatusMock = vi.mocked(indexStatus);
@@ -322,6 +324,28 @@ describe("「库」选项卡（保留库管理能力）", () => {
     expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
   });
 
+  it("深链 ?tab=ai 直达 AI 选项卡（语义门禁「去设置」落点）；非法 tab 回常规", async () => {
+    function renderSettings(entry: string) {
+      return render(
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={[entry]}>
+            <Routes>
+              <Route path="/settings" element={<SettingsPage />} />
+            </Routes>
+          </MemoryRouter>
+        </I18nextProvider>,
+      );
+    }
+    const first = renderSettings("/settings?tab=ai");
+    expect(await screen.findByTestId("ai-model-list")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-tab-ai")).toHaveAttribute("aria-selected", "true");
+    first.unmount();
+
+    renderSettings("/settings?tab=nonsense");
+    expect(screen.getByTestId("settings-row-close-behavior")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-tab-general")).toHaveAttribute("aria-selected", "true");
+  });
+
   it("「新建库」打开与菜单共用的对话框（同一 testid）", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
@@ -370,54 +394,71 @@ describe("AI tab（M4 实化）", () => {
     expect(useSettingsStore.getState().settings.ai.semanticMinScore).toBe(0.09);
   });
 
-  it("模型状态区：按能力分组渲染 5 行（组头 + 显示名/体积/状态徽标）", async () => {
+  it("模型管理两包制：两张包卡片（整包状态文案）+ 包内模型紧凑行，无单模型操作", async () => {
     aiModelsStatusMock.mockResolvedValue(allModels());
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
 
-    const rows = await screen.findAllByTestId("ai-model-row");
-    expect(rows).toHaveLength(5);
-    expect(rows[0]).toHaveTextContent("语义 · 图像编码");
-    expect(rows[0]).toHaveTextContent("已安装");
-    // 语义组三件：visual / text / tokenizer（分组依据=后端清单 feature 字段）
-    expect(rows[2]).toHaveTextContent("语义 · 分词器");
-    expect(rows[3]).toHaveTextContent("人脸 · 检测");
-    expect(rows[3]).toHaveTextContent("2.0 MB");
-    expect(rows[3]).toHaveTextContent("未下载");
-
-    // 组头：组名 + 聚合进度（已装 N/M）
-    const semanticGroup = screen.getByTestId("ai-model-group-semantic");
-    expect(semanticGroup).toHaveAttribute("data-installed", "3");
-    expect(semanticGroup).toHaveAttribute("data-total", "3");
-    expect(screen.getByTestId("ai-model-group-count-semantic")).toHaveTextContent(
-      "已安装 3/3",
-    );
-    expect(screen.getByTestId("ai-model-group-count-face")).toHaveTextContent("已安装 0/2");
+    // 两张包卡：语义（三件全 done → 已就绪）/ 人脸（两件未装 → 未安装）
+    const semantic = await screen.findByTestId("ai-package-semantic");
+    expect(semantic).toHaveAttribute("data-installed", "3");
+    expect(semantic).toHaveAttribute("data-total", "3");
+    expect(screen.getByTestId("ai-package-badge-semantic")).toHaveTextContent("已就绪");
     expect(screen.getByText("语义搜索模型")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-package-badge-face")).toHaveTextContent("未安装");
+    expect(screen.getByTestId("ai-package-face")).toHaveAttribute("data-installed", "0");
     expect(screen.getByText("人脸识别模型")).toBeInTheDocument();
+
+    // 包内模型紧凑行仍展示（名称/状态/体积），但操作粒度在包：无单模型按钮
+    const lines = within(screen.getByTestId("ai-package-models-semantic")).getAllByText(
+      /语义 · /,
+    );
+    expect(lines).toHaveLength(3);
+    expect(
+      within(screen.getByTestId("ai-package-models-face")).getByText("人脸 · 检测"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-model-download-scrfd")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ai-model-delete-siglip2-visual")).not.toBeInTheDocument();
+
+    // 已就绪的包只有删除；未装的包只有下载
+    expect(screen.getByTestId("ai-package-download-face")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-package-delete-face")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ai-package-delete-semantic")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-package-download-semantic")).not.toBeInTheDocument();
   });
 
-  it("下载：idle 行点击下载 → ai_model_download；状态翻 downloading 后进度条随事件增长", async () => {
-    const idle = allModels();
+  it("整包下载：包卡按钮发起全部未装模型；进度事件聚合到整包进度条", async () => {
     aiModelsStatusMock
-      .mockResolvedValueOnce(idle)
+      .mockResolvedValueOnce(allModels())
       .mockResolvedValue(
-        allModels([{ id: "scrfd", state: "downloading" }]),
+        allModels([
+          { id: "scrfd", state: "downloading", downloadedBytes: 0 },
+          {
+            id: "arcface",
+            state: "downloading",
+            downloadedBytes: 0,
+            bytesTotal: 4 * 1024 * 1024,
+          },
+        ]),
       );
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
 
-    await user.click(await screen.findByTestId("ai-model-download-scrfd"));
+    await user.click(await screen.findByTestId("ai-package-download-face"));
+    // 两件未装模型都发起（顺序 await，逐个结算）
+    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
     expect(aiModelDownloadMock).toHaveBeenCalledWith("scrfd");
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("arcface");
 
-    // refresh 后状态翻 downloading：进度条出现（快照字段 0/2MB）
-    const row = document.querySelector('[data-model-id="scrfd"]');
-    expect(row).not.toBeNull();
-    expect(row).toHaveAttribute("data-state", "downloading");
+    // refresh 后状态翻 downloading：整包徽标 + 取消按钮出现
+    await waitFor(() =>
+      expect(screen.getByTestId("ai-package-badge-face")).toHaveTextContent("下载中"),
+    );
+    expect(screen.getByTestId("ai-package-cancel-face")).toBeInTheDocument();
 
-    // 事件驱动进度（节流 1s 的节流事件）
+    // 事件进度（节流 1s）聚合到整包：scrfd 1MB/2MB + arcface 2MB/4MB = 3MB/6MB
     act(() => {
       useAiStore.getState().handleAppEvent({
         type: "aiModelDownloadProgress",
@@ -425,69 +466,111 @@ describe("AI tab（M4 实化）", () => {
         doneBytes: 1024 * 1024,
         totalBytes: 2 * 1024 * 1024,
       });
+      useAiStore.getState().handleAppEvent({
+        type: "aiModelDownloadProgress",
+        id: "arcface",
+        doneBytes: 2 * 1024 * 1024,
+        totalBytes: 4 * 1024 * 1024,
+      });
     });
-    await waitFor(() =>
-      expect(document.querySelector('[data-testid="ai-model-progress-scrfd"]')).not.toBeNull(),
-    );
-    expect(row).toHaveTextContent("1.0 MB / 2.0 MB");
+    expect(await screen.findByTestId("ai-package-progress-face")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-package-face")).toHaveTextContent("3.0 MB / 6.0 MB");
+    // 包内单模型进度小字仍在
+    expect(screen.getByTestId("ai-package-face")).toHaveTextContent("1.0 MB / 2.0 MB");
   });
 
-  it("删除释放磁盘：两步确认（可取消）；确认后调 ai_model_delete", async () => {
-    aiModelsStatusMock.mockResolvedValue(allModels());
+  it("整包取消：逐个取消包内在途下载", async () => {
+    aiModelCancelMock.mockReset().mockResolvedValue(undefined);
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "scrfd", state: "downloading", downloadedBytes: 0 },
+        {
+          id: "arcface",
+          state: "downloading",
+          downloadedBytes: 0,
+          bytesTotal: 4 * 1024 * 1024,
+        },
+      ]),
+    );
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
 
-    await user.click(await screen.findByTestId("ai-model-delete-siglip2-visual"));
-    // 取消路径
-    await user.click(screen.getByTestId("ai-model-delete-cancel-siglip2-visual"));
-    expect(screen.queryByTestId("ai-model-delete-confirm-siglip2-visual")).not.toBeInTheDocument();
-
-    // 确认路径
-    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
-    await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
-    expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-visual");
+    await user.click(await screen.findByTestId("ai-package-cancel-face"));
+    await waitFor(() => expect(aiModelCancelMock).toHaveBeenCalledTimes(2));
+    expect(aiModelCancelMock).toHaveBeenCalledWith("scrfd");
+    expect(aiModelCancelMock).toHaveBeenCalledWith("arcface");
   });
 
-  it("删除后状态即时刷新：ai_model_delete 结算后重拉，不切选项卡卡片即翻未下载", async () => {
-    // 真机根因：删除命令无事件回执，旧实现发起后立刻 refresh（后端尚未删除，
-    // 快照仍是 done），此后无人再拉——要切走选项卡再切回才变
-    let deleted = false;
-    aiModelDeleteMock.mockImplementation(async () => {
-      deleted = true;
+  it("整包删除：两步确认（可取消）；确认后删除全部已装模型并即时刷新", async () => {
+    // 真机时序根因：删除无事件回执，必须等全部 ai_model_delete 结算后再刷新
+    const deleted = new Set<string>();
+    aiModelDeleteMock.mockImplementation(async (id: string) => {
+      deleted.add(id);
     });
     aiModelsStatusMock.mockImplementation(async () =>
-      allModels([{ id: "siglip2-visual", state: deleted ? "idle" : "done" }]),
+      allModels(
+        (["siglip2-visual", "siglip2-text", "siglip2-tokenizer"] as const).map((id) => ({
+          id,
+          state: deleted.has(id) ? ("idle" as const) : ("done" as const),
+        })),
+      ),
     );
     const user = userEvent.setup();
     renderSettingsPage();
     await gotoAiTab(user);
 
-    const row = await waitFor(() => {
-      const el = document.querySelector('[data-model-id="siglip2-visual"]');
-      expect(el).not.toBeNull();
-      return el as HTMLElement;
+    expect(await screen.findByTestId("ai-package-badge-semantic")).toHaveTextContent("已就绪");
+
+    // 取消路径：不发删除
+    await user.click(screen.getByTestId("ai-package-delete-semantic"));
+    await user.click(screen.getByTestId("ai-package-delete-cancel-semantic"));
+    expect(screen.queryByTestId("ai-package-delete-confirm-semantic")).not.toBeInTheDocument();
+    expect(aiModelDeleteMock).not.toHaveBeenCalled();
+
+    // 确认路径：包内全部已装模型（三件）都删，顺序结算后统一刷新
+    await user.click(screen.getByTestId("ai-package-delete-semantic"));
+    await user.click(screen.getByTestId("ai-package-delete-confirm-semantic"));
+    await waitFor(() => expect(aiModelDeleteMock).toHaveBeenCalledTimes(3));
+    expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-visual");
+    expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-text");
+    expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-tokenizer");
+
+    // 不切选项卡：包卡即时翻「未安装」0/3
+    await waitFor(() => {
+      expect(screen.getByTestId("ai-package-semantic")).toHaveAttribute("data-installed", "0");
     });
-    expect(row).toHaveAttribute("data-state", "done");
-
-    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
-    await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
-
-    // 不切选项卡：删除结算 → refresh → 卡片即时翻 idle
-    await waitFor(() =>
-      expect(document.querySelector('[data-model-id="siglip2-visual"]')).toHaveAttribute(
-        "data-state",
-        "idle",
-      ),
-    );
-    // 挂载一次 + 删除后一次
+    expect(screen.getByTestId("ai-package-badge-semantic")).toHaveTextContent("未安装");
+    expect(screen.getByTestId("ai-package-download-semantic")).toBeInTheDocument();
+    // 挂载一次 + 整包删除后一次
     expect(aiModelsStatusMock).toHaveBeenCalledTimes(2);
   });
 
-  it("一键下载：组内未装模型批量发起（done/downloading 不重复发起）", async () => {
+  it("整包下载只发起未装模型（已装不重复发起）；部分安装显示 N/M", async () => {
     aiModelsStatusMock.mockResolvedValue(
       allModels([
         { id: "siglip2-text", state: "idle" },
+        { id: "siglip2-tokenizer", state: "idle" },
+      ]),
+    );
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await gotoAiTab(user);
+
+    expect(await screen.findByTestId("ai-package-badge-semantic")).toHaveTextContent("已安装 1/3");
+    expect(screen.getByTestId("ai-package-download-semantic")).toHaveTextContent("下载");
+
+    await user.click(screen.getByTestId("ai-package-download-semantic"));
+    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-text");
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-tokenizer");
+    expect(aiModelDownloadMock).not.toHaveBeenCalledWith("siglip2-visual");
+  });
+
+  it("任一模型失败：包卡标错 + 失败提示，整包重试只发起未装模型", async () => {
+    aiModelsStatusMock.mockResolvedValue(
+      allModels([
+        { id: "siglip2-text", state: "done" },
         { id: "siglip2-tokenizer", state: "failed" },
       ]),
     );
@@ -495,16 +578,19 @@ describe("AI tab（M4 实化）", () => {
     renderSettingsPage();
     await gotoAiTab(user);
 
-    await user.click(await screen.findByTestId("ai-model-group-download-semantic"));
-    // 组内未装两件（idle + failed）都发起；已装的 visual 不重复发起
-    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
-    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-text");
+    expect(await screen.findByTestId("ai-package-badge-semantic")).toHaveTextContent("部分失败");
+    expect(screen.getByTestId("ai-package-failed-semantic")).toHaveTextContent("整包重试");
+    expect(screen.getByTestId("ai-package-download-semantic")).toHaveTextContent("重试下载");
+
+    await user.click(screen.getByTestId("ai-package-download-semantic"));
+    // 只重试未装的 tokenizer；visual/text 已装不发起
+    await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(1));
     expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-tokenizer");
     expect(aiModelDownloadMock).not.toHaveBeenCalledWith("siglip2-visual");
-    expect(screen.getByTestId("ai-model-group-count-semantic")).toHaveTextContent("已安装 1/3");
+    expect(aiModelDownloadMock).not.toHaveBeenCalledWith("siglip2-text");
   });
 
-  it("一键下载错误隔离：单个模型发起失败不中断其余", async () => {
+  it("整包下载错误隔离：单个模型发起失败不中断其余", async () => {
     aiModelsStatusMock.mockResolvedValue(
       allModels([
         { id: "siglip2-visual", state: "idle" },
@@ -520,29 +606,10 @@ describe("AI tab（M4 实化）", () => {
     renderSettingsPage();
     await gotoAiTab(user);
 
-    await user.click(await screen.findByTestId("ai-model-group-download-semantic"));
+    await user.click(await screen.findByTestId("ai-package-download-semantic"));
     await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(3));
     expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-visual");
     expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-tokenizer");
-  });
-
-  it("组内全装后一键下载按钮消失", async () => {
-    aiModelsStatusMock.mockResolvedValue(
-      allModels([
-        { id: "siglip2-tokenizer", state: "idle" },
-        { id: "scrfd", state: "done" },
-        { id: "arcface", state: "done" },
-      ]),
-    );
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await gotoAiTab(user);
-
-    await screen.findAllByTestId("ai-model-row");
-    expect(screen.getByTestId("ai-model-group-count-face")).toHaveTextContent("已安装 2/2");
-    expect(screen.queryByTestId("ai-model-group-download-face")).not.toBeInTheDocument();
-    // 语义组未装全（分词器缺）：按钮仍在
-    expect(screen.getByTestId("ai-model-group-download-semantic")).toBeInTheDocument();
   });
 
   it("功能门控：两个 siglip2 未 done → 语义开关禁用+「先下载模型」；都 done → 开启写设置", async () => {

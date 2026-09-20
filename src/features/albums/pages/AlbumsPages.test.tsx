@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -10,7 +10,8 @@ import Sidebar from "@/app/shell/Sidebar";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import { AlbumsIndexPage, AlbumTagPage, SMART_ALBUM_TAGS } from "./AlbumsPages";
 import { HIDDEN_ALBUM_TAGS_KEY } from "../lib/hiddenTags";
-import { searchSemantic, assetsByIds, assetThumbGet } from "@/ipc/api";
+import { searchSemantic, assetsByIds, assetThumbGet, aiModelsStatus, indexStatus } from "@/ipc/api";
+import type { AiModelStatus, IndexStatus } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -20,6 +21,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     searchSemantic: vi.fn(),
     assetsByIds: vi.fn(),
     assetThumbGet: vi.fn(),
+    aiModelsStatus: vi.fn(),
+    indexStatus: vi.fn(),
   };
 });
 vi.mock("@tauri-apps/api/core", () => ({
@@ -32,7 +35,51 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 const searchSemanticMock = vi.mocked(searchSemantic);
 const assetsByIdsMock = vi.mocked(assetsByIds);
 const thumbMock = vi.mocked(assetThumbGet);
+const aiModelsStatusMock = vi.mocked(aiModelsStatus);
+const indexStatusMock = vi.mocked(indexStatus);
 const convertMock = vi.mocked(convertFileSrc);
+
+function gateModel(
+  id: string,
+  feature: "semantic" | "face",
+  state: AiModelStatus["state"],
+): AiModelStatus {
+  return {
+    id,
+    installed: state === "done",
+    bytesTotal: 1024,
+    downloadedBytes: state === "done" ? 1024 : 0,
+    version: null,
+    feature,
+    state,
+  };
+}
+
+function readyModels(): AiModelStatus[] {
+  return [
+    gateModel("siglip2-visual", "semantic", "done"),
+    gateModel("siglip2-text", "semantic", "done"),
+    gateModel("siglip2-tokenizer", "semantic", "done"),
+    gateModel("scrfd", "face", "done"),
+    gateModel("arcface", "face", "done"),
+  ];
+}
+
+/** 语义三件缺 text → 门禁 models 分支 */
+function gatedModels(): AiModelStatus[] {
+  return readyModels().map((m) =>
+    m.id === "siglip2-text" ? { ...m, state: "idle" as const, installed: false } : m,
+  );
+}
+
+function builtIndex(): IndexStatus {
+  return {
+    thumb: { pending: 0, running: 0, done: 0, failed: 0, total: 100 },
+    exif: { pending: 0, running: 0, done: 0, failed: 0, total: 100 },
+    ai: { pending: 0, running: 0, done: 100, failed: 0, total: 100 },
+    face: { pending: 0, running: 0, done: 0, failed: 0, total: 0 },
+  };
+}
 
 function makeAsset(id: number, name: string) {
   return {
@@ -78,6 +125,9 @@ beforeEach(() => {
   assetsByIdsMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
+  // 语义门禁默认就绪（模型全装 + 索引已建）；各用例按需覆写为被拦态
+  aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
+  indexStatusMock.mockReset().mockResolvedValue(builtIndex());
   useAiStore.getState().resetForTests();
 });
 
@@ -217,5 +267,72 @@ describe("智能相册标签隐藏", () => {
 
     expect(await screen.findByTestId("albums-all-hidden")).toBeInTheDocument();
     expect(screen.queryByTestId("albums-tag")).not.toBeInTheDocument();
+  });
+});
+
+// --- 语义门禁（模型未齐/索引未建 → 点相册不导航、标签页不发查询） ----------------------
+
+describe("智能相册：语义搜索前置门禁", () => {
+  it("模型未齐：点相册不导航，行内提示 + 一键跳设置", async () => {
+    const user = userEvent.setup();
+    aiModelsStatusMock.mockResolvedValue(gatedModels());
+    // 同步预置（挂载即拦，不等异步 refresh；封面预取仍会调 searchSemantic，不算入口查询）
+    useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() });
+    renderRoutes("/albums");
+
+    const tags = await screen.findAllByTestId("albums-tag");
+    await user.click(tags[0]);
+
+    // 被拦：不进入 /albums/:tag，仍在标签墙
+    expect(await screen.findByTestId("albums-gate-notice")).toHaveTextContent("语义模型未下载");
+    expect(screen.getByTestId("albums-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("album-tag-page")).not.toBeInTheDocument();
+
+    // 一键跳设置（AI tab 深链）
+    await user.click(screen.getByTestId("albums-gate-notice-gosettings"));
+    expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();
+  });
+
+  it("索引从未建立（模型已齐 + ai.total==0 + 库内有资产）：同样拦截", async () => {
+    const user = userEvent.setup();
+    indexStatusMock.mockResolvedValue({
+      ...builtIndex(),
+      ai: { pending: 0, running: 0, done: 0, failed: 0, total: 0 },
+    });
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-tag"))[0]);
+    expect(await screen.findByTestId("albums-gate-notice")).toHaveTextContent("语义索引未建立");
+    expect(screen.queryByTestId("album-tag-page")).not.toBeInTheDocument();
+  });
+
+  it("标签页直链：门禁未过不自动执行、输入框回车不发查询（文字保留）", async () => {
+    const user = userEvent.setup();
+    aiModelsStatusMock.mockResolvedValue(gatedModels());
+    // 同步预置：标签页自动执行在挂载 effect 里同步判定，异步 refresh 来不及
+    useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() });
+    renderRoutes("/albums/%E6%97%A5%E8%90%BD");
+
+    expect(await screen.findByTestId("album-tag-gate-notice")).toHaveTextContent("语义模型未下载");
+    // 自动执行被拦
+    await waitFor(() => expect(useAiStore.getState().modelsLoaded).toBe(true));
+    expect(searchSemanticMock).not.toHaveBeenCalled();
+
+    // 输入框回车同样被拦：文字保留、不发查询
+    await user.type(screen.getByTestId("semantic-input"), "海边");
+    fireEvent.keyDown(screen.getByTestId("semantic-input"), { key: "Enter" });
+    expect(searchSemanticMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("semantic-input")).toHaveValue("海边");
+  });
+
+  it("就绪放行：模型全装 + 索引已建 → 点相册正常进入并自动执行", async () => {
+    const user = userEvent.setup();
+    searchSemanticMock.mockResolvedValue([]);
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-tag"))[0]);
+    expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
+    await waitFor(() => expect(searchSemanticMock).toHaveBeenCalled());
+    expect(screen.queryByTestId("albums-gate-notice")).not.toBeInTheDocument();
   });
 });

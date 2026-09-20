@@ -10,15 +10,19 @@ import { SearchRedirect } from "@/app/routes";
 import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import { clearGallerySnapshotForTests } from "../lib/galleryCache";
 import {
+  aiModelsStatus,
   assetGroupDates,
   assetThumbGet,
   assetsByIds,
   assetsPage,
   cameraList,
   formatList,
+  indexStatus,
   lensList,
   searchSemantic,
+  type AiModelStatus,
   type AssetDto,
+  type IndexStatus,
 } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -40,6 +44,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     formatList: vi.fn(),
     searchSemantic: vi.fn(),
     assetsByIds: vi.fn(),
+    aiModelsStatus: vi.fn(),
+    indexStatus: vi.fn(),
   };
 });
 
@@ -48,6 +54,8 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: vi.fn(),
 }));
 
+const aiModelsStatusMock = vi.mocked(aiModelsStatus);
+const indexStatusMock = vi.mocked(indexStatus);
 const assetsPageMock = vi.mocked(assetsPage);
 const groupDatesMock = vi.mocked(assetGroupDates);
 const thumbMock = vi.mocked(assetThumbGet);
@@ -68,6 +76,48 @@ function makeAsset(id: number, date: string | null): AssetDto {
     capturedAt: date === null ? null : `${date}T10:00:00`,
     camera: "Canon EOS R5",
     sizeBytes: 1024 * 1024,
+  };
+}
+
+function gateModel(
+  id: string,
+  feature: "semantic" | "face",
+  state: AiModelStatus["state"],
+): AiModelStatus {
+  return {
+    id,
+    installed: state === "done",
+    bytesTotal: 1024,
+    downloadedBytes: state === "done" ? 1024 : 0,
+    version: null,
+    feature,
+    state,
+  };
+}
+
+function readyModels(): AiModelStatus[] {
+  return [
+    gateModel("siglip2-visual", "semantic", "done"),
+    gateModel("siglip2-text", "semantic", "done"),
+    gateModel("siglip2-tokenizer", "semantic", "done"),
+    gateModel("scrfd", "face", "done"),
+    gateModel("arcface", "face", "done"),
+  ];
+}
+
+/** 语义三件缺 text → 门禁 models 分支 */
+function gatedModels(): AiModelStatus[] {
+  return readyModels().map((m) =>
+    m.id === "siglip2-text" ? { ...m, state: "idle" as const, installed: false } : m,
+  );
+}
+
+function builtIndex(ai?: Partial<IndexStatus["ai"]>): IndexStatus {
+  return {
+    thumb: { pending: 0, running: 0, done: 0, failed: 0, total: 100 },
+    exif: { pending: 0, running: 0, done: 0, failed: 0, total: 100 },
+    ai: { pending: 0, running: 0, done: 100, failed: 0, total: 100, ...ai },
+    face: { pending: 0, running: 0, done: 0, failed: 0, total: 0 },
   };
 }
 
@@ -123,8 +173,11 @@ beforeEach(() => {
   cameraListMock.mockReset().mockResolvedValue([]);
   lensListMock.mockReset().mockResolvedValue([]);
   formatListMock.mockReset().mockResolvedValue([]);
-  vi.mocked(searchSemantic).mockReset();
+  vi.mocked(searchSemantic).mockReset().mockResolvedValue([]);
   vi.mocked(assetsByIds).mockReset().mockResolvedValue([]);
+  // 语义门禁默认就绪（模型全装 + 索引已建）；各用例按需覆写为被拦态
+  aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
+  indexStatusMock.mockReset().mockResolvedValue(builtIndex());
   useAiStore.getState().resetForTests();
   useSettingsStore.setState({ settings: { ...useSettingsStore.getState().settings } });
   resetThumbPipelineForTests();
@@ -363,5 +416,112 @@ describe("画廊合并：三态切换", () => {
     renderGallery("/gallery?mode=semantic&q=%E7%8C%AB");
 
     expect(await screen.findByTestId("semantic-empty")).toHaveTextContent("没有语义匹配的照片");
+  });
+});
+
+// --- 语义搜索前置门禁 + 索引建立中提示条 ------------------------------------------------
+
+describe("画廊：语义搜索门禁与索引提示条", () => {
+  it("门禁·模型未齐：输入框回车不发查询，工具条下提示 + 文字保留", async () => {
+    aiModelsStatusMock.mockResolvedValue(gatedModels());
+    // 同步预置：挂载即拦（不等异步 refresh）
+    act(() =>
+      useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() }),
+    );
+    renderGallery();
+
+    const input = await screen.findByTestId("semantic-input");
+    fireEvent.change(input, { target: { value: "海边" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(searchSemantic).not.toHaveBeenCalled();
+    expect(screen.getByTestId("gallery-semantic-gate")).toHaveTextContent("语义模型未下载");
+    expect(screen.getByTestId("gallery-semantic-gate-gosettings")).toBeInTheDocument();
+    expect(screen.getByTestId("semantic-input")).toHaveValue("海边");
+  });
+
+  it("门禁·索引未建立（模型已齐 + ai.total==0 + 库内有资产）：URL 自动执行也被拦", async () => {
+    const unbuilt = builtIndex({ done: 0, total: 0 });
+    indexStatusMock.mockResolvedValue(unbuilt);
+    act(() =>
+      useAiStore.setState({ models: readyModels(), modelsLoaded: true, indexStatus: unbuilt }),
+    );
+    renderGallery("/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD");
+
+    expect(await screen.findByTestId("gallery-semantic-gate")).toHaveTextContent(
+      "语义索引未建立",
+    );
+    expect(searchSemantic).not.toHaveBeenCalled();
+  });
+
+  it("门禁解除后放行：模型装齐（事件驱动重拉）→ 同一输入回车正常发查询，提示消失", async () => {
+    aiModelsStatusMock.mockResolvedValueOnce(gatedModels()).mockResolvedValue(readyModels());
+    act(() =>
+      useAiStore.setState({ models: gatedModels(), modelsLoaded: true, indexStatus: builtIndex() }),
+    );
+    renderGallery();
+
+    const input = await screen.findByTestId("semantic-input");
+    fireEvent.change(input, { target: { value: "海边" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("gallery-semantic-gate")).toBeInTheDocument();
+    expect(searchSemantic).not.toHaveBeenCalled();
+
+    // 模型装齐：aiModelDownloadFinished → 重拉 → 门禁开
+    act(() => {
+      useAiStore.getState().handleAppEvent({
+        type: "aiModelDownloadFinished",
+        id: "siglip2-text",
+        ok: true,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId("gallery-semantic-gate")).not.toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(searchSemantic).toHaveBeenCalledWith("海边", 100, undefined));
+  });
+
+  it("索引建立中：语义态顶部提示条出现；索引完成自动消失", async () => {
+    const indexing = builtIndex({ pending: 60, done: 60, total: 120 });
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.87 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    indexStatusMock.mockResolvedValue(indexing);
+    act(() =>
+      useAiStore.setState({
+        models: readyModels(),
+        modelsLoaded: true,
+        indexStatus: indexing,
+      }),
+    );
+    renderGallery("/gallery?mode=semantic&q=%E6%97%A5%E8%90%BD");
+
+    await screen.findAllByTestId("gallery-tile");
+    expect(screen.getByTestId("semantic-indexing")).toHaveTextContent(
+      "索引正在建立，搜索可能遗漏",
+    );
+
+    // 索引完成（任务账结算）：提示条自动消失
+    act(() => useAiStore.setState({ indexStatus: builtIndex() }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("semantic-indexing")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("索引建立中：默认画廊（非语义态）不弹提示条", async () => {
+    const indexing = builtIndex({ pending: 60, done: 60, total: 120 });
+    indexStatusMock.mockResolvedValue(indexing);
+    act(() =>
+      useAiStore.setState({
+        models: readyModels(),
+        modelsLoaded: true,
+        indexStatus: indexing,
+      }),
+    );
+    renderGallery();
+
+    await screen.findByTestId("gallery-page");
+    expect(screen.queryByTestId("semantic-indexing")).not.toBeInTheDocument();
   });
 });

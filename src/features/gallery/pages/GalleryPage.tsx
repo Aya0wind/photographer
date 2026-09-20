@@ -27,9 +27,13 @@ import {
   useGalleryTileSize,
 } from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
-import { useSemanticSearch } from "@/features/ai/useSemanticSearch";
+import { useSemanticSearch, useSemanticGate, useAiIndexingProgress } from "@/features/ai/useSemanticSearch";
 import { recordSemanticQuery } from "@/features/ai/semanticHistory";
-import { SemanticQueryInput } from "@/features/ai/SemanticResultsView";
+import {
+  SemanticQueryInput,
+  SemanticGateNotice,
+  SemanticIndexingBanner,
+} from "@/features/ai/SemanticResultsView";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
@@ -107,13 +111,26 @@ export default function GalleryPage() {
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
+  // 语义搜索前置门禁 + 索引建立进度（语义态顶部细提示条数据源）
+  const semanticGate = useSemanticGate();
+  const semanticIndexing = useAiIndexingProgress();
+  /** 被门禁拦截过：工具条下方行内提示（成功放行或改走筛选即消） */
+  const [semanticGateNotice, setSemanticGateNotice] = useState(false);
+
   function runSemantic(query: string): void {
+    if (semanticGate.blocked) {
+      // 门禁拦截：不发查询（URL 自动执行与输入框回车共用此口）；输入文字保留
+      setSemanticGateNotice(true);
+      return;
+    }
+    setSemanticGateNotice(false);
     recordSemanticQuery(query); // 语义历史（最近 5 条，localStorage）
     void semantic.run(query);
   }
 
-  /** 修改筛选 = 退出语义态回筛选/默认（语义结果与条件筛选互斥） */
+  /** 修改筛选 = 退出语义态回筛选/默认（语义结果与条件筛选互斥）；门禁提示一并撤下 */
   function patchFilters(patch: Partial<SearchInputsShim>): void {
+    setSemanticGateNotice(false);
     semantic.reset();
     patchInputs(patch);
   }
@@ -547,6 +564,11 @@ export default function GalleryPage() {
           </div>
         </div>
 
+        {/* 语义门禁拦截提示（模型未下载/索引未建立）：行内 + 一键跳设置 */}
+        {semanticGateNotice && semanticGate.reason !== null && (
+          <SemanticGateNotice reason={semanticGate.reason} testId="gallery-semantic-gate" />
+        )}
+
         {/* 筛选面板（默认收起；修改筛选自动退出语义态） */}
         {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} />}
 
@@ -555,10 +577,12 @@ export default function GalleryPage() {
           <FilterChipsRow
             chips={chips}
             onPatch={(next) => {
+              setSemanticGateNotice(false);
               semantic.reset();
               setInputs(next);
             }}
             onClearAll={() => {
+              setSemanticGateNotice(false);
               semantic.reset();
               setInputs(EMPTY_INPUTS);
             }}
@@ -567,6 +591,8 @@ export default function GalleryPage() {
 
         {/* 照片墙（justify 布局）+ 吸顶当前日期 + 年份条 */}
         <div className="relative min-h-0 flex-1">
+          {/* 索引建立中：语义态顶部细提示条（完成自动消失；默认/筛选态不弹） */}
+          <SemanticIndexingBanner progress={semanticMode ? semanticIndexing : null} />
           {gridEmpty ? (
             semanticMode ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="semantic-empty">
