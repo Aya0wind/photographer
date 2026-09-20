@@ -295,41 +295,28 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     }
   }, [asset.kind, stage, originalUrl]);
 
-  // --- 双图层交叉淡入（#7 切换闪烁） -------------------------------------------------
-  // 切换时保留上一张为底层，新图 onLoad 后 150ms 淡入盖上去再移除旧层——永远有内容无空窗。
+  // --- 无空窗单层切换 ---------------------------------------------------------------
+  // 新图在不可见层完成解码前保留旧图；onLoad 后一次性提交替换。两张图从不同时可见，
+  // 避免透明图片或不同宽高比切换时出现叠图，同时也不会先清空造成黑屏闪烁。
   const [committed, setCommitted] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<{ src: string } | null>(null);
-  const [incomingReady, setIncomingReady] = useState(false);
   useEffect(() => {
     if (mainSrc === null) return; // 源在途（等 2048/512 URL）——旧图层继续显示
     if (mainSrc === committed || mainSrc === incoming?.src) return;
     setIncoming({ src: mainSrc });
-    setIncomingReady(false);
   }, [mainSrc, committed, incoming]);
-  // 新图 onLoad → 150ms 淡入完成后提交为新底层
-  useEffect(() => {
-    if (!incomingReady || incoming === null) return;
-    const timer = setTimeout(() => {
-      setCommitted(incoming.src);
-      setIncoming(null);
-      setIncomingReady(false);
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [incomingReady, incoming]);
   // 确定无图：清掉残留图层，显示占位
   useEffect(() => {
     if (mainFailed) {
       setCommitted(null);
       setIncoming(null);
-      setIncomingReady(false);
     }
   }, [mainFailed]);
 
   // 大图加载提示：源在途超过 300ms 才转圈（几十 MB 原图加载慢，避免黑屏误判失败）；
   // 切换期间旧图层兜底显示，仅新图 300ms 仍未 onLoad 才叠加 spinner（快速连按不闪）。
   const [slowLoading, setSlowLoading] = useState(false);
-  const awaitingImage =
-    (incoming !== null && !incomingReady) || (mainSrc === null && !mainFailed);
+  const awaitingImage = incoming !== null || (mainSrc === null && !mainFailed);
   useEffect(() => {
     setSlowLoading(false);
     if (!awaitingImage) return;
@@ -704,14 +691,19 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               />
             )}
             {incoming !== null && (
-              /* 上层：切换中的新图，onLoad 后 150ms 淡入盖过底层 */
+              /* 解码层始终不可见；onLoad 后直接提交为唯一可见图层 */
               <img
                 src={incoming.src}
                 alt={asset.name}
                 draggable={false}
                 loading="eager"
                 decoding="async"
-                onLoad={() => setIncomingReady(true)}
+                onLoad={() => {
+                  // 只提交当前请求，快速连切时迟到的旧 onLoad 不能覆盖新图。
+                  if (incoming.src !== mainSrc) return;
+                  setCommitted(incoming.src);
+                  setIncoming(null);
+                }}
                 onError={() => {
                   // 分级降档：原图失败 → 中间档（2048）→ 512 档。
                   // TIF 等大尺寸/特殊编码原图 WebView2 渲染不动，逐级降而不是一步到 512。
@@ -730,16 +722,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                           ? "mid"
                           : "thumb"
                 }
-                className={`max-h-full max-w-full select-none object-contain transition-opacity duration-150 ${
-                  incomingReady ? "opacity-100" : "opacity-0"
-                }`}
+                className="invisible max-h-full max-w-full select-none object-contain"
                 style={{
                   // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
                   // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）
                   transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
-                  transition: dragRef.current
-                    ? "none"
-                    : "transform 150ms ease-out, opacity 150ms ease-out",
+                  transition: dragRef.current ? "none" : "transform 150ms ease-out",
                 }}
               />
             )}

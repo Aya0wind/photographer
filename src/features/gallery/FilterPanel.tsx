@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -161,7 +161,7 @@ function mbToBytes(value: string): number | undefined {
   return mb !== undefined ? Math.round(mb * 1024 * 1024) : undefined;
 }
 
-/** 全部输入 → AssetFilters（空条件=无过滤；相机仍单值契约传第一个） */
+/** 全部输入 → AssetFilters（空条件=无过滤；各条件之间 AND，同字段多选 OR） */
 export function buildFilters(inputs: SearchInputs): AssetFilters {
   const filters: AssetFilters = {};
   const kinds = kindsOf(inputs.kind);
@@ -170,7 +170,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (inputs.from && after) filters.capturedAfter = after;
   const before = dateToRfc3339(inputs.to, true);
   if (inputs.to && before) filters.capturedBefore = before;
-  if (inputs.cameras.length > 0) filters.camera = inputs.cameras[0];
+  if (inputs.cameras.length > 0) filters.cameras = inputs.cameras;
   if (inputs.lenses.length > 0) filters.lenses = inputs.lenses;
   if (inputs.formats.length > 0) filters.formats = inputs.formats;
   if (inputs.orientation !== "all") filters.orientation = inputs.orientation;
@@ -227,7 +227,7 @@ export function hasActiveFilters(inputs: SearchInputs): boolean {
 // --- 面板小组件 ---------------------------------------------------------------------
 
 const INPUT_CLASS =
-  "rounded border border-edge bg-bg px-1.5 py-0.5 font-mono text-[11px] text-text-primary outline-none transition-colors focus:border-accent";
+  "h-7 rounded-md border border-edge bg-panel/55 px-2 font-mono text-[11px] text-text-primary placeholder:text-text-muted/60 outline-none transition-colors hover:border-text-muted/70 focus:border-accent focus:ring-1 focus:ring-accent/20";
 
 /** 分段单选（类型/方向/闪光灯/GPS 共用）；testId 透传到组与各按钮 */
 function Segment<T extends string>({
@@ -246,7 +246,7 @@ function Segment<T extends string>({
   const { t } = useTranslation();
   return (
     <div
-      className="flex shrink-0 items-center rounded-md border border-edge bg-bg p-0.5"
+      className="flex h-7 shrink-0 items-center rounded-md border border-edge bg-panel/55 p-0.5"
       role="radiogroup"
       aria-label={ariaLabel}
       data-testid={testId}
@@ -280,6 +280,7 @@ function FilterDropdown({
   options,
   selected,
   onToggle,
+  onClear,
   testId,
 }: {
   label: string;
@@ -288,42 +289,65 @@ function FilterDropdown({
   options: Array<{ value: string; count: number }>;
   selected: string[];
   onToggle: (value: string) => void;
+  onClear: () => void;
   testId: string;
 }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
   return (
-    <div className="relative min-w-0">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        aria-label={label}
-        className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] transition-colors ${
+    <div ref={rootRef} className="relative min-w-0">
+      <div
+        className={`inline-flex h-7 min-w-32 items-stretch overflow-hidden rounded-md border bg-panel/55 transition-colors ${
           selected.length > 0 || open
-            ? "border-accent text-accent"
+            ? "border-accent bg-accent/10 text-accent"
             : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
         }`}
-        data-testid={`${testId}-button`}
       >
-        <span className="max-w-[110px] truncate">{selected.length > 0 ? selected[0] : allLabel}</span>
-        {selected.length > 1 && <span className="font-mono">+{selected.length - 1}</span>}
-        <svg
-          viewBox="0 0 16 16"
-          width="9"
-          height="9"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.6"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={label}
+          className="flex min-w-0 flex-1 items-center justify-between gap-1.5 px-2 text-[11px]"
+          data-testid={`${testId}-button`}
         >
-          <path d="M3.5 6l4.5 4.5L12.5 6" />
-        </svg>
-      </button>
+          <span className="max-w-[116px] truncate">{selected.length > 0 ? selected[0] : allLabel}</span>
+          {selected.length > 1 && <span className="rounded bg-accent/15 px-1 font-mono">+{selected.length - 1}</span>}
+          <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3.5 6l4.5 4.5L12.5 6" />
+          </svg>
+        </button>
+        {selected.length > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            aria-label={`${label} ×`}
+            title={`${label} ×`}
+            className="flex w-7 shrink-0 items-center justify-center border-l border-accent/25 text-sm text-text-muted transition-colors hover:bg-accent/15 hover:text-accent"
+            data-testid={`${testId}-clear`}
+          >
+            ×
+          </button>
+        )}
+      </div>
       {open && (
         <div
-          className="sp-scroll absolute left-0 top-7 z-20 max-h-64 w-56 overflow-y-auto rounded-lg border border-edge bg-surface p-1 shadow-lg"
+          className="sp-scroll absolute left-0 top-8 z-20 max-h-72 w-64 overflow-y-auto rounded-xl border border-edge bg-surface p-1.5 shadow-2xl shadow-black/40"
           data-testid={`${testId}-menu`}
         >
           {options.length === 0 ? (
@@ -341,8 +365,22 @@ function FilterDropdown({
                   type="checkbox"
                   checked={selected.includes(option.value)}
                   onChange={() => onToggle(option.value)}
-                  className="h-3 w-3 accent-[#F0A83C]"
+                  className="peer sr-only"
                 />
+                <span
+                  className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition-colors ${
+                    selected.includes(option.value)
+                      ? "border-accent bg-accent text-black"
+                      : "border-text-muted/70 bg-bg"
+                  }`}
+                  aria-hidden="true"
+                >
+                  {selected.includes(option.value) && (
+                    <svg viewBox="0 0 12 12" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.2 6.2l2.2 2.2 5.2-5.1" />
+                    </svg>
+                  )}
+                </span>
                 <span
                   className="min-w-0 flex-1 truncate text-[11px] text-text-secondary"
                   title={option.value}
@@ -383,30 +421,34 @@ function RangeField({
   maxTestId: string;
   step?: number;
 }) {
+  const { t } = useTranslation();
+  const updateNumeric = (value: string, update: (next: string) => void) => {
+    if (/^\d*(?:\.\d*)?$/.test(value)) update(value);
+  };
   return (
     <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-text-muted">
-      <span className="shrink-0">{label}</span>
+      <span className="sr-only">{label}</span>
       <input
-        type="number"
-        step={step}
-        min={0}
+        type="text"
+        inputMode="decimal"
+        data-step={step}
         value={min}
-        onChange={(e) => onMinChange(e.target.value)}
-        placeholder="min"
-        aria-label={`${label} min`}
-        className={`${INPUT_CLASS} w-16`}
+        onChange={(e) => updateNumeric(e.target.value, onMinChange)}
+        placeholder={t("search.rangeMin")}
+        aria-label={`${label} ${t("search.rangeMin")}`}
+        className={`${INPUT_CLASS} w-[68px] text-right tabular-nums`}
         data-testid={minTestId}
       />
       <span className="shrink-0">–</span>
       <input
-        type="number"
-        step={step}
-        min={0}
+        type="text"
+        inputMode="decimal"
+        data-step={step}
         value={max}
-        onChange={(e) => onMaxChange(e.target.value)}
-        placeholder="max"
-        aria-label={`${label} max`}
-        className={`${INPUT_CLASS} w-16`}
+        onChange={(e) => updateNumeric(e.target.value, onMaxChange)}
+        placeholder={t("search.rangeMax")}
+        aria-label={`${label} ${t("search.rangeMax")}`}
+        className={`${INPUT_CLASS} w-[68px] text-right tabular-nums`}
         data-testid={maxTestId}
       />
       {unit && <span className="shrink-0">{unit}</span>}
@@ -417,8 +459,8 @@ function RangeField({
 /** 面板内单个控件的行布局：左侧固定宽标签 + 右控件 */
 function FieldRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="w-14 shrink-0 text-right text-[11px] text-text-muted">{label}</span>
+    <div className="flex min-h-9 min-w-0 items-center gap-2 rounded-lg border border-transparent px-2 transition-colors hover:border-edge/60 hover:bg-panel/25">
+      <span className="w-14 shrink-0 text-right text-[11px] font-medium text-text-muted">{label}</span>
       {children}
     </div>
   );
@@ -463,7 +505,7 @@ export function FilterPanel({
 
   return (
     <div className="shrink-0 border-b border-edge bg-bg/40 px-2 py-3" data-testid="search-filter-panel">
-      <div className="grid grid-cols-1 items-center gap-x-6 gap-y-2.5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+      <div className="grid grid-cols-1 items-center gap-x-3 gap-y-1 rounded-xl border border-edge/70 bg-surface/70 p-2 shadow-inner shadow-black/20 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         <FieldRow label={t("search.kind")}>
           <Segment
             ariaLabel={t("search.kind")}
@@ -481,6 +523,7 @@ export function FilterPanel({
             options={cameraOptions.map((o) => ({ value: o.camera, count: o.count }))}
             selected={inputs.cameras}
             onToggle={(camera) => onPatch({ cameras: toggleIn(inputs.cameras, camera) })}
+            onClear={() => onPatch({ cameras: [] })}
             testId="search-camera"
           />
         </FieldRow>
@@ -492,6 +535,7 @@ export function FilterPanel({
             options={lensOptions.map((o) => ({ value: o.lens, count: o.count }))}
             selected={inputs.lenses}
             onToggle={(lens) => onPatch({ lenses: toggleIn(inputs.lenses, lens) })}
+            onClear={() => onPatch({ lenses: [] })}
             testId="search-lens"
           />
         </FieldRow>
@@ -503,6 +547,7 @@ export function FilterPanel({
             options={formatOptions.map((o) => ({ value: o.format, count: o.count }))}
             selected={inputs.formats}
             onToggle={(format) => onPatch({ formats: toggleIn(inputs.formats, format) })}
+            onClear={() => onPatch({ formats: [] })}
             testId="search-format"
           />
         </FieldRow>
@@ -535,7 +580,7 @@ export function FilterPanel({
         </FieldRow>
         <FieldRow label={t("search.focal")}>
           <RangeField
-            label=""
+            label={t("search.focal")}
             unit="mm"
             min={inputs.focalMin}
             max={inputs.focalMax}
@@ -547,7 +592,7 @@ export function FilterPanel({
         </FieldRow>
         <FieldRow label={t("search.iso")}>
           <RangeField
-            label=""
+            label={t("search.iso")}
             min={inputs.isoMin}
             max={inputs.isoMax}
             onMinChange={(v) => onPatch({ isoMin: v })}
@@ -558,7 +603,7 @@ export function FilterPanel({
         </FieldRow>
         <FieldRow label={t("search.aperture")}>
           <RangeField
-            label=""
+            label={t("search.aperture")}
             min={inputs.apertureMin}
             max={inputs.apertureMax}
             step={0.1}
@@ -570,7 +615,7 @@ export function FilterPanel({
         </FieldRow>
         <FieldRow label={t("search.shutter")}>
           <RangeField
-            label=""
+            label={t("search.shutter")}
             unit="s"
             step={0.001}
             min={inputs.shutterMin}
@@ -583,7 +628,7 @@ export function FilterPanel({
         </FieldRow>
         <FieldRow label={t("search.fileSize")}>
           <RangeField
-            label=""
+            label={t("search.fileSize")}
             unit="MB"
             min={inputs.sizeMin}
             max={inputs.sizeMax}
@@ -619,7 +664,7 @@ export function FilterPanel({
               key={key}
               type="button"
               onClick={() => applyQuickRange(key)}
-              className="rounded border border-edge px-1.5 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              className="h-7 rounded-md border border-edge bg-panel/55 px-2 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
               data-testid={`search-quick-${key}`}
             >
               {t(`search.quick.${key}`)}
@@ -748,7 +793,7 @@ export function FilterChipsRow({
       {chips.map((chip) => (
         <span
           key={chip.key}
-          className="flex max-w-[220px] items-center gap-1 rounded-full border border-edge bg-surface pl-2 pr-1 text-[11px] text-text-secondary"
+          className="flex max-w-[220px] items-center gap-1 rounded-full border border-accent/35 bg-accent/8 py-0.5 pl-2.5 pr-1 text-[11px] text-text-secondary"
           data-testid="search-chip"
           data-chip={chip.key}
         >
@@ -759,7 +804,7 @@ export function FilterChipsRow({
             type="button"
             onClick={() => onPatch(chip.patch)}
             aria-label={`${chip.label} ×`}
-            className="rounded-full px-1 text-text-muted transition-colors hover:bg-panel hover:text-text-primary"
+            className="flex h-4 w-4 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-accent/15 hover:text-accent"
             data-testid="search-chip-remove"
           >
             ×
@@ -769,7 +814,7 @@ export function FilterChipsRow({
       <button
         type="button"
         onClick={onClearAll}
-        className="ml-1 shrink-0 rounded border border-edge px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:border-red-400 hover:text-red-400"
+        className="ml-1 h-6 shrink-0 rounded-md border border-edge bg-panel/40 px-2 text-[11px] text-text-muted transition-colors hover:border-red-400 hover:bg-red-400/5 hover:text-red-400"
         data-testid="search-clear-all"
       >
         {t("search.chipsClearAll")}

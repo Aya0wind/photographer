@@ -22,8 +22,8 @@ const peopleListMock = vi.mocked(peopleList);
 
 /** 分组 → 导航项（含禁用占位）的期望结构 */
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
-  { section: "浏览", links: ["图库", "最近浏览"], disabled: ["收藏"] },
-  { section: "组织", links: ["相册", "人物", "媒体类型", "标签"], disabled: [] },
+  { section: "浏览", links: ["图库", "最近浏览", "那年今天"], disabled: ["收藏"] },
+  { section: "组织", links: ["相册", "人物", "媒体类型", "器材统计", "标签"], disabled: [] },
   { section: "工具", links: ["导入"], disabled: ["相似照片"] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
@@ -36,6 +36,8 @@ function renderSidebar(initialPath: string) {
         <Routes>
           <Route path="/gallery" element={<div>GALLERY_CONTENT</div>} />
           <Route path="/recent" element={<div>RECENT_CONTENT</div>} />
+          <Route path="/memories" element={<div>MEMORIES_CONTENT</div>} />
+          <Route path="/gear" element={<div>GEAR_CONTENT</div>} />
           <Route path="/albums" element={<div>ALBUMS_CONTENT</div>} />
           <Route path="/albums/:tag" element={<div>TAG_CONTENT</div>} />
           <Route path="/people" element={<div>PEOPLE_CONTENT</div>} />
@@ -113,6 +115,23 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
 
     await user.click(screen.getByRole("link", { name: /相册/ }));
     expect(screen.getByText("ALBUMS_CONTENT")).toBeInTheDocument();
+  });
+
+  it("M7 新入口：那年今天→/memories（浏览组）、器材统计→/gear（组织组）", async () => {
+    renderSidebar("/gallery");
+    const user = userEvent.setup();
+
+    const memories = screen.getByRole("link", { name: /那年今天/ });
+    const gear = screen.getByRole("link", { name: /器材统计/ });
+    const browse = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("浏览"));
+    const organize = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("组织"));
+    expect(browse).toContain(memories);
+    expect(organize).toContain(gear);
+
+    await user.click(memories);
+    expect(screen.getByText("MEMORIES_CONTENT")).toBeInTheDocument();
+    await user.click(gear);
+    expect(screen.getByText("GEAR_CONTENT")).toBeInTheDocument();
   });
 
   it("「标签」入口指向 /albums#tags（与相册同路由锚点）", async () => {

@@ -187,8 +187,8 @@ export interface AssetFilters {
   /** RFC3339（后端按绝对时间归一比较）；前端由 "YYYY-MM-DD" 本地日界转 UTC */
   capturedAfter?: string;
   capturedBefore?: string;
-  /** 相机名子串（不区分大小写，后端解释）；数组 OR 契约到位前传第一个 */
-  camera?: string;
+  /** 相机型号多选：所选值精确匹配（OR）；无相机信息的资产不会命中 */
+  cameras?: string[];
   // --- M4 扩展筛选（后端 lane 契约扩展中；全 Optional，后端未实现时不传） ---
   /** 镜头多选 OR */
   lenses?: string[];
@@ -610,6 +610,84 @@ export async function burstStats(): Promise<BurstStats | null> {
     return typeof s.groups === "number" && typeof s.photosInBursts === "number"
       ? (stats as BurstStats)
       : null;
+  } catch {
+    return null;
+  }
+}
+
+// --- 那年今天 / 器材统计（M7） ---------------------------------------------------------
+
+/** 那年今天：历年同月日资产（on_this_day；今天无历史为 []）。
+ *  前端按 capturedAt 年份归块（降序）；失败/非数组回退 []——UI 自然降级空态。 */
+export async function onThisDay(): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("on_this_day");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 机身/镜头型号计数（gear_stats TOP 榜；按 count 降序由后端排） */
+export interface GearNameCount {
+  /** 型号名（EXIF Model/LensModel，后端已做空值清洗，如 "Canon EOS R5"） */
+  name: string;
+  count: number;
+}
+
+/** 焦段分桶（24/50/85/135/200+mm）：max=null 表示 200+ 开放桶 */
+export interface GearFocalBucket {
+  /** 桶文案（如 "24mm"、"200+mm"） */
+  label: string;
+  /** 桶下界（含）；200+ 桶 min=200 */
+  min: number;
+  /** 桶上界（不含）；null=开放桶 */
+  max: number | null;
+  count: number;
+}
+
+/** 标签计数桶（ISO/光圈/快门分布共用；label 由后端生成，如 "ISO 400"、"f/2.8"、"1/250s"） */
+export interface GearLabelBucket {
+  label: string;
+  count: number;
+}
+
+/** 器材与拍摄参数分布快照（gear_stats 返回；无 EXIF 数据/后端未就绪为 null） */
+export interface GearStats {
+  /** 机身 TOP（型号 × 快门数） */
+  cameras: GearNameCount[];
+  /** 镜头 TOP */
+  lenses: GearNameCount[];
+  /** 焦段分布（24/50/85/135/200+mm 分桶） */
+  focalBuckets: GearFocalBucket[];
+  /** ISO 分布（100/200/400/800/1600/3200+） */
+  isoBuckets: GearLabelBucket[];
+  /** 光圈分布（f/1.x/2.x/4/5.6/8/11+） */
+  apertureBuckets: GearLabelBucket[];
+  /** 快门分布（>1s/1s/1/2…1/1000+ 归档） */
+  shutterBuckets: GearLabelBucket[];
+}
+
+/** 负载形状校验：六个字段必须是数组（桶项内容浅校验 count 为数） */
+function isGearStats(value: unknown): value is GearStats {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as Partial<Record<keyof GearStats, unknown>>;
+  const arrays: Array<[unknown, (item: unknown) => boolean]> = [
+    [s.cameras, (i) => typeof (i as GearNameCount)?.name === "string" && typeof (i as GearNameCount)?.count === "number"],
+    [s.lenses, (i) => typeof (i as GearNameCount)?.name === "string" && typeof (i as GearNameCount)?.count === "number"],
+    [s.focalBuckets, (i) => typeof (i as GearFocalBucket)?.label === "string" && typeof (i as GearFocalBucket)?.count === "number"],
+    [s.isoBuckets, (i) => typeof (i as GearLabelBucket)?.label === "string" && typeof (i as GearLabelBucket)?.count === "number"],
+    [s.apertureBuckets, (i) => typeof (i as GearLabelBucket)?.label === "string" && typeof (i as GearLabelBucket)?.count === "number"],
+    [s.shutterBuckets, (i) => typeof (i as GearLabelBucket)?.label === "string" && typeof (i as GearLabelBucket)?.count === "number"],
+  ];
+  return arrays.every(([field, itemOk]) => Array.isArray(field) && field.every(itemOk));
+}
+
+/** 器材统计快照；命令失败/负载形状异常静默 null */
+export async function gearStats(): Promise<GearStats | null> {
+  try {
+    const stats = await ipc<GearStats | null>("gear_stats");
+    return isGearStats(stats) ? stats : null;
   } catch {
     return null;
   }

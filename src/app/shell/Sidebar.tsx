@@ -8,9 +8,10 @@ import { peopleList } from "@/ipc/api";
 
 /**
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
- * - 浏览：图库、收藏（F5 数据未就绪——禁用 +「即将支持」）、最近添加（/recent）
- * - 组织：相册（/albums 标签墙总览）、人物、媒体类型（/media）、标签（/albums#tags
- *   同路由锚点，v1 与相册同区块）
+ * - 浏览：图库、最近浏览（/recent）、那年今天（/memories，M7 F6）、
+ *   收藏（F5 数据未就绪——禁用 +「即将支持」）
+ * - 组织：相册（/albums 标签墙总览）、人物、媒体类型（/media）、
+ *   器材统计（/gear，M7 F9）、标签（/albums#tags 同路由锚点，v1 与相册同区块）
  * - 工具：相似照片（F8 占位禁用——pHash 近似重复检查，组内对比保留最优；
  *   完全一样的重复图导入时已由查重策略处理）、导入（任务并入右侧抽屉，M4.5）
  * - 系统：设置
@@ -78,6 +79,14 @@ const ICONS = {
     </>,
     "recent",
   ),
+  memories: icon(
+    <>
+      <rect x="2" y="3" width="12" height="10.5" rx="1.5" />
+      <path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" />
+      <circle cx="8" cy="9.7" r="1.2" />
+    </>,
+    "memories",
+  ),
   albums: icon(
     <>
       <rect x="1.5" y="3" width="13" height="10.5" rx="1.5" />
@@ -99,6 +108,14 @@ const ICONS = {
       <path d="M3.5 12.5h3" />
     </>,
     "media",
+  ),
+  gear: icon(
+    <>
+      <path d="M5.5 4.5l1-1.7h3l1 1.7" />
+      <rect x="1.5" y="4.5" width="13" height="8.5" rx="1.5" />
+      <circle cx="8" cy="8.6" r="2.4" />
+    </>,
+    "gear",
   ),
   tags: icon(
     <>
@@ -139,6 +156,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery },
       { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent },
+      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories },
     ],
   },
   {
@@ -147,6 +165,7 @@ const SECTIONS: NavSection[] = [
       { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
       { to: "/media", labelKey: "nav.media", icon: ICONS.media },
+      { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
       { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags },
     ],
   },

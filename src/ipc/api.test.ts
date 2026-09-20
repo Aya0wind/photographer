@@ -17,6 +17,8 @@ import {
   assetsPage,
   assetViewMark,
   burstStats,
+  gearStats,
+  onThisDay,
   assetFlagSet,
   assetRatingSet,
   importJobDelete,
@@ -295,7 +297,7 @@ describe("M3 画廊命令", () => {
         kinds: ["photo", "raw"],
         capturedAfter: "2026-01-01T00:00:00.000Z",
         capturedBefore: "2026-02-01T23:59:59.999Z",
-        camera: "Canon",
+        cameras: ["Canon EOS R5", "Sony A7R5"],
       }),
     ).resolves.toEqual([ASSET]);
     expect(invokeMock).toHaveBeenCalledWith("assets_page", {
@@ -305,7 +307,7 @@ describe("M3 画廊命令", () => {
         kinds: ["photo", "raw"],
         capturedAfter: "2026-01-01T00:00:00.000Z",
         capturedBefore: "2026-02-01T23:59:59.999Z",
-        camera: "Canon",
+        cameras: ["Canon EOS R5", "Sony A7R5"],
       },
     });
   });
@@ -671,5 +673,46 @@ describe("M4 AI 命令", () => {
 
     invokeMock.mockResolvedValueOnce({ groups: 12 }); // photosInBursts 缺失
     await expect(burstStats()).resolves.toBeNull();
+  });
+
+  it("onThisDay 返回历年同月日资产；失败/非数组回退空数组", async () => {
+    const assets = [{ id: 3, path: "P", name: "A.JPG", kind: "photo", capturedAt: "2023-09-19T10:00:00", camera: null, sizeBytes: 1 }];
+    invokeMock.mockResolvedValueOnce(assets);
+    await expect(onThisDay()).resolves.toEqual(assets);
+    expect(invokeMock).toHaveBeenCalledWith("on_this_day", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("command not found"));
+    await expect(onThisDay()).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(onThisDay()).resolves.toEqual([]);
+  });
+
+  it("gearStats 返回器材分布；null/失败/字段形状异常静默回 null", async () => {
+    const stats = {
+      cameras: [{ name: "Canon EOS R5", count: 10 }],
+      lenses: [{ name: "RF 50mm F1.8", count: 4 }],
+      focalBuckets: [
+        { label: "24mm", min: 20, max: 35, count: 3 },
+        { label: "200+mm", min: 200, max: null, count: 1 },
+      ],
+      isoBuckets: [{ label: "ISO 100", count: 5 }],
+      apertureBuckets: [{ label: "f/2.8", count: 2 }],
+      shutterBuckets: [{ label: "1/250s", count: 6 }],
+    };
+    invokeMock.mockResolvedValueOnce(stats);
+    await expect(gearStats()).resolves.toEqual(stats);
+    expect(invokeMock).toHaveBeenCalledWith("gear_stats", undefined);
+
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(gearStats()).resolves.toBeNull();
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(gearStats()).resolves.toBeNull();
+
+    // 字段缺失/类型不对：形状校验拦下（不把半截数据交给 UI）
+    invokeMock.mockResolvedValueOnce({ cameras: stats.cameras }); // 其余字段缺失
+    await expect(gearStats()).resolves.toBeNull();
+    invokeMock.mockResolvedValueOnce({ ...stats, isoBuckets: "nope" });
+    await expect(gearStats()).resolves.toBeNull();
   });
 });

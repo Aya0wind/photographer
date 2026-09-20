@@ -197,6 +197,30 @@ describe("画廊合并：URL 协议", () => {
 // --- 筛选面板（画廊内可用） -------------------------------------------------------------
 
 describe("画廊合并：筛选面板", () => {
+  it("相机多选使用后端 cameras 严格契约，不再发送会被忽略的单数 camera", async () => {
+    cameraListMock.mockResolvedValue([
+      { camera: "Canon EOS R5", count: 12 },
+      { camera: "Sony A7R5", count: 8 },
+    ]);
+    renderGallery();
+    await screen.findByTestId("gallery-empty");
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    fireEvent.click(screen.getByTestId("search-camera-button"));
+
+    const options = await screen.findAllByTestId("search-camera-option");
+    fireEvent.click(within(options[0]).getByRole("checkbox"));
+    fireEvent.click(within(options[1]).getByRole("checkbox"));
+
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+        cameras: ["Canon EOS R5", "Sony A7R5"],
+      }),
+    );
+    const calls = assetsPageMock.mock.calls;
+    const payload = calls[calls.length - 1]?.[2] as unknown as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("camera");
+  });
+
   it("默认收起；展开后条件变更触发筛选查询（防抖 300ms 后单次）", async () => {
     vi.useFakeTimers();
     try {
