@@ -1418,20 +1418,35 @@ impl Db {
         })?;
         rows.collect()
     }
-
-    /// exif 任务深提取成果落库（gen-2 回填 worker / 导入管线共用）：
-    /// 只写 0008 深提取列，不动既有拍摄参数列（0004 列导入时已写）。
+    /// exif 任务深提取成果落库（gen-3 回填 worker / 导入管线共用）。
+    /// 真机发现（2026-09-20）：119 张老库 lens/0004 拍摄参数列全空——旧链
+    /// 只在导入时提取，存量永远没人补。gen-3 起一并回填（COALESCE 保留
+    /// 已有值，提取不到不清空）；captured_at/camera 不动（导入已写对）。
     pub fn update_asset_deep_exif(
         &self,
         id: i64,
-        deep: &crate::metadata::exif_lite::DeepExif,
+        meta: &crate::metadata::exif_lite::MetaLite,
     ) -> Result<()> {
+        let deep = &meta.deep;
         self.0.execute(
-            "UPDATE assets SET orientation = ?2, flash = ?3, metering_mode = ?4, \
-             white_balance = ?5, exposure_program = ?6, software = ?7, artist = ?8, \
-             gps_lat = ?9, gps_lon = ?10 WHERE id = ?1",
+            "UPDATE assets SET lens = COALESCE(?2, lens), \
+             width = COALESCE(?3, width), height = COALESCE(?4, height), \
+             iso = COALESCE(?5, iso), f_number = COALESCE(?6, f_number), \
+             exposure_time = COALESCE(?7, exposure_time), \
+             focal_length = COALESCE(?8, focal_length), \
+             orientation = COALESCE(?9, orientation), flash = ?10, \
+             metering_mode = ?11, white_balance = ?12, exposure_program = ?13, \
+             software = ?14, artist = ?15, gps_lat = ?16, gps_lon = ?17 \
+             WHERE id = ?1",
             params![
                 id,
+                meta.lens,
+                meta.width,
+                meta.height,
+                meta.iso,
+                meta.f_number,
+                meta.exposure_time,
+                meta.focal_length,
                 deep.orientation,
                 deep.flash,
                 deep.metering_mode,

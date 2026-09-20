@@ -87,7 +87,8 @@ fn step(db: &Db, db_dir: &Path) -> bool {
     true
 }
 
-/// EXIF 深提取任务（gen-2）：读文件头 ≤1MB → 深提取字段落库。
+/// EXIF 深提取任务（gen-3）：读文件头 ≤1MB → 全量字段落库（深字段 +
+/// lens/0004 拍摄参数——老库这些列从未有人写，真机 2026-09-20 发现）。
 /// 文件消失（外部库被移走/导入源清理）按完成收尾不占重试额度；
 /// 解码失败走 attempts 封顶策略（与 thumb 一致）。
 fn process_exif_task(db: &Db, asset_id: i64) -> bool {
@@ -101,7 +102,7 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
         return true; // 文件不可读（外部库被移走等）：不再重试
     };
     let meta = crate::metadata::exif_lite::parse(&head);
-    db.update_asset_deep_exif(asset_id, &meta.deep).is_ok()
+    db.update_asset_deep_exif(asset_id, &meta).is_ok()
 }
 
 /// 读文件头（≤1MB，与导入管线 HEAD_MAX 同口径）。
@@ -238,7 +239,7 @@ pub fn refresh_exif_for_generation(
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    let marker = db_dir.join("exif-gen-2.marker");
+    let marker = db_dir.join("exif-gen-3.marker");
     if marker.is_file() {
         return;
     }
@@ -252,7 +253,7 @@ pub fn refresh_exif_for_generation(
                     .and_then(|db| db.requeue_exif_tasks_for_all().ok())
             })
             .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("exif-gen-2.marker"), b"");
+        let _ = std::fs::write(db_dir.join("exif-gen-3.marker"), b"");
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
             run_pending(&db_dir, worker_count());
