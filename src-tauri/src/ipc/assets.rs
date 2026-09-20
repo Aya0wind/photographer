@@ -139,6 +139,28 @@ fn gcd(a: u64, b: u64) -> u64 {
     }
 }
 
+/// AssetPageRow → AssetDto（画廊/最近添加共用映射）。
+pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
+    AssetDto {
+        id: r.id,
+        path: r.path,
+        name: r.filename,
+        kind: r.kind,
+        captured_at: r.captured_at,
+        camera: r.camera,
+        size_bytes: r.size,
+        width: r.width,
+        height: r.height,
+        iso: r.iso,
+        f_number: r.f_number,
+        exposure_time: r.exposure_time,
+        focal_length: r.focal_length,
+        lens: r.lens,
+        pair_id: r.pair_id,
+        thumb_state: r.thumb_state,
+    }
+}
+
 /// 日期过滤值归一：转与库内 captured_at 同构的定宽 UTC 字符串
 /// （库内为 `to_rfc3339_opts(Millis, true)`；带时区偏移的入参转 UTC 瞬时）。
 /// **纯日期 `YYYY-MM-DD`**：按本地时区解释——起始（after）= 当日
@@ -186,27 +208,7 @@ pub fn fetch_assets_page(
     let rows = db
         .assets_page(after_id, limit.clamp(1, 200), &filters)
         .map_err(|e| e.to_string())?;
-    Ok(rows
-        .into_iter()
-        .map(|r| AssetDto {
-            id: r.id,
-            path: r.path,
-            name: r.filename,
-            kind: r.kind,
-            captured_at: r.captured_at,
-            camera: r.camera,
-            size_bytes: r.size,
-            width: r.width,
-            height: r.height,
-            iso: r.iso,
-            f_number: r.f_number,
-            exposure_time: r.exposure_time,
-            focal_length: r.focal_length,
-            lens: r.lens,
-            pair_id: r.pair_id,
-            thumb_state: r.thumb_state,
-        })
-        .collect())
+    Ok(rows.into_iter().map(page_row_to_dto).collect())
 }
 
 /// 本地时区日期分组（降序；unknown 组置顶）。

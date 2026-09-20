@@ -27,6 +27,9 @@ pub struct Settings {
     pub import: ImportSettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
+    /// 监视文件夹（F4：后台轮询发现新文件自动入册；绝对路径形态）。
+    /// v1 默认空；旧 settings.json 缺字段由 serde default 容错填充。
+    pub watch_folders: Vec<String>,
 }
 
 impl Settings {
@@ -108,6 +111,7 @@ impl Default for Settings {
             import: ImportSettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),
+            watch_folders: Vec::new(),
         }
     }
 }

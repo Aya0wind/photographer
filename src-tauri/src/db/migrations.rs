@@ -13,6 +13,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0006_FACES_AND_PEOPLE,
     MIGRATION_0007_UNIQUE_INDEX_TASKS,
     MIGRATION_0008_DEEP_EXIF,
+    MIGRATION_0009_RATING_AND_FLAG,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -225,4 +226,13 @@ ALTER TABLE assets ADD COLUMN software TEXT;
 ALTER TABLE assets ADD COLUMN artist TEXT;
 ALTER TABLE assets ADD COLUMN gps_lat REAL;
 ALTER TABLE assets ADD COLUMN gps_lon REAL;
+"#;
+
+/// 0009（M5 评分与 LR 互通）：rating 0-5（0 = 未评）；flagged 布尔语义
+/// （0/1，收藏旗标）。两列 NOT NULL DEFAULT 0——无 NULL 态，筛选语义
+/// 简单。评分写入侧自动同步 XMP 边车（crate::metadata::xmp），LR 存量
+/// 边车的 xmp:Rating 经 exif 通道回填进库。
+const MIGRATION_0009_RATING_AND_FLAG: &str = r#"
+ALTER TABLE assets ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;
 "#;

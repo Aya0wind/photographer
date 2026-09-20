@@ -177,6 +177,12 @@ pub struct AssetRow {
     /// GPS 经度（十进制度，西经为负）。
     #[serde(default)]
     pub gps_lon: Option<f64>,
+    /// 评分 0-5（0009，NOT NULL DEFAULT 0；0 = 未评）。
+    #[serde(default)]
+    pub rating: i64,
+    /// 收藏旗标（0009，布尔语义 0/1）。
+    #[serde(default)]
+    pub flagged: i64,
 }
 
 /// 索引任务行（index_tasks；导入/索引任务分离后的资产级待办）。
@@ -343,6 +349,14 @@ pub struct AssetFilters {
     /// 文件大小范围（字节，闭区间）。
     pub size_min: Option<i64>,
     pub size_max: Option<i64>,
+    /// 评分范围 0-5（闭区间；rating NOT NULL DEFAULT 0，无 NULL 态）。
+    pub rating_min: Option<i64>,
+    pub rating_max: Option<i64>,
+    /// 收藏旗标：true → flagged=1；false → flagged=0。
+    pub flagged: Option<bool>,
+    /// 收藏页组合条件：true → rating > 0 OR flagged = 1（评分或旗标任一）；
+    /// false → rating = 0 AND flagged = 0。
+    pub favorite: Option<bool>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -750,6 +764,28 @@ impl Db {
             });
         }
 
+        // —— 评分 / 旗标（0009；NOT NULL 无 NULL 态）——
+        for (bound, cmp) in [(filters.rating_min, ">="), (filters.rating_max, "<=")] {
+            if let Some(v) = bound {
+                let s = slot(&mut params_vec, V::from(v));
+                conds.push(format!("rating {cmp} {s}"));
+            }
+        }
+        if let Some(flag) = filters.flagged {
+            conds.push(if flag {
+                "flagged = 1".into()
+            } else {
+                "flagged = 0".into()
+            });
+        }
+        if let Some(fav) = filters.favorite {
+            conds.push(if fav {
+                "(rating > 0 OR flagged = 1)".into()
+            } else {
+                "rating = 0 AND flagged = 0".into()
+            });
+        }
+
         // —— 游标（归一排序键二元组；cursor_id=0 即第一页短路）——
         let cursor_id_slot = slot(&mut params_vec, V::from(cursor_id));
         let cursor_key_slot = slot(&mut params_vec, V::from(cursor_key));
@@ -773,6 +809,35 @@ impl Db {
              ORDER BY k DESC, id DESC LIMIT {limit_slot}",
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), map_asset_page)?;
+        rows.collect()
+    }
+
+    /// 最近添加分页（「最近添加」页数据源）：created_at DESC、id DESC
+    /// keyset——created_at NOT NULL 定宽 RFC3339，字典序即时间序；游标
+    /// after_id 为上一页末行 id（0 = 第一页；行已删按第一页）。
+    pub fn recent_assets_page(&self, after_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
+        let (cursor_key, cursor_id) = if after_id > 0 {
+            match self.0.query_row(
+                "SELECT created_at FROM assets WHERE id = ?1",
+                [after_id],
+                |r| r.get::<_, String>(0),
+            ) {
+                Ok(key) => (key, after_id),
+                Err(_) => ("9999-12-31T23:59:59.999Z".to_string(), 0), // 行已删：回退第一页
+            }
+        } else {
+            ("9999-12-31T23:59:59.999Z".to_string(), 0)
+        };
+        let mut stmt = self.0.prepare(
+            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state \
+             FROM (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
+                    a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, \
+                    a.lens, a.pair_asset_id, a.thumb_state, a.created_at AS ck FROM assets a) \
+             WHERE (?1 = 0 OR ck < ?2 OR (ck = ?2 AND id < ?1)) \
+             ORDER BY ck DESC, id DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![cursor_id, cursor_key, limit], map_asset_page)?;
         rows.collect()
     }
 
@@ -818,7 +883,7 @@ impl Db {
              source, created_at, origin, width, height, iso, f_number, exposure_time, \
              focal_length, lens, pair_asset_id, thumb_state, orientation, flash, \
              metering_mode, white_balance, exposure_program, software, artist, \
-             gps_lat, gps_lon FROM assets WHERE id = ?1",
+             gps_lat, gps_lon, rating, flagged FROM assets WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
@@ -855,9 +920,10 @@ impl Db {
              (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, \
              created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
              lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
-             white_balance, exposure_program, software, artist, gps_lat, gps_lon) \
+             white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
+             rating, flagged) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
+             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
             params![
                 a.path,
                 a.filename,
@@ -889,6 +955,8 @@ impl Db {
                 a.artist,
                 a.gps_lat,
                 a.gps_lon,
+                a.rating,
+                a.flagged,
             ],
         )?;
         let id = self
@@ -1461,6 +1529,35 @@ impl Db {
         Ok(())
     }
 
+    /// 评分写入（0-5 由 IPC 层校验；资产不存在返回 false）。
+    /// 只动 DB——XMP 边车同步由调用方（ipc::rating）异步派发。
+    pub fn set_asset_rating(&self, id: i64, rating: i64) -> Result<bool> {
+        let n = self.0.execute(
+            "UPDATE assets SET rating = ?2 WHERE id = ?1",
+            params![id, rating],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 当前评分（资产不存在 None；exif 通道 XMP 回填判定用）。
+    pub fn asset_rating_of(&self, id: i64) -> Result<Option<i64>> {
+        let mut stmt = self.0.prepare("SELECT rating FROM assets WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 收藏旗标写入（0/1；资产不存在返回 false）。
+    pub fn set_asset_flagged(&self, id: i64, flagged: bool) -> Result<bool> {
+        let n = self.0.execute(
+            "UPDATE assets SET flagged = ?2 WHERE id = ?1",
+            params![id, i64::from(flagged)],
+        )?;
+        Ok(n > 0)
+    }
+
     /// EXIF 提取代际升级自愈（exif-gen-2）：重排**全部** photo/raw 资产的
     /// exif 任务（既有任务复位 pending + 为无任务行新建），返回待处理数。
     /// 唯一索引（0007）保证 INSERT OR IGNORE 不重复。
@@ -1656,6 +1753,8 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
         artist: row.get(27)?,
         gps_lat: row.get(28)?,
         gps_lon: row.get(29)?,
+        rating: row.get(30)?,
+        flagged: row.get(31)?,
     })
 }
 

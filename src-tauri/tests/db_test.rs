@@ -85,6 +85,8 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        rating: 0,
+        flagged: 0,
         orientation: None,
         flash: None,
         metering_mode: None,
@@ -114,15 +116,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 8);
+        assert_eq!(user_version(&db), 9);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 8, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 9, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 8);
+    assert_eq!(user_version(&db), 9);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -165,7 +167,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
             [asset_id],
         )
         .unwrap();
-        // 0008 的 ALTER ADD COLUMN 不可重放：回卷版本前先摘掉 0008 列
+        // 0008/0009 的 ALTER ADD COLUMN 不可重放：回卷版本前先摘掉这些列
         //（迁移会原样补回，语义不变）
         for col in [
             "orientation",
@@ -177,6 +179,8 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
             "artist",
             "gps_lat",
             "gps_lon",
+            "rating",
+            "flagged",
         ] {
             db.0.execute(&format!("ALTER TABLE assets DROP COLUMN {col}"), [])
                 .unwrap();
@@ -186,7 +190,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 8);
+    assert_eq!(user_version(&db), 9);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

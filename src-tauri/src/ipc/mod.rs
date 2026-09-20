@@ -9,9 +9,11 @@ pub mod import;
 pub mod indexing;
 pub mod migrate;
 pub mod people;
+pub mod rating;
 pub mod reconcile;
 pub mod settings;
 pub mod thumb;
+pub mod watch;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

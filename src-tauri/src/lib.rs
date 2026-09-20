@@ -117,7 +117,13 @@ pub fn run() {
             // 后台线程 3：系统通知（会话开始/结束 + 里程碑）
             spawn_notification_subscriber(app.handle().clone());
             // 后台线程 4：热插拔检测（隐藏顶层窗口泵）
-            let _hotplug = hotplug::spawn_hotplug_thread(bus);
+            let _hotplug = hotplug::spawn_hotplug_thread(bus.clone());
+            // 后台线程 5：监视文件夹轮询（F4 v1：5min 一轮，新文件自动入册）
+            ipc::watch::spawn_watch_worker(
+                app.state::<ipc::SharedState>().inner().clone(),
+                &bus,
+                &supervisor_handle,
+            );
 
             // 主窗口关闭行为：close_to_tray=true 时隐藏到托盘，否则放行正常退出。
             if let Some(main_window) = app.get_webview_window("main") {
@@ -191,6 +197,12 @@ pub fn run() {
             ipc::people::person_delete,
             ipc::indexing::index_kick_now,
             ipc::indexing::index_status,
+            ipc::rating::asset_rating_set,
+            ipc::rating::asset_flag_set,
+            ipc::rating::recent_assets,
+            ipc::watch::watch_folders_list,
+            ipc::watch::watch_folder_add,
+            ipc::watch::watch_folder_remove,
             ipc::device::event_ping,
         ])
         .run(tauri::generate_context!())

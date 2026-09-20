@@ -258,6 +258,13 @@ pub enum AppEvent {
         total: u64,
     },
 
+    // 监视文件夹（F4 v1）
+    /// 轮询发现新文件并已发起自动入册：folder = 监视目录，files = 新文件数。
+    WatchFolderImported {
+        folder: String,
+        files: u64,
+    },
+
     // 错误
     AppError {
         level: String,

@@ -54,6 +54,9 @@ usearch = "=2.19.23" # 2.20+ 引入 numkong 多目标分发，MSVC 编译失败�
 ureq = "2"
 walkdir = "2"
 kamadak-exif = "0.6"
+# M5 XMP 边车（LR 互通）：quick-xml 只做读取侧的结构化解析；改写侧用
+# 字符串外科手术（未触字段逐字节保留，绝不整档重序列化——防丢 LR 数据）
+quick-xml = "0.42"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

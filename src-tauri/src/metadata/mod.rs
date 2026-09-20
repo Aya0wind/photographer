@@ -2,3 +2,4 @@
 //! 完整提取（rawler/ffprobe）在 M3。
 
 pub mod exif_lite;
+pub mod xmp;

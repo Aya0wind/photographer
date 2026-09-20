@@ -850,6 +850,8 @@ impl Engine {
             artist: copied.meta.deep.artist.clone(),
             gps_lat: copied.meta.deep.gps_lat,
             gps_lon: copied.meta.deep.gps_lon,
+            rating: 0,
+            flagged: 0,
         });
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2

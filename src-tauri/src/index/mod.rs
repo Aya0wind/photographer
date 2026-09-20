@@ -102,7 +102,24 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
         return true; // 文件不可读（外部库被移走等）：不再重试
     };
     let meta = crate::metadata::exif_lite::parse(&head);
-    db.update_asset_deep_exif(asset_id, &meta).is_ok()
+    let deep_ok = db.update_asset_deep_exif(asset_id, &meta).is_ok();
+    // LR 存量评分回填：边车 xmp:Rating → DB（只读边车不回写，与应用内
+    // 评分写入方向相反，无循环；DB 已有评分（>0）不覆盖——应用内值优先）
+    if let Some(stars) = crate::metadata::xmp::sidecar_rating(
+        &std::fs::read_to_string(crate::metadata::xmp::sidecar_path(Path::new(&path)))
+            .unwrap_or_default(),
+    ) {
+        if stars > 0
+            && db
+                .asset_rating_of(asset_id)
+                .ok()
+                .flatten()
+                .is_none_or(|r| r == 0)
+        {
+            let _ = db.set_asset_rating(asset_id, i64::from(stars));
+        }
+    }
+    deep_ok
 }
 
 /// 读文件头（≤1MB，与导入管线 HEAD_MAX 同口径）。

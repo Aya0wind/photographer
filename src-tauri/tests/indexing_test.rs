@@ -37,6 +37,8 @@ fn asset_row(path: &str, kind: AssetKind) -> AssetRow {
         lens: None,
         pair_asset_id: None,
         thumb_state: 0,
+        rating: 0,
+        flagged: 0,
         orientation: None,
         flash: None,
         metering_mode: None,

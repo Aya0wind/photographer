@@ -55,6 +55,8 @@ fn state_with_asset(db_dir: &Path, src: &Path) -> (ipc::AppState, i64) {
             lens: None,
             pair_asset_id: None,
             thumb_state: 0,
+            rating: 0,
+            flagged: 0,
             orientation: None,
             flash: None,
             metering_mode: None,

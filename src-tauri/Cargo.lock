@@ -4966,6 +4966,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "ort",
+ "quick-xml",
  "rawler",
  "rusqlite",
  "serde",
