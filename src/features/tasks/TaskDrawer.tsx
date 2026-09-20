@@ -425,10 +425,14 @@ function HistoryRow({
   onOpenLogs: (jobId: number) => void;
 }) {
   const { t } = useTranslation();
-  // statsJson = ImportStats JSON（游标分页行内自带）；解析失败静默空统计
+  // statsJson = ImportStats JSON（游标分页行内自带）；解析失败/非对象
+  // （含 "null"——JSON.parse 不抛错返回 null，真机崩过整路由）静默空统计
   let stats: { doneFiles?: number; skippedDuplicates?: number; failedFiles?: number } = {};
   try {
-    stats = JSON.parse(row.statsJson) as typeof stats;
+    const parsed: unknown = JSON.parse(row.statsJson);
+    if (parsed !== null && typeof parsed === "object") {
+      stats = parsed as typeof stats;
+    }
   } catch {
     // 兼容旧数据/异常 JSON
   }
