@@ -5,8 +5,8 @@
 //! 协议加载）；无法生成（RAW/视频/读取失败/超时）返回 null。
 //!
 //! - 可解码集：image crate 支持的位图格式（JPG/PNG/WEBP/BMP/GIF/TIFF）；
-//!   RAW（NEF/ARW/CR3…）与视频 v1 返回 null（RAW 内嵌预览提取留给 M3
-//!   rawler 集成）。
+//!   RAW（NEF/ARW/CR3…）走内嵌 JPEG 预览提取；视频（MP4/MOV…，M8）经
+//!   `crate::videos` ffmpeg 侧车抽帧出海报（缓存同挂 thumbs 根，LRU 同治）。
 //! - 缓存：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime unixsecs>.jpg`
 //!   （路径小写哈希：Windows 路径大小写不敏感；键含 mtime → 源变化自然
 //!   miss）。命中直接返回，不重解码。
@@ -139,8 +139,14 @@ fn is_raw_embed_request(ext: &str, size: u16) -> bool {
 /// `db_dir` = 库 dbDir（缓存根）；源文件只读不动。
 pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let ext = src.extension()?.to_str()?.to_ascii_lowercase();
+    // 视频扩展（M8）：ffmpeg 侧车海报（缓存沿用 thumbs 根，LRU 上限同治）
+    if crate::videos::is_video_ext(&ext) {
+        let size = snap_size(size);
+        return crate::videos::video_poster(db_dir, src, size)
+            .map(|p| p.to_string_lossy().into_owned());
+    }
     if !DECODABLE_EXTS.contains(&ext.as_str()) && !is_raw_ext(&ext) {
-        return None; // 视频等永久不支持
+        return None; // 其他类型永久不支持
     }
     // 内嵌直出档不 snap（>2048 是语义标记而非目标边长）
     let size = if is_raw_embed_request(&ext, size) {
@@ -294,11 +300,14 @@ pub fn evict_lru(db_dir: &Path, cap_bytes: u64, min_age_secs: u64, now: SystemTi
     (deleted, freed)
 }
 
-/// 源是否可出缩略图（位图直解或 RAW 内嵌预览提取；入队前的廉价否决）。
+/// 源是否可出缩略图（位图直解 / RAW 内嵌预览提取 / 视频海报（M8 ffmpeg
+/// 侧车）；入队前的廉价否决）。
 pub fn is_decodable(src: &Path) -> bool {
     src.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         let e = e.to_ascii_lowercase();
-        DECODABLE_EXTS.contains(&e.as_str()) || RAW_EXTS.contains(&e.as_str())
+        DECODABLE_EXTS.contains(&e.as_str())
+            || RAW_EXTS.contains(&e.as_str())
+            || crate::videos::is_video_ext(&e)
     })
 }
 
@@ -314,6 +323,10 @@ pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
         .extension()
         .and_then(|e| e.to_str())?
         .to_ascii_lowercase();
+    // 视频扩展（M8）：海报缓存探测（不 spawn ffmpeg）
+    if crate::videos::is_video_ext(&ext) {
+        return crate::videos::cached_poster(db_dir, src, snap_size(size));
+    }
     let size = if is_raw_embed_request(&ext, size) {
         size
     } else {

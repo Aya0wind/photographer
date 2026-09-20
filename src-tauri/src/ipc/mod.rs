@@ -14,6 +14,7 @@ pub mod people;
 pub mod rating;
 pub mod reconcile;
 pub mod settings;
+pub mod system;
 pub mod thumb;
 pub mod watch;
 

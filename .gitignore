@@ -28,3 +28,6 @@ dist-ssr
 .e2e-shots/
 target-test/
 hh.json
+
+# ffmpeg 侧车（下载物不入库，构建脚本自动下载）
+src-tauri/binaries/

@@ -5,7 +5,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
+    thumbs, videos,
 };
 
 use std::path::{Path, PathBuf};
@@ -204,14 +205,14 @@ fn bounded_queue_full_drops_request() {
 }
 
 #[test]
-fn raw_and_missing_assets_return_none_without_enqueue() {
+fn undecodable_and_missing_assets_return_none_without_enqueue() {
     let src_dir = tempfile::tempdir().unwrap();
-    let raw = src_dir.path().join("VID_0001.MP4");
-    std::fs::write(&raw, b"video-bytes").unwrap();
+    let txt = src_dir.path().join("notes.txt");
+    std::fs::write(&txt, b"not media").unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let (state, id) = state_with_asset(db_dir.path(), &raw);
+    let (state, id) = state_with_asset(db_dir.path(), &txt);
 
-    // 视频不可解码：Unavailable 且不入队
+    // 非媒体扩展：Unavailable 且不入队
     assert_eq!(
         ipc::thumb::fetch_asset_thumb(&state, id, 256).unwrap(),
         ipc::thumb::ThumbOutcome::Unavailable,
@@ -224,6 +225,18 @@ fn raw_and_missing_assets_return_none_without_enqueue() {
         ipc::thumb::ThumbOutcome::Unavailable
     );
     assert_eq!(state.thumb_queue.pending_len(), 0);
+
+    // 视频（M8 起）：不再永久占位——垃圾字节也入队试海报（worker 侧由
+    // ffmpeg 失败 + 队列失败计数 ≥3 兜底）
+    let mp4 = src_dir.path().join("VID_0001.MP4");
+    std::fs::write(&mp4, b"video-bytes").unwrap();
+    let db_dir2 = tempfile::tempdir().unwrap();
+    let (state2, id2) = state_with_asset(db_dir2.path(), &mp4);
+    assert_eq!(
+        ipc::thumb::fetch_asset_thumb(&state2, id2, 256).unwrap(),
+        ipc::thumb::ThumbOutcome::Pending,
+        "视频（M8）：入队出 ffmpeg 海报"
+    );
 }
 
 #[test]

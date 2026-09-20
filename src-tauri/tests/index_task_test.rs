@@ -1,11 +1,13 @@
 //! 索引任务系统（导入/索引任务分离）：导入入册→待办生成、worker 跑完→
-//! 三档缓存+thumb_state=1、损坏图→attempts 重试后 failed、video→永久占位、
+//! 三档缓存+thumb_state=1、损坏图→attempts 重试后 failed、video→按需海报
+//!（M8：不占索引待办）、
 //! 中断恢复（running 复位→续跑）、worker 数=核心数、DTO 契约。
 
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
+    thumbs, videos,
 };
 
 use std::fs;
@@ -76,9 +78,10 @@ fn import_creates_thumb_tasks_only_for_photo_and_raw() {
     assert!(tasks
         .iter()
         .all(|(kind, _, state, attempts)| kind == "thumb" && state == "pending" && *attempts == 0));
-    // video 资产直接永久占位
+    // video（M8 起）：不写索引待办、也不永久占位——thumb_state=0 走按需
+    // 队列出 ffmpeg 海报（失败由队列失败计数兜底）
     let video_state = thumb_state(&database, "MVI_0003.MP4");
-    assert_eq!(video_state, 2, "video 永久占位");
+    assert_eq!(video_state, 0, "video 留给按需海报队列");
     // photo/raw 仍 pending
     assert_eq!(thumb_state(&database, "IMG_0001.jpg"), 0);
 }

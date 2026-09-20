@@ -978,9 +978,10 @@ impl Db {
         }
         self.refresh_asset_pair(id, &a.path)?;
 
-        // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video/
-        // other 直接永久占位（无缩略图可言）。REPLACE 旧资产行时其任务行
-        // 随 ON DELETE CASCADE 消失，这里只补新行。
+        // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video 留
+        // thumb_state=0 走按需队列（M8：ffmpeg 海报，侧车失败由队列失败
+        // 计数兜底）；other 无缩略图可言直接永久占位。REPLACE 旧资产行时
+        // 其任务行随 ON DELETE CASCADE 消失，这里只补新行。
         if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
             let now = now_rfc3339();
             self.0.execute(
@@ -988,13 +989,25 @@ impl Db {
                  VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
                 params![id, now],
             )?;
-        } else {
+        } else if a.kind != AssetKind::Video {
             self.0.execute(
                 "UPDATE assets SET thumb_state = 2 WHERE id = ?1",
                 params![id],
             )?;
         }
         Ok(())
+    }
+
+    /// M8 视频海报解锁：历史库的 video 资产曾被置 thumb_state=2（当时无
+    /// 海报路径的永久占位）。海报管线就位后复位为 0——按需队列下次请求
+    /// 即补生成；真失败仍由队列自身失败计数兜底。幂等（无 marker：每次
+    /// 启动重置一次无副作用，反而是侧车补装后的自愈通道）。
+    pub fn reset_video_thumb_placeholders(&self) -> Result<u64> {
+        let n = self.0.execute(
+            "UPDATE assets SET thumb_state = 0 WHERE kind = 'video' AND thumb_state = 2",
+            [],
+        )?;
+        Ok(n as u64)
     }
 
     /// 按 (同目录, 同 stem, 异扩展名) 找配对伙伴并双向写 pair_asset_id；

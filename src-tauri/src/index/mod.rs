@@ -36,8 +36,11 @@ fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
         // 资产已被删除（级联应清任务，防御性兜底）：按完成收尾
         return true;
     };
-    if !matches!(kind.as_str(), "photo" | "raw") || !crate::thumbs::is_decodable(Path::new(&path)) {
-        // 视频/其他/不可解码：永久占位（不占重试额度）
+    if !matches!(kind.as_str(), "photo" | "raw" | "video")
+        || !crate::thumbs::is_decodable(Path::new(&path))
+    {
+        // 其他类型/不可解码：永久占位（不占重试额度）。视频（M8 海报）
+        // 不在此列——经 thumb_file 路由到 ffmpeg 侧车。
         let _ = db.set_thumb_state(asset_id, 2);
         return true;
     }

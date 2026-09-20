@@ -5,7 +5,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
+    thumbs, videos,
 };
 
 use devices::hotplug::unitmask_to_drives;

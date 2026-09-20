@@ -34,6 +34,8 @@ pub mod settings;
 pub mod tasks;
 #[path = "../../src/thumbs/mod.rs"]
 pub mod thumbs;
+#[path = "../../src/videos/mod.rs"]
+pub mod videos;
 
 use std::collections::HashMap;
 use std::fs;

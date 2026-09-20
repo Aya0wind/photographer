@@ -20,6 +20,9 @@ mod metadata;
 #[path = "../src/thumbs/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树（metadata::phash 引用）
 mod thumbs;
+#[path = "../src/videos/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树（thumbs 视频路由引用）
+mod videos;
 
 #[path = "../src/db/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树

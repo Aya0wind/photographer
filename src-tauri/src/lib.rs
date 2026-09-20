@@ -12,6 +12,7 @@ pub mod settings;
 mod tasks;
 mod thumbs;
 mod tray;
+mod videos;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -114,6 +115,17 @@ pub fn run() {
                 index::refresh_hash_for_generation(db_dir.clone(), &bus, &supervisor_handle);
                 // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）
                 thumbs::kick_startup_evict(db_dir.clone());
+                // M8 视频海报解锁：历史库 video 永久占位（thumb_state=2）
+                // 复位为 0——海报管线就位后按需队列即可补生成（幂等，兼作
+                // 侧车补装后的自愈通道）
+                {
+                    let db_dir = db_dir.clone();
+                    supervisor_handle.spawn("thumbs", "video-poster-unlock".into(), move |_| {
+                        if let Ok(db) = ipc::open_library_db(&db_dir) {
+                            let _ = db.reset_video_thumb_placeholders();
+                        }
+                    });
+                }
                 // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算
                 // pHash + 完成后连拍重组
                 index::refresh_phash_for_generation(
@@ -229,6 +241,7 @@ pub fn run() {
             ipc::assets::assets_by_ids,
             ipc::thumb::asset_thumb_get,
             ipc::thumb::thumb_get_by_path,
+            ipc::system::open_with_system,
             ipc::migrate::db_dir_migrate,
             ipc::migrate::photo_root_switch,
             ipc::ai::ai_models_status,
