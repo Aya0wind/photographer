@@ -103,7 +103,11 @@ fn process_phash_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
     let Some(phash) = crate::metadata::phash::compute_phash(db_dir, Path::new(&path)) else {
         return false;
     };
-    db.set_phash(asset_id, phash).is_ok()
+    if db.set_phash(asset_id, phash).is_err() {
+        return false;
+    }
+    // 近重复分桶增量维护（F8：4×16-bit 多探针）
+    db.insert_similar_buckets(asset_id, phash).is_ok()
 }
 
 /// EXIF 深提取任务（gen-3）：读文件头 ≤1MB → 全量字段落库（深字段 +

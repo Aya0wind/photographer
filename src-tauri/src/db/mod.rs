@@ -385,6 +385,9 @@ pub struct AssetPageRow {
 /// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
 pub type BurstScanRow = (i64, i64, Option<String>, String, Option<i64>);
 
+/// 桶成员表条目（多探针候选装配用）。
+pub type SimilarBucketMembers = ((i64, i64), Vec<i64>);
+
 /// 相机聚合行（搜索页相机勾选数据源）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1717,6 +1720,193 @@ impl Db {
             params![now],
         )?;
         self.pending_index_task_count("phash")
+    }
+
+    /// pHash 指纹的 4 段 16-bit 分桶插入（phash 任务成功后增量维护）。
+    pub fn insert_similar_buckets(&self, id: i64, phash: u64) -> Result<()> {
+        let p = phash as i64;
+        self.0.execute(
+            "INSERT OR IGNORE INTO similar_bucket (segment, seg_val, asset_id) VALUES \
+             (0, (?1 >> 48) & 0xFFFF, ?5), (1, (?1 >> 32) & 0xFFFF, ?5), \
+             (2, (?1 >> 16) & 0xFFFF, ?5), (3, ?1 & 0xFFFF, ?5)",
+            params![p, p, p, p, id],
+        )?;
+        Ok(())
+    }
+
+    /// 桶表懒校验+全量重建（行数 ≠ 4×phash 行数时；纯 SQL，20 万行秒级）。
+    /// 返回是否执行了重建。
+    pub fn ensure_similar_buckets(&self) -> Result<bool, String> {
+        let (phash_rows, bucket_rows): (i64, i64) = self
+            .0
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM assets WHERE phash IS NOT NULL), \
+                 (SELECT COUNT(*) FROM similar_bucket)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        if bucket_rows == phash_rows * 4 {
+            return Ok(false);
+        }
+        self.0
+            .execute_batch(
+                "DELETE FROM similar_bucket; \
+                 INSERT INTO similar_bucket (segment, seg_val, asset_id) \
+                 SELECT 0, (phash >> 48) & 0xFFFF, id FROM assets WHERE phash IS NOT NULL; \
+                 INSERT INTO similar_bucket (segment, seg_val, asset_id) \
+                 SELECT 1, (phash >> 32) & 0xFFFF, id FROM assets WHERE phash IS NOT NULL; \
+                 INSERT INTO similar_bucket (segment, seg_val, asset_id) \
+                 SELECT 2, (phash >> 16) & 0xFFFF, id FROM assets WHERE phash IS NOT NULL; \
+                 INSERT INTO similar_bucket (segment, seg_val, asset_id) \
+                 SELECT 3, phash & 0xFFFF, id FROM assets WHERE phash IS NOT NULL;",
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// 近重复扫描行：(asset_id, phash, pair_asset_id)。**RAW 孪生整行排除**
+    /// （pair 非空且自己是 RAW——同拍摄不算重复；只排除边不够，孪生会经
+    /// 第三成员间接入组）。
+    pub fn similar_scan_rows(&self) -> Result<Vec<(i64, i64, Option<i64>)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, phash, pair_asset_id FROM assets \
+             WHERE phash IS NOT NULL AND kind IN ('photo', 'raw') \
+               AND NOT (kind = 'raw' AND pair_asset_id IS NOT NULL) ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// 多探针桶成员表：(segment, seg_val) → 资产 id 列表（仅 ≥2 成员的桶）。
+    pub fn similar_bucket_members(&self) -> Result<Vec<SimilarBucketMembers>> {
+        let mut stmt = self.0.prepare(
+            "SELECT segment, seg_val, asset_id FROM similar_bucket \
+             ORDER BY segment, seg_val, asset_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out: Vec<((i64, i64), Vec<i64>)> = Vec::new();
+        for row in rows {
+            let (seg, val, id) = row?;
+            match out.last_mut() {
+                Some((key, members)) if *key == (seg, val) => members.push(id),
+                _ => out.push(((seg, val), vec![id])),
+            }
+        }
+        out.retain(|(_, members)| members.len() >= 2);
+        Ok(out)
+    }
+
+    /// 完全重复组：(size, xxhash) 分组计数 >1 的指纹键（count 降序）。
+    pub fn exact_duplicate_keys(&self) -> Result<Vec<(i64, u64)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT size, xxhash, COUNT(*) AS c FROM assets \
+             WHERE kind IN ('photo', 'raw') \
+             GROUP BY size, xxhash HAVING c > 1 ORDER BY c DESC, size, xxhash",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect()
+    }
+
+    /// 按多个 id 批量取分页行（组内按 created_at 升序；分组装配由调用方做）。
+    pub fn assets_by_ids_ordered(&self, ids: &[i64]) -> Result<Vec<AssetPageRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             FROM assets WHERE id IN ({slots}) ORDER BY created_at ASC, id ASC"
+        );
+        let mut stmt = self.0.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), map_asset_page)?;
+        rows.collect()
+    }
+
+    /// 那年今天：本地时区同月日的 photo/raw，年份 DESC、年内时间 ASC。
+    pub fn assets_on_this_day(&self, month_day: &str) -> Result<Vec<AssetPageRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             FROM assets \
+             WHERE kind IN ('photo', 'raw') AND captured_at IS NOT NULL \
+               AND strftime('%m-%d', captured_at, 'localtime') = ?1 \
+             ORDER BY substr(captured_at, 1, 4) DESC, captured_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![month_day], map_asset_page)?;
+        rows.collect()
+    }
+
+    /// 器材统计桶计数（单遍 SQL：子查询把 exposure_time 展示串解析成秒，
+    /// 外层 CASE 分桶；GLOB 守卫挡住非数值串——CAST('垃圾' AS REAL)=0 会
+    /// 污染快桶）。快门桶序：>1s / 1-1/2 / 1/2-1/8 / 1/8-1/60 / 1/60-1/500 /
+    /// ≤1/500（秒）；光圈序：≤1.4/1.4-2.8/2.8-4/4-5.6/5.6-8/>8；焦段序：
+    /// <24/24-50/50-85/85-135/135-200/≥200；ISO 序：≤100/…/1600-3200/>3200。
+    pub fn gear_bucket_counts(&self) -> Result<Vec<i64>, String> {
+        let mut stmt = self
+            .0
+            .prepare(
+                "SELECT \
+                    SUM(CASE WHEN f < 24 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN f >= 24 AND f < 50 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN f >= 50 AND f < 85 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN f >= 85 AND f < 135 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN f >= 135 AND f < 200 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN f >= 200 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso <= 100 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 100 AND iso <= 200 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 200 AND iso <= 400 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 400 AND iso <= 800 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 800 AND iso <= 1600 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 1600 AND iso <= 3200 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN iso > 3200 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap <= 1.4 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap > 1.4 AND ap <= 2.8 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap > 2.8 AND ap <= 4 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap > 4 AND ap <= 5.6 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap > 5.6 AND ap <= 8 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN ap > 8 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec > 1.0 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec <= 1.0 AND sec >= 0.5 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec < 0.5 AND sec >= 0.125 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec < 0.125 AND sec >= 1.0/60 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec < 1.0/60 AND sec > 1.0/500 THEN 1 ELSE 0 END), \
+                    SUM(CASE WHEN sec <= 1.0/500 THEN 1 ELSE 0 END) \
+                 FROM ( \
+                    SELECT CASE WHEN focal_length GLOB '[0-9]*' \
+                            THEN CAST(focal_length AS REAL) END AS f, iso, \
+                    CASE WHEN f_number GLOB '[0-9]*' \
+                         THEN CAST(f_number AS REAL) END AS ap, \
+                    CASE WHEN exposure_time GLOB '1/[0-9]*' \
+                         THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) \
+                         WHEN exposure_time GLOB '[0-9]*' \
+                         THEN CAST(exposure_time AS REAL) END AS sec \
+                    FROM assets WHERE kind IN ('photo', 'raw') \
+                 )",
+            )
+            .map_err(|e| e.to_string())?;
+        let counts = stmt
+            .query_row([], |r| {
+                let mut row = [0i64; 25];
+                for (i, slot) in row.iter_mut().enumerate() {
+                    *slot = r.get::<_, Option<i64>>(i)?.unwrap_or(0);
+                }
+                Ok(row)
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(counts.to_vec())
     }
 
     /// 收藏旗标写入（0/1；资产不存在返回 false）。

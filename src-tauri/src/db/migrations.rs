@@ -17,6 +17,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0010_VIEW_HISTORY,
     MIGRATION_0011_DROP_SHA256,
     MIGRATION_0012_BURSTS,
+    MIGRATION_0013_SIMILAR_BUCKET,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -294,4 +295,17 @@ DROP TABLE index_tasks;
 ALTER TABLE index_tasks_new RENAME TO index_tasks;
 CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
 CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
+"#;
+
+/// 0013（M7 F8 近重复分桶）：pHash 64-bit 切 4 段 16-bit 入桶（多探针：
+/// 汉明 ≤6 时 4 段差的总和 ≤6 < 4×2，必有一段差 0——段相等必命中，零漏检；
+/// 命中对再精确汉明过滤）。表随 phash 任务增量插入；行数 ≠ 4×phash 数时
+/// 纯 SQL 全量重建（懒校验）；资产删除级联清行。
+const MIGRATION_0013_SIMILAR_BUCKET: &str = r#"
+CREATE TABLE similar_bucket (
+    segment  INTEGER NOT NULL,
+    seg_val  INTEGER NOT NULL,
+    asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    PRIMARY KEY (segment, seg_val, asset_id)
+);
 "#;
