@@ -16,6 +16,8 @@ import {
   assetsByIds,
   assetsPage,
   cameraList,
+  formatList,
+  lensList,
   searchSemantic,
   deviceList,
   deviceScan,
@@ -355,10 +357,22 @@ describe("M3 画廊命令", () => {
       dupCount: 2,
       width: null,
       height: null,
+      megapixels: null,
+      aspect: null,
+      orientation: null,
       iso: null,
       aperture: null,
       shutter: null,
       focalLength: null,
+      flash: null,
+      meteringMode: null,
+      whiteBalance: null,
+      exposureProgram: null,
+      software: null,
+      artist: null,
+      gpsLat: null,
+      gpsLon: null,
+      format: null,
     });
     expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
   });
@@ -417,25 +431,47 @@ describe("M3 画廊命令", () => {
       dupCount: 0,
       width: null,
       height: null,
+      megapixels: null,
+      aspect: null,
+      orientation: null,
       iso: null,
       aperture: null,
       shutter: null,
       focalLength: null,
+      flash: null,
+      meteringMode: null,
+      whiteBalance: null,
+      exposureProgram: null,
+      software: null,
+      artist: null,
+      gpsLat: null,
+      gpsLon: null,
+      format: null,
     });
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
     await expect(assetDetail(3)).resolves.toBeNull();
   });
 
-  it("assetThumbGet 传 assetId/size；失败返回 null", async () => {
-    invokeMock.mockResolvedValueOnce("I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg");
-    await expect(assetThumbGet(3, 240)).resolves.toBe(
-      "I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg",
-    );
+  it("assetThumbGet 传 assetId/size；三态 ready/pending/unavailable（含失败与非对象回退）", async () => {
+    invokeMock.mockResolvedValueOnce({
+      status: "ready",
+      path: "I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg",
+    });
+    await expect(assetThumbGet(3, 240)).resolves.toEqual({
+      status: "ready",
+      path: "I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg",
+    });
     expect(invokeMock).toHaveBeenCalledWith("asset_thumb_get", { assetId: 3, size: 240 });
 
+    invokeMock.mockResolvedValueOnce({ status: "pending" });
+    await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "pending" });
+
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "unavailable" });
+
     invokeMock.mockRejectedValueOnce(new Error("nope"));
-    await expect(assetThumbGet(3, 1280)).resolves.toBeNull();
+    await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "unavailable" });
   });
 
   it("cameraList 返回相机计数清单（cameras_list）；失败/非数组回退空数组", async () => {
@@ -448,6 +484,33 @@ describe("M3 画廊命令", () => {
     await expect(cameraList()).resolves.toEqual([]);
     invokeMock.mockResolvedValueOnce(null);
     await expect(cameraList()).resolves.toEqual([]);
+  });
+
+  it("lensList 返回镜头计数清单（lens_list）；失败/非数组回退空数组", async () => {
+    const list = [{ lens: "RF24-70mm F2.8 L", count: 8 }];
+    invokeMock.mockResolvedValueOnce(list);
+    await expect(lensList()).resolves.toEqual(list);
+    expect(invokeMock).toHaveBeenCalledWith("lens_list", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(lensList()).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(lensList()).resolves.toEqual([]);
+  });
+
+  it("formatList 返回格式计数清单（format_list）；失败/非数组回退空数组", async () => {
+    const list = [
+      { format: "NEF", count: 5 },
+      { format: "JPG", count: 3 },
+    ];
+    invokeMock.mockResolvedValueOnce(list);
+    await expect(formatList()).resolves.toEqual(list);
+    expect(invokeMock).toHaveBeenCalledWith("format_list", undefined);
+
+    invokeMock.mockRejectedValueOnce(new Error("nope"));
+    await expect(formatList()).resolves.toEqual([]);
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(formatList()).resolves.toEqual([]);
   });
 });
 

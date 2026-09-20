@@ -76,6 +76,26 @@ function formatValue(value: string | null | undefined): string {
   return value === null || value === undefined || value === "" ? "—" : value;
 }
 
+/** 快门格式化："1/250" → "1/250s"（已带 s 或描述性文本原样透传） */
+function formatShutter(value: string): string {
+  return /s$/i.test(value) ? value : `${value}s`;
+}
+
+/** EXIF orientation（1-8）→ 拍摄方向：5-8 为竖拍（含镜像竖拍），1-4 为横拍 */
+function isPortraitOrientation(orientation: number): boolean {
+  return Number.isInteger(orientation) && orientation >= 5 && orientation <= 8;
+}
+
+/** 详情面板行/组（LR 式分组：文件 / 图像 / 拍摄 / 位置） */
+interface ExifRow {
+  label: string;
+  value: React.ReactNode;
+}
+interface ExifSection {
+  key: "file" | "image" | "camera" | "location";
+  rows: ExifRow[];
+}
+
 interface ViewerOverlayProps {
   asset: AssetDto;
   group: AssetGroup;
@@ -344,34 +364,87 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     };
   }, [asset.id]);
 
-  const exifRows: Array<[string, React.ReactNode]> = useMemo(() => {
-    const detail = visibleDetail;
-    // 核心行：缺失显示「—」（后端字段可能为 null/undefined，均按无值处理）
-    const rows: Array<[string, React.ReactNode]> = [
-      [t("viewer.camera"), formatValue(detail.camera)],
-      [t("viewer.lens"), formatValue(detail.lens)],
-      [t("viewer.capturedAt"), isoLabel(detail.capturedAt)],
-      [t("viewer.size"), formatBytes(detail.size)],
+  const exifSections = useMemo<ExifSection[]>(() => {
+    const d = visibleDetail;
+    const sections: ExifSection[] = [];
+
+    // 【文件】核心行恒在（缺值「—」）；格式行仅在有值时渲染
+    sections.push({
+      key: "file",
+      rows: [
+        { label: t("viewer.filename"), value: formatValue(d.filename) },
+        ...(d.format ? [{ label: t("viewer.format"), value: d.format }] : []),
+        { label: t("viewer.size"), value: formatBytes(d.size) },
+        {
+          label: t("viewer.path"),
+          value: <span key="path" className="break-all font-mono text-[11px]">{d.path}</span>,
+        },
+        { label: t("viewer.importedAt"), value: isoLabel(d.createdAt) },
+        { label: t("viewer.capturedAt"), value: isoLabel(d.capturedAt) },
+        {
+          label: t("viewer.dupCount"),
+          value: (
+            <span key="dup" className={d.dupCount > 0 ? "font-medium text-accent" : undefined}>
+              {t("viewer.dupItems", { count: d.dupCount })}
+            </span>
+          ),
+        },
+      ],
+    });
+
+    // 【图像】任一字段存在才成组（后端未返回 EXIF 扩展时整组隐藏）
+    const imageRows: ExifRow[] = [];
+    if (d.width != null && d.height != null) {
+      imageRows.push({ label: t("viewer.dimensions"), value: `${d.width} × ${d.height}` });
+    }
+    if (d.megapixels != null) {
+      imageRows.push({ label: t("viewer.megapixels"), value: `${d.megapixels} MP` });
+    }
+    if (d.aspect) imageRows.push({ label: t("viewer.aspect"), value: d.aspect });
+    if (d.orientation != null && d.orientation >= 1 && d.orientation <= 8) {
+      imageRows.push({
+        label: t("viewer.orientation"),
+        value: isPortraitOrientation(d.orientation)
+          ? t("viewer.orientation.portrait")
+          : t("viewer.orientation.landscape"),
+      });
+    }
+    if (imageRows.length > 0) sections.push({ key: "image", rows: imageRows });
+
+    // 【拍摄】相机/镜头核心行恒在（缺值「—」）；其余字段有值才渲染
+    const shotRows: ExifRow[] = [
+      { label: t("viewer.camera"), value: formatValue(d.camera) },
+      { label: t("viewer.lens"), value: formatValue(d.lens) },
     ];
-    // EXIF 扩展行（后端契约扩展中）：无值整行隐藏（比一排「—」干净）
-    if (detail.width != null && detail.height != null) {
-      rows.push([t("viewer.dimensions"), `${detail.width} × ${detail.height}`]);
+    if (d.focalLength != null) {
+      shotRows.push({ label: t("viewer.focalLength"), value: `${d.focalLength}mm` });
     }
-    if (detail.iso != null) rows.push([t("viewer.iso"), String(detail.iso)]);
-    if (detail.aperture != null) rows.push([t("viewer.aperture"), `f/${detail.aperture}`]);
-    if (detail.shutter != null) rows.push([t("viewer.shutter"), detail.shutter]);
-    if (detail.focalLength != null) {
-      rows.push([t("viewer.focalLength"), `${detail.focalLength} mm`]);
+    if (d.aperture != null) {
+      shotRows.push({ label: t("viewer.aperture"), value: `f/${d.aperture}` });
     }
-    rows.push([t("viewer.path"), <span key="path" className="break-all font-mono text-[11px]">{detail.path}</span>]);
-    rows.push([t("viewer.importedAt"), isoLabel(detail.createdAt)]);
-    rows.push([
-      t("viewer.dupCount"),
-      <span key="dup" className={detail.dupCount > 0 ? "font-medium text-accent" : undefined}>
-        {t("viewer.dupItems", { count: detail.dupCount })}
-      </span>,
-    ]);
-    return rows;
+    if (d.shutter) shotRows.push({ label: t("viewer.shutter"), value: formatShutter(d.shutter) });
+    if (d.iso != null) shotRows.push({ label: t("viewer.iso"), value: String(d.iso) });
+    if (d.flash) shotRows.push({ label: t("viewer.flash"), value: d.flash });
+    if (d.meteringMode) shotRows.push({ label: t("viewer.meteringMode"), value: d.meteringMode });
+    if (d.whiteBalance) shotRows.push({ label: t("viewer.whiteBalance"), value: d.whiteBalance });
+    if (d.exposureProgram) {
+      shotRows.push({ label: t("viewer.exposureProgram"), value: d.exposureProgram });
+    }
+    if (d.software) shotRows.push({ label: t("viewer.software"), value: d.software });
+    if (d.artist) shotRows.push({ label: t("viewer.artist"), value: d.artist });
+    sections.push({ key: "camera", rows: shotRows });
+
+    // 【位置】仅有 GPS 坐标时成组（缺单个坐标的行显示「—」）
+    if (d.gpsLat != null || d.gpsLon != null) {
+      sections.push({
+        key: "location",
+        rows: [
+          { label: t("viewer.gpsLat"), value: d.gpsLat != null ? String(d.gpsLat) : "—" },
+          { label: t("viewer.gpsLon"), value: d.gpsLon != null ? String(d.gpsLon) : "—" },
+        ],
+      });
+    }
+    return sections;
   }, [visibleDetail, t]);
 
   const hasPrev = index > 0;
@@ -631,16 +704,25 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               className="h-full shrink-0 overflow-hidden border-l border-edge bg-surface/95"
               data-testid="viewer-exif"
             >
-              <div className="h-full w-72 overflow-y-auto p-3">
-                <h2 className="mb-2 text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
-                <dl className="space-y-1.5" data-testid="viewer-exif-rows">
-                  {exifRows.map(([label, value]) => (
-                    <div key={label} className="flex items-baseline justify-between gap-2 text-xs">
-                      <dt className="shrink-0 text-text-muted">{label}</dt>
-                      <dd className="min-w-0 text-right text-text-secondary">{value}</dd>
-                    </div>
+              <div className="h-full w-72 overflow-y-auto p-3" data-testid="viewer-exif-scroll">
+                <h2 className="mb-1 text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
+                <div data-testid="viewer-exif-rows">
+                  {exifSections.map((section) => (
+                    <section key={section.key} data-testid={`viewer-exif-group-${section.key}`}>
+                      <h3 className="mb-1.5 mt-3 text-[10px] font-semibold uppercase tracking-wider text-text-muted first:mt-1">
+                        {t(`viewer.group.${section.key}`)}
+                      </h3>
+                      <dl className="space-y-1.5">
+                        {section.rows.map((row) => (
+                          <div key={row.label} className="flex items-baseline justify-between gap-2 text-xs">
+                            <dt className="shrink-0 text-text-muted">{row.label}</dt>
+                            <dd className="min-w-0 text-right text-text-secondary">{row.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </section>
                   ))}
-                </dl>
+                </div>
               </div>
             </motion.aside>
           )}

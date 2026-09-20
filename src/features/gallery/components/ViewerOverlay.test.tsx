@@ -316,17 +316,17 @@ describe("查看器：左右切换与关闭", () => {
 
     // 箭头按钮 → 第二张
     fireEvent.click(screen.getByTestId("viewer-next"));
-    expect(await screen.findByText("IMG_0002.JPG")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0002.JPG"));
     expect(screen.getByTestId("viewer-prev")).toBeEnabled();
 
     // 键盘 → 第三张；此时 next 禁用
     fireEvent.keyDown(window, { key: "ArrowRight" });
-    expect(await screen.findByText("IMG_0003.JPG")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0003.JPG"));
     expect(screen.getByTestId("viewer-next")).toBeDisabled();
 
     // 键盘回退一张
     fireEvent.keyDown(window, { key: "ArrowLeft" });
-    expect(await screen.findByText("IMG_0002.JPG")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0002.JPG"));
     expect(setIndex).toBeDefined();
   });
 
@@ -485,9 +485,9 @@ describe("查看器：旋转（90° 步进）", () => {
     expect(await screen.findByTestId("viewer")).toBeInTheDocument();
 
     fireEvent.keyDown(window, { key: "Home" });
-    expect(await screen.findByText("IMG_0001.JPG")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0001.JPG"));
     fireEvent.keyDown(window, { key: "End" });
-    expect(await screen.findByText("IMG_0003.JPG")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0003.JPG"));
   });
 
   it("操作提示：首次 3s 后淡出；? 键重新唤出并再计时（fake timers）", async () => {
@@ -654,7 +654,7 @@ describe("查看器：交叉淡入与胶片条", () => {
   });
 });
 
-// --- EXIF 面板 ---------------------------------------------------------------------
+// --- EXIF 面板（M4 二轮：LR 式分组 文件/图像/拍摄/位置） ------------------------------
 
 describe("查看器：EXIF 面板", () => {
   it("展示核心元数据与库内重复；EXIF 扩展无值行整行隐藏；可收起/展开", async () => {
@@ -672,8 +672,10 @@ describe("查看器：EXIF 面板", () => {
     const dup = within(rows).getByText("库内重复");
     expect(dup.nextSibling).toHaveTextContent("2 张");
 
-    // 无 EXIF 扩展数据：尺寸/ISO/光圈/快门/焦距行不渲染（无值行不显示「—」）
-    expect(screen.queryByText("尺寸")).not.toBeInTheDocument();
+    // 无 EXIF 扩展数据：图像/位置组整组不渲染（无值行不显示「—」）
+    expect(screen.queryByTestId("viewer-exif-group-image")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("viewer-exif-group-location")).not.toBeInTheDocument();
+    expect(screen.queryByText("分辨率")).not.toBeInTheDocument();
     expect(screen.queryByText("ISO")).not.toBeInTheDocument();
     expect(screen.queryByText("光圈")).not.toBeInTheDocument();
     expect(screen.queryByText("快门")).not.toBeInTheDocument();
@@ -688,11 +690,69 @@ describe("查看器：EXIF 面板", () => {
     expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
   });
 
-  it("EXIF 扩展字段存在时展示尺寸/ISO/光圈/快门/焦距（契约扩展后自动出现）", async () => {
+  it("LR 式分组渲染：文件/图像/拍摄/位置组标题 + 组内字段（新契约字段）", async () => {
     detailMock.mockResolvedValue({
       ...DETAIL,
+      format: "NEF",
       width: 8192,
       height: 5464,
+      megapixels: 44.7,
+      aspect: "3:2",
+      orientation: 1,
+      iso: 400,
+      aperture: 2.8,
+      shutter: "1/250",
+      focalLength: 35,
+      flash: "未闪光",
+      meteringMode: "评价测光",
+      whiteBalance: "自动",
+      exposureProgram: "光圈优先",
+      software: "Adobe Lightroom",
+      gpsLat: 31.2304,
+      gpsLon: 121.4737,
+    });
+    renderViewer();
+
+    const rows = await screen.findByTestId("viewer-exif-rows");
+    // 四组标题（小字大写分组）
+    expect(within(rows).getByText("文件")).toBeInTheDocument();
+    expect(within(rows).getByText("图像")).toBeInTheDocument();
+    expect(within(rows).getByText("拍摄")).toBeInTheDocument();
+    expect(within(rows).getByText("位置")).toBeInTheDocument();
+
+    const fileGroup = screen.getByTestId("viewer-exif-group-file");
+    expect(within(fileGroup).getByText("文件名").nextSibling).toHaveTextContent("IMG_0001.JPG");
+    expect(within(fileGroup).getByText("格式").nextSibling).toHaveTextContent("NEF");
+
+    const imageGroup = screen.getByTestId("viewer-exif-group-image");
+    expect(within(imageGroup).getByText("分辨率").nextSibling).toHaveTextContent("8192 × 5464");
+    expect(within(imageGroup).getByText("总像素").nextSibling).toHaveTextContent("44.7 MP");
+    expect(within(imageGroup).getByText("长宽比").nextSibling).toHaveTextContent("3:2");
+    expect(within(imageGroup).getByText("方向").nextSibling).toHaveTextContent("横拍");
+
+    const shotGroup = screen.getByTestId("viewer-exif-group-camera");
+    expect(within(shotGroup).getByText("闪光灯").nextSibling).toHaveTextContent("未闪光");
+    expect(within(shotGroup).getByText("测光").nextSibling).toHaveTextContent("评价测光");
+    expect(within(shotGroup).getByText("白平衡").nextSibling).toHaveTextContent("自动");
+    expect(within(shotGroup).getByText("曝光程序").nextSibling).toHaveTextContent("光圈优先");
+    expect(within(shotGroup).getByText("软件").nextSibling).toHaveTextContent("Adobe Lightroom");
+
+    const locGroup = screen.getByTestId("viewer-exif-group-location");
+    expect(within(locGroup).getByText("纬度").nextSibling).toHaveTextContent("31.2304");
+    expect(within(locGroup).getByText("经度").nextSibling).toHaveTextContent("121.4737");
+  });
+
+  it("orientation 翻译：6 = 竖拍（EXIF 5-8 竖拍 / 1-4 横拍）", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, orientation: 6 });
+    renderViewer();
+
+    const imageGroup = await screen.findByTestId("viewer-exif-group-image");
+    expect(within(imageGroup).getByText("方向").nextSibling).toHaveTextContent("竖拍");
+  });
+
+  it("快门/光圈/焦距格式化：1/250 → 1/250s、f/2.8、35mm", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
       iso: 400,
       aperture: 2.8,
       shutter: "1/250",
@@ -700,12 +760,20 @@ describe("查看器：EXIF 面板", () => {
     });
     renderViewer();
 
-    const rows = await screen.findByTestId("viewer-exif-rows");
-    expect(within(rows).getByText("尺寸").nextSibling).toHaveTextContent("8192 × 5464");
-    expect(within(rows).getByText("ISO").nextSibling).toHaveTextContent("400");
-    expect(within(rows).getByText("光圈").nextSibling).toHaveTextContent("f/2.8");
-    expect(within(rows).getByText("快门").nextSibling).toHaveTextContent("1/250");
-    expect(within(rows).getByText("焦距").nextSibling).toHaveTextContent("35 mm");
+    const shotGroup = await screen.findByTestId("viewer-exif-group-camera");
+    expect(within(shotGroup).getByText("快门").nextSibling).toHaveTextContent("1/250s");
+    expect(within(shotGroup).getByText("光圈").nextSibling).toHaveTextContent("f/2.8");
+    expect(within(shotGroup).getByText("焦距").nextSibling).toHaveTextContent("35mm");
+    expect(within(shotGroup).getByText("ISO").nextSibling).toHaveTextContent("400");
+  });
+
+  it("GPS 仅一侧坐标：位置组显示，缺侧为「—」", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, gpsLat: 31.2304 });
+    renderViewer();
+
+    const locGroup = await screen.findByTestId("viewer-exif-group-location");
+    expect(within(locGroup).getByText("纬度").nextSibling).toHaveTextContent("31.2304");
+    expect(within(locGroup).getByText("经度").nextSibling).toHaveTextContent("—");
   });
 
   it("字段全缺失：核心行显示「—」、重复计数 0 张，绝不渲染 undefined", async () => {
@@ -721,7 +789,7 @@ describe("查看器：EXIF 面板", () => {
     const rows = await screen.findByTestId("viewer-exif-rows");
     expect(rows).toHaveTextContent("0 张");
     expect(rows.textContent).not.toContain("undefined");
-    // 相机/拍摄时间/入库时间行仍渲染（核心行），值为「—」/空时间
+    // 相机行仍渲染（拍摄组核心行），值为「—」
     expect(within(rows).getByText("相机").nextSibling).toHaveTextContent("—");
   });
 

@@ -13,8 +13,10 @@ import {
   assetsByIds,
   assetsPage,
   cameraList,
+  formatList,
   indexKickNow,
   indexStatus,
+  lensList,
   searchSemantic,
   type AssetDto,
 } from "@/ipc/api";
@@ -27,6 +29,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetsPage: vi.fn(),
     assetThumbGet: vi.fn(),
     cameraList: vi.fn(),
+    lensList: vi.fn(),
+    formatList: vi.fn(),
     searchSemantic: vi.fn(),
     assetsByIds: vi.fn(),
     indexStatus: vi.fn(),
@@ -44,6 +48,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 const assetsPageMock = vi.mocked(assetsPage);
 const thumbMock = vi.mocked(assetThumbGet);
 const cameraListMock = vi.mocked(cameraList);
+const lensListMock = vi.mocked(lensList);
+const formatListMock = vi.mocked(formatList);
 const convertMock = vi.mocked(convertFileSrc);
 const indexStatusMock = vi.mocked(indexStatus);
 const indexKickNowMock = vi.mocked(indexKickNow);
@@ -98,6 +104,8 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   cameraListMock.mockReset().mockResolvedValue([]);
+  lensListMock.mockReset().mockResolvedValue([]);
+  formatListMock.mockReset().mockResolvedValue([]);
   vi.mocked(searchSemantic).mockReset();
   vi.mocked(assetsByIds).mockReset().mockResolvedValue([]);
   indexStatusMock.mockReset().mockResolvedValue(null);
@@ -109,6 +117,11 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
 });
+
+/** 筛选面板默认收起：先展开再操作条件控件（fireEvent 版） */
+function openFilterPanel(): void {
+  fireEvent.click(screen.getByTestId("search-filter-toggle"));
+}
 
 // --- 条件负载组装 -------------------------------------------------------------------
 
@@ -131,6 +144,7 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    openFilterPanel();
 
     // 组合条件：照片档（=photo+raw）+ 日期范围（RFC3339 本地日界）+ 相机勾选
     fireEvent.click(screen.getByTestId("search-kind-photo"));
@@ -140,7 +154,7 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     const menu = screen.getByTestId("search-camera-menu");
     const options = within(menu).getAllByTestId("search-camera-option");
     expect(options).toHaveLength(2);
-    expect(options[0]).toHaveAttribute("data-camera", "Canon EOS R5");
+    expect(options[0]).toHaveAttribute("data-value", "Canon EOS R5");
     expect(options[0]).toHaveTextContent("12");
     fireEvent.click(within(options[0]).getByRole("checkbox"));
 
@@ -165,6 +179,7 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    openFilterPanel();
 
     fireEvent.click(screen.getByTestId("search-kind-photo"));
     await act(async () => {
@@ -191,6 +206,7 @@ describe("搜索：filters 负载组装（camelCase 平铺）", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
+    openFilterPanel();
 
     fireEvent.click(screen.getByTestId("search-quick-recent7"));
     await act(async () => {
@@ -224,6 +240,7 @@ describe("搜索：300ms 防抖", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(assetsPageMock).toHaveBeenCalledTimes(1);
+    openFilterPanel();
 
     // 快速连点快捷段（条件连续变更）
     fireEvent.click(screen.getByTestId("search-quick-recent7"));
@@ -269,13 +286,14 @@ describe("搜索：相机勾选（cameraList 清单）", () => {
     renderSearch();
     await screen.findByTestId("search-page");
     await waitFor(() => expect(assetsPageMock).toHaveBeenCalledWith(0, 100, {}));
+    openFilterPanel();
 
     // 默认按钮=全部相机；打开下拉
     expect(screen.getByTestId("search-camera-button")).toHaveTextContent("全部相机");
     fireEvent.click(screen.getByTestId("search-camera-button"));
     const options = screen.getAllByTestId("search-camera-option");
     expect(options).toHaveLength(2);
-    expect(options[0]).toHaveAttribute("data-camera", "Canon EOS R5");
+    expect(options[0]).toHaveAttribute("data-value", "Canon EOS R5");
     expect(options[0]).toHaveTextContent("12");
     expect(options[1]).toHaveTextContent("Apple iPhone 15");
     expect(options[1]).toHaveTextContent("3");
@@ -307,6 +325,7 @@ describe("搜索：相机勾选（cameraList 清单）", () => {
   it("相机清单为空：下拉显示空态文案（不过滤）", async () => {
     renderSearch();
     await waitFor(() => expect(cameraListMock).toHaveBeenCalled());
+    openFilterPanel();
 
     fireEvent.click(screen.getByTestId("search-camera-button"));
     expect(screen.getByTestId("search-camera-menu")).toHaveTextContent("库内还没有相机信息");
@@ -377,23 +396,46 @@ describe("搜索：语义模式", () => {
     return user.click(screen.getByTestId("search-mode-semantic"));
   }
 
-  it("模式切换：语义模式显示输入/搜索按钮，条件控件隐藏；切回条件恢复", async () => {
+  it("模式切换：语义模式显示输入/搜索按钮，筛选按钮隐藏；切回条件恢复（面板展开后类型控件可见）", async () => {
     const user = userEvent.setup();
     renderSearch();
 
     await screen.findByTestId("search-page");
     expect(screen.getByTestId("search-mode-filters")).toHaveAttribute("aria-checked", "true");
+    // 条件模式：筛选按钮在（面板默认收起，类型控件不可见）
+    expect(screen.getByTestId("search-filter-toggle")).toBeInTheDocument();
+    expect(screen.queryByTestId("search-kind")).not.toBeInTheDocument();
     expect(screen.queryByTestId("semantic-input")).not.toBeInTheDocument();
 
     await switchToSemantic(user);
     expect(screen.getByTestId("semantic-input")).toHaveAttribute("rows", "1");
     expect(screen.getByTestId("semantic-input").className).toContain("h-8");
     expect(screen.getByTestId("semantic-run")).toBeInTheDocument();
-    expect(screen.queryByTestId("search-kind")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("search-from")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("search-filter-toggle")).not.toBeInTheDocument();
 
+    // 切回条件模式：筛选按钮恢复；展开面板后类型控件可见
     await user.click(screen.getByTestId("search-mode-filters"));
+    expect(screen.getByTestId("search-filter-toggle")).toBeInTheDocument();
+    await user.click(screen.getByTestId("search-filter-toggle"));
     expect(screen.getByTestId("search-kind")).toBeInTheDocument();
+  });
+
+  it("语义结果瓦片点击打开查看器（onOpenAsset 透传；Esc 关闭）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.9 }]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+
+    await user.click(screen.getByTestId("search-mode-semantic"));
+    await user.type(screen.getByTestId("semantic-input"), "日落");
+    await user.click(screen.getByTestId("semantic-run"));
+
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    await user.click(tiles[0]);
+    expect(await screen.findByTestId("viewer")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("viewer")).not.toBeInTheDocument());
   });
 
   it("语义搜索：searchSemantic 负载 + assets_by_ids 回填 + 相似度百分比角标", async () => {
@@ -607,5 +649,151 @@ describe("搜索：空结果提示（语义索引未建完）", () => {
       expect(screen.queryByTestId("semantic-empty-indexing")).not.toBeInTheDocument(),
     );
     expect(screen.getByTestId("semantic-empty")).toHaveTextContent("没有语义匹配的照片");
+  });
+});
+
+// --- 筛选面板（M4 二轮：展开收起 / 计数徽标 / chips / 扩展条件负载） -------------------
+
+describe("搜索：筛选面板", () => {
+  it("默认收起；点击展开、再点收起；首次展开才拉取镜头/格式清单", async () => {
+    lensListMock.mockResolvedValue([{ lens: "RF24-70mm F2.8 L", count: 8 }]);
+    formatListMock.mockResolvedValue([{ format: "NEF", count: 5 }]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+
+    expect(screen.queryByTestId("search-filter-panel")).not.toBeInTheDocument();
+    expect(lensListMock).not.toHaveBeenCalled();
+    expect(formatListMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    expect(screen.getByTestId("search-filter-panel")).toBeInTheDocument();
+    await waitFor(() => expect(lensListMock).toHaveBeenCalledTimes(1));
+    expect(formatListMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    expect(screen.queryByTestId("search-filter-panel")).not.toBeInTheDocument();
+  });
+
+  it("无激活条件时无计数徽标；设定条件后徽标计数 + chips 展示（面板收起也可见）", async () => {
+    renderSearch();
+    await screen.findByTestId("search-page");
+    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+
+    openFilterPanel();
+    fireEvent.click(screen.getByTestId("search-orientation-portrait"));
+    await waitFor(() => expect(screen.getByTestId("search-filter-count")).toHaveTextContent("1"));
+
+    const chipsRow = screen.getByTestId("search-filter-chips");
+    expect(within(chipsRow).getAllByTestId("search-chip")).toHaveLength(1);
+    expect(within(chipsRow).getByTestId("search-chip")).toHaveTextContent("竖拍");
+
+    // 收起面板后 chips 与徽标仍在（一眼可见当前条件）
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    expect(screen.getByTestId("search-filter-chips")).toBeInTheDocument();
+    expect(screen.getByTestId("search-filter-count")).toHaveTextContent("1");
+  });
+
+  it("扩展条件负载：方向/闪光/GPS/数值区间/MB 转字节/镜头与格式多选数组", async () => {
+    lensListMock.mockResolvedValue([{ lens: "RF24-70mm F2.8 L", count: 8 }]);
+    formatListMock.mockResolvedValue([
+      { format: "NEF", count: 5 },
+      { format: "JPG", count: 3 },
+    ]);
+    renderSearch();
+    await screen.findByTestId("search-page");
+    openFilterPanel();
+    // 首次展开异步拉取清单：等面板与清单就位再操作（fireEvent 全同步不冲微任务）
+    await screen.findByTestId("search-filter-panel");
+    await waitFor(() => expect(lensListMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByTestId("search-orientation-landscape"));
+    fireEvent.click(screen.getByTestId("search-flash-on"));
+    fireEvent.click(screen.getByTestId("search-gps-no"));
+    fireEvent.change(screen.getByTestId("search-focal-min"), { target: { value: "24" } });
+    fireEvent.change(screen.getByTestId("search-focal-max"), { target: { value: "70" } });
+    fireEvent.change(screen.getByTestId("search-iso-min"), { target: { value: "100" } });
+    fireEvent.change(screen.getByTestId("search-iso-max"), { target: { value: "3200" } });
+    fireEvent.change(screen.getByTestId("search-aperture-min"), { target: { value: "2.8" } });
+    fireEvent.change(screen.getByTestId("search-shutter-max"), { target: { value: "0.004" } });
+    fireEvent.change(screen.getByTestId("search-size-min"), { target: { value: "10" } });
+
+    fireEvent.click(screen.getByTestId("search-lens-button"));
+    fireEvent.click(
+      within(within(screen.getByTestId("search-lens-menu")).getAllByTestId("search-lens-option")[0]).getByRole("checkbox"),
+    );
+    fireEvent.click(screen.getByTestId("search-format-button"));
+    const formatOptions = within(screen.getByTestId("search-format-menu")).getAllByTestId(
+      "search-format-option",
+    );
+    fireEvent.click(within(formatOptions[0]).getByRole("checkbox"));
+    fireEvent.click(within(formatOptions[1]).getByRole("checkbox"));
+
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+        orientation: "landscape",
+        hasFlash: true,
+        hasGps: false,
+        focalMin: 24,
+        focalMax: 70,
+        isoMin: 100,
+        isoMax: 3200,
+        apertureMin: 2.8,
+        shutterMax: 0.004,
+        sizeMin: 10485760, // 10MB → 字节
+        lenses: ["RF24-70mm F2.8 L"],
+        formats: ["NEF", "JPG"],
+      }),
+    );
+  });
+
+  it("chips 单独移除与一键清空：移除后负载回退、chips 行消失", async () => {
+    renderSearch();
+    await screen.findByTestId("search-page");
+    openFilterPanel();
+
+    fireEvent.click(screen.getByTestId("search-orientation-portrait"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { orientation: "portrait" }),
+    );
+
+    // 单独移除 chip → 回无条件
+    fireEvent.click(screen.getByTestId("search-chip-remove"));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {}));
+    await waitFor(() =>
+      expect(screen.queryByTestId("search-filter-chips")).not.toBeInTheDocument(),
+    );
+
+    // 多条件 → 一键清空
+    fireEvent.click(screen.getByTestId("search-flash-on"));
+    fireEvent.click(screen.getByTestId("search-gps-yes"));
+    fireEvent.change(screen.getByTestId("search-focal-min"), { target: { value: "24" } });
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {
+        hasFlash: true,
+        hasGps: true,
+        focalMin: 24,
+      }),
+    );
+    expect(screen.getByTestId("search-filter-count")).toHaveTextContent("3");
+
+    fireEvent.click(screen.getByTestId("search-clear-all"));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, {}));
+    await waitFor(() =>
+      expect(screen.queryByTestId("search-filter-chips")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+  });
+
+  it("镜头/格式清单为空（后端未就绪）：下拉空态文案，不阻塞查询", async () => {
+    renderSearch();
+    await screen.findByTestId("search-page");
+    openFilterPanel();
+
+    fireEvent.click(screen.getByTestId("search-lens-button"));
+    expect(screen.getByTestId("search-lens-menu")).toHaveTextContent("库内还没有镜头信息");
+    fireEvent.click(screen.getByTestId("search-lens-button"));
+
+    fireEvent.click(screen.getByTestId("search-format-button"));
+    expect(screen.getByTestId("search-format-menu")).toHaveTextContent("库内还没有格式信息");
   });
 });

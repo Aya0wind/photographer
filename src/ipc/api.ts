@@ -157,6 +157,18 @@ export interface AssetCameraCount {
   count: number;
 }
 
+/** 镜头型号计数（lens_list 返回，搜索页镜头勾选数据源；按 count 降序） */
+export interface AssetLensCount {
+  lens: string;
+  count: number;
+}
+
+/** 文件格式计数（format_list 返回，搜索页格式勾选数据源；如 NEF/ARW/JPG） */
+export interface AssetFormatCount {
+  format: string;
+  count: number;
+}
+
 /** 搜索/过滤条件（camelCase 平铺进 assets_page 负载；全字段可省略） */
 export interface AssetFilters {
   /** 类型集合（两档语义：照片=photo+raw，视频=video）；省略=全部。
@@ -167,6 +179,32 @@ export interface AssetFilters {
   capturedBefore?: string;
   /** 相机名子串（不区分大小写，后端解释）；数组 OR 契约到位前传第一个 */
   camera?: string;
+  // --- M4 扩展筛选（后端 lane 契约扩展中；全 Optional，后端未实现时不传） ---
+  /** 镜头多选 OR */
+  lenses?: string[];
+  /** 文件格式多选 OR（如 NEF/ARW/JPG） */
+  formats?: string[];
+  /** 焦距区间（mm，含端点） */
+  focalMin?: number;
+  focalMax?: number;
+  /** ISO 区间（含端点） */
+  isoMin?: number;
+  isoMax?: number;
+  /** 光圈 f 值区间（如 2.8-5.6，含端点） */
+  apertureMin?: number;
+  apertureMax?: number;
+  /** 快门区间（秒，如 0.004=1/250s，含端点） */
+  shutterMin?: number;
+  shutterMax?: number;
+  /** 闪光灯是否闪光（true=开/false=关；省略=不过滤） */
+  hasFlash?: boolean;
+  /** 拍摄方向（按 EXIF orientation 归类）；省略=不过滤 */
+  orientation?: "landscape" | "portrait";
+  /** 是否有 GPS 坐标（true=有/false=无；省略=不过滤） */
+  hasGps?: boolean;
+  /** 文件大小区间（字节，含端点） */
+  sizeMin?: number;
+  sizeMax?: number;
 }
 
 /** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
@@ -193,21 +231,38 @@ export interface AssetDetailDto {
   kind: AssetKind;
   capturedAt: string | null;
   camera: string | null;
-  /** 镜头（后端暂未返回，契约扩展中） */
+  /** 镜头 */
   lens?: string | null;
   /** 入库时间（后端 AssetRow.createdAt） */
   createdAt: string | null;
   /** 库内同指纹重复数（不含自身；后端 duplicate_count 归一） */
   dupCount: number;
-  // --- EXIF 扩展（后端契约扩展中；未返回时缺省） ---
+  // --- EXIF 扩展（M4 契约扩展；未返回时缺省，面板按缺失隐藏行/组） ---
   width?: number | null;
   height?: number | null;
-  iso?: number | null;
-  /** 光圈 f 值（后端扩展可能名 fNumber） */
-  aperture?: number | null;
-  /** 快门（后端扩展可能名 exposure，如 "1/250"） */
+  /** 总像素（百万，如 24.3） */
+  megapixels?: number | null;
+  /** 长宽比（如 "3:2"） */
+  aspect?: string | null;
+  /** EXIF 方向 1-8（5-8=竖拍；1-4=横拍，含镜像） */
+  orientation?: number | null;
+  /** 快门（如 "1/250"；面板追加 s 展示） */
   shutter?: string | null;
+  /** 光圈 f 值 */
+  aperture?: number | null;
   focalLength?: number | null;
+  iso?: number | null;
+  /** 闪光灯（后端翻译后的文案，如「闪光」/「未闪光」） */
+  flash?: string | null;
+  meteringMode?: string | null;
+  whiteBalance?: string | null;
+  exposureProgram?: string | null;
+  software?: string | null;
+  artist?: string | null;
+  gpsLat?: number | null;
+  gpsLon?: number | null;
+  /** 文件格式（扩展名大写，如 "NEF"） */
+  format?: string | null;
 }
 
 // --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
@@ -477,6 +532,26 @@ export async function cameraList(): Promise<AssetCameraCount[]> {
   }
 }
 
+/** 库内镜头清单（搜索页镜头勾选；按 count 降序）；失败/非数组回退 [] */
+export async function lensList(): Promise<AssetLensCount[]> {
+  try {
+    const list = await ipc<AssetLensCount[] | null>("lens_list");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 库内文件格式清单（搜索页格式勾选，如 NEF/ARW/JPG）；失败/非数组回退 [] */
+export async function formatList(): Promise<AssetFormatCount[]> {
+  try {
+    const list = await ipc<AssetFormatCount[] | null>("format_list");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 暂停索引任务（库级后台：缩略图三档/EXIF 深提取）；命令失败静默（后端接线前按钮无副作用） */
 export async function indexTaskPause(): Promise<void> {
   try {
@@ -616,7 +691,8 @@ export async function assetsByIds(ids: number[]): Promise<AssetDto[]> {
 /** 单资产全量元数据（查看器 EXIF 面板）；命令失败/不存在/负载异常返回 null。
  *  后端负载 → AssetDetailDto 归一：filename/size/createdAt + duplicate_count（顶层
  *  snake_case，未做 camelCase 重命名）→ dupCount；字段缺失容错（不透传 undefined），
- *  EXIF 扩展字段存在即带出（aperture/shutter 兼容 fNumber/exposure 别名）。 */
+ *  EXIF 扩展字段存在即带出（aperture/shutter 兼容 fNumber/exposure 别名；
+ *  M4 新字段读 camelCase、snake_case 兜底）。 */
 export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
   try {
     const raw = await ipc<unknown>("asset_detail", { id });
@@ -641,10 +717,22 @@ export async function assetDetail(id: number): Promise<AssetDetailDto | null> {
       dupCount: numOf(r.duplicate_count ?? r.duplicateCount) ?? 0,
       width: numOf(r.width),
       height: numOf(r.height),
+      megapixels: numOf(r.megapixels),
+      aspect: strOf(r.aspect),
+      orientation: numOf(r.orientation),
       iso: numOf(r.iso),
       aperture: numOf(r.aperture ?? r.fNumber),
       shutter: strOf(r.shutter ?? r.exposure),
       focalLength: numOf(r.focalLength),
+      flash: strOf(r.flash),
+      meteringMode: strOf(r.meteringMode ?? r.metering_mode),
+      whiteBalance: strOf(r.whiteBalance ?? r.white_balance),
+      exposureProgram: strOf(r.exposureProgram ?? r.exposure_program),
+      software: strOf(r.software),
+      artist: strOf(r.artist),
+      gpsLat: numOf(r.gpsLat ?? r.gps_lat),
+      gpsLon: numOf(r.gpsLon ?? r.gps_lon),
+      format: strOf(r.format),
     };
   } catch {
     return null;
