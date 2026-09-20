@@ -289,6 +289,20 @@ pub fn worker_count_for_ai() -> usize {
         .clamp(1, 4)
 }
 
+/// 语义分数显示标定（经验锚点，2026-09-21 于 162 张真库实测）：
+/// SigLIP2 统一重嵌入后 cos 相似度整体压缩在窄带——无关内容查询 top
+/// ≤0.096（「手术台/无人机航拍」实测）、相关簇 0.09-0.12、长尾地板
+/// ≈0.04。阈值过滤仍用原始分数（0.09 为实测工作点，[0.088,0.096] 区间
+/// 真假重叠属 ANN 固有的精度/召回权衡），但返回前端的 score 做线性
+/// 拉伸到 [0,1]，否则 top 命中 0.12 会显示成「12%」。
+pub const SEMANTIC_SCORE_FLOOR: f32 = 0.04;
+pub const SEMANTIC_SCORE_CEILING: f32 = 0.125;
+
+/// 原始 cos 相似度 → 显示分数 [0,1]：floor 以下归 0，ceiling 以上饱和 1。
+pub fn calibrated_display_score(raw: f32) -> f32 {
+    ((raw - SEMANTIC_SCORE_FLOOR) / (SEMANTIC_SCORE_CEILING - SEMANTIC_SCORE_FLOOR)).clamp(0.0, 1.0)
+}
+
 /// 语义检索：embed 查询 → HNSW KNN → 资产账 join（过滤失效 id 与
 /// min_score），按相似度降序。
 pub fn search(

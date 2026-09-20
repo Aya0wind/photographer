@@ -13,7 +13,8 @@ use crate::ai::ModelStatusDto;
 #[serde(rename_all = "camelCase")]
 pub struct SearchHitDto {
     pub asset_id: i64,
-    /// cos 相似度（归一化嵌入点积，[-1,1]）。
+    /// 显示分数 [0,1]：原始 cos 经 calibrated_display_score 线性拉伸
+    /// （SigLIP2 窄带 0.04-0.125 → 0-1）。阈值过滤仍用原始分数。
     pub score: f32,
 }
 
@@ -64,7 +65,10 @@ pub fn fetch_search_semantic(
     )?;
     Ok(hits
         .into_iter()
-        .map(|(asset_id, score)| SearchHitDto { asset_id, score })
+        .map(|(asset_id, score)| SearchHitDto {
+            asset_id,
+            score: crate::ai::semantic::calibrated_display_score(score),
+        })
         .collect())
 }
 

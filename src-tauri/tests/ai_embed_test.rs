@@ -611,3 +611,23 @@ fn backfill_survives_pooled_immutable_view() {
     let locked = idx.lock().unwrap();
     assert_eq!(locked.size(), 2, "两轮向量都应在索引里");
 }
+
+/// 显示分数标定（2026-09-21 真库实测定案）：SigLIP2 统一重嵌入后 cos 压缩
+/// 在 0.04-0.125 窄带，原始分直接当百分比显示会把 top 命中显示成「12%」。
+/// 线性拉伸锚点锁定 semantic.rs 常量；阈值过滤保持原始分（0.09 工作点）。
+#[test]
+fn semantic_display_calibration_anchors() {
+    let f = ai::semantic::calibrated_display_score;
+    // 边界：floor 归零、ceiling 饱和，两侧钳制
+    assert_eq!(f(ai::semantic::SEMANTIC_SCORE_FLOOR), 0.0);
+    assert!((f(ai::semantic::SEMANTIC_SCORE_CEILING) - 1.0).abs() < 1e-6);
+    assert_eq!(f(0.0), 0.0);
+    assert_eq!(f(0.5), 1.0);
+    // 真库锚点（真机采样值）：top 命中 0.1187 → ~93%；无关内容 top
+    // 0.0957（「无人机航拍」）→ ~66%；长尾地板 0.0558 → ~19%
+    assert!((f(0.1187) - 0.926).abs() < 0.005);
+    assert!((f(0.0957) - 0.655).abs() < 0.005);
+    assert!((f(0.0558) - 0.186).abs() < 0.005);
+    // 单调性：拉伸后排序不变（前端徽标与排序一致性依赖此性质）
+    assert!(f(0.10) > f(0.09) && f(0.09) > f(0.08));
+}
