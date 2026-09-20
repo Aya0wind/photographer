@@ -22,7 +22,6 @@ fn asset(path: &str, created_at: &str) -> AssetRow {
         size: 100,
         mtime: "2026-09-20T00:00:00.000Z".into(),
         xxhash: 1,
-        sha256: [0; 32],
         kind: AssetKind::Photo,
         captured_at: None,
         camera: None,

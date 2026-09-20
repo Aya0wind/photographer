@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, Type, ValueRef};
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSqlOutput, ValueRef};
 use rusqlite::{params, Connection, Error, Result, Row, ToSql};
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +86,6 @@ pub struct JobFileRow {
     pub state: FileState,
     pub error: Option<String>,
     pub xxhash: Option<u64>,
-    pub sha256: Option<[u8; 32]>,
     #[serde(default)]
     pub dst2: String,
 }
@@ -111,7 +110,6 @@ pub struct AssetRow {
     pub size: u64,
     pub mtime: String,
     pub xxhash: u64,
-    pub sha256: [u8; 32],
     pub kind: AssetKind,
     pub captured_at: Option<String>,
     pub camera: Option<String>,
@@ -503,13 +501,12 @@ impl Db {
 
     /// journal 落状态：PK(job_id, src) 冲突时整行覆盖。
     pub fn upsert_job_file(&self, row: &JobFileRow) -> Result<()> {
-        let sha256: Option<&[u8]> = row.sha256.as_ref().map(|sha| sha.as_slice());
         self.0.execute(
-            "INSERT INTO job_files (job_id, src, dst, size, state, error, xxhash, sha256, dst2) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO job_files (job_id, src, dst, size, state, error, xxhash, dst2) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT (job_id, src) DO UPDATE SET \
              dst = excluded.dst, size = excluded.size, state = excluded.state, \
-             error = excluded.error, xxhash = excluded.xxhash, sha256 = excluded.sha256, \
+             error = excluded.error, xxhash = excluded.xxhash, \
              dst2 = excluded.dst2",
             params![
                 row.job_id,
@@ -519,7 +516,6 @@ impl Db {
                 row.state,
                 row.error,
                 row.xxhash.map(|v| v as i64),
-                sha256,
                 row.dst2
             ],
         )?;
@@ -531,7 +527,7 @@ impl Db {
     #[allow(dead_code)]
     pub fn pending_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT job_id, src, dst, size, state, error, xxhash, sha256, dst2 FROM job_files \
+            "SELECT job_id, src, dst, size, state, error, xxhash, dst2 FROM job_files \
              WHERE job_id = ?1 AND state IN (?2, ?3) ORDER BY src",
         )?;
         let rows = stmt.query_map(
@@ -544,7 +540,7 @@ impl Db {
     /// 任务全部 journal 行（resume 重建统计基线；按 src 有序）。
     pub fn all_job_files(&self, job_id: i64) -> Result<Vec<JobFileRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT job_id, src, dst, size, state, error, xxhash, sha256, dst2 FROM job_files \
+            "SELECT job_id, src, dst, size, state, error, xxhash, dst2 FROM job_files \
              WHERE job_id = ?1 ORDER BY src",
         )?;
         let rows = stmt.query_map(params![job_id], map_job_file)?;
@@ -879,7 +875,7 @@ impl Db {
     /// 按 id 取完整资产行（详情数据源）。
     pub fn asset_by_id(&self, id: i64) -> Result<Option<AssetRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, \
+            "SELECT path, filename, size, mtime, xxhash, kind, captured_at, camera, \
              source, created_at, origin, width, height, iso, f_number, exposure_time, \
              focal_length, lens, pair_asset_id, thumb_state, orientation, flash, \
              metering_mode, white_balance, exposure_program, software, artist, \
@@ -917,20 +913,19 @@ impl Db {
             })?;
         self.0.execute(
             "INSERT OR REPLACE INTO assets \
-             (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, \
+             (path, filename, size, mtime, xxhash, kind, captured_at, camera, source, \
              created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
              lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
              white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
              rating, flagged) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)",
+             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
             params![
                 a.path,
                 a.filename,
                 a.size as i64,
                 a.mtime,
                 a.xxhash as i64,
-                a.sha256.as_slice(),
                 a.kind,
                 a.captured_at,
                 a.camera,
@@ -1156,6 +1151,38 @@ impl Db {
             params![now],
         )?;
         self.pending_index_task_count("thumb")
+    }
+
+    /// 重建用：重排**全部** photo/raw 的 thumb 任务（既有复位 pending +
+    /// 无任务行新建；配合 thumb_state=0 复位 + 缩略图目录删除）。
+    pub fn requeue_thumb_tasks_for_all(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1              WHERE kind = 'thumb' AND state != 'pending'",
+            params![now],
+        )?;
+        self.0.execute(
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'thumb', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'thumb' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        self.pending_index_task_count("thumb")
+    }
+
+    /// 重建用：EXIF 深提取列全清（0004 拍摄参数 + 0008 深字段全 NULL，
+    /// captured_at/camera 保留——目录结构/时间线依赖它们），配合 exif 任务
+    /// 重排由 worker 重新提取。
+    pub fn clear_exif_columns(&self) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET                  width = NULL, height = NULL, iso = NULL, f_number = NULL,                  exposure_time = NULL, focal_length = NULL, lens = NULL,                  orientation = NULL, flash = NULL, metering_mode = NULL,                  white_balance = NULL, exposure_program = NULL, software = NULL,                  artist = NULL, gps_lat = NULL, gps_lon = NULL",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// 重建用：缩略图状态镜像全复位（配合 thumbs 目录删除）。
+    pub fn reset_thumb_states(&self) -> Result<()> {
+        self.0.execute("UPDATE assets SET thumb_state = 0", [])?;
+        Ok(())
     }
 
     /// 手动“立即索引”重试：复用已有失败任务，不再为同一资产重复插行。
@@ -1549,6 +1576,25 @@ impl Db {
         }
     }
 
+    /// 浏览记账（upsert：每资产一行，浏览即刷新 viewed_at）。
+    /// 资产不存在静默（调用方契约：mark 对无效 id 不报错）。
+    pub fn mark_asset_viewed(&self, asset_id: i64) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO view_history (asset_id, viewed_at) VALUES (?1, ?2)              ON CONFLICT (asset_id) DO UPDATE SET viewed_at = excluded.viewed_at",
+            params![asset_id, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 最近浏览资产（viewed_at DESC；复用画廊分页行结构）。
+    pub fn recently_viewed(&self, limit: u32) -> Result<Vec<AssetPageRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], map_asset_page)?;
+        rows.collect()
+    }
+
     /// 收藏旗标写入（0/1；资产不存在返回 false）。
     pub fn set_asset_flagged(&self, id: i64, flagged: bool) -> Result<bool> {
         let n = self.0.execute(
@@ -1728,33 +1774,32 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
         size: row.get::<_, i64>(2)? as u64,
         mtime: row.get(3)?,
         xxhash: row.get::<_, i64>(4)? as u64,
-        sha256: blob_to_sha256(Some(row.get(5)?))?.unwrap_or([0; 32]),
-        kind: row.get(6)?,
-        captured_at: row.get(7)?,
-        camera: row.get(8)?,
-        source: row.get(9)?,
-        created_at: row.get(10)?,
-        origin: row.get(11)?,
-        width: row.get::<_, Option<i64>>(12)?.map(|v| v as u32),
-        height: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
-        iso: row.get::<_, Option<i64>>(14)?.map(|v| v as u32),
-        f_number: row.get(15)?,
-        exposure_time: row.get(16)?,
-        focal_length: row.get(17)?,
-        lens: row.get(18)?,
-        pair_asset_id: row.get(19)?,
-        thumb_state: row.get::<_, Option<i64>>(20)?.unwrap_or(0) as i32,
-        orientation: row.get(21)?,
-        flash: row.get(22)?,
-        metering_mode: row.get(23)?,
-        white_balance: row.get(24)?,
-        exposure_program: row.get(25)?,
-        software: row.get(26)?,
-        artist: row.get(27)?,
-        gps_lat: row.get(28)?,
-        gps_lon: row.get(29)?,
-        rating: row.get(30)?,
-        flagged: row.get(31)?,
+        kind: row.get(5)?,
+        captured_at: row.get(6)?,
+        camera: row.get(7)?,
+        source: row.get(8)?,
+        created_at: row.get(9)?,
+        origin: row.get(10)?,
+        width: row.get::<_, Option<i64>>(11)?.map(|v| v as u32),
+        height: row.get::<_, Option<i64>>(12)?.map(|v| v as u32),
+        iso: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
+        f_number: row.get(14)?,
+        exposure_time: row.get(15)?,
+        focal_length: row.get(16)?,
+        lens: row.get(17)?,
+        pair_asset_id: row.get(18)?,
+        thumb_state: row.get::<_, Option<i64>>(19)?.unwrap_or(0) as i32,
+        orientation: row.get(20)?,
+        flash: row.get(21)?,
+        metering_mode: row.get(22)?,
+        white_balance: row.get(23)?,
+        exposure_program: row.get(24)?,
+        software: row.get(25)?,
+        artist: row.get(26)?,
+        gps_lat: row.get(27)?,
+        gps_lon: row.get(28)?,
+        rating: row.get(29)?,
+        flagged: row.get(30)?,
     })
 }
 
@@ -1789,23 +1834,6 @@ fn map_job_file(row: &Row<'_>) -> Result<JobFileRow> {
         state: row.get(4)?,
         error: row.get(5)?,
         xxhash: row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
-        sha256: blob_to_sha256(row.get(7)?)?,
-        dst2: row.get(8)?,
+        dst2: row.get(7)?,
     })
-}
-
-fn blob_to_sha256(bytes: Option<Vec<u8>>) -> Result<Option<[u8; 32]>> {
-    match bytes {
-        None => Ok(None),
-        Some(bytes) => {
-            let sha: [u8; 32] = bytes.try_into().map_err(|bad: Vec<u8>| {
-                Error::FromSqlConversionFailure(
-                    bad.len(),
-                    Type::Blob,
-                    format!("sha256 blob must be 32 bytes, got {}", bad.len()).into(),
-                )
-            })?;
-            Ok(Some(sha))
-        }
-    }
 }

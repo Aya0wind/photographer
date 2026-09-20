@@ -3,6 +3,8 @@
 
 mod common;
 
+use xxhash_rust::xxh64::xxh64;
+
 pub use common::{
     ai, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
@@ -11,7 +13,7 @@ use std::fs;
 
 use common::{
     build_many, build_source, count_assets, expected_subdir, find_part_files, open_db, plan_for,
-    run_engine, sha256_of, shrink,
+    run_engine, shrink,
 };
 use devices::volume::VolumeSource;
 use events::{AppEvent, EventBus, FileState};
@@ -51,11 +53,7 @@ fn copies_files_with_byte_and_hash_integrity() {
             .find(|r| &r.src == rel)
             .expect("journal row");
         assert_eq!(row.state, FileState::Verified);
-        let expected_sha = sha256_of(content);
-        assert_eq!(
-            row.sha256.as_ref().map(|s| s.as_slice()),
-            Some(expected_sha.as_slice())
-        );
+        assert_eq!(row.xxhash, Some(xxh64(content, 0))); // (size, xxhash) 复合键
         assert_eq!(
             row.dst.replace('\\', "/"),
             dst.to_string_lossy().replace('\\', "/")

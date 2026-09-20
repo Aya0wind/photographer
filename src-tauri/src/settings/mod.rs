@@ -180,6 +180,16 @@ pub struct AiSettings {
     /// 默认 0.09——SigLIP2 cos 分数区间压缩（实测无关内容 top≈0.087，
     /// 相关簇 ≈0.099+），过高全灭、过低「进哪个相册都是全部照片」。
     pub semantic_min_score: f32,
+    /// 语义嵌入输入档位（px，squash 到 embed_input_size²）：默认 256。
+    /// **改了必须重建语义索引**（嵌入向量随输入尺寸变化）——启动时经
+    /// dbDir/index-params.marker 指纹比对自动重建，设置页另有手动按钮。
+    pub embed_input_size: u16,
+    /// SCRFD 检测框置信门槛（0-1）：默认 0.5。改了需重建人脸索引。
+    pub face_detect_threshold: f32,
+    /// 在线聚类归簇 cos 阈值（0-1）：默认 0.4。改了需重建人脸索引。
+    pub face_cluster_threshold: f32,
+    /// AI 索引参数指纹版本（内部）：参数语义变更时递增，强制全通道重建。
+    pub index_params_version: u32,
 }
 
 impl Default for AiSettings {
@@ -192,6 +202,10 @@ impl Default for AiSettings {
             cpu_limit_percent: 50,
             use_gpu: true,
             semantic_min_score: 0.09,
+            embed_input_size: 256,
+            face_detect_threshold: 0.5,
+            face_cluster_threshold: 0.4,
+            index_params_version: 1,
         }
     }
 }

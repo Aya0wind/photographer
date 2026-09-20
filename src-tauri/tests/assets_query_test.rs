@@ -33,7 +33,6 @@ fn ins(
         size,
         mtime: "2026-09-01T00:00:00.000Z".to_string(),
         xxhash,
-        sha256: [7; 32],
         kind,
         captured_at: captured.map(str::to_string),
         camera: camera.map(str::to_string),
@@ -502,7 +501,6 @@ fn ins_full(db: &db::Db, path: &str, meta: AssetRow) -> i64 {
     row.size = 10;
     row.mtime = "2026-09-01T00:00:00.000Z".to_string();
     row.xxhash = 1;
-    row.sha256 = [3; 32];
     row.source = "imported".into();
     row.created_at = "2026-09-01T00:00:00.000Z".into();
     db.insert_asset(&row).unwrap();
@@ -516,7 +514,6 @@ fn base_row() -> AssetRow {
         size: 10,
         mtime: "2026-09-01T00:00:00.000Z".into(),
         xxhash: 1,
-        sha256: [3; 32],
         kind: AssetKind::Photo,
         captured_at: None,
         camera: None,
@@ -723,7 +720,7 @@ fn camera_list_groups_by_camera_desc() {
     database
         .0
         .execute(
-            "INSERT INTO assets (path, filename, size, mtime, xxhash, sha256, kind, captured_at, \
+            "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, captured_at, \
              camera, source, created_at, origin) VALUES ('e.jpg','e.jpg',1,'2026',1,x'00', \
              'photo',NULL,'','imported','2026','imported')",
             [],

@@ -73,7 +73,6 @@ fn candidates_list_only_verified_present_files() {
         state: FileState::Failed,
         error: Some("人工置失败".into()),
         xxhash: None,
-        sha256: None,
         dst2: String::new(),
     })
     .unwrap();

@@ -96,6 +96,15 @@ pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     Ok(Arc::clone(pool.get(&key).expect("just inserted")))
 }
 
+/// 索引缓存失效（语义重建删 vectors.usearch 后调用：池内 mmap 的旧索引
+/// 必须逐出，否则后续 add/search 命中已删除文件的旧视图）。
+pub fn invalidate_index(db_dir: &Path) {
+    pool()
+        .lock()
+        .expect("semantic pool mutex poisoned")
+        .remove(&pool_key(db_dir));
+}
+
 fn new_index() -> Result<Index, String> {
     let idx = Index::new(&IndexOptions {
         dimensions: EMBED_DIM,

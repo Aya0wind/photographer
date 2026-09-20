@@ -39,7 +39,6 @@ fn state_with_asset(db_dir: &Path, src: &Path) -> (ipc::AppState, i64) {
             size: 123,
             mtime: "2026-09-01T00:00:00.000Z".into(),
             xxhash: 42,
-            sha256: [0; 32],
             kind: events::AssetKind::Photo,
             captured_at: None,
             camera: None,

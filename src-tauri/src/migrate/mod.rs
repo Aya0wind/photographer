@@ -654,7 +654,6 @@ fn start_photo_root_migration(
             state: crate::events::FileState::Pending,
             error: None,
             xxhash: None,
-            sha256: None,
             dst2: String::new(),
         })
         .map_err(|e| e.to_string())?;
@@ -768,7 +767,6 @@ fn resume_photo_root_job(state: &SharedState, library_id: &str, job_id: i64, bus
                     state: crate::events::FileState::Verified,
                     error: None,
                     xxhash: None,
-                    sha256: None,
                     dst2: String::new(),
                 });
                 settled += row.size;
@@ -789,7 +787,6 @@ fn resume_photo_root_job(state: &SharedState, library_id: &str, job_id: i64, bus
                     state: crate::events::FileState::Failed,
                     error: Some(err.clone()),
                     xxhash: None,
-                    sha256: None,
                     dst2: String::new(),
                 });
                 let _ = db.append_log("error", Some(job_id), &err);

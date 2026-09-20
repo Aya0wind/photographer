@@ -37,8 +37,12 @@ use crate::events::{AppEvent, EventBus};
 /// ArcFace 输出维度。
 pub const FACE_EMBED_DIM: usize = 512;
 /// 在线聚类归簇阈值（与簇心的最大 cos 相似度；可配常量）。
+#[doc(hidden)]
+#[allow(dead_code)] // face_test 引用（lib 内已由 settings 参数取代）
 pub const CLUSTER_COS_THRESHOLD: f32 = 0.4;
 /// 检测置信度下限（immich 默认 0.5 档）。
+#[doc(hidden)]
+#[allow(dead_code)] // face_test 引用（lib 内已由 settings 参数取代）
 pub const DETECT_MIN_SCORE: f32 = 0.5;
 /// NMS IoU 阈值（immich _ops.py 同值）。
 const NMS_IOU: f32 = 0.4;
@@ -154,6 +158,8 @@ pub fn letterbox(img: &RgbImage, size: u32) -> (RgbImage, f32) {
 
 /// SCRFD 检测（RGB8 输入 → 原图坐标人脸列表，score 降序）。
 pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<DetectedFace>, String> {
+    // 置信门槛（settings.ai.face_detect_threshold，默认 DETECT_MIN_SCORE）
+    let threshold = manager.ai_params().face_detect_threshold;
     let (canvas, scale) = letterbox(img, DET_SIZE);
     let mut data = Vec::with_capacity(3 * DET_SIZE as usize * DET_SIZE as usize);
     for ch in 0..3 {
@@ -193,7 +199,7 @@ pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<Detect
         .zip(scores)
         .filter_map(|((box4, kps), score)| {
             let [x1, y1, x2, y2] = box4;
-            (score >= DETECT_MIN_SCORE).then(|| DetectedFace {
+            (score >= threshold).then(|| DetectedFace {
                 box_x: x1 / scale,
                 box_y: y1 / scale,
                 box_w: (x2 - x1) / scale,
@@ -603,7 +609,11 @@ fn pool_key(db_dir: &Path) -> PathBuf {
 }
 
 /// 取（或惰性重建）某库的聚类器缓存。
-fn cluster_cache(db: &Db, db_dir: &Path) -> Result<std::sync::Arc<Mutex<OnlineClusterer>>, String> {
+fn cluster_cache(
+    db: &Db,
+    db_dir: &Path,
+    threshold: f32,
+) -> Result<std::sync::Arc<Mutex<OnlineClusterer>>, String> {
     let key = pool_key(db_dir);
     let mut pool = cache_pool().lock().expect("cluster pool mutex poisoned");
     if let Some(hit) = pool.get(&key) {
@@ -612,10 +622,7 @@ fn cluster_cache(db: &Db, db_dir: &Path) -> Result<std::sync::Arc<Mutex<OnlineCl
     let sums = db
         .face_cluster_sums()
         .map_err(|e| format!("读取簇心失败: {e}"))?;
-    let clusterer = std::sync::Arc::new(Mutex::new(OnlineClusterer::from_sums(
-        sums,
-        CLUSTER_COS_THRESHOLD,
-    )));
+    let clusterer = std::sync::Arc::new(Mutex::new(OnlineClusterer::from_sums(sums, threshold)));
     pool.insert(key, std::sync::Arc::clone(&clusterer));
     Ok(clusterer)
 }
@@ -659,7 +666,8 @@ fn process_face_task(db: &Db, db_dir: &Path, manager: &ModelManager, asset_id: i
         Ok(f) => f,
         Err(_) => return false,
     };
-    let cache = match cluster_cache(db, db_dir) {
+    // 聚类阈值（settings.ai.face_cluster_threshold，默认 CLUSTER_COS_THRESHOLD）
+    let cache = match cluster_cache(db, db_dir, manager.ai_params().face_cluster_threshold) {
         Ok(c) => c,
         Err(_) => return false,
     };

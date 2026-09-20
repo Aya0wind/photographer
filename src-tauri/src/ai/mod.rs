@@ -153,6 +153,29 @@ struct ActiveDownload {
     done: AtomicU64,
 }
 
+/// AI 索引推理参数（settings.ai 的运行时投影；settings_set / 启动时刷新）。
+/// 放 ModelManager（Clone 共享）而非逐层传参：embed/face 推理层都从
+/// manager 取，避免 SemanticEmbedder trait 与聚类缓存签名随配置膨胀。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AiIndexParams {
+    /// 语义嵌入输入档位（px；thumb 档 + squash + 张量边长共用）。
+    pub embed_input_size: u16,
+    /// SCRFD 检测框置信门槛。
+    pub face_detect_threshold: f32,
+    /// 在线聚类归簇 cos 阈值。
+    pub face_cluster_threshold: f32,
+}
+
+impl Default for AiIndexParams {
+    fn default() -> Self {
+        Self {
+            embed_input_size: 256,
+            face_detect_threshold: 0.5,
+            face_cluster_threshold: 0.4,
+        }
+    }
+}
+
 /// 模型下载管理器（AppState 持有；Clone 共享）。
 #[derive(Clone)]
 pub struct ModelManager {
@@ -162,6 +185,8 @@ pub struct ModelManager {
     active: Arc<Mutex<HashMap<String, Arc<ActiveDownload>>>>,
     /// 最近一次失败的模型 id（重下载时清除）。
     failed: Arc<Mutex<HashSet<String>>>,
+    /// 索引推理参数（settings 快照；启动 / settings_set 时刷新）。
+    params: Arc<Mutex<AiIndexParams>>,
 }
 
 impl ModelManager {
@@ -172,7 +197,18 @@ impl ModelManager {
             supervisor,
             active: Arc::new(Mutex::new(HashMap::new())),
             failed: Arc::new(Mutex::new(HashSet::new())),
+            params: Arc::new(Mutex::new(AiIndexParams::default())),
         }
+    }
+
+    /// 当前索引推理参数（推理层读；缺省 256/0.5/0.4）。
+    pub fn ai_params(&self) -> AiIndexParams {
+        *self.params.lock().expect("ai params mutex poisoned")
+    }
+
+    /// 参数快照刷新（启动加载 settings / settings_set 落库后调用）。
+    pub fn set_ai_params(&self, params: AiIndexParams) {
+        *self.params.lock().expect("ai params mutex poisoned") = params;
     }
 
     /// 事件总线（测试订阅进度/完成事件用）。

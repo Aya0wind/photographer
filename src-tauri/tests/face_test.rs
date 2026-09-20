@@ -265,7 +265,6 @@ fn asset_row(path: &str, kind: AssetKind, captured_at: Option<&str>) -> AssetRow
         size: 100,
         mtime: "2026-09-19T00:00:00.000Z".into(),
         xxhash: 1,
-        sha256: [0; 32],
         kind,
         captured_at: captured_at.map(Into::into),
         camera: None,

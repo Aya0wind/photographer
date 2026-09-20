@@ -21,7 +21,6 @@ fn asset_row(path: &str, kind: AssetKind) -> AssetRow {
         size: 100,
         mtime: "2026-09-19T00:00:00.000Z".into(),
         xxhash: 1,
-        sha256: [0; 32],
         kind,
         captured_at: None,
         camera: None,

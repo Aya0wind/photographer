@@ -1,4 +1,4 @@
-//! 单文件单遍读取流水线（引擎工作线程侧）：读流 → 双哈希 → `.part`
+//! 单文件单遍读取流水线（引擎工作线程侧）：读流 → xxh64 哈希 → `.part`
 //! 暂存（主/第二目的地双写）→ head 截存 → 类型识别/EXIF → 长度校验。
 //! 只做源读取/哈希/写盘，不碰 SQLite；收集端（mod.rs）串行结算。
 
@@ -6,7 +6,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 use xxhash_rust::xxh64::Xxh64;
 
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
@@ -46,7 +45,6 @@ pub(super) struct CopiedFile {
     pub(super) kind: AssetKind,
     pub(super) meta: MetaLite,
     pub(super) xxh: u64,
-    pub(super) sha: [u8; 32],
     /// 暂存 .part 路径（已写满、长度已校验）。
     pub(super) part: PathBuf,
     /// 渲染出的最终路径（收集端做冲突处理后 rename）。
@@ -99,8 +97,8 @@ impl PartSink {
         })
     }
 
-    /// 写双侧 + 双哈希单遍更新；失败清双侧半成品。
-    fn write(&mut self, buf: &[u8], xxh: &mut Xxh64, sha: &mut Sha256) -> Result<(), String> {
+    /// 写双侧 + xxh64 单遍更新；失败清双侧半成品。
+    fn write(&mut self, buf: &[u8], xxh: &mut Xxh64) -> Result<(), String> {
         if let Err(e) = self.out.write_all(buf) {
             self.discard();
             return Err(format!("写盘失败: {e}"));
@@ -112,7 +110,6 @@ impl PartSink {
             }
         }
         xxh.update(buf);
-        sha.update(buf);
         Ok(())
     }
 
@@ -245,8 +242,7 @@ pub(super) fn copy_one(
         Err(error) => return fail(error),
     };
     let mut xxh = Xxh64::new(0);
-    let mut sha = Sha256::new();
-    if let Err(error) = sink.write(&head, &mut xxh, &mut sha) {
+    if let Err(error) = sink.write(&head, &mut xxh) {
         return fail(error);
     }
 
@@ -256,7 +252,7 @@ pub(super) fn copy_one(
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                if let Err(error) = sink.write(&chunk[..n], &mut xxh, &mut sha) {
+                if let Err(error) = sink.write(&chunk[..n], &mut xxh) {
                     return fail(error);
                 }
             }
@@ -275,7 +271,6 @@ pub(super) fn copy_one(
         kind,
         meta,
         xxh: xxh.digest(),
-        sha: sha.finalize().into(),
         part,
         dst,
         part2,

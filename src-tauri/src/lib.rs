@@ -71,7 +71,14 @@ pub fn run() {
             );
             // settings/ai 在 manage(move) 前先取启动自愈所需快照
             let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
+            // AI 索引参数投影到推理层（embed 输入档位 / 人脸阈值）
+            ai.set_ai_params(crate::ai::AiIndexParams {
+                embed_input_size: settings.ai.embed_input_size,
+                face_detect_threshold: settings.ai.face_detect_threshold,
+                face_cluster_threshold: settings.ai.face_cluster_threshold,
+            });
             let ai_for_kick = ai.clone();
+            let ai_settings_snapshot = settings.ai.clone();
             app.manage(std::sync::Arc::new(AppState {
                 settings: Mutex::new(settings),
                 config_dir,
@@ -106,8 +113,23 @@ pub fn run() {
                     );
                 }
                 if enable_face {
-                    ai::face::kick_face_if_ready(db_dir, &ai_for_kick, &bus, &supervisor_handle);
+                    ai::face::kick_face_if_ready(
+                        db_dir.clone(),
+                        &ai_for_kick,
+                        &bus,
+                        &supervisor_handle,
+                    );
                 }
+                // AI 索引参数指纹比对（用户 2026-09-20：改参数自动重建对应
+                // 通道；dbDir 标记防每启动重做，手动按钮走 index_rebuild）
+                let shared = app.state::<ipc::SharedState>().inner().clone();
+                supervisor_handle.spawn("index", "params-fingerprint-check".into(), move |_| {
+                    ipc::indexing::check_params_and_rebuild(
+                        &shared,
+                        &db_dir,
+                        &ai_settings_snapshot,
+                    );
+                });
             }
 
             // 后台线程 1：领域事件转发（bus → 前端 `app://event`）
@@ -197,9 +219,12 @@ pub fn run() {
             ipc::people::person_delete,
             ipc::indexing::index_kick_now,
             ipc::indexing::index_status,
+            ipc::indexing::index_rebuild,
             ipc::rating::asset_rating_set,
             ipc::rating::asset_flag_set,
             ipc::rating::recent_assets,
+            ipc::rating::asset_view_mark,
+            ipc::rating::recent_viewed,
             ipc::watch::watch_folders_list,
             ipc::watch::watch_folder_add,
             ipc::watch::watch_folder_remove,

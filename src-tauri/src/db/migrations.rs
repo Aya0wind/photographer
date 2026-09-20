@@ -14,6 +14,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0007_UNIQUE_INDEX_TASKS,
     MIGRATION_0008_DEEP_EXIF,
     MIGRATION_0009_RATING_AND_FLAG,
+    MIGRATION_0010_VIEW_HISTORY,
+    MIGRATION_0011_DROP_SHA256,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -235,4 +237,24 @@ ALTER TABLE assets ADD COLUMN gps_lon REAL;
 const MIGRATION_0009_RATING_AND_FLAG: &str = r#"
 ALTER TABLE assets ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE assets ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// 0010（M5 最近浏览）：view_history 每资产一行（PK = asset_id，upsert
+/// 天然去重，查询按 viewed_at DESC 即「最近浏览」序）；资产删除级联清
+/// 历史。用户定案 2026-09-20：「最近添加」改「最近浏览」。
+const MIGRATION_0010_VIEW_HISTORY: &str = r#"
+CREATE TABLE view_history (
+    asset_id  INTEGER PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+    viewed_at TEXT NOT NULL
+);
+"#;
+
+/// 0011（M5）：资产/journal 的 SHA256 指纹退役（用户定案 2026-09-20）：
+/// 完全重复级判据 = (size, xxhash) 复合键——64 位 xxhash 在 20 万规模
+/// 碰撞 ~1e-9，且查重/删除均有人工确认环节；复制流少一次哈希更新。
+/// 注意：AI 模型下载校验的 sha256（ai/mod.rs）是另一回事，不受影响。
+const MIGRATION_0011_DROP_SHA256: &str = r#"
+DROP INDEX idx_assets_sha256;
+ALTER TABLE assets DROP COLUMN sha256;
+ALTER TABLE job_files DROP COLUMN sha256;
 "#;

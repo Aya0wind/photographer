@@ -1,6 +1,6 @@
 //! M1 T7 导入引擎（spec §5.2 / §7）：单文件单遍读取流水线。
 //!
-//! 打开源流 → 循环读 8MB chunk → xxh64+sha256 同时 update → 写 `.part`
+//! 打开源流 → 循环读 8MB chunk → xxh64 update → 写 `.part`
 //! （集中暂存目录）→ 首 1MB 截存 head（EXIF + 魔数识别）→ 渲染目标路径 →
 //! 完成后长度校验 → 原子 rename → journal verified → assets 入库。
 //!
@@ -515,7 +515,6 @@ impl Engine {
                                 state: FileState::Failed,
                                 error: Some(error.clone()),
                                 xxhash: Some(copied.xxh),
-                                sha256: Some(copied.sha),
                                 dst2: String::new(),
                             });
                             let _ = self.db.append_log("error", Some(job_id), &error);
@@ -539,7 +538,6 @@ impl Engine {
                         state: FileState::Failed,
                         error: Some(error.clone()),
                         xxhash: None,
-                        sha256: None,
                         dst2: String::new(),
                     });
                     let _ = self.db.append_log("error", Some(job_id), &error);
@@ -554,7 +552,6 @@ impl Engine {
                         state: FileState::Pending,
                         error: Some(error),
                         xxhash: None,
-                        sha256: None,
                         dst2: String::new(),
                     });
                     self.controls.cancelled.store(true, Ordering::SeqCst);
@@ -825,7 +822,6 @@ impl Engine {
             size: entry.size,
             mtime: rfc3339(entry.mtime),
             xxhash: copied.xxh,
-            sha256: copied.sha,
             kind: copied.kind,
             captured_at: copied.meta.captured_at.map(rfc3339),
             camera: copied.meta.camera.clone(),
@@ -889,7 +885,6 @@ impl Engine {
             state,
             error: None,
             xxhash: Some(copied.xxh),
-            sha256: Some(copied.sha),
             dst2: dst2.to_string(),
         });
     }

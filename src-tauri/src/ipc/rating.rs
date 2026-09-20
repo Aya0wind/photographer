@@ -136,3 +136,52 @@ pub async fn recent_assets(
     })
     .await
 }
+
+/// 浏览记账核（查看器打开照片时调用；无效资产静默 Ok）。
+pub fn fetch_asset_view_mark(state: &super::AppState, asset_id: i64) -> Result<(), String> {
+    let db = super::active_library_db(state)?;
+    // 资产不存在 → 静默（mark 对无效 id 不构成用户可见错误）
+    let exists: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1",
+            [asset_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        return Ok(());
+    }
+    db.mark_asset_viewed(asset_id).map_err(|e| e.to_string())
+}
+
+/// 最近浏览分页核（viewed_at DESC；每资产一行天然去重）。
+pub fn fetch_recent_viewed(
+    state: &super::AppState,
+    limit: u32,
+) -> Result<Vec<super::assets::AssetDto>, String> {
+    let db = super::active_library_db(state)?;
+    let rows = db
+        .recently_viewed(limit.clamp(1, 200))
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(super::assets::page_row_to_dto)
+        .collect())
+}
+
+/// 浏览记账（查看器打开照片时调用；幂等刷新时间）。
+#[tauri::command]
+pub async fn asset_view_mark(state: State<'_, SharedState>, asset_id: i64) -> Result<(), String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_asset_view_mark(state, asset_id)).await
+}
+
+/// 最近浏览列表（「最近浏览」页数据源；limit 上限 200）。
+#[tauri::command]
+pub async fn recent_viewed(
+    state: State<'_, SharedState>,
+    limit: u32,
+) -> Result<Vec<super::assets::AssetDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_recent_viewed(state, limit)).await
+}

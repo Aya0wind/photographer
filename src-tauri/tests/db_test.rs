@@ -57,7 +57,6 @@ fn job_file(job_id: i64, src: &str, state: FileState) -> JobFileRow {
         state,
         error: None,
         xxhash: None,
-        sha256: None,
         dst2: String::new(),
     }
 }
@@ -69,7 +68,6 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         size,
         mtime: "2026-09-18T00:00:00.000Z".to_string(),
         xxhash,
-        sha256: [7u8; 32],
         kind,
         captured_at: Some("2026-09-01T10:20:30.000Z".to_string()),
         camera: Some("Sony A7M4".to_string()),
@@ -116,15 +114,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 9);
+        assert_eq!(user_version(&db), 11);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 9, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 11, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 9);
+    assert_eq!(user_version(&db), 11);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -142,7 +140,7 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 10,
+        indexes, 9,
         "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，migration 0007）"
     );
 }
@@ -168,7 +166,18 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
         )
         .unwrap();
         // 0008/0009 的 ALTER ADD COLUMN 不可重放：回卷版本前先摘掉这些列
-        //（迁移会原样补回，语义不变）
+        //（迁移会原样补回，语义不变）；0010 的表同理（先 DROP 再重建）；
+        // 0011 会再删一遍 sha256 列/索引——先按 0001 形态补回
+        db.0.execute("DROP TABLE view_history", []).unwrap();
+        db.0.execute(
+            "ALTER TABLE assets ADD COLUMN sha256 BLOB NOT NULL DEFAULT x'00'",
+            [],
+        )
+        .unwrap();
+        db.0.execute("CREATE INDEX idx_assets_sha256 ON assets (sha256)", [])
+            .unwrap();
+        db.0.execute("ALTER TABLE job_files ADD COLUMN sha256 BLOB", [])
+            .unwrap();
         for col in [
             "orientation",
             "flash",
@@ -190,7 +199,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 9);
+    assert_eq!(user_version(&db), 11);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()
@@ -259,21 +268,19 @@ fn upsert_job_file_overwrites_same_pk() {
     let mut updated = job_file(job_id, "DCIM/100EOSCK/IMG_0001.JPG", FileState::Verified);
     updated.dst = "I:/SmartPhoto/2026/IMG_0001_1.JPG".to_string();
     updated.xxhash = Some(0xdead_beef);
-    updated.sha256 = Some([9u8; 32]);
     db.upsert_job_file(&updated).expect("upsert overwrite");
 
     // PK(job_id, src) 覆盖：仍只有一行，且读回的是新值
-    let (dst, state, xxhash, sha256): (String, String, Option<i64>, Option<Vec<u8>>) =
+    let (dst, state, xxhash): (String, String, Option<i64>) =
         db.0.query_row(
-            "SELECT dst, state, xxhash, sha256 FROM job_files WHERE job_id = ?1",
+            "SELECT dst, state, xxhash FROM job_files WHERE job_id = ?1",
             params![job_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("select job file");
     assert_eq!(dst, "I:/SmartPhoto/2026/IMG_0001_1.JPG");
     assert_eq!(state, "verified");
     assert_eq!(xxhash, Some(0xdead_beef_i64));
-    assert_eq!(sha256, Some(vec![9u8; 32]));
 }
 
 #[test]

@@ -124,7 +124,7 @@ fn open_search_db(dir: &Path) -> db::Db {
         database
             .0
             .execute(
-                "INSERT OR IGNORE INTO assets (id, path, filename, size, mtime, xxhash, sha256,                  kind, captured_at, camera, source, created_at)                  VALUES (?1, ?2, 'x.jpg', 1, '2026', 1, x'00', 'photo', NULL, NULL, 'imported', '2026')",
+                "INSERT OR IGNORE INTO assets (id, path, filename, size, mtime, xxhash, kind, captured_at, camera, source, created_at)                  VALUES (?1, ?2, 'x.jpg', 1, '2026', 1, 'photo', NULL, NULL, 'imported', '2026')",
                 rusqlite::params![id as i64, format!("X:/p/{id}.jpg")],
             )
             .unwrap();
@@ -132,7 +132,7 @@ fn open_search_db(dir: &Path) -> db::Db {
     database
         .0
         .execute(
-            "INSERT OR IGNORE INTO assets (id, path, filename, size, mtime, xxhash, sha256,              kind, captured_at, camera, source, created_at)              VALUES (10000, 'X:/p/near.jpg', 'near.jpg', 1, '2026', 1, x'00', 'photo', NULL, NULL, 'imported', '2026')",
+            "INSERT OR IGNORE INTO assets (id, path, filename, size, mtime, xxhash, kind, captured_at, camera, source, created_at)              VALUES (10000, 'X:/p/near.jpg', 'near.jpg', 1, '2026', 1, 'photo', NULL, NULL, 'imported', '2026')",
             [],
         )
         .unwrap();
@@ -192,9 +192,9 @@ fn semantic_backfill_consumes_existing_pending_tasks() {
     database
         .0
         .execute(
-            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
              kind, captured_at, camera, source, created_at) \
-             VALUES (1, 'X:/p/1.jpg', '1.jpg', 1, '2026', 1, x'00', 'photo', \
+             VALUES (1, 'X:/p/1.jpg', '1.jpg', 1, '2026', 1, 'photo', \
              NULL, NULL, 'imported', '2026')",
             [],
         )
@@ -242,9 +242,9 @@ fn semantic_backfill_persists_in_non_ascii_library_path() {
     database
         .0
         .execute(
-            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
              kind, captured_at, camera, source, created_at) \
-             VALUES (1, ?1, 'source.jpg', 1, '2026', 1, x'00', 'photo', \
+             VALUES (1, ?1, 'source.jpg', 1, '2026', 1, 'photo', \
              NULL, NULL, 'imported', '2026')",
             rusqlite::params![source.to_string_lossy()],
         )
@@ -318,9 +318,9 @@ fn real_backfill_chinese_dbdir_diagnosis() {
     database
         .0
         .execute(
-            "INSERT INTO assets (path, filename, size, mtime, xxhash, sha256, \
+            "INSERT INTO assets (path, filename, size, mtime, xxhash, \
              kind, captured_at, camera, source, created_at) \
-             VALUES (?1, 'DSC_0177.JPG', 1, '2026', 1, x'00', 'photo', \
+             VALUES (?1, 'DSC_0177.JPG', 1, '2026', 1, 'photo', \
              NULL, NULL, 'imported', '2026')",
             rusqlite::params![target.to_string_lossy()],
         )
@@ -480,7 +480,7 @@ fn real_semantic_backfill_one_asset() {
     database
         .0
         .execute(
-            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, sha256, \
+            "INSERT INTO assets (id, path, filename, size, mtime, xxhash, \
              kind, captured_at, camera, source, created_at) \
              VALUES (1, ?1, 'DSC_0176.NEF', 1, '2026', 1, x'00', 'raw', \
              NULL, NULL, 'imported', '2026')",

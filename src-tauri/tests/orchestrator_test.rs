@@ -66,7 +66,6 @@ fn skip_imported_deducts_loose_matched_assets() {
         size: 100,
         mtime: mtime.to_rfc3339_opts(SecondsFormat::Millis, true),
         xxhash: 42,
-        sha256: [7u8; 32],
         kind: AssetKind::Photo,
         captured_at: None,
         camera: None,

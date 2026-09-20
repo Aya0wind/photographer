@@ -154,9 +154,10 @@ impl ModelManager {
 
 impl SemanticEmbedder for ModelManager {
     fn embed_image(&self, src: &Path, db_dir: &Path) -> Result<Vec<f32>, String> {
-        // 图源 = 256 档缩略图（命中缓存零解码原图；缺失则顺手生成——
-        // 与缩略图索引任务协同，之后的索引 worker 会补齐其余两档）
-        let thumb_path = crate::thumbs::thumb_file(db_dir, src, 256).ok_or_else(|| {
+        // 图源 = embed_input_size 档缩略图（settings.ai 可配，默认 256；
+        // 命中缓存零解码原图；缺失则顺手生成——与缩略图索引任务协同）
+        let input_size = self.ai_params().embed_input_size;
+        let thumb_path = crate::thumbs::thumb_file(db_dir, src, input_size).ok_or_else(|| {
             format!(
                 "缩略图生成失败（RAW 预览提取失败或已损坏）: {}",
                 src.display()
@@ -166,21 +167,23 @@ impl SemanticEmbedder for ModelManager {
         self.ensure_visual(&mut slots)?;
         let session = slots.visual.as_mut().expect("ensure_visual 已保证");
 
-        // squash resize 到 256×256（SigLIP2 预处理：非保比，直接缩放）
+        // squash resize 到 input_size²（SigLIP2 预处理：非保比，直接缩放；
+        // onnx-community 导出为动态 H/W，改档位即改嵌入——需重建语义索引）
         let img = image::ImageReader::open(&thumb_path)
             .ok()
             .and_then(|r| r.decode().ok())
             .ok_or_else(|| format!("缩略图解码失败: {thumb_path}"))?
             .to_rgb8();
-        let img = image::imageops::resize(&img, 256, 256, image::imageops::FilterType::Triangle);
+        let dim = u32::from(input_size);
+        let img = image::imageops::resize(&img, dim, dim, image::imageops::FilterType::Triangle);
         // NCHW f32，(px/127.5 - 1)
-        let mut data = Vec::with_capacity(3 * 256 * 256);
+        let mut data = Vec::with_capacity(3 * input_size as usize * input_size as usize);
         for ch in 0..3 {
             for px in img.pixels() {
                 data.push((px.0[ch] as f32 / 127.5) - 1.0);
             }
         }
-        let tensor = Tensor::from_array((vec![1i64, 3, 256, 256], data))
+        let tensor = Tensor::from_array((vec![1i64, 3, dim as i64, dim as i64], data))
             .map_err(|e| format!("构造图像张量失败: {e}"))?;
         let out_name = pick_embed_name(session, &["image_embeds", "pooler", "embeds", "hidden"])?;
         let outputs = session
