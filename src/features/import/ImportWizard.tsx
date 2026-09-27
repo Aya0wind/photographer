@@ -8,6 +8,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   albumCreate,
   albumList,
+  albumSubgroups,
   deviceFiles,
   folderScan,
   fsListDirs,
@@ -1395,6 +1396,21 @@ export default function ImportWizard() {
     const ungrouped = albums.find((a) => isUngroupedAlbum(a));
     if (ungrouped) setAlbumId((prev) => (prev === null ? ungrouped.id : prev));
   }, [albums]);
+  // 子分组（B4 定案，可选）：所选相册的现有子分组名（datalist 提示）；换相册即清空
+  const [albumSubgroup, setAlbumSubgroup] = useState("");
+  const [albumSubgroupNames, setAlbumSubgroupNames] = useState<string[]>([]);
+  useEffect(() => {
+    setAlbumSubgroup("");
+    setAlbumSubgroupNames([]);
+    if (albumChoice !== "existing" || albumId === null) return;
+    let cancelled = false;
+    void albumSubgroups(albumId).then((list) => {
+      if (!cancelled) setAlbumSubgroupNames(list.map((g) => g.name));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [albumChoice, albumId]);
   // 相册主组织（必选）：导入落 `相册目录/日期模板/`。
   // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；未选出时按「未分组」兜底；
   // 新建分支用输入名）。
@@ -1662,6 +1678,11 @@ export default function ImportWizard() {
       include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
       // 添加到相册（可选）：导入完成后新入库照片加入该相册
       albumId: resolvedAlbumId,
+      // 子分组（B4 定案，可选）：留空 = 相册根
+      albumSubgroup:
+        albumChoice === "existing" && albumSubgroup.trim() !== ""
+          ? albumSubgroup.trim()
+          : undefined,
     };
     // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式/源类型
     useImportStore.getState().setPendingJobMode(mode);
@@ -2170,6 +2191,25 @@ export default function ImportWizard() {
                   </option>
                 ))}
               </select>
+            )}
+            {albumChoice === "existing" && albumId !== null && (
+              <input
+                type="text"
+                value={albumSubgroup}
+                onChange={(e) => setAlbumSubgroup(e.target.value)}
+                list="wizard-subgroup-options"
+                placeholder={t("wizard.album.subgroupPlaceholder")}
+                aria-label={t("wizard.album.subgroup")}
+                className="ml-5 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
+                data-testid="wizard-album-subgroup"
+              />
+            )}
+            {albumChoice === "existing" && albumId !== null && (
+              <datalist id="wizard-subgroup-options">
+                {albumSubgroupNames.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
             )}
             <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
               <input

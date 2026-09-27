@@ -18,6 +18,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import {
   albumCreate,
   albumList,
+  albumSubgroups,
   deviceFiles,
   deviceList,
   folderScan,
@@ -38,6 +39,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     deviceList: vi.fn(),
     thumbGet: vi.fn(),
     albumList: vi.fn(),
+    albumSubgroups: vi.fn(),
     albumCreate: vi.fn(),
   };
 });
@@ -61,6 +63,7 @@ const deviceListMock = vi.mocked(deviceList);
 const convertMock = vi.mocked(convertFileSrc);
 const thumbMock = vi.mocked(thumbGet);
 const albumListMock = vi.mocked(albumList);
+const albumSubgroupsMock = vi.mocked(albumSubgroups);
 const albumCreateMock = vi.mocked(albumCreate);
 
 function volumeDevice() {
@@ -192,6 +195,7 @@ beforeEach(() => {
     { id: 1, name: "未分组", coverAssetId: null, itemCount: 0, createdAt: "2026-09-01" },
     { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2026-09-01" },
   ]);
+  albumSubgroupsMock.mockReset().mockResolvedValue([]);
   albumCreateMock.mockReset().mockResolvedValue({
     ok: true,
     album: { id: 9, name: "新相册", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
@@ -1279,6 +1283,47 @@ describe("ImportWizard：添加到相册步骤", () => {
 
     const plan = startMock.mock.calls[0][0] as ImportPlan;
     expect(plan.albumId).toBe(1);
+  });
+
+  it("子分组（可选，B4）：留空 = 相册根，plan.albumSubgroup 不携带", async () => {
+    seedSession();
+    albumSubgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 5 }]);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 41 });
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-album-existing"));
+    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
+    await waitFor(() => expect(albumSubgroupsMock).toHaveBeenCalledWith(3));
+
+    const input = screen.getByTestId("wizard-album-subgroup");
+    expect(input).toHaveValue("");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBe(3);
+    expect(plan.albumSubgroup).toBeUndefined();
+  });
+
+  it("子分组（可选，B4）：输入新名随 plan.albumSubgroup 下发（album_subgroups 供 datalist）", async () => {
+    seedSession();
+    albumSubgroupsMock.mockResolvedValue([
+      { name: "原片", itemCount: 5 },
+      { name: "成片", itemCount: 2 },
+    ]);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 42 });
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-album-existing"));
+    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
+    await waitFor(() => expect(albumSubgroupsMock).toHaveBeenCalledWith(3));
+
+    await user.type(screen.getByTestId("wizard-album-subgroup"), "精修");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumSubgroup).toBe("精修");
   });
 
   it("未选相册（清单为空）：行内提示「请选择相册」且不启动", async () => {

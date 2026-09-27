@@ -11,11 +11,14 @@ import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline
 import {
   albumAddAssets,
   albumAssetsPage,
+  albumItemMoveSubgroup,
   albumList,
+  albumSubgroups,
   albumRemoveAssets,
   albumRename,
   assetThumbGet,
   type AssetDto,
+  type AssetFilters,
 } from "@/ipc/api";
 
 /**
@@ -30,6 +33,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     albumList: vi.fn(),
     albumAssetsPage: vi.fn(),
+    albumSubgroups: vi.fn(),
+    albumItemMoveSubgroup: vi.fn(),
     albumRemoveAssets: vi.fn(),
     albumRename: vi.fn(),
     albumAddAssets: vi.fn(),
@@ -44,6 +49,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 const albumListMock = vi.mocked(albumList);
 const assetsPageMock = vi.mocked(albumAssetsPage);
+const subgroupsMock = vi.mocked(albumSubgroups);
+const moveMock = vi.mocked(albumItemMoveSubgroup);
 const removeMock = vi.mocked(albumRemoveAssets);
 const renameMock = vi.mocked(albumRename);
 const addMock = vi.mocked(albumAddAssets);
@@ -119,6 +126,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   albumListMock.mockResolvedValue([makeAlbum(1, "青海湖 2026", 3)]);
   assetsPageMock.mockResolvedValue([]);
+  subgroupsMock.mockReset().mockResolvedValue([]);
+  moveMock.mockReset().mockResolvedValue(true);
   removeMock.mockResolvedValue(true);
   renameMock.mockResolvedValue({ ok: true });
   addMock.mockResolvedValue(0);
@@ -135,7 +144,7 @@ describe("相册详情页：数据与分页", () => {
     expect(screen.getByTestId("album-detail-name")).toHaveTextContent("青海湖 2026");
     expect(screen.getByTestId("album-detail-count")).toHaveTextContent("3 张");
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenCalledWith(1, 0, PAGE_LIMIT, undefined),
+      expect(assetsPageMock).toHaveBeenCalledWith(1, 0, PAGE_LIMIT, expect.objectContaining({ subgroupIsNull: true })),
     );
     expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(3);
   });
@@ -150,7 +159,7 @@ describe("相册详情页：数据与分页", () => {
 
     await screen.findAllByTestId("gallery-tile");
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenCalledWith(1, PAGE_LIMIT, PAGE_LIMIT, undefined),
+      expect(assetsPageMock).toHaveBeenCalledWith(1, PAGE_LIMIT, PAGE_LIMIT, expect.objectContaining({ subgroupIsNull: true })),
     );
     // 第二页短页（< limit）→ hasMore=false：不再有更多请求
     await waitFor(() =>
@@ -327,5 +336,108 @@ describe("相册详情：原片/成片分段（B2）", () => {
         expect.objectContaining({ groupRole: "derived_only" }),
       ),
     );
+  });
+});
+
+// --- 子分组（B4 定案：相册内任意命名文件夹层） ---------------------------------------------
+
+describe("相册详情页：子分组", () => {
+  it("根视图渲染子分组文件夹卡（名称+张数）；点击进入子分组视图（面包屑+数据源 filters.subgroup）", async () => {
+    subgroupsMock.mockResolvedValue([
+      { name: "原片", itemCount: 5 },
+      { name: "成片", itemCount: 2 },
+    ]);
+    assetsPageMock.mockResolvedValue([]);
+    renderDetail();
+
+    // 子分组卡横排（仅根视图）
+    const cards = await screen.findAllByTestId("album-subgroup-card");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveAttribute("data-subgroup", "原片");
+    expect(within(cards[0]).getByTestId("album-subgroup-name")).toHaveTextContent("原片");
+    expect(within(cards[0]).getByTestId("album-subgroup-count")).toHaveTextContent("5");
+
+    // 点击进入：面包屑 + 数据源切到 filters.subgroup 精确名
+    const user = userEvent.setup();
+    await user.click(cards[0]);
+    expect(screen.getByTestId("album-subgroup-breadcrumb")).toHaveTextContent("青海湖 2026");
+    expect(screen.getByTestId("album-subgroup-breadcrumb")).toHaveTextContent("原片");
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(1, 0, PAGE_LIMIT, expect.objectContaining({ subgroup: "原片" })),
+    );
+
+    // 返回根：subgroupIsNull=true 回归
+    await user.click(screen.getByTestId("album-subgroup-back"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenLastCalledWith(1, 0, PAGE_LIMIT, expect.objectContaining({ subgroupIsNull: true })),
+    );
+    expect(screen.queryByTestId("album-subgroup-bar")).not.toBeInTheDocument();
+  });
+
+  it("子分组内多选 → 操作条「移到子分组…」输入新名即建 → album_item_move_subgroup + 重拉", async () => {
+    assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+
+    const user = userEvent.setup();
+    await user.click(checkOf(1));
+    await user.click(tileOf(2));
+
+    await user.click(screen.getByTestId("selection-subgroup-move"));
+    const menu = screen.getByTestId("selection-subgroup-menu");
+    await user.type(within(menu).getByTestId("selection-subgroup-name"), "精选");
+    await user.click(within(menu).getByTestId("selection-subgroup-confirm"));
+
+    await waitFor(() => expect(moveMock).toHaveBeenCalledWith(1, [1, 2], "精选"));
+    // 移组后重置重拉 + 退出多选
+    await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
+  });
+
+  it("根视图移组弹窗不出现「移到相册根」；输入留空时确认禁用", async () => {
+    subgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 1 }]);
+    assetsPageMock.mockResolvedValue([makeAsset(1)]);
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+
+    const user = userEvent.setup();
+    await user.click(checkOf(1));
+    await user.click(screen.getByTestId("selection-subgroup-move"));
+    const menu = screen.getByTestId("selection-subgroup-menu");
+    // 根视图没有「移到相册根」
+    expect(within(menu).queryByTestId("selection-subgroup-root")).not.toBeInTheDocument();
+    // 输入留空 → 确认禁用
+    expect(within(menu).getByTestId("selection-subgroup-confirm")).toBeDisabled();
+  });
+
+  it("子分组视图移回根：操作条出现「移到相册根」→ album_item_move_subgroup(id, ids, null)", async () => {
+    subgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 2 }]);
+    assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByTestId("album-subgroup-card"))[0]);
+    // 进入子分组会重拉：等第二次请求发出并结算（loading 撤下）后瓦片重挂
+    // 数据源已切到 filters.subgroup（IO 桩可能追加一次补页调用，故用 some 而非 last）
+    await waitFor(() =>
+      expect(
+        assetsPageMock.mock.calls.some(([, , , filters]) => (filters as AssetFilters)?.subgroup === "原片"),
+      ).toBe(true),
+    );
+    await screen.findAllByTestId("gallery-tile");
+    await user.click(checkOf(1));
+    await user.click(tileOf(2));
+
+    await user.click(screen.getByTestId("selection-subgroup-move"));
+    await user.click(screen.getByTestId("selection-subgroup-root"));
+    await waitFor(() => expect(moveMock).toHaveBeenCalledWith(1, [1, 2], null));
+  });
+
+  it("工具条「导入成片」按钮 → 打开导入成片对话框", async () => {
+    renderDetail();
+    await screen.findByTestId("album-detail-page");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("album-import-derived"));
+    expect(screen.getByTestId("import-derived-dialog")).toBeInTheDocument();
   });
 });

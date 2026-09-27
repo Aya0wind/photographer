@@ -4,16 +4,21 @@ import { useTranslation } from "react-i18next";
 
 import {
   albumAssetsPage,
+  albumItemMoveSubgroup,
   albumList,
   albumRename,
+  albumSubgroups,
   type AlbumDto,
+  type AlbumSubgroupDto,
   type AssetDto,
+  type AssetFilters,
 } from "@/ipc/api";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { AssetContextMenu } from "@/features/gallery/components/ContextMenu";
 import SelectionBar from "@/features/gallery/components/SelectionBar";
+import ImportDerivedDialog from "@/features/albums/components/ImportDerivedDialog";
 import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
@@ -63,6 +68,14 @@ export default function AlbumDetailPage() {
 
   const albumName = meta?.name ?? t("albums.fallbackName", { id: albumId });
   const itemCount = meta?.itemCount ?? 0;
+  // --- 子分组（B4 定案）：null = 相册根散照片视图；进入子分组 = 页内状态切换 ------------
+  const [subgroup, setSubgroup] = useState<string | null>(null);
+  const [subgroups, setSubgroups] = useState<AlbumSubgroupDto[]>([]);
+  const [derivedImportOpen, setDerivedImportOpen] = useState(false);
+  const refreshSubgroups = useCallback(async () => {
+    setSubgroups(await albumSubgroups(albumId));
+  }, [albumId]);
+
 
   // --- 筛选（复用图库 FilterPanel；相册维度隐藏） --------------------------------------
   const [inputs, setInputs] = useState(EMPTY_INPUTS);
@@ -90,30 +103,37 @@ export default function AlbumDetailPage() {
 
   const fetchPage = useCallback(
     async (afterId: number, key: string): Promise<AssetDto[]> => {
-      const pageFilters = hasActiveFilters(parseInputs(key)) ? buildFilters(parseInputs(key)) : undefined;
+      // 子分组作用域（B4）：默认根视图 subgroupIsNull=true；子分组视图精确名。
+      // 与面板筛选（groupRole 等）正交叠加。
+      const pageFilters: AssetFilters = {
+        ...(hasActiveFilters(parseInputs(key)) ? buildFilters(parseInputs(key)) : {}),
+        ...(subgroup === null ? { subgroupIsNull: true } : { subgroup }),
+      };
       return albumAssetsPage(albumId, afterId, PAGE_LIMIT, pageFilters);
     },
-    [albumId],
+    [albumId, subgroup],
   );
 
   const appendPage = useCallback(async (): Promise<AssetDto[]> => {
     if (loadingRef.current || !hasMoreRef.current) return [];
     loadingRef.current = true;
     setLoadingMore(true);
-    const seq = ++loadSeqRef.current;
     const afterId =
       assetsRef.current.length > 0 ? assetsRef.current[assetsRef.current.length - 1].id : 0;
     const page = await fetchPage(afterId, appliedKeyRef.current);
-    if (seq !== loadSeqRef.current) return page;
-    if (page.length > 0) {
-      const seen = new Set(assetsRef.current.map((a) => a.id));
-      const fresh = page.filter((a) => !seen.has(a.id));
-      assetsRef.current = [...assetsRef.current, ...fresh];
-      setAssets(assetsRef.current);
+    // 补页不参与主加载的 seq 竞争（bump 会丢弃在途主加载且 status 卡 loading）：
+    // 若 await 期间发生主加载重置（loadingRef 已被主管线清零），本页丢弃由新管线接管
+    if (loadingRef.current) {
+      if (page.length > 0) {
+        const seen = new Set(assetsRef.current.map((a) => a.id));
+        const fresh = page.filter((a) => !seen.has(a.id));
+        assetsRef.current = [...assetsRef.current, ...fresh];
+        setAssets(assetsRef.current);
+      }
+      if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
+      loadingRef.current = false;
+      setLoadingMore(false);
     }
-    if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
-    loadingRef.current = false;
-    setLoadingMore(false);
     return page;
   }, [fetchPage]);
 
@@ -134,6 +154,11 @@ export default function AlbumDetailPage() {
       cancelled = true;
     };
   }, [fetchPage, debouncedKey, reloadToken]);
+
+  // 子分组清单（B4）：挂载/换相册/移组与导入后（reloadToken）刷新
+  useEffect(() => {
+    void refreshSubgroups();
+  }, [refreshSubgroups, reloadToken]);
 
   // 无限滚动：哨兵进入视口（提前 800px 预载）
   useEffect(() => {
@@ -180,6 +205,16 @@ export default function AlbumDetailPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selecting, exitSelection]);
 
+
+  function enterSubgroup(name: string): void {
+    exitSelection();
+    setSubgroup(name);
+  }
+  function backToRoot(): void {
+    exitSelection();
+    setSubgroup(null);
+  }
+
   // --- 分组 + 查看器 -------------------------------------------------------------------
   const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
@@ -217,12 +252,32 @@ export default function AlbumDetailPage() {
     setCtxMenu({ ...at, assets: [asset] });
   }
 
-  /** 相册上下文刷新：移除引用后重置分页重拉 + 相册计数 */
+  /** 相册上下文刷新：移除引用后重置分页重拉 + 相册计数 + 子分组清单 */
   const handleAssetsRemoved = useCallback(() => {
     exitSelection();
     setReloadToken((token) => token + 1);
     void refreshMeta();
   }, [exitSelection, refreshMeta]);
+
+  /** 子分组移组（B4）：target=null 移回根；输入新名即建（后端按名幂等）。
+   *  完成后重拉当前视图 + 子分组清单 + 相册计数。 */
+  const handleSubgroupMove = useCallback(
+    async (target: string | null, items: AssetDto[]): Promise<boolean> => {
+      const ok = await albumItemMoveSubgroup(
+        albumId,
+        items.map((a) => a.id),
+        target,
+      );
+      if (ok) {
+        exitSelection();
+        setReloadToken((token) => token + 1);
+        void refreshMeta();
+        void refreshSubgroups();
+      }
+      return ok;
+    },
+    [albumId, exitSelection, refreshMeta, refreshSubgroups],
+  );
 
   // --- 页头行内重命名 -----------------------------------------------------------------
   const [renaming, setRenaming] = useState(false);
@@ -310,12 +365,23 @@ export default function AlbumDetailPage() {
             {t("gallery.groupCount", { count: itemCount })}
           </span>
 
-          {/* 原片/成片四态分段（B2）：全部/只看原片/只看成片/尚无成片；与筛选正交 */}
+          {/* 原片/成片四态分段（B2）：全部/只看原片/只看成片/尚无成片；与筛选正交，
+              在相册根/子分组视图内均作为照片属性辅助筛选 */}
           <GroupRoleSegment
             value={inputs.groupRole}
             onChange={(groupRole) => patchInputs({ groupRole })}
             testId="album-grouprole"
           />
+
+          {/* 导入成片（B4 子分组定案）：LR 导出的成片导回本相册（目标子分组默认「成片」） */}
+          <button
+            type="button"
+            onClick={() => setDerivedImportOpen(true)}
+            className="flex shrink-0 items-center gap-1.5 rounded-md border border-violet-400/60 px-2.5 py-1 text-[11px] text-violet-300 transition-colors hover:bg-violet-400/10"
+            data-testid="album-import-derived"
+          >
+            {t("albums.importDerived")}
+          </button>
 
           {/* 筛选按钮（激活条件计数徽标） */}
           <button
@@ -386,6 +452,59 @@ export default function AlbumDetailPage() {
           onClearAll={() => setInputs(EMPTY_INPUTS)}
         />
 
+        {/* 子分组视图面包屑（B4）：相册名 ‹ 子分组名 + 返回 */}
+        {subgroup !== null && (
+          <div
+            className="flex shrink-0 items-center gap-2 border-b border-edge/60 py-1.5"
+            data-testid="album-subgroup-bar"
+          >
+            <button
+              type="button"
+              onClick={backToRoot}
+              className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid="album-subgroup-back"
+            >
+              <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M10 3L5 8l5 5" />
+              </svg>
+              {t("albums.subgroupBack")}
+            </button>
+            <span className="min-w-0 truncate text-xs text-text-secondary" data-testid="album-subgroup-breadcrumb">
+              {albumName}
+              <span className="mx-1.5 text-text-muted">‹</span>
+              <span className="font-medium text-text-primary">{subgroup}</span>
+            </span>
+          </div>
+        )}
+
+        {/* 子分组文件夹卡（B4，仅根视图）：文件夹图标 + 名称 + 张数；点击进入子分组视图 */}
+        {subgroup === null && subgroups.length > 0 && (
+          <div className="flex shrink-0 flex-wrap gap-2 border-b border-edge/60 py-2" data-testid="album-subgroups">
+            {subgroups.map((group) => (
+              <button
+                key={group.name}
+                type="button"
+                onClick={() => enterSubgroup(group.name)}
+                className="flex items-center gap-2 rounded-lg border border-edge bg-surface px-3 py-2 text-left transition-colors hover:border-accent"
+                data-testid="album-subgroup-card"
+                data-subgroup={group.name}
+              >
+                <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-amber-400" aria-hidden="true">
+                  <path d="M1.5 4a1 1 0 0 1 1-1h3.2l1.5 1.8h6.3a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
+                </svg>
+                <span className="min-w-0">
+                  <span className="block max-w-[140px] truncate text-xs text-text-primary" title={group.name} data-testid="album-subgroup-name">
+                    {group.name}
+                  </span>
+                  <span className="block font-mono text-[10px] tabular-nums text-text-muted" data-testid="album-subgroup-count">
+                    {t("albums.itemCountBadge", { count: group.itemCount })}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* 照片墙（与图库同款虚拟网格） */}
         <div className="relative min-h-0 flex-1">
           {status === "loading" ? (
@@ -401,7 +520,11 @@ export default function AlbumDetailPage() {
               data-testid="album-detail-empty"
             >
               <p className="text-sm text-text-secondary">
-                {filtersActive ? t("search.empty") : t("albums.empty")}
+                {filtersActive
+                  ? t("search.empty")
+                  : subgroup !== null
+                    ? t("albums.subgroupEmpty", { name: subgroup })
+                    : t("albums.empty")}
               </p>
               {!filtersActive && (
                 <p className="text-xs text-text-muted">{t("albums.addPhotosHint")}</p>
@@ -447,6 +570,11 @@ export default function AlbumDetailPage() {
             albumName,
             onRemoved: handleAssetsRemoved,
           }}
+          subgroup={{
+            current: subgroup,
+            names: subgroups.map((g) => g.name),
+            onMove: handleSubgroupMove,
+          }}
         />
       )}
 
@@ -459,6 +587,21 @@ export default function AlbumDetailPage() {
           testId="album-asset-context-menu"
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
           albumContext={{ albumId, onRemoved: handleAssetsRemoved }}
+        />
+      )}
+
+      {/* 导入成片弹窗（B4：目标=本相册+子分组，默认「成片」） */}
+      {derivedImportOpen && (
+        <ImportDerivedDialog
+          albumId={albumId}
+          albumName={albumName}
+          subgroups={subgroups.map((g) => g.name)}
+          onClose={() => setDerivedImportOpen(false)}
+          onImported={() => {
+            setReloadToken((token) => token + 1);
+            void refreshMeta();
+            void refreshSubgroups();
+          }}
         />
       )}
 

@@ -176,6 +176,7 @@ export default function SelectionBar({
   onAddToAlbum,
   onFavoritesChanged,
   album,
+  subgroup,
   onColorLabeled,
   onRejected,
   onTrashRequest,
@@ -191,6 +192,15 @@ export default function SelectionBar({
   onFavoritesChanged?: (assets: AssetDto[]) => void;
   /** 相册上下文（相册详情页）：额外显示「从相册移除」 */
   album?: SelectionAlbumContext;
+  /** 子分组上下文（B4，相册详情页传入）：多选操作条「移到子分组…/移到相册根」 */
+  subgroup?: {
+    /** 当前视图所在子分组名；null = 相册根 */
+    current: string | null;
+    /** 相册已有子分组名（弹窗内选择/提示） */
+    names: string[];
+    /** 移组（target=null 移回根）；返回成功与否供提示 */
+    onMove: (target: string | null, assets: AssetDto[]) => Promise<boolean>;
+  };
   /** 颜色标签设置完成（IPC 后同步本地列表态）；不传则仅写后端 */
   onColorLabeled?: (assets: AssetDto[], label: string | null) => void;
   /** 拒绝旗标切换完成（IPC 后同步本地列表态） */
@@ -207,24 +217,26 @@ export default function SelectionBar({
   const { t } = useTranslation();
   const [shareOpen, setShareOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
+  const [subgroupOpen, setSubgroupOpen] = useState(false);
+  const [subgroupName, setSubgroupName] = useState("");
   const [toast, setToast] = useState<string | null>(null);
   const shareRef = useRef<HTMLDivElement | null>(null);
   const colorRef = useRef<HTMLDivElement | null>(null);
+  const subgroupRef = useRef<HTMLDivElement | null>(null);
 
   // 点击浮层菜单外关闭
   useEffect(() => {
-    if (!shareOpen && !colorOpen) return;
+    if (!shareOpen && !colorOpen && !subgroupOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (shareOpen && shareRef.current && e.target instanceof Node && !shareRef.current.contains(e.target)) {
-        setShareOpen(false);
-      }
-      if (colorOpen && colorRef.current && e.target instanceof Node && !colorRef.current.contains(e.target)) {
-        setColorOpen(false);
+      if (e.target instanceof Node) {
+        if (shareOpen && shareRef.current && !shareRef.current.contains(e.target)) setShareOpen(false);
+        if (colorOpen && colorRef.current && !colorRef.current.contains(e.target)) setColorOpen(false);
+        if (subgroupOpen && subgroupRef.current && !subgroupRef.current.contains(e.target)) setSubgroupOpen(false);
       }
     };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
-  }, [shareOpen, colorOpen]);
+  }, [shareOpen, colorOpen, subgroupOpen]);
 
   function flash(message: string): void {
     setToast(message);
@@ -290,6 +302,14 @@ export default function SelectionBar({
     } catch {
       flash(t("selection.copyFailed"));
     }
+  }
+
+  /** 子分组移组（B4）：target=null 移回相册根；新名输入即建（后端按名幂等） */
+  async function moveSubgroup(target: string | null): Promise<void> {
+    if (!subgroup) return;
+    setSubgroupOpen(false);
+    const ok = await subgroup.onMove(target, assets);
+    flash(ok ? t("selection.done") : t("albums.subgroupMoveFailed"));
   }
 
   /** 相册上下文：从相册移除引用（只删引用，照片保留图库），完成后上层刷新 */
@@ -465,6 +485,77 @@ export default function SelectionBar({
           >
             {t("albums.removeFromAlbum")}
           </button>
+        )}
+        {subgroup && (
+          <div ref={subgroupRef} className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setSubgroupOpen((v) => !v);
+                setSubgroupName("");
+              }}
+              disabled={count === 0}
+              aria-expanded={subgroupOpen}
+              title={subgroup.current === null ? t("albums.moveToSubgroup") : t("albums.moveToSubgroupHint")}
+              className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
+              data-testid="selection-subgroup-move"
+            >
+              {t("albums.moveToSubgroup")}
+            </button>
+            {subgroupOpen && (
+              <div
+                className="absolute left-0 top-8 z-40 w-52 rounded-lg border border-edge bg-surface p-2 shadow-xl"
+                data-testid="selection-subgroup-menu"
+              >
+                {subgroup.current !== null && (
+                  <button
+                    type="button"
+                    onClick={() => void moveSubgroup(null)}
+                    className="mb-1.5 block w-full rounded px-2 py-1.5 text-left text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
+                    data-testid="selection-subgroup-root"
+                  >
+                    {t("albums.moveToRoot")}
+                  </button>
+                )}
+                <input
+                  type="text"
+                  value={subgroupName}
+                  onChange={(e) => setSubgroupName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const name = subgroupName.trim();
+                      if (name !== "") void moveSubgroup(name);
+                    }
+                  }}
+                  list="selection-subgroup-datalist"
+                  placeholder={t("albums.subgroupInputPlaceholder")}
+                  aria-label={t("albums.moveToSubgroup")}
+                  className="h-7 w-full rounded-md border border-edge bg-bg px-2 text-[11px] text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
+                  data-testid="selection-subgroup-name"
+                />
+                <datalist id="selection-subgroup-datalist">
+                  {subgroup.names
+                    .filter((n) => n !== subgroup.current)
+                    .map((n) => (
+                      <option key={n} value={n} />
+                    ))}
+                </datalist>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const name = subgroupName.trim();
+                    if (name !== "") void moveSubgroup(name);
+                  }}
+                  disabled={subgroupName.trim() === ""}
+                  className="mt-1.5 w-full rounded-md bg-accent px-2 py-1.5 text-[11px] font-medium text-black transition-colors hover:brightness-110 disabled:opacity-40"
+                  data-testid="selection-subgroup-confirm"
+                >
+                  {t("albums.subgroupMoveConfirm", { name: subgroupName.trim() || "…" })}
+                </button>
+              </div>
+            )}
+          </div>
         )}
         {/* 反选：当前数据窗口内取补集（窗口 id 全集由上层传入） */}
         {windowIds !== undefined && onInvert && (

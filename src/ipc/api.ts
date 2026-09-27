@@ -50,6 +50,8 @@ export interface ImportPlan {
   include?: string[];
   /** 导入完成后把新入库照片加入该相册（向导「添加到相册」步骤；省略 = 不加入） */
   albumId?: number;
+  /** 相册子分组名（B4 子分组模型；省略 = 相册根；后端按名幂等建层） */
+  albumSubgroup?: string;
 }
 
 export type JobStatus = "running" | "paused" | "done" | "cancelled" | "failed";
@@ -239,6 +241,10 @@ export interface AssetFilters {
   /** 版本维度（B2）：raw_only=只看原片（未入组资产也算原片）| derived_only=只看
    *  成片（自身是派生件）| no_derived=尚无成片（所在组无派生成员）；省略 = 全部 */
   groupRole?: "raw_only" | "derived_only" | "no_derived";
+  /** 相册子分组精确名（仅 album_assets_page 消费；省略 = 不限层） */
+  subgroup?: string;
+  /** true = 只看相册根散照片（album_item.subgroup 为 NULL；仅 album_assets_page 消费） */
+  subgroupIsNull?: boolean;
 }
 
 /** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
@@ -1286,9 +1292,16 @@ export async function albumCoverSet(id: number, assetId: number | null): Promise
 }
 
 /** 批量加入相册，返回实际新增数（已引用幂等跳过）；失败 null（调用方提示加入失败） */
-export async function albumAddAssets(id: number, assetIds: number[]): Promise<number | null> {
+export async function albumAddAssets(
+  id: number,
+  assetIds: number[],
+  subgroup?: string,
+): Promise<number | null> {
   try {
-    const added = await ipc<number>("album_add_assets", { id, assetIds });
+    const payload: Record<string, unknown> = { id, assetIds };
+    const trimmed = subgroup?.trim();
+    if (trimmed) payload.subgroup = trimmed;
+    const added = await ipc<number>("album_add_assets", payload);
     return typeof added === "number" && Number.isFinite(added) ? added : null;
   } catch {
     return null;
@@ -1323,9 +1336,16 @@ export async function albumDirRename(id: number, dirName: string): Promise<Album
  * 挪入相册主目录（相册名/YYYY/MM-DD/）。已在别册主目录的资产后端整批报错——
  * 那部分只能引用加入；Err 原文透传给调用方展示。返回实际归入数；命令失败 null。
  */
-export async function albumClaimAssets(id: number, assetIds: number[]): Promise<number | null> {
+export async function albumClaimAssets(
+  id: number,
+  assetIds: number[],
+  subgroup?: string,
+): Promise<number | null> {
   try {
-    const moved = await ipc<number>("album_claim_assets", { id, assetIds });
+    const payload: Record<string, unknown> = { id, assetIds };
+    const trimmed = subgroup?.trim();
+    if (trimmed) payload.subgroup = trimmed;
+    const moved = await ipc<number>("album_claim_assets", payload);
     return typeof moved === "number" && Number.isFinite(moved) ? moved : assetIds.length;
   } catch (err) {
     const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
@@ -1380,6 +1400,42 @@ export async function albumAssetsPage(
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+/** 相册子分组（album_subgroups 返回；B4 子分组模型：相册内任意命名文件夹层） */
+export interface AlbumSubgroupDto {
+  name: string;
+  /** 组内照片数（引用数） */
+  itemCount: number;
+}
+
+/** 相册子分组清单（album_subgroups）；失败/非数组/形状异常回退 [] */
+export async function albumSubgroups(albumId: number): Promise<AlbumSubgroupDto[]> {
+  try {
+    const list = await ipc<unknown>("album_subgroups", { albumId });
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      (g): g is AlbumSubgroupDto =>
+        g !== null && typeof g === "object" && typeof (g as AlbumSubgroupDto).name === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 相册内挪子分组（album_item_move_subgroup）：纯引用移动，subgroup=null 移回根。
+ *  失败 false（调用方提示）。 */
+export async function albumItemMoveSubgroup(
+  albumId: number,
+  assetIds: number[],
+  subgroup: string | null,
+): Promise<boolean> {
+  try {
+    await ipc<void>("album_item_move_subgroup", { albumId, assetIds, subgroup });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1566,15 +1622,18 @@ export interface LrImportResult {
   failed: LrImportFailure[];
 }
 
-/** 成片导回入库（幂等；成片落 photoRoot/importSubdir/原片stem/）。
- *  命令失败返回 null（调用方提示通用失败文案）。 */
+/** 成片导回入库（幂等；成片落 photoRoot/importSubdir/原片stem/；subgroup=目标
+ *  相册子分组名，省略 = 相册根）。命令失败返回 null（调用方提示通用失败文案）。 */
 export async function lrExportImport(
   matches: LrExportImportItem[],
   albumId?: number,
+  subgroup?: string,
 ): Promise<LrImportResult | null> {
   try {
     const payload: Record<string, unknown> = { matches };
     if (albumId !== undefined) payload.albumId = albumId;
+    const trimmed = subgroup?.trim();
+    if (trimmed) payload.subgroup = trimmed;
     const raw = await ipc<unknown>("lr_export_import", payload);
     if (raw === null || typeof raw !== "object") return null;
     const r = raw as Partial<LrImportResult>;
