@@ -272,6 +272,8 @@ describe("相册详情页：页头与筛选", () => {
     await user.click(screen.getByTestId("album-add-photos"));
     const hint = await screen.findByTestId("album-add-photos-hint");
     expect(hint).toHaveTextContent("到图库多选照片");
+    // 目录化归入引导（追加包）：日期根未归册照片加入本相册时默认归入（移动文件）
+    expect(screen.getByTestId("album-add-photos-claim-hint")).toHaveTextContent("归入");
 
     await user.click(screen.getByTestId("album-add-photos-go-gallery"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();

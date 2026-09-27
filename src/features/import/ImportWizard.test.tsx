@@ -1212,6 +1212,51 @@ it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾�
   expect(deviceFilesMock).not.toHaveBeenCalled();
 });
 
+// --- 相册目录化：导入位置实时预览（B1 追加包） ---------------------------------------------
+
+describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
+  it("默认不建相册：预览 = 收纳区日期根（Y:\\照片\\SmartPhoto\\2026\\09-18\\）", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-table-stats");
+
+    const preview = screen.getByTestId("wizard-album-path-preview");
+    expect(preview).toHaveTextContent("导入位置预览");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09-18\\");
+  });
+
+  it("存入已有相册：预览随相册目录更新（相册目录/日期模板）", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    await screen.findByTestId("wizard-table-stats");
+
+    await user.click(screen.getByTestId("wizard-album-existing"));
+    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
+    const preview = screen.getByTestId("wizard-album-path-preview");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\青海湖 2026\\2026\\09-18\\");
+  });
+
+  it("新建相册：预览随输入名实时更新；切回不建相册回日期根", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    await screen.findByTestId("wizard-table-stats");
+
+    await user.click(screen.getByTestId("wizard-album-new"));
+    const input = screen.getByTestId("wizard-album-new-name");
+    await user.type(input, "婚礼0927");
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\SmartPhoto\\婚礼0927\\2026\\09-18\\",
+    );
+
+    await user.click(screen.getByTestId("wizard-album-none"));
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\SmartPhoto\\2026\\09-18\\",
+    );
+  });
+});
+
 // --- 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载 -----------------------
 
 describe("ImportWizard：添加到相册步骤", () => {

@@ -20,6 +20,7 @@ import {
   albumCoverSet,
   albumCreate,
   albumDelete,
+  albumDirRename,
   albumList,
   albumRename,
   assetThumbGet,
@@ -47,6 +48,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     albumList: vi.fn(),
     albumCreate: vi.fn(),
     albumRename: vi.fn(),
+    albumDirRename: vi.fn(),
     albumDelete: vi.fn(),
     albumCoverSet: vi.fn(),
     albumAssetsPage: vi.fn(),
@@ -67,6 +69,7 @@ const indexStatusMock = vi.mocked(indexStatus);
 const albumListMock = vi.mocked(albumList);
 const albumCreateMock = vi.mocked(albumCreate);
 const albumRenameMock = vi.mocked(albumRename);
+const albumDirRenameMock = vi.mocked(albumDirRename);
 const albumDeleteMock = vi.mocked(albumDelete);
 const albumCoverSetMock = vi.mocked(albumCoverSet);
 const albumAssetsPageMock = vi.mocked(albumAssetsPage);
@@ -162,6 +165,7 @@ beforeEach(() => {
   albumListMock.mockReset().mockResolvedValue([]);
   albumCreateMock.mockReset();
   albumRenameMock.mockReset();
+  albumDirRenameMock.mockReset();
   albumDeleteMock.mockReset().mockResolvedValue(true);
   albumCoverSetMock.mockReset().mockResolvedValue(true);
   albumAssetsPageMock.mockReset().mockResolvedValue([]);
@@ -558,6 +562,39 @@ describe("相册页两区：手工相册 + 智能相册", () => {
       expect(screen.getByTestId("albums-manual-name")).toHaveTextContent("更新名"),
     );
     expect(albumRenameMock).toHaveBeenLastCalledWith(5, "更新名");
+  });
+
+  it("更改相册文件夹名（目录化）：菜单入口 → 弹窗（显示名不受影响）→ album_dir_rename；错误行内提示", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([{ ...makeAlbum(8, "婚礼", 3), dirName: "婚礼" }]);
+    albumDirRenameMock
+      .mockResolvedValueOnce({ ok: false, error: "目标文件夹名已存在" })
+      .mockResolvedValueOnce({ ok: true });
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-card-menu"))[0]);
+    await user.click(
+      within(await screen.findByTestId("albums-card-context-menu")).getByTestId(
+        "albums-card-context-menu-item-dir-rename",
+      ),
+    );
+
+    const dialog = await screen.findByTestId("album-dir-rename-dialog");
+    expect(within(dialog).getByTestId("album-dir-rename-hint")).toHaveTextContent("相册显示名不受影响");
+    const input = within(dialog).getByTestId("album-dir-rename-input");
+    expect(input).toHaveValue("婚礼");
+
+    // 错误行内提示（不关弹窗）
+    await user.clear(input);
+    await user.type(input, "wedding2026");
+    await user.click(within(dialog).getByTestId("album-dir-rename-confirm"));
+    expect(await within(dialog).findByTestId("album-dir-rename-error")).toHaveTextContent("目标文件夹名已存在");
+    expect(albumDirRenameMock).toHaveBeenLastCalledWith(8, "wedding2026");
+
+    // 修正后成功：弹窗收起
+    await user.click(within(dialog).getByTestId("album-dir-rename-confirm"));
+    await waitFor(() => expect(albumDirRenameMock).toHaveBeenLastCalledWith(8, "wedding2026"));
+    await waitFor(() => expect(screen.queryByTestId("album-dir-rename-dialog")).not.toBeInTheDocument());
   });
 
   it("设为封面：进入选择弹窗，点选照片调 album_cover_set", async () => {

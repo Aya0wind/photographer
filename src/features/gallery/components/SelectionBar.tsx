@@ -121,6 +121,25 @@ function GlyphTrash() {
   );
 }
 
+function GlyphLr() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="12"
+      height="12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <path d="M4.5 5.5v5h3M9 10.5h3.5M9 10.5v-5" />
+    </svg>
+  );
+}
+
 function GlyphInvert() {
   return (
     <svg
@@ -160,6 +179,7 @@ export default function SelectionBar({
   onColorLabeled,
   onRejected,
   onTrashRequest,
+  onLrStaging,
   windowIds,
   onInvert,
 }: {
@@ -177,6 +197,8 @@ export default function SelectionBar({
   onRejected?: (assets: AssetDto[], rejected: boolean) => void;
   /** 「移入回收站」请求（确认弹窗由上层挂载）；不传则不显示该按钮 */
   onTrashRequest?: (assets: AssetDto[]) => void;
+  /** 「生成 LR 暂存夹」请求（命名弹窗由上层挂载）；不传则不显示该按钮 */
+  onLrStaging?: (assets: AssetDto[]) => void;
   /** 反选的数据窗口（当前已加载资产 id 全集）；与 onInvert 同给才显示按钮 */
   windowIds?: number[];
   /** 反选完成（上层以补集替换选中集） */
@@ -472,6 +494,19 @@ export default function SelectionBar({
           >
             <GlyphTrash />
             {t("selection.trash")}
+          </button>
+        )}
+        {onLrStaging && (
+          <button
+            type="button"
+            onClick={() => onLrStaging(assets)}
+            disabled={count === 0}
+            title={t("lr.hint")}
+            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
+            data-testid="selection-lr"
+          >
+            <GlyphLr />
+            {t("selection.lr")}
           </button>
         )}
         <span className="h-4 w-px bg-edge" aria-hidden="true" />

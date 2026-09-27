@@ -17,6 +17,7 @@ import {
   albumCoverSet,
   albumCreate,
   albumDelete,
+  albumDirRename,
   albumList,
   albumRename,
   type AlbumDto,
@@ -30,7 +31,8 @@ import AlbumDetailPage from "./AlbumDetailPage";
  * 相册页（手工 + 智能同页两区，2026-09 相册定案重构）：
  * - 手工相册 = 纯引用照片组（同一照片可入多相册；删除只删引用）。/albums 手工区：
  *   相册卡片网格（封面=coverAssetId 缩略图，未指定回退列表第一张，空相册占位图形）
- *   + 名称 + 张数；卡片右键/悬浮菜单：重命名 / 设为封面 / 删除（红色确认）。
+ *   + 名称 + 张数；卡片右键/悬浮菜单：重命名 / 更改相册文件夹名（目录化，仅改
+ *   磁盘目录名、显示名不动）/ 设为封面 / 删除（红色确认）。
  * - 智能相册 = 预置标签墙（40 个中文，飞牛词表对齐），自动管理的相册：点击进入
  *   该标签的语义结果视图（/albums/:tag，行为照旧）。卡片样式与手工区统一。
  * - 分区样式参考图库「按年分块」写法（区标题 + 内容块）。
@@ -372,6 +374,10 @@ export function AlbumsIndexPage() {
   const [renaming, setRenaming] = useState<AlbumDto | null>(null);
   const [renameName, setRenameName] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
+  // 更改相册文件夹名（目录化：仅改磁盘主目录名，显示名不动）
+  const [dirRenaming, setDirRenaming] = useState<AlbumDto | null>(null);
+  const [dirRenameName, setDirRenameName] = useState("");
+  const [dirRenameError, setDirRenameError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<AlbumDto | null>(null);
   const [coverPicking, setCoverPicking] = useState<AlbumDto | null>(null);
 
@@ -386,6 +392,19 @@ export function AlbumsIndexPage() {
     }
     setAlbums((prev) => prev.map((a) => (a.id === renaming.id ? { ...a, name } : a)));
     setRenaming(null);
+  }
+
+  async function submitDirRename(): Promise<void> {
+    if (!dirRenaming) return;
+    const dirName = dirRenameName.trim();
+    if (dirName === "") return;
+    const result = await albumDirRename(dirRenaming.id, dirName);
+    if (!result.ok) {
+      setDirRenameError(result.error ?? t("albums.dirRenameFailed"));
+      return;
+    }
+    setAlbums((prev) => prev.map((a) => (a.id === dirRenaming.id ? { ...a, dirName } : a)));
+    setDirRenaming(null);
   }
 
   async function submitDelete(): Promise<void> {
@@ -413,6 +432,15 @@ export function AlbumsIndexPage() {
           setRenaming(album);
           setRenameName(album.name);
           setRenameError(null);
+        },
+      },
+      {
+        key: "dir-rename",
+        label: t("albums.dirRename"),
+        onSelect: () => {
+          setDirRenaming(album);
+          setDirRenameName(album.dirName ?? album.name);
+          setDirRenameError(null);
         },
       },
       {
@@ -664,6 +692,66 @@ export function AlbumsIndexPage() {
           {renameError !== null && (
             <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="album-rename-error">
               {renameError}
+            </p>
+          )}
+        </ModalShell>
+      )}
+
+      {/* 更改相册文件夹名（目录化：仅改磁盘主目录名，显示名不受影响） */}
+      {dirRenaming && (
+        <ModalShell
+          title={t("albums.dirRenameTitle", { name: dirRenaming.name })}
+          onClose={() => setDirRenaming(null)}
+          testId="album-dir-rename-dialog"
+          footer={
+            <>
+              <button
+                type="button"
+                onClick={() => setDirRenaming(null)}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
+                data-testid="album-dir-rename-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitDirRename()}
+                disabled={
+                  dirRenameName.trim() === "" ||
+                  dirRenameName.trim() === (dirRenaming.dirName ?? dirRenaming.name)
+                }
+                className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                data-testid="album-dir-rename-confirm"
+              >
+                {t("albums.dirRenameConfirm")}
+              </button>
+            </>
+          }
+        >
+          <p className="mb-2 text-[11px] leading-relaxed text-text-muted" data-testid="album-dir-rename-hint">
+            {t("albums.dirRenameHint")}
+          </p>
+          <input
+            autoFocus
+            type="text"
+            value={dirRenameName}
+            onChange={(e) => {
+              setDirRenameName(e.target.value);
+              setDirRenameError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submitDirRename();
+              }
+            }}
+            aria-label={t("albums.dirRename")}
+            className="h-8 w-full rounded-md border border-edge bg-bg px-2.5 text-xs text-text-primary outline-none transition-colors focus:border-accent"
+            data-testid="album-dir-rename-input"
+          />
+          {dirRenameError !== null && (
+            <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="album-dir-rename-error">
+              {dirRenameError}
             </p>
           )}
         </ModalShell>

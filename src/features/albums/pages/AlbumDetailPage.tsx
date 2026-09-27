@@ -347,6 +347,10 @@ export default function AlbumDetailPage() {
                 <p className="text-[11px] leading-relaxed text-text-secondary">
                   {t("albums.addPhotosHint")}
                 </p>
+                {/* 归入引导（目录化）：日期根未归册照片加入本相册时默认移动文件进相册目录 */}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-text-muted" data-testid="album-add-photos-claim-hint">
+                  {t("albums.addPhotosClaimHint")}
+                </p>
                 <button
                   type="button"
                   onClick={() => navigate("/gallery")}

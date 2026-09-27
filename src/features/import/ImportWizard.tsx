@@ -1387,6 +1387,19 @@ export default function ImportWizard() {
       cancelled = true;
     };
   }, []);
+  // 相册主组织（B1 追加包）：带相册导入落 `相册目录/日期模板/`，无相册落日期根。
+  // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；新建用输入名）。
+  const selectedAlbum = albumChoice === "existing" ? albums.find((a) => a.id === albumId) : undefined;
+  const albumDirForPreview =
+    albumChoice === "existing"
+      ? (selectedAlbum?.dirName ?? selectedAlbum?.name ?? "")
+      : albumChoice === "new"
+        ? newAlbumName.trim()
+        : "";
+  const importTargetPreview =
+    albumDirForPreview === ""
+      ? locationPreview
+      : previewTemplate(dirTemplate, `${targetRoot}\\${albumDirForPreview}`);
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
@@ -2196,6 +2209,13 @@ export default function ImportWizard() {
                 {albumError}
               </p>
             )}
+            {/* 导入位置实时预览（B1 追加包）：随相册（=存放目录）/日期选择即时更新 */}
+            <p className="ml-5 mt-1 text-[11px] text-text-muted" data-testid="wizard-album-path-preview">
+              {t("wizard.album.pathPreview")}：
+              <span className="break-all font-mono text-text-secondary">
+                {importTargetPreview}\
+              </span>
+            </p>
           </fieldset>
 
           {/* 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget） */}
