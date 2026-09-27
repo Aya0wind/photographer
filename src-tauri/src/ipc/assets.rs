@@ -79,24 +79,30 @@ pub struct AssetDetailDto {
     pub aspect: Option<String>,
     /// RAW/JPG 配对资产 id（无配对 null；flatten 内 pairAssetId 同值）。
     pub pair_id: Option<i64>,
-    /// AI 选片建议（0021）：eyes/blur 分析行（value/score/modelVersion）；
-    /// 无记录 = 空数组。建议标签与用户决定分层，绝不写 XMP。
-    /// （本 DTO 其余键沿用历史 snake 形态；新键显式 camel 与 flatten 层一致）
+    /// AI 选片建议（0021）：{eyes?, blur?} 对象（value/score/modelVersion）；
+    /// 两键皆空 = 未分析（前端契约形状，非行数组）。建议标签与用户决定
+    /// 分层，绝不写 XMP。
     #[serde(rename = "aiAnalysis")]
-    pub ai_analysis: Vec<AiAnalysisDto>,
+    pub ai_analysis: AiAnalysisMap,
 }
 
-/// 单条 AI 分析（查看器详情行，camelCase）。
+/// 单项 AI 分析值（camelCase）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AiAnalysisDto {
-    /// "eyes" | "blur"
-    pub kind: String,
+pub struct AiAnalysisValue {
     /// eyes: closed/maybe/unknown；blur: sharp/soft/unknown
     pub value: Option<String>,
     /// 0-100 清晰度分 / 0-1 闭眼概率
     pub score: Option<f64>,
     pub model_version: String,
+}
+
+/// 按分析类型分桶的详情载荷：eyes/blur 各自缺省 None（未分析）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAnalysisMap {
+    pub eyes: Option<AiAnalysisValue>,
+    pub blur: Option<AiAnalysisValue>,
 }
 
 /// 扩展名（最后一个点后的部分大写；无点 → None）。
@@ -304,17 +310,19 @@ pub fn fetch_asset_detail(
     let duplicate_count = db
         .asset_duplicate_count(id, asset.size, asset.xxhash)
         .map_err(|e| e.to_string())?;
-    let ai_analysis = db
-        .ai_analysis_for(id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(kind, value, score, model_version)| AiAnalysisDto {
-            kind,
+    let mut ai_analysis = AiAnalysisMap::default();
+    for (kind, value, score, model_version) in db.ai_analysis_for(id).map_err(|e| e.to_string())? {
+        let entry = AiAnalysisValue {
             value,
             score,
             model_version,
-        })
-        .collect();
+        };
+        match kind.as_str() {
+            "eyes" => ai_analysis.eyes = Some(entry),
+            "blur" => ai_analysis.blur = Some(entry),
+            _ => {}
+        }
+    }
     Ok(Some(AssetDetailDto {
         id,
         format: format_of(&asset.path),

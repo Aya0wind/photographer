@@ -299,15 +299,22 @@ fn ai_analysis_cascades_on_asset_delete_and_filters_work() {
         "非白名单值容错不过滤"
     );
 
-    // 详情 aiAnalysis 行
+    // 详情 aiAnalysis（契约对象形状 {eyes, blur}）
     let detail = ipc::assets::fetch_asset_detail(&state, closed)
         .unwrap()
         .unwrap();
-    let kinds: Vec<&str> = detail.ai_analysis.iter().map(|a| a.kind.as_str()).collect();
-    assert_eq!(kinds, vec!["eyes"]);
+    assert_eq!(
+        detail
+            .ai_analysis
+            .eyes
+            .as_ref()
+            .and_then(|e| e.value.clone()),
+        Some("closed".to_string())
+    );
+    assert!(detail.ai_analysis.blur.is_none());
     let json = serde_json::to_value(&detail).unwrap();
-    assert_eq!(json["aiAnalysis"][0]["value"], "closed");
-    assert_eq!(json["aiAnalysis"][0]["modelVersion"], "stub-v1");
+    assert_eq!(json["aiAnalysis"]["eyes"]["value"], "closed");
+    assert_eq!(json["aiAnalysis"]["eyes"]["modelVersion"], "stub-v1");
 
     // 级联：删除资产 → 分析行随 FK 消失
     db.assets_delete_rows(&[closed]).unwrap();
