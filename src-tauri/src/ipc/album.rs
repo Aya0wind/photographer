@@ -53,6 +53,12 @@ pub fn fetch_album_list(state: &super::AppState) -> Result<Vec<AlbumDto>, String
     db.album_list().map_err(|e| e.to_string())
 }
 
+/// 资产所属相册反查核（查看器详情「所属相册」行；未入册返回空）。
+pub fn fetch_asset_albums(state: &super::AppState, asset_id: i64) -> Result<Vec<AlbumDto>, String> {
+    let db = super::active_library_db(state)?;
+    db.asset_albums(asset_id).map_err(|e| e.to_string())
+}
+
 /// 建相册核：trim / 空拒绝；重名报错。
 pub fn fetch_album_create(state: &super::AppState, name: &str) -> Result<AlbumDto, String> {
     let name = validate_name(name)?;
@@ -139,6 +145,16 @@ pub fn fetch_album_assets_page(
 pub async fn album_list(state: State<'_, SharedState>) -> Result<Vec<AlbumDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_album_list).await
+}
+
+/// 资产所属相册反查（查看器详情「所属相册」行）。
+#[tauri::command]
+pub async fn asset_albums(
+    state: State<'_, SharedState>,
+    asset_id: i64,
+) -> Result<Vec<AlbumDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_asset_albums(state, asset_id)).await
 }
 
 /// 建相册（重名/空名报错），返回新相册。

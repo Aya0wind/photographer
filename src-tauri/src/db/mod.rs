@@ -1414,6 +1414,20 @@ impl Db {
         rows.collect()
     }
 
+    /// 资产 → 所属相册反查（查看器详情「所属相册」行）。按相册创建时间 DESC；
+    /// 未入任何相册返回空。
+    pub fn asset_albums(&self, asset_id: i64) -> Result<Vec<AlbumRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT a.id, a.name, a.cover_asset_id, \
+                    (SELECT COUNT(*) FROM album_item i2 WHERE i2.album_id = a.id), a.created_at \
+             FROM album a \
+             WHERE EXISTS (SELECT 1 FROM album_item i WHERE i.album_id = a.id AND i.asset_id = ?1) \
+             ORDER BY a.created_at DESC, a.id DESC",
+        )?;
+        let rows = stmt.query_map(params![asset_id], map_album)?;
+        rows.collect()
+    }
+
     /// 建相册，返回新行（item_count=0、cover=None）。重名由 name UNIQUE
     /// 兜底（错误透传，IPC 层转友好文案）；名称 trim/空校验在 IPC 层。
     pub fn album_create(&self, name: &str) -> Result<AlbumRow> {

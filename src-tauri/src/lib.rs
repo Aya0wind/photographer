@@ -285,6 +285,7 @@ pub fn run() {
             ipc::album::album_add_assets,
             ipc::album::album_remove_assets,
             ipc::album::album_assets_page,
+            ipc::album::asset_albums,
             ipc::indexing::index_kick_now,
             ipc::indexing::index_status,
             ipc::indexing::index_rebuild,

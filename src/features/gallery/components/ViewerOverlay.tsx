@@ -4,6 +4,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
+  assetAlbums,
   assetDetail,
   assetFlagSet,
   assetRatingSet,
@@ -374,9 +375,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // --- EXIF 面板 ---------------------------------------------------------------------
   const [exifOpen, setExifOpen] = useState(true);
   const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
-  // 切图闪缩修复（M4.5）：切换资产时不回退「基础行集」（行数骤减→面板高度跳变），
+  // 切图闪缩修复（M4.5）：切换资产时不回退「基本行集」（行数骤减→面板高度跳变），
   // 保留上一份完整详情的行结构直到新详情到达（值随后一次更新，行不重挂）。
   const visibleDetail = detail ?? detailFromAsset(asset);
+  // 所属相册（asset_albums 反查；失败/空 → 不渲染该行）
+  const [albumNames, setAlbumNames] = useState<string[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setAlbumNames(null);
+    void assetAlbums(asset.id).then((albums) => {
+      if (cancelled) return;
+      setAlbumNames(albums.map((a) => a.name));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset.id]);
   useEffect(() => {
     let cancelled = false;
     void assetDetail(asset.id).then((d) => {
@@ -471,13 +485,14 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     const sections: ExifSection[] = [];
 
     // 【文件】核心行恒在（缺值「—」）；格式行仅在有值时渲染
-    // TODO(相册): 「所属相册」行——等后端提供资产→相册反查 IPC（如
-    // asset_albums(assetId) -> AlbumDto[]）后在此追加：label=t("viewer.albums")、
-    // value=相册名顿号连接；当前后端契约未含反查口，先不渲染不阻塞。
     sections.push({
       key: "file",
       rows: [
         { label: t("viewer.filename"), value: formatValue(d.filename) },
+        // 所属相册（asset_albums 反查）：非空才渲染（未入册/查询在途不打扰）
+        ...(albumNames !== null && albumNames.length > 0
+          ? [{ label: t("viewer.albums"), value: albumNames.join("、") }]
+          : []),
         ...(d.format ? [{ label: t("viewer.format"), value: d.format }] : []),
         { label: t("viewer.size"), value: formatBytes(d.size) },
         {
@@ -554,7 +569,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       });
     }
     return sections;
-  }, [visibleDetail, t]);
+  }, [visibleDetail, albumNames, t]);
 
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;

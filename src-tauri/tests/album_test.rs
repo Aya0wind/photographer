@@ -625,3 +625,38 @@ fn sidebar_albums_count_is_real_count() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// 资产 → 所属相册反查（asset_albums；查看器详情「所属相册」行）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn asset_albums_reverse_lookup_order_and_empty() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let db = open_db(db_dir.path());
+    let a1 = ins(&db, "X:/p/1.jpg", None, AssetKind::Photo);
+    let a2 = ins(&db, "X:/p/2.jpg", None, AssetKind::Photo);
+    let first = fetch_album_create(&state, "甲册").unwrap();
+    let second = fetch_album_create(&state, "乙册").unwrap();
+    fetch_album_add_assets(&state, first.id, &[a1]).unwrap();
+    fetch_album_add_assets(&state, second.id, &[a1, a2]).unwrap();
+
+    // a1 入两册：createdAt DESC → 乙册在前；itemCount 反映全量引用
+    let albums = db.asset_albums(a1).unwrap();
+    assert_eq!(
+        albums.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        vec!["乙册", "甲册"]
+    );
+    assert_eq!(albums[0].item_count, 2);
+
+    // a2 只入一册；未入册资产返回空（不报错）
+    assert_eq!(db.asset_albums(a2).unwrap().len(), 1);
+    let a3 = ins(&db, "X:/p/3.jpg", None, AssetKind::Photo);
+    assert!(db.asset_albums(a3).unwrap().is_empty());
+
+    // 移出后反查同步收窄
+    fetch_album_remove_assets(&state, second.id, &[a1]).unwrap();
+    assert_eq!(db.asset_albums(a1).unwrap().len(), 1);
+}

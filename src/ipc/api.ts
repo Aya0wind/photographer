@@ -1276,6 +1276,19 @@ export async function albumAssetsPage(
   }
 }
 
+/** 资产所属相册反查（asset_albums；查看器详情「所属相册」行）。
+ *  失败/非数组回退 []——行级降级不阻塞详情面板 */
+export async function assetAlbums(assetId: number): Promise<AlbumDto[]> {
+  try {
+    const list = await ipc<AlbumDto[] | null>("asset_albums", { assetId });
+    return Array.isArray(list)
+      ? list.filter((a): a is AlbumDto => typeof a?.id === "number" && typeof a?.name === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 // --- 事件订阅 ----------------------------------------------------------------
 
 /**
