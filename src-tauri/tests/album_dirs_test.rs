@@ -267,7 +267,7 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
         Some(captured),
     );
 
-    let result = fetch_album_claim_assets(&state, album.id, &[id]).unwrap();
+    let result = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
     assert_eq!(result.skipped, 0);
     assert!(result.failed.is_empty());
@@ -290,13 +290,13 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
     assert_eq!(in_album, 1, "挪移补挂引用");
 
     // 幂等重试：已在相册目录 → skipped
-    let again = fetch_album_claim_assets(&state, album.id, &[id]).unwrap();
+    let again = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
     assert_eq!(again.moved, 0);
     assert_eq!(again.skipped, 1);
 
     // 他相册主目录资产 → 归入 = 物理挪移并改主相册（引用转移）
     let other = db.album_create("另一册").unwrap();
-    let result2 = fetch_album_claim_assets(&state, other.id, &[id]).unwrap();
+    let result2 = fetch_album_claim_assets(&state, other.id, &[id], None).unwrap();
     assert_eq!(result2.moved, 1, "{result2:?}");
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
@@ -328,13 +328,13 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
     );
     db.0.execute("UPDATE assets SET origin = 'external' WHERE id = ?1", [ext])
         .unwrap();
-    let result3 = fetch_album_claim_assets(&state, album.id, &[ext]).unwrap();
+    let result3 = fetch_album_claim_assets(&state, album.id, &[ext], None).unwrap();
     assert_eq!(result3.failed.len(), 1);
     assert!(result3.failed[0].error.contains("外部库"));
 
     // 回收站资产 → 拒绝
     db.assets_trash_move(&[ext]).unwrap();
-    let result4 = fetch_album_claim_assets(&state, album.id, &[ext]).unwrap();
+    let result4 = fetch_album_claim_assets(&state, album.id, &[ext], None).unwrap();
     assert_eq!(result4.failed.len(), 1);
     assert!(result4.failed[0].error.contains("回收站"));
 }
@@ -374,7 +374,7 @@ fn claim_cross_volume_copies_verifies_and_deletes_source() {
     )
     .unwrap();
 
-    let result = fetch_album_claim_assets(&state, album.id, &[id]).unwrap();
+    let result = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
     assert!(!photo.exists(), "跨卷校验通过后删源");
     let moved_path: String =
@@ -395,7 +395,7 @@ fn claim_cross_volume_copies_verifies_and_deletes_source() {
         [bad_id],
     )
     .unwrap();
-    let result2 = fetch_album_claim_assets(&state, album.id, &[bad_id]).unwrap();
+    let result2 = fetch_album_claim_assets(&state, album.id, &[bad_id], None).unwrap();
     assert_eq!(result2.moved, 0);
     assert_eq!(result2.failed.len(), 1);
     assert!(result2.failed[0].error.contains("校验失败"));
@@ -523,10 +523,10 @@ fn claim_from_default_album_moves_file_but_keeps_reference() {
         AssetKind::Photo,
         Some("2026-01-01T00:00:00.000Z"),
     );
-    let _ = db.album_add_assets(default_id, &[id]);
+    let _ = db.album_add_assets(default_id, &[id], None);
 
     // 归入正式相册：物理挪移 + 路径更新；「未分组」引用保留（兜底袋不清）
-    let result = fetch_album_claim_assets(&state, target.id, &[id]).unwrap();
+    let result = fetch_album_claim_assets(&state, target.id, &[id], None).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))

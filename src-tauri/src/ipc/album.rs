@@ -105,14 +105,48 @@ pub fn fetch_album_cover_set(
     db.album_cover_set(id, asset_id).map_err(map_missing)
 }
 
-/// 批量入册核：INSERT OR IGNORE 幂等，返回实际新增数（重复/失效 id 不计）。
+/// 批量入册核：幂等（已存在仅在显式给子分组时改写归属），返回实际新增数
+/// （重复/失效 id 不计）。`subgroup` = 0019 子分组命名层（None = 相册根）。
 pub fn fetch_album_add_assets(
     state: &super::AppState,
     id: i64,
     asset_ids: &[i64],
+    subgroup: Option<&str>,
 ) -> Result<u64, String> {
+    let subgroup = subgroup.map(str::trim).filter(|s| !s.is_empty());
     let db = super::active_library_db(state)?;
-    db.album_add_assets(id, asset_ids).map_err(map_missing)
+    db.album_add_assets(id, asset_ids, subgroup)
+        .map_err(map_missing)
+}
+
+/// 相册子分组清单核（0019）：DISTINCT subgroup + 计数，name 升序。
+pub fn fetch_album_subgroups(
+    state: &super::AppState,
+    id: i64,
+) -> Result<Vec<AlbumSubgroupDto>, String> {
+    let db = super::active_library_db(state)?;
+    if !db.album_exists(id).map_err(|e| e.to_string())? {
+        return Err("相册不存在".into());
+    }
+    Ok(db
+        .album_subgroups(id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(name, item_count)| AlbumSubgroupDto { name, item_count })
+        .collect())
+}
+
+/// 相册内挪子分组核（0019）：纯引用层 UPDATE（None = 挪回根）。
+pub fn fetch_album_item_move_subgroup(
+    state: &super::AppState,
+    id: i64,
+    asset_ids: &[i64],
+    subgroup: Option<&str>,
+) -> Result<u64, String> {
+    let subgroup = subgroup.map(str::trim).filter(|s| !s.is_empty());
+    let db = super::active_library_db(state)?;
+    db.album_item_move_subgroup(id, asset_ids, subgroup)
+        .map_err(map_missing)
 }
 
 /// 批量移除引用核（幂等；相册不存在报错）。
@@ -277,10 +311,36 @@ pub async fn album_add_assets(
     state: State<'_, SharedState>,
     id: i64,
     asset_ids: Vec<i64>,
+    subgroup: Option<String>,
 ) -> Result<u64, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        fetch_album_add_assets(state, id, &asset_ids)
+        fetch_album_add_assets(state, id, &asset_ids, subgroup.as_deref())
+    })
+    .await
+}
+
+/// 相册子分组清单（DISTINCT + 计数，name 升序）。
+#[tauri::command]
+pub async fn album_subgroups(
+    state: State<'_, SharedState>,
+    id: i64,
+) -> Result<Vec<AlbumSubgroupDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_album_subgroups(state, id)).await
+}
+
+/// 相册内挪子分组（None = 挪回根），返回改写行数。
+#[tauri::command]
+pub async fn album_item_move_subgroup(
+    state: State<'_, SharedState>,
+    id: i64,
+    asset_ids: Vec<i64>,
+    subgroup: Option<String>,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_album_item_move_subgroup(state, id, &asset_ids, subgroup.as_deref())
     })
     .await
 }
@@ -297,6 +357,14 @@ pub async fn album_remove_assets(
         fetch_album_remove_assets(state, id, &asset_ids)
     })
     .await
+}
+
+/// 子分组条目 DTO（0019，camelCase）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumSubgroupDto {
+    pub name: String,
+    pub item_count: u64,
 }
 
 /// 相册内时间线（captured_at keyset 分页 + filters 求交）。

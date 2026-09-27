@@ -101,6 +101,10 @@ pub struct ImportPlan {
     /// 落 journal，resume 重放不重不漏。None = 行为与历史版本完全一致。
     #[serde(default)]
     pub album_id: Option<i64>,
+    /// 相册内子分组（0019，可选）：入册 album_item 带 subgroup（NULL = 散在
+    /// 相册根）。serde default 缺省 = None（历史 journal 兼容）。
+    #[serde(default)]
+    pub album_subgroup: Option<String>,
 }
 
 /// 引擎错误（begin 阶段：设备枚举或建任务失败）。
@@ -879,6 +883,7 @@ impl Engine {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let _ = self.db.insert_asset_with_album(
+            // album_subgroup（0019）：入册引用带子分组命名层
             &AssetRow {
                 path: final_dst.to_string_lossy().into_owned(),
                 filename,
@@ -915,6 +920,7 @@ impl Engine {
                 rejected: 0,
             },
             self.plan.album_id,
+            self.plan.album_subgroup.as_deref(),
         );
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2

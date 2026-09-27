@@ -150,6 +150,7 @@ pub fn plan_for(target: &Path) -> ImportPlan {
         second_target: None,
         include: None,
         album_id: None,
+        album_subgroup: None,
     }
 }
 
@@ -393,6 +394,7 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         second_target: None,
         include: None,
         album_id,
+        album_subgroup: None,
     }
 }
 

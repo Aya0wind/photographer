@@ -85,7 +85,7 @@ pub async fn library_delete(
 ) -> Result<LibraryDeleteResult, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        fetch_library_delete(&state, &db_dir, photo_root.as_deref())
+        fetch_library_delete(state, &db_dir, photo_root.as_deref())
     })
     .await
 }

@@ -187,6 +187,7 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
             second_target: None,
             include: None,
             album_id,
+            album_subgroup: None,
         };
         match super::start_import(state, plan) {
             Ok(_job_id) => {

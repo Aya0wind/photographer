@@ -23,6 +23,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0016_SELECTION,
     MIGRATION_0017_VERSIONS,
     MIGRATION_0018_ALBUM_DIRS,
+    MIGRATION_0019_ALBUM_SUBGROUPS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -447,4 +448,14 @@ const MIGRATION_0018_ALBUM_DIRS: &str = r#"
 ALTER TABLE album ADD COLUMN dir_name TEXT NOT NULL DEFAULT '';
 UPDATE album SET dir_name = 'album-' || id WHERE dir_name = '';
 CREATE UNIQUE INDEX idx_album_dir_name ON album (dir_name);
+"#;
+
+/// 0019（相册子分组，用户定案 2026-09-27）：相册=容器，可直放散照片；
+/// 子分组 = album_item 上的命名层（NULL = 散在相册根）。子分组名无特殊
+/// 语义（「成片」「原片」只是约定），同一 (album_id, asset_id) 仍唯一——
+/// 一张照片在一个相册里只属于一个子分组或根。索引支撑子分组清单
+/// （DISTINCT）与子分组视图查询。
+const MIGRATION_0019_ALBUM_SUBGROUPS: &str = r#"
+ALTER TABLE album_item ADD COLUMN subgroup TEXT;
+CREATE INDEX idx_album_item_subgroup ON album_item (album_id, subgroup);
 "#;

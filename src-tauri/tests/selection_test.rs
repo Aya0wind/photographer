@@ -453,7 +453,7 @@ fn trash_purge_deletes_rows_files_and_cascades_references() {
     std::fs::write(&photo, b"jpeg").unwrap();
     let a = ins(&db, &photo.to_string_lossy(), None, AssetKind::Photo);
     let album = db.album_create("相册一").unwrap();
-    assert_eq!(db.album_add_assets(album.id, &[a]).unwrap(), 1);
+    assert_eq!(db.album_add_assets(album.id, &[a], None).unwrap(), 1);
     db.insert_face(a, 1.0, 2.0, 10.0, 10.0, &[0.5f32; 512], None)
         .unwrap();
     db.mark_asset_viewed(a).unwrap();

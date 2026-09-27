@@ -377,7 +377,7 @@ fn lr_export_import_links_relation_group_and_is_idempotent() {
         source_asset_id: raw,
         basis: Some(r#"{"bases":["filename"]}"#.into()),
     }];
-    let result = lr_export_import_core(&state, &db, &matches, Some(album.id)).unwrap();
+    let result = lr_export_import_core(&state, &db, &matches, Some(album.id), None).unwrap();
     assert_eq!(result.imported, 1, "{result:?}");
     assert!(result.failed.is_empty());
 
@@ -432,7 +432,7 @@ fn lr_export_import_links_relation_group_and_is_idempotent() {
         .any(|a| a.id == album.id));
 
     // 幂等重放：同文件再导入 → skipped，不产生第二份
-    let result2 = lr_export_import_core(&state, &db, &matches, None).unwrap();
+    let result2 = lr_export_import_core(&state, &db, &matches, None, None).unwrap();
     assert_eq!(result2.imported, 0);
     assert_eq!(result2.skipped, 1);
     assert_eq!(db.group_members(group).unwrap().len(), 3);
@@ -455,6 +455,7 @@ fn lr_export_import_links_relation_group_and_is_idempotent() {
                 basis: None,
             },
         ],
+        None,
         None,
     )
     .unwrap();
@@ -517,6 +518,7 @@ fn group_role_filters_raw_only_derived_only_no_derived() {
             source_asset_id: raw,
             basis: None,
         }],
+        None,
         None,
     )
     .unwrap();

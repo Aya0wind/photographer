@@ -189,6 +189,7 @@ pub fn fetch_album_claim_assets(
     state: &super::AppState,
     album_id: i64,
     asset_ids: &[i64],
+    subgroup: Option<&str>,
 ) -> Result<ClaimResultDto, String> {
     let db = super::active_library_db(state)?;
     if !db.album_exists(album_id).map_err(|e| e.to_string())? {
@@ -266,7 +267,7 @@ pub fn fetch_album_claim_assets(
         let src = PathBuf::from(&path);
         if path.starts_with(&target_prefix) {
             // 幂等：已在目标相册目录——仅确保引用存在
-            let _ = db.album_add_assets(album_id, &[asset_id]);
+            let _ = db.album_add_assets(album_id, &[asset_id], subgroup);
             result.skipped += 1;
             continue;
         }
@@ -318,7 +319,7 @@ pub fn fetch_album_claim_assets(
                 let _ = db.album_remove_assets(mid, &[asset_id]);
             }
         }
-        let _ = db.album_add_assets(album_id, &[asset_id]);
+        let _ = db.album_add_assets(album_id, &[asset_id], subgroup);
         let _ = db.append_log(
             "info",
             None,
@@ -414,10 +415,11 @@ pub async fn album_claim_assets(
     state: State<'_, SharedState>,
     album_id: i64,
     asset_ids: Vec<i64>,
+    subgroup: Option<String>,
 ) -> Result<ClaimResultDto, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        fetch_album_claim_assets(state, album_id, &asset_ids)
+        fetch_album_claim_assets(state, album_id, &asset_ids, subgroup.as_deref())
     })
     .await
 }

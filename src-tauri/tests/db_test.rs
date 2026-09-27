@@ -122,15 +122,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 18);
+        assert_eq!(user_version(&db), 19);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 18, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 19, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 18);
+    assert_eq!(user_version(&db), 19);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -148,7 +148,7 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 17,
+        indexes, 18,
         "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，0007）+ burst 1（0012）+ album_item 2（0015）"
     );
 }
@@ -232,7 +232,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 18);
+    assert_eq!(user_version(&db), 19);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

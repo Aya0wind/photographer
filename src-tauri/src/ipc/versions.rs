@@ -470,6 +470,7 @@ pub fn lr_export_import_core(
     db: &crate::db::Db,
     matches: &[LrExportImportItem],
     album_id: Option<i64>,
+    subgroup: Option<&str>,
 ) -> Result<LrImportResultDto, String> {
     use crate::events::AssetKind;
 
@@ -616,7 +617,7 @@ pub fn lr_export_import_core(
             color_label: None,
             rejected: 0,
         };
-        if let Err(e) = db.insert_asset_with_album(&row, album_id) {
+        if let Err(e) = db.insert_asset_with_album(&row, album_id, subgroup) {
             let _ = std::fs::remove_file(&dst);
             fail(format!("入库失败: {e}"));
             continue;
@@ -728,11 +729,12 @@ pub async fn lr_export_import(
     state: State<'_, SharedState>,
     matches: Vec<LrExportImportItem>,
     album_id: Option<i64>,
+    subgroup: Option<String>,
 ) -> Result<LrImportResultDto, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         let db = super::active_library_db(state)?;
-        lr_export_import_core(state, &db, &matches, album_id)
+        lr_export_import_core(state, &db, &matches, album_id, subgroup.as_deref())
     })
     .await
 }

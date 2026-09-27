@@ -383,6 +383,13 @@ pub struct AssetFilters {
     /// 其他值容错不过滤。实现为 EXISTS/NOT EXISTS 条件，未入组资产在
     /// raw_only/no_derived 下天然命中。
     pub group_role: Option<String>,
+    /// 相册子分组（0019）：精确名匹配——「album_assets_page + album_id」
+    /// 下只看该子分组（EXISTS album_item 命中）；无 album_id 时按任意
+    /// 相册的同名子分组匹配。仅 album 视图有意义。
+    pub subgroup: Option<String>,
+    /// 相册根散照片（0019）：true → 只看 album_id 相册中 subgroup IS NULL
+    /// 的引用（文件夹树的「根」视图）。false/None = 不限。
+    pub subgroup_is_null: Option<bool>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -837,7 +844,7 @@ impl Db {
     /// 测试覆盖——与 create_job 同款约定。）
     #[allow(dead_code)]
     pub fn insert_asset(&self, a: &AssetRow) -> Result<()> {
-        insert_asset_on(&self.0, a, None)
+        insert_asset_on(&self.0, a, None, None)
     }
 
     /// 资产入库 + 同事务挂相册（导入引擎的 album_id 通道，0015）：资产行、
@@ -845,9 +852,14 @@ impl Db {
     /// 引用都在、要么都不在，INSERT OR IGNORE 保证 resume 重放幂等。
     /// 相册在导入期间被删除（用户侧并发操作）时**跳过挂载不报错**：
     /// 文件已安全复制落盘，不因相册消失判整个文件失败（journal 不留假失败）。
-    pub fn insert_asset_with_album(&self, a: &AssetRow, album_id: Option<i64>) -> Result<()> {
+    pub fn insert_asset_with_album(
+        &self,
+        a: &AssetRow,
+        album_id: Option<i64>,
+        album_subgroup: Option<&str>,
+    ) -> Result<()> {
         let tx = self.0.unchecked_transaction()?;
-        insert_asset_on(&tx, a, album_id)?;
+        insert_asset_on(&tx, a, album_id, album_subgroup)?;
         tx.commit()
     }
 
@@ -1486,10 +1498,16 @@ impl Db {
         Ok(())
     }
 
-    /// 批量入册引用：`INSERT OR IGNORE` 对 PK(album_id, asset_id) 幂等，
-    /// 返回**实际新增**数；不存在的资产 id 静默跳过（相册页列表来自
+    /// 批量入册引用：幂等（已存在仅在显式给子分组时改写归属，None = 保持
+    /// 原状），返回**实际新增**数；不存在的资产 id 静默跳过（相册页列表来自
     /// 实时库，恰好在他处被永久删除的 id 属预期陈旧值）；相册不存在报错。
-    pub fn album_add_assets(&self, album_id: i64, asset_ids: &[i64]) -> Result<u64> {
+    /// `subgroup` = 0019 子分组命名层（None = 散在相册根）。
+    pub fn album_add_assets(
+        &self,
+        album_id: i64,
+        asset_ids: &[i64],
+        subgroup: Option<&str>,
+    ) -> Result<u64> {
         if !self.album_exists(album_id)? {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -1498,14 +1516,81 @@ impl Db {
         let mut added = 0u64;
         for asset_id in asset_ids {
             // INSERT..SELECT：资产不存在 → 0 行（跳过），不触发 FK 错误
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM album_item \
+                     WHERE album_id = ?1 AND asset_id = ?2)",
+                    params![album_id, asset_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                if let Some(sub) = subgroup {
+                    tx.execute(
+                        "UPDATE album_item SET subgroup = ?3 \
+                         WHERE album_id = ?1 AND asset_id = ?2",
+                        params![album_id, asset_id, sub],
+                    )?;
+                }
+                continue;
+            }
             added += tx.execute(
-                "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
-                     SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM assets WHERE id = ?2)",
-                params![album_id, asset_id, added_at],
+                "INSERT INTO album_item (album_id, asset_id, added_at, subgroup) \
+                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM assets WHERE id = ?2)",
+                params![album_id, asset_id, added_at, subgroup],
             )? as u64;
         }
         tx.commit()?;
         Ok(added)
+    }
+
+    /// 相册内挪子分组（0019）：纯引用层 UPDATE（subgroup 改写，None = 挪回
+    /// 根），不动物理文件与资产行。不在该相册的 id 自然不命中（0 行）。
+    /// 返回实际改写行数；相册不存在报错。
+    pub fn album_item_move_subgroup(
+        &self,
+        album_id: i64,
+        asset_ids: &[i64],
+        subgroup: Option<&str>,
+    ) -> Result<u64> {
+        if !self.album_exists(album_id)? {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        if asset_ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..asset_ids.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = self.0.execute(
+            &format!(
+                "UPDATE album_item SET subgroup = ?2 \
+                 WHERE album_id = ?1 AND asset_id IN ({slots})"
+            ),
+            rusqlite::params_from_iter(
+                std::iter::once(rusqlite::types::Value::from(album_id))
+                    .chain(std::iter::once(rusqlite::types::Value::from(
+                        subgroup.map(str::to_string),
+                    )))
+                    .chain(asset_ids.iter().map(|id| rusqlite::types::Value::from(*id))),
+            ),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 相册子分组清单（0019）：DISTINCT subgroup + 计数，name 升序；
+    /// 散在根（NULL）不入清单（根视图即相册默认视图）。
+    pub fn album_subgroups(&self, album_id: i64) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT subgroup, COUNT(*) FROM album_item \
+             WHERE album_id = ?1 AND subgroup IS NOT NULL \
+             GROUP BY subgroup ORDER BY subgroup ASC",
+        )?;
+        let rows = stmt.query_map(params![album_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        rows.collect()
     }
 
     /// 批量移除引用（幂等：不在册的 id 删 0 行）；相册不存在报错。
@@ -2674,7 +2759,12 @@ fn now_rfc3339() -> String {
 /// 自动重指 pair_asset_id 既有引用）→ 按目录/配对规则双向写 pair →
 /// 索引待办 → （可选）同事务挂相册。见 [`Db::insert_asset`] /
 /// [`Db::insert_asset_with_album`]。
-fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Result<()> {
+fn insert_asset_on(
+    conn: &Connection,
+    a: &AssetRow,
+    album_id: Option<i64>,
+    album_subgroup: Option<&str>,
+) -> Result<()> {
     let old_id: Option<i64> = conn
         .query_row("SELECT id FROM assets WHERE path = ?1", [&a.path], |r| {
             r.get(0)
@@ -2780,9 +2870,9 @@ fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Re
             .unwrap_or(false);
         if album_alive {
             conn.execute(
-                "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
-                 VALUES (?1, ?2, ?3)",
-                params![album, id, now_rfc3339()],
+                "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at, subgroup) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![album, id, now_rfc3339(), album_subgroup],
             )?;
         }
     }
@@ -3153,6 +3243,27 @@ fn asset_filter_conditions(
         } else {
             "rejected = 0".into()
         });
+    }
+
+    // —— 相册子分组（0019）：依附 album 维度（相册视图覆写 album_id 后
+    //    传到这里）；无 album_id 时按任意相册同名子分组匹配（容错）——
+    let album_clause = match filters.album_id {
+        Some(album) => {
+            let s = slot(params_vec, V::from(album));
+            format!("ai.album_id = {s}")
+        }
+        None => "1 = 1".to_string(),
+    };
+    if let Some(sub) = &filters.subgroup {
+        let s = slot(params_vec, V::from(sub.clone()));
+        conds.push(format!(
+            "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id              AND {album_clause} AND ai.subgroup = {s})"
+        ));
+    }
+    if filters.subgroup_is_null == Some(true) {
+        conds.push(format!(
+            "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id              AND {album_clause} AND ai.subgroup IS NULL)"
+        ));
     }
 
     // —— 版本维度（0017）：原片/成片 EXISTS 视图（相册页快捷视图后端支撑）——

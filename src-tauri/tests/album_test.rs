@@ -84,7 +84,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
 
     for object in [
         "album",
@@ -131,7 +131,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,14 +231,14 @@ fn album_add_idempotent_skips_missing_assets_and_requires_album() {
     let a2 = ins(&db, "X:/p/2.jpg", None, AssetKind::Photo);
 
     // 首次：2 新增（重复入参去重；失效资产 id 静默跳过不计）
-    let added = fetch_album_add_assets(&state, album.id, &[a1, a2, a2, 999_999]).unwrap();
+    let added = fetch_album_add_assets(&state, album.id, &[a1, a2, a2, 999_999], None).unwrap();
     assert_eq!(added, 2);
     // 再次全量重放：0 新增（INSERT OR IGNORE 幂等）
-    let added = fetch_album_add_assets(&state, album.id, &[a1, a2, 999_999]).unwrap();
+    let added = fetch_album_add_assets(&state, album.id, &[a1, a2, 999_999], None).unwrap();
     assert_eq!(added, 0);
     assert_eq!(fetch_album_list(&state).unwrap()[0].item_count, 2);
     // 相册不存在
-    let err = fetch_album_add_assets(&state, 9999, &[a1]).unwrap_err();
+    let err = fetch_album_add_assets(&state, 9999, &[a1], None).unwrap_err();
     assert!(err.contains("相册不存在"), "{err}");
 
     // 移除：单移 + 不在册 id 幂等；相册不存在报错
@@ -266,7 +266,7 @@ fn asset_permanent_delete_cascades_references_and_cover() {
     std::fs::write(&path, b"jpeg").unwrap();
     let db = open_db(db_dir.path());
     let id = ins(&db, &path.to_string_lossy(), None, AssetKind::Photo);
-    fetch_album_add_assets(&state, album.id, &[id]).unwrap();
+    fetch_album_add_assets(&state, album.id, &[id], None).unwrap();
     fetch_album_cover_set(&state, album.id, Some(id)).unwrap();
 
     // 永久删除路径（duplicate_delete）
@@ -292,7 +292,7 @@ fn album_delete_only_removes_references_never_assets() {
     let db = open_db(db_dir.path());
     let a1 = ins(&db, "X:/p/1.jpg", None, AssetKind::Photo);
     let a2 = ins(&db, "X:/p/2.jpg", None, AssetKind::Photo);
-    fetch_album_add_assets(&state, album.id, &[a1, a2]).unwrap();
+    fetch_album_add_assets(&state, album.id, &[a1, a2], None).unwrap();
     assert_eq!(count_assets(&db), 2);
 
     fetch_album_delete(&state, album.id).unwrap();
@@ -342,7 +342,7 @@ fn album_assets_page_keyset_order_and_filter_intersection() {
         Some("2026-08-01T00:00:00.000Z"),
         AssetKind::Photo,
     );
-    fetch_album_add_assets(&state, album.id, &[a_null1, a_old, a_new, a_video]).unwrap();
+    fetch_album_add_assets(&state, album.id, &[a_null1, a_old, a_new, a_video], None).unwrap();
 
     // 第一页 limit 2：NULL 最先，随后 captured 降序（video 2026-07 在前）
     let page1: Vec<i64> = fetch_album_assets_page(&state, album.id, 0, 2, None)
@@ -398,8 +398,8 @@ fn global_assets_page_filters_by_album_id() {
     let b = ins(&db, "X:/p/b.jpg", None, AssetKind::Photo);
     let c = ins(&db, "X:/p/c.mp4", None, AssetKind::Video);
     let shared = ins(&db, "X:/p/shared.jpg", None, AssetKind::Photo);
-    fetch_album_add_assets(&state, x.id, &[a, shared]).unwrap();
-    fetch_album_add_assets(&state, y.id, &[b, c, shared]).unwrap(); // 同一照片可入多相册
+    fetch_album_add_assets(&state, x.id, &[a, shared], None).unwrap();
+    fetch_album_add_assets(&state, y.id, &[b, c, shared], None).unwrap(); // 同一照片可入多相册
 
     let in_x = AssetFilters {
         album_id: Some(x.id),
@@ -637,8 +637,8 @@ fn asset_albums_reverse_lookup_order_and_empty() {
     let a2 = ins(&db, "X:/p/2.jpg", None, AssetKind::Photo);
     let first = fetch_album_create(&state, "甲册").unwrap();
     let second = fetch_album_create(&state, "乙册").unwrap();
-    fetch_album_add_assets(&state, first.id, &[a1]).unwrap();
-    fetch_album_add_assets(&state, second.id, &[a1, a2]).unwrap();
+    fetch_album_add_assets(&state, first.id, &[a1], None).unwrap();
+    fetch_album_add_assets(&state, second.id, &[a1, a2], None).unwrap();
 
     // a1 入两册：createdAt DESC → 乙册在前；itemCount 反映全量引用
     let albums = db.asset_albums(a1).unwrap();
