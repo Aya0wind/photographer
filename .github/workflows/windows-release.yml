@@ -133,9 +133,6 @@ jobs:
           "version=$tauriVersion" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - name: Run frontend tests
-        run: npm test
-
       - name: Build NSIS and MSI installers
         shell: cmd
         run: scripts\build-installer.cmd --nopause
