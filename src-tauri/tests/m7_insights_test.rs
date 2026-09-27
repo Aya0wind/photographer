@@ -102,9 +102,9 @@ fn sidebar_counts_empty_library() {
     assert_eq!(counts.assets, 0);
     assert_eq!(counts.recent_viewed, 0);
     assert_eq!(counts.on_this_day, 0);
-    // 标签墙/相册 = 预置词表全量（v1 相册页即标签墙）
+    // 标签墙 = 预置词表全量；相册 = 真实 COUNT(album)（0015 起为 DB 实体）
     assert_eq!(counts.tags, ipc::insights::SMART_ALBUM_TAG_COUNT);
-    assert_eq!(counts.albums, ipc::insights::SMART_ALBUM_TAG_COUNT);
+    assert_eq!(counts.albums, 0);
 }
 
 /// 当前本地年（闰日 2/29 场景 md 内部自回落）。
@@ -176,7 +176,7 @@ fn sidebar_counts_semantics_and_tz_boundary() {
         "本地时区同月日（含 UTC 落前一天的边界样本）: {today}"
     );
     assert_eq!(counts.tags, 40);
-    assert_eq!(counts.albums, 40);
+    assert_eq!(counts.albums, 0, "真实 COUNT(album)——本测试未建相册");
 
     // 列表与计数同口径（共用的 WHERE 片段）：列表行数 == 计数
     let list = db.assets_on_this_day(&today).unwrap();

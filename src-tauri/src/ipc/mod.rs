@@ -2,6 +2,7 @@
 //! （命令层只做 tauri 参数/返回值的薄包装）。
 
 pub mod ai;
+pub mod album;
 pub mod assets;
 pub mod device;
 pub mod device_manager;

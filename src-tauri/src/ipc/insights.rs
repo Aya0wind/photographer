@@ -191,8 +191,8 @@ pub async fn gear_stats(state: State<'_, SharedState>) -> Result<Option<GearStat
 
 /// 预置标签墙词表规模（与前端 AlbumsPages.tsx 的 SMART_ALBUM_TAGS 对齐
 /// ——40 个中文标签；v1 词表是前端常量而非 DB 数据，改词表时两处同步）。
-/// 标签墙同时就是相册页（/albums#tags 同页同区块），albums 与 tags 同源
-/// 同值；前端本地隐藏（localStorage）的标签由前端自行扣减，后端计全量。
+/// 标签墙同时就是相册页的标签分区（/albums#tags 同页同区块）；前端本地
+/// 隐藏（localStorage）的标签由前端自行扣减，后端计全量。
 pub const SMART_ALBUM_TAG_COUNT: i64 = 40;
 
 /// 侧栏计数载荷（camelCase；全 i64）。
@@ -208,16 +208,17 @@ pub struct SidebarCountsDto {
     pub on_this_day: i64,
     /// 标签墙标签数（预置词表全量，见 SMART_ALBUM_TAG_COUNT）。
     pub tags: i64,
-    /// 相册数（v1 相册页=标签墙，同 tags 口径）。
+    /// 用户相册数（0015 起真实 COUNT(album)——相册已是 DB 实体）。
     pub albums: i64,
 }
 
-/// 侧栏计数核：三条 COUNT + 一条常量。库未开 → Err（与洞察命令的
-/// active_library_db 透传语义一致——前端侧栏在库开前后都有明确状态）。
+/// 侧栏计数核：四条 COUNT/常量，绝不拉资产行。库未开 → Err（与洞察命令
+/// 的 active_library_db 透传语义一致——前端侧栏在库开前后都有明确状态）。
 pub fn fetch_sidebar_counts(state: &super::AppState) -> Result<SidebarCountsDto, String> {
     let db = super::active_library_db(state)?;
     let assets = db.sidebar_assets_count().map_err(|e| e.to_string())?;
     let recent_viewed = db.sidebar_viewed_count().map_err(|e| e.to_string())?;
+    let albums = db.sidebar_albums_count().map_err(|e| e.to_string())?;
     // 日期窗口与 fetch_on_this_day 同源：本地时区今天 "%m-%d"
     let month_day = chrono::Local::now().format("%m-%d").to_string();
     let on_this_day = db
@@ -228,7 +229,7 @@ pub fn fetch_sidebar_counts(state: &super::AppState) -> Result<SidebarCountsDto,
         recent_viewed,
         on_this_day,
         tags: SMART_ALBUM_TAG_COUNT,
-        albums: SMART_ALBUM_TAG_COUNT,
+        albums,
     })
 }
 

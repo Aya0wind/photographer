@@ -361,6 +361,10 @@ pub struct AssetFilters {
     /// 收藏页组合条件：true → rating > 0 OR flagged = 1（评分或旗标任一）；
     /// false → rating = 0 AND flagged = 0。
     pub favorite: Option<bool>,
+    /// 相册维度（0015）：Some(id) → 仅「在 id 相册中」的资产（EXISTS
+    /// album_item 求交；相册不存在命中空集）。全局筛选「在某相册」用；
+    /// 相册内时间线（album_assets_page）也复用此条件与 keyset 机制。
+    pub album_id: Option<i64>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -411,6 +415,19 @@ pub struct PersonRow {
     pub name: Option<String>,
     pub face_count: u64,
     pub cover_asset_id: Option<i64>,
+}
+
+/// 相册行（album_list 数据源 / IPC 载荷 AlbumDto，camelCase）：纯引用照片组
+/// 的元数据面——name 全库唯一；cover_asset_id 只是封面引用（资产永久删除时
+/// FK SET NULL 自动解除）；item_count 为引用数（相册为空合法）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumRow {
+    pub id: i64,
+    pub name: String,
+    pub cover_asset_id: Option<i64>,
+    pub item_count: u64,
+    pub created_at: String,
 }
 
 /// 日期分组行（画廊吸顶 + 跳转）。
@@ -796,6 +813,14 @@ impl Db {
             });
         }
 
+        // —— 相册维度（0015）：EXISTS 求交，相册不存在命中空集 ——
+        if let Some(album) = filters.album_id {
+            let s = slot(&mut params_vec, V::from(album));
+            conds.push(format!(
+                "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id AND ai.album_id = {s})"
+            ));
+        }
+
         // —— 游标（归一排序键二元组；cursor_id=0 即第一页短路）——
         let cursor_id_slot = slot(&mut params_vec, V::from(cursor_id));
         let cursor_key_slot = slot(&mut params_vec, V::from(cursor_key));
@@ -917,91 +942,22 @@ impl Db {
     /// 资产入库：同路径重复导入整行覆盖（REPLACE 换 id 时自动重指
     /// pair_asset_id 既有引用），随后按 (同目录, 同 stem, 异扩展名) 双向
     /// 写 RAW/JPG 配对（pair_asset_id）。
+    /// （引擎走 [`Db::insert_asset_with_album`]；本方法保留为仓储基元，
+    /// 测试覆盖——与 create_job 同款约定。）
+    #[allow(dead_code)]
     pub fn insert_asset(&self, a: &AssetRow) -> Result<()> {
-        let old_id: Option<i64> = self
-            .0
-            .query_row("SELECT id FROM assets WHERE path = ?1", [&a.path], |r| {
-                r.get(0)
-            })
-            .map(Some)
-            .or_else(|e| match e {
-                Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
-        self.0.execute(
-            "INSERT OR REPLACE INTO assets \
-             (path, filename, size, mtime, xxhash, kind, captured_at, camera, source, \
-             created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
-             lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
-             white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
-             rating, flagged) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-             ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
-            params![
-                a.path,
-                a.filename,
-                a.size as i64,
-                a.mtime,
-                a.xxhash as i64,
-                a.kind,
-                a.captured_at,
-                a.camera,
-                a.source,
-                a.created_at,
-                a.origin,
-                a.width.map(|v| v as i64),
-                a.height.map(|v| v as i64),
-                a.iso.map(|v| v as i64),
-                a.f_number,
-                a.exposure_time,
-                a.focal_length,
-                a.lens,
-                a.pair_asset_id,
-                a.thumb_state,
-                a.orientation,
-                a.flash,
-                a.metering_mode,
-                a.white_balance,
-                a.exposure_program,
-                a.software,
-                a.artist,
-                a.gps_lat,
-                a.gps_lon,
-                a.rating,
-                a.flagged,
-            ],
-        )?;
-        let id = self
-            .asset_id_by_path(&a.path)?
-            .ok_or(Error::QueryReturnedNoRows)?;
-        if let Some(old) = old_id {
-            if old != id {
-                self.0.execute(
-                    "UPDATE assets SET pair_asset_id = ?2 WHERE pair_asset_id = ?1 AND id != ?2",
-                    params![old, id],
-                )?;
-            }
-        }
-        self.refresh_asset_pair(id, &a.path)?;
+        insert_asset_on(&self.0, a, None)
+    }
 
-        // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video 留
-        // thumb_state=0 走按需队列（M8：ffmpeg 海报，侧车失败由队列失败
-        // 计数兜底）；other 无缩略图可言直接永久占位。REPLACE 旧资产行时
-        // 其任务行随 ON DELETE CASCADE 消失，这里只补新行。
-        if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
-            let now = now_rfc3339();
-            self.0.execute(
-                "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
-                 VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
-                params![id, now],
-            )?;
-        } else if a.kind != AssetKind::Video {
-            self.0.execute(
-                "UPDATE assets SET thumb_state = 2 WHERE id = ?1",
-                params![id],
-            )?;
-        }
-        Ok(())
+    /// 资产入库 + 同事务挂相册（导入引擎的 album_id 通道，0015）：资产行、
+    /// 配对、索引待办与 album_item 引用原子落库——中断恢复时要么资产与
+    /// 引用都在、要么都不在，INSERT OR IGNORE 保证 resume 重放幂等。
+    /// 相册在导入期间被删除（用户侧并发操作）时**跳过挂载不报错**：
+    /// 文件已安全复制落盘，不因相册消失判整个文件失败（journal 不留假失败）。
+    pub fn insert_asset_with_album(&self, a: &AssetRow, album_id: Option<i64>) -> Result<()> {
+        let tx = self.0.unchecked_transaction()?;
+        insert_asset_on(&tx, a, album_id)?;
+        tx.commit()
     }
 
     /// M8 视频海报解锁：历史库的 video 资产曾被置 thumb_state=2（当时无
@@ -1014,52 +970,6 @@ impl Db {
             [],
         )?;
         Ok(n as u64)
-    }
-
-    /// 按 (同目录, 同 stem, 异扩展名) 找配对伙伴并双向写 pair_asset_id；
-    /// 多候选取 id 最小（先入册者）。目录前缀 = 原样前缀（含分隔符）匹配，
-    /// stem 大小写折叠（Windows 路径大小写不敏感）。
-    fn refresh_asset_pair(&self, id: i64, path: &str) -> Result<()> {
-        let (dir, stem, _ext) = split_dir_stem_ext(path);
-        if stem.is_empty() || dir.is_empty() {
-            return Ok(());
-        }
-        let prefix_chars = dir.chars().count(); // dir 已含尾分隔符
-        let stem_chars = stem.chars().count();
-        let mut stmt = self.0.prepare(
-            "SELECT id FROM assets WHERE id != ?1 \
-             AND substr(path, 1, ?2) = ?3 \
-             AND lower(substr(path, ?2 + 1, ?4 + 1)) = lower(?5) \
-             AND length(substr(path, ?2 + 1)) > ?4 + 1 \
-             ORDER BY id LIMIT 1",
-        )?;
-        let partner: Option<i64> = stmt
-            .query_row(
-                params![
-                    id,
-                    prefix_chars as i64,
-                    dir,
-                    stem_chars as i64,
-                    format!("{stem}.")
-                ],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
-        self.0.execute(
-            "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
-            params![id, partner],
-        )?;
-        if let Some(p) = partner {
-            self.0.execute(
-                "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
-                params![p, id],
-            )?;
-        }
-        Ok(())
     }
 
     // —— 索引任务（index_tasks）——
@@ -1488,6 +1398,128 @@ impl Db {
             params![id, now_rfc3339()],
         )?;
         Ok(())
+    }
+
+    // —— 相册（M9，album + album_item 表：纯引用照片组）——
+
+    /// 相册列表（item_count 子查询免 GROUP BY 空相册丢行；createdAt DESC、
+    /// id DESC tiebreak——空相册同样返回且 itemCount=0）。
+    pub fn album_list(&self) -> Result<Vec<AlbumRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT a.id, a.name, a.cover_asset_id, \
+                    (SELECT COUNT(*) FROM album_item i WHERE i.album_id = a.id), a.created_at \
+             FROM album a ORDER BY a.created_at DESC, a.id DESC",
+        )?;
+        let rows = stmt.query_map([], map_album)?;
+        rows.collect()
+    }
+
+    /// 建相册，返回新行（item_count=0、cover=None）。重名由 name UNIQUE
+    /// 兜底（错误透传，IPC 层转友好文案）；名称 trim/空校验在 IPC 层。
+    pub fn album_create(&self, name: &str) -> Result<AlbumRow> {
+        let created_at = now_rfc3339();
+        self.0.execute(
+            "INSERT INTO album (name, cover_asset_id, created_at) VALUES (?1, NULL, ?2)",
+            params![name, created_at],
+        )?;
+        Ok(AlbumRow {
+            id: self.0.last_insert_rowid(),
+            name: name.to_string(),
+            cover_asset_id: None,
+            item_count: 0,
+            created_at,
+        })
+    }
+
+    /// 相册重命名；相册不存在报错（同 rename_person 语义）。
+    /// 重名由 UNIQUE 兜底透传。
+    pub fn album_rename(&self, id: i64, name: &str) -> Result<()> {
+        let n = self.0.execute(
+            "UPDATE album SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        if n == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// 删相册：只删相册行——album_item 引用经 FK ON DELETE CASCADE 级联
+    /// 消失，资产与物理文件绝不动；相册不存在报错（幂等删除由 IPC 语义定）。
+    pub fn album_delete(&self, id: i64) -> Result<()> {
+        let n = self
+            .0
+            .execute("DELETE FROM album WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// 设/清相册封面（纯引用；asset_id 为 None 清回默认封面）。
+    /// 相册不存在报错；asset 不存在触发 FK 约束错误透传（IPC 层转文案）。
+    pub fn album_cover_set(&self, id: i64, asset_id: Option<i64>) -> Result<()> {
+        let n = self.0.execute(
+            "UPDATE album SET cover_asset_id = ?2 WHERE id = ?1",
+            params![id, asset_id],
+        )?;
+        if n == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// 批量入册引用：`INSERT OR IGNORE` 对 PK(album_id, asset_id) 幂等，
+    /// 返回**实际新增**数；不存在的资产 id 静默跳过（相册页列表来自
+    /// 实时库，恰好在他处被永久删除的 id 属预期陈旧值）；相册不存在报错。
+    pub fn album_add_assets(&self, album_id: i64, asset_ids: &[i64]) -> Result<u64> {
+        if !self.album_exists(album_id)? {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        let added_at = now_rfc3339();
+        let tx = self.0.unchecked_transaction()?;
+        let mut added = 0u64;
+        for asset_id in asset_ids {
+            // INSERT..SELECT：资产不存在 → 0 行（跳过），不触发 FK 错误
+            added += tx.execute(
+                "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
+                     SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM assets WHERE id = ?2)",
+                params![album_id, asset_id, added_at],
+            )? as u64;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// 批量移除引用（幂等：不在册的 id 删 0 行）；相册不存在报错。
+    /// 只删 album_item 行，绝不动资产行/物理文件。
+    pub fn album_remove_assets(&self, album_id: i64, asset_ids: &[i64]) -> Result<()> {
+        if !self.album_exists(album_id)? {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let slots = (0..asset_ids.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("DELETE FROM album_item WHERE album_id = ?1 AND asset_id IN ({slots})");
+        self.0.execute(
+            &sql,
+            rusqlite::params_from_iter(std::iter::once(album_id).chain(asset_ids.iter().copied())),
+        )?;
+        Ok(())
+    }
+
+    /// 相册是否存在（IPC 存在性校验 / add-remove 前置）。
+    pub fn album_exists(&self, id: i64) -> Result<bool> {
+        let exists: i64 = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM album WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(exists != 0)
     }
 
     /// 各通道任务状态计数（(kind, state, count)，index_status IPC 数据源）。
@@ -1948,6 +1980,12 @@ impl Db {
             .query_row("SELECT COUNT(*) FROM view_history", [], |r| r.get(0))
     }
 
+    /// 相册数（侧栏计数 0015 起：真实 COUNT(album)，不再是标签墙常量）。
+    pub fn sidebar_albums_count(&self) -> Result<i64> {
+        self.0
+            .query_row("SELECT COUNT(*) FROM album", [], |r| r.get(0))
+    }
+
     /// 器材统计桶计数（单遍 SQL：子查询把 exposure_time 展示串解析成秒，
     /// 外层 CASE 分桶；GLOB 守卫挡住非数值串——CAST('垃圾' AS REAL)=0 会
     /// 污染快桶）。快门桶序：>1s / 1-1/2 / 1/2-1/8 / 1/8-1/60 / 1/60-1/500 /
@@ -2219,6 +2257,179 @@ impl Db {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 资产入库核（连接/事务通用）：同路径重复导入整行覆盖（REPLACE 换 id 时
+/// 自动重指 pair_asset_id 既有引用）→ 按目录/配对规则双向写 pair →
+/// 索引待办 → （可选）同事务挂相册。见 [`Db::insert_asset`] /
+/// [`Db::insert_asset_with_album`]。
+fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Result<()> {
+    let old_id: Option<i64> = conn
+        .query_row("SELECT id FROM assets WHERE path = ?1", [&a.path], |r| {
+            r.get(0)
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    conn.execute(
+        "INSERT OR REPLACE INTO assets \
+         (path, filename, size, mtime, xxhash, kind, captured_at, camera, source, \
+         created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
+         lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
+         white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
+         rating, flagged) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
+        params![
+            a.path,
+            a.filename,
+            a.size as i64,
+            a.mtime,
+            a.xxhash as i64,
+            a.kind,
+            a.captured_at,
+            a.camera,
+            a.source,
+            a.created_at,
+            a.origin,
+            a.width.map(|v| v as i64),
+            a.height.map(|v| v as i64),
+            a.iso.map(|v| v as i64),
+            a.f_number,
+            a.exposure_time,
+            a.focal_length,
+            a.lens,
+            a.pair_asset_id,
+            a.thumb_state,
+            a.orientation,
+            a.flash,
+            a.metering_mode,
+            a.white_balance,
+            a.exposure_program,
+            a.software,
+            a.artist,
+            a.gps_lat,
+            a.gps_lon,
+            a.rating,
+            a.flagged,
+        ],
+    )?;
+    let id: i64 = conn
+        .query_row("SELECT id FROM assets WHERE path = ?1", [&a.path], |r| {
+            r.get(0)
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?
+        .ok_or(Error::QueryReturnedNoRows)?;
+    if let Some(old) = old_id {
+        if old != id {
+            conn.execute(
+                "UPDATE assets SET pair_asset_id = ?2 WHERE pair_asset_id = ?1 AND id != ?2",
+                params![old, id],
+            )?;
+        }
+    }
+    refresh_asset_pair_on(conn, id, &a.path)?;
+
+    // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video 留
+    // thumb_state=0 走按需队列（M8：ffmpeg 海报，侧车失败由队列失败
+    // 计数兜底）；other 无缩略图可言直接永久占位。REPLACE 旧资产行时
+    // 其任务行随 ON DELETE CASCADE 消失，这里只补新行。
+    if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
+        let now = now_rfc3339();
+        conn.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
+            params![id, now],
+        )?;
+    } else if a.kind != AssetKind::Video {
+        conn.execute(
+            "UPDATE assets SET thumb_state = 2 WHERE id = ?1",
+            params![id],
+        )?;
+    }
+
+    // 相册挂载（导入 album_id 通道，0015）：与资产入册同事务；REPLACE 换
+    // id 时旧行随级联消失、此处按新 id 重写，天然幂等。相册已被并发删除
+    // 时跳过（见 insert_asset_with_album 契约）。
+    if let Some(album) = album_id {
+        let album_alive: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM album WHERE id = ?1)",
+                [album],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if album_alive {
+            conn.execute(
+                "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
+                 VALUES (?1, ?2, ?3)",
+                params![album, id, now_rfc3339()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 按 (同目录, 同 stem, 异扩展名) 找配对伙伴并双向写 pair_asset_id；
+/// 多候选取 id 最小（先入册者）。目录前缀 = 原样前缀（含分隔符）匹配，
+/// stem 大小写折叠（Windows 路径大小写不敏感）。
+fn refresh_asset_pair_on(conn: &Connection, id: i64, path: &str) -> Result<()> {
+    let (dir, stem, _ext) = split_dir_stem_ext(path);
+    if stem.is_empty() || dir.is_empty() {
+        return Ok(());
+    }
+    let prefix_chars = dir.chars().count(); // dir 已含尾分隔符
+    let stem_chars = stem.chars().count();
+    let mut stmt = conn.prepare(
+        "SELECT id FROM assets WHERE id != ?1 \
+         AND substr(path, 1, ?2) = ?3 \
+         AND lower(substr(path, ?2 + 1, ?4 + 1)) = lower(?5) \
+         AND length(substr(path, ?2 + 1)) > ?4 + 1 \
+         ORDER BY id LIMIT 1",
+    )?;
+    let partner: Option<i64> = stmt
+        .query_row(
+            params![
+                id,
+                prefix_chars as i64,
+                dir,
+                stem_chars as i64,
+                format!("{stem}.")
+            ],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    conn.execute(
+        "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
+        params![id, partner],
+    )?;
+    if let Some(p) = partner {
+        conn.execute(
+            "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
+            params![p, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn map_album(row: &Row<'_>) -> Result<AlbumRow> {
+    Ok(AlbumRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        cover_asset_id: row.get(2)?,
+        item_count: row.get::<_, i64>(3)? as u64,
+        created_at: row.get(4)?,
+    })
 }
 
 fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {

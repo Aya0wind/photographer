@@ -149,6 +149,7 @@ pub fn plan_for(target: &Path) -> ImportPlan {
         mode: ImportMode::Copy,
         second_target: None,
         include: None,
+        album_id: None,
     }
 }
 
@@ -364,6 +365,7 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         mode: ImportMode::Copy,
         second_target: None,
         include: None,
+        album_id: None,
     }
 }
 

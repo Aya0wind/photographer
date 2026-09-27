@@ -19,6 +19,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0012_BURSTS,
     MIGRATION_0013_SIMILAR_BUCKET,
     MIGRATION_0014_HASH_CHANNEL,
+    MIGRATION_0015_ALBUMS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -331,4 +332,30 @@ DROP TABLE index_tasks;
 ALTER TABLE index_tasks_new RENAME TO index_tasks;
 CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
 CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
+"#;
+
+/// 0015（M9 相册）：纯引用照片组——album（相册元数据 + 封面引用）+
+/// album_item（相册×资产多对多引用）。相册只引用全局图库资产，绝不持有
+/// 物理文件：删除相册仅级联清 album_item 引用（ON DELETE CASCADE）；
+/// 资产永久删除（duplicate_delete 等）时引用随资产级联消失、封面经
+/// ON DELETE SET NULL 解除。AUTOINCREMENT 保证相册 id 删除后不复用
+/// （前端路由/事件携带的旧 id 不致指向新相册）。FK 级联依赖连接级
+/// `PRAGMA foreign_keys=ON`（[`Db::open`]，与 faces/view_history 同构）。
+const MIGRATION_0015_ALBUMS: &str = r#"
+CREATE TABLE album (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT    NOT NULL UNIQUE,
+    cover_asset_id INTEGER REFERENCES assets (id) ON DELETE SET NULL,
+    created_at     TEXT    NOT NULL
+);
+
+CREATE TABLE album_item (
+    album_id  INTEGER NOT NULL REFERENCES album (id) ON DELETE CASCADE,
+    asset_id  INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    added_at  TEXT    NOT NULL,
+    PRIMARY KEY (album_id, asset_id)
+);
+
+CREATE INDEX idx_album_item_asset       ON album_item (asset_id);
+CREATE INDEX idx_album_item_album_added ON album_item (album_id, added_at);
 "#;

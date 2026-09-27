@@ -96,6 +96,11 @@ pub struct ImportPlan {
     /// 随 plan_json 落 journal，resume/retry 自然兼容。
     #[serde(default)]
     pub include: Option<Vec<String>>,
+    /// 导入挂相册（M9 0015，可选）：Some(album_id) 时每个资产入册与
+    /// album_item 引用同事务落库（INSERT OR IGNORE 幂等）；随 plan_json
+    /// 落 journal，resume 重放不重不漏。None = 行为与历史版本完全一致。
+    #[serde(default)]
+    pub album_id: Option<i64>,
 }
 
 /// 引擎错误（begin 阶段：设备枚举或建任务失败）。
@@ -845,44 +850,48 @@ impl Engine {
             }
         }
 
-        // 入库（assets 同路径覆盖；第二目的地是备份拷贝，不入 assets）
+        // 入库（assets 同路径覆盖；第二目的地是备份拷贝，不入 assets）；
+        // album_id 通道：资产与相册引用同事务（相册被并发删除时跳过挂载）
         let filename = final_dst
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let _ = self.db.insert_asset(&AssetRow {
-            path: final_dst.to_string_lossy().into_owned(),
-            filename,
-            size: entry.size,
-            mtime: rfc3339(entry.mtime),
-            xxhash: copied.xxh,
-            kind: copied.kind,
-            captured_at: copied.meta.captured_at.map(rfc3339),
-            camera: copied.meta.camera.clone(),
-            source: "imported".into(),
-            created_at: rfc3339(Utc::now()),
-            origin: "imported".into(),
-            width: copied.meta.width,
-            height: copied.meta.height,
-            iso: copied.meta.iso,
-            f_number: copied.meta.f_number.clone(),
-            exposure_time: copied.meta.exposure_time.clone(),
-            focal_length: copied.meta.focal_length.clone(),
-            lens: copied.meta.lens.clone(),
-            pair_asset_id: None,
-            thumb_state: 0,
-            orientation: copied.meta.deep.orientation,
-            flash: copied.meta.deep.flash.clone(),
-            metering_mode: copied.meta.deep.metering_mode.clone(),
-            white_balance: copied.meta.deep.white_balance.clone(),
-            exposure_program: copied.meta.deep.exposure_program.clone(),
-            software: copied.meta.deep.software.clone(),
-            artist: copied.meta.deep.artist.clone(),
-            gps_lat: copied.meta.deep.gps_lat,
-            gps_lon: copied.meta.deep.gps_lon,
-            rating: 0,
-            flagged: 0,
-        });
+        let _ = self.db.insert_asset_with_album(
+            &AssetRow {
+                path: final_dst.to_string_lossy().into_owned(),
+                filename,
+                size: entry.size,
+                mtime: rfc3339(entry.mtime),
+                xxhash: copied.xxh,
+                kind: copied.kind,
+                captured_at: copied.meta.captured_at.map(rfc3339),
+                camera: copied.meta.camera.clone(),
+                source: "imported".into(),
+                created_at: rfc3339(Utc::now()),
+                origin: "imported".into(),
+                width: copied.meta.width,
+                height: copied.meta.height,
+                iso: copied.meta.iso,
+                f_number: copied.meta.f_number.clone(),
+                exposure_time: copied.meta.exposure_time.clone(),
+                focal_length: copied.meta.focal_length.clone(),
+                lens: copied.meta.lens.clone(),
+                pair_asset_id: None,
+                thumb_state: 0,
+                orientation: copied.meta.deep.orientation,
+                flash: copied.meta.deep.flash.clone(),
+                metering_mode: copied.meta.deep.metering_mode.clone(),
+                white_balance: copied.meta.deep.white_balance.clone(),
+                exposure_program: copied.meta.deep.exposure_program.clone(),
+                software: copied.meta.deep.software.clone(),
+                artist: copied.meta.deep.artist.clone(),
+                gps_lat: copied.meta.deep.gps_lat,
+                gps_lon: copied.meta.deep.gps_lon,
+                rating: 0,
+                flagged: 0,
+            },
+            self.plan.album_id,
+        );
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2
             .map(|p| p.to_string_lossy().into_owned())
