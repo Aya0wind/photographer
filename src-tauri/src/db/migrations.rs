@@ -20,6 +20,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0013_SIMILAR_BUCKET,
     MIGRATION_0014_HASH_CHANNEL,
     MIGRATION_0015_ALBUMS,
+    MIGRATION_0016_SELECTION,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -358,4 +359,33 @@ CREATE TABLE album_item (
 
 CREATE INDEX idx_album_item_asset       ON album_item (asset_id);
 CREATE INDEX idx_album_item_album_added ON album_item (album_id, added_at);
+"#;
+
+/// 0016（阶段 B1 选片补全）：
+/// - `color_label`：LR 标准色名小写 token（red/yellow/green/blue/purple，
+///   NULL = 无标签）。写回侧同步 `xmp:Label`（LR 原生就是标准色名，无映射
+///   配置成本）；非法 token 由 IPC 层拒绝，列不设 CHECK（SQLite ALTER 加不了）。
+/// - `rejected`：接受/拒绝状态（布尔 0/1），与星级分层的应用内选片状态
+///   （roadmap §3：拒绝不写 XMP，避免与星级/旗标混淆）。默认查询**不排除**
+///   已拒绝——只是可筛选项，区别于回收站。
+/// - `in_trash` / `trashed_at`：应用内回收站（软删标记）。所有常规查询
+///   默认排除 in_trash=1；物理删除走 trash_purge（显式动作）。
+/// - `smart_view`：智能视图 = 前端 AssetFilters 序列化的命名存取（后端
+///   不解释只存取，roadmap §3「搜索结果能保存为智能视图」）。AUTOINCREMENT
+///   保证 id 删除后不复用（与 album 同款约定）。
+/// - 索引 idx_assets_trash 支撑回收站列表 trashed_at DESC keyset。
+const MIGRATION_0016_SELECTION: &str = r#"
+ALTER TABLE assets ADD COLUMN color_label TEXT;
+ALTER TABLE assets ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN in_trash INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE assets ADD COLUMN trashed_at TEXT;
+
+CREATE TABLE smart_view (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL UNIQUE,
+    filters_json TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL
+);
+
+CREATE INDEX idx_assets_trash ON assets (in_trash, trashed_at);
 "#;

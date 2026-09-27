@@ -128,12 +128,12 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
     };
     let meta = crate::metadata::exif_lite::parse(&head);
     let deep_ok = db.update_asset_deep_exif(asset_id, &meta).is_ok();
-    // LR 存量评分回填：边车 xmp:Rating → DB（只读边车不回写，与应用内
-    // 评分写入方向相反，无循环；DB 已有评分（>0）不覆盖——应用内值优先）
-    if let Some(stars) = crate::metadata::xmp::sidecar_rating(
-        &std::fs::read_to_string(crate::metadata::xmp::sidecar_path(Path::new(&path)))
-            .unwrap_or_default(),
-    ) {
+    // LR 存量评分/颜色标签回填：边车 xmp:Rating / xmp:Label → DB（只读边车
+    // 不回写，与应用内写入方向相反，无循环；DB 已有值不覆盖——应用内值优先）
+    let sidecar_text =
+        std::fs::read_to_string(crate::metadata::xmp::sidecar_path(Path::new(&path)))
+            .unwrap_or_default();
+    if let Some(stars) = crate::metadata::xmp::sidecar_rating(&sidecar_text) {
         if stars > 0
             && db
                 .asset_rating_of(asset_id)
@@ -142,6 +142,22 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
                 .is_none_or(|r| r == 0)
         {
             let _ = db.set_asset_rating(asset_id, i64::from(stars));
+        }
+    }
+    if let Some(label) = crate::metadata::xmp::sidecar_label(&sidecar_text) {
+        let unset: Option<String> =
+            db.0.query_row(
+                "SELECT color_label FROM assets WHERE id = ?1",
+                params![asset_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        if unset.is_none() {
+            let _ = db.0.execute(
+                "UPDATE assets SET color_label = ?2 WHERE id = ?1",
+                params![asset_id, label],
+            );
         }
     }
     deep_ok

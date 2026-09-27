@@ -1,0 +1,349 @@
+//! 选片命令（阶段 B1）：颜色标签 / 接受拒绝 / 应用内回收站 / 智能视图。
+//!
+//! - 颜色标签：DB 权威 + XMP 边车异步写 `xmp:Label`（与 rating 同策略：
+//!   外部库只读资产跳过边车；LR 标准色名直映，无映射配置）。
+//! - 拒绝状态：应用内选片状态，只写库（roadmap §3：拒绝不进 XMP，与星级
+//!   分层；默认查询不排除已拒绝——只是可筛选项）。
+//! - 回收站：软删标记（in_trash+trashed_at），常规查询全链路默认排除；
+//!   恢复还原可见性；purge 才动 DB 行与物理文件（外部库绝不物理删）。
+//! - 智能视图：前端 AssetFilters 序列化的命名存取，后端不解释只校验
+//!   JSON 合法性。
+//!
+//! 全部走 active_library_db + run_blocking（铁律：DB/磁盘 IO 不上主线程）。
+
+use std::path::PathBuf;
+
+use tauri::State;
+
+use super::{run_blocking, SharedState};
+use crate::events::AppEvent;
+
+pub use crate::db::SmartViewRow;
+
+/// SmartViewDto 的 Rust 面别名（serde 输出 `{id, name, filtersJson,
+/// createdAt}`）。
+pub type SmartViewDto = SmartViewRow;
+
+/// LR 标准颜色标签（应用内小写 token；xmp:Label 写首字母大写标准色名）。
+pub const COLOR_LABELS: &[&str] = &["red", "yellow", "green", "blue", "purple"];
+
+/// 颜色标签归一校验：trim + 小写；None/空串 = 清除。非法色名拒绝。
+pub fn validate_label(raw: Option<&str>) -> Result<Option<&'static str>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let token = raw.trim().to_ascii_lowercase();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    match COLOR_LABELS.iter().find(|c| **c == token) {
+        Some(valid) => Ok(Some(*valid)),
+        None => Err(format!(
+            "非法颜色标签: {raw}（可选 {}）",
+            COLOR_LABELS.join("/")
+        )),
+    }
+}
+
+/// 批量设颜色标签核：DB 批量更新 → 派 XMP 边车同步（supervisor 后台线程，
+/// 失败经 AppError 事件上报，不阻塞入库；外部库只读资产跳过边车）。
+pub fn fetch_asset_label_set(
+    state: &super::AppState,
+    asset_ids: &[i64],
+    label: Option<&str>,
+) -> Result<u64, String> {
+    let label = validate_label(label)?;
+    let db = super::active_library_db(state)?;
+    let n = db
+        .assets_label_set(asset_ids, label)
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(0);
+    }
+    // 边车同步清单（库内复制入册的资产；xmp 值形态 = 首字母大写标准色名）
+    let targets: Vec<(String, Option<&'static str>)> =
+        db.0.prepare(&format!(
+            "SELECT path, origin FROM assets WHERE id IN ({})",
+            (0..asset_ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(asset_ids.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|(_, origin)| origin != "external")
+        .map(|(path, _)| (path, label))
+        .collect();
+    if targets.is_empty() {
+        return Ok(n);
+    }
+    let bus = state.bus.clone();
+    state
+        .supervisor
+        .spawn("xmp", format!("label-batch-{n}"), move |_| {
+            let xmp_label = label.and_then(crate::metadata::xmp::label_to_xmp);
+            let mut failed = 0usize;
+            for (path, _) in &targets {
+                if let Err(error) =
+                    crate::metadata::xmp::sync_label_to_sidecar(&PathBuf::from(path), xmp_label)
+                {
+                    failed += 1;
+                    if failed == 1 {
+                        bus.publish(AppEvent::AppError {
+                            level: "warn".into(),
+                            message: format!("颜色标签已入库，但 XMP 边车同步失败：{error}"),
+                            recoverable: true,
+                        });
+                    }
+                }
+            }
+            if failed > 1 {
+                bus.publish(AppEvent::AppError {
+                    level: "warn".into(),
+                    message: format!("颜色标签已入库，{failed} 个 XMP 边车同步失败"),
+                    recoverable: true,
+                });
+            }
+        });
+    Ok(n)
+}
+
+/// 批量设接受/拒绝核（只写库；XMP 无对应标准字段，roadmap §3 分层定案）。
+pub fn fetch_asset_reject_set(
+    state: &super::AppState,
+    asset_ids: &[i64],
+    rejected: bool,
+) -> Result<u64, String> {
+    let db = super::active_library_db(state)?;
+    db.assets_reject_set(asset_ids, rejected)
+        .map_err(|e| e.to_string())
+}
+
+/// 移入回收站核（软删：in_trash=1 + trashed_at；幂等）。返回新移入数。
+pub fn fetch_asset_trash_move(state: &super::AppState, asset_ids: &[i64]) -> Result<u64, String> {
+    let db = super::active_library_db(state)?;
+    db.assets_trash_move(asset_ids).map_err(|e| e.to_string())
+}
+
+/// 回收站列表核（trashed_at DESC keyset；复用 AssetDto 契约）。
+pub fn fetch_trash_list(
+    state: &super::AppState,
+    after_id: i64,
+    limit: u32,
+) -> Result<Vec<super::assets::AssetDto>, String> {
+    let db = super::active_library_db(state)?;
+    let rows = db
+        .trash_list(after_id, limit.clamp(1, 200))
+        .map_err(|e| e.to_string())?;
+    let mut dtos: Vec<_> = rows
+        .into_iter()
+        .map(super::assets::page_row_to_dto)
+        .collect();
+    super::assets::attach_burst_counts_pub(&db, &mut dtos);
+    Ok(dtos)
+}
+
+/// 回收站还原核（幂等）。返回还原数。
+pub fn fetch_trash_restore(state: &super::AppState, asset_ids: &[i64]) -> Result<u64, String> {
+    let db = super::active_library_db(state)?;
+    db.trash_restore(asset_ids).map_err(|e| e.to_string())
+}
+
+/// 永久删除核（回收站「清空」动作；复用 duplicate_delete 的资产删除路径
+/// 经验——失败容忍、日志记账、幂等）：
+/// - DB：只作用于 in_trash=1 的行（防前端陈旧选中误删库内活跃资产），
+///   行级联清引用（album_item/faces/view_history/similar_bucket/index_tasks）。
+/// - 物理文件：仅 `delete_files=true` 且 origin=imported（外部库文件不在
+///   库内，绝不物理删）；单文件失败不回滚 DB（计数+warn 日志）。
+///
+/// 返回 DB 删除行数。
+pub fn fetch_trash_purge(
+    state: &super::AppState,
+    asset_ids: &[i64],
+    delete_files: bool,
+) -> Result<u64, String> {
+    let db = super::active_library_db(state)?;
+    let entries = db.trash_entries(asset_ids).map_err(|e| e.to_string())?;
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    if delete_files {
+        for (id, path, origin) in &entries {
+            if origin == "external" {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    let _ = db.append_log(
+                        "warn",
+                        None,
+                        &format!("回收站清除：文件删除失败 {path}: {e}（库行仍清除）"),
+                    );
+                }
+            }
+            let _ = db.append_log("info", None, &format!("回收站清除：{path}"));
+            let _ = id; // id 只用于选中集，删除走下面的批量
+        }
+    }
+    let ids: Vec<i64> = entries.iter().map(|(id, _, _)| *id).collect();
+    let deleted = db.assets_delete_rows(&ids).map_err(|e| e.to_string())?;
+    Ok(deleted)
+}
+
+/// 智能视图列表核（createdAt DESC）。
+pub fn fetch_smart_view_list(state: &super::AppState) -> Result<Vec<SmartViewDto>, String> {
+    let db = super::active_library_db(state)?;
+    db.smart_view_list().map_err(|e| e.to_string())
+}
+
+/// 建智能视图核：名称 trim/空拒绝；filters_json 必须是合法 JSON（后端不
+/// 解释只存取）；重名报错。
+pub fn fetch_smart_view_create(
+    state: &super::AppState,
+    name: &str,
+    filters_json: &str,
+) -> Result<SmartViewDto, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("智能视图名不能为空".into());
+    }
+    serde_json::from_str::<serde_json::Value>(filters_json)
+        .map_err(|e| format!("filters_json 不是合法 JSON: {e}"))?;
+    let db = super::active_library_db(state)?;
+    db.smart_view_create(name, filters_json.trim())
+        .map_err(|e| {
+            if matches!(
+                &e,
+                rusqlite::Error::SqliteFailure(ffi_err, _)
+                    if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            ) {
+                format!("同名智能视图已存在：{name}")
+            } else {
+                e.to_string()
+            }
+        })
+}
+
+/// 删智能视图核；不存在报错。
+pub fn fetch_smart_view_delete(state: &super::AppState, id: i64) -> Result<(), String> {
+    let db = super::active_library_db(state)?;
+    db.smart_view_delete(id)
+        .map_err(|_| "智能视图不存在".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Tauri 命令壳（async + spawn_blocking）
+// ---------------------------------------------------------------------------
+
+/// 批量设颜色标签（label=null 清除；非法色名拒绝）。返回更新行数。
+#[tauri::command]
+pub async fn asset_label_set(
+    state: State<'_, SharedState>,
+    asset_ids: Vec<i64>,
+    label: Option<String>,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_asset_label_set(state, &asset_ids, label.as_deref())
+    })
+    .await
+}
+
+/// 批量设接受/拒绝状态。返回更新行数。
+#[tauri::command]
+pub async fn asset_reject_set(
+    state: State<'_, SharedState>,
+    asset_ids: Vec<i64>,
+    rejected: bool,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_asset_reject_set(state, &asset_ids, rejected)
+    })
+    .await
+}
+
+/// 移入回收站（软删）。返回新移入数。
+#[tauri::command]
+pub async fn asset_trash_move(
+    state: State<'_, SharedState>,
+    asset_ids: Vec<i64>,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_asset_trash_move(state, &asset_ids)
+    })
+    .await
+}
+
+/// 回收站列表（trashed_at DESC keyset；after_id = 上一页末行 id）。
+#[tauri::command]
+pub async fn trash_list(
+    state: State<'_, SharedState>,
+    after_id: i64,
+    limit: u32,
+) -> Result<Vec<super::assets::AssetDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_trash_list(state, after_id, limit)
+    })
+    .await
+}
+
+/// 回收站还原。返回还原数。
+#[tauri::command]
+pub async fn trash_restore(
+    state: State<'_, SharedState>,
+    asset_ids: Vec<i64>,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_trash_restore(state, &asset_ids)).await
+}
+
+/// 永久删除（delete_files=true 时物理删文件；外部库只删库行）。返回 DB 删除数。
+#[tauri::command]
+pub async fn trash_purge(
+    state: State<'_, SharedState>,
+    asset_ids: Vec<i64>,
+    delete_files: bool,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_trash_purge(state, &asset_ids, delete_files)
+    })
+    .await
+}
+
+/// 智能视图列表。
+#[tauri::command]
+pub async fn smart_view_list(state: State<'_, SharedState>) -> Result<Vec<SmartViewDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, fetch_smart_view_list).await
+}
+
+/// 建智能视图（重名/空名/非法 JSON 报错）。
+#[tauri::command]
+pub async fn smart_view_create(
+    state: State<'_, SharedState>,
+    name: String,
+    filters_json: String,
+) -> Result<SmartViewDto, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_smart_view_create(state, &name, &filters_json)
+    })
+    .await
+}
+
+/// 删智能视图。
+#[tauri::command]
+pub async fn smart_view_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_smart_view_delete(state, id)).await
+}

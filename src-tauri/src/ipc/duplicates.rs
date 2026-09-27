@@ -36,7 +36,7 @@ pub fn fetch_duplicates_exact(
     for (size, xxhash) in keys.into_iter().skip(after).take(limit.min(100)) {
         let ids: Vec<i64> =
             db.0.prepare(
-                "SELECT id FROM assets WHERE size = ?1 AND xxhash = ?2 \
+                "SELECT id FROM assets WHERE size = ?1 AND xxhash = ?2 AND in_trash = 0 \
                  ORDER BY created_at ASC, id ASC",
             )
             .and_then(|mut s| {
@@ -153,19 +153,28 @@ pub fn fetch_duplicates_list(
 }
 
 /// 删除资产核（duplicate_delete）：删库行（FK 级联清 index_tasks/faces/
-/// view_history/similar_bucket）+ 磁盘文件（缺失不报错）+ 日志。缩略图缓存
-/// 按 (path, mtime) 键成为孤儿——开发期容忍，整库重建可清。返回实际删除数。
+/// view_history/similar_bucket；同款 DB 删除路径 assets_delete_rows 为
+/// 回收站 purge 共用，顺带清 pair 双向引用）+ 磁盘文件（缺失不报错）
+/// + 日志。缩略图缓存按 (path, mtime) 键成为孤儿——开发期容忍，整库重建可清。
+///
+/// 返回实际删除数。
 pub fn fetch_duplicate_delete(state: &super::AppState, asset_ids: &[i64]) -> Result<u64, String> {
     let db = super::active_library_db(state)?;
-    let mut deleted = 0u64;
+    let mut paths = Vec::with_capacity(asset_ids.len());
     for id in asset_ids.iter().copied() {
+        // 不存在的 id：跳过（文件清单只为物理删除与日志服务）
         let path: Option<String> =
             db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
                 .ok();
-        let Some(path) = path else {
-            continue; // 不存在：幂等跳过
-        };
-        if let Err(e) = std::fs::remove_file(&path) {
+        if let Some(path) = path {
+            paths.push(path);
+        }
+    }
+    let deleted = db
+        .assets_delete_rows(asset_ids)
+        .map_err(|e| e.to_string())?;
+    for path in &paths {
+        if let Err(e) = std::fs::remove_file(path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 let _ = db.append_log(
                     "warn",
@@ -174,10 +183,6 @@ pub fn fetch_duplicate_delete(state: &super::AppState, asset_ids: &[i64]) -> Res
                 );
             }
         }
-        let n =
-            db.0.execute("DELETE FROM assets WHERE id = ?1", [id])
-                .map_err(|e| e.to_string())?;
-        deleted += n as u64;
         let _ = db.append_log("info", None, &format!("重复删除：{path}"));
     }
     Ok(deleted)

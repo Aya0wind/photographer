@@ -52,6 +52,8 @@ fn asset(path: &str, kind: events::AssetKind) -> AssetRow {
         gps_lon: Some(121.5),
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
     }
 }
 

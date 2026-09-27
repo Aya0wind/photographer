@@ -23,6 +23,25 @@ use quick_xml::Reader;
 /// xmp:Rating 命名空间前缀（新建模板/属性插入用）。
 const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
 
+/// LR 标准颜色标签名（首字母大写的 XMP 值形态；LR 原生读写这些 token）。
+pub const COLOR_LABELS_XMP: &[&str] = &["Red", "Yellow", "Green", "Blue", "Purple"];
+
+/// 应用内小写 token（DB 列存储形态）→ XMP 标准色名（首字母大写）。
+/// LR 侧映射默认即标准色名（roadmap §3：不同软件映射可不同，v1 不做配置）。
+pub fn label_to_xmp(token: &str) -> Option<&'static str> {
+    let lower = token.to_ascii_lowercase();
+    COLOR_LABELS_XMP
+        .iter()
+        .find(|name| name.to_ascii_lowercase() == lower)
+        .copied()
+}
+
+/// XMP 色名 → 应用内小写 token（大小写不敏感认标准色名；未知值 None——
+/// 非 LR 标准标签的 xmp:Label 值不回填，避免脏数据入列）。
+pub fn label_from_xmp(value: &str) -> Option<&'static str> {
+    label_to_xmp(value)
+}
+
 /// 边车路径：同目录同名换扩展名（`DSC_0176.NEF` → `DSC_0176.xmp`；
 /// 无扩展名直接补 `.xmp`）。
 pub fn sidecar_path(asset_path: &Path) -> PathBuf {
@@ -131,6 +150,68 @@ pub fn sidecar_rating(xmp_text: &str) -> Option<u8> {
     read_rating(xmp_text).or_else(|| read_rating_element(xmp_text))
 }
 
+/// 解析子元素形态颜色标签（`<xmp:Label>Red</xmp:Label>`；同 read_rating_element
+/// 手法，按 local name "Label" 捕获）。
+fn read_label_element(xmp_text: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xmp_text);
+    reader.config_mut().trim_text(true);
+    let mut capture = false;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                capture = e.name().local_name().as_ref() == "Label";
+            }
+            Ok(Event::Text(ref t)) if capture => {
+                // BytesText: Deref<Target = str>（0.42）；LR 色名为纯词无转义
+                let text = t.trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+            Ok(Event::End(_)) => capture = false,
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        buf.clear();
+    }
+    None
+}
+
+/// 读取边车颜色标签（原始值，大小写保留；归一由 [`label_from_xmp`] 做）。
+/// 认 rdf:Description 的 `xmp:Label` 属性与 `<xmp:Label>` 子元素两种形态。
+pub fn read_label(xmp_text: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xmp_text);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if e.name().local_name().as_ref() != "Description" {
+                    continue;
+                }
+                for attr in e.attributes().flatten() {
+                    if attr.key.as_ref() == "xmp:Label" {
+                        if let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::default()) {
+                            if !value.trim().is_empty() {
+                                return Some(value.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    read_label_element(xmp_text)
+}
+
+/// 读取边车颜色标签的完整入口（属性 + 子元素两种形态，归一为小写 token）。
+pub fn sidecar_label(xmp_text: &str) -> Option<&'static str> {
+    read_label(xmp_text).and_then(|raw| label_from_xmp(&raw))
+}
+
 /// 最小边车模板（新建路径）：LR 可直接读的 xmp:Rating。
 fn minimal_template(rating: u8) -> String {
     format!(
@@ -208,9 +289,144 @@ pub fn sync_rating_to_sidecar(asset_path: &Path, rating: u8) -> Result<(), Strin
     let sidecar = sidecar_path(asset_path);
     let existing = std::fs::read_to_string(&sidecar).ok();
     let updated = write_rating(existing.as_deref(), rating);
+    atomic_write_sidecar(&sidecar, &updated)
+}
+
+/// 在文本中把颜色标签写入/更新/清除为 `xmp:Label`（返回新文本；label None =
+/// 清除——LR「无颜色」即无该属性，不是空值）。与 [`write_rating`] 同一套
+/// 外科手术策略，全部字节级保留未触内容：
+/// 1. 已有 `xmp:Label="Red"` 属性 → 原位替换 / 整属性摘除；
+/// 2. 已有 `<xmp:Label>Red</xmp:Label>` 子元素 → 原位替换 / 整元素摘除；
+/// 3. 都没有 → 写入时在首个 `<rdf:Description` 开标签插属性（缺 xmlns:xmp
+///    声明一并补）；清除时无事可做原样返回。
+pub fn write_label(existing: Option<&str>, label: Option<&str>) -> String {
+    let Some(text) = existing else {
+        return match label {
+            Some(l) => minimal_template_label(l),
+            None => minimal_template_noop(),
+        };
+    };
+    // 路径 1：属性形态
+    if let Some(pos) = text.find("xmp:Label=\"") {
+        let start = pos + "xmp:Label=\"".len();
+        if let Some(end) = text[start..].find('"').map(|n| start + n) {
+            return match label {
+                Some(l) => {
+                    let mut out = String::with_capacity(text.len() + 8);
+                    out.push_str(&text[..start]);
+                    out.push_str(l);
+                    out.push_str(&text[end..]);
+                    out
+                }
+                // 整属性摘除：连带吃掉属性前的缩进/换行空白
+                None => remove_span(text, eat_ws_before(text, pos), end + 1),
+            };
+        }
+    }
+    // 路径 2：子元素形态
+    if let Some(open) = text.find("<xmp:Label>") {
+        let content_start = open + "<xmp:Label>".len();
+        if let Some(close) = text[content_start..].find("</xmp:Label>") {
+            let close = content_start + close;
+            return match label {
+                Some(l) => {
+                    let mut out = String::with_capacity(text.len() + 8);
+                    out.push_str(&text[..content_start]);
+                    out.push_str(l);
+                    out.push_str(&text[close..]);
+                    out
+                }
+                // 整元素摘除（含元素独占行的前导空白）
+                None => remove_span(
+                    text,
+                    eat_ws_before(text, open),
+                    close + "</xmp:Label>".len(),
+                ),
+            };
+        }
+    }
+    // 路径 3：插入属性到首个 rdf:Description（清除无既有形态 → 原样返回）
+    let Some(l) = label else {
+        return text.to_string();
+    };
+    if let Some(tag_start) = text.find("<rdf:Description") {
+        let tag_end = text[tag_start..].find('>').map(|n| tag_start + n);
+        let Some(tag_end) = tag_end else {
+            return minimal_template_label(l);
+        };
+        let tag = &text[tag_start..tag_end];
+        let needs_ns = !tag.contains("xmlns:xmp=");
+        let mut insert = String::new();
+        if needs_ns {
+            insert.push_str("\n    xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"");
+        }
+        insert.push_str(&format!("\n    xmp:Label=\"{l}\""));
+        let mut out = String::with_capacity(text.len() + insert.len());
+        out.push_str(&text[..tag_end]);
+        out.push_str(&insert);
+        out.push_str(&text[tag_end..]);
+        return out;
+    }
+    minimal_template_label(l)
+}
+
+/// 摘除属性/元素时，把 span 起点前的连续空白（含换行）一并吃掉——保持
+/// 摘除后 rdf:Description 属性列表的排版不残留孤立缩进行。
+fn eat_ws_before(text: &str, mut start: usize) -> usize {
+    while start > 0 {
+        let prev = text[..start].chars().next_back().unwrap_or(' ');
+        if prev.is_whitespace() {
+            start -= prev.len_utf8();
+        } else {
+            break;
+        }
+    }
+    start
+}
+
+/// 摘除 [from, to) 区间（其余字节原样保留）。
+fn remove_span(text: &str, from: usize, to: usize) -> String {
+    let mut out = String::with_capacity(text.len() - (to - from));
+    out.push_str(&text[..from]);
+    out.push_str(&text[to..]);
+    out
+}
+
+/// 无档新建 + 写标签：最小模板（Rating 0 + Label）。
+fn minimal_template_label(label: &str) -> String {
+    format!(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Smart Photo">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:xmp="{XMP_NS}"
+    xmp:Rating="0"
+    xmp:Label="{label}"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#
+    )
+}
+
+/// 无档新建 + 清标签：无 Label 字段的最小模板（幂等，无意义写盘由调用方
+/// ——IPC 层——在 label 无变化时避免）。
+fn minimal_template_noop() -> String {
+    minimal_template(0)
+}
+
+/// 同步颜色标签到边车（读已有 → 改/建/摘除 → 原子写）。
+pub fn sync_label_to_sidecar(asset_path: &Path, label: Option<&str>) -> Result<(), String> {
+    let sidecar = sidecar_path(asset_path);
+    let existing = std::fs::read_to_string(&sidecar).ok();
+    let updated = write_label(existing.as_deref(), label);
+    atomic_write_sidecar(&sidecar, &updated)
+}
+
+/// 边车原子落盘（.tmp + rename；rename 失败清残留 .tmp）。
+fn atomic_write_sidecar(sidecar: &Path, content: &str) -> Result<(), String> {
     let tmp = sidecar.with_extension("xmp.tmp");
-    std::fs::write(&tmp, updated).map_err(|e| format!("写边车失败 {}: {e}", sidecar.display()))?;
-    std::fs::rename(&tmp, &sidecar).map_err(|e| {
+    std::fs::write(&tmp, content).map_err(|e| format!("写边车失败 {}: {e}", sidecar.display()))?;
+    std::fs::rename(&tmp, sidecar).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("边车落盘失败 {}: {e}", sidecar.display())
     })?;

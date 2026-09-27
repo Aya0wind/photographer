@@ -47,6 +47,8 @@ fn asset(path: &str, captured_at: Option<&str>) -> AssetRow {
         gps_lon: None,
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
     }
 }
 

@@ -889,6 +889,8 @@ impl Engine {
                 gps_lon: copied.meta.deep.gps_lon,
                 rating: 0,
                 flagged: 0,
+                color_label: None,
+                rejected: 0,
             },
             self.plan.album_id,
         );

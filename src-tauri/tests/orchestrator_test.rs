@@ -84,6 +84,8 @@ fn skip_imported_deducts_loose_matched_assets() {
         thumb_state: 0,
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
         orientation: None,
         flash: None,
         metering_mode: None,

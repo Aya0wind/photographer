@@ -51,6 +51,8 @@ fn ins(
         thumb_state: 0,
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
         orientation: None,
         flash: None,
         metering_mode: None,
@@ -460,12 +462,16 @@ fn dtos_serialize_camel_case() {
         burst_count: None,
         flagged: false,
         rating: 0,
+        color_label: None,
+        rejected: false,
     };
     let json = serde_json::to_value(&dto).unwrap();
     assert_eq!(json["capturedAt"], "2026-01-01T00:00:00.000Z");
     assert_eq!(json["sizeBytes"], 123);
     assert_eq!(json["kind"], "video");
     assert_eq!(json["pairId"], serde_json::Value::Null);
+    assert_eq!(json["colorLabel"], serde_json::Value::Null);
+    assert_eq!(json["rejected"], false);
 
     let filters: AssetFilters = serde_json::from_str(
         r#"{"kinds":["raw","photo"],"capturedAfter":"2026-01-01T00:00:00Z","cameras":["c"]}"#,
@@ -587,6 +593,8 @@ fn base_row() -> AssetRow {
         thumb_state: 0,
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
         orientation: None,
         flash: None,
         metering_mode: None,

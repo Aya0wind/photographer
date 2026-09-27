@@ -47,6 +47,8 @@ pub fn fetch_people_assets(
             burst_count: None,
             flagged: r.flagged,
             rating: r.rating,
+            color_label: r.color_label,
+            rejected: r.rejected,
         })
         .collect())
 }

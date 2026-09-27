@@ -283,6 +283,8 @@ fn asset_row(path: &str, kind: AssetKind, captured_at: Option<&str>) -> AssetRow
         thumb_state: 0,
         rating: 0,
         flagged: 0,
+        color_label: None,
+        rejected: 0,
         orientation: None,
         flash: None,
         metering_mode: None,

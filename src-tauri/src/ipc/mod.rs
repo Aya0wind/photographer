@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod people;
 pub mod rating;
 pub mod reconcile;
+pub mod selection;
 pub mod settings;
 pub mod system;
 pub mod thumb;

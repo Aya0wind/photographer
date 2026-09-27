@@ -44,6 +44,10 @@ pub struct AssetDto {
     pub burst_count: Option<u32>,
     pub flagged: bool,
     pub rating: i64,
+    /// 颜色标签（0016；LR 标准色名小写 token，无标签 null）。
+    pub color_label: Option<String>,
+    /// 接受/拒绝状态（0016；与星级分层的应用内选片状态）。
+    pub rejected: bool,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -168,6 +172,8 @@ pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
         burst_count: None,
         flagged: r.flagged,
         rating: r.rating,
+        color_label: r.color_label,
+        rejected: r.rejected,
     }
 }
 
@@ -477,6 +483,8 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 burst_count: None,
                 flagged: asset.flagged != 0,
                 rating: asset.rating,
+                color_label: asset.color_label,
+                rejected: asset.rejected != 0,
             });
         }
     }

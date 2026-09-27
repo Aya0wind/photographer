@@ -181,6 +181,12 @@ pub struct AssetRow {
     /// 收藏旗标（0009，布尔语义 0/1）。
     #[serde(default)]
     pub flagged: i64,
+    /// 颜色标签（0016，LR 标准色名小写 token；NULL = 无标签）。
+    #[serde(default)]
+    pub color_label: Option<String>,
+    /// 接受/拒绝状态（0016，布尔语义 0/1；与星级分层的应用内选片状态）。
+    #[serde(default)]
+    pub rejected: i64,
 }
 
 /// 索引任务行（index_tasks；导入/索引任务分离后的资产级待办）。
@@ -301,6 +307,7 @@ pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 /// 同月日的 photo/raw（captured_at 为 RFC3339；'localtime' 把 UTC 存储
 /// 转本地后取 %m-%d）。
 const ON_THIS_DAY_WHERE: &str = "kind IN ('photo', 'raw') AND captured_at IS NOT NULL \
+     AND in_trash = 0 \
      AND strftime('%m-%d', captured_at, 'localtime') = ?1 \
      AND strftime('%Y', captured_at, 'localtime') < strftime('%Y', 'now', 'localtime')";
 
@@ -309,8 +316,7 @@ const ON_THIS_DAY_WHERE: &str = "kind IN ('photo', 'raw') AND captured_at IS NOT
 /// 23:59:59.999 本地时区），字典序比较即时间序；任一日期过滤出现时
 /// NULL captured_at 的行被排除（无日期不落任何区间）。`kinds` 多选（SQL IN，
 /// 空 = 不过滤；用户分类语义「照片」=photo+raw 由前端传 [photo,raw]）；
-/// `cameras` 多选 OR（搜索页相机勾选）。
-///
+/// `cameras` 多选 OR（搜索页相机勾选）。///
 /// # M5 扩展（数值/布尔条件）与 NULL 语义（统一约定）
 /// 数值范围条件对列为 NULL 的行**不匹配**——「未知」不冒充任何区间
 /// （如 focal_length NULL 的资产在任何 focalMin/focalMax 组合下都排除）。
@@ -366,6 +372,11 @@ pub struct AssetFilters {
     /// album_item 求交；相册不存在命中空集）。全局筛选「在某相册」用；
     /// 相册内时间线（album_assets_page）也复用此条件与 keyset 机制。
     pub album_id: Option<i64>,
+    /// 颜色标签（0016）：精确匹配小写 token（red/yellow/green/blue/purple）。
+    pub color_label: Option<String>,
+    /// 接受/拒绝状态（0016）：true → rejected=1；false → rejected=0。
+    /// 默认查询**不排除**已拒绝——只是可筛选项，区别于回收站。
+    pub rejected: Option<bool>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -393,6 +404,10 @@ pub struct AssetPageRow {
     pub burst_id: Option<i64>,
     pub flagged: bool,
     pub rating: i64,
+    /// 颜色标签（0016；无标签 None）。
+    pub color_label: Option<String>,
+    /// 接受/拒绝状态（0016；布尔语义）。
+    pub rejected: bool,
 }
 
 /// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
@@ -443,9 +458,29 @@ pub struct DateGroupRow {
     pub cover_asset_id: i64,
 }
 
+/// 智能视图行（0016 smart_view 表；IPC 载荷 SmartViewDto 同构 camelCase）。
+/// filters_json 为前端 AssetFilters 序列化——后端不解释只存取。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartViewRow {
+    pub id: i64,
+    pub name: String,
+    pub filters_json: String,
+    pub created_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // 仓储方法
 // ---------------------------------------------------------------------------
+
+/// 分页行投影列（[`map_asset_page`] 消费顺序；各查询共用，防列序漂移）。
+const ASSET_PAGE_COLS: &str = "id, path, filename, size, kind, captured_at, camera, \
+     width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
+     thumb_state, burst_id, flagged, rating, color_label, rejected";
+/// 同 [`ASSET_PAGE_COLS`] 的 `a.` 别名前缀形态（内层子查询用）。
+const ASSET_PAGE_COLS_A: &str = "a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
+     a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
+     a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, a.color_label, a.rejected";
 
 impl Db {
     /// 建导入任务（status='running'，started_at=now），返回 job_id。
@@ -664,12 +699,8 @@ impl Db {
         };
         // 过滤条件作用于内层（可引用 assets 全列），游标/排序用外层投影列
         let mut stmt = self.0.prepare(&format!(
-            "SELECT id, path, filename, size, kind, captured_at, camera, \
-             width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
-             thumb_state, burst_id, flagged, rating FROM \
-             (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
-              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
-              a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
+            "SELECT {ASSET_PAGE_COLS} FROM \
+             (SELECT {ASSET_PAGE_COLS_A}, \
               COALESCE(a.captured_at, {sentinel_slot}) AS k \
               FROM assets a WHERE {all}) \
              WHERE ({cursor_id_slot} = 0 OR k < {cursor_key_slot} \
@@ -700,7 +731,8 @@ impl Db {
 
     /// 最近添加分页（「最近添加」页数据源）：created_at DESC、id DESC
     /// keyset——created_at NOT NULL 定宽 RFC3339，字典序即时间序；游标
-    /// after_id 为上一页末行 id（0 = 第一页；行已删按第一页）。
+    /// after_id 为上一页末行 id（0 = 第一页；行已删按第一页）。回收站资产
+    /// 不出现（in_trash=0）。
     pub fn recent_assets_page(&self, after_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
         let (cursor_key, cursor_id) = if after_id > 0 {
             match self.0.query_row(
@@ -714,16 +746,13 @@ impl Db {
         } else {
             ("9999-12-31T23:59:59.999Z".to_string(), 0)
         };
-        let mut stmt = self.0.prepare(
-            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
-             FROM (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
-                    a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, \
-                    a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
-                    a.created_at AS ck FROM assets a) \
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {ASSET_PAGE_COLS} FROM \
+             (SELECT {ASSET_PAGE_COLS_A}, a.created_at AS ck FROM assets a \
+              WHERE a.in_trash = 0) \
              WHERE (?1 = 0 OR ck < ?2 OR (ck = ?2 AND id < ?1)) \
              ORDER BY ck DESC, id DESC LIMIT ?3",
-        )?;
+        ))?;
         let rows = stmt.query_map(params![cursor_id, cursor_key, limit], map_asset_page)?;
         rows.collect()
     }
@@ -742,15 +771,16 @@ impl Db {
 
     /// 本地时区日期分组（降序；unknown 组置顶与画廊页序一致）。
     /// date() 无值（NULL）→ 'unknown'；cover 取组内同排序首张
-    /// （captured DESC、id DESC）。
+    /// （captured DESC、id DESC）。回收站资产不计（in_trash=0）。
     pub fn asset_group_dates(&self) -> Result<Vec<DateGroupRow>> {
         let mut stmt = self.0.prepare(
             "SELECT day, COUNT(*), \
                (SELECT t.id FROM assets t \
                  WHERE COALESCE(date(t.captured_at, 'localtime'), 'unknown') = day \
+                   AND t.in_trash = 0 \
                  ORDER BY COALESCE(t.captured_at, ?1) DESC, t.id DESC LIMIT 1) \
              FROM (SELECT COALESCE(date(captured_at, 'localtime'), 'unknown') AS day \
-                   FROM assets) \
+                   FROM assets WHERE in_trash = 0) \
              GROUP BY day ORDER BY (day = 'unknown') DESC, day DESC",
         )?;
         let rows = stmt.query_map(params![CAPTURED_NULL_HIGH], |row| {
@@ -770,7 +800,7 @@ impl Db {
              source, created_at, origin, width, height, iso, f_number, exposure_time, \
              focal_length, lens, pair_asset_id, thumb_state, orientation, flash, \
              metering_mode, white_balance, exposure_program, software, artist, \
-             gps_lat, gps_lon, rating, flagged FROM assets WHERE id = ?1",
+             gps_lat, gps_lon, rating, flagged, color_label, rejected FROM assets WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
@@ -779,11 +809,13 @@ impl Db {
         }
     }
 
-    /// 库内同指纹 (size, xxhash) 的**其他**资产数（不含自身）。
+    /// 库内同指纹 (size, xxhash) 的**其他**资产数（不含自身）。回收站资产
+    /// 不计（详情页重复计数与画廊一致口径）。
     pub fn asset_duplicate_count(&self, id: i64, size: u64, xxhash: u64) -> Result<u64> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT COUNT(*) FROM assets WHERE size = ?1 AND xxhash = ?2 AND id != ?3")?;
+        let mut stmt = self.0.prepare(
+            "SELECT COUNT(*) FROM assets WHERE size = ?1 AND xxhash = ?2 AND id != ?3 \
+             AND in_trash = 0",
+        )?;
         let count: i64 = stmt.query_row(params![size as i64, xxhash as i64, id], |r| r.get(0))?;
         Ok(count as u64)
     }
@@ -906,10 +938,12 @@ impl Db {
         Ok((done as u64, total as u64))
     }
 
-    /// 语义检索 join：资产是否存在且可检索（photo/raw）。
+    /// 语义检索 join：资产是否存在且可检索（photo/raw）。回收站资产不可检索
+    /// （0016：常规链路默认排除，恢复后自动回到检索结果）。
     pub fn asset_searchable(&self, id: i64) -> Result<bool> {
         let ok: i64 = self.0.query_row(
-            "SELECT COUNT(*) FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
+            "SELECT COUNT(*) FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw') \
+             AND in_trash = 0",
             params![id],
             |r| r.get(0),
         )?;
@@ -1174,8 +1208,10 @@ impl Db {
             "SELECT p.id, p.name, COUNT(f.id), \
                (SELECT f2.asset_id FROM faces f2 WHERE f2.id = p.cover_face_id), \
                (SELECT f3.asset_id FROM faces f3 WHERE f3.cluster_id = p.id \
+                 AND f3.asset_id IN (SELECT id FROM assets WHERE in_trash = 0) \
                  ORDER BY f3.box_w * f3.box_h DESC, f3.id ASC LIMIT 1) \
              FROM people p JOIN faces f ON f.cluster_id = p.id \
+             JOIN assets a ON a.id = f.asset_id AND a.in_trash = 0 \
              GROUP BY p.id \
              ORDER BY COUNT(f.id) DESC, p.id ASC",
         )?;
@@ -1193,19 +1229,16 @@ impl Db {
     }
 
     /// 某人物簇的资产页（去重，captured_at DESC、id DESC tiebreak；NULL
-    /// captured_at 最先——与画廊排序契约一致）。
+    /// captured_at 最先——与画廊排序契约一致）。回收站资产不出现。
     pub fn assets_by_cluster(&self, cluster_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
-             FROM (SELECT DISTINCT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
-                    a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, \
-                    a.focal_length, a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {ASSET_PAGE_COLS} FROM \
+             (SELECT DISTINCT {ASSET_PAGE_COLS_A}, \
                     COALESCE(a.captured_at, ?2) AS k \
                    FROM assets a JOIN faces f ON f.asset_id = a.id \
-                   WHERE f.cluster_id = ?1) \
+                   WHERE f.cluster_id = ?1 AND a.in_trash = 0) \
              ORDER BY k DESC, id DESC LIMIT ?3",
-        )?;
+        ))?;
         let rows = stmt.query_map(
             params![cluster_id, CAPTURED_NULL_HIGH, limit],
             map_asset_page,
@@ -1405,7 +1438,7 @@ impl Db {
     pub fn camera_list(&self) -> Result<Vec<CameraCountRow>> {
         let mut stmt = self.0.prepare(
             "SELECT camera, COUNT(*) FROM assets \
-             WHERE camera IS NOT NULL AND camera != '' \
+             WHERE camera IS NOT NULL AND camera != '' AND in_trash = 0 \
              GROUP BY camera ORDER BY COUNT(*) DESC, camera ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1422,7 +1455,7 @@ impl Db {
     pub fn lens_list(&self) -> Result<Vec<CameraCountRow>> {
         let mut stmt = self.0.prepare(
             "SELECT lens, COUNT(*) FROM assets \
-             WHERE lens IS NOT NULL AND lens != '' \
+             WHERE lens IS NOT NULL AND lens != '' AND in_trash = 0 \
              GROUP BY lens ORDER BY COUNT(*) DESC, lens ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1442,7 +1475,7 @@ impl Db {
         let mut stmt = self.0.prepare(
             "SELECT upper(substr(path, length(rtrim(path, replace(path, '.', ''))) + 1)) AS fmt, \
              COUNT(*) FROM assets \
-             WHERE path LIKE '%.%' \
+             WHERE path LIKE '%.%' AND in_trash = 0 \
              GROUP BY fmt ORDER BY COUNT(*) DESC, fmt ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1532,11 +1565,14 @@ impl Db {
         Ok(())
     }
 
-    /// 最近浏览资产（viewed_at DESC；复用画廊分页行结构）。
+    /// 最近浏览资产（viewed_at DESC；复用画廊分页行结构）。回收站资产不出现。
     pub fn recently_viewed(&self, limit: u32) -> Result<Vec<AssetPageRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
-        )?;
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {ASSET_PAGE_COLS} FROM view_history v \
+             JOIN assets a ON a.id = v.asset_id \
+             WHERE a.in_trash = 0 \
+             ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
+        ))?;
         let rows = stmt.query_map(params![limit], map_asset_page)?;
         rows.collect()
     }
@@ -1749,7 +1785,7 @@ impl Db {
     pub fn similar_scan_rows(&self) -> Result<Vec<(i64, i64, Option<i64>)>> {
         let mut stmt = self.0.prepare(
             "SELECT id, phash, pair_asset_id FROM assets \
-             WHERE phash IS NOT NULL AND kind IN ('photo', 'raw') \
+             WHERE phash IS NOT NULL AND kind IN ('photo', 'raw') AND in_trash = 0 \
                AND NOT (kind = 'raw' AND pair_asset_id IS NOT NULL) ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
@@ -1785,7 +1821,7 @@ impl Db {
     pub fn exact_duplicate_keys(&self) -> Result<Vec<(i64, u64)>> {
         let mut stmt = self.0.prepare(
             "SELECT size, xxhash, COUNT(*) AS c FROM assets \
-             WHERE kind IN ('photo', 'raw') \
+             WHERE kind IN ('photo', 'raw') AND in_trash = 0 \
              GROUP BY size, xxhash HAVING c > 1 ORDER BY c DESC, size, xxhash",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1804,9 +1840,7 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
-             FROM assets WHERE id IN ({slots}) ORDER BY created_at ASC, id ASC"
+            "SELECT {ASSET_PAGE_COLS} FROM assets WHERE id IN ({slots}) ORDER BY created_at ASC, id ASC"
         );
         let mut stmt = self.0.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), map_asset_page)?;
@@ -1817,9 +1851,7 @@ impl Db {
     /// WHERE 片段抽成常量——列表与 sidebar 计数两处共用，杜绝口径漂移。
     pub fn assets_on_this_day(&self, month_day: &str) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(&format!(
-            "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
-             FROM assets \
+            "SELECT {ASSET_PAGE_COLS} FROM assets \
              WHERE {ON_THIS_DAY_WHERE} \
              ORDER BY substr(captured_at, 1, 4) DESC, captured_at ASC, id ASC",
         ))?;
@@ -1838,10 +1870,12 @@ impl Db {
     }
 
     /// 侧栏计数（2026-09-21）：库内资产总数（全 kind——侧栏「照片」即画廊
-    /// 全量）与浏览历史行数。纯 COUNT，毫秒级。
+    /// 全量；0016 起排除回收站）与浏览历史行数。纯 COUNT，毫秒级。
     pub fn sidebar_assets_count(&self) -> Result<i64> {
         self.0
-            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM assets WHERE in_trash = 0", [], |r| {
+                r.get(0)
+            })
     }
 
     pub fn sidebar_viewed_count(&self) -> Result<i64> {
@@ -1899,7 +1933,7 @@ impl Db {
                          THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) \
                          WHEN exposure_time GLOB '[0-9]*' \
                          THEN CAST(exposure_time AS REAL) END AS sec \
-                    FROM assets WHERE kind IN ('photo', 'raw') \
+                    FROM assets WHERE kind IN ('photo', 'raw') AND in_trash = 0 \
                  )",
             )
             .map_err(|e| e.to_string())?;
@@ -1922,6 +1956,211 @@ impl Db {
             params![id, i64::from(flagged)],
         )?;
         Ok(n > 0)
+    }
+
+    // —— 选片状态（0016：颜色标签 / 拒绝；批量）——
+
+    /// 批量写颜色标签（token 已由 IPC 层校验；None = 清除）。
+    /// 返回实际更新行数（失效 id 自然不计）。XMP 写回由调用方派发。
+    pub fn assets_label_set(&self, ids: &[i64], label: Option<&str>) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = self.0.execute(
+            &format!("UPDATE assets SET color_label = ?1 WHERE id IN ({slots})"),
+            rusqlite::params_from_iter(
+                std::iter::once(rusqlite::types::Value::from(label.map(str::to_string)))
+                    .chain(ids.iter().map(|id| rusqlite::types::Value::from(*id))),
+            ),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 批量写接受/拒绝状态（布尔语义 0/1）。返回实际更新行数。
+    pub fn assets_reject_set(&self, ids: &[i64], rejected: bool) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = self.0.execute(
+            &format!("UPDATE assets SET rejected = ?1 WHERE id IN ({slots})"),
+            rusqlite::params_from_iter(
+                std::iter::once(i64::from(rejected)).chain(ids.iter().copied()),
+            ),
+        )?;
+        Ok(n as u64)
+    }
+
+    // —— 应用内回收站（0016：软删标记 + 显式恢复/清除）——
+
+    /// 移入回收站（幂等：已在站的行不动、trashed_at 不刷新）。返回新移入数。
+    pub fn assets_trash_move(&self, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = self.0.execute(
+            &format!(
+                "UPDATE assets SET in_trash = 1, trashed_at = ?{0} \
+                 WHERE id IN ({slots}) AND in_trash = 0",
+                ids.len() + 1
+            ),
+            rusqlite::params_from_iter(
+                ids.iter()
+                    .map(|id| rusqlite::types::Value::from(*id))
+                    .chain(std::iter::once(rusqlite::types::Value::from(now_rfc3339()))),
+            ),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 回收站列表（trashed_at DESC、id DESC keyset；复用画廊分页行结构）。
+    /// 游标 after_id 为上一页末行 id（0 = 第一页；行已删/已恢复按第一页）。
+    pub fn trash_list(&self, after_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
+        let (cursor_key, cursor_id) = if after_id > 0 {
+            match self.0.query_row(
+                "SELECT trashed_at FROM assets WHERE id = ?1 AND in_trash = 1",
+                [after_id],
+                |r| r.get::<_, String>(0),
+            ) {
+                Ok(key) => (key, after_id),
+                Err(_) => (now_rfc3339(), 0), // 游标失效：回退第一页
+            }
+        } else {
+            (now_rfc3339(), 0)
+        };
+        // 哨兵 = 当前时刻：trashed_at 恒不晚于 now，第一页必含最新行
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {ASSET_PAGE_COLS} FROM assets \
+             WHERE in_trash = 1 \
+               AND (?2 = 0 OR trashed_at < ?1 OR (trashed_at = ?1 AND id < ?2)) \
+             ORDER BY trashed_at DESC, id DESC LIMIT ?3",
+        ))?;
+        let rows = stmt.query_map(params![cursor_key, cursor_id, limit], map_asset_page)?;
+        rows.collect()
+    }
+
+    /// 回收站还原（幂等）。返回还原行数。
+    pub fn trash_restore(&self, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let n = self.0.execute(
+            &format!(
+                "UPDATE assets SET in_trash = 0, trashed_at = NULL \
+                 WHERE id IN ({slots}) AND in_trash = 1"
+            ),
+            rusqlite::params_from_iter(ids.iter().copied()),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 回收站内资产行（id → (path, origin)）：purge 物理删除前取清单，
+    /// 外部库（origin='external'，文件不在库内）绝不物理删。
+    pub fn trash_entries(&self, ids: &[i64]) -> Result<Vec<(i64, String, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT id, path, origin FROM assets \
+             WHERE id IN ({slots}) AND in_trash = 1"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// 资产记录级删除（duplicate_delete / trash_purge 共用路径）：事务内
+    /// 清 pair 双向引用 → 删行（album_item/faces/view_history/similar_bucket/
+    /// index_tasks 等经既有 FK ON DELETE CASCADE 级联）→ 清空组。返回删除数。
+    /// 物理文件删除由调用方负责（失败容忍记账，见 ipc::duplicates）。
+    pub fn assets_delete_rows(&self, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let slots = (0..ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
+            &format!("UPDATE assets SET pair_asset_id = NULL WHERE pair_asset_id IN ({slots})"),
+            rusqlite::params_from_iter(ids.iter()),
+        )?;
+        let n = tx.execute(
+            &format!("DELETE FROM assets WHERE id IN ({slots})"),
+            rusqlite::params_from_iter(ids.iter()),
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    // —— 智能视图（0016：AssetFilters 序列化的命名存取，后端不解释）——
+
+    /// 智能视图列表（created_at DESC、id DESC）。
+    pub fn smart_view_list(&self) -> Result<Vec<SmartViewRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id, name, filters_json, created_at FROM smart_view \
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SmartViewRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                filters_json: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// 建智能视图（重名由 name UNIQUE 兜底，错误透传由 IPC 层转文案）。
+    pub fn smart_view_create(&self, name: &str, filters_json: &str) -> Result<SmartViewRow> {
+        let created_at = now_rfc3339();
+        self.0.execute(
+            "INSERT INTO smart_view (name, filters_json, created_at) VALUES (?1, ?2, ?3)",
+            params![name, filters_json, created_at],
+        )?;
+        Ok(SmartViewRow {
+            id: self.0.last_insert_rowid(),
+            name: name.to_string(),
+            filters_json: filters_json.to_string(),
+            created_at,
+        })
+    }
+
+    /// 删智能视图；不存在报错（幂等删除由 IPC 语义定）。
+    pub fn smart_view_delete(&self, id: i64) -> Result<()> {
+        let n = self
+            .0
+            .execute("DELETE FROM smart_view WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        Ok(())
     }
 
     /// EXIF 提取代际升级自愈（exif-gen-2）：重排**全部** photo/raw 资产的
@@ -2148,9 +2387,9 @@ fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Re
          created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
          lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
          white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
-         rating, flagged) \
+         rating, flagged, color_label, rejected) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)",
+         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
         params![
             a.path,
             a.filename,
@@ -2183,6 +2422,8 @@ fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Re
             a.gps_lon,
             a.rating,
             a.flagged,
+            a.color_label,
+            a.rejected,
         ],
     )?;
     let id: i64 = conn
@@ -2304,7 +2545,7 @@ fn map_album(row: &Row<'_>) -> Result<AlbumRow> {
 /// 分页与计数共用条件，避免筛选结果数和实际分页发生口径偏差。
 fn asset_filter_conditions(
     filters: &AssetFilters,
-    mut params_vec: &mut Vec<rusqlite::types::Value>,
+    params_vec: &mut Vec<rusqlite::types::Value>,
 ) -> Vec<String> {
     use rusqlite::types::Value as V;
     let mut conds: Vec<String> = Vec::new();
@@ -2313,6 +2554,8 @@ fn asset_filter_conditions(
         params_vec.push(v);
         s
     };
+    // —— 回收站排除（0016）：常规查询全链路默认不可见（唯一入口 trash_list）——
+    conds.push("a.in_trash = 0".to_string());
     // —— 多选 IN / 尾部匹配（各上限 16；空 = 不过滤）——
     let kinds: Vec<AssetKind> = filters.kinds.iter().take(16).copied().collect();
     let cameras: Vec<String> = filters.cameras.iter().take(16).cloned().collect();
@@ -2327,7 +2570,7 @@ fn asset_filter_conditions(
     if !kinds.is_empty() {
         let slots = kinds
             .iter()
-            .map(|k| slot(&mut params_vec, V::from(k.as_db_str().to_string())))
+            .map(|k| slot(params_vec, V::from(k.as_db_str().to_string())))
             .collect::<Vec<_>>()
             .join(", ");
         conds.push(format!("kind IN ({slots})"));
@@ -2335,7 +2578,7 @@ fn asset_filter_conditions(
     if !cameras.is_empty() {
         let slots = cameras
             .iter()
-            .map(|c| slot(&mut params_vec, V::from(c.clone())))
+            .map(|c| slot(params_vec, V::from(c.clone())))
             .collect::<Vec<_>>()
             .join(", ");
         conds.push(format!("camera IN ({slots})"));
@@ -2343,7 +2586,7 @@ fn asset_filter_conditions(
     if !lenses.is_empty() {
         let slots = lenses
             .iter()
-            .map(|l| slot(&mut params_vec, V::from(l.clone())))
+            .map(|l| slot(params_vec, V::from(l.clone())))
             .collect::<Vec<_>>()
             .join(", ");
         conds.push(format!("lens IN ({slots})"));
@@ -2354,7 +2597,7 @@ fn asset_filter_conditions(
         let frags = formats
             .iter()
             .map(|f| {
-                let s = slot(&mut params_vec, V::from(format!("%.{f}")));
+                let s = slot(params_vec, V::from(format!("%.{f}")));
                 format!("path LIKE {s}")
             })
             .collect::<Vec<_>>();
@@ -2363,11 +2606,11 @@ fn asset_filter_conditions(
 
     // —— 日期（RFC3339 定宽字典序比较即时间序）——
     if let Some(after) = &filters.captured_after {
-        let s = slot(&mut params_vec, V::from(after.clone()));
+        let s = slot(params_vec, V::from(after.clone()));
         conds.push(format!("captured_at >= {s}"));
     }
     if let Some(before) = &filters.captured_before {
-        let s = slot(&mut params_vec, V::from(before.clone()));
+        let s = slot(params_vec, V::from(before.clone()));
         conds.push(format!("captured_at <= {s}"));
     }
 
@@ -2387,21 +2630,21 @@ fn asset_filter_conditions(
     };
     range(
         &mut conds,
-        &mut params_vec,
+        params_vec,
         "CAST(focal_length AS REAL)",
         filters.focal_min,
         filters.focal_max,
     );
     range(
         &mut conds,
-        &mut params_vec,
+        params_vec,
         "CAST(iso AS REAL)",
         filters.iso_min.map(|v| v as f64),
         filters.iso_max.map(|v| v as f64),
     );
     range(
         &mut conds,
-        &mut params_vec,
+        params_vec,
         "CAST(f_number AS REAL)",
         filters.aperture_min,
         filters.aperture_max,
@@ -2410,14 +2653,14 @@ fn asset_filter_conditions(
     // 按写入格式解析——分数串取倒数，其余 CAST REAL。
     range(
             &mut conds,
-            &mut params_vec,
+            params_vec,
             "CASE WHEN exposure_time LIKE '1/%' THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) ELSE CAST(exposure_time AS REAL) END",
             filters.shutter_min,
             filters.shutter_max,
         );
     range(
         &mut conds,
-        &mut params_vec,
+        params_vec,
         "CAST(size AS REAL)",
         filters.size_min.map(|v| v as f64),
         filters.size_max.map(|v| v as f64),
@@ -2429,11 +2672,11 @@ fn asset_filter_conditions(
         // no_flash 族前缀 "no_flash"；"unknown" 显式取 NULL（未知 ≠ 未闪光）。
         match state.as_str() {
             "on" => {
-                let s = slot(&mut params_vec, V::from("%fired%".to_string()));
+                let s = slot(params_vec, V::from("%fired%".to_string()));
                 conds.push(format!("flash LIKE {s}"));
             }
             "off" => {
-                let s = slot(&mut params_vec, V::from("no_flash%".to_string()));
+                let s = slot(params_vec, V::from("no_flash%".to_string()));
                 conds.push(format!("(flash LIKE {s} AND flash IS NOT NULL)"));
             }
             "unknown" => conds.push("flash IS NULL".to_string()),
@@ -2457,7 +2700,7 @@ fn asset_filter_conditions(
     // —— 评分 / 旗标（0009；NOT NULL 无 NULL 态）——
     for (bound, cmp) in [(filters.rating_min, ">="), (filters.rating_max, "<=")] {
         if let Some(v) = bound {
-            let s = slot(&mut params_vec, V::from(v));
+            let s = slot(params_vec, V::from(v));
             conds.push(format!("rating {cmp} {s}"));
         }
     }
@@ -2478,10 +2721,23 @@ fn asset_filter_conditions(
 
     // —— 相册维度（0015）：EXISTS 求交，相册不存在命中空集 ——
     if let Some(album) = filters.album_id {
-        let s = slot(&mut params_vec, V::from(album));
+        let s = slot(params_vec, V::from(album));
         conds.push(format!(
             "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id AND ai.album_id = {s})"
         ));
+    }
+
+    // —— 颜色标签 / 拒绝状态（0016；与星级同层级的选片筛选）——
+    if let Some(label) = &filters.color_label {
+        let s = slot(params_vec, V::from(label.clone()));
+        conds.push(format!("color_label = {s}"));
+    }
+    if let Some(rej) = filters.rejected {
+        conds.push(if rej {
+            "rejected = 1".into()
+        } else {
+            "rejected = 0".into()
+        });
     }
 
     conds
@@ -2508,6 +2764,8 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         burst_id: row.get(16)?,
         flagged: row.get::<_, i64>(17)? != 0,
         rating: row.get(18)?,
+        color_label: row.get(19)?,
+        rejected: row.get::<_, i64>(20)? != 0,
     })
 }
 
@@ -2544,6 +2802,8 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
         gps_lon: row.get(28)?,
         rating: row.get(29)?,
         flagged: row.get(30)?,
+        color_label: row.get(31)?,
+        rejected: row.get(32)?,
     })
 }
 
