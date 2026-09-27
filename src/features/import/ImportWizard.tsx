@@ -7,6 +7,8 @@ import { motion } from "motion/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
+  albumCreate,
+  albumList,
   deviceFiles,
   folderScan,
   fsListDirs,
@@ -14,6 +16,7 @@ import {
   isIpcAvailable,
   kindFromName,
   thumbGet,
+  type AlbumDto,
   type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
@@ -1205,6 +1208,21 @@ export default function ImportWizard() {
   const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
+  // 「添加到相册（可选）」：无 / 选择已有 / 新建；albumId 随 import_start 负载下发
+  const [albumChoice, setAlbumChoice] = useState<"none" | "existing" | "new">("none");
+  const [albumId, setAlbumId] = useState<number | null>(null);
+  const [newAlbumName, setNewAlbumName] = useState("");
+  const [albums, setAlbums] = useState<AlbumDto[]>([]);
+  const [albumError, setAlbumError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void albumList().then((list) => {
+      if (!cancelled) setAlbums(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
@@ -1486,6 +1504,26 @@ export default function ImportWizard() {
 
   async function startImport(): Promise<void> {
     if (!device || !canStart) return;
+    // 「新建相册」分支：先建相册拿 id（重名等错误透出行内提示并中止启动）
+    let resolvedAlbumId: number | undefined;
+    if (albumChoice === "existing" && albumId !== null) {
+      resolvedAlbumId = albumId;
+    } else if (albumChoice === "new") {
+      const name = newAlbumName.trim();
+      if (name === "") {
+        setAlbumError(t("wizard.album.nameRequired"));
+        return;
+      }
+      const created = await albumCreate(name);
+      if (!created.ok) {
+        setAlbumError(created.error ?? t("albums.createFailed"));
+        return;
+      }
+      resolvedAlbumId = created.album.id;
+      setAlbums((prev) => [created.album, ...prev]);
+      setAlbumId(created.album.id);
+    }
+    setAlbumError(null);
     setStarting(true);
     setStartError(null);
     const plan: ImportPlan = {
@@ -1501,6 +1539,8 @@ export default function ImportWizard() {
         secondEnabled && secondRoot.trim() ? { targetRoot: secondRoot.trim(), dirTemplate } : undefined,
       // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
       include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
+      // 添加到相册（可选）：导入完成后新入库照片加入该相册
+      albumId: resolvedAlbumId,
     };
     // 竞态防护：sessionStarted 事件可能先于 import_start 返回到达，先挂待归位模式/源类型
     useImportStore.getState().setPendingJobMode(mode);
@@ -2033,6 +2073,93 @@ export default function ImportWizard() {
             />
             {t("wizard.skipImported")}
           </label>
+
+          {/* 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载下发 */}
+          <fieldset className="mt-4 flex flex-col gap-1" data-testid="wizard-album-section">
+            <legend className="mb-1 text-xs font-medium text-text-secondary">
+              {t("wizard.album.label")}
+            </legend>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
+              <input
+                type="radio"
+                name="wizard.albumChoice"
+                value="none"
+                checked={albumChoice === "none"}
+                onChange={() => {
+                  setAlbumChoice("none");
+                  setAlbumError(null);
+                }}
+                className="h-3 w-3 accent-[#F0A83C]"
+                data-testid="wizard-album-none"
+              />
+              {t("wizard.album.none")}
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
+              <input
+                type="radio"
+                name="wizard.albumChoice"
+                value="existing"
+                checked={albumChoice === "existing"}
+                onChange={() => {
+                  setAlbumChoice("existing");
+                  setAlbumError(null);
+                }}
+                className="h-3 w-3 accent-[#F0A83C]"
+                data-testid="wizard-album-existing"
+              />
+              {t("wizard.album.existing")}
+            </label>
+            {albumChoice === "existing" && (
+              <select
+                value={albumId === null ? "" : String(albumId)}
+                onChange={(e) => setAlbumId(e.target.value === "" ? null : Number(e.target.value))}
+                aria-label={t("wizard.album.existing")}
+                className="ml-5 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors focus:border-accent"
+                data-testid="wizard-album-select"
+              >
+                <option value="">{t("wizard.album.selectPlaceholder")}</option>
+                {albums.map((album) => (
+                  <option key={album.id} value={album.id}>
+                    {album.name}（{album.itemCount}）
+                  </option>
+                ))}
+              </select>
+            )}
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
+              <input
+                type="radio"
+                name="wizard.albumChoice"
+                value="new"
+                checked={albumChoice === "new"}
+                onChange={() => {
+                  setAlbumChoice("new");
+                  setAlbumError(null);
+                }}
+                className="h-3 w-3 accent-[#F0A83C]"
+                data-testid="wizard-album-new"
+              />
+              {t("wizard.album.new")}
+            </label>
+            {albumChoice === "new" && (
+              <input
+                type="text"
+                value={newAlbumName}
+                onChange={(e) => {
+                  setNewAlbumName(e.target.value);
+                  setAlbumError(null);
+                }}
+                placeholder={t("albums.newNamePlaceholder")}
+                aria-label={t("wizard.album.new")}
+                className="ml-5 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
+                data-testid="wizard-album-new-name"
+              />
+            )}
+            {albumError !== null && (
+              <p className="ml-5 text-[11px] text-red-400" role="alert" data-testid="wizard-album-error">
+                {albumError}
+              </p>
+            )}
+          </fieldset>
 
           {/* 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget） */}
           <div className="mt-4 flex flex-col gap-1.5">

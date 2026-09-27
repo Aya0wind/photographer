@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
@@ -10,16 +10,32 @@ import { useSemanticSearch, useSemanticGate } from "@/features/ai/useSemanticSea
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
-import { useAlbumCovers } from "../lib/albumCovers";
+import ContextMenu, { type ContextMenuEntry } from "@/features/gallery/components/ContextMenu";
+import AssetThumb from "@/features/gallery/components/AssetThumb";
+import {
+  albumAssetsPage,
+  albumCoverSet,
+  albumCreate,
+  albumDelete,
+  albumList,
+  albumRename,
+  type AlbumDto,
+  type AssetDto,
+} from "@/ipc/api";
+import { useAlbumCovers, useManualAlbumCovers } from "../lib/albumCovers";
 import { loadHiddenTags } from "../lib/hiddenTags";
+import AlbumDetailPage from "./AlbumDetailPage";
 
 /**
- * 智能相册（M4 v1 → M4.5 B1 标签卡片墙）：预置标签（40 个中文，飞牛词表对齐）
- * 作为语义搜索快捷入口。/albums → 标签卡片墙（封面=该词首条语义命中的缩略图，
- * 进页面后台并发 3 预取、失败/未命中静默渐变底+标签名）；/albums/:tag → 该词
- * 语义搜索结果（与搜索页语义模式同管线）。
+ * 相册页（手工 + 智能同页两区，2026-09 相册定案重构）：
+ * - 手工相册 = 纯引用照片组（同一照片可入多相册；删除只删引用）。/albums 手工区：
+ *   相册卡片网格（封面=coverAssetId 缩略图，未指定回退列表第一张，空相册占位图形）
+ *   + 名称 + 张数；卡片右键/悬浮菜单：重命名 / 设为封面 / 删除（红色确认）。
+ * - 智能相册 = 预置标签墙（40 个中文，飞牛词表对齐），自动管理的相册：点击进入
+ *   该标签的语义结果视图（/albums/:tag，行为照旧）。卡片样式与手工区统一。
+ * - 分区样式参考图库「按年分块」写法（区标题 + 内容块）；#tags 锚点保留。
+ * - /albums/:tag 参数为纯数字 → 手工相册详情页（AlbumDetailPage）。
  * 标签可见性：设置页画廊 tab 多选（localStorage smartphoto.albums.hiddenTags）。
- * #tags 锚点：侧栏「标签」入口指向 /albums#tags（v1 与相册同页同区块）。
  */
 
 /** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
@@ -68,8 +84,22 @@ export const SMART_ALBUM_TAGS: readonly string[] = [
   "雾",
 ];
 
-/** 标签封面块（img / 渐变底+标签名占位） */
-function TagCover({ url, tag }: { url: string | null | undefined; tag: string }) {
+// --- 共享卡片件（手工 / 智能同款样式） ------------------------------------------------
+
+/** 封面块（img / 渐变底+名称占位）；手工与智能相册卡片共用 */
+function CardCover({
+  url,
+  label,
+  testIdImg,
+  testIdFallback,
+  dataTag,
+}: {
+  url: string | null | undefined;
+  label: string;
+  testIdImg: string;
+  testIdFallback: string;
+  dataTag?: string;
+}) {
   if (url) {
     return (
       <img
@@ -78,16 +108,16 @@ function TagCover({ url, tag }: { url: string | null | undefined; tag: string })
         loading="lazy"
         decoding="async"
         className="h-full w-full object-cover"
-        data-testid="albums-tag-cover-img"
-        data-tag={tag}
+        data-testid={testIdImg}
+        data-tag={dataTag}
       />
     );
   }
   return (
     <div
       className="flex h-full w-full flex-col items-center justify-center gap-1 bg-gradient-to-br from-panel via-bg to-bg"
-      data-testid="albums-tag-cover-fallback"
-      data-tag={tag}
+      data-testid={testIdFallback}
+      data-tag={dataTag}
     >
       <svg
         viewBox="0 0 24 24"
@@ -104,51 +134,436 @@ function TagCover({ url, tag }: { url: string | null | undefined; tag: string })
         <path d="M4 8.5l4-4 4 4 4-4 4 4" />
         <path d="M4 15.5l4-4 4 4 4-4 4 4" />
       </svg>
-      <span className="px-1 text-center text-[10px] leading-tight text-text-muted">{tag}</span>
+      <span className="px-1 text-center text-[10px] leading-tight text-text-muted">{label}</span>
     </div>
   );
 }
 
-/** /albums：标签快捷入口网格（含封面；进页面后台批量预取） */
+/** 区块头（参考图库按年分块：标题 + 计数） */
+function SectionHeader({
+  title,
+  count,
+  testId,
+}: {
+  title: string;
+  count: number;
+  testId: string;
+}) {
+  return (
+    <header className="flex h-10 items-center gap-2" data-testid={testId}>
+      <h2 className="text-[13px] font-semibold text-text-primary">{title}</h2>
+      <span className="text-xs text-text-muted">{count}</span>
+    </header>
+  );
+}
+
+/** 通用小弹窗外壳（重命名/删除确认/封面选择共用）：居中模态，点背景关闭 */
+function ModalShell({
+  title,
+  onClose,
+  testId,
+  children,
+  footer,
+}: {
+  title: string;
+  onClose: () => void;
+  testId: string;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45"
+      onClick={onClose}
+      data-testid={`${testId}-overlay`}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="flex max-h-[70vh] w-[380px] flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={testId}
+      >
+        <div className="flex shrink-0 items-center justify-between border-b border-edge px-4 py-3">
+          <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="close"
+            className="rounded px-1.5 text-lg leading-none text-text-muted transition-colors hover:text-text-primary"
+            data-testid={`${testId}-close`}
+          >
+            ×
+          </button>
+        </div>
+        <div className="sp-scroll min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        {footer !== undefined && (
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-edge px-4 py-3">
+            {footer}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 手工相册卡片：封面 + 名称 + 张数；点击进详情；右键/悬浮 ⋯ 打开卡片菜单 */
+function ManualAlbumCard({
+  album,
+  cover,
+  onOpen,
+  onMenu,
+}: {
+  album: AlbumDto;
+  cover: string | null | undefined;
+  onOpen: (album: AlbumDto) => void;
+  onMenu: (at: { x: number; y: number }, album: AlbumDto) => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(album)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onOpen(album);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onMenu({ x: e.clientX, y: e.clientY }, album);
+      }}
+      className="group relative cursor-pointer select-none overflow-hidden rounded-lg border border-edge bg-surface text-center transition-colors hover:border-accent"
+      data-testid="albums-manual-card"
+      data-album-id={album.id}
+    >
+      <span className="block h-20 w-full border-b border-edge/60">
+        <CardCover url={cover} label={album.name} testIdImg="albums-manual-cover" testIdFallback="albums-manual-cover-fallback" />
+      </span>
+      <span className="block px-2 py-2 text-sm text-text-secondary">
+        <span className="block truncate" data-testid="albums-manual-name" title={album.name}>
+          {album.name}
+        </span>
+        <span className="block text-[11px] text-text-muted" data-testid="albums-manual-count">
+          {album.itemCount}
+        </span>
+      </span>
+      {/* 悬浮 ⋯ 菜单钮（与右键同一菜单） */}
+      <button
+        type="button"
+        aria-label="menu"
+        onClick={(e) => {
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          onMenu({ x: rect.left, y: rect.bottom + 2 }, album);
+        }}
+        className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded bg-black/45 text-xs leading-none text-white opacity-0 transition-opacity hover:bg-black/70 group-hover:opacity-100"
+        data-testid="albums-card-menu"
+        data-album-id={album.id}
+      >
+        ⋯
+      </button>
+    </div>
+  );
+}
+
+/** 设为封面选择弹窗：相册第一页照片网格，点选即设为封面；「恢复自动封面」= 清除指定 */
+function CoverPickerDialog({
+  album,
+  onClose,
+  onPicked,
+}: {
+  album: AlbumDto;
+  onClose: () => void;
+  onPicked: (assetId: number | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [assets, setAssets] = useState<AssetDto[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void albumAssetsPage(album.id, 0, 24).then((list) => {
+      if (!cancelled) setAssets(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [album.id]);
+
+  return (
+    <ModalShell title={t("albums.coverPickTitle", { name: album.name })} onClose={onClose} testId="album-cover-dialog">
+      {assets === null ? (
+        <p className="text-xs text-text-muted" data-testid="album-cover-loading">
+          {t("recent.loading")}
+        </p>
+      ) : assets.length === 0 ? (
+        <p className="text-xs text-text-muted" data-testid="album-cover-empty">
+          {t("albums.coverPickEmpty")}
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-4 gap-1.5" data-testid="album-cover-grid">
+            {assets.map((asset) => (
+              <button
+                key={asset.id}
+                type="button"
+                onClick={() => onPicked(asset.id)}
+                className="aspect-square overflow-hidden rounded-md border border-edge bg-panel/40 transition-colors hover:border-accent"
+                data-testid="album-cover-option"
+                data-asset-id={asset.id}
+              >
+                <AssetThumb asset={asset} size={240} className="h-full w-full" skeleton={false} />
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => onPicked(null)}
+            className="mt-3 w-full rounded-md border border-edge px-3 py-1.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="album-cover-auto"
+          >
+            {t("albums.coverAuto")}
+          </button>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+/** /albums：手工相册区 + 智能相册区（标签墙） */
 export function AlbumsIndexPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  // 语义门禁：相册即语义查询，模型未齐/索引未建时不进入（行内提示 + 跳设置）
+  // 语义门禁：智能相册即语义查询，模型未齐/索引未建时不进入（行内提示 + 跳设置）
   const gate = useSemanticGate();
   const [gateNotice, setGateNotice] = useState(false);
-  // 可见标签（挂载时读一次隐藏清单；设置页修改后下次进入生效）
+
+  // --- 手工相册清单 ---------------------------------------------------------------
+  const [albums, setAlbums] = useState<AlbumDto[]>([]);
+  const refreshAlbums = useCallback(async () => {
+    setAlbums(await albumList());
+  }, []);
+  useEffect(() => {
+    void refreshAlbums();
+  }, [refreshAlbums]);
+  const covers = useManualAlbumCovers(albums);
+
+  // --- 新建相册（工具条内联输入；重名错误行内提示） -----------------------------------
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createBusy, setCreateBusy] = useState(false);
+
+  async function submitCreate(): Promise<void> {
+    const name = newName.trim();
+    if (name === "" || createBusy) return;
+    setCreateBusy(true);
+    setCreateError(null);
+    const result = await albumCreate(name);
+    setCreateBusy(false);
+    if (!result.ok) {
+      // 重名等后端业务错误原文透传；invoke 不可用给通用文案
+      setCreateError(result.error ?? t("albums.createFailed"));
+      return;
+    }
+    setAlbums((prev) => [result.album, ...prev]);
+    setNewName("");
+    setCreating(false);
+    setCreateError(null);
+  }
+
+  // --- 卡片菜单（右键/悬浮 ⋯）与三个弹层 --------------------------------------------
+  const [cardMenu, setCardMenu] = useState<{ x: number; y: number; album: AlbumDto } | null>(null);
+  const [renaming, setRenaming] = useState<AlbumDto | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<AlbumDto | null>(null);
+  const [coverPicking, setCoverPicking] = useState<AlbumDto | null>(null);
+
+  async function submitRename(): Promise<void> {
+    if (!renaming) return;
+    const name = renameName.trim();
+    if (name === "") return;
+    const result = await albumRename(renaming.id, name);
+    if (!result.ok) {
+      setRenameError(result.error ?? t("albums.renameFailed"));
+      return;
+    }
+    setAlbums((prev) => prev.map((a) => (a.id === renaming.id ? { ...a, name } : a)));
+    setRenaming(null);
+  }
+
+  async function submitDelete(): Promise<void> {
+    if (!deleting) return;
+    const ok = await albumDelete(deleting.id);
+    if (ok) setAlbums((prev) => prev.filter((a) => a.id !== deleting.id));
+    setDeleting(null);
+  }
+
+  async function submitCover(album: AlbumDto, assetId: number | null): Promise<void> {
+    await albumCoverSet(album.id, assetId);
+    setCoverPicking(null);
+    // 本地即刻反映（covers 钩子按 coverAssetId 变化自动重取）
+    setAlbums((prev) =>
+      prev.map((a) => (a.id === album.id ? { ...a, coverAssetId: assetId } : a)),
+    );
+  }
+
+  function cardMenuEntries(album: AlbumDto): ContextMenuEntry[] {
+    return [
+      {
+        key: "rename",
+        label: t("albums.rename"),
+        onSelect: () => {
+          setRenaming(album);
+          setRenameName(album.name);
+          setRenameError(null);
+        },
+      },
+      {
+        key: "cover",
+        label: t("albums.setCover"),
+        onSelect: () => setCoverPicking(album),
+      },
+      {
+        key: "delete",
+        label: t("albums.delete"),
+        onSelect: () => setDeleting(album),
+        danger: true,
+      },
+    ];
+  }
+
+  // --- 智能相册（标签墙，行为照旧） ---------------------------------------------------
   const visibleTags = useMemo(
     () => SMART_ALBUM_TAGS.filter((tag) => !loadHiddenTags().includes(tag)),
     [],
   );
-  const covers = useAlbumCovers(visibleTags);
+  const tagCovers = useAlbumCovers(visibleTags);
 
   return (
     <div className="h-full overflow-y-auto" data-testid="albums-page">
-      <div className="mx-auto w-full max-w-[1600px] px-6 pt-4">
-        <div className="flex shrink-0 items-baseline gap-3">
+      <div className="mx-auto w-full max-w-[1600px] px-6 pt-4 pb-8">
+        {/* 顶部工具条：标题 + 新建相册 */}
+        <div className="flex shrink-0 items-center gap-3" data-testid="albums-toolbar">
           <h1 className="text-sm font-semibold text-text-primary">{t("albums.title")}</h1>
           <p className="text-xs text-text-muted">{t("albums.desc")}</p>
+          <div className="ml-auto shrink-0" data-testid="albums-create-area">
+            {creating ? (
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={newName}
+                    onChange={(e) => {
+                      setNewName(e.target.value);
+                      setCreateError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void submitCreate();
+                      }
+                      if (e.key === "Escape") setCreating(false);
+                    }}
+                    placeholder={t("albums.newNamePlaceholder")}
+                    aria-label={t("albums.createAlbum")}
+                    className="h-7 w-44 rounded-md border border-edge bg-panel/55 px-2 text-xs text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
+                    data-testid="albums-new-name"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void submitCreate()}
+                    disabled={createBusy || newName.trim() === ""}
+                    className="h-7 rounded-md bg-accent px-3 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:opacity-40"
+                    data-testid="albums-new-submit"
+                  >
+                    {t("albums.createAlbum")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreating(false);
+                      setCreateError(null);
+                    }}
+                    className="h-7 rounded-md border border-edge px-2.5 text-xs text-text-secondary transition-colors hover:border-text-muted"
+                    data-testid="albums-new-cancel"
+                  >
+                    {t("common.cancel")}
+                  </button>
+                </div>
+                {createError !== null && (
+                  <p className="text-[11px] text-red-400" role="alert" data-testid="albums-new-error">
+                    {createError}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setCreating(true);
+                  setNewName("");
+                  setCreateError(null);
+                }}
+                className="flex h-7 items-center gap-1.5 rounded-md border border-edge px-2.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                data-testid="albums-new-button"
+              >
+                <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+                  <path d="M8 3.5v9M3.5 8h9" />
+                </svg>
+                {t("albums.createAlbum")}
+              </button>
+            )}
+          </div>
         </div>
+
         {gateNotice && gate.reason !== null && (
           <div className="mt-3">
             <SemanticGateNotice reason={gate.reason} testId="albums-gate-notice" />
           </div>
         )}
-        {visibleTags.length === 0 ? (
-          <p className="mt-6 text-xs text-text-muted" data-testid="albums-all-hidden">
-            {t("albums.allHidden")}
-          </p>
-        ) : (
-          /* 标签卡片墙（#tags 锚点：侧栏「标签」入口指向 /albums#tags） */
-          <section
-            id="tags"
-            className="mt-4 scroll-mt-2"
-            data-testid="albums-tags-section"
-          >
-            <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-              {t("albums.tagsTitle")}
-            </h2>
+
+        {/* 手工相册区（区标题样式参考图库按年分块头） */}
+        <section className="mt-5" data-testid="albums-manual-section">
+          <SectionHeader
+            title={t("albums.manualTitle")}
+            count={albums.length}
+            testId="albums-manual-header"
+          />
+          {albums.length === 0 ? (
+            <p className="py-4 text-xs text-text-muted" data-testid="albums-manual-empty">
+              {t("albums.manualEmpty")}
+            </p>
+          ) : (
+            <div
+              className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2.5"
+              data-testid="albums-manual-grid"
+            >
+              {albums.map((album) => (
+                <ManualAlbumCard
+                  key={album.id}
+                  album={album}
+                  cover={covers[album.id]}
+                  onOpen={(a) => navigate(`/albums/${a.id}`)}
+                  onMenu={(at, a) => setCardMenu({ ...at, album: a })}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* 智能相册区（#tags 锚点：侧栏「标签」入口指向 /albums#tags） */}
+        <section id="tags" className="mt-6 scroll-mt-2" data-testid="albums-tags-section">
+          <SectionHeader
+            title={t("albums.smartTitle")}
+            count={visibleTags.length}
+            testId="albums-smart-header"
+          />
+          {visibleTags.length === 0 ? (
+            <p className="py-4 text-xs text-text-muted" data-testid="albums-all-hidden">
+              {t("albums.allHidden")}
+            </p>
+          ) : (
             <div
               className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2.5 pb-6"
               data-testid="albums-tag-grid"
@@ -158,7 +573,7 @@ export function AlbumsIndexPage() {
                   key={tag}
                   type="button"
                   onClick={() => {
-                    // 语义门禁：相册即语义查询，被拦时不导航（行内提示 + 跳设置）
+                    // 语义门禁：智能相册即语义查询，被拦时不导航（行内提示 + 跳设置）
                     if (gate.blocked) {
                       setGateNotice(true);
                       return;
@@ -170,7 +585,13 @@ export function AlbumsIndexPage() {
                   data-tag={tag}
                 >
                   <span className="block h-20 w-full border-b border-edge/60">
-                    <TagCover url={covers[tag]} tag={tag} />
+                    <CardCover
+                      url={tagCovers[tag]}
+                      label={tag}
+                      testIdImg="albums-tag-cover-img"
+                      testIdFallback="albums-tag-cover-fallback"
+                      dataTag={tag}
+                    />
                   </span>
                   <span
                     className="block px-2 py-2 text-sm text-text-secondary transition-colors group-hover:text-accent"
@@ -181,11 +602,124 @@ export function AlbumsIndexPage() {
                 </button>
               ))}
             </div>
-          </section>
-        )}
+          )}
+        </section>
       </div>
+
+      {/* 卡片右键/悬浮菜单 */}
+      {cardMenu && (
+        <ContextMenu
+          at={{ x: cardMenu.x, y: cardMenu.y }}
+          entries={cardMenuEntries(cardMenu.album)}
+          onClose={() => setCardMenu(null)}
+          testId="albums-card-context-menu"
+        />
+      )}
+
+      {/* 重命名对话框（重名错误行内提示） */}
+      {renaming && (
+        <ModalShell
+          title={t("albums.renameTitle")}
+          onClose={() => setRenaming(null)}
+          testId="album-rename-dialog"
+          footer={
+            <>
+              <button
+                type="button"
+                onClick={() => setRenaming(null)}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
+                data-testid="album-rename-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitRename()}
+                disabled={renameName.trim() === "" || renameName.trim() === renaming.name}
+                className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                data-testid="album-rename-confirm"
+              >
+                {t("albums.renameConfirm")}
+              </button>
+            </>
+          }
+        >
+          <input
+            autoFocus
+            type="text"
+            value={renameName}
+            onChange={(e) => {
+              setRenameName(e.target.value);
+              setRenameError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void submitRename();
+              }
+            }}
+            aria-label={t("albums.renameTitle")}
+            className="h-8 w-full rounded-md border border-edge bg-bg px-2.5 text-xs text-text-primary outline-none transition-colors focus:border-accent"
+            data-testid="album-rename-input"
+          />
+          {renameError !== null && (
+            <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="album-rename-error">
+              {renameError}
+            </p>
+          )}
+        </ModalShell>
+      )}
+
+      {/* 删除确认（红色；仅移除引用，照片保留在图库） */}
+      {deleting && (
+        <ModalShell
+          title={t("albums.deleteTitle", { name: deleting.name })}
+          onClose={() => setDeleting(null)}
+          testId="album-delete-dialog"
+          footer={
+            <>
+              <button
+                type="button"
+                onClick={() => setDeleting(null)}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
+                data-testid="album-delete-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitDelete()}
+                className="rounded-md bg-red-500/90 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-500"
+                data-testid="album-delete-confirm"
+              >
+                {t("albums.deleteConfirm")}
+              </button>
+            </>
+          }
+        >
+          <p className="text-xs leading-relaxed text-text-secondary" data-testid="album-delete-hint">
+            {t("albums.deleteHint", { count: deleting.itemCount })}
+          </p>
+        </ModalShell>
+      )}
+
+      {/* 设为封面选择 */}
+      {coverPicking && (
+        <CoverPickerDialog
+          album={coverPicking}
+          onClose={() => setCoverPicking(null)}
+          onPicked={(assetId) => void submitCover(coverPicking, assetId)}
+        />
+      )}
     </div>
   );
+}
+
+/** /albums/:tag 参数分发：纯数字 = 手工相册详情；其余 = 智能标签语义结果 */
+export function AlbumEntryPage() {
+  const { tag = "" } = useParams();
+  if (/^\d+$/.test(tag)) return <AlbumDetailPage />;
+  return <AlbumTagPage />;
 }
 
 /** /albums/:tag：该标签的语义搜索结果（自动执行；输入框可改词重搜，不回写路由） */
@@ -196,7 +730,7 @@ export function AlbumTagPage() {
   // 语义门禁：被拦时不自动执行、输入框回车不发查询（文字保留）
   const gate = useSemanticGate();
   const [lastQuery, setLastQuery] = useState(tag);
-  // 语义结果同样可点开查看器（与画廊/搜索页一致）
+  // 标签结果同样可点开查看器（与画廊/搜索页一致）
   const groups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
 

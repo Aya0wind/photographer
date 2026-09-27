@@ -3,7 +3,13 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
-import { assetFlagSet, clipboardCopyFiles, revealInExplorer, type AssetDto } from "@/ipc/api";
+import {
+  albumRemoveAssets,
+  assetFlagSet,
+  clipboardCopyFiles,
+  revealInExplorer,
+  type AssetDto,
+} from "@/ipc/api";
 
 /**
  * 自定义右键菜单（全局 contextmenu 已被 nativeBehaviorGuard 屏蔽）：
@@ -98,19 +104,27 @@ export default function ContextMenu({
 
 /**
  * 资产右键菜单（画廊瓦片 / 查看器大图共用）：在资源管理器中显示 /
- * 复制文件到剪贴板 / 旗标。动作对 targets 全部资产逐个执行，单个失败
- * 不中断其余（reveal 非 Tauri 环境静默；clipboard 后端在途，失败静默）。
+ * 复制文件到剪贴板 / 旗标 / 加入相册（③ 全局入口，onAddToAlbum 提供时显示）。
+ * 相册上下文（相册详情页，albumContext 提供时）额外多一项「从相册移除」。
+ * 动作对 targets 全部资产逐个执行，单个失败不中断其余（reveal 非 Tauri 环境
+ * 静默；clipboard 后端在途，失败静默）。
  */
 export function AssetContextMenu({
   at,
   assets,
   onClose,
   testId = "asset-context-menu",
+  onAddToAlbum,
+  albumContext,
 }: {
   at: { x: number; y: number };
   assets: AssetDto[];
   onClose: () => void;
   testId?: string;
+  /** 「加入相册」入口回调（弹窗由上层挂载）；不传则不显示该项 */
+  onAddToAlbum?: (assets: AssetDto[]) => void;
+  /** 相册上下文（相册详情页）：显示「从相册移除」（danger） */
+  albumContext?: { albumId: number; onRemoved: () => void };
 }) {
   const { t } = useTranslation();
 
@@ -147,17 +161,36 @@ export function AssetContextMenu({
     }
   }
 
+  /** 相册上下文：从相册移除引用（仅删引用，照片保留图库），完成后上层刷新 */
+  async function removeFromAlbum(): Promise<void> {
+    if (!albumContext) return;
+    const ok = await albumRemoveAssets(
+      albumContext.albumId,
+      assets.map((a) => a.id),
+    );
+    if (ok) albumContext.onRemoved();
+  }
+
   const count = assets.length;
-  return (
-    <ContextMenu
-      at={at}
-      onClose={onClose}
-      testId={testId}
-      entries={[
-        { key: "reveal", label: t("context.reveal"), onSelect: () => void reveal() },
-        { key: "copy", label: t("context.copyFiles"), onSelect: () => void copyFiles() },
-        { key: "flag", label: count > 1 ? t("context.flagMany", { count }) : t("context.flag"), onSelect: () => void flag() },
-      ]}
-    />
-  );
+  const entries: ContextMenuEntry[] = [
+    { key: "reveal", label: t("context.reveal"), onSelect: () => void reveal() },
+    { key: "copy", label: t("context.copyFiles"), onSelect: () => void copyFiles() },
+    { key: "flag", label: count > 1 ? t("context.flagMany", { count }) : t("context.flag"), onSelect: () => void flag() },
+  ];
+  if (onAddToAlbum) {
+    entries.push({
+      key: "add-album",
+      label: count > 1 ? t("albums.addManyTo", { count }) : t("albums.addToAlbum"),
+      onSelect: () => onAddToAlbum(assets),
+    });
+  }
+  if (albumContext) {
+    entries.push({
+      key: "remove-album",
+      label: count > 1 ? t("albums.removeManyFrom", { count }) : t("albums.removeFromAlbum"),
+      onSelect: () => void removeFromAlbum(),
+      danger: true,
+    });
+  }
+  return <ContextMenu at={at} onClose={onClose} testId={testId} entries={entries} />;
 }

@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useTranslation } from "react-i18next";
 
 import {
+  albumList,
   cameraList,
   formatList,
   lensList,
+  type AlbumDto,
   type AssetCameraCount,
   type AssetFilters,
   type AssetFormatCount,
@@ -16,8 +18,8 @@ import {
  * 筛选面板（M4.5 自 SearchPage 抽取的共享组件，画廊合并后唯一消费方）：
  * - 状态：SearchInputs 单对象（数字区间为原始字符串，构建时校验）；序列化键即防抖键
  * - UI：两行网格——类型/相机/镜头/格式（分段+勾选下拉）、方向/闪光灯/GPS（分段）、
- *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段
- * - 清单：cameraList 挂载拉一次；lensList/formatList 面板首次展开才拉（少打 IPC）
+ *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段、相册（单选下拉）
+ * - 清单：cameraList/albumList 挂载拉一次；lensList/formatList 面板首次展开才拉（少打 IPC）
  * - chips：激活条件清单（每个可单独移除 + 一键清空），由 FilterChipsRow 渲染
  */
 
@@ -71,6 +73,8 @@ export interface SearchInputs {
   /** MB（构建 filters 时转字节） */
   sizeMin: string;
   sizeMax: string;
+  /** 所属相册（单选；name 随行携带供 chips 直接展示，序列化进防抖键） */
+  album: { id: number; name: string } | null;
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
@@ -93,6 +97,7 @@ export const EMPTY_INPUTS: SearchInputs = {
   shutterMax: "",
   sizeMin: "",
   sizeMax: "",
+  album: null,
 };
 
 /** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；视频=video；全部=不传） */
@@ -196,6 +201,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (sizeMin !== undefined) filters.sizeMin = sizeMin;
   const sizeMax = mbToBytes(inputs.sizeMax);
   if (sizeMax !== undefined) filters.sizeMax = sizeMax;
+  if (inputs.album !== null) filters.albumId = inputs.album.id;
   return filters;
 }
 
@@ -399,8 +405,117 @@ function FilterDropdown({
   );
 }
 
-/** min-max 数字区间输入（焦段/ISO/光圈/快门/文件大小共用） */
-function RangeField({
+/** 相册单选下拉（所属相册维度；FilterDropdown 的单选版） */
+function AlbumDropdown({
+  albums,
+  selected,
+  onSelect,
+  testId,
+}: {
+  albums: AlbumDto[];
+  selected: { id: number; name: string } | null;
+  onSelect: (next: { id: number; name: string } | null) => void;
+  testId: string;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+  return (
+    <div ref={rootRef} className="relative min-w-0">
+      <div
+        className={`inline-flex h-7 min-w-32 items-stretch overflow-hidden rounded-md border bg-panel/55 transition-colors ${
+          selected !== null || open
+            ? "border-accent bg-accent/10 text-accent"
+            : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center justify-between gap-1.5 px-2 text-[11px]"
+          data-testid={`${testId}-button`}
+        >
+          <span className="max-w-[116px] truncate">{selected ? selected.name : t("search.albumAll")}</span>
+          <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3.5 6l4.5 4.5L12.5 6" />
+          </svg>
+        </button>
+        {selected !== null && (
+          <button
+            type="button"
+            onClick={() => onSelect(null)}
+            aria-label={`${t("search.album")} ×`}
+            title={`${t("search.album")} ×`}
+            className="flex w-7 shrink-0 items-center justify-center border-l border-accent/25 text-sm text-text-muted transition-colors hover:bg-accent/15 hover:text-accent"
+            data-testid={`${testId}-clear`}
+          >
+            ×
+          </button>
+        )}
+      </div>
+      {open && (
+        <div
+          className="sp-scroll absolute left-0 top-8 z-20 max-h-72 w-64 overflow-y-auto rounded-xl border border-edge bg-surface p-1.5 shadow-2xl shadow-black/40"
+          data-testid={`${testId}-menu`}
+        >
+          {albums.length === 0 ? (
+            <p className="px-2 py-2 text-[11px] leading-relaxed text-text-muted">
+              {t("search.albumEmpty")}
+            </p>
+          ) : (
+            albums.map((album) => {
+              const active = selected?.id === album.id;
+              return (
+                <button
+                  key={album.id}
+                  type="button"
+                  onClick={() => onSelect(active ? null : { id: album.id, name: album.name })}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-panel/40"
+                  data-testid={`${testId}-option`}
+                  data-album-id={album.id}
+                  data-selected={active}
+                >
+                  <span
+                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                      active ? "border-accent bg-accent" : "border-text-muted/70"
+                    }`}
+                    aria-hidden="true"
+                  >
+                    {active && <span className="h-1.5 w-1.5 rounded-full bg-black" />}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-text-secondary" title={album.name}>
+                    {album.name}
+                  </span>
+                  <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-text-muted">
+                    {album.itemCount}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** min-max 数字区间输入（焦段/ISO/光圈/快门/文件大小共用） */function RangeField({
   label,
   unit,
   min,
@@ -468,20 +583,24 @@ function FieldRow({ label, children }: { label: string; children: ReactNode }) {
 
 // --- 面板与 chips 行 ----------------------------------------------------------------
 
-/** 筛选面板（受控：inputs/onPatch 由调用方持有；清单自取） */
+/** 筛选面板（受控：inputs/onPatch 由调用方持有；清单自取）。
+ *  hideAlbum=相册详情页传入：隐藏「所属相册」维度（详情页本身已在相册上下文内）。 */
 export function FilterPanel({
   inputs,
   onPatch,
+  hideAlbum = false,
 }: {
   inputs: SearchInputs;
   onPatch: (patch: Partial<SearchInputs>) => void;
+  hideAlbum?: boolean;
 }) {
   const { t } = useTranslation();
 
-  // 相机清单挂载拉一次；镜头/格式首次渲染面板才拉（面板即「首次展开」）
+  // 相机/相册清单挂载拉一次；镜头/格式首次渲染面板才拉（面板即「首次展开」）
   const [cameraOptions, setCameraOptions] = useState<AssetCameraCount[]>([]);
   const [lensOptions, setLensOptions] = useState<AssetLensCount[]>([]);
   const [formatOptions, setFormatOptions] = useState<AssetFormatCount[]>([]);
+  const [albumOptions, setAlbumOptions] = useState<AlbumDto[]>([]);
   useEffect(() => {
     let cancelled = false;
     void cameraList().then((list) => {
@@ -493,10 +612,15 @@ export function FilterPanel({
     void formatList().then((list) => {
       if (!cancelled) setFormatOptions(list);
     });
+    if (!hideAlbum) {
+      void albumList().then((list) => {
+        if (!cancelled) setAlbumOptions(list);
+      });
+    }
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [hideAlbum]);
 
   function applyQuickRange(key: QuickRangeKey): void {
     const [qFrom, qTo] = quickRange(key);
@@ -578,6 +702,16 @@ export function FilterPanel({
             testId="search-gps"
           />
         </FieldRow>
+        {!hideAlbum && (
+          <FieldRow label={t("search.album")}>
+            <AlbumDropdown
+              albums={albumOptions}
+              selected={inputs.album}
+              onSelect={(album) => onPatch({ album })}
+              testId="search-album"
+            />
+          </FieldRow>
+        )}
         <FieldRow label={t("search.focal")}>
           <RangeField
             label={t("search.focal")}
@@ -770,6 +904,9 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
   rangeChip("aperture", "f/", inputs.apertureMin, inputs.apertureMax, "apertureMin", "apertureMax");
   rangeChip("shutter", "", inputs.shutterMin, inputs.shutterMax, "shutterMin", "shutterMax");
   rangeChip("size", "MB", inputs.sizeMin, inputs.sizeMax, "sizeMin", "sizeMax");
+  if (inputs.album !== null) {
+    chips.push({ key: "album", label: inputs.album.name, patch: { ...inputs, album: null } });
+  }
   return chips;
 }
 

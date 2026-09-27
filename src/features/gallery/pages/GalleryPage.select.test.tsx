@@ -12,6 +12,8 @@ import { clearGallerySnapshotForTests } from "../lib/galleryCache";
 import { resetViewMarkForTests } from "../lib/viewMark";
 import { SHORTCUTS_HINT_KEY } from "../components/ShortcutsHint";
 import {
+  albumAddAssets,
+  albumList,
   assetFlagSet,
   assetGroupDates,
   assetRatingSet,
@@ -39,6 +41,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetFlagSet: vi.fn(),
     clipboardCopyFiles: vi.fn(),
     revealInExplorer: vi.fn(),
+    albumList: vi.fn(),
+    albumAddAssets: vi.fn(),
   };
 });
 
@@ -61,6 +65,8 @@ const flagMock = vi.mocked(assetFlagSet);
 const copyMock = vi.mocked(clipboardCopyFiles);
 const revealBatchMock = vi.mocked(revealInExplorer);
 const revealMock = vi.mocked(revealItemInDir);
+const albumListMock = vi.mocked(albumList);
+const albumAddMock = vi.mocked(albumAddAssets);
 
 function makeAsset(id: number): AssetDto {
   return {
@@ -117,6 +123,10 @@ beforeEach(() => {
   copyMock.mockReset().mockResolvedValue(undefined);
   revealBatchMock.mockReset().mockResolvedValue(1);
   revealMock.mockReset().mockResolvedValue(undefined);
+  albumListMock.mockReset().mockResolvedValue([
+    { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 0, createdAt: "2026-09-01" },
+  ]);
+  albumAddMock.mockReset().mockResolvedValue(1);
   resetThumbPipelineForTests();
   clearGallerySnapshotForTests();
   resetViewMarkForTests();
@@ -330,6 +340,69 @@ describe("画廊：瓦片右键菜单", () => {
     expect(await screen.findByTestId("asset-context-menu")).toBeInTheDocument();
     fireEvent.mouseDown(document.body);
     await waitFor(() => expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument());
+  });
+});
+
+// --- 加入相册入口（③ 全局：多选操作条 + 瓦片右键菜单） -----------------------------------
+
+describe("画廊：加入相册入口", () => {
+  it("多选操作条「加入相册」→ 弹窗（已选计数）确定 → album_add_assets(相册, 选中集)", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(1));
+    await user.click(tileOf(2));
+    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "2");
+
+    await user.click(screen.getByTestId("selection-add-album"));
+    const dialog = await screen.findByTestId("add-to-album-dialog");
+    expect(within(dialog).getByText("2 张")).toBeInTheDocument();
+
+    const option = (await within(dialog).findAllByTestId("add-to-album-option"))[0];
+    await user.click(option);
+    await user.click(within(dialog).getByTestId("add-to-album-confirm"));
+
+    await waitFor(() => expect(albumAddMock).toHaveBeenCalledWith(3, [1, 2]));
+    // toast：1 新增 + 1 已在相册
+    expect(await within(dialog).findByTestId("add-to-album-toast")).toHaveTextContent(
+      "已加入 1 张（1 张已在相册）",
+    );
+  });
+
+  it("右键菜单「加入相册」项：多选语义=作用于全部选中；无多选=该资产", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    // 非多选：右键单项 → 菜单含加入相册
+    fireEvent.contextMenu(tileOf(2), { clientX: 100, clientY: 100 });
+    let menu = await screen.findByTestId("asset-context-menu");
+    await user.click(within(menu).getByTestId("asset-context-menu-item-add-album"));
+    let dialog = await screen.findByTestId("add-to-album-dialog");
+    await user.click((await within(dialog).findAllByTestId("add-to-album-option"))[0]);
+    await user.click(within(dialog).getByTestId("add-to-album-confirm"));
+    await waitFor(() => expect(albumAddMock).toHaveBeenCalledWith(3, [2]));
+
+    // toast 关闭后弹窗自动收起（1.4s）；等弹窗退场再走多选分支
+    await waitFor(
+      () => expect(screen.queryByTestId("add-to-album-dialog")).not.toBeInTheDocument(),
+      { timeout: 3000 },
+    );
+
+    // 多选语义：右键选中瓦片 → 全部选中集
+    await user.click(checkOf(1));
+    await user.click(checkOf(3));
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    menu = await screen.findByTestId("asset-context-menu");
+    expect(within(menu).getByTestId("asset-context-menu-item-add-album")).toHaveTextContent(
+      "加入相册（2 张）",
+    );
+    await user.click(within(menu).getByTestId("asset-context-menu-item-add-album"));
+    dialog = await screen.findByTestId("add-to-album-dialog");
+    await user.click((await within(dialog).findAllByTestId("add-to-album-option"))[0]);
+    await user.click(within(dialog).getByTestId("add-to-album-confirm"));
+    await waitFor(() => expect(albumAddMock).toHaveBeenLastCalledWith(3, [1, 3]));
   });
 });
 

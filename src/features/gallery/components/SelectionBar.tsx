@@ -2,13 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
-import { assetFlagSet, assetRatingSet, revealInExplorer, type AssetDto } from "@/ipc/api";
+import { albumRemoveAssets, assetFlagSet, assetRatingSet, revealInExplorer, type AssetDto } from "@/ipc/api";
 
 /**
  * 多选浮动操作条（M4.5，画廊选择模式）：顶部居中浮条——已选 N 张 |
  * 收藏（星标=rating 5）/ 旗标 / 分享（在资源管理器中显示 = opener reveal、
- * 复制文件路径）/ 取消。动作对全部选中资产循环调用；失败静默（乐观 UI）。
+ * 复制文件路径）/ 加入相册（③ 全局入口；弹窗由上层挂载）/ 取消。动作对
+ * 全部选中资产循环调用；失败静默（乐观 UI）。
+ * 相册上下文（相册详情页）：额外多一项「从相册移除」——只删引用，照片保留图库。
  */
+
+/** 相册上下文（相册详情页传入）：操作条多一项「从相册移除」 */
+export interface SelectionAlbumContext {
+  albumId: number;
+  albumName: string;
+  /** 移除完成回调（详情页刷新列表与计数） */
+  onRemoved: () => void;
+}
 
 function GlyphStar({ filled }: { filled: boolean }) {
   return (
@@ -64,14 +74,39 @@ function GlyphShare() {
   );
 }
 
+function GlyphAlbum() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="12"
+      height="12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="1.5" y="3" width="13" height="10.5" rx="1.5" />
+      <path d="M1.5 6h13M5 1.5h6" />
+    </svg>
+  );
+}
+
 export default function SelectionBar({
   count,
   assets,
   onDone,
+  onAddToAlbum,
+  album,
 }: {
   count: number;
   assets: AssetDto[];
   onDone: () => void;
+  /** 「加入相册」入口回调（弹窗由上层挂载）；不传则不显示该按钮 */
+  onAddToAlbum?: (assets: AssetDto[]) => void;
+  /** 相册上下文（相册详情页）：额外显示「从相册移除」 */
+  album?: SelectionAlbumContext;
 }) {
   const { t } = useTranslation();
   const [shareOpen, setShareOpen] = useState(false);
@@ -133,6 +168,21 @@ export default function SelectionBar({
     } catch {
       flash(t("selection.copyFailed"));
     }
+  }
+
+  /** 相册上下文：从相册移除引用（只删引用，照片保留图库），完成后上层刷新 */
+  async function removeFromAlbum(): Promise<void> {
+    if (!album) return;
+    const ok = await albumRemoveAssets(
+      album.albumId,
+      assets.map((a) => a.id),
+    );
+    if (!ok) {
+      flash(t("albums.removeFailed"));
+      return;
+    }
+    flash(t("albums.removedToast", { count: assets.length }));
+    album.onRemoved();
   }
 
   return (
@@ -202,6 +252,31 @@ export default function SelectionBar({
             </div>
           )}
         </div>
+        <span className="h-4 w-px bg-edge" aria-hidden="true" />
+        {onAddToAlbum && (
+          <button
+            type="button"
+            onClick={() => onAddToAlbum(assets)}
+            disabled={count === 0}
+            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
+            data-testid="selection-add-album"
+          >
+            <GlyphAlbum />
+            {t("albums.addToAlbum")}
+          </button>
+        )}
+        {album && (
+          <button
+            type="button"
+            onClick={() => void removeFromAlbum()}
+            disabled={count === 0}
+            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-red-400 transition-colors hover:bg-red-400/10 disabled:opacity-40"
+            title={t("albums.removeFromAlbumHint")}
+            data-testid="selection-remove-album"
+          >
+            {t("albums.removeFromAlbum")}
+          </button>
+        )}
         <span className="h-4 w-px bg-edge" aria-hidden="true" />
         <button
           type="button"

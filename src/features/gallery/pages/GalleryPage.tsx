@@ -40,6 +40,7 @@ import TileSizeSwitch from "../components/TileSizeSwitch";
 import YearRail from "../components/YearRail";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
+import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 import {
   FilterChipsRow,
   FilterPanel,
@@ -436,6 +437,8 @@ export default function GalleryPage() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(
     null,
   );
+  // --- 「加入相册」弹窗（多选操作条 / 右键菜单共用入口，③ 全局） -----------------------
+  const [addToAlbumTargets, setAddToAlbumTargets] = useState<AssetDto[] | null>(null);
   const assetsById = useMemo(() => {
     const map = new Map<number, AssetDto>();
     for (const group of viewerGroups) for (const a of group.assets) map.set(a.id, a);
@@ -765,21 +768,31 @@ export default function GalleryPage() {
         )}
       </div>
 
-      {/* 多选浮动操作条（已选 N | 收藏/旗标/分享/取消） */}
+      {/* 多选浮动操作条（已选 N | 收藏/旗标/分享/加入相册/取消） */}
       {selecting && (
         <SelectionBar
           count={selectedAssets.length}
           assets={selectedAssets}
           onDone={exitSelection}
+          onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
         />
       )}
 
-      {/* 瓦片右键菜单（自定义；多选态作用于全部选中） */}
+      {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含「加入相册」） */}
       {ctxMenu && (
         <AssetContextMenu
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
           assets={ctxMenu.assets}
           onClose={() => setCtxMenu(null)}
+          onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
+        />
+      )}
+
+      {/* 「加入相册」选择弹窗（toast 报实际新增数与已在相册数） */}
+      {addToAlbumTargets !== null && (
+        <AddToAlbumDialog
+          assets={addToAlbumTargets}
+          onClose={() => setAddToAlbumTargets(null)}
         />
       )}
 

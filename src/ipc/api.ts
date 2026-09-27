@@ -48,6 +48,8 @@ export interface ImportPlan {
   /** 本次导入的文件清单（rel_path 列表）——向导勾选结果，引擎只导入集合内的文件；
    *  省略 = 全部（历史计划兼容）。 */
   include?: string[];
+  /** 导入完成后把新入库照片加入该相册（向导「添加到相册」步骤；省略 = 不加入） */
+  albumId?: number;
 }
 
 export type JobStatus = "running" | "paused" | "done" | "cancelled" | "failed";
@@ -216,6 +218,8 @@ export interface AssetFilters {
   /** 文件大小区间（字节，含端点） */
   sizeMin?: number;
   sizeMax?: number;
+  /** 所属相册（手工相册引用维度；省略 = 不过滤）。相册详情页内不重复携带 */
+  albumId?: number;
 }
 
 /** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
@@ -1149,6 +1153,126 @@ export async function sidebarCounts(): Promise<SidebarCounts | null> {
     };
   } catch {
     return null;
+  }
+}
+
+// --- 手工相册（纯引用照片组）契约 -----------------------------------------------------
+// 相册 = 照片引用集合：同一照片可入多个相册；删除相册/移出相册只删引用，
+// 永不动库内文件（后端 lane 并行实现中，前端按此契约封装）。
+
+/** 手工相册（album_list 返回；createdAt DESC 由后端保证） */
+export interface AlbumDto {
+  id: number;
+  name: string;
+  /** 封面资产 id（album_cover_set 指定；null=未指定，前端回退相册第一张） */
+  coverAssetId: number | null;
+  /** 相册内照片数（引用数） */
+  itemCount: number;
+  /** 创建时间（ISO 8601） */
+  createdAt: string;
+}
+
+/** 相册写操作结果：ok=false 时 error 为后端 Err 文案（如重名）；null = invoke 不可用 */
+export type AlbumOpResult = { ok: true } | { ok: false; error: string | null };
+export type AlbumCreateResult = { ok: true; album: AlbumDto } | { ok: false; error: string | null };
+
+/** 相册清单（album_list）；命令失败/非数组回退 []——UI 自然降级空态 */
+export async function albumList(): Promise<AlbumDto[]> {
+  try {
+    const list = await ipc<AlbumDto[] | null>("album_list");
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      (a): a is AlbumDto =>
+        typeof a?.id === "number" && Number.isFinite(a.id) && typeof a?.name === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** 新建相册（重名等业务错误由后端透传，调用方行内提示） */
+export async function albumCreate(name: string): Promise<AlbumCreateResult> {
+  try {
+    const album = await ipc<AlbumDto>("album_create", { name });
+    if (album === null || typeof album !== "object" || typeof album.id !== "number") {
+      return { ok: false, error: null };
+    }
+    return { ok: true, album };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 重命名相册（重名等业务错误透传） */
+export async function albumRename(id: number, name: string): Promise<AlbumOpResult> {
+  try {
+    await ipc<void>("album_rename", { id, name });
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 删除相册（仅删引用组，照片保留在图库）；失败 false（调用方按需提示） */
+export async function albumDelete(id: number): Promise<boolean> {
+  try {
+    await ipc<void>("album_delete", { id });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 设置相册封面（assetId=null 清除封面回退首张）；失败 false */
+export async function albumCoverSet(id: number, assetId: number | null): Promise<boolean> {
+  try {
+    await ipc<void>("album_cover_set", { id, assetId });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 批量加入相册，返回实际新增数（已引用幂等跳过）；失败 null（调用方提示加入失败） */
+export async function albumAddAssets(id: number, assetIds: number[]): Promise<number | null> {
+  try {
+    const added = await ipc<number>("album_add_assets", { id, assetIds });
+    return typeof added === "number" && Number.isFinite(added) ? added : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 从相册移除引用（仅删引用，照片保留在图库）；失败 false */
+export async function albumRemoveAssets(id: number, assetIds: number[]): Promise<boolean> {
+  try {
+    await ipc<void>("album_remove_assets", { id, assetIds });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 相册内照片分页（album_assets_page；keyset 与 assets_page 同风格：afterId=上一页
+ *  末条 id、首页 0；按拍摄时间排序由后端保证；filters 透传可选筛选）。
+ *  失败/非数组回退 []。 */
+export async function albumAssetsPage(
+  id: number,
+  afterId: number,
+  limit: number,
+  filters?: AssetFilters,
+): Promise<AssetDto[]> {
+  try {
+    const payload: Record<string, unknown> = { id, afterId, limit };
+    if (filters && Object.keys(filters).length > 0) payload.filters = filters;
+    const list = await ipc<AssetDto[] | null>("album_assets_page", payload);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
   }
 }
 

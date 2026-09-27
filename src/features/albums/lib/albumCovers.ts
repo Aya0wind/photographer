@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { assetThumbGet, searchSemantic } from "@/ipc/api";
+import { albumAssetsPage, assetThumbGet, searchSemantic, type AlbumDto } from "@/ipc/api";
 
 /**
  * 智能相册标签封面（/albums）：自动用「该标签语义搜索第一条命中」的缩略图做封面。
@@ -69,6 +69,45 @@ export function useAlbumCovers(tags: readonly string[]): Record<string, string |
       cancelled = true;
     };
   }, [tags]);
+
+  return covers;
+}
+
+/**
+ * 手工相册封面（/albums 手工相册区）：coverAssetId 有值 → 该资产缩略图；
+ * 未指定 → 回退相册第一张（album_assets_page 首条）；空相册/失败 → null（占位图形）。
+ * 与标签封面同一并发池语义（≤3），批量预取、静默降级。
+ * @returns albumId → 封面 asset URL（缺失键 = 尚未结算）
+ */
+export function useManualAlbumCovers(albums: readonly AlbumDto[]): Record<number, string | null> {
+  const [covers, setCovers] = useState<Record<number, string | null>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    void runTaskPool(
+      albums.map((album) => async () => {
+        let assetId = album.coverAssetId;
+        if (assetId === null && album.itemCount > 0) {
+          const first = await albumAssetsPage(album.id, 0, 1);
+          assetId = first[0]?.id ?? null;
+        }
+        if (assetId === null) {
+          if (!cancelled) setCovers((prev) => ({ ...prev, [album.id]: null }));
+          return;
+        }
+        const result = await assetThumbGet(assetId, ALBUM_COVER_THUMB_SIZE);
+        const url =
+          result.status === "ready" ? convertFileSrc(result.path) || null : null;
+        if (!cancelled) setCovers((prev) => ({ ...prev, [album.id]: url }));
+      }),
+      ALBUM_COVER_CONCURRENCY,
+    );
+    return () => {
+      cancelled = true;
+    };
+    // albums 引用每次渲染都可能变化（albumList 结果 state）；以 id+cover 串签名稳定化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albums.map((a) => `${a.id}:${a.coverAssetId ?? ""}:${a.itemCount}`).join(",")]);
 
   return covers;
 }

@@ -8,9 +8,26 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import i18n from "@/i18n";
 import Sidebar from "@/app/shell/Sidebar";
 import PeoplePage from "@/features/people/pages/PeoplePage";
-import { AlbumsIndexPage, AlbumTagPage, SMART_ALBUM_TAGS } from "./AlbumsPages";
+import {
+  AlbumsIndexPage,
+  AlbumEntryPage,
+  SMART_ALBUM_TAGS,
+} from "./AlbumsPages";
 import { HIDDEN_ALBUM_TAGS_KEY } from "../lib/hiddenTags";
-import { searchSemantic, assetsByIds, assetThumbGet, aiModelsStatus, indexStatus } from "@/ipc/api";
+import {
+  aiModelsStatus,
+  albumAssetsPage,
+  albumCoverSet,
+  albumCreate,
+  albumDelete,
+  albumList,
+  albumRename,
+  assetThumbGet,
+  assetsByIds,
+  indexStatus,
+  searchSemantic,
+  type AlbumDto,
+} from "@/ipc/api";
 import type { AiModelStatus, IndexStatus } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 
@@ -23,6 +40,12 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetThumbGet: vi.fn(),
     aiModelsStatus: vi.fn(),
     indexStatus: vi.fn(),
+    albumList: vi.fn(),
+    albumCreate: vi.fn(),
+    albumRename: vi.fn(),
+    albumDelete: vi.fn(),
+    albumCoverSet: vi.fn(),
+    albumAssetsPage: vi.fn(),
   };
 });
 vi.mock("@tauri-apps/api/core", () => ({
@@ -37,6 +60,12 @@ const assetsByIdsMock = vi.mocked(assetsByIds);
 const thumbMock = vi.mocked(assetThumbGet);
 const aiModelsStatusMock = vi.mocked(aiModelsStatus);
 const indexStatusMock = vi.mocked(indexStatus);
+const albumListMock = vi.mocked(albumList);
+const albumCreateMock = vi.mocked(albumCreate);
+const albumRenameMock = vi.mocked(albumRename);
+const albumDeleteMock = vi.mocked(albumDelete);
+const albumCoverSetMock = vi.mocked(albumCoverSet);
+const albumAssetsPageMock = vi.mocked(albumAssetsPage);
 const convertMock = vi.mocked(convertFileSrc);
 
 function gateModel(
@@ -101,7 +130,8 @@ function renderRoutes(initialPath: string) {
         <Routes>
           <Route path="/people" element={<PeoplePage />} />
           <Route path="/albums" element={<AlbumsIndexPage />} />
-          <Route path="/albums/:tag" element={<AlbumTagPage />} />
+          {/* 与 routes.tsx 一致：数字参数=手工相册详情，其余=智能标签结果 */}
+          <Route path="/albums/:tag" element={<AlbumEntryPage />} />
           <Route path="/settings" element={<div data-testid="settings-probe" />} />
           <Route path="/gallery" element={<div data-testid="gallery-probe" />} />
           <Route path="/search" element={<div data-testid="search-probe" />} />
@@ -125,6 +155,12 @@ beforeEach(() => {
   assetsByIdsMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
+  albumListMock.mockReset().mockResolvedValue([]);
+  albumCreateMock.mockReset();
+  albumRenameMock.mockReset();
+  albumDeleteMock.mockReset().mockResolvedValue(true);
+  albumCoverSetMock.mockReset().mockResolvedValue(true);
+  albumAssetsPageMock.mockReset().mockResolvedValue([]);
   // 语义门禁默认就绪（模型全装 + 索引已建）；各用例按需覆写为被拦态
   aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
   indexStatusMock.mockReset().mockResolvedValue(builtIndex());
@@ -334,5 +370,182 @@ describe("智能相册：语义搜索前置门禁", () => {
     expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
     await waitFor(() => expect(searchSemanticMock).toHaveBeenCalled());
     expect(screen.queryByTestId("albums-gate-notice")).not.toBeInTheDocument();
+  });
+});
+
+// --- 手工相册区（2026-09 相册重构：手工 + 智能同页两区） ---------------------------------
+
+function makeAlbum(id: number, name: string, itemCount: number): AlbumDto {
+  return { id, name, coverAssetId: null, itemCount, createdAt: "2026-09-01T00:00:00" };
+}
+
+describe("相册页两区：手工相册 + 智能相册", () => {
+  it("album_list 渲染手工区卡片（名称+张数+空封面占位），智能区 40 标签照旧", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(1, "青海湖 2026", 12), makeAlbum(2, "空相册", 0)]);
+    renderRoutes("/albums");
+
+    // 手工区：两分区头 + 两张卡片
+    expect(await screen.findByTestId("albums-manual-section")).toBeInTheDocument();
+    expect(screen.getByTestId("albums-manual-header")).toHaveTextContent("手工相册");
+    const cards = await screen.findAllByTestId("albums-manual-card");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveAttribute("data-album-id", "1");
+    expect(screen.getAllByTestId("albums-manual-name").map((n) => n.textContent)).toEqual([
+      "青海湖 2026",
+      "空相册",
+    ]);
+    expect(screen.getAllByTestId("albums-manual-count").map((c) => c.textContent)).toEqual([
+      "12",
+      "0",
+    ]);
+    // 未指定封面且未取到首张 → 占位图形
+    expect(screen.getAllByTestId("albums-manual-cover-fallback")).toHaveLength(2);
+
+    // 智能区：同款分区头 + 40 标签墙（点击行为照旧）
+    expect(screen.getByTestId("albums-smart-header")).toHaveTextContent("智能相册");
+    expect(screen.getAllByTestId("albums-tag")).toHaveLength(SMART_ALBUM_TAGS.length);
+    expect(screen.getByTestId("albums-tags-section")).toHaveAttribute("id", "tags");
+  });
+
+  it("手工相册封面：coverAssetId 指定 → 该资产缩略图；未指定 → 取列表第一张", async () => {
+    albumListMock.mockResolvedValue([
+      { ...makeAlbum(1, "有封面", 5), coverAssetId: 9 },
+      makeAlbum(2, "无封面", 3),
+    ]);
+    thumbMock.mockImplementation((assetId: number) =>
+      Promise.resolve(
+        assetId === 9
+          ? { status: "ready", path: "D:\\cache\\9.jpg" }
+          : { status: "pending" },
+      ),
+    );
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    albumAssetsPageMock.mockResolvedValue([makeAsset(11, "FIRST.JPG")]);
+    renderRoutes("/albums");
+
+    const img = await screen.findByTestId("albums-manual-cover");
+    expect(img).toHaveAttribute("src", "asset://D:\\cache\\9.jpg");
+    // 未指定封面：album_assets_page 取首条 → 该资产缩略图
+    await waitFor(() => expect(albumAssetsPageMock).toHaveBeenCalledWith(2, 0, 1));
+    await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(11, 240));
+  });
+
+  it("点击手工相册卡片 → /albums/:id 详情页（数字参数分发）", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([makeAlbum(7, "旅行", 4)]);
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-manual-card"))[0]);
+    expect(await screen.findByTestId("album-detail-page")).toHaveAttribute("data-album-id", "7");
+  });
+
+  it("新建相册：成功即时插入卡片；重名后端错误行内提示且不新增", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([]);
+    albumCreateMock
+      .mockResolvedValueOnce({ ok: true, album: makeAlbum(1, "新相册", 0) })
+      .mockResolvedValueOnce({ ok: false, error: "同名相册已存在" });
+    renderRoutes("/albums");
+
+    // 展开 → 输入 → 提交：成功后卡片出现、表单收起
+    await user.click(await screen.findByTestId("albums-new-button"));
+    await user.type(screen.getByTestId("albums-new-name"), "新相册");
+    await user.click(screen.getByTestId("albums-new-submit"));
+    expect(await screen.findAllByTestId("albums-manual-card")).toHaveLength(1);
+    expect(screen.queryByTestId("albums-new-name")).not.toBeInTheDocument();
+
+    // 再次新建同名：后端重名错误行内透传
+    await user.click(screen.getByTestId("albums-new-button"));
+    await user.type(screen.getByTestId("albums-new-name"), "新相册");
+    await user.click(screen.getByTestId("albums-new-submit"));
+    expect(await screen.findByTestId("albums-new-error")).toHaveTextContent("同名相册已存在");
+    expect(screen.getByTestId("albums-new-name")).toBeInTheDocument(); // 表单保留可改
+    expect(screen.getAllByTestId("albums-manual-card")).toHaveLength(1);
+  });
+
+  it("手工区空态文案（album_list 为空）", async () => {
+    renderRoutes("/albums");
+    expect(await screen.findByTestId("albums-manual-empty")).toHaveTextContent("还没有相册");
+    expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument();
+  });
+
+  it("卡片右键菜单：重命名 / 设为封面 / 删除；删除红色确认弹窗文案「仅移除引用，N 张照片保留在图库」", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([makeAlbum(3, "待整理", 8)]);
+    renderRoutes("/albums");
+
+    const card = (await screen.findAllByTestId("albums-manual-card"))[0];
+    fireEvent.contextMenu(card, { clientX: 120, clientY: 80 });
+    const menu = await screen.findByTestId("albums-card-context-menu");
+    expect(within(menu).getByTestId("albums-card-context-menu-item-rename")).toHaveTextContent("重命名");
+    expect(within(menu).getByTestId("albums-card-context-menu-item-cover")).toHaveTextContent("设为封面");
+    expect(within(menu).getByTestId("albums-card-context-menu-item-delete")).toHaveTextContent("删除相册");
+
+    // 删除 → 红色确认弹窗（引用语义文案）
+    await user.click(within(menu).getByTestId("albums-card-context-menu-item-delete"));
+    const dialog = await screen.findByTestId("album-delete-dialog");
+    expect(within(dialog).getByTestId("album-delete-hint")).toHaveTextContent(
+      "仅移除引用，8 张照片保留在图库",
+    );
+
+    // 确认 → album_delete(3) + 卡片移除
+    await user.click(within(dialog).getByTestId("album-delete-confirm"));
+    await waitFor(() => expect(albumDeleteMock).toHaveBeenCalledWith(3));
+    await waitFor(() => expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument());
+  });
+
+  it("悬浮 ⋯ 菜单与右键同一菜单；重命名弹窗：重名错误行内提示，成功更新卡片名", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([makeAlbum(5, "旧名", 2)]);
+    albumRenameMock
+      .mockResolvedValueOnce({ ok: false, error: "同名相册已存在" })
+      .mockResolvedValueOnce({ ok: true });
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-card-menu"))[0]);
+    await user.click(
+      within(await screen.findByTestId("albums-card-context-menu")).getByTestId(
+        "albums-card-context-menu-item-rename",
+      ),
+    );
+
+    const dialog = await screen.findByTestId("album-rename-dialog");
+    const input = within(dialog).getByTestId("album-rename-input");
+    expect(input).toHaveValue("旧名");
+
+    // 重名错误行内提示（不关闭弹窗）
+    await user.clear(input);
+    await user.type(input, "新名");
+    await user.click(within(dialog).getByTestId("album-rename-confirm"));
+    expect(await within(dialog).findByTestId("album-rename-error")).toHaveTextContent("同名相册已存在");
+
+    // 修正后成功：卡片名更新
+    await user.clear(input);
+    await user.type(input, "更新名");
+    await user.click(within(dialog).getByTestId("album-rename-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("albums-manual-name")).toHaveTextContent("更新名"),
+    );
+    expect(albumRenameMock).toHaveBeenLastCalledWith(5, "更新名");
+  });
+
+  it("设为封面：进入选择弹窗，点选照片调 album_cover_set", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([makeAlbum(6, "选封面", 4)]);
+    albumAssetsPageMock.mockResolvedValue([makeAsset(21, "A.JPG"), makeAsset(22, "B.JPG")]);
+    renderRoutes("/albums");
+
+    await user.click((await screen.findAllByTestId("albums-card-menu"))[0]);
+    await user.click(
+      within(await screen.findByTestId("albums-card-context-menu")).getByTestId(
+        "albums-card-context-menu-item-cover",
+      ),
+    );
+
+    const picker = await screen.findByTestId("album-cover-dialog");
+    const options = await within(picker).findAllByTestId("album-cover-option");
+    expect(options).toHaveLength(2);
+    await user.click(options[1]);
+    await waitFor(() => expect(albumCoverSetMock).toHaveBeenCalledWith(6, 22));
   });
 });

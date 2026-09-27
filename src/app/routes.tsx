@@ -15,7 +15,7 @@ import SimilarPage from "@/features/similar/pages/SimilarPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import PeoplePage from "@/features/people/pages/PeoplePage";
-import { AlbumsIndexPage, AlbumTagPage } from "@/features/albums/pages/AlbumsPages";
+import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsPages";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
 import { useSettingsStore } from "@/stores/settingsStore";
 
@@ -63,7 +63,8 @@ export const router = createBrowserRouter([
       { path: "similar", element: <SimilarPage /> },
       { path: "people", element: <PeoplePage /> },
       { path: "albums", element: <AlbumsIndexPage /> },
-      { path: "albums/:tag", element: <AlbumTagPage /> },
+      // 手工相册详情（/albums/:id，纯数字参数）/ 智能标签语义结果共用一个槽位
+      { path: "albums/:tag", element: <AlbumEntryPage /> },
       { path: "import", element: <ImportPage /> },
       { path: "settings", element: <SettingsPage /> },
     ],

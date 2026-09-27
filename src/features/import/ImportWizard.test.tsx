@@ -16,6 +16,8 @@ import ImportWizard, {
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
+  albumCreate,
+  albumList,
   deviceFiles,
   deviceList,
   folderScan,
@@ -35,6 +37,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
     thumbGet: vi.fn(),
+    albumList: vi.fn(),
+    albumCreate: vi.fn(),
   };
 });
 
@@ -56,6 +60,8 @@ const deviceFilesMock = vi.mocked(deviceFiles);
 const deviceListMock = vi.mocked(deviceList);
 const convertMock = vi.mocked(convertFileSrc);
 const thumbMock = vi.mocked(thumbGet);
+const albumListMock = vi.mocked(albumList);
+const albumCreateMock = vi.mocked(albumCreate);
 
 function volumeDevice() {
   return {
@@ -182,6 +188,13 @@ beforeEach(() => {
   deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
   convertMock.mockReset().mockReturnValue("");
   thumbMock.mockReset().mockResolvedValue(null);
+  albumListMock.mockReset().mockResolvedValue([
+    { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2026-09-01" },
+  ]);
+  albumCreateMock.mockReset().mockResolvedValue({
+    ok: true,
+    album: { id: 9, name: "新相册", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
+  });
   localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
   localStorage.removeItem(PANEL_COLLAPSE_KEY);
   localStorage.removeItem(COL_WIDTHS_KEY);
@@ -1170,4 +1183,79 @@ it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾�
   expect(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
   expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
   expect(deviceFilesMock).not.toHaveBeenCalled();
+});
+
+// --- 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载 -----------------------
+
+describe("ImportWizard：添加到相册步骤", () => {
+  it("默认「不添加」：plan.albumId 不携带（undefined）", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
+
+    await screen.findByTestId("wizard-table-stats");
+    expect(screen.getByTestId("wizard-album-none")).toBeChecked();
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBeUndefined();
+  });
+
+  it("「选择已有」：下拉列 album_list，选中后 plan.albumId=该相册 id", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 32 });
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-album-existing"));
+    const select = await screen.findByTestId("wizard-album-select");
+    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toContain(
+      "青海湖 2026（12）",
+    );
+    await user.selectOptions(select, "3");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBe(3);
+  });
+
+  it("「新建相册」：先建相册再启动，plan.albumId=新相册 id；重名错误行内提示且不启动", async () => {
+    seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 33 });
+    albumCreateMock
+      .mockResolvedValueOnce({ ok: false, error: "同名相册已存在" })
+      .mockResolvedValueOnce({
+        ok: true,
+        album: { id: 9, name: "旅行", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
+      });
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-album-new"));
+
+    // 空名拦截
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("请填写新相册名称");
+    expect(startMock).not.toHaveBeenCalled();
+
+    // 重名错误透传
+    const input = screen.getByTestId("wizard-album-new-name");
+    await user.type(input, "旅行");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("同名相册已存在");
+    expect(albumCreateMock).toHaveBeenCalledWith("旅行");
+    expect(startMock).not.toHaveBeenCalled();
+
+    // 修正后成功：album_create → import_start(albumId=9)
+    await user.clear(input);
+    await user.type(input, "旅行 2");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
+    expect(albumCreateMock).toHaveBeenLastCalledWith("旅行 2");
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBe(9);
+  });
 });

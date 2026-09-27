@@ -471,6 +471,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     const sections: ExifSection[] = [];
 
     // 【文件】核心行恒在（缺值「—」）；格式行仅在有值时渲染
+    // TODO(相册): 「所属相册」行——等后端提供资产→相册反查 IPC（如
+    // asset_albums(assetId) -> AlbumDto[]）后在此追加：label=t("viewer.albums")、
+    // value=相册名顿号连接；当前后端契约未含反查口，先不渲染不阻塞。
     sections.push({
       key: "file",
       rows: [
