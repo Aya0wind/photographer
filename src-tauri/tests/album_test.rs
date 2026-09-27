@@ -9,7 +9,7 @@ mod common;
 
 pub use common::{
     ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    thumbs,
 };
 
 use std::time::Duration;
@@ -84,7 +84,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
 
     for object in [
         "album",
@@ -131,7 +131,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
 }
 
 // ---------------------------------------------------------------------------

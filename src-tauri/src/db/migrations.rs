@@ -24,6 +24,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0017_VERSIONS,
     MIGRATION_0018_ALBUM_DIRS,
     MIGRATION_0019_ALBUM_SUBGROUPS,
+    MIGRATION_0020_DROP_DERIVED_RELATIONS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -458,4 +459,13 @@ CREATE UNIQUE INDEX idx_album_dir_name ON album (dir_name);
 const MIGRATION_0019_ALBUM_SUBGROUPS: &str = r#"
 ALTER TABLE album_item ADD COLUMN subgroup TEXT;
 CREATE INDEX idx_album_item_subgroup ON album_item (album_id, subgroup);
+"#;
+
+/// 0020（移除内嵌原片/成片概念，用户定案 2026-09-27 简化）：asset_relation
+/// 表删除——唯一使用者是 lr_export_import（成片导回），该功能已随概念一并
+/// 移除（派生件走普通导入 + 相册子分组，无显式派生关系）。
+/// photo_group / group_asset **保留**：RAW+机内 JPEG 孪生分组与查看器版本
+/// chips 仍依赖，与原成片概念无关。
+const MIGRATION_0020_DROP_DERIVED_RELATIONS: &str = r#"
+DROP TABLE asset_relation;
 "#;

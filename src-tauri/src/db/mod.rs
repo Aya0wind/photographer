@@ -377,12 +377,6 @@ pub struct AssetFilters {
     /// 接受/拒绝状态（0016）：true → rejected=1；false → rejected=0。
     /// 默认查询**不排除**已拒绝——只是可筛选项，区别于回收站。
     pub rejected: Option<bool>,
-    /// 版本维度（0017）："raw_only"（只看原片：自身非派生件——raw/sooc/
-    /// 未入组资产都算原片）| "derived_only"（只看成片：自身是派生件）|
-    /// "no_derived"（原片尚无成片：自身非派生件且所在组无派生成员）。
-    /// 其他值容错不过滤。实现为 EXISTS/NOT EXISTS 条件，未入组资产在
-    /// raw_only/no_derived 下天然命中。
-    pub group_role: Option<String>,
     /// 相册子分组（0019）：精确名匹配——「album_assets_page + album_id」
     /// 下只看该子分组（EXISTS album_item 命中）；无 album_id 时按任意
     /// 相册的同名子分组匹配。仅 album 视图有意义。
@@ -2403,90 +2397,6 @@ impl Db {
         rows.collect()
     }
 
-    /// 把派生件挂入原片所在组（成片导回路径）：原片有组 → 追加 derived 成员；
-    /// 无组 → 建组并把原片按 kind 定角色（raw/sooc）后连同派生件一起入组。
-    /// 幂等（PK 冲突时校正 role）。返回 (组 id, 是否新建组)。
-    pub fn group_link_derived(&self, derived_id: i64, source_id: i64) -> Result<(i64, bool)> {
-        let tx = self.0.unchecked_transaction()?;
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT group_id FROM group_asset WHERE asset_id = ?1",
-                [source_id],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
-        let (target, created) = match existing {
-            Some(g) => (g, false),
-            None => {
-                let kind: String =
-                    tx.query_row("SELECT kind FROM assets WHERE id = ?1", [source_id], |r| {
-                        r.get(0)
-                    })?;
-                let role = match kind.as_str() {
-                    "raw" => "raw",
-                    _ => "sooc",
-                };
-                tx.execute("INSERT INTO photo_group DEFAULT VALUES", [])?;
-                let g = tx.last_insert_rowid();
-                tx.execute(
-                    "INSERT OR REPLACE INTO group_asset (group_id, asset_id, role) \
-                     VALUES (?1, ?2, ?3)",
-                    params![g, source_id, role],
-                )?;
-                (g, true)
-            }
-        };
-        tx.execute(
-            "INSERT INTO group_asset (group_id, asset_id, role) VALUES (?1, ?2, 'derived') \
-             ON CONFLICT (group_id, asset_id) DO UPDATE SET role = 'derived'",
-            params![target, derived_id],
-        )?;
-        tx.commit()?;
-        Ok((target, created))
-    }
-
-    /// 落一条派生关系（derived_from；confirmed=1 表示用户已确认的强关联）。
-    /// 返回关系 id。同 (asset_id, related_asset_id, kind) 幂等（IGNORE）。
-    pub fn asset_relation_add(
-        &self,
-        asset_id: i64,
-        related_asset_id: i64,
-        source: Option<&str>,
-        match_basis: Option<&str>,
-    ) -> Result<i64> {
-        self.0.execute(
-            "INSERT OR IGNORE INTO asset_relation \
-             (asset_id, related_asset_id, kind, source, match_basis, confirmed, created_at) \
-             VALUES (?1, ?2, 'derived_from', ?3, ?4, 1, ?5)",
-            params![
-                asset_id,
-                related_asset_id,
-                source,
-                match_basis,
-                now_rfc3339()
-            ],
-        )?;
-        Ok(self.0.last_insert_rowid())
-    }
-
-    /// 派生关系是否已存在（asset ← related 的 derived_from）。
-    /// （仓储基元：当前导入幂等性由文件级 size+xxhash 去重承担，本方法
-    /// 留作查询基元，测试覆盖。）
-    #[allow(dead_code)]
-    pub fn asset_relation_exists(&self, asset_id: i64, related_asset_id: i64) -> Result<bool> {
-        let n: i64 = self.0.query_row(
-            "SELECT COUNT(*) FROM asset_relation \
-             WHERE asset_id = ?1 AND related_asset_id = ?2 AND kind = 'derived_from'",
-            params![asset_id, related_asset_id],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
     /// 存量回填：由既有 pair_asset_id 双向链建 photo_group（0017 配套，
     /// 幂等可重跑——已同组的配对直接跳过）。只处理 raw+photo 孪生，角色
     /// 按 kind 定（raw/sooc）。返回 (回填配对数, 新建组数)。
@@ -3264,29 +3174,6 @@ fn asset_filter_conditions(
         conds.push(format!(
             "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id              AND {album_clause} AND ai.subgroup IS NULL)"
         ));
-    }
-
-    // —— 版本维度（0017）：原片/成片 EXISTS 视图（相册页快捷视图后端支撑）——
-    match filters.group_role.as_deref() {
-        Some("raw_only") => conds.push(
-            "NOT EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
-             AND ga.role = 'derived')"
-                .into(),
-        ),
-        Some("derived_only") => conds.push(
-            "EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
-             AND ga.role = 'derived')"
-                .into(),
-        ),
-        Some("no_derived") => conds.push(
-            "NOT EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
-             AND ga.role = 'derived') \
-             AND NOT EXISTS (SELECT 1 FROM group_asset me \
-                 JOIN group_asset other ON other.group_id = me.group_id \
-                 WHERE me.asset_id = a.id AND other.role = 'derived')"
-                .into(),
-        ),
-        _ => {} // 未知 token 容错：不过滤
     }
 
     conds

@@ -20,10 +20,6 @@ mod metadata;
 #[path = "../src/thumbs/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树（metadata::phash 引用）
 mod thumbs;
-#[path = "../src/videos/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树（thumbs 视频路由引用）
-mod videos;
-
 #[path = "../src/db/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树
 mod db;
@@ -122,15 +118,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 19);
+        assert_eq!(user_version(&db), 20);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 19, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 20, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 19);
+    assert_eq!(user_version(&db), 20);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -148,7 +144,7 @@ fn migration_is_idempotent_and_version_stable() {
         )
         .expect("count indexes");
     assert_eq!(
-        indexes, 18,
+        indexes, 16,
         "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2          + faces 2（asset/cluster，0007）+ burst 1（0012）+ album_item 2（0015）"
     );
 }
@@ -203,9 +199,9 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
         // 0016：smart_view 表 CREATE 不可重放；assets 新列不可重放（索引随列摘除）
         db.0.execute("DROP INDEX idx_assets_trash", []).unwrap();
         db.0.execute("DROP TABLE smart_view", []).unwrap();
-        // 0017：版本关系表 CREATE 不可重放（group_asset 先于 photo_group——FK 依赖）
+        // 0017：分组表 CREATE 不可重放（group_asset 先于 photo_group——FK
+        // 依赖）；asset_relation 已随 0020 删除，无需回卷
         db.0.execute("DROP TABLE group_asset", []).unwrap();
-        db.0.execute("DROP TABLE asset_relation", []).unwrap();
         db.0.execute("DROP TABLE photo_group", []).unwrap();
         for col in [
             "orientation",
@@ -232,7 +228,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 19);
+    assert_eq!(user_version(&db), 20);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

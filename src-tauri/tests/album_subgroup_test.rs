@@ -8,7 +8,7 @@ mod common;
 
 pub use common::{
     ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    thumbs,
 };
 
 use std::time::Duration;
@@ -18,7 +18,6 @@ use db::{AssetFilters, AssetRow};
 use events::AssetKind;
 use ipc::album::fetch_album_subgroups;
 use ipc::claim::fetch_album_claim_assets;
-use ipc::versions::{lr_export_import_core, LrExportImportItem};
 
 fn setup() -> (tempfile::TempDir, ipc::AppState, db::Db) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -386,52 +385,4 @@ fn claim_with_subgroup_lands_named_layer() {
     let again = fetch_album_claim_assets(&state, album.id, &[id], Some("成片")).unwrap();
     assert_eq!(again.skipped, 1);
     assert_eq!(subgroup_of(&db, album.id, id).as_deref(), Some("成片"));
-}
-
-#[test]
-fn lr_export_import_with_subgroup_files_named_layer() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_dir = dir.path().join("db");
-    let photo_root = dir.path().join("photos");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&photo_root).unwrap();
-    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
-    let db = open_db(&db_dir);
-    let album = db.album_create("成片册").unwrap();
-
-    let raw = ins(&db, "X:/lib/DSC_0070.NEF", None);
-    let export_dir = dir.path().join("lr_export");
-    std::fs::create_dir_all(&export_dir).unwrap();
-    let derived_src = export_dir.join("DSC_0070_final.jpg");
-    let img = image::RgbImage::from_pixel(32, 32, image::Rgb([64, 64, 64]));
-    img.save_with_format(&derived_src, image::ImageFormat::Jpeg)
-        .unwrap();
-
-    let result = lr_export_import_core(
-        &state,
-        &db,
-        &[LrExportImportItem {
-            path: derived_src.to_string_lossy().into_owned(),
-            source_asset_id: raw,
-            basis: Some(r#"{"bases":["filename"]}"#.into()),
-        }],
-        Some(album.id),
-        Some("成片"),
-    )
-    .unwrap();
-    assert_eq!(result.imported, 1, "{result:?}");
-
-    let derived_path = photo_root
-        .join("SmartPhoto")
-        .join("DSC_0070")
-        .join("DSC_0070_final.jpg");
-    let derived = db
-        .asset_id_by_path(&derived_path.to_string_lossy())
-        .unwrap()
-        .unwrap();
-    assert_eq!(subgroup_of(&db, album.id, derived).as_deref(), Some("成片"));
-
-    // 子分组清单反映成片层
-    let list = db.album_subgroups(album.id).unwrap();
-    assert_eq!(list, vec![("成片".to_string(), 1u64)]);
 }

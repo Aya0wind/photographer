@@ -310,8 +310,6 @@ pub fn run() {
             ipc::selection::smart_view_list,
             ipc::selection::smart_view_create,
             ipc::selection::smart_view_delete,
-            ipc::versions::lr_export_scan,
-            ipc::versions::lr_export_import,
             ipc::versions::asset_versions,
             ipc::watch::watch_folders_list,
             ipc::watch::watch_folder_add,
