@@ -30,6 +30,10 @@ pub struct IndexStatusDto {
     pub exif: IndexKindStatus,
     pub ai: IndexKindStatus,
     pub face: IndexKindStatus,
+    pub phash: IndexKindStatus,
+    pub hash: IndexKindStatus,
+    pub eyes: IndexKindStatus,
+    pub blur: IndexKindStatus,
 }
 
 const KINDS: [&str; 8] = [
@@ -75,6 +79,10 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
         (&mut dto.exif, "exif"),
         (&mut dto.ai, "ai"),
         (&mut dto.face, "face"),
+        (&mut dto.phash, "phash"),
+        (&mut dto.hash, "hash"),
+        (&mut dto.eyes, "eyes"),
+        (&mut dto.blur, "blur"),
     ] {
         let slots = by_kind.get(kind).copied().unwrap_or_default();
         *field = IndexKindStatus {
