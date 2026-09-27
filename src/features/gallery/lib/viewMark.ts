@@ -17,7 +17,12 @@ export function markAssetViewed(assetId: number, now = Date.now()): void {
   void assetViewMark(assetId);
 }
 
+/** 清空去抖表（切库时调用：去抖键是 assetId，跨库撞号） */
+export function resetViewMark(): void {
+  lastMarkAt.clear();
+}
+
 /** 仅测试用：清空去抖表（模块级状态，用例间隔离） */
 export function resetViewMarkForTests(): void {
-  lastMarkAt.clear();
+  resetViewMark();
 }

@@ -21,6 +21,7 @@ import {
 } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { resetLibrarySession } from "@/lib/librarySession";
 
 const STEP_TITLES = [
   "onboarding.step.library",
@@ -142,6 +143,8 @@ export default function OnboardingPage() {
       ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice] },
     });
     useSettingsStore.getState().setLibraryChosen(true);
+    // 新库启用：清上一个库的会话态（快照/缩略图缓存/store）
+    resetLibrarySession();
     // 配置完成：清除「本次会话新建」标记（该库已不再是可删空库）
     clearDraftLibraryId();
     navigate("/gallery", { replace: true });

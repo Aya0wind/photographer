@@ -29,7 +29,12 @@ export function saveGallerySnapshot(next: GallerySnapshot): void {
   snapshot = next;
 }
 
+/** 清空会话快照（切库时必须调用——快照不区分库，跨库沿用=看到上一个库的照片） */
+export function clearGallerySnapshot(): void {
+  snapshot = null;
+}
+
 /** 仅测试用 */
 export function clearGallerySnapshotForTests(): void {
-  snapshot = null;
+  clearGallerySnapshot();
 }

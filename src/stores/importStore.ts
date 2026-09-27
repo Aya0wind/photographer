@@ -140,6 +140,8 @@ interface ImportState {
 
   /** 事件入口（initImportStore 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
+  /** 切库时清任务态（jobs/历史/失败清单/源清单全按库私有；设备与最近源是应用级保留） */
+  resetLibrarySession: () => void;
   /** 忽略设备弹窗（队列继续下一个） */
   ignoreDevice: (id: string) => void;
   /** 手动刷新设备快照（device_scan），成功则更新列表 */
@@ -297,6 +299,23 @@ export const useImportStore = create<ImportState>((set, get) => ({
   pendingJobSource: null,
   clean: null,
   indexPending: null,
+
+  resetLibrarySession: () =>
+    set({
+      activeJobs: {},
+      currentJobId: null,
+      failedFiles: {},
+      history: { ...EMPTY_HISTORY },
+      summary: null,
+      lastError: null,
+      sourceFiles: {},
+      jobModes: {},
+      pendingJobMode: null,
+      jobSources: {},
+      pendingJobSource: null,
+      clean: null,
+      indexPending: null,
+    }),
 
   handleAppEvent: (event) => {
     if (event.type === "deviceArrived" || event.type === "deviceRemoved" ||

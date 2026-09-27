@@ -46,6 +46,8 @@ interface AiState {
   refreshIndexStatus: () => Promise<void>;
   /** 事件入口（initAi 订阅转发；测试可直接驱动） */
   handleAppEvent: (event: AppEvent) => void;
+  /** 切库时清索引态（索引任务/进度按库私有；模型清单是应用级不动） */
+  resetLibrarySession: () => void;
   /** 仅测试用：清空状态 */
   resetForTests: () => void;
 }
@@ -105,6 +107,10 @@ export const useAiStore = create<AiState>((set, get) => ({
       default:
         break;
     }
+  },
+
+  resetLibrarySession: () => {
+    set({ indexProgress: null, indexStatus: null });
   },
 
   resetForTests: () => {

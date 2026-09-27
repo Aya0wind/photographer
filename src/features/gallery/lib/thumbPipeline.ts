@@ -258,11 +258,17 @@ export function emitAssetEventForTests(event: AppEvent): void {
   dispatchAssetEvent(event);
 }
 
-/** 仅测试用：清空管线状态（缓存/in-flight/信号量） */
-export function resetThumbPipelineForTests(): void {
+/** 清空管线状态（缓存/in-flight/信号量）。切库必须调用：缓存键是
+ *  assetId+size，不同库的 assetId 会撞号，跨库沿用=张冠李戴的缩略图。 */
+export function resetThumbPipeline(): void {
   thumbCache.clear();
   failedCache.clear();
   thumbInflight.clear();
   activeLoads = 0;
   slotQueue.length = 0;
+}
+
+/** 仅测试用 */
+export function resetThumbPipelineForTests(): void {
+  resetThumbPipeline();
 }
