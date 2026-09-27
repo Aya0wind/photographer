@@ -36,11 +36,8 @@ fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
         // 资产已被删除（级联应清任务，防御性兜底）：按完成收尾
         return true;
     };
-    if !matches!(kind.as_str(), "photo" | "raw" | "video")
-        || !crate::thumbs::is_decodable(Path::new(&path))
-    {
-        // 其他类型/不可解码：永久占位（不占重试额度）。视频（M8 海报）
-        // 不在此列——经 thumb_file 路由到 ffmpeg 侧车。
+    if !matches!(kind.as_str(), "photo" | "raw") || !crate::thumbs::is_decodable(Path::new(&path)) {
+        // 其他类型/不可解码：永久占位（不占重试额度）。
         let _ = db.set_thumb_state(asset_id, 2);
         return true;
     }
@@ -75,7 +72,7 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 /// 层）→ phash → thumb（数量大头）。每 worker 一次认领一条，认领经
 /// SQLite 写锁串行化，不重不漏。
 fn step(db: &Db, db_dir: &Path) -> bool {
-    let task = ["exif", "hash", "phash"]
+    let task = ["exif", "hash", "phash", "blur"]
         .iter()
         .find_map(|kind| db.claim_index_task(kind).ok().flatten())
         .or_else(|| db.claim_index_task("thumb").ok().flatten());
@@ -87,6 +84,15 @@ fn step(db: &Db, db_dir: &Path) -> bool {
         "exif" => process_exif_task(db, task.asset_id),
         "phash" => process_phash_task(db, db_dir, task.asset_id),
         "hash" => process_hash_task(db, task.asset_id),
+        // 0021 失焦通道：512 档缩略图拉普拉斯清晰度分（无模型依赖）
+        "blur" => crate::ai::selection::process_blur_task(
+            db,
+            db_dir,
+            task.asset_id,
+            crate::ai::selection::blur_soft_threshold(),
+        ),
+        // eyes 通道由 ai::selection::run_eyes_backfill 串行消费（依赖
+        // SCRFD + 闭眼分类器，index worker 无模型会话，不在此认领）
         _ => false,
     };
     let _ = db.finish_index_task(task.id, ok);
@@ -121,7 +127,7 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
         return true; // 资产已删除：级联应清任务，防御兜底
     };
     if !matches!(kind.as_str(), "photo" | "raw") {
-        return true; // 视频/其他无 EXIF 深提取可言
+        return true; // 非图片无 EXIF 深提取可言
     }
     let Ok(head) = read_head(&path) else {
         return true; // 文件不可读（外部库被移走等）：不再重试
@@ -379,6 +385,38 @@ pub fn refresh_hash_for_generation(
         let _ = std::fs::write(db_dir.join("hash-gen-1.marker"), b"");
         if pending > 0 {
             bus.publish(AppEvent::IndexTaskResumed { pending });
+            run_pending(&db_dir, worker_count());
+        }
+    });
+}
+
+/// 选片分析代际自愈（gen-1，0021 配套）：eyes/blur 任务账一次性建档
+/// （新导入经 insert_asset_on 自动登记；存量资产由此补种）。dbDir 标记
+/// 防每次启动重排；指纹变更重建走 ipc::indexing（selection 通道）。
+pub fn refresh_selection_for_generation(
+    db_dir: PathBuf,
+    bus: &EventBus,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+) {
+    let marker = db_dir.join("selection-gen-1.marker");
+    if marker.is_file() {
+        return;
+    }
+    let bus = bus.clone();
+    supervisor.spawn("index", "selection-gen1-regen".into(), move |_| {
+        let created = std::fs::create_dir_all(&db_dir)
+            .ok()
+            .and_then(|_| {
+                crate::ipc::open_library_db(&db_dir).ok().and_then(|db| {
+                    let eyes = db.create_eyes_tasks_for_unindexed().ok()?;
+                    let blur = db.create_blur_tasks_for_unindexed().ok()?;
+                    Some(eyes + blur)
+                })
+            })
+            .unwrap_or(0);
+        let _ = std::fs::write(db_dir.join("selection-gen-1.marker"), b"");
+        if created > 0 {
+            bus.publish(AppEvent::IndexTaskResumed { pending: created });
             run_pending(&db_dir, worker_count());
         }
     });

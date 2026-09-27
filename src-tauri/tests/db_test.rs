@@ -8,6 +8,9 @@
 //! `#[path]` 把 `src/db` 及其依赖的 `src/events` 直接编译进测试 crate，
 //! 保证被测代码就是生产源码本体（events 自带的单测会随本目标重复执行一次）。
 
+#[path = "../src/db/mod.rs"]
+#[allow(dead_code)] // 测试按子集编译源码树
+mod db;
 #[path = "../src/devices/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树（events::DeviceScanned 引用）
 mod devices;
@@ -20,9 +23,6 @@ mod metadata;
 #[path = "../src/thumbs/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树（metadata::phash 引用）
 mod thumbs;
-#[path = "../src/db/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod db;
 
 use chrono::DateTime;
 use rusqlite::params;
@@ -118,15 +118,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 20);
+        assert_eq!(user_version(&db), 21);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 20, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 21, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 20);
+    assert_eq!(user_version(&db), 21);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -203,6 +203,12 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
         // 依赖）；asset_relation 已随 0020 删除，无需回卷
         db.0.execute("DROP TABLE group_asset", []).unwrap();
         db.0.execute("DROP TABLE photo_group", []).unwrap();
+        // 0021：index_tasks 旧 CHECK（0012/0014 形态）不容 eyes/blur 行——
+        // 回卷前清掉（re-migrate 后由 insert_asset_on 重新登记）
+        db.0.execute("DELETE FROM index_tasks WHERE kind IN ('eyes', 'blur')", [])
+            .unwrap();
+        // ai_analysis 表 CREATE 不可重放（0021）
+        db.0.execute("DROP TABLE ai_analysis", []).unwrap();
         for col in [
             "orientation",
             "flash",
@@ -228,7 +234,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 20);
+    assert_eq!(user_version(&db), 21);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

@@ -98,6 +98,18 @@ impl ModelManager {
             .all(|id| self.model_path(id).is_file())
     }
 
+    /// 闭眼检测模型是否就绪（feature="selection" 清单条目全部落盘）。
+    /// 今日清单无 selection 条目 → 恒 false：eyes 通道跳过并计数，
+    /// 任务保持 pending（模型收录后 kick 自然续跑）。
+    pub fn selection_eyes_ready(&self) -> bool {
+        let ids: Vec<String> = super::catalog()
+            .iter()
+            .filter(|e| e.feature == "selection")
+            .map(|e| e.id.clone())
+            .collect();
+        !ids.is_empty() && ids.iter().all(|id| self.model_path(id).is_file())
+    }
+
     fn ensure_det(&self, slots: &mut FaceSlots) -> Result<(), String> {
         if slots.det.is_some() {
             return Ok(());

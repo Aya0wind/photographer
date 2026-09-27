@@ -8,8 +8,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -84,7 +83,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 20);
+    assert_eq!(version, 21);
 
     for object in [
         "album",
@@ -131,7 +130,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 20);
+    assert_eq!(version, 21);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,27 +343,27 @@ fn album_assets_page_keyset_order_and_filter_intersection() {
     );
     fetch_album_add_assets(&state, album.id, &[a_null1, a_old, a_new, a_video], None).unwrap();
 
-    // 第一页 limit 2：NULL 最先，随后 captured 降序（video 2026-07 在前）
+    // 旧视频记录不出现在相册时间线。
     let page1: Vec<i64> = fetch_album_assets_page(&state, album.id, 0, 2, None)
         .unwrap()
         .iter()
         .map(|d: &AssetDto| d.id)
         .collect();
-    assert_eq!(page1, vec![a_null1, a_video]);
-    // 第二页（afterId = a_video）：仅 a_new 在 a_old 前；a_out 不在册
-    let page2: Vec<i64> = fetch_album_assets_page(&state, album.id, a_video, 2, None)
+    assert_eq!(page1, vec![a_null1, a_new]);
+    // 第二页：仅 a_old；a_out 不在册
+    let page2: Vec<i64> = fetch_album_assets_page(&state, album.id, a_new, 2, None)
         .unwrap()
         .iter()
         .map(|d: &AssetDto| d.id)
         .collect();
-    assert_eq!(page2, vec![a_new, a_old]);
+    assert_eq!(page2, vec![a_old]);
     assert!(!page2.contains(&a_out), "相册外资产不进入相册时间线");
     // 尾页空
     assert!(fetch_album_assets_page(&state, album.id, a_old, 2, None)
         .unwrap()
         .is_empty());
 
-    // filters 与相册集合求交：kind=video（相册内视频唯一）
+    // 旧视频筛选条件也不能让视频重新出现。
     let filters = AssetFilters {
         kinds: vec![AssetKind::Video],
         ..AssetFilters::default()
@@ -374,7 +373,7 @@ fn album_assets_page_keyset_order_and_filter_intersection() {
         .iter()
         .map(|d: &AssetDto| d.id)
         .collect();
-    assert_eq!(only_video, vec![a_video]);
+    assert!(only_video.is_empty());
 
     // 空相册合法：空页
     let empty = fetch_album_create(&state, "空册").unwrap();
@@ -412,7 +411,7 @@ fn global_assets_page_filters_by_album_id() {
         .collect();
     assert!(ids.contains(&a) && ids.contains(&shared) && !ids.contains(&b) && !ids.contains(&c));
 
-    // 组合既有维度：albumId(Y) ∩ kind=video → 仅 c（c 只在 Y）
+    // 组合既有维度：albumId(Y) ∩ 旧视频筛选条件 → 空集。
     let y_video = AssetFilters {
         album_id: Some(y.id),
         kinds: vec![AssetKind::Video],
@@ -423,7 +422,7 @@ fn global_assets_page_filters_by_album_id() {
         .iter()
         .map(|d| d.id)
         .collect();
-    assert_eq!(ids, vec![c]);
+    assert!(ids.is_empty());
 
     // 不存在的相册 = 空集（筛选语义，非报错）
     let none = AssetFilters {

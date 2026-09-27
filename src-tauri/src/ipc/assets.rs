@@ -20,7 +20,7 @@ pub struct AssetDto {
     pub path: String,
     /// 文件名。
     pub name: String,
-    /// photo | raw | video | other（`AssetKind` camelCase 序列化）。
+    /// photo | raw（`AssetKind` camelCase 序列化）。
     pub kind: AssetKind,
     /// RFC3339；未知为 null（排序时排最前）。
     pub captured_at: Option<String>,
@@ -79,6 +79,24 @@ pub struct AssetDetailDto {
     pub aspect: Option<String>,
     /// RAW/JPG 配对资产 id（无配对 null；flatten 内 pairAssetId 同值）。
     pub pair_id: Option<i64>,
+    /// AI 选片建议（0021）：eyes/blur 分析行（value/score/modelVersion）；
+    /// 无记录 = 空数组。建议标签与用户决定分层，绝不写 XMP。
+    /// （本 DTO 其余键沿用历史 snake 形态；新键显式 camel 与 flatten 层一致）
+    #[serde(rename = "aiAnalysis")]
+    pub ai_analysis: Vec<AiAnalysisDto>,
+}
+
+/// 单条 AI 分析（查看器详情行，camelCase）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAnalysisDto {
+    /// "eyes" | "blur"
+    pub kind: String,
+    /// eyes: closed/maybe/unknown；blur: sharp/soft/unknown
+    pub value: Option<String>,
+    /// 0-100 清晰度分 / 0-1 闭眼概率
+    pub score: Option<f64>,
+    pub model_version: String,
 }
 
 /// 扩展名（最后一个点后的部分大写；无点 → None）。
@@ -286,6 +304,17 @@ pub fn fetch_asset_detail(
     let duplicate_count = db
         .asset_duplicate_count(id, asset.size, asset.xxhash)
         .map_err(|e| e.to_string())?;
+    let ai_analysis = db
+        .ai_analysis_for(id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(kind, value, score, model_version)| AiAnalysisDto {
+            kind,
+            value,
+            score,
+            model_version,
+        })
+        .collect();
     Ok(Some(AssetDetailDto {
         id,
         format: format_of(&asset.path),
@@ -293,6 +322,7 @@ pub fn fetch_asset_detail(
         aspect: aspect_of(asset.width, asset.height, asset.orientation),
         pair_id: asset.pair_asset_id,
         duplicate_count,
+        ai_analysis,
         asset,
     }))
 }

@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 
 pub mod embed;
 pub mod face;
+pub mod selection;
 pub mod semantic;
 
 use crate::events::{AppEvent, EventBus, Throttle};
@@ -40,6 +41,15 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 const CHUNK: usize = 256 * 1024;
 
 /// 内置模型清单（JSON 常量 → 强类型；sha256/bytes 为 HF API 实测 pin 值）。
+///
+/// feature="selection"（闭眼检测，0021 选型 2026-09-27）：**暂无条目**。
+/// 评估结论——HuggingFace 许可证干净（Apache-2.0）的 open/closed eye
+/// 分类器（dima806/closed_eyes_image_detection、MrKrauzer/
+/// closed-eyes-image-detection）均为 ViT-base（~330MB）且无 ONNX 权重；
+/// MIT+ONNX 的 notgoodkeeper/cnn-based-drowsiness-detection 是整图驾驶
+/// 困倦分类，语义/标签不适用于双眼裁剪。按定案「不塞来源不明的权重」
+/// 停止收录：eyes 通道代码就绪（ai::selection，trait 注入可测），模型
+/// 收录（含 ONNX 会话实现与输入规格）待找到合规小模型后落地。
 ///
 /// 语义模型选型（2026-09-19 调研定案）：目标为 SigLIP 2（多语言中文直搜、
 /// 检索优于 CLIP），但可用 ONNX 量化转换版的 URL/SHA 需先核实——以下暂以
@@ -103,7 +113,7 @@ pub struct ModelEntry {
     pub sha256: String,
     pub bytes_total: u64,
     pub version: String,
-    /// "semantic" | "face"
+    /// "semantic" | "face"（"selection" 预留：闭眼模型选型未过，暂无条目）
     pub feature: String,
 }
 

@@ -144,7 +144,7 @@ pub struct AssetRow {
     #[serde(default)]
     pub pair_asset_id: Option<i64>,
     /// 缩略图状态镜像（index_tasks 的 O(1) 读路径）：
-    /// 0=pending 1=done 2=permanent-none（视频/不可解码/生成失败）。
+    /// 0=pending 1=done 2=permanent-none（不可解码/生成失败）。
     #[serde(default)]
     pub thumb_state: i32,
     // —— 0008 起的深提取可空列（存量资产经 exif-gen-2 代际回填补齐）——
@@ -384,6 +384,12 @@ pub struct AssetFilters {
     /// 相册根散照片（0019）：true → 只看 album_id 相册中 subgroup IS NULL
     /// 的引用（文件夹树的「根」视图）。false/None = 不限。
     pub subgroup_is_null: Option<bool>,
+    /// 闭眼筛选（0021）："closed" | "maybe"——命中 ai_analysis('eyes') 的
+    /// 对应 value。其他值容错不过滤（建议标签，非定罪）。
+    pub eyes: Option<String>,
+    /// 失焦筛选（0021）："soft"——命中 ai_analysis('blur') 的 soft 判定。
+    /// 其他值容错不过滤。
+    pub blur: Option<String>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -483,6 +489,9 @@ pub struct SmartViewRow {
 // ---------------------------------------------------------------------------
 // 仓储方法
 // ---------------------------------------------------------------------------
+
+/// ai_analysis 行（0021：kind/value/score/model_version）。
+pub type AiAnalysisRow = (String, Option<String>, Option<f64>, String);
 
 /// 分页行投影列（[`map_asset_page`] 消费顺序；各查询共用，防列序漂移）。
 const ASSET_PAGE_COLS: &str = "id, path, filename, size, kind, captured_at, camera, \
@@ -760,7 +769,7 @@ impl Db {
         let mut stmt = self.0.prepare(&format!(
             "SELECT {ASSET_PAGE_COLS} FROM \
              (SELECT {ASSET_PAGE_COLS_A}, a.created_at AS ck FROM assets a \
-              WHERE a.in_trash = 0) \
+              WHERE a.in_trash = 0 AND a.kind IN ('photo', 'raw')) \
              WHERE (?1 = 0 OR ck < ?2 OR (ck = ?2 AND id < ?1)) \
              ORDER BY ck DESC, id DESC LIMIT ?3",
         ))?;
@@ -788,10 +797,10 @@ impl Db {
             "SELECT day, COUNT(*), \
                (SELECT t.id FROM assets t \
                  WHERE COALESCE(date(t.captured_at, 'localtime'), 'unknown') = day \
-                   AND t.in_trash = 0 \
+                   AND t.in_trash = 0 AND t.kind IN ('photo', 'raw') \
                  ORDER BY COALESCE(t.captured_at, ?1) DESC, t.id DESC LIMIT 1) \
              FROM (SELECT COALESCE(date(captured_at, 'localtime'), 'unknown') AS day \
-                   FROM assets WHERE in_trash = 0) \
+                   FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')) \
              GROUP BY day ORDER BY (day = 'unknown') DESC, day DESC",
         )?;
         let rows = stmt.query_map(params![CAPTURED_NULL_HIGH], |row| {
@@ -811,7 +820,7 @@ impl Db {
              source, created_at, origin, width, height, iso, f_number, exposure_time, \
              focal_length, lens, pair_asset_id, thumb_state, orientation, flash, \
              metering_mode, white_balance, exposure_program, software, artist, \
-             gps_lat, gps_lon, rating, flagged, color_label, rejected FROM assets WHERE id = ?1",
+             gps_lat, gps_lon, rating, flagged, color_label, rejected FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
         )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
@@ -825,7 +834,7 @@ impl Db {
     pub fn asset_duplicate_count(&self, id: i64, size: u64, xxhash: u64) -> Result<u64> {
         let mut stmt = self.0.prepare(
             "SELECT COUNT(*) FROM assets WHERE size = ?1 AND xxhash = ?2 AND id != ?3 \
-             AND in_trash = 0",
+             AND in_trash = 0 AND kind IN ('photo', 'raw')",
         )?;
         let count: i64 = stmt.query_row(params![size as i64, xxhash as i64, id], |r| r.get(0))?;
         Ok(count as u64)
@@ -855,18 +864,6 @@ impl Db {
         let tx = self.0.unchecked_transaction()?;
         insert_asset_on(&tx, a, album_id, album_subgroup)?;
         tx.commit()
-    }
-
-    /// M8 视频海报解锁：历史库的 video 资产曾被置 thumb_state=2（当时无
-    /// 海报路径的永久占位）。海报管线就位后复位为 0——按需队列下次请求
-    /// 即补生成；真失败仍由队列自身失败计数兜底。幂等（无 marker：每次
-    /// 启动重置一次无副作用，反而是侧车补装后的自愈通道）。
-    pub fn reset_video_thumb_placeholders(&self) -> Result<u64> {
-        let n = self.0.execute(
-            "UPDATE assets SET thumb_state = 0 WHERE kind = 'video' AND thumb_state = 2",
-            [],
-        )?;
-        Ok(n as u64)
     }
 
     // —— 索引任务（index_tasks）——
@@ -1098,9 +1095,9 @@ impl Db {
 
     /// 按需兜底通道的快路径：资产 (path, thumb_state)；无资产返回 None。
     pub fn thumb_info_by_id(&self, id: i64) -> Result<Option<(String, i32)>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT path, thumb_state FROM assets WHERE id = ?1")?;
+        let mut stmt = self.0.prepare(
+            "SELECT path, thumb_state FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
+        )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
             Some(row) => Ok(Some((
@@ -1304,8 +1301,9 @@ impl Db {
     /// id DESC tiebreak——空相册同样返回且 itemCount=0）。
     pub fn album_list(&self) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT a.id, a.name, a.cover_asset_id, \
-                    (SELECT COUNT(*) FROM album_item i WHERE i.album_id = a.id), a.created_at, \
+            "SELECT a.id, a.name, \
+                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND kind IN ('photo', 'raw')), \
+                    (SELECT COUNT(*) FROM album_item i JOIN assets x ON x.id = i.asset_id AND x.kind IN ('photo', 'raw') WHERE i.album_id = a.id), a.created_at, \
                     a.dir_name \
              FROM album a ORDER BY a.created_at DESC, a.id DESC",
         )?;
@@ -1317,8 +1315,9 @@ impl Db {
     /// 未入任何相册返回空。
     pub fn asset_albums(&self, asset_id: i64) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT a.id, a.name, a.cover_asset_id, \
-                    (SELECT COUNT(*) FROM album_item i2 WHERE i2.album_id = a.id), a.created_at, \
+            "SELECT a.id, a.name, \
+                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND kind IN ('photo', 'raw')), \
+                    (SELECT COUNT(*) FROM album_item i2 JOIN assets x ON x.id = i2.asset_id AND x.kind IN ('photo', 'raw') WHERE i2.album_id = a.id), a.created_at, \
                     a.dir_name \
              FROM album a \
              WHERE EXISTS (SELECT 1 FROM album_item i WHERE i.album_id = a.id AND i.asset_id = ?1) \
@@ -1530,7 +1529,7 @@ impl Db {
             }
             added += tx.execute(
                 "INSERT INTO album_item (album_id, asset_id, added_at, subgroup) \
-                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM assets WHERE id = ?2)",
+                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM assets WHERE id = ?2 AND kind IN ('photo', 'raw'))",
                 params![album_id, asset_id, added_at, subgroup],
             )? as u64;
         }
@@ -1577,8 +1576,9 @@ impl Db {
     /// 散在根（NULL）不入清单（根视图即相册默认视图）。
     pub fn album_subgroups(&self, album_id: i64) -> Result<Vec<(String, u64)>> {
         let mut stmt = self.0.prepare(
-            "SELECT subgroup, COUNT(*) FROM album_item \
-             WHERE album_id = ?1 AND subgroup IS NOT NULL \
+            "SELECT i.subgroup, COUNT(*) FROM album_item i \
+             JOIN assets a ON a.id = i.asset_id AND a.kind IN ('photo', 'raw') \
+             WHERE i.album_id = ?1 AND i.subgroup IS NOT NULL \
              GROUP BY subgroup ORDER BY subgroup ASC",
         )?;
         let rows = stmt.query_map(params![album_id], |r| {
@@ -1638,7 +1638,7 @@ impl Db {
     pub fn camera_list(&self) -> Result<Vec<CameraCountRow>> {
         let mut stmt = self.0.prepare(
             "SELECT camera, COUNT(*) FROM assets \
-             WHERE camera IS NOT NULL AND camera != '' AND in_trash = 0 \
+             WHERE camera IS NOT NULL AND camera != '' AND in_trash = 0 AND kind IN ('photo', 'raw') \
              GROUP BY camera ORDER BY COUNT(*) DESC, camera ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1655,7 +1655,7 @@ impl Db {
     pub fn lens_list(&self) -> Result<Vec<CameraCountRow>> {
         let mut stmt = self.0.prepare(
             "SELECT lens, COUNT(*) FROM assets \
-             WHERE lens IS NOT NULL AND lens != '' AND in_trash = 0 \
+             WHERE lens IS NOT NULL AND lens != '' AND in_trash = 0 AND kind IN ('photo', 'raw') \
              GROUP BY lens ORDER BY COUNT(*) DESC, lens ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1675,7 +1675,7 @@ impl Db {
         let mut stmt = self.0.prepare(
             "SELECT upper(substr(path, length(rtrim(path, replace(path, '.', ''))) + 1)) AS fmt, \
              COUNT(*) FROM assets \
-             WHERE path LIKE '%.%' AND in_trash = 0 \
+             WHERE path LIKE '%.%' AND in_trash = 0 AND kind IN ('photo', 'raw') \
              GROUP BY fmt ORDER BY COUNT(*) DESC, fmt ASC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1770,7 +1770,7 @@ impl Db {
         let mut stmt = self.0.prepare(&format!(
             "SELECT {ASSET_PAGE_COLS} FROM view_history v \
              JOIN assets a ON a.id = v.asset_id \
-             WHERE a.in_trash = 0 \
+             WHERE a.in_trash = 0 AND a.kind IN ('photo', 'raw') \
              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
         ))?;
         let rows = stmt.query_map(params![limit], map_asset_page)?;
@@ -1903,11 +1903,11 @@ impl Db {
     }
 
     /// 为哈希补算建任务：xxhash = 0 哨兵（rename 快道遗留）且无未完成
-    /// hash 任务的资产（全 kind——视频等同样参与查重）。
+    /// hash 任务的照片和 RAW 资产。
     pub fn create_hash_tasks_for_unhashed(&self) -> Result<u64> {
         let now = now_rfc3339();
         let created = self.0.execute(
-            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id                                AND t.state IN ('pending', 'running'))",
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0 AND a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id                                AND t.state IN ('pending', 'running'))",
             params![now],
         )?;
         Ok(created as u64)
@@ -1921,7 +1921,7 @@ impl Db {
             params![now],
         )?;
         self.0.execute(
-            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id)",
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'hash', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.xxhash = 0 AND a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'hash' AND t.asset_id = a.id)",
             params![now],
         )?;
         self.pending_index_task_count("hash")
@@ -2040,7 +2040,7 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT {ASSET_PAGE_COLS} FROM assets WHERE id IN ({slots}) ORDER BY created_at ASC, id ASC"
+            "SELECT {ASSET_PAGE_COLS} FROM assets WHERE id IN ({slots}) AND kind IN ('photo', 'raw') ORDER BY created_at ASC, id ASC"
         );
         let mut stmt = self.0.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), map_asset_page)?;
@@ -2072,10 +2072,11 @@ impl Db {
     /// 侧栏计数（2026-09-21）：库内资产总数（全 kind——侧栏「照片」即画廊
     /// 全量；0016 起排除回收站）与浏览历史行数。纯 COUNT，毫秒级。
     pub fn sidebar_assets_count(&self) -> Result<i64> {
-        self.0
-            .query_row("SELECT COUNT(*) FROM assets WHERE in_trash = 0", [], |r| {
-                r.get(0)
-            })
+        self.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')",
+            [],
+            |r| r.get(0),
+        )
     }
 
     pub fn sidebar_viewed_count(&self) -> Result<i64> {
@@ -2242,7 +2243,7 @@ impl Db {
         // 哨兵 = 当前时刻：trashed_at 恒不晚于 now，第一页必含最新行
         let mut stmt = self.0.prepare(&format!(
             "SELECT {ASSET_PAGE_COLS} FROM assets \
-             WHERE in_trash = 1 \
+             WHERE in_trash = 1 AND kind IN ('photo', 'raw') \
                AND (?2 = 0 OR trashed_at < ?1 OR (trashed_at = ?1 AND id < ?2)) \
              ORDER BY trashed_at DESC, id DESC LIMIT ?3",
         ))?;
@@ -2366,6 +2367,85 @@ impl Db {
             return Err(Error::QueryReturnedNoRows);
         }
         Ok(())
+    }
+
+    // —— AI 辅助选片（0021：ai_analysis，eyes/blur 两通道）——
+
+    /// 落一条分析结果（PK(asset_id, kind) upsert）。value/score 可空
+    /// （eyes unknown / 计算不可得）。model_version = 算法或模型版本标签。
+    pub fn set_ai_analysis(
+        &self,
+        asset_id: i64,
+        kind: &str,
+        value: Option<&str>,
+        score: Option<f64>,
+        model_version: &str,
+    ) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO ai_analysis (asset_id, kind, value, score, model_version, analyzed_at)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)              ON CONFLICT (asset_id, kind) DO UPDATE SET              value = excluded.value, score = excluded.score,              model_version = excluded.model_version, analyzed_at = excluded.analyzed_at",
+            params![asset_id, kind, value, score, model_version, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 某资产的分析记录（详情 aiAnalysis 行；kind 升序）。
+    pub fn ai_analysis_for(&self, asset_id: i64) -> Result<Vec<AiAnalysisRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT kind, value, score, model_version FROM ai_analysis              WHERE asset_id = ?1 ORDER BY kind ASC",
+        )?;
+        let rows = stmt.query_map(params![asset_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// 为闭眼通道建任务：photo/raw 且无 eyes 任务的行（任意状态——检测在
+    /// eyes 任务时进行；无人脸 → done 且不产生记录，不重做）。
+    pub fn create_eyes_tasks_for_unindexed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'eyes', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'eyes' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
+    /// 为失焦通道建任务：photo/raw 且无 blur 任务的行。
+    pub fn create_blur_tasks_for_unindexed(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        let created = self.0.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)              SELECT 'blur', a.id, 'pending', 0, ?1, ?1 FROM assets a              WHERE a.kind IN ('photo', 'raw')                AND NOT EXISTS (SELECT 1 FROM index_tasks t                                WHERE t.kind = 'blur' AND t.asset_id = a.id)",
+            params![now],
+        )?;
+        Ok(created as u64)
+    }
+
+    /// eyes 通道代际重排（指纹变更：模型/阈值变了——done 复位 pending +
+    /// 无任务行新建）。
+    pub fn requeue_eyes_tasks_for_all(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1              WHERE kind = 'eyes' AND state != 'pending'",
+            params![now],
+        )?;
+        self.create_eyes_tasks_for_unindexed()?;
+        self.pending_index_task_count("eyes")
+    }
+
+    /// blur 通道代际重排（指纹变更：阈值/算法版本变了）。
+    pub fn requeue_blur_tasks_for_all(&self) -> Result<u64> {
+        let now = now_rfc3339();
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?1              WHERE kind = 'blur' AND state != 'pending'",
+            params![now],
+        )?;
+        self.create_blur_tasks_for_unindexed()?;
+        self.pending_index_task_count("blur")
     }
 
     // —— 原片-成片版本关系（0017：photo_group / group_asset / asset_relation）——
@@ -2749,18 +2829,20 @@ fn insert_asset_on(
     }
     refresh_asset_pair_on(conn, id, &a.path)?;
 
-    // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；video 留
-    // thumb_state=0 走按需队列（M8：ffmpeg 海报，侧车失败由队列失败
-    // 计数兜底）；other 无缩略图可言直接永久占位。REPLACE 旧资产行时
+    // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；
+    // other 无缩略图可言直接永久占位。REPLACE 旧资产行时
     // 其任务行随 ON DELETE CASCADE 消失，这里只补新行。
+    // 0021：photo/raw 同时登记 eyes/blur 分析任务（闭眼/疑似失焦）。
     if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
         let now = now_rfc3339();
-        conn.execute(
-            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
-             VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
-            params![id, now],
-        )?;
-    } else if a.kind != AssetKind::Video {
+        for kind in ["thumb", "eyes", "blur"] {
+            conn.execute(
+                "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+                 VALUES (?2, ?1, 'pending', 0, ?3, ?3)",
+                params![id, kind, now],
+            )?;
+        }
+    } else {
         conn.execute(
             "UPDATE assets SET thumb_state = 2 WHERE id = ?1",
             params![id],
@@ -2971,6 +3053,7 @@ fn asset_filter_conditions(
     };
     // —— 回收站排除（0016）：常规查询全链路默认不可见（唯一入口 trash_list）——
     conds.push("a.in_trash = 0".to_string());
+    conds.push("a.kind IN ('photo', 'raw')".to_string());
     // —— 多选 IN / 尾部匹配（各上限 16；空 = 不过滤）——
     let kinds: Vec<AssetKind> = filters.kinds.iter().take(16).copied().collect();
     let cameras: Vec<String> = filters.cameras.iter().take(16).cloned().collect();
@@ -3174,6 +3257,25 @@ fn asset_filter_conditions(
         conds.push(format!(
             "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id              AND {album_clause} AND ai.subgroup IS NULL)"
         ));
+    }
+
+    // —— AI 选片建议（0021）：eyes/blur 命中 ai_analysis 对应 value；
+    //    只认白名单值（closed/maybe、soft），其余容错不过滤 ——
+    if let Some(eyes) = &filters.eyes {
+        if matches!(eyes.as_str(), "closed" | "maybe") {
+            let s = slot(params_vec, V::from(eyes.clone()));
+            conds.push(format!(
+                "EXISTS (SELECT 1 FROM ai_analysis aa WHERE aa.asset_id = a.id                  AND aa.kind = 'eyes' AND aa.value = {s})"
+            ));
+        }
+    }
+    if let Some(blur) = &filters.blur {
+        if blur == "soft" {
+            conds.push(
+                "EXISTS (SELECT 1 FROM ai_analysis aa WHERE aa.asset_id = a.id                  AND aa.kind = 'blur' AND aa.value = 'soft')"
+                    .to_string(),
+            );
+        }
     }
 
     conds

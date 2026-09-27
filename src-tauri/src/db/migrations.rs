@@ -25,6 +25,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0018_ALBUM_DIRS,
     MIGRATION_0019_ALBUM_SUBGROUPS,
     MIGRATION_0020_DROP_DERIVED_RELATIONS,
+    MIGRATION_0021_AI_SELECTION,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -468,4 +469,39 @@ CREATE INDEX idx_album_item_subgroup ON album_item (album_id, subgroup);
 /// chips 仍依赖，与原成片概念无关。
 const MIGRATION_0020_DROP_DERIVED_RELATIONS: &str = r#"
 DROP TABLE asset_relation;
+"#;
+
+/// 0021（阶段 C AI 辅助选片）：ai_analysis —— 每资产每分析 kind 一行
+/// （PK(asset_id, kind) upsert），kind ∈ eyes（闭眼三态 closed/maybe/
+/// unknown；无人脸不产生记录）| blur（sharp/soft/unknown + 0-100 清晰度
+/// 分）。输出只是可筛选建议，与用户决定分层，绝不自动写 XMP。
+/// index_tasks kind 扩 'eyes'/'blur' 通道（整表重建，0012 手法）：
+/// - eyes：独立通道（检测当时裁眼区域送分类器；模型未收录→通道空转跳过）
+/// - blur：无模型依赖（512 档缩略图拉普拉斯清晰度分，始终可用）
+const MIGRATION_0021_AI_SELECTION: &str = r#"
+CREATE TABLE ai_analysis (
+    asset_id      INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    kind          TEXT    NOT NULL CHECK (kind IN ('eyes', 'blur')),
+    value         TEXT,
+    score         REAL,
+    model_version TEXT,
+    analyzed_at   TEXT    NOT NULL,
+    PRIMARY KEY (asset_id, kind)
+);
+
+CREATE TABLE index_tasks_new (
+    id         INTEGER PRIMARY KEY,
+    kind       TEXT    NOT NULL CHECK (kind IN ('thumb', 'exif', 'ai', 'face', 'phash', 'hash', 'eyes', 'blur')),
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    state      TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+);
+INSERT INTO index_tasks_new (id, kind, asset_id, state, attempts, created_at, updated_at)
+    SELECT id, kind, asset_id, state, attempts, created_at, updated_at FROM index_tasks;
+DROP TABLE index_tasks;
+ALTER TABLE index_tasks_new RENAME TO index_tasks;
+CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
+CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
 "#;

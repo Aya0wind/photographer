@@ -32,7 +32,9 @@ pub struct IndexStatusDto {
     pub face: IndexKindStatus,
 }
 
-const KINDS: [&str; 6] = ["thumb", "exif", "ai", "face", "phash", "hash"];
+const KINDS: [&str; 8] = [
+    "thumb", "exif", "ai", "face", "phash", "hash", "eyes", "blur",
+];
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
@@ -119,7 +121,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
-        "thumb" | "exif" | "phash" | "hash" => {
+        "thumb" | "exif" | "phash" | "hash" | "eyes" | "blur" => {
             match kind {
                 "thumb" => {
                     db.create_thumb_tasks_for_unindexed()
@@ -128,6 +130,21 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
                 "phash" => {
                     db.create_phash_tasks_for_unindexed()
                         .map_err(|e| format!("创建 pHash 任务失败: {e}"))?;
+                }
+                // 0021 选片分析通道：eyes 依赖闭眼模型（未收录 → 明确错误，
+                // 任务账可先建档）；blur 无模型依赖始终可用
+                "eyes" => {
+                    if !state.ai.selection_eyes_ready() {
+                        return Err(
+                            "闭眼检测模型未收录（选型未过：许可证/格式，详见模型清单）".into()
+                        );
+                    }
+                    db.create_eyes_tasks_for_unindexed()
+                        .map_err(|e| format!("创建闭眼任务失败: {e}"))?;
+                }
+                "blur" => {
+                    db.create_blur_tasks_for_unindexed()
+                        .map_err(|e| format!("创建失焦任务失败: {e}"))?;
                 }
                 // M8-②：xxhash=0 哨兵（rename 快道/历史遗留）手动补算入口
                 "hash" => {
@@ -181,7 +198,7 @@ pub async fn index_kick_now(state: State<'_, SharedState>, kind: String) -> Resu
 // ---------------------------------------------------------------------------
 
 /// 重建通道名（IPC kind）。
-const REBUILD_KINDS: [&str; 4] = ["semantic", "face", "thumb", "exif"];
+const REBUILD_KINDS: [&str; 5] = ["semantic", "face", "thumb", "exif", "selection"];
 
 /// 单通道重建核（同步、可测）：清理该通道全部持久化产物 + 时间账/任务账
 /// 重排。返回重排后的待办数。不 kick worker（调用方决定：手动 IPC 后台
@@ -229,6 +246,16 @@ pub fn rebuild_channel_core(
             db.clear_exif_columns().map_err(|e| e.to_string())?;
             db.requeue_exif_tasks_for_all()
                 .map_err(|e| format!("重排 EXIF 任务失败: {e}"))
+        }
+        "selection" => {
+            // 0021 选片分析重建：清分析产物 + 两通道任务账重排（eyes 模型
+            // 未收录时其任务保持 pending 空转跳过）
+            db.0
+                .execute_batch("DELETE FROM ai_analysis;                                DELETE FROM index_tasks WHERE kind IN ('eyes', 'blur');")
+                .map_err(|e| e.to_string())?;
+            let eyes = db.requeue_eyes_tasks_for_all().map_err(|e| e.to_string())?;
+            let blur = db.requeue_blur_tasks_for_all().map_err(|e| e.to_string())?;
+            Ok(eyes + blur)
         }
         other => Err(format!("未知重建通道: {other}（可选 {REBUILD_KINDS:?}）")),
     }
@@ -279,7 +306,7 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
             }
         }
-        "thumb" | "exif" => {}
+        "thumb" | "exif" | "selection" => {}
         other => return Err(format!("未知重建通道: {other}（可选 {REBUILD_KINDS:?}）")),
     }
     Ok(())
@@ -376,6 +403,20 @@ pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     hash
 }
 
+/// 选片分析指纹（0021：blur 阈值/算法版本 + eyes 模型就绪态；f32 用
+/// to_bits 保精确比较）。阈值变更 → 两通道任务重排（分析结果随阈值变）。
+pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in [
+        ai.index_params_version as u64,
+        ai.blur_soft_threshold.to_bits() as u64,
+    ] {
+        hash ^= part;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// 连拍分组指纹（版本 + gap/hamming/min——改参数只重组不重算 pHash）。
 pub fn burst_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
@@ -403,10 +444,11 @@ pub fn check_params_and_rebuild(
     db_dir: &std::path::Path,
     ai: &crate::settings::AiSettings,
 ) {
-    let (want_sem, want_face, want_burst) = (
+    let (want_sem, want_face, want_burst, want_sel) = (
         semantic_params_fingerprint(ai),
         face_params_fingerprint(ai),
         burst_params_fingerprint(ai),
+        selection_params_fingerprint(ai),
     );
     let marker = db_dir.join(PARAMS_MARKER);
     // 首跑（marker 不存在）：视参数为「一直就是当前值」，只写标记不重建
@@ -418,6 +460,7 @@ pub fn check_params_and_rebuild(
                 "semantic={want_sem}
 face={want_face}
 burst={want_burst}
+selection={want_sel}
 "
             ),
         )
@@ -437,6 +480,12 @@ burst={want_burst}
         .lines()
         .find_map(|l| l.strip_prefix("burst="))
         .and_then(|v| v.parse::<u64>().ok());
+    // 0021 前的旧 marker 无 selection 行 → None（首次对齐即重排两通道任务，
+    // 分析结果随阈值产出，与 gen-1 建档幂等）
+    let stored_sel = content
+        .lines()
+        .find_map(|l| l.strip_prefix("selection="))
+        .and_then(|v| v.parse::<u64>().ok());
 
     let mut rebuilt_sem = false;
     if stored_sem != Some(want_sem) && ai.enable_clip && state.ai.semantic_ready() {
@@ -452,6 +501,22 @@ burst={want_burst}
     }
     // 连拍参数变更：只重组不重算（pHash 与参数无关）。旧 marker 无 burst 行
     //（0012 前创建）视作「从未分组」——一次重组后对齐。
+    // 0021 选片参数变更（或旧 marker 升级）：两通道任务重排（清分析产物
+    // 不必须——upsert 覆盖；阈值回退时旧记录随重算覆写）
+    if stored_sel != Some(want_sel) {
+        eprintln!("[params] 选片参数变更（{stored_sel:?} → {want_sel}），重排 eyes/blur 任务");
+        if let Ok(db) = super::open_library_db(db_dir) {
+            let _ = db.requeue_eyes_tasks_for_all();
+            let _ = db.requeue_blur_tasks_for_all();
+            let pending = db.pending_index_task_count("blur").unwrap_or(0);
+            if pending > 0 {
+                crate::index::kick(
+                    db_dir.to_path_buf(),
+                    &std::sync::Arc::clone(&state.supervisor),
+                );
+            }
+        }
+    }
     let mut regrouped_burst = false;
     if stored_burst != Some(want_burst) {
         eprintln!("[params] 连拍参数变更（{stored_burst:?} → {want_burst}），重组");
@@ -486,6 +551,7 @@ burst={want_burst}
             stored_burst.unwrap_or(want_burst)
         }
     );
+    let sel_line = format!("selection={want_sel}");
     let _ = std::fs::create_dir_all(db_dir);
     let _ = std::fs::write(
         &marker,
@@ -493,6 +559,7 @@ burst={want_burst}
             "{sem_line}
 {face_line}
 {burst_line}
+{sel_line}
 "
         ),
     );
