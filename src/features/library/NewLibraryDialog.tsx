@@ -84,9 +84,18 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
     }
   }, [open]);
 
+  // 库名全局唯一（用户定案）：与现有库重名时禁建并提示
+  // selector 只取 libraries（引用稳定——.map 进 selector 会每渲染新数组，
+  // zustand 快照失稳导致订阅组件死循环，真机设置页 40 测试崩）
+  const libraries = useSettingsStore((s) => s.settings.libraries);
+  const nameTaken = libraries.some(
+    (l) => l.name.trim() === draft.name.trim() && draft.name.trim() !== "",
+  );
+
   const canCreate =
     !creating &&
     draft.name.trim().length > 0 &&
+    !nameTaken &&
     draft.dbDir.trim().length > 0 &&
     draft.photoRoot.trim().length > 0;
 
@@ -157,6 +166,11 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
                   className={FIELD_CLASS}
                   autoFocus
                 />
+                {nameTaken && (
+                  <span className="text-[11px] text-red-400" role="alert">
+                    {t("newLib.nameTaken")}
+                  </span>
+                )}
               </label>
               <label className="flex flex-col gap-1 text-xs text-text-secondary">
                 {t("onboarding.library.photoRoot")}

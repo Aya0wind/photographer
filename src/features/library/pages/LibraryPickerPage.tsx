@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import TitleBar from "@/app/shell/TitleBar";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { resetLibrarySession } from "@/lib/librarySession";
+import DeleteLibraryDialog from "../DeleteLibraryDialog";
 
 /**
  * 库选择器（达芬奇式启动首屏，/library-picker）：
@@ -21,6 +23,8 @@ export default function LibraryPickerPage() {
 
   // 当前激活库预选；列表变化后仍指向有效库
   const [selectedId, setSelectedId] = useState<string | null>(activeLibraryId);
+  /** 删除库对话框目标（卡片垃圾桶按钮打开） */
+  const [deleting, setDeleting] = useState<Library | null>(null);
   useEffect(() => {
     setSelectedId((prev) =>
       prev !== null && libraries.some((lib) => lib.id === prev)
@@ -38,6 +42,9 @@ export default function LibraryPickerPage() {
   function openLibrary(library: Library): void {
     const { save, setLibraryChosen } = useSettingsStore.getState();
     const settings = useSettingsStore.getState().settings;
+    // 切库先清会话态（快照/缩略图缓存/store）——不清=新库看到上一个库的
+    // 照片（快照跨库沿用）与张冠李戴的缩略图（assetId 跨库撞号）
+    if (settings.activeLibraryId !== library.id) resetLibrarySession();
     void save({ ...settings, activeLibraryId: library.id });
     setLibraryChosen(true);
     // 配置链被中断过的库：先进向导补完（提交时置 configured=true）
@@ -103,11 +110,38 @@ export default function LibraryPickerPage() {
                     <span className="truncate text-sm font-semibold text-text-primary" title={lib.name}>
                       {lib.name}
                     </span>
-                    {wasActive && (
-                      <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">
-                        {t("picker.lastActive")}
-                      </span>
-                    )}
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {wasActive && (
+                        <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">
+                          {t("picker.lastActive")}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        aria-label={t("picker.deleteLib")}
+                        title={t("picker.deleteLib")}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleting(lib);
+                        }}
+                        className="flex h-6 w-6 items-center justify-center rounded text-text-muted transition-colors hover:bg-red-400/10 hover:text-red-400"
+                        data-testid="picker-delete-lib"
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="13"
+                          height="13"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m-9 0l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13" />
+                        </svg>
+                      </button>
+                    </span>
                   </div>
                   <div className="flex items-start gap-2.5">
                     {/* 照片数占位：M4 统计接入前用图片图标位 */}
@@ -180,6 +214,13 @@ export default function LibraryPickerPage() {
         </>
       )}
       </div>
+      {deleting !== null && (
+        <DeleteLibraryDialog
+          library={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={() => setDeleting(null)}
+        />
+      )}
     </div>
   );
 }

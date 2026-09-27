@@ -232,6 +232,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::settings::settings_set,
+            ipc::settings::library_delete,
             ipc::device::device_list,
             ipc::device::device_scan,
             ipc::device::device_files,
