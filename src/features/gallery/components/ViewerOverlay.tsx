@@ -9,8 +9,11 @@ import {
   assetLabelSet,
   assetRatingSet,
   assetRejectSet,
+  assetVersions,
   type AssetDetailDto,
   type AssetDto,
+  type AssetVersions,
+  type VersionMember,
 } from "@/ipc/api";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
 import type { AssetGroup } from "../lib/assetGroups";
@@ -138,6 +141,13 @@ function isPortraitOrientation(orientation: number): boolean {
   return Number.isInteger(orientation) && orientation >= 5 && orientation <= 8;
 }
 
+/** 版本成员角色 → 文案键（B2；成片角色即「成片」标） */
+const VERSION_ROLE_KEYS: Record<NonNullable<VersionMember["role"]>, string> = {
+  raw: "viewer.version.raw",
+  sooc: "viewer.version.sooc",
+  derived: "viewer.version.derived",
+};
+
 /** 详情面板行/组（LR 式分组：文件 / 图像 / 拍摄 / 位置） */
 interface ExifRow {
   label: string;
@@ -157,9 +167,11 @@ interface ViewerOverlayProps {
   onClose: () => void;
   /** 本视图内的资产标记变更回传（颜色标签/拒绝旗标；上层同步网格态，可选） */
   onAssetPatched?: (id: number, patch: Partial<AssetDto>) => void;
+  /** 版本切换（B2：版本区 chips 点击；上层换 asset；不传则版本区只读不渲染交互） */
+  onVersionSelect?: (assetId: number) => void;
 }
 
-export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched }: ViewerOverlayProps) {
+export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -483,6 +495,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     await assetRejectSet([asset.id], rejected);
     onAssetPatched?.(asset.id, { rejected });
   }
+
+  // --- 版本关系（B2）：原片/机内JPEG/成片 chips（点击换 asset；孤片不渲染） -------------
+  const [versions, setVersions] = useState<AssetVersions | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setVersions(null);
+    void assetVersions(asset.id).then((v) => {
+      if (!cancelled) setVersions(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset.id]);
+  /** 组员 >1 才成「版本」（孤片 members 只有自己，不渲染版本区） */
+  const versionMembers: VersionMember[] | null =
+    versions !== null && versions.members.length > 1 ? versions.members : null;
 
   // LR 风格查看器快捷键：方向键导航、[]/,./R 旋转、0-5 评分、P/U 旗标、
   // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键；
@@ -1021,6 +1049,66 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                     </svg>
                   </button>
                 </div>
+                {/* 版本区（B2）：原片/机内JPEG/成片成员 chips；当前项高亮；孤片不渲染 */}
+                {versionMembers !== null && (
+                  <div className="mb-2 border-b border-edge/60 pb-2" data-testid="viewer-versions">
+                    <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                      {t("viewer.versions")}
+                    </h3>
+                    <div className="flex flex-wrap gap-1" role="listbox" aria-label={t("viewer.versions")}>
+                      {versionMembers.map((member) => {
+                        const current = member.assetId === asset.id;
+                        const derived = member.role === "derived";
+                        const roleLabel =
+                          member.role === null ? null : t(VERSION_ROLE_KEYS[member.role]);
+                        return (
+                          <button
+                            key={member.assetId}
+                            type="button"
+                            role="option"
+                            aria-selected={current}
+                            onClick={() => onVersionSelect?.(member.assetId)}
+                            disabled={onVersionSelect === undefined}
+                            className={`flex max-w-full items-center gap-1.5 rounded-md border px-1.5 py-1 text-left transition-colors disabled:cursor-default ${
+                              current
+                                ? "border-accent bg-accent/10 text-accent"
+                                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+                            } disabled:opacity-70`}
+                            data-testid="viewer-version-chip"
+                            data-role={member.role ?? "none"}
+                            data-asset-id={member.assetId}
+                            data-current={current}
+                          >
+                            {roleLabel !== null && (
+                              <span
+                                className={`shrink-0 font-mono text-[10px] font-bold leading-4 ${
+                                  member.role === "raw"
+                                    ? "text-sky-400"
+                                    : derived
+                                      ? "text-violet-300"
+                                      : "text-text-muted"
+                                }`}
+                              >
+                                {roleLabel}
+                              </span>
+                            )}
+                            <span className="max-w-[110px] truncate text-[10px]" title={member.name}>
+                              {member.name}
+                            </span>
+                            {derived && (
+                              <span
+                                className="shrink-0 rounded bg-violet-400/15 px-1 text-[9px] leading-4 text-violet-300"
+                                data-testid="viewer-version-derived-badge"
+                              >
+                                {t("viewer.version.derived")}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <div data-testid="viewer-exif-rows" data-asset-id={visibleDetail.id}>
                   {exifSections.map((section) => (
                     <section key={section.key} data-testid={`viewer-exif-group-${section.key}`}>

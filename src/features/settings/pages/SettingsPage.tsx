@@ -35,6 +35,42 @@ function commit(partial: DeepPartial<Settings>): void {
   void save(useSettingsStore.getState().settings);
 }
 
+/** LR 交接指引行（B2 静态文案）：小图标 + 标题 + 说明 */
+function LrGuideRow({
+  icon,
+  titleKey,
+  textKey,
+}: {
+  icon: string;
+  titleKey: string;
+  textKey: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-start gap-2.5" data-testid="lr-guide-row" data-guide={titleKey}>
+      <svg
+        viewBox="0 0 16 16"
+        width="14"
+        height="14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="mt-0.5 shrink-0 text-accent"
+        aria-hidden="true"
+      >
+        <path d={icon} />
+      </svg>
+      <p className="min-w-0 text-[11px] leading-relaxed text-text-secondary">
+        <span className="font-medium text-text-primary">{t(titleKey)}</span>
+        <span className="mx-1.5 text-text-muted">·</span>
+        {t(textKey)}
+      </p>
+    </div>
+  );
+}
+
 export function SectionTitle({ children }: { children: ReactNode }) {
   return (
     <h3 className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
@@ -284,6 +320,18 @@ export default function SettingsPage() {
                   <option value="zh">{t("settings.languageZh")}</option>
                 </select>
               </SettingRow>
+
+              {/* LR 交接（B2）：静态指引——导出建议 / XMP 冲突 / 星级互通边界 */}
+              <SectionTitle>{t("settings.section.lr")}</SectionTitle>
+              <div
+                className="flex flex-col gap-2 rounded-lg border border-edge/70 bg-surface/60 p-3"
+                data-testid="settings-lr-guide"
+              >
+                <LrGuideRow icon="M2 3.5h12M2 3.5v9h12v-9M5 6.5h6M5 9h4" titleKey="lr.guide.flowTitle" textKey="lr.guide.flow" />
+                <LrGuideRow icon="M8 2v8M5 4.5L8 2l3 2.5M3 8v3.5h10V8" titleKey="lr.guide.exportTitle" textKey="lr.guide.export" />
+                <LrGuideRow icon="M3 4h10v8H3zM5.5 8l2 2 3.5-4" titleKey="lr.guide.xmpTitle" textKey="lr.guide.xmp" />
+                <LrGuideRow icon="M8 2l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4 4.4 13.1l.7-4L2.2 6.3l4-.6z" titleKey="lr.guide.ratingTitle" textKey="lr.guide.rating" />
+              </div>
             </>
           )}
 

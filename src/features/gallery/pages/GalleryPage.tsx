@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import {
+  assetsByIds,
   assetsCount,
   assetsPage,
   assetTrashMove,
@@ -497,6 +498,26 @@ export default function GalleryPage() {
     [],
   );
 
+  /** 版本切换（B2 查看器版本区）：成员在已加载窗口内直接换 asset；不在（如被
+   *  groupRole 过滤滤掉）时经 assets_by_ids 取回补进窗口，再走 URL 协议换 asset */
+  const handleVersionSelect = useCallback(
+    (assetId: number) => {
+      const known = viewerGroups.flatMap((g) => g.assets).find((a) => a.id === assetId);
+      if (known !== undefined) {
+        openAsset(known);
+        return;
+      }
+      void assetsByIds([assetId]).then((list) => {
+        const asset = list.find((a) => a.id === assetId);
+        if (asset === undefined) return;
+        assetsRef.current = [asset, ...assetsRef.current];
+        setAssets(assetsRef.current);
+        openAsset(asset);
+      });
+    },
+    [openAsset, viewerGroups],
+  );
+
   /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
   const [trashConfirm, setTrashConfirm] = useState<{ ids: number[] } | null>(null);
   const requestTrashMove = useCallback((targets: AssetDto[]) => {
@@ -929,6 +950,7 @@ export default function GalleryPage() {
           onNavigate={navigateTo}
           onClose={closeViewer}
           onAssetPatched={handleAssetPatched}
+          onVersionSelect={handleVersionSelect}
         />
       )}
     </div>

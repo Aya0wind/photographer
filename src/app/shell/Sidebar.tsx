@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { ReactElement } from "react";
 
 import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
@@ -168,6 +169,8 @@ const SECTIONS: NavSection[] = [
 
 export default function Sidebar() {
   const { t } = useTranslation();
+  // 计数/人脸徽标按库私有：切库时以 activeLibraryId 为依赖重拉
+  const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
   // 人物入口徽标：聚类人脸总数（进 app 拉一次；失败静默 0——后端未就绪不显示）
   const [peopleFaces, setPeopleFaces] = useState(0);
   useEffect(() => {
@@ -179,7 +182,7 @@ export default function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeLibraryId]);
 
   // 计数徽标（sidebar_counts 一次性纯 COUNT）：挂载拉一次；导入会话完成后
   // 重拉（资产/标签/相册/最近浏览都可能变——最小事件集，不上轮询）。
@@ -208,7 +211,7 @@ export default function Sidebar() {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [activeLibraryId]);
 
   /** 行徽标值（people 走聚类总数；其余走 sidebar_counts；0/缺数据=不显示） */
   function badgeValueOf(badge: NonNullable<NavItem["badge"]>): number {

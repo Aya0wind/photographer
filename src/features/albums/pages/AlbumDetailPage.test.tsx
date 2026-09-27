@@ -305,3 +305,27 @@ describe("相册详情页：页头与筛选", () => {
     await waitFor(() => expect(screen.queryByTestId("add-to-album-dialog")).not.toBeInTheDocument());
   });
 });
+
+// --- 原片/成片四态分段（B2） -------------------------------------------------------------
+
+describe("相册详情：原片/成片分段（B2）", () => {
+  it("工具条渲染四态分段（默认全部=不传）；点「只看成片」→ album_assets_page 透传 filters.groupRole", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    expect(await screen.findByTestId("album-detail-page")).toBeInTheDocument();
+    const segment = screen.getByTestId("album-grouprole");
+    expect(segment).toBeInTheDocument();
+    expect(screen.getByTestId("album-grouprole-all")).toHaveAttribute("aria-checked", "true");
+
+    await user.click(screen.getByTestId("album-grouprole-derived_only"));
+    await waitFor(() =>
+      expect(assetsPageMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ groupRole: "derived_only" }),
+      ),
+    );
+  });
+});

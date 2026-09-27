@@ -20,6 +20,7 @@ import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 import {
   FilterChipsRow,
   FilterPanel,
+  GroupRoleSegment,
   buildChips,
   buildFilters,
   hasActiveFilters,
@@ -308,6 +309,13 @@ export default function AlbumDetailPage() {
           >
             {t("gallery.groupCount", { count: itemCount })}
           </span>
+
+          {/* 原片/成片四态分段（B2）：全部/只看原片/只看成片/尚无成片；与筛选正交 */}
+          <GroupRoleSegment
+            value={inputs.groupRole}
+            onChange={(groupRole) => patchInputs({ groupRole })}
+            testId="album-grouprole"
+          />
 
           {/* 筛选按钮（激活条件计数徽标） */}
           <button

@@ -16,8 +16,10 @@ import {
   assetRatingSet,
   assetRejectSet,
   assetThumbGet,
+  assetVersions,
   type AssetDetailDto,
   type AssetDto,
+  type AssetVersions,
 } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -30,6 +32,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetRatingSet: vi.fn(),
     assetLabelSet: vi.fn(),
     assetRejectSet: vi.fn(),
+    assetVersions: vi.fn(),
     clipboardCopyFiles: vi.fn(),
     revealInExplorer: vi.fn(),
   };
@@ -60,6 +63,7 @@ const ratingMock = vi.mocked(assetRatingSet);
 const flagMock = vi.mocked(assetFlagSet);
 const labelMock = vi.mocked(assetLabelSet);
 const rejectMock = vi.mocked(assetRejectSet);
+const versionsMock = vi.mocked(assetVersions);
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -101,6 +105,7 @@ function renderViewer(
     onNavigate?: (i: number) => void;
     onClose?: () => void;
     onAssetPatched?: (id: number, patch: Partial<AssetDto>) => void;
+    onVersionSelect?: (assetId: number) => void;
   },
 ) {
   const group: AssetGroup = groupAssetsByDate(assets)[0];
@@ -115,6 +120,7 @@ function renderViewer(
         onNavigate={overrides?.onNavigate ?? onNavigate}
         onClose={overrides?.onClose ?? onClose}
         onAssetPatched={overrides?.onAssetPatched}
+        onVersionSelect={overrides?.onVersionSelect}
       />
     </I18nextProvider>,
   );
@@ -142,6 +148,7 @@ beforeEach(() => {
   flagMock.mockReset().mockResolvedValue(undefined);
   labelMock.mockReset().mockResolvedValue(undefined);
   rejectMock.mockReset().mockResolvedValue(undefined);
+  versionsMock.mockReset().mockResolvedValue(null);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
@@ -1249,5 +1256,44 @@ describe("查看器：拒绝旗标（与星级分层）", () => {
     expect(btn).toHaveAttribute("aria-pressed", "true");
     await user.click(btn);
     await waitFor(() => expect(rejectMock).toHaveBeenCalledWith([1], false));
+  });
+});
+
+// --- 版本关系（B2）：版本区 chips --------------------------------------------------------
+
+const VERSIONS_GROUP: AssetVersions = {
+  groupId: 5,
+  members: [
+    { assetId: 1, role: "raw", name: "IMG_0001.NEF", thumbReady: true },
+    { assetId: 9, role: "derived", name: "IMG_0001_edit_v1.jpg", thumbReady: true },
+  ],
+};
+
+describe("查看器：版本区（B2）", () => {
+  it("多成员：渲染 RAW/成片 chips（成片带标），当前项高亮；点击 → onVersionSelect(成员 id)", async () => {
+    const user = userEvent.setup();
+    versionsMock.mockResolvedValue(VERSIONS_GROUP);
+    const onVersionSelect = vi.fn();
+    renderViewer(GROUP_ASSETS, 0, { onVersionSelect });
+    await screen.findByTestId("viewer-versions");
+
+    const chips = screen.getAllByTestId("viewer-version-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0]).toHaveAttribute("data-role", "raw");
+    expect(chips[0]).toHaveAttribute("data-current", "true");
+    expect(chips[1]).toHaveAttribute("data-role", "derived");
+    expect(within(chips[1]).getByTestId("viewer-version-derived-badge")).toHaveTextContent("成片");
+    expect(within(chips[1]).getByText("IMG_0001_edit_v1.jpg")).toBeInTheDocument();
+
+    await user.click(chips[1]);
+    expect(onVersionSelect).toHaveBeenCalledWith(9);
+  });
+
+  it("孤片（members 只有自己）：不渲染版本区；asset_versions 失败同样不渲染", async () => {
+    versionsMock.mockResolvedValue({ groupId: null, members: [{ assetId: 1, role: null, name: "IMG_0001.JPG", thumbReady: false }] });
+    renderViewer(GROUP_ASSETS, 0);
+    await screen.findByTestId("viewer-rating");
+    await waitFor(() => expect(versionsMock).toHaveBeenCalledWith(1));
+    expect(screen.queryByTestId("viewer-versions")).not.toBeInTheDocument();
   });
 });

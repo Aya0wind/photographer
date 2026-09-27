@@ -8,6 +8,7 @@ import i18n from "@/i18n";
 import { albumList, smartViewCreate } from "@/ipc/api";
 import {
   FilterPanel,
+  QuickFilterBar,
   buildChips,
   buildFilters,
   inputsFromFilters,
@@ -213,5 +214,49 @@ describe("inputsFromFilters：filters → 面板输入（B1）", () => {
     const inputs = inputsFromFilters({});
     expect(inputs).toEqual(EMPTY_INPUTS);
     expect(inputsFromFilters({ ratingMin: 3 }).favoriteOnly).toBe(false);
+  });
+});
+
+// --- 原片/成片四态分段（B2） -------------------------------------------------------------
+
+describe("筛选面板：原片/成片版本维度（B2）", () => {
+  it("四态分段：点「只看原片」→ onPatch({groupRole:'raw_only'})；默认全部", async () => {
+    const user = userEvent.setup();
+    const { onPatch } = renderPanel();
+
+    expect(screen.getByTestId("search-grouprole-all")).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByTestId("search-grouprole-raw_only"));
+    expect(onPatch).toHaveBeenCalledWith({ groupRole: "raw_only" });
+  });
+
+  it("buildFilters：非 all 才透传 filters.groupRole", () => {
+    expect(buildFilters({ ...EMPTY_INPUTS, groupRole: "derived_only" }).groupRole).toBe("derived_only");
+    expect(buildFilters(EMPTY_INPUTS).groupRole).toBeUndefined();
+  });
+
+  it("chips：版本维度 chip 可单独移除；inputsFromFilters 反解", () => {
+    const chips = buildChips({ ...EMPTY_INPUTS, groupRole: "no_derived" }, (key) => key);
+    const chip = chips.find((c) => c.key === "groupRole");
+    expect(chip?.label).toBe("search.groupRole.no_derived");
+    expect(chip?.patch.groupRole).toBe("all");
+    expect(inputsFromFilters({ groupRole: "raw_only" }).groupRole).toBe("raw_only");
+    expect(inputsFromFilters({}).groupRole).toBe("all");
+  });
+});
+
+describe("QuickFilterBar：图库工具条版本分段（B2）", () => {
+  it("常驻工具条渲染四态分段（默认全部）；点选 → onPatch({groupRole})", async () => {
+    const user = userEvent.setup();
+    const onPatch = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QuickFilterBar inputs={EMPTY_INPUTS} onPatch={onPatch} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByTestId("search-grouprole")).toBeInTheDocument();
+    expect(screen.getByTestId("search-grouprole-all")).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByTestId("search-grouprole-no_derived"));
+    expect(onPatch).toHaveBeenCalledWith({ groupRole: "no_derived" });
   });
 });

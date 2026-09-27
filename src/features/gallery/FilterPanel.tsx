@@ -13,8 +13,7 @@ import {
   type AssetFormatCount,
   type AssetKind,
   type AssetLensCount,
-} from "@/ipc/api";
-import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
+} from "@/ipc/api";import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
 
 /**
  * 筛选面板（M4.5 自 SearchPage 抽取的共享组件，画廊合并后唯一消费方）：
@@ -36,6 +35,15 @@ type GpsFilter = "all" | "yes" | "no";
 export type ColorFilter = "all" | ColorLabel;
 /** 拒绝旗标三态：all=不限 / yes=仅已拒绝 / no=仅未拒绝 */
 export type RejectedFilter = "all" | "yes" | "no";
+/** 版本维度（B2）：all=全部（不传）| 只看原片 / 只看成片 / 尚无成片 */
+export type GroupRoleFilter = "all" | "raw_only" | "derived_only" | "no_derived";
+
+const GROUPROLE_OPTIONS: ReadonlyArray<{ value: GroupRoleFilter; labelKey: string }> = [
+  { value: "all", labelKey: "search.groupRole.all" },
+  { value: "raw_only", labelKey: "search.groupRole.raw_only" },
+  { value: "derived_only", labelKey: "search.groupRole.derived_only" },
+  { value: "no_derived", labelKey: "search.groupRole.no_derived" },
+];
 
 const KIND_OPTIONS: ReadonlyArray<{ value: KindFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.kind.all" },
@@ -94,6 +102,8 @@ export interface SearchInputs {
   color: ColorFilter;
   /** 拒绝旗标三态（B1；all=不限） */
   rejected: RejectedFilter;
+  /** 版本维度（B2；all=全部不过滤） */
+  groupRole: GroupRoleFilter;
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
@@ -120,6 +130,7 @@ export const EMPTY_INPUTS: SearchInputs = {
   album: null,
   color: "all",
   rejected: "all",
+  groupRole: "all",
 };
 
 /** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；视频=video；全部=不传） */
@@ -227,6 +238,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (inputs.album !== null) filters.albumId = inputs.album.id;
   if (inputs.color !== "all") filters.colorLabel = inputs.color;
   if (inputs.rejected !== "all") filters.rejected = inputs.rejected === "yes";
+  if (inputs.groupRole !== "all") filters.groupRole = inputs.groupRole;
   return filters;
 }
 
@@ -286,6 +298,13 @@ export function inputsFromFilters(filters: AssetFilters): SearchInputs {
   inputs.sizeMax = bytesToMbStr(filters.sizeMax ?? NaN);
   if (asColorLabel(filters.colorLabel) !== null) inputs.color = filters.colorLabel as ColorLabel;
   if (filters.rejected !== undefined) inputs.rejected = filters.rejected ? "yes" : "no";
+  if (
+    filters.groupRole === "raw_only" ||
+    filters.groupRole === "derived_only" ||
+    filters.groupRole === "no_derived"
+  ) {
+    inputs.groupRole = filters.groupRole;
+  }
   return inputs;
 }
 
@@ -415,6 +434,28 @@ function ColorSegment({
         </button>
       ))}
     </div>
+  );
+}
+
+/** 版本维度分段（B2，图库工具条/相册详情页/筛选面板共用）：全部/只看原片/只看成片/尚无成片 */
+export function GroupRoleSegment({
+  value,
+  onChange,
+  testId,
+}: {
+  value: GroupRoleFilter;
+  onChange: (next: GroupRoleFilter) => void;
+  testId: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Segment
+      ariaLabel={t("search.groupRole")}
+      value={value}
+      options={GROUPROLE_OPTIONS}
+      onChange={onChange}
+      testId={testId}
+    />
   );
 }
 
@@ -757,6 +798,9 @@ export function QuickFilterBar({
         {t("gallery.favoriteOnly")}
       </button>
       <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.groupRole")}</span>
+      <GroupRoleSegment value={inputs.groupRole} onChange={(groupRole) => onPatch({ groupRole })} testId="search-grouprole" />
+      <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
       <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.date")}</span>
       <div className="flex flex-wrap items-center gap-1" data-testid="search-quick-ranges">
         {(["recent7", "recent30", "thisYear", "lastYear"] as const).map((key) => {
@@ -980,6 +1024,13 @@ export function FilterPanel({
             testId="search-rejected"
           />
         </FieldRow>
+        <FieldRow label={t("search.groupRole")}>
+          <GroupRoleSegment
+            value={inputs.groupRole}
+            onChange={(groupRole) => onPatch({ groupRole })}
+            testId="search-grouprole"
+          />
+        </FieldRow>
         {!hideAlbum && (
           <FieldRow label={t("search.album")}>
             <AlbumDropdown
@@ -1199,6 +1250,13 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
       key: "rejected",
       label: t(`search.rejected.${inputs.rejected}`),
       patch: { ...inputs, rejected: "all" },
+    });
+  }
+  if (inputs.groupRole !== "all") {
+    chips.push({
+      key: "groupRole",
+      label: t(`search.groupRole.${inputs.groupRole}`),
+      patch: { ...inputs, groupRole: "all" },
     });
   }
   if (inputs.album !== null) {

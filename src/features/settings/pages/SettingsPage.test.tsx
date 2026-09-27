@@ -1015,3 +1015,21 @@ describe("AI tab：连拍分组（④ 起位于「高级」折叠分组内）", 
     expect(screen.queryByTestId("ai-burst-stats")).not.toBeInTheDocument();
   });
 });
+
+// --- LR 交接指引（B2 静态分区） -----------------------------------------------------------
+
+describe("LR 交接指引（B2）", () => {
+  it("常规 tab 渲染指引分区：工作流/导出建议/XMP 冲突/星级边界四行", () => {
+    renderSettingsPage();
+
+    const guide = screen.getByTestId("settings-lr-guide");
+    const rows = within(guide).getAllByTestId("lr-guide-row");
+    expect(rows).toHaveLength(4);
+    expect(guide).toHaveTextContent("工作流");
+    expect(guide).toHaveTextContent("导出建议设置");
+    expect(guide).toHaveTextContent("XMP 冲突");
+    expect(guide).toHaveTextContent("星级互通边界");
+    expect(guide).toHaveTextContent("从文件读取元数据");
+    expect(guide).toHaveTextContent("_edit_v1.jpg");
+  });
+});
