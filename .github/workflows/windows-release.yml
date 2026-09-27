@@ -82,9 +82,11 @@ jobs:
         with:
           workspaces: src-tauri -> target
           shared-key: windows-installers
-          key: nasm-3.2.0
+          # v1 was populated by the pre-NASM failed build. GitHub cache entries
+          # are immutable, so use a fresh generation and only save successful builds.
+          key: nasm-3.2.0-v2
           cache-workspace-crates: true
-          cache-on-failure: true
+          cache-on-failure: false
 
       - name: Cache Tauri bundler tools
         uses: actions/cache@v4
