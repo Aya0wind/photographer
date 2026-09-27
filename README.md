@@ -122,6 +122,8 @@ GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows bu
 
 推送到 `dev` 时也会自动构建安装包用于验证，但不会创建 Release。
 
+工作流会复用 npm 下载、Rust 依赖与编译产物、FFmpeg 侧车和 Tauri 的 NSIS/WiX 打包工具缓存。连续推送到 `dev` 时，旧的未完成构建会自动取消；`dev` 构建产物保留 3 天，正式分支及手动构建保留 14 天。
+
 ## 数据目录
 
 - 应用数据/模型：`%APPDATA%\com.smartphoto.app`
