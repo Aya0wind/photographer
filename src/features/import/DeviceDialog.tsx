@@ -4,7 +4,8 @@ import { AnimatePresence, motion } from "motion/react";
 
 import { formatBytes } from "@/lib/format";
 import { useImportStore } from "@/stores/importStore";
-import type { DeviceKind, FileKind } from "@/ipc/api";
+import type { FileKind } from "@/ipc/api";
+import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind } from "./devicePresentation";
 
 /**
  * 设备就绪弹窗（B 简洁风格）：deviceScanned 事件把设备推入 promptQueue，
@@ -19,18 +20,11 @@ const KIND_BADGE: Record<FileKind, string> = {
   other: "text-text-muted",
 };
 
-/** 设备类型 → i18n 键（folder=本地文件夹源） */
-const KIND_LABEL_KEY: Record<DeviceKind, string> = {
-  volume: "deviceDialog.kind.reader",
-  mtp: "deviceDialog.kind.camera",
-  folder: "deviceDialog.kind.folder",
-};
-
-function DeviceGlyph({ kind }: { kind: DeviceKind }) {
+function DeviceGlyph({ kind }: { kind: DevicePresentationKind }) {
   const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round" } as const;
   return (
     <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true" className="text-text-secondary">
-      {kind === "mtp" ? (
+      {kind === "camera" ? (
         <g {...stroke}>
           <rect x="3.5" y="7" width="17" height="12" rx="2" />
           <path d="M9 7l1.2-2.4h3.6L15 7" />
@@ -92,13 +86,13 @@ export default function DeviceDialog() {
             data-testid="device-dialog-card"
           >
             <div className="flex items-center gap-3">
-              <DeviceGlyph kind={device.kind} />
+              <DeviceGlyph kind={devicePresentationKind(device)} />
               <div className="min-w-0 flex-1">
                 <h2 className="truncate text-base font-semibold text-text-primary" title={device.name}>
                   {device.name}
                 </h2>
                 <span className="mt-0.5 inline-block rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-secondary">
-                  {t(KIND_LABEL_KEY[device.kind])}
+                  {t(deviceKindLabelKey(device))}
                 </span>
               </div>
             </div>

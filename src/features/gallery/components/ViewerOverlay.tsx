@@ -4,7 +4,6 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
-  assetAlbums,
   assetDetail,
   assetFlagSet,
   assetRatingSet,
@@ -378,19 +377,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 切图闪缩修复（M4.5）：切换资产时不回退「基本行集」（行数骤减→面板高度跳变），
   // 保留上一份完整详情的行结构直到新详情到达（值随后一次更新，行不重挂）。
   const visibleDetail = detail ?? detailFromAsset(asset);
-  // 所属相册（asset_albums 反查；失败/空 → 不渲染该行）
-  const [albumNames, setAlbumNames] = useState<string[] | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setAlbumNames(null);
-    void assetAlbums(asset.id).then((albums) => {
-      if (cancelled) return;
-      setAlbumNames(albums.map((a) => a.name));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [asset.id]);
   useEffect(() => {
     let cancelled = false;
     void assetDetail(asset.id).then((d) => {
@@ -489,10 +475,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       key: "file",
       rows: [
         { label: t("viewer.filename"), value: formatValue(d.filename) },
-        // 所属相册（asset_albums 反查）：非空才渲染（未入册/查询在途不打扰）
-        ...(albumNames !== null && albumNames.length > 0
-          ? [{ label: t("viewer.albums"), value: albumNames.join("、") }]
-          : []),
         ...(d.format ? [{ label: t("viewer.format"), value: d.format }] : []),
         { label: t("viewer.size"), value: formatBytes(d.size) },
         {
@@ -569,7 +551,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       });
     }
     return sections;
-  }, [visibleDetail, albumNames, t]);
+  }, [visibleDetail, t]);
 
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;
@@ -844,10 +826,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               onClick={() => onNavigate(index - 1)}
               disabled={!hasPrev}
               aria-label={t("viewer.prev")}
-              className="pointer-events-auto absolute left-3 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className="pointer-events-auto absolute left-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
               data-testid="viewer-prev"
             >
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M10 3L5 8l5 5" />
               </svg>
             </button>
@@ -857,10 +839,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               onClick={() => onNavigate(index + 1)}
               disabled={!hasNext}
               aria-label={t("viewer.next")}
-              className="pointer-events-auto absolute right-3 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className="pointer-events-auto absolute right-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
               data-testid="viewer-next"
             >
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M6 3l5 5-5 5" />
               </svg>
             </button>
@@ -990,7 +972,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 <div data-testid="viewer-exif-rows" data-asset-id={visibleDetail.id}>
                   {exifSections.map((section) => (
                     <section key={section.key} data-testid={`viewer-exif-group-${section.key}`}>
-                      <h3 className="mb-1.5 mt-3 text-[10px] font-semibold uppercase tracking-wider text-text-muted first:mt-1">
+                      <h3 className="mb-2 mt-4 border-l-2 border-accent pl-2 text-[13px] font-bold tracking-wide text-text-primary first:mt-1">
                         {t(`viewer.group.${section.key}`)}
                       </h3>
                       <dl className="space-y-1.5">

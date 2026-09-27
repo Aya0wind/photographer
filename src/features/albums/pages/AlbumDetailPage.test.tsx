@@ -300,6 +300,6 @@ describe("相册详情页：页头与筛选", () => {
     await user.click(within(dialog).getByTestId("add-to-album-confirm"));
 
     await waitFor(() => expect(addMock).toHaveBeenCalledWith(5, [1]));
-    expect(await within(dialog).findByTestId("add-to-album-toast")).toHaveTextContent("已加入 1 张");
+    await waitFor(() => expect(screen.queryByTestId("add-to-album-dialog")).not.toBeInTheDocument());
   });
 });

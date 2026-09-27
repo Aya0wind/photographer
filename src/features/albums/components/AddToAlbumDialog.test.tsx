@@ -10,8 +10,7 @@ import { albumAddAssets, albumCreate, albumList, type AssetDto } from "@/ipc/api
 
 /**
  * 「加入相册」选择弹窗（③ 全局入口）：已有相册单选 + 底部新建内联输入；
- * 确定后 album_add_assets，toast 按实际新增数报「已加入 N 张（M 张已在相册）」
- * （幂等跳过数 M = 选中数 - 返回新增数），1.4s 后自动关闭。
+ * 确定后 album_add_assets，成功立即关闭；失败留在弹窗中提示。
  */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -84,36 +83,13 @@ describe("加入相册弹窗", () => {
     await waitFor(() => expect(addMock).toHaveBeenCalledWith(3, [1, 2]));
   });
 
-  it("幂等文案：返回实际新增数 → 「已加入 N 张（M 张已在相册）」；全新增无后缀", async () => {
-    const user = userEvent.setup();
-    // 3 选 2 新增（1 张已在相册）
-    addMock.mockResolvedValueOnce(2);
-    renderDialog([makeAsset(1), makeAsset(2), makeAsset(3)]);
-    await pickAlbumAndConfirm(user, "4");
-
-    const toast = await screen.findByTestId("add-to-album-toast");
-    expect(toast).toHaveTextContent("已加入 2 张（1 张已在相册）");
-    expect(toast).not.toHaveTextContent("undefined");
-  });
-
-  it("全新增：toast 只有「已加入 N 张」（无已在相册后缀）", async () => {
-    const user = userEvent.setup();
-    addMock.mockResolvedValueOnce(2);
-    renderDialog([makeAsset(1), makeAsset(2)]);
-
-    await pickAlbumAndConfirm(user, "3");
-    const toast = await screen.findByTestId("add-to-album-toast");
-    expect(toast).toHaveTextContent("已加入 2 张");
-    expect(toast).not.toHaveTextContent("已在相册");
-  });
-
   it("album_add_assets 失败（null）→ 加入失败文案", async () => {
     const user = userEvent.setup();
     addMock.mockResolvedValueOnce(null);
     renderDialog([makeAsset(1)]);
 
     await pickAlbumAndConfirm(user, "3");
-    expect(await screen.findByTestId("add-to-album-toast")).toHaveTextContent("加入失败");
+    expect(await screen.findByTestId("add-to-album-error")).toHaveTextContent("加入失败");
   });
 
   it("底部新建相册：重名错误行内提示；创建成功自动选中并可确定", async () => {
@@ -147,7 +123,6 @@ describe("加入相册弹窗", () => {
     // 确定加入新建相册
     await user.click(screen.getByTestId("add-to-album-confirm"));
     await waitFor(() => expect(addMock).toHaveBeenCalledWith(9, [7]));
-    expect(await screen.findByTestId("add-to-album-toast")).toHaveTextContent("已加入 1 张");
   });
 
   it("无相册（后端不可用）→ 空态文案，仍可新建", async () => {
@@ -161,7 +136,7 @@ describe("加入相册弹窗", () => {
     await waitFor(() => expect(albumCreateMock).toHaveBeenCalledWith("第一本"));
   });
 
-  it("toast 后 1.4s 自动调 onClose（自动关闭弹窗）", async () => {
+  it("加入成功后立即调 onClose", async () => {
     const onClose = vi.fn();
     addMock.mockResolvedValue(1);
     const user = userEvent.setup();
@@ -172,7 +147,6 @@ describe("加入相册弹窗", () => {
     );
 
     await pickAlbumAndConfirm(user, "3");
-    expect(await screen.findByTestId("add-to-album-toast")).toBeInTheDocument();
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 });

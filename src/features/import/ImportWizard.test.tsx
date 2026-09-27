@@ -1037,7 +1037,7 @@ describe("三栏列宽拖动", () => {
 });
 
 describe("缩略图档位", () => {
-  it("默认标准 120px；大档 150；紧凑档 100 且信息条只显文件名", async () => {
+  it("与其他页面统一为标准 120px、大档 150px 两档", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1051,13 +1051,8 @@ describe("缩略图档位", () => {
     await user.click(screen.getByTestId("wizard-tile-size-large"));
     expect(within(grid).getAllByTestId("wizard-tile")[0].style.width).toBe("150px");
     expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("large");
-
-    await user.click(screen.getByTestId("wizard-tile-size-compact"));
-    const tile = within(grid).getAllByTestId("wizard-tile")[0];
-    expect(tile.style.width).toBe("100px");
-    expect(tile).not.toHaveTextContent("MB"); // 紧凑档只显文件名
-    expect(tile).toHaveTextContent("IMG_0001.CR3");
-    expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("compact");
+    expect(within(screen.getByTestId("wizard-tile-size")).getAllByRole("radio")).toHaveLength(2);
+    expect(screen.queryByTestId("wizard-tile-size-compact")).not.toBeInTheDocument();
   });
 });
 

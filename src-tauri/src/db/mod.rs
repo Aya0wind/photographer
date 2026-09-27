@@ -1670,10 +1670,16 @@ impl Db {
     /// 浏览记账（upsert：每资产一行，浏览即刷新 viewed_at）。
     /// 资产不存在静默（调用方契约：mark 对无效 id 不报错）。
     pub fn mark_asset_viewed(&self, asset_id: i64) -> Result<()> {
-        self.0.execute(
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO view_history (asset_id, viewed_at) VALUES (?1, ?2)              ON CONFLICT (asset_id) DO UPDATE SET viewed_at = excluded.viewed_at",
             params![asset_id, now_rfc3339()],
         )?;
+        tx.execute(
+            "DELETE FROM view_history WHERE asset_id NOT IN (SELECT asset_id FROM view_history ORDER BY viewed_at DESC, asset_id DESC LIMIT 200)",
+            [],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

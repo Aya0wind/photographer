@@ -28,7 +28,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetRatingSet: vi.fn(),
     clipboardCopyFiles: vi.fn(),
     revealInExplorer: vi.fn(),
-    assetAlbums: vi.fn(),
   };
 });
 
@@ -43,12 +42,11 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { assetAlbums, clipboardCopyFiles, revealInExplorer } from "@/ipc/api";
+import { clipboardCopyFiles, revealInExplorer } from "@/ipc/api";
 
 const detailMock = vi.mocked(assetDetail);
 const revealItemMock = vi.mocked(revealItemInDir);
 const revealBatchMock = vi.mocked(revealInExplorer);
-const assetAlbumsMock = vi.mocked(assetAlbums);
 const copyFilesMock = vi.mocked(clipboardCopyFiles);
 const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
@@ -124,7 +122,6 @@ beforeAll(() => {
 beforeEach(() => {
   revealItemMock.mockReset().mockResolvedValue(undefined);
   revealBatchMock.mockReset().mockResolvedValue(1);
-  assetAlbumsMock.mockReset().mockResolvedValue([]);
   copyFilesMock.mockReset().mockResolvedValue(undefined);
   detailMock.mockReset().mockResolvedValue(DETAIL);
   ratingMock.mockReset().mockResolvedValue(undefined);
@@ -1173,29 +1170,5 @@ describe("查看器：视频播放（M8）", () => {
     fireEvent.error(await screen.findByTestId("viewer-video"));
     expect(await screen.findByTestId("viewer-video-fallback")).toBeInTheDocument();
     expect(screen.getByTestId("viewer-video-system")).toBeInTheDocument();
-  });
-});
-
-// --- 所属相册行（asset_albums 反查） ----------------------------------------------------
-
-describe("查看器：所属相册行", () => {
-  it("入册资产：文件组渲染「所属相册」，名称顿号连接", async () => {
-    assetAlbumsMock.mockResolvedValue([
-      { id: 2, name: "婚礼交付", coverAssetId: null, itemCount: 30, createdAt: "2026-09-27T01:00:00Z" },
-      { id: 1, name: "精选", coverAssetId: null, itemCount: 8, createdAt: "2026-09-26T01:00:00Z" },
-    ]);
-    renderViewer();
-    await screen.findByTestId("viewer-exif-rows");
-    await waitFor(() =>
-      expect(screen.getByText("婚礼交付、精选")).toBeInTheDocument(),
-    );
-  });
-
-  it("未入册/空返回：不渲染该行（不显示 — 占位）", async () => {
-    assetAlbumsMock.mockResolvedValue([]);
-    renderViewer();
-    await screen.findByTestId("viewer-exif-rows");
-    await waitFor(() => expect(assetAlbumsMock).toHaveBeenCalledWith(1));
-    expect(screen.queryByText("所属相册")).not.toBeInTheDocument();
   });
 });

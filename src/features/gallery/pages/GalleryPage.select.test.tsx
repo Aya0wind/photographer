@@ -364,10 +364,7 @@ describe("画廊：加入相册入口", () => {
     await user.click(within(dialog).getByTestId("add-to-album-confirm"));
 
     await waitFor(() => expect(albumAddMock).toHaveBeenCalledWith(3, [1, 2]));
-    // toast：1 新增 + 1 已在相册
-    expect(await within(dialog).findByTestId("add-to-album-toast")).toHaveTextContent(
-      "已加入 1 张（1 张已在相册）",
-    );
+    await waitFor(() => expect(screen.queryByTestId("add-to-album-dialog")).not.toBeInTheDocument());
   });
 
   it("右键菜单「加入相册」项：多选语义=作用于全部选中；无多选=该资产", async () => {

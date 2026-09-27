@@ -82,6 +82,17 @@ describe("DeviceDialog", () => {
     expect(screen.getByText("EOS R5")).toBeInTheDocument();
   });
 
+  it("通过 MTP 暴露的存储卡仍显示为读卡器", () => {
+    useImportStore.setState({
+      devices: [snapshot("MTP_CARD", "SanDisk SDXC 存储卡", "mtp", 5)],
+      promptQueue: ["MTP_CARD"],
+    });
+
+    renderDialog();
+    expect(screen.getByText("读卡器")).toBeInTheDocument();
+    expect(screen.queryByText("相机")).not.toBeInTheDocument();
+  });
+
   it("开始导入：出队并携带 device 参数跳转导入向导", async () => {
     useImportStore.setState({
       devices: [snapshot("E:", "SanDisk 64G", "volume", 12)],

@@ -198,6 +198,35 @@ describe("AssetGrid：多选交互", () => {
     expect(onOpenAsset).not.toHaveBeenCalled();
   });
 
+  it("按住鼠标拖过多张照片会连续选择，随后 click 不会重复切换", () => {
+    const onToggle = vi.fn();
+    renderGrid({
+      groups: groupsOf([asset(1), asset(2)]),
+      selection: { active: true, selected: [], onToggle },
+    });
+
+    const tiles = screen.getAllByTestId("gallery-tile");
+    fireEvent.pointerDown(tiles[0], { button: 0, pointerType: "mouse" });
+    fireEvent.pointerEnter(tiles[1], { pointerType: "mouse" });
+    fireEvent.pointerUp(tiles[1], { pointerType: "mouse" });
+    fireEvent.click(tiles[1]);
+
+    expect(onToggle.mock.calls.map(([a]) => a.id)).toEqual([1, 2]);
+  });
+
+  it("从已选照片开始拖动时统一取消经过的照片", () => {
+    const onToggle = vi.fn();
+    renderGrid({
+      groups: groupsOf([asset(1), asset(2)]),
+      selection: { active: true, selected: [1, 2], onToggle },
+    });
+
+    const tiles = screen.getAllByTestId("gallery-tile");
+    fireEvent.pointerDown(tiles[0], { button: 0, pointerType: "mouse" });
+    fireEvent.pointerEnter(tiles[1], { pointerType: "mouse" });
+    expect(onToggle.mock.calls.map(([a]) => a.id)).toEqual([1, 2]);
+  });
+
   it("check 圆钮点击 stopPropagation：只进多选不开查看器；默认 hover 显示、多选态常显", async () => {
     const onOpenAsset = vi.fn();
     const onCheckClick = vi.fn();

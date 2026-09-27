@@ -360,6 +360,10 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   // --- 长按（进入多选）：pointerdown 起 500ms 计时，抬起/离开/滚动取消 ----------------
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
+  const dragSelection = useRef<{ intent: "select" | "deselect"; visited: Set<number> } | null>(null);
+  const suppressTileClick = useRef(false);
+  const selectedIds = useRef(new Set(selection?.selected ?? []));
+  selectedIds.current = new Set(selection?.selected ?? []);
   const clearLongPress = useCallback(() => {
     if (longPressTimer.current !== null) {
       clearTimeout(longPressTimer.current);
@@ -368,7 +372,39 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   }, []);
   useEffect(() => clearLongPress, [clearLongPress]);
 
-  function handleTilePointerDown(asset: AssetDto): void {
+  useEffect(() => {
+    const finishDrag = () => {
+      dragSelection.current = null;
+      // click follows pointerup synchronously. Keep suppression through that click, then
+      // release it so a pointerup outside the tile cannot swallow the next interaction.
+      window.setTimeout(() => {
+        suppressTileClick.current = false;
+      }, 0);
+    };
+    window.addEventListener("pointerup", finishDrag);
+    window.addEventListener("pointercancel", finishDrag);
+    return () => {
+      window.removeEventListener("pointerup", finishDrag);
+      window.removeEventListener("pointercancel", finishDrag);
+    };
+  }, []);
+
+  function applyDragSelection(asset: AssetDto, intent: "select" | "deselect"): void {
+    const selected = selectedIds.current.has(asset.id);
+    if ((intent === "select") === selected) return;
+    if (intent === "select") selectedIds.current.add(asset.id);
+    else selectedIds.current.delete(asset.id);
+    selection?.onToggle(asset);
+  }
+
+  function handleTilePointerDown(asset: AssetDto, event: React.PointerEvent<HTMLButtonElement>): void {
+    if (selection?.active && event.button === 0 && event.pointerType === "mouse") {
+      const intent = selectedIds.current.has(asset.id) ? "deselect" : "select";
+      dragSelection.current = { intent, visited: new Set([asset.id]) };
+      suppressTileClick.current = true;
+      applyDragSelection(asset, intent);
+      return;
+    }
     if (selection?.active || !onLongPress) return; // 已在多选或调用方不支持
     longPressFired.current = false;
     clearLongPress();
@@ -379,6 +415,13 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     }, LONG_PRESS_MS);
   }
 
+  function handleTilePointerEnter(asset: AssetDto, event: React.PointerEvent<HTMLButtonElement>): void {
+    const drag = dragSelection.current;
+    if (!drag || event.pointerType !== "mouse" || drag.visited.has(asset.id)) return;
+    drag.visited.add(asset.id);
+    applyDragSelection(asset, drag.intent);
+  }
+
   function handleTileClick(asset: AssetDto, group: AssetGroup, ctrl: boolean): void {
     if (longPressFired.current) {
       // 长按刚触发：吞掉本次 click（多选已切换）
@@ -386,6 +429,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       return;
     }
     if (selection?.active) {
+      if (suppressTileClick.current) return;
       selection.onToggle(asset);
       return;
     }
@@ -560,9 +604,11 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         key={asset.id}
                         type="button"
                         onClick={(e) => handleTileClick(asset, row.group, e.ctrlKey || e.metaKey)}
-                        onPointerDown={() => handleTilePointerDown(asset)}
+                        onPointerDown={(e) => handleTilePointerDown(asset, e)}
+                        onPointerEnter={(e) => handleTilePointerEnter(asset, e)}
                         onPointerUp={clearLongPress}
                         onPointerLeave={clearLongPress}
+                        onDragStart={(e) => e.preventDefault()}
                         onContextMenu={(e) => {
                           // 右键自定义菜单（原生菜单已被全局 guard 屏蔽，此处兜底）
                           e.preventDefault();

@@ -465,3 +465,26 @@ fn view_history_mark_recent_and_cascade() {
             .unwrap();
     assert_eq!(rows, 1, "级联清历史");
 }
+
+#[test]
+fn view_history_keeps_only_latest_200_assets() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = open_db(db_dir.path());
+    for n in 0..205 {
+        let path = format!("X:/recent/{n:03}.jpg");
+        db.insert_asset(&asset(&path, Photo)).unwrap();
+        let id = db.asset_id_by_path(&path).unwrap().unwrap();
+        db.mark_asset_viewed(id).unwrap();
+    }
+
+    let rows: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM view_history", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(rows, 200);
+    assert!(db.asset_id_by_path("X:/recent/000.jpg").unwrap().is_some());
+    let oldest_kept: i64 =
+        db.0.query_row("SELECT MIN(asset_id) FROM view_history", [], |r| r.get(0))
+            .unwrap();
+    let first_kept = db.asset_id_by_path("X:/recent/005.jpg").unwrap().unwrap();
+    assert_eq!(oldest_kept, first_kept);
+}

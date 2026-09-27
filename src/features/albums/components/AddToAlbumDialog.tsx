@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -13,8 +13,7 @@ import {
  * 「加入相册」选择弹窗（③ 全局入口共用：多选操作条 / 瓦片右键菜单）：
  * - 已有相册列表（单选，radio 语义）；底部「新建相册」内联输入（重名错误行内提示，
  *   创建成功自动选中并刷新列表）
- * - 确定 → album_add_assets（已引用幂等跳过）；按返回的实际新增数 toast：
- *   「已加入 N 张（M 张已在相册）」，1.4s 后自动关闭
+ * - 确定 → album_add_assets（已引用幂等跳过）；成功后立即关闭
  * - 后端不可用/命令失败 → 行内失败文案（不静默吞掉）
  */
 
@@ -32,8 +31,7 @@ export default function AddToAlbumDialog({
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
-  const closeTimerRef = useRef<number | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
 
   // 挂载拉相册清单（后端不可用 → 空列表 + 只能新建）
   useEffect(() => {
@@ -45,15 +43,6 @@ export default function AddToAlbumDialog({
       cancelled = true;
     };
   }, []);
-
-  // toast 出现后 1.4s 自动关弹窗
-  useEffect(() => {
-    if (toast === null) return;
-    closeTimerRef.current = window.setTimeout(onClose, 1400);
-    return () => {
-      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
-    };
-  }, [toast, onClose]);
 
   // Esc 关闭（无输入焦点语义冲突时）
   useEffect(() => {
@@ -84,17 +73,17 @@ export default function AddToAlbumDialog({
   async function add(): Promise<void> {
     if (selectedId === null || adding) return;
     setAdding(true);
+    setAddError(null);
     const added = await albumAddAssets(
       selectedId,
       assets.map((a) => a.id),
     );
     setAdding(false);
     if (added === null) {
-      setToast(t("albums.addFailed"));
+      setAddError(t("albums.addFailed"));
       return;
     }
-    const already = Math.max(0, assets.length - added);
-    setToast(already > 0 ? t("albums.addedToast", { added, already }) : t("albums.addedToastAll", { added }));
+    onClose();
   }
 
   return (
@@ -202,9 +191,9 @@ export default function AddToAlbumDialog({
 
         {/* 底部操作条：取消 / 加入 */}
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-edge px-4 py-3">
-          {toast !== null ? (
-            <p className="mr-auto text-[11px] text-accent" role="status" data-testid="add-to-album-toast">
-              {toast}
+          {addError !== null ? (
+            <p className="mr-auto text-[11px] text-red-400" role="alert" data-testid="add-to-album-error">
+              {addError}
             </p>
           ) : (
             <span className="mr-auto" aria-hidden="true" />
@@ -220,7 +209,7 @@ export default function AddToAlbumDialog({
           <button
             type="button"
             onClick={() => void add()}
-            disabled={selectedId === null || adding || toast !== null}
+            disabled={selectedId === null || adding}
             className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="add-to-album-confirm"
           >

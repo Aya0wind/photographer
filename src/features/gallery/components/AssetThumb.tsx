@@ -149,6 +149,7 @@ export default function AssetThumb({
           onLoad={() => setLoaded(true)}
           onError={() => setFailed(true)}
           data-testid={testId ? `${testId}-img` : undefined}
+          draggable={false}
           className={`h-full w-full object-cover transition-opacity duration-150 ${
             loaded ? "opacity-100" : "opacity-0"
           }`}

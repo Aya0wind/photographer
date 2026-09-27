@@ -16,7 +16,6 @@ import {
   kindFromName,
   thumbGet,
   type AlbumDto,
-  type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
   type FsDirEntry,
@@ -27,6 +26,7 @@ import { formatBytes } from "@/lib/format";
 import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { seedDevicesFromBackend, useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
+import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind } from "./devicePresentation";
 
 /**
  * 导入向导（LR 式源面板 + A 密度三栏）：
@@ -68,13 +68,6 @@ const KIND_LABEL_COLOR: Record<FileKind, string> = {
   other: "text-text-muted",
 };
 
-/** 设备类型 → i18n 键（folder=从本地文件夹导入） */
-const KIND_LABEL_KEY: Record<DeviceKind, string> = {
-  volume: "deviceDialog.kind.reader",
-  mtp: "deviceDialog.kind.camera",
-  folder: "deviceDialog.kind.folder",
-};
-
 /** 文件夹图标（stroke 风格与现有图标一致，16 viewBox） */
 function FolderGlyph({ size = 14, className = "" }: { size?: number; className?: string }) {
   return (
@@ -101,18 +94,18 @@ function DeviceGlyph({
   size = 14,
   className = "",
 }: {
-  kind: DeviceKind;
+  kind: DevicePresentationKind;
   size?: number;
   className?: string;
 }) {
-  const paths: Record<DeviceKind, React.ReactNode> = {
-    volume: (
+  const paths: Record<DevicePresentationKind, React.ReactNode> = {
+    reader: (
       <>
         <path d="M4.6 2.5h4.5L12.5 6v6.2c0 .8-.6 1.3-1.4 1.3H4.6c-.9 0-1.6-.7-1.6-1.5V4c0-.8.7-1.5 1.6-1.5z" />
         <path d="M9.1 2.5V6h3.4" />
       </>
     ),
-    mtp: (
+    camera: (
       <>
         <rect x="2" y="4.6" width="12" height="8.4" rx="1.5" />
         <path d="M5.7 4.6l.9-1.7h2.8l.9 1.7" />
@@ -146,7 +139,7 @@ function deviceBadge(d: DeviceSnapshot, t: (key: string) => string): string {
   if (d.scanStatus === "scanning") return t("wizard.deviceScanning");
   if (d.scanStatus === "failed") return t("wizard.deviceScanFailed");
   const total = Object.values(d.filesByKind).reduce((sum, n) => sum + n, 0);
-  return total > 0 ? `${total.toLocaleString("zh-CN")} ${t("wizard.deviceFiles")}` : t(KIND_LABEL_KEY[d.kind]);
+  return total > 0 ? `${total.toLocaleString("zh-CN")} ${t("wizard.deviceFiles")}` : t(deviceKindLabelKey(d));
 }
 
 /** Windows 路径宽松比较（大小写/分隔符/尾斜杠归一）——树节点选中高亮用 */
@@ -255,9 +248,9 @@ function saveColWidths(left: number, right: number): void {
   }
 }
 
-// --- 缩略图档位：紧凑 100 / 标准 120（默认）/ 大 150；紧凑档信息条只显文件名 -------
+// --- 缩略图档位：标准 120（默认）/ 大 150，与其他照片网格统一为两档 -------
 
-type TileSizeKey = "compact" | "standard" | "large";
+type TileSizeKey = "standard" | "large";
 
 interface TileSizeSpec {
   /** 块宽（px），缩略区按 4:3 */
@@ -268,18 +261,17 @@ interface TileSizeSpec {
 }
 
 const TILE_SIZE_SPECS: Record<TileSizeKey, TileSizeSpec> = {
-  compact: { width: 100, thumbH: 75, infoH: 26, showSize: false },
   standard: { width: 120, thumbH: 90, infoH: 28, showSize: true },
   large: { width: 150, thumbH: 112, infoH: 30, showSize: true },
 };
-const TILE_SIZE_ORDER: readonly TileSizeKey[] = ["compact", "standard", "large"];
+const TILE_SIZE_ORDER: readonly TileSizeKey[] = ["standard", "large"];
 /** 档位图标：居中方块边长（12 viewBox 内） */
-const TILE_SIZE_ICON: Record<TileSizeKey, number> = { compact: 6, standard: 9, large: 12 };
+const TILE_SIZE_ICON: Record<TileSizeKey, number> = { standard: 7, large: 12 };
 
 function loadTileSize(): TileSizeKey {
   try {
     const value = localStorage.getItem(TILE_SIZE_KEY);
-    return value === "compact" || value === "large" ? value : "standard";
+    return value === "large" ? value : "standard";
   } catch {
     return "standard";
   }
@@ -1765,7 +1757,7 @@ export default function ImportWizard() {
                           title={d.id}
                         >
                           <DeviceGlyph
-                            kind={d.kind}
+                            kind={devicePresentationKind(d)}
                             size={13}
                             className={isSelected ? "text-accent" : "text-text-muted"}
                           />
@@ -1803,8 +1795,8 @@ export default function ImportWizard() {
                         <div className="flex justify-between">
                           <dt className="text-text-muted">{t("wizard.deviceKind")}</dt>
                           <dd className="flex items-center gap-1 text-text-secondary">
-                            <DeviceGlyph kind={device.kind} size={12} className="text-text-secondary" />
-                            {t(KIND_LABEL_KEY[device.kind])}
+                            <DeviceGlyph kind={devicePresentationKind(device)} size={12} className="text-text-secondary" />
+                            {t(deviceKindLabelKey(device))}
                           </dd>
                         </div>
                         {(Object.keys(device.filesByKind) as FileKind[]).map((kind) => (
