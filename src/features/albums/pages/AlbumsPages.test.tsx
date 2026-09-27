@@ -200,9 +200,6 @@ describe("M4 路由与侧栏", () => {
     expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("日落");
     expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("猫");
     expect(tags.map((t) => t.getAttribute("data-tag"))).toContain("森林");
-    // #tags 锚点区块（侧栏「标签」入口指向 /albums#tags）
-    expect(screen.getByTestId("albums-tags-section")).toHaveAttribute("id", "tags");
-
     await user.click(screen.getAllByTestId("albums-tag")[0]);
     expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
   });
@@ -404,7 +401,6 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     // 智能区：同款分区头 + 40 标签墙（点击行为照旧）
     expect(screen.getByTestId("albums-smart-header")).toHaveTextContent("智能相册");
     expect(screen.getAllByTestId("albums-tag")).toHaveLength(SMART_ALBUM_TAGS.length);
-    expect(screen.getByTestId("albums-tags-section")).toHaveAttribute("id", "tags");
   });
 
   it("手工相册封面：coverAssetId 指定 → 该资产缩略图；未指定 → 取列表第一张", async () => {

@@ -10,13 +10,12 @@ import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } fro
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
  * - 浏览：图库、最近浏览（/recent）、那年今天（/memories，M7 F6）、
  *   收藏（F5 数据未就绪——禁用 +「即将支持」）
- * - 组织：相册（/albums 标签墙总览）、人物、器材统计（/gear，M7 F9）、
- *   标签（/albums#tags 同路由锚点，v1 与相册同区块）
+ * - 组织：相册（/albums，含手工相册和智能相册）、人物、器材统计（/gear，M7 F9）
  * - 工具：导入（任务并入右侧抽屉，M4.5）、相似照片（/similar，M7 F8 两级
  *   去重：完全重复 + pHash 近似，组内勾选清理）
  * - 系统：设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
- * 计数徽标：图库/最近浏览/那年今天/相册/标签走 sidebar_counts（一次性纯
+ * 计数徽标：图库/最近浏览/那年今天/相册走 sidebar_counts（一次性纯
  * COUNT，挂载拉一次 + 导入会话完成事件后重拉——最小事件集，不上轮询；
  * 0 或后端不可用不显示）；人物走 peopleList 聚类人脸总数（照旧）。
  */
@@ -114,13 +113,6 @@ const ICONS = {
     </>,
     "gear",
   ),
-  tags: icon(
-    <>
-      <path d="M2 2.5h5l6 6-3.5 3.5-6-6z" />
-      <circle cx="5" cy="5" r="0.9" />
-    </>,
-    "tags",
-  ),
   similar: icon(
     <>
       <rect x="2" y="2" width="7.5" height="7.5" rx="1" />
@@ -162,7 +154,6 @@ const SECTIONS: NavSection[] = [
       { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums, badge: "albums" },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
-      { to: "/albums#tags", labelKey: "nav.tags", icon: ICONS.tags, badge: "tags" },
     ],
   },
   {

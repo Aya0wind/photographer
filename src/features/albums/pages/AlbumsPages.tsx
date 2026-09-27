@@ -33,7 +33,7 @@ import AlbumDetailPage from "./AlbumDetailPage";
  *   + 名称 + 张数；卡片右键/悬浮菜单：重命名 / 设为封面 / 删除（红色确认）。
  * - 智能相册 = 预置标签墙（40 个中文，飞牛词表对齐），自动管理的相册：点击进入
  *   该标签的语义结果视图（/albums/:tag，行为照旧）。卡片样式与手工区统一。
- * - 分区样式参考图库「按年分块」写法（区标题 + 内容块）；#tags 锚点保留。
+ * - 分区样式参考图库「按年分块」写法（区标题 + 内容块）。
  * - /albums/:tag 参数为纯数字 → 手工相册详情页（AlbumDetailPage）。
  * 标签可见性：设置页画廊 tab 多选（localStorage smartphoto.albums.hiddenTags）。
  */
@@ -552,8 +552,8 @@ export function AlbumsIndexPage() {
           )}
         </section>
 
-        {/* 智能相册区（#tags 锚点：侧栏「标签」入口指向 /albums#tags） */}
-        <section id="tags" className="mt-6 scroll-mt-2" data-testid="albums-tags-section">
+        {/* 智能相册区 */}
+        <section className="mt-6" data-testid="albums-tags-section">
           <SectionHeader
             title={t("albums.smartTitle")}
             count={visibleTags.length}

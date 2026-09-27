@@ -37,7 +37,7 @@ let eventHandlers: Array<(event: AppEvent) => void> = [];
 /** 分组 → 导航项（含禁用占位）的期望结构 */
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
   { section: "浏览", links: ["图库", "最近浏览", "那年今天"], disabled: ["收藏"] },
-  { section: "组织", links: ["相册", "人物", "器材统计", "标签"], disabled: [] },
+  { section: "组织", links: ["相册", "人物", "器材统计"], disabled: [] },
   { section: "工具", links: ["导入", "相似照片"], disabled: [] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
@@ -165,16 +165,6 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     expect(screen.getByText("SIMILAR_CONTENT")).toBeInTheDocument();
   });
 
-  it("「标签」入口指向 /albums#tags（与相册同路由锚点）", async () => {
-    renderSidebar("/gallery");
-    const user = userEvent.setup();
-
-    const tagsLink = screen.getByRole("link", { name: /^标签$/ });
-    expect(tagsLink).toHaveAttribute("href", "/albums#tags");
-    await user.click(tagsLink);
-    expect(screen.getByText("ALBUMS_CONTENT")).toBeInTheDocument();
-  });
-
   it("品牌区让位顶部标题栏：侧栏不再展示应用标识", () => {
     renderSidebar("/gallery");
     expect(screen.queryByText("Photo Hub")).not.toBeInTheDocument();
@@ -207,7 +197,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
 // --- 侧栏计数徽标（⑥：sidebar_counts 契约铺开） -----------------------------------------
 
 describe("Sidebar：导航计数徽标", () => {
-  it("各入口计数渲染：图库/最近浏览/那年今天/相册/标签 + 人物照旧；0 不显示", async () => {
+  it("各入口计数渲染：图库/最近浏览/那年今天/相册 + 人物照旧；0 不显示", async () => {
     peopleListMock.mockResolvedValue([
       { clusterId: 1, name: null, faceCount: 93, coverAssetId: 1 },
     ]);
@@ -227,7 +217,7 @@ describe("Sidebar：导航计数徽标", () => {
     const byKind = new Map(badges.map((b) => [b.getAttribute("data-kind"), b.textContent]));
     expect(byKind.get("assets")).toBe("1234"); // 图库
     expect(byKind.get("recentViewed")).toBe("5"); // 最近浏览
-    expect(byKind.get("tags")).toBe("7"); // 标签
+    expect(byKind.has("tags")).toBe(false); // 标签无独立导航入口
     expect(byKind.get("albums")).toBe("40"); // 相册
     expect(byKind.has("onThisDay")).toBe(false); // 0 → 不渲染
     // 人物徽标照旧（peopleList 数据源）
