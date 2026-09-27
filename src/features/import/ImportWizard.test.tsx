@@ -1326,6 +1326,22 @@ describe("ImportWizard：添加到相册步骤", () => {
     expect(plan.albumSubgroup).toBe("精修");
   });
 
+  it("子分组 datalist 默认建议名（B4 修订）：「原片」「成片」前置、与已有去重", async () => {
+    seedSession();
+    albumSubgroupsMock.mockResolvedValue([{ name: "精选", itemCount: 0 }, { name: "成片", itemCount: 0 }]);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-album-existing"));
+    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
+
+    // datalist = [原片, 精选, 成片]：「成片」已被占用 → 不重复前置；「原片」缺位补前
+    const datalist = document.getElementById("wizard-subgroup-options") as HTMLDataListElement;
+    await waitFor(() => expect(datalist?.options).toHaveLength(3));
+    expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "精选", "成片"]);
+  });
+
   it("未选相册（清单为空）：行内提示「请选择相册」且不启动", async () => {
     seedSession();
     albumListMock.mockReset().mockResolvedValue([]);

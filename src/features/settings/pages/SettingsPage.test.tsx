@@ -1024,12 +1024,12 @@ describe("LR 交接指引（B2）", () => {
 
     const guide = screen.getByTestId("settings-lr-guide");
     const rows = within(guide).getAllByTestId("lr-guide-row");
-    expect(rows).toHaveLength(4);
-    expect(guide).toHaveTextContent("工作流");
+    // 纯 XMP/导出建议文档（用户定案：无内建原片/成片语义）
+    expect(rows).toHaveLength(2);
     expect(guide).toHaveTextContent("导出建议设置");
     expect(guide).toHaveTextContent("XMP 冲突");
-    expect(guide).toHaveTextContent("星级互通边界");
     expect(guide).toHaveTextContent("从文件读取元数据");
     expect(guide).toHaveTextContent("_edit_v1.jpg");
+    expect(guide).toHaveTextContent("元数据选「包含全部」");
   });
 });

@@ -315,30 +315,6 @@ describe("相册详情页：页头与筛选", () => {
   });
 });
 
-// --- 原片/成片四态分段（B2） -------------------------------------------------------------
-
-describe("相册详情：原片/成片分段（B2）", () => {
-  it("工具条渲染四态分段（默认全部=不传）；点「只看成片」→ album_assets_page 透传 filters.groupRole", async () => {
-    const user = userEvent.setup();
-    renderDetail();
-
-    expect(await screen.findByTestId("album-detail-page")).toBeInTheDocument();
-    const segment = screen.getByTestId("album-grouprole");
-    expect(segment).toBeInTheDocument();
-    expect(screen.getByTestId("album-grouprole-all")).toHaveAttribute("aria-checked", "true");
-
-    await user.click(screen.getByTestId("album-grouprole-derived_only"));
-    await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-        expect.objectContaining({ groupRole: "derived_only" }),
-      ),
-    );
-  });
-});
-
 // --- 子分组（B4 定案：相册内任意命名文件夹层） ---------------------------------------------
 
 describe("相册详情页：子分组", () => {
@@ -393,6 +369,20 @@ describe("相册详情页：子分组", () => {
     await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
   });
 
+  it("移组弹窗 datalist 默认建议名（B4 修订）：「原片」「成片」前置、与已有去重", async () => {
+    subgroupsMock.mockResolvedValue([{ name: "精选", itemCount: 0 }]);
+    assetsPageMock.mockResolvedValue([makeAsset(1)]);
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+
+    const user = userEvent.setup();
+    await user.click(checkOf(1));
+    await user.click(screen.getByTestId("selection-subgroup-move"));
+
+    const datalist = document.getElementById("selection-subgroup-datalist") as HTMLDataListElement;
+    expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "成片", "精选"]);
+  });
+
   it("根视图移组弹窗不出现「移到相册根」；输入留空时确认禁用", async () => {
     subgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 1 }]);
     assetsPageMock.mockResolvedValue([makeAsset(1)]);
@@ -431,13 +421,5 @@ describe("相册详情页：子分组", () => {
     await user.click(screen.getByTestId("selection-subgroup-move"));
     await user.click(screen.getByTestId("selection-subgroup-root"));
     await waitFor(() => expect(moveMock).toHaveBeenCalledWith(1, [1, 2], null));
-  });
-
-  it("工具条「导入成片」按钮 → 打开导入成片对话框", async () => {
-    renderDetail();
-    await screen.findByTestId("album-detail-page");
-    const user = userEvent.setup();
-    await user.click(screen.getByTestId("album-import-derived"));
-    expect(screen.getByTestId("import-derived-dialog")).toBeInTheDocument();
   });
 });

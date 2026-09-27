@@ -12,6 +12,7 @@ import {
   type AssetDto,
 } from "@/ipc/api";
 import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
+import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
 
 /**
  * 多选浮动操作条（M4.5，画廊选择模式）：顶部居中浮条——已选 N 张 |
@@ -535,7 +536,7 @@ export default function SelectionBar({
                   data-testid="selection-subgroup-name"
                 />
                 <datalist id="selection-subgroup-datalist">
-                  {subgroup.names
+                  {subgroupSuggestions(subgroup.names)
                     .filter((n) => n !== subgroup.current)
                     .map((n) => (
                       <option key={n} value={n} />

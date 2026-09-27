@@ -18,14 +18,12 @@ import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { AssetContextMenu } from "@/features/gallery/components/ContextMenu";
 import SelectionBar from "@/features/gallery/components/SelectionBar";
-import ImportDerivedDialog from "@/features/albums/components/ImportDerivedDialog";
 import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 import {
   FilterChipsRow,
   FilterPanel,
-  GroupRoleSegment,
   buildChips,
   buildFilters,
   hasActiveFilters,
@@ -71,7 +69,6 @@ export default function AlbumDetailPage() {
   // --- 子分组（B4 定案）：null = 相册根散照片视图；进入子分组 = 页内状态切换 ------------
   const [subgroup, setSubgroup] = useState<string | null>(null);
   const [subgroups, setSubgroups] = useState<AlbumSubgroupDto[]>([]);
-  const [derivedImportOpen, setDerivedImportOpen] = useState(false);
   const refreshSubgroups = useCallback(async () => {
     setSubgroups(await albumSubgroups(albumId));
   }, [albumId]);
@@ -365,23 +362,6 @@ export default function AlbumDetailPage() {
             {t("gallery.groupCount", { count: itemCount })}
           </span>
 
-          {/* 原片/成片四态分段（B2）：全部/只看原片/只看成片/尚无成片；与筛选正交，
-              在相册根/子分组视图内均作为照片属性辅助筛选 */}
-          <GroupRoleSegment
-            value={inputs.groupRole}
-            onChange={(groupRole) => patchInputs({ groupRole })}
-            testId="album-grouprole"
-          />
-
-          {/* 导入成片（B4 子分组定案）：LR 导出的成片导回本相册（目标子分组默认「成片」） */}
-          <button
-            type="button"
-            onClick={() => setDerivedImportOpen(true)}
-            className="flex shrink-0 items-center gap-1.5 rounded-md border border-violet-400/60 px-2.5 py-1 text-[11px] text-violet-300 transition-colors hover:bg-violet-400/10"
-            data-testid="album-import-derived"
-          >
-            {t("albums.importDerived")}
-          </button>
 
           {/* 筛选按钮（激活条件计数徽标） */}
           <button
@@ -587,21 +567,6 @@ export default function AlbumDetailPage() {
           testId="album-asset-context-menu"
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
           albumContext={{ albumId, onRemoved: handleAssetsRemoved }}
-        />
-      )}
-
-      {/* 导入成片弹窗（B4：目标=本相册+子分组，默认「成片」） */}
-      {derivedImportOpen && (
-        <ImportDerivedDialog
-          albumId={albumId}
-          albumName={albumName}
-          subgroups={subgroups.map((g) => g.name)}
-          onClose={() => setDerivedImportOpen(false)}
-          onImported={() => {
-            setReloadToken((token) => token + 1);
-            void refreshMeta();
-            void refreshSubgroups();
-          }}
         />
       )}
 

@@ -25,7 +25,11 @@ import {
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
 import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
-import { isUngroupedAlbum, UNGROUPED_ALBUM_NAME } from "@/features/albums/lib/ungroupedAlbum";
+import {
+  isUngroupedAlbum,
+  subgroupSuggestions,
+  UNGROUPED_ALBUM_NAME,
+} from "@/features/albums/lib/ungroupedAlbum";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { seedDevicesFromBackend, useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
 import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind } from "./devicePresentation";
@@ -2206,7 +2210,7 @@ export default function ImportWizard() {
             )}
             {albumChoice === "existing" && albumId !== null && (
               <datalist id="wizard-subgroup-options">
-                {albumSubgroupNames.map((name) => (
+                {subgroupSuggestions(albumSubgroupNames).map((name) => (
                   <option key={name} value={name} />
                 ))}
               </datalist>

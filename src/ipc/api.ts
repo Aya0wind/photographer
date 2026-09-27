@@ -238,9 +238,6 @@ export interface AssetFilters {
   colorLabel?: string;
   /** 拒绝旗标三态过滤（true=仅拒绝 / false=仅未拒绝；省略 = 不限）。后端契约扩展中 */
   rejected?: boolean;
-  /** 版本维度（B2）：raw_only=只看原片（未入组资产也算原片）| derived_only=只看
-   *  成片（自身是派生件）| no_derived=尚无成片（所在组无派生成员）；省略 = 全部 */
-  groupRole?: "raw_only" | "derived_only" | "no_derived";
   /** 相册子分组精确名（仅 album_assets_page 消费；省略 = 不限层） */
   subgroup?: string;
   /** true = 只看相册根散照片（album_item.subgroup 为 NULL；仅 album_assets_page 消费） */
@@ -1567,92 +1564,7 @@ export async function smartViewDelete(id: number): Promise<boolean> {
   }
 }
 
-// --- B2：LR 成片导回 + 版本关系 --------------------------------------------------------
-// 契约对齐 src-tauri/src/ipc/versions.rs（serde camelCase）。
-
-/** 扫描候选原片（匹配依据三通道：filename / exif_time / phash；score 0-100 封顶） */
-export interface LrExportMatch {
-  assetId: number;
-  /** 库内原片文件名 */
-  name: string;
-  score: number;
-  /** 匹配依据 JSON：{bases: string[], time_delta_ms?, phash_hamming?} */
-  basis: string;
-}
-
-/** 导出目录内的成片文件（candidates 空 = 「待关联」） */
-export interface LrExportCandidate {
-  /** 导出目录内文件的绝对路径 */
-  path: string;
-  size: number;
-  candidates: LrExportMatch[];
-}
-
-/** 扫描 LR 导出目录（dir = 导出目录绝对路径）；已入库文件（size+xxhash 命中）
- *  被后端排除。失败/非数组回退 []（UI 显示扫描失败/空态）。 */
-export async function lrExportScan(dir: string): Promise<LrExportCandidate[]> {
-  try {
-    const list = await ipc<LrExportCandidate[] | null>("lr_export_scan", { dir });
-    if (!Array.isArray(list)) return [];
-    return list.filter(
-      (c): c is LrExportCandidate =>
-        c !== null && typeof c === "object" && typeof c.path === "string" && Array.isArray(c.candidates),
-    );
-  } catch {
-    return [];
-  }
-}
-
-/** 导入单条匹配（basis 透传扫描给出的依据 JSON；缺省不传） */
-export interface LrExportImportItem {
-  path: string;
-  sourceAssetId: number;
-  basis?: string;
-}
-
-/** 单条失败（不整批回滚） */
-export interface LrImportFailure {
-  path: string;
-  error: string;
-}
-
-/** 导入结果汇总（skipped=已在库幂等跳过） */
-export interface LrImportResult {
-  imported: number;
-  skipped: number;
-  failed: LrImportFailure[];
-}
-
-/** 成片导回入库（幂等；成片落 photoRoot/importSubdir/原片stem/；subgroup=目标
- *  相册子分组名，省略 = 相册根）。命令失败返回 null（调用方提示通用失败文案）。 */
-export async function lrExportImport(
-  matches: LrExportImportItem[],
-  albumId?: number,
-  subgroup?: string,
-): Promise<LrImportResult | null> {
-  try {
-    const payload: Record<string, unknown> = { matches };
-    if (albumId !== undefined) payload.albumId = albumId;
-    const trimmed = subgroup?.trim();
-    if (trimmed) payload.subgroup = trimmed;
-    const raw = await ipc<unknown>("lr_export_import", payload);
-    if (raw === null || typeof raw !== "object") return null;
-    const r = raw as Partial<LrImportResult>;
-    const numOf = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-    return {
-      imported: numOf(r.imported),
-      skipped: numOf(r.skipped),
-      failed: Array.isArray(r.failed)
-        ? r.failed.filter(
-            (f): f is LrImportFailure =>
-              f !== null && typeof f === "object" && typeof f.path === "string",
-          )
-        : [],
-    };
-  } catch {
-    return null;
-  }
-}
+// --- B2：资产版本关系（RAW+机内JPEG 孪生展示；子分组为纯子文件夹，无内建成片语义） ----------------
 
 /** 版本组成员（role: raw=原片 RAW | sooc=机内 JPEG | derived=成片；未入组 null） */
 export interface VersionMember {

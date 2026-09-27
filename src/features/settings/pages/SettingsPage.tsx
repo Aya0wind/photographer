@@ -327,10 +327,8 @@ export default function SettingsPage() {
                 className="flex flex-col gap-2 rounded-lg border border-edge/70 bg-surface/60 p-3"
                 data-testid="settings-lr-guide"
               >
-                <LrGuideRow icon="M2 3.5h12M2 3.5v9h12v-9M5 6.5h6M5 9h4" titleKey="lr.guide.flowTitle" textKey="lr.guide.flow" />
                 <LrGuideRow icon="M8 2v8M5 4.5L8 2l3 2.5M3 8v3.5h10V8" titleKey="lr.guide.exportTitle" textKey="lr.guide.export" />
                 <LrGuideRow icon="M3 4h10v8H3zM5.5 8l2 2 3.5-4" titleKey="lr.guide.xmpTitle" textKey="lr.guide.xmp" />
-                <LrGuideRow icon="M8 2l1.8 3.7 4 .6-2.9 2.8.7 4L8 11.4 4.4 13.1l.7-4L2.2 6.3l4-.6z" titleKey="lr.guide.ratingTitle" textKey="lr.guide.rating" />
               </div>
             </>
           )}
