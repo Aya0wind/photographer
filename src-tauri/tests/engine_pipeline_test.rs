@@ -83,11 +83,14 @@ fn milestones_fire_in_order() {
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let db = open_db(db_dir.path());
+    let mut plan = plan_for(target.path());
+    // 0018 导入必落相册：引擎兜底校验前先落「未分组」
+    plan.album_id = Some(db.ensure_default_album().unwrap());
     let engine = Engine::new(
         db,
         bus.clone(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(target.path()),
+        plan,
     );
     let stats = engine.run();
 
@@ -111,12 +114,9 @@ fn progress_events_are_throttled() {
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let db = open_db(db_dir.path());
-    let engine = Engine::new(
-        db,
-        bus,
-        Box::new(VolumeSource::new(src.path())),
-        plan_for(target.path()),
-    );
+    let mut plan = plan_for(target.path());
+    plan.album_id = Some(db.ensure_default_album().unwrap());
+    let engine = Engine::new(db, bus, Box::new(VolumeSource::new(src.path())), plan);
     let stats = engine.run();
     assert_eq!(stats.done_files, 40);
 
@@ -144,11 +144,13 @@ fn camera_template_falls_back_for_exifless_files() {
     fs::write(src.path().join("DCIM/DSC_0001.NEF"), &nef).unwrap();
 
     let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
+        // 0018 修订：带 album_id 的导入内层模板固定 {YYYY}/{MM-DD}——
+        // 自定义 dir_template（含 {相机} 段）不再生效，此处验证其被覆盖
         plan.dir_template = "{YYYY}/{相机}/{MM-DD}".into();
     });
 
     assert_eq!(stats.done_files, 1);
-    // 期望落在 .../<年>/未知相机/<月-日>/DSC_0001.NEF
+    // 期望落在 未分组/<年>/<月-日>/DSC_0001.NEF（相册内层模板固定）
     let mtime: chrono::DateTime<chrono::Utc> = fs::metadata(src.path().join("DCIM/DSC_0001.NEF"))
         .unwrap()
         .modified()
@@ -156,13 +158,13 @@ fn camera_template_falls_back_for_exifless_files() {
         .into();
     let expected = target
         .path()
+        .join("未分组")
         .join(mtime.format("%Y").to_string())
-        .join("未知相机")
         .join(mtime.format("%m-%d").to_string())
         .join("DSC_0001.NEF");
     assert!(
         expected.exists(),
-        "应降级到 未知相机 目录: {}",
+        "相册导入应使用固定内层模板: {}",
         expected.display()
     );
     assert_eq!(fs::read(&expected).unwrap(), nef);

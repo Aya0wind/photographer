@@ -154,6 +154,7 @@ pub fn plan_for(target: &Path) -> ImportPlan {
 }
 
 /// 跑一个引擎会话（Volume 源），返回 (job_id, stats)。
+/// 0018 起导入必落相册：plan 未指定 album_id 时兜底创建/复用「未分组」。
 pub fn run_engine(
     source_dir: &Path,
     db_dir: &Path,
@@ -165,20 +166,38 @@ pub fn run_engine(
     let source = Box::new(VolumeSource::new(source_dir));
     let mut plan = plan_for(target_dir);
     plan_override(&mut plan);
+    if plan.album_id.is_none() {
+        plan.album_id = Some(db.ensure_default_album().unwrap());
+    }
     let mut engine = Engine::new(db, bus, source, plan);
     let job_id = engine.begin().unwrap();
     let stats = engine.run();
     (job_id, stats)
 }
 
-/// 源文件 mtime 推导的期望目标目录（模板 {YYYY}/{MM-DD}；无 EXIF 回退 mtime）。
+/// 相册导入产物的期望目录：`target/{album_dir}/{YYYY}/{MM-DD}`。
+/// album_dir 传 "未分组"（DEFAULT_ALBUM_NAME）即默认兜底相册。
+pub fn expected_album_path(target: &Path, album_dir: &str, expected_rel: &Path) -> PathBuf {
+    target.join(album_dir).join(expected_rel)
+}
+
+/// 源文件 mtime 推导的期望目标目录（含「未分组」相册段——0018 导入必落
+/// 相册后的默认兜底；无 EXIF 回退 mtime）。
 pub fn expected_subdir(source_dir: &Path, rel: &str) -> PathBuf {
     let mtime = fs::metadata(source_dir.join(rel.replace('/', "\\")))
         .unwrap()
         .modified()
         .unwrap();
     let t: DateTime<Utc> = mtime.into();
-    PathBuf::from(t.format("%Y/%m-%d").to_string())
+    // 0018 起导入必落相册：run_engine 兜底相册为「未分组」，期望路径已含该段
+    PathBuf::from(format!("未分组/{}", t.format("%Y/%m-%d")))
+}
+
+/// plan_for + ensure_default_album（0018 导入必落相册；直接建引擎的测试用）。
+pub fn plan_with_album(db: &Db, target: &Path) -> ImportPlan {
+    let mut plan = plan_for(target);
+    plan.album_id = Some(db.ensure_default_album().unwrap());
+    plan
 }
 
 pub fn sha256_of(data: &[u8]) -> [u8; 32] {
@@ -344,7 +363,8 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
     }
 }
 
-/// IPC 导入计划：source_id 取注册表首个设备。
+/// IPC 导入计划：source_id 取注册表首个设备。0018 导入必落相册：
+/// album_id 兜底到「未分组」（不存在则自动创建）。
 pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
     let device_id = state
         .devices
@@ -354,6 +374,13 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         .next()
         .cloned()
         .unwrap();
+    // 无激活库时 album_id 置 None（start_import 会先报「尚未创建库」）
+    let album_id = state
+        .settings
+        .lock()
+        .unwrap()
+        .active_library()
+        .and_then(|lib| open_db(Path::new(&lib.db_dir)).ensure_default_album().ok());
     ImportPlan {
         source_id: device_id,
         target_root: target.to_path_buf(),
@@ -365,7 +392,7 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         mode: ImportMode::Copy,
         second_target: None,
         include: None,
-        album_id: None,
+        album_id,
     }
 }
 

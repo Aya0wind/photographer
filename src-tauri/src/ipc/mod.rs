@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod album;
 pub mod assets;
+pub mod claim;
 pub mod device;
 pub mod device_manager;
 pub mod duplicates;
@@ -519,8 +520,19 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 }
 
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
+/// 0018 修订（导入必落相册）：启动即确保默认相册「未分组」存在（按名幂等）；
+/// `album_id = None` 报错「必须选择相册」（引擎内另有同款防御，双保险）。
 pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     ensure_library_not_migrating(state)?;
+    {
+        let db = active_library_db(state)?;
+        // 系统级保底：默认相册「未分组」自动创建（幂等，先于校验——前端
+        // 拿它当缺省相册）
+        db.ensure_default_album().map_err(|e| e.to_string())?;
+        if plan.album_id.is_none() {
+            return Err("必须选择相册".into());
+        }
+    }
     let mut active = state
         .active_import
         .lock()

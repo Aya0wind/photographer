@@ -307,6 +307,28 @@ impl Engine {
             base.total_bytes += e.size;
         }
 
+        // 相册物理目录化（0018）：带 album_id 的导入落
+        // `photoRoot/{album.dir_name}/{YYYY}/{MM-DD}/`（相册内层模板固定，
+        // dir_name 作为最外层段前缀拼进 dir_template；随 plan_json 落
+        // journal，resume/retry 自然一致）。album_id 必填（None = 防御性
+        // 报错，IPC 层已有同款校验；历史 journal 的 None 计划走 resume
+        // 路径不经过这里，保留日期根模板仅作历史兼容）。
+        match self.plan.album_id {
+            Some(album_id) => {
+                let dir_name = self
+                    .db
+                    .album_dir_name(album_id)
+                    .map_err(EngineError::Db)?
+                    .ok_or_else(|| {
+                        EngineError::InvalidPlan(format!("导入相册 {album_id} 不存在"))
+                    })?;
+                self.plan.dir_template = format!("{dir_name}/{{YYYY}}/{{MM-DD}}");
+            }
+            None => {
+                return Err(EngineError::InvalidPlan("必须选择相册".into()));
+            }
+        }
+
         let plan_json = serde_json::to_string(&self.plan)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
         let job_id = self.db.create_job_with_plan(

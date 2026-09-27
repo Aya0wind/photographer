@@ -84,7 +84,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 17);
+    assert_eq!(version, 18);
 
     for object in [
         "album",
@@ -131,7 +131,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 17);
+    assert_eq!(version, 18);
 }
 
 // ---------------------------------------------------------------------------
@@ -535,9 +535,9 @@ fn import_without_album_keeps_behavior_unchanged() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    // 先有相册也不入：不挂 album_id 时行为与历史版本完全一致（完整跑）
-    fetch_album_create(&state, "无关册").unwrap();
+    let _state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    // 0018 修订（导入必落相册）：album_id = None 一律拒绝（引擎防御层；
+    // IPC 层另有同款校验，并在启动链上确保默认相册「未分组」存在）
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
     let mut engine = Engine::new(
@@ -546,14 +546,15 @@ fn import_without_album_keeps_behavior_unchanged() {
         Box::new(VolumeSource::new(src.path())),
         plan_for(target.path()),
     );
-    let job_id = engine.begin().unwrap();
-    let stats = engine.run();
-    assert_eq!(stats.done_files, 6);
-    assert_eq!(stats.failed_files, 0);
-    let db = open_db(db_dir.path());
-    assert_eq!(count_assets(&db), 6);
-    assert_eq!(album_item_count(&db), 0);
-    let plan_json = db.job_plan_json(job_id).unwrap().unwrap();
+    let err = engine.begin().expect_err("无 album_id 必须被拒绝");
+    assert!(err.to_string().contains("必须选择相册"), "{err}");
+
+    // 带 album_id 时 plan 契约仍序列化 albumId 字段（resume/retry 依赖）
+    let state_db = open_db(db_dir.path());
+    let album_id = state_db.ensure_default_album().unwrap();
+    let mut plan = plan_for(target.path());
+    plan.album_id = Some(album_id);
+    let plan_json = serde_json::to_string(&plan).unwrap();
     assert!(
         plan_json.contains("albumId"),
         "plan 契约应序列化 albumId 字段: {plan_json}"
@@ -568,8 +569,9 @@ fn import_into_deleted_album_degrades_gracefully() {
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
     let album = fetch_album_create(&state, "将被删").unwrap();
 
-    // 相册在导入启动前已被用户删除（并发窗口）：资产照常入册，
-    // 不产生假失败——文件已安全复制落盘，不因相册消失判整个文件失败
+    // 相册在导入启动前已被用户删除（并发窗口）：0018 起 begin 阶段显式
+    // 拒绝（相册目录名缺失，落点无从谈起）；导入中途删相册的窗口仍由
+    // insert_asset_on 的 album 存活检查优雅降级（跳过挂载不判失败）。
     fetch_album_delete(&state, album.id).unwrap();
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
@@ -581,21 +583,14 @@ fn import_into_deleted_album_degrades_gracefully() {
         Box::new(VolumeSource::new(src.path())),
         plan,
     );
-    let job_id = engine.begin().unwrap();
-    let stats = engine.run();
-
-    assert_eq!(
-        stats.failed_files, 0,
-        "相册消失不得判文件失败（文件已安全落盘）"
-    );
-    assert_eq!(stats.done_files, 6);
+    let err = engine.begin().expect_err("已删相册应拒绝导入");
+    assert!(err.to_string().contains("不存在"), "{err}");
+    // 拒绝未产生任务
     let db = open_db(db_dir.path());
-    assert_eq!(count_assets(&db), 6, "资产全部入册");
-    assert_eq!(album_item_count(&db), 0);
     assert_eq!(
-        common::job_status(&db, job_id),
-        "done",
-        "任务正常终态，journal 无假失败"
+        db.0.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }
 

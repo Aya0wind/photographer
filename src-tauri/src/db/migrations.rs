@@ -22,6 +22,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0015_ALBUMS,
     MIGRATION_0016_SELECTION,
     MIGRATION_0017_VERSIONS,
+    MIGRATION_0018_ALBUM_DIRS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -432,4 +433,18 @@ CREATE TABLE asset_relation (
 
 CREATE INDEX idx_asset_relation_asset   ON asset_relation (asset_id);
 CREATE INDEX idx_asset_relation_related ON asset_relation (related_asset_id);
+"#;
+
+/// 0018（阶段 B3 相册物理目录化，用户定案 2026-09-27）：
+/// - `album.dir_name`：相册物理主目录名（布局 `photoRoot/{dir_name}/
+///   {YYYY}/{MM-DD}/`，一次拍摄任务一册）。创建时由显示名净化生成
+///   （[`crate::db::sanitize_dir_name`]），显示名改名不动它；受控改目录走
+///   album_dir_rename（物理 rename + DB 路径批量更新）。NOT NULL UNIQUE 经
+///   唯一索引实现（SQLite ALTER 加不了 UNIQUE 列）。
+/// - 存量行回填 `album-{id}`（确定性唯一；用户定案：存量测试数据自行重导，
+///   无迁移负担，不做按名净化回填）。
+const MIGRATION_0018_ALBUM_DIRS: &str = r#"
+ALTER TABLE album ADD COLUMN dir_name TEXT NOT NULL DEFAULT '';
+UPDATE album SET dir_name = 'album-' || id WHERE dir_name = '';
+CREATE UNIQUE INDEX idx_album_dir_name ON album (dir_name);
 "#;

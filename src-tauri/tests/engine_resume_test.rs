@@ -4,8 +4,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, plan_with_album,
+    settings, tasks, thumbs, videos,
 };
 
 use std::fs;
@@ -27,6 +27,7 @@ fn soft_cancel_returns_partial_and_job_cancelled() {
     build_many(src.path(), 12);
 
     let db = open_db(db_dir.path());
+    let plan = plan_with_album(&db, target.path());
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let mut engine = Engine::new(
@@ -36,7 +37,7 @@ fn soft_cancel_returns_partial_and_job_cancelled() {
             inner: VolumeSource::new(src.path()),
             delay: Duration::from_millis(15),
         }),
-        plan_for(target.path()),
+        plan,
     );
     let job_id = engine.begin().unwrap();
     let controls = engine.controls();
@@ -64,6 +65,7 @@ fn pause_resume_completes_without_loss() {
     build_many(src.path(), 10);
 
     let db = open_db(db_dir.path());
+    let plan = plan_with_album(&db, target.path());
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let mut engine = Engine::new(
@@ -73,7 +75,7 @@ fn pause_resume_completes_without_loss() {
             inner: VolumeSource::new(src.path()),
             delay: Duration::from_millis(10),
         }),
-        plan_for(target.path()),
+        plan,
     );
     let job_id = engine.begin().unwrap();
     let controls = engine.controls();
@@ -100,6 +102,7 @@ fn resume_after_interruption_redoes_pending_only() {
 
     // 会话一：取消中断
     let db = open_db(db_dir.path());
+    let plan = plan_with_album(&db, target.path());
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let mut engine = Engine::new(
@@ -109,7 +112,7 @@ fn resume_after_interruption_redoes_pending_only() {
             inner: VolumeSource::new(src.path()),
             delay: Duration::from_millis(12),
         }),
-        plan_for(target.path()),
+        plan,
     );
     let job_id = engine.begin().unwrap();
     let controls = engine.controls();

@@ -4,8 +4,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, plan_with_album,
+    settings, tasks, thumbs, videos,
 };
 
 use std::fs;
@@ -77,7 +77,7 @@ fn move_delete_failure_is_warning_not_import_failure() {
     let files = build_source(src.path());
 
     let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_with_album(&db, target.path());
     plan.mode = ImportMode::Move;
     let mut engine = Engine::new(
         db,
@@ -192,11 +192,13 @@ fn nesting_guard_rejects_overlapping_source_and_target() {
     assert!(engine.begin().is_err(), "目标与源相同应拒绝");
 
     // ④ 相互独立的目录 → 放行
+    let separate_db = open_db(db_dir.path());
+    let plan = plan_with_album(&separate_db, separate.path());
     let mut engine = Engine::new(
-        open_db(db_dir.path()),
+        separate_db,
         EventBus::new(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(separate.path()),
+        plan,
     );
     assert!(engine.begin().is_ok(), "独立目录不得误拒");
 

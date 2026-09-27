@@ -71,15 +71,21 @@ pub fn fetch_album_create(state: &super::AppState, name: &str) -> Result<AlbumDt
 pub fn fetch_album_rename(state: &super::AppState, id: i64, name: &str) -> Result<(), String> {
     let name = validate_name(name)?;
     let db = super::active_library_db(state)?;
-    db.album_rename(id, &name)
-        .map_err(|e| map_album_write_error(e, &name))
+    db.album_rename(id, &name).map_err(|e| match e {
+        rusqlite::Error::InvalidParameterName(msg) => msg,
+        other => map_album_write_error(other, &name),
+    })
 }
 
 /// 删相册核：只删引用（album_item 级联消失），资产与物理文件绝不动；
-/// 相册不存在报错（前端列表刷新前的竞态显式暴露）。
+/// 相册不存在报错（前端列表刷新前的竞态显式暴露）；默认相册「未分组」
+/// 拒删（db 层守卫，此处转友好文案）。
 pub fn fetch_album_delete(state: &super::AppState, id: i64) -> Result<(), String> {
     let db = super::active_library_db(state)?;
-    db.album_delete(id).map_err(map_missing)
+    db.album_delete(id).map_err(|e| match e {
+        rusqlite::Error::InvalidParameterName(msg) => msg,
+        other => map_missing(other),
+    })
 }
 
 /// 设/清封面核：asset_id=None 清回默认；资产不存在明确报错（FK 兜底之上的
@@ -138,6 +144,75 @@ pub fn fetch_album_assets_page(
     let mut filters = filters.unwrap_or_default();
     filters.album_id = Some(id);
     super::assets::fetch_assets_page(state, after_id, limit, filters)
+}
+
+/// 受控改目录核（0018）：物理 rename（`photoRoot/{old}` → `photoRoot/{new}`，
+/// 结构上恒同卷）+ DB 内库内资产路径前缀批量改写 + album.dir_name 更新。
+/// - 新目录名经 [`crate::db::sanitize_dir_name`] 净化；与其他相册目录重名
+///   拒绝；目标目录已存在拒绝。
+/// - 旧目录不在盘（从未有相册导入/已被外部搬走）→ 只做 DB 改写（记 warn）。
+/// - XMP 边车随目录整体移动（同目录文件）；缩略图缓存键 = (path, mtime)，
+///   路径变更后自然失效重生成。
+pub fn fetch_album_dir_rename(
+    state: &super::AppState,
+    id: i64,
+    new_dir_name: &str,
+) -> Result<String, String> {
+    let new_dir = crate::db::sanitize_dir_name(new_dir_name);
+    let db = super::active_library_db(state)?;
+    let old_dir = db
+        .album_dir_name(id)
+        .map_err(|e| e.to_string())?
+        .ok_or("相册不存在")?;
+    if old_dir == new_dir {
+        return Ok(new_dir);
+    }
+    let taken: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM album WHERE dir_name = ?1 AND id != ?2",
+            rusqlite::params![new_dir, id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if taken > 0 {
+        return Err(format!("目录名已被其他相册占用：{new_dir}"));
+    }
+    let photo_root = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .active_library()
+        .cloned()
+        .ok_or("尚未创建库")?
+        .photo_root;
+    let old_path = std::path::Path::new(&photo_root).join(&old_dir);
+    let new_path = std::path::Path::new(&photo_root).join(&new_dir);
+    if new_path.exists() {
+        return Err(format!("目标目录已存在：{}", new_path.display()));
+    }
+    let old_prefix = format!("{}{}", old_path.display(), std::path::MAIN_SEPARATOR);
+    let new_prefix = format!("{}{}", new_path.display(), std::path::MAIN_SEPARATOR);
+    if old_path.is_dir() {
+        std::fs::rename(&old_path, &new_path).map_err(|e| format!("目录改名失败: {e}"))?;
+    } else {
+        let _ = db.append_log(
+            "warn",
+            None,
+            &format!(
+                "相册改目录：旧目录不在盘，仅改写库（{}）",
+                old_path.display()
+            ),
+        );
+    }
+    let n = db
+        .album_rewrite_paths(id, &new_dir, &old_prefix, &new_prefix)
+        .map_err(|e| e.to_string())?;
+    let _ = db.append_log(
+        "info",
+        None,
+        &format!("相册改目录：{old_dir} → {new_dir}（改写 {n} 条资产路径）"),
+    );
+    Ok(new_dir)
 }
 
 /// 相册列表（createdAt DESC）。
@@ -236,6 +311,20 @@ pub async fn album_assets_page(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_album_assets_page(state, id, after_id, limit, filters)
+    })
+    .await
+}
+
+/// 受控改相册物理目录（净化后的目录名返回给前端刷新）。
+#[tauri::command]
+pub async fn album_dir_rename(
+    state: State<'_, SharedState>,
+    id: i64,
+    new_dir_name: String,
+) -> Result<String, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_album_dir_rename(state, id, &new_dir_name)
     })
     .await
 }

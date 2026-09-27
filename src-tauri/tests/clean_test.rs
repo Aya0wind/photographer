@@ -4,15 +4,15 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, plan_with_album,
+    settings, tasks, thumbs, videos,
 };
 
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{build_source, open_db, plan_for, state_with_library, wait_done};
+use common::{build_source, open_db, state_with_library, wait_done};
 use devices::volume::VolumeSource;
 use events::{AppEvent, EventBus, FileState};
 use import::clean::{clean_apply, clean_candidates, CleanCandidateDto};
@@ -27,11 +27,12 @@ use ipc::{apply_clean, list_clean_candidates, start_import};
 fn import_all(src_dir: &Path, db_dir: &Path, target_dir: &Path) -> (i64, Vec<(String, Vec<u8>)>) {
     let files = build_source(src_dir);
     let db = open_db(db_dir);
+    let plan = plan_with_album(&db, target_dir);
     let mut engine = Engine::new(
         db,
         EventBus::new(),
         Box::new(VolumeSource::new(src_dir)),
-        plan_for(target_dir),
+        plan,
     );
     let job_id = engine.begin().unwrap();
     let stats = engine.run();
@@ -246,7 +247,7 @@ fn ipc_clean_flow_and_offline_device_rejected() {
     // 经 IPC 导入（copy）→ 完成
     let plan = import::engine::ImportPlan {
         source_id: device_id,
-        ..plan_for(target.path())
+        ..plan_with_album(&open_db(db_dir.path()), target.path())
     };
     let job_id = start_import(&state, plan).unwrap();
     assert!(wait_done(&state, Duration::from_secs(15)), "导入应完成");

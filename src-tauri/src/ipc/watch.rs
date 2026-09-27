@@ -159,10 +159,26 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
             continue;
         };
         let streams = library.streams.max(1);
+        // 0018 导入必落相册：监视入册自动归入默认相册「未分组」（按名幂等）
+        let default_db_dir = std::path::PathBuf::from(&library.db_dir);
+        let default_album = crate::ipc::open_library_db(&default_db_dir)
+            .and_then(|db| db.ensure_default_album().map_err(|e| e.to_string()));
+        let album_id = match default_album {
+            Ok(id) => Some(id),
+            Err(e) => {
+                state.bus.publish(AppEvent::AppError {
+                    level: "warn".into(),
+                    message: format!("监视入册失败（默认相册创建失败）: {e}"),
+                    recoverable: true,
+                });
+                continue;
+            }
+        };
         let plan = ImportPlan {
             source_id: source.id(),
             target_root: std::path::PathBuf::from(&library.photo_root),
-            dir_template: library.dir_template.clone(),
+            // 内层模板固定（0018）：album 段由引擎按 dir_name 拼接
+            dir_template: "{YYYY}/{MM-DD}".into(),
             name_template: "{原文件名}".into(),
             duplicate_policy: DuplicatePolicy::Skip,
             skip_imported: true,
@@ -170,7 +186,7 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
             mode: ImportMode::Copy,
             second_target: None,
             include: None,
-            album_id: None,
+            album_id,
         };
         match super::start_import(state, plan) {
             Ok(_job_id) => {

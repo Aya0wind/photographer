@@ -442,8 +442,10 @@ pub struct PersonRow {
 }
 
 /// 相册行（album_list 数据源 / IPC 载荷 AlbumDto，camelCase）：纯引用照片组
-/// 的元数据面——name 全库唯一；cover_asset_id 只是封面引用（资产永久删除时
-/// FK SET NULL 自动解除）；item_count 为引用数（相册为空合法）。
+/// 的元数据面——name 全库唯一；dir_name 为物理主目录名（0018，布局
+/// `photoRoot/{dir_name}/{YYYY}/{MM-DD}/`，由显示名净化生成，改显示名不动）；
+/// cover_asset_id 只是封面引用（资产永久删除时 FK SET NULL 自动解除）；
+/// item_count 为引用数（相册为空合法）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlbumRow {
@@ -452,6 +454,8 @@ pub struct AlbumRow {
     pub cover_asset_id: Option<i64>,
     pub item_count: u64,
     pub created_at: String,
+    /// 物理主目录名（0018；存量行 = `album-{id}` 回填）。
+    pub dir_name: String,
 }
 
 /// 日期分组行（画廊吸顶 + 跳转）。
@@ -1295,7 +1299,8 @@ impl Db {
     pub fn album_list(&self) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
             "SELECT a.id, a.name, a.cover_asset_id, \
-                    (SELECT COUNT(*) FROM album_item i WHERE i.album_id = a.id), a.created_at \
+                    (SELECT COUNT(*) FROM album_item i WHERE i.album_id = a.id), a.created_at, \
+                    a.dir_name \
              FROM album a ORDER BY a.created_at DESC, a.id DESC",
         )?;
         let rows = stmt.query_map([], map_album)?;
@@ -1307,7 +1312,8 @@ impl Db {
     pub fn asset_albums(&self, asset_id: i64) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
             "SELECT a.id, a.name, a.cover_asset_id, \
-                    (SELECT COUNT(*) FROM album_item i2 WHERE i2.album_id = a.id), a.created_at \
+                    (SELECT COUNT(*) FROM album_item i2 WHERE i2.album_id = a.id), a.created_at, \
+                    a.dir_name \
              FROM album a \
              WHERE EXISTS (SELECT 1 FROM album_item i WHERE i.album_id = a.id AND i.asset_id = ?1) \
              ORDER BY a.created_at DESC, a.id DESC",
@@ -1316,13 +1322,101 @@ impl Db {
         rows.collect()
     }
 
+    /// 按相册 id 取目录名（相册导入模板 / 物理挪移用）。
+    pub fn album_dir_name(&self, id: i64) -> Result<Option<String>> {
+        self.0
+            .query_row("SELECT dir_name FROM album WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
+    /// 批量改写资产路径前缀（0018 相册目录 rename / claim 挪移共用）：
+    /// `path` 以 `old_prefix`（含尾分隔符，按字符比较）开头的行改为
+    /// `new_prefix +` 剩余部分，同事务内顺带更新 album.dir_name。
+    /// 返回改写行数。filename 若在新路径下失效由调用方一并处理。
+    pub fn album_rewrite_paths(
+        &self,
+        album_id: i64,
+        new_dir_name: &str,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<u64> {
+        let prefix_chars = old_prefix.chars().count() as i64;
+        let tx = self.0.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE assets SET path = ?2 || substr(path, ?4 + 1) \
+             WHERE substr(path, 1, ?4) = ?3",
+            params![album_id, new_prefix, old_prefix, prefix_chars],
+        )?;
+        tx.execute(
+            "UPDATE album SET dir_name = ?2 WHERE id = ?1",
+            params![album_id, new_dir_name],
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// 单资产路径更新（claim 挪移落库；文件名可随冲突后缀变化）。
+    pub fn asset_update_path(&self, id: i64, new_path: &str, new_filename: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE assets SET path = ?2, filename = ?3 WHERE id = ?1",
+            params![id, new_path, new_filename],
+        )?;
+        Ok(())
+    }
+
+    /// 系统级保底（0018 修订）：确保默认相册「未分组」存在（按名称幂等），
+    /// 返回其 id。导入启动时调用；「未分组」禁删禁改名（用户定案），故
+    /// 幂等保证永远命中同一条，不会重复创建。
+    pub fn ensure_default_album(&self) -> Result<i64> {
+        if let Ok(id) = self.0.query_row(
+            "SELECT id FROM album WHERE name = ?1",
+            [DEFAULT_ALBUM_NAME],
+            |r| r.get::<_, i64>(0),
+        ) {
+            return Ok(id);
+        }
+        Ok(self.album_create(DEFAULT_ALBUM_NAME)?.id)
+    }
+
+    /// 全部相册目录名（挪移守卫：判断资产是否已在某相册主目录内）。
+    pub fn album_dir_names(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id, dir_name FROM album ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect()
+    }
+
     /// 建相册，返回新行（item_count=0、cover=None）。重名由 name UNIQUE
     /// 兜底（错误透传，IPC 层转友好文案）；名称 trim/空校验在 IPC 层。
+    /// dir_name 由显示名净化生成（0018），被占用时追加 `-2`/`-3`… 后缀。
     pub fn album_create(&self, name: &str) -> Result<AlbumRow> {
         let created_at = now_rfc3339();
+        let base = sanitize_dir_name(name);
+        let mut dir_name = base.clone();
+        let mut n = 2;
+        loop {
+            let taken: i64 = self.0.query_row(
+                "SELECT COUNT(*) FROM album WHERE dir_name = ?1",
+                [&dir_name],
+                |r| r.get(0),
+            )?;
+            if taken == 0 {
+                break;
+            }
+            dir_name = format!("{base}-{n}");
+            n += 1;
+        }
         self.0.execute(
-            "INSERT INTO album (name, cover_asset_id, created_at) VALUES (?1, NULL, ?2)",
-            params![name, created_at],
+            "INSERT INTO album (name, cover_asset_id, created_at, dir_name) \
+             VALUES (?1, NULL, ?2, ?3)",
+            params![name, created_at, dir_name],
         )?;
         Ok(AlbumRow {
             id: self.0.last_insert_rowid(),
@@ -1330,12 +1424,23 @@ impl Db {
             cover_asset_id: None,
             item_count: 0,
             created_at,
+            dir_name,
         })
     }
 
     /// 相册重命名；相册不存在报错（同 rename_person 语义）。
-    /// 重名由 UNIQUE 兜底透传。
+    /// 重名由 UNIQUE 兜底透传。默认相册「未分组」禁改名（0018 再修订：
+    /// 与禁删叠加——它完全固定，永远是系统兜底落点；自动创建按名幂等，
+    /// 不会重复创建）。
     pub fn album_rename(&self, id: i64, name: &str) -> Result<()> {
+        let current: String =
+            self.0
+                .query_row("SELECT name FROM album WHERE id = ?1", [id], |r| r.get(0))?;
+        if current == DEFAULT_ALBUM_NAME {
+            return Err(Error::InvalidParameterName(
+                "默认相册「未分组」不可改名".into(),
+            ));
+        }
         let n = self.0.execute(
             "UPDATE album SET name = ?2 WHERE id = ?1",
             params![id, name],
@@ -1348,7 +1453,17 @@ impl Db {
 
     /// 删相册：只删相册行——album_item 引用经 FK ON DELETE CASCADE 级联
     /// 消失，资产与物理文件绝不动；相册不存在报错（幂等删除由 IPC 语义定）。
+    /// 默认相册「未分组」拒删（0018 修订：系统级保底，防误删后下次导入又
+    /// 冒出来；禁删禁改名——完全固定）。
     pub fn album_delete(&self, id: i64) -> Result<()> {
+        let name: String = self
+            .0
+            .query_row("SELECT name FROM album WHERE id = ?1", [id], |r| r.get(0))?;
+        if name == DEFAULT_ALBUM_NAME {
+            return Err(Error::InvalidParameterName(
+                "默认相册「未分组」不可删除（只能清空或改名）".into(),
+            ));
+        }
         let n = self
             .0
             .execute("DELETE FROM album WHERE id = ?1", params![id])?;
@@ -2803,7 +2918,43 @@ fn map_album(row: &Row<'_>) -> Result<AlbumRow> {
         cover_asset_id: row.get(2)?,
         item_count: row.get::<_, i64>(3)? as u64,
         created_at: row.get(4)?,
+        dir_name: row.get(5)?,
     })
+}
+
+/// 默认相册（系统级保底）：导入必落相册的归宿；禁删禁改名（用户定案
+/// 2026-09-27）——完全固定，永远是兜底落点。
+pub const DEFAULT_ALBUM_NAME: &str = "未分组";
+
+/// 相册显示名 → 物理目录名（0018，跨平台安全）：Windows 非法字符
+/// `< > : " / \ | ? *` 与控制符折叠为 `-`；去掉结尾的点/空格（Win32 路径
+/// 语义）；保留中文等 Unicode 字母；Windows 保留设备名（CON/PRN/NUL/
+/// COM1-9/LPT1-9）加 `album-` 前缀；超长截断 80 字符；空结果回退 `album`。
+pub fn sanitize_dir_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.trim().chars() {
+        if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control() {
+            out.push('-');
+        } else {
+            out.push(c);
+        }
+    }
+    let mut out = out.trim().trim_end_matches(['.', ' ']).to_string();
+    if out.chars().count() > 80 {
+        out = out.chars().take(80).collect();
+        out = out.trim_end_matches(['.', ' ', '-']).to_string();
+    }
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if RESERVED.contains(&out.to_ascii_uppercase().as_str()) {
+        out = format!("album-{out}");
+    }
+    if out.is_empty() {
+        out = "album".to_string();
+    }
+    out
 }
 
 /// 分页与计数共用条件，避免筛选结果数和实际分页发生口径偏差。
