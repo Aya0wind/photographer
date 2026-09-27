@@ -60,7 +60,7 @@ const MODEL_NAMES: Record<string, string> = {
 };
 
 /** 能力分组展示顺序（分组依据=后端清单 feature 字段，非前端硬编码集合） */
-const FEATURE_ORDER: AiFeature[] = ["semantic", "face"];
+const FEATURE_ORDER: AiFeature[] = ["semantic", "face", "selection"];
 
 /** 状态徽标（含色） */
 function StateBadge({ model }: { model: AiModelStatus }) {

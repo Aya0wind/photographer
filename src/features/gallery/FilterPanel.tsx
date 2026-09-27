@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
+import { useAiStore } from "@/stores/aiStore";
 
 import {
   albumList,
@@ -27,7 +29,7 @@ import {
  *   重名等业务错误行内提示；filtersJson=当前 buildFilters 结果序列化）
  */
 
-export type KindFilter = "all" | "photo" | "raw" | "video";
+export type KindFilter = "all" | "photo" | "raw";
 type OrientationFilter = "all" | "landscape" | "portrait";
 type FlashFilter = "all" | "on" | "off" | "unknown";
 type GpsFilter = "all" | "yes" | "no";
@@ -35,12 +37,13 @@ type GpsFilter = "all" | "yes" | "no";
 export type ColorFilter = "all" | ColorLabel;
 /** 拒绝旗标三态：all=不限 / yes=仅已拒绝 / no=仅未拒绝 */
 export type RejectedFilter = "all" | "yes" | "no";
+/** 闭眼风险（C 阶段 AI 选片）：none=不限；closed/maybe 与后端 filters.eyes 单值对应（互斥） */
+export type AiEyesFilter = "none" | "closed" | "maybe";
 
 const KIND_OPTIONS: ReadonlyArray<{ value: KindFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.kind.all" },
   { value: "photo", labelKey: "search.kind.photo" },
   { value: "raw", labelKey: "search.kind.raw" },
-  { value: "video", labelKey: "search.kind.video" },
 ];
 const ORIENTATION_OPTIONS: ReadonlyArray<{ value: OrientationFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.orientation.all" },
@@ -93,6 +96,10 @@ export interface SearchInputs {
   color: ColorFilter;
   /** 拒绝旗标三态（B1；all=不限） */
   rejected: RejectedFilter;
+  /** 闭眼风险（C；none=不限） */
+  aiEyes: AiEyesFilter;
+  /** 疑似失焦（C；false=不限） */
+  aiBlur: boolean;
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
@@ -119,13 +126,14 @@ export const EMPTY_INPUTS: SearchInputs = {
   album: null,
   color: "all",
   rejected: "all",
+  aiEyes: "none",
+  aiBlur: false,
 };
 
-/** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；视频=video；全部=不传） */
+/** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；全部=不传） */
 function kindsOf(kind: KindFilter): AssetKind[] | undefined {
   if (kind === "photo") return ["photo", "raw"];
   if (kind === "raw") return ["raw"];
-  if (kind === "video") return ["video"];
   return undefined;
 }
 
@@ -226,6 +234,8 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (inputs.album !== null) filters.albumId = inputs.album.id;
   if (inputs.color !== "all") filters.colorLabel = inputs.color;
   if (inputs.rejected !== "all") filters.rejected = inputs.rejected === "yes";
+  if (inputs.aiEyes !== "none") filters.eyes = inputs.aiEyes;
+  if (inputs.aiBlur) filters.blur = "soft";
   return filters;
 }
 
@@ -257,7 +267,6 @@ export function inputsFromFilters(filters: AssetFilters): SearchInputs {
     const set = new Set(kinds);
     if (set.has("photo") && set.has("raw")) inputs.kind = "photo";
     else if (set.has("raw")) inputs.kind = "raw";
-    else if (set.has("video")) inputs.kind = "video";
   }
   if (filters.capturedAfter) inputs.from = rfc3339ToYmd(filters.capturedAfter);
   if (filters.capturedBefore) inputs.to = rfc3339ToYmd(filters.capturedBefore);
@@ -285,6 +294,8 @@ export function inputsFromFilters(filters: AssetFilters): SearchInputs {
   inputs.sizeMax = bytesToMbStr(filters.sizeMax ?? NaN);
   if (asColorLabel(filters.colorLabel) !== null) inputs.color = filters.colorLabel as ColorLabel;
   if (filters.rejected !== undefined) inputs.rejected = filters.rejected ? "yes" : "no";
+  if (filters.eyes === "closed" || filters.eyes === "maybe") inputs.aiEyes = filters.eyes;
+  if (filters.blur === "soft") inputs.aiBlur = true;
   return inputs;
 }
 
@@ -768,6 +779,100 @@ export function QuickFilterBar({
   );
 }
 
+/** AI 标签区（C 阶段，AI 辅助选片）：闭眼两档（互斥，对应 filters.eyes 单值）+
+ *  疑似失焦单档（filters.blur）。eyes 依赖「选片辅助」模型——未装置灰并提示去
+ *  设置下载（?tab=ai 门禁跳转模式）；blur 算法内置恒可用。
+ *  「分析中」提示：AI 索引通道有未完成项时沿用「结果可能不全」提示模式。 */
+function AiTagsField({
+  aiEyes,
+  aiBlur,
+  onPatch,
+}: {
+  aiEyes: AiEyesFilter;
+  aiBlur: boolean;
+  onPatch: (patch: Partial<SearchInputs>) => void;
+}) {
+  const { t } = useTranslation();
+  const models = useAiStore((s) => s.models);
+  const indexStatus = useAiStore((s) => s.indexStatus);
+  const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
+
+  // 模型清单（eyes 门禁）与索引账（分析中提示）：挂载拉一次；分析进度经
+  // store 事件流自更新（indexTaskProgress 由 initAi 转发）
+  const modelsLoaded = useAiStore((s) => s.modelsLoaded);
+  const refresh = useAiStore((s) => s.refresh);
+  useEffect(() => {
+    if (!modelsLoaded) void refresh();
+    void refreshIndexStatus();
+  }, [modelsLoaded, refresh, refreshIndexStatus]);
+
+  const eyesInstalled = models.some(
+    (m) => m.feature === "selection" && (m.state === "done" || m.installed),
+  );
+  const aiRunning =
+    indexStatus !== null && (indexStatus.ai.pending > 0 || indexStatus.ai.running > 0);
+
+  const chipClass = (active: boolean, disabled = false): string =>
+    `rounded-md border px-2 py-1 text-[11px] transition-colors ${
+      active ? "border-accent bg-accent/10 text-accent" : "border-edge text-text-secondary hover:border-text-muted"
+    } ${disabled ? "cursor-not-allowed opacity-40" : ""}`;
+
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1.5" data-testid="search-ai-tags">
+        <button
+          type="button"
+          aria-pressed={aiEyes === "closed"}
+          disabled={!eyesInstalled}
+          title={eyesInstalled ? undefined : t("search.ai.modelHint")}
+          onClick={() => onPatch({ aiEyes: aiEyes === "closed" ? "none" : "closed" })}
+          className={chipClass(aiEyes === "closed", !eyesInstalled)}
+          data-testid="search-ai-eyes-closed"
+        >
+          {t("search.ai.eyesClosed")}
+        </button>
+        <button
+          type="button"
+          aria-pressed={aiEyes === "maybe"}
+          disabled={!eyesInstalled}
+          title={eyesInstalled ? undefined : t("search.ai.modelHint")}
+          onClick={() => onPatch({ aiEyes: aiEyes === "maybe" ? "none" : "maybe" })}
+          className={chipClass(aiEyes === "maybe", !eyesInstalled)}
+          data-testid="search-ai-eyes-maybe"
+        >
+          {t("search.ai.eyesMaybe")}
+        </button>
+        <button
+          type="button"
+          aria-pressed={aiBlur}
+          onClick={() => onPatch({ aiBlur: !aiBlur })}
+          className={chipClass(aiBlur)}
+          data-testid="search-ai-blur"
+        >
+          {t("search.ai.blurSoft")}
+        </button>
+      </div>
+      {!eyesInstalled && (
+        <p className="flex items-center gap-1.5 text-[11px] text-text-muted" data-testid="search-ai-model-hint">
+          {t("search.ai.modelHint")}
+          <Link
+            to="/settings?tab=ai"
+            className="shrink-0 text-accent underline-offset-2 transition-colors hover:underline"
+            data-testid="search-ai-model-link"
+          >
+            {t("search.ai.modelLink")}
+          </Link>
+        </p>
+      )}
+      {aiRunning && (
+        <p className="text-[11px] text-amber-400" data-testid="search-ai-running-hint" role="status">
+          {t("search.ai.running")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** 智能视图保存行（B1）：有激活条件时出现——命名输入 → smart_view_create；
  *  重名等后端业务错误行内提示；成功后清空输入并回调上层刷新视图清单。 */
 function SmartViewSaveRow({
@@ -963,6 +1068,13 @@ export function FilterPanel({
             testId="search-gps"
           />
         </FieldRow>}
+        <FieldRow label={t("search.ai")}>
+          <AiTagsField
+            aiEyes={inputs.aiEyes}
+            aiBlur={inputs.aiBlur}
+            onPatch={onPatch}
+          />
+        </FieldRow>
         <FieldRow label={t("search.color")}>
           <ColorSegment
             value={inputs.color}
@@ -1198,6 +1310,20 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
       key: "rejected",
       label: t(`search.rejected.${inputs.rejected}`),
       patch: { ...inputs, rejected: "all" },
+    });
+  }
+  if (inputs.aiEyes !== "none") {
+    chips.push({
+      key: "ai-eyes",
+      label: t(inputs.aiEyes === "closed" ? "search.ai.eyesClosed" : "search.ai.eyesMaybe"),
+      patch: { ...inputs, aiEyes: "none" },
+    });
+  }
+  if (inputs.aiBlur) {
+    chips.push({
+      key: "ai-blur",
+      label: t("search.ai.blurSoft"),
+      patch: { ...inputs, aiBlur: false },
     });
   }
   if (inputs.album !== null) {

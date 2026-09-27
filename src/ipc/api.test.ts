@@ -78,7 +78,7 @@ describe("IPC 契约封装", () => {
   });
 
   it("deviceList 成功返回数据", async () => {
-    const devices = [{ id: "E:", name: "SD 卡", kind: "volume", filesByKind: { photo: 3, raw: 0, video: 0, other: 0 }, bytesTotal: 100, newFiles: 2 }];
+    const devices = [{ id: "E:", name: "SD 卡", kind: "volume", filesByKind: { photo: 3, raw: 0, other: 0 }, bytesTotal: 100, newFiles: 2 }];
     invokeMock.mockResolvedValue(devices);
 
     await expect(deviceList()).resolves.toEqual(devices);
@@ -106,7 +106,7 @@ describe("IPC 契约封装", () => {
   });
 
   it("folderScan 传 path 并返回快照", async () => {
-    const snapshot = { id: "FOLDER:D:\\老照片", name: "老照片", kind: "folder", filesByKind: { photo: 3, raw: 0, video: 0, other: 0 }, bytesTotal: 100, newFiles: 3 };
+    const snapshot = { id: "FOLDER:D:\\老照片", name: "老照片", kind: "folder", filesByKind: { photo: 3, raw: 0, other: 0 }, bytesTotal: 100, newFiles: 3 };
     invokeMock.mockResolvedValue(snapshot);
 
     await expect(folderScan("D:\\老照片")).resolves.toEqual(snapshot);
@@ -266,7 +266,7 @@ describe("IPC 可用性自愈", () => {
 
     invokeMock.mockResolvedValueOnce({
       id: "E:", name: "SD", kind: "volume",
-      filesByKind: { photo: 0, raw: 0, video: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
+      filesByKind: { photo: 0, raw: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
     });
     await deviceScan("E:");
     expect(isIpcAvailable()).toBe(true);
@@ -387,6 +387,7 @@ describe("M3 画廊命令", () => {
       format: null,
       rating: null,
       flagged: null,
+      aiAnalysis: null,
     });
     expect(invokeMock).toHaveBeenCalledWith("asset_detail", { id: 3 });
   });
@@ -463,6 +464,7 @@ describe("M3 画廊命令", () => {
       format: null,
       rating: null,
       flagged: null,
+      aiAnalysis: null,
     });
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));

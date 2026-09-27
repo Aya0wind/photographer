@@ -96,6 +96,7 @@ const DETAIL: AssetDetailDto = {
   lens: null,
   createdAt: "2026-09-19T08:00:00",
   dupCount: 2,
+  aiAnalysis: null,
 };
 
 function renderViewer(
@@ -847,8 +848,11 @@ describe("查看器：EXIF 面板", () => {
     const dup = within(rows).getByText("库内重复");
     expect(dup.nextSibling).toHaveTextContent("2 张");
 
-    // 无 EXIF 扩展数据：图像/位置组整组不渲染（无值行不显示「—」）
-    expect(screen.queryByTestId("viewer-exif-group-image")).not.toBeInTheDocument();
+    // 无 EXIF 扩展数据：位置组不渲染；图像组保留 AI 选片行（未分析态，C 阶段）
+    expect(screen.getByTestId("viewer-exif-group-image")).toBeInTheDocument();
+    expect(screen.getByTestId("viewer-ai-eyes")).toHaveAttribute("data-state", "not_analyzed");
+    expect(screen.getByTestId("viewer-ai-blur")).toHaveAttribute("data-soft", "false");
+    expect(screen.getAllByTestId("viewer-ai-badge").length).toBe(2);
     expect(screen.queryByTestId("viewer-exif-group-location")).not.toBeInTheDocument();
     expect(screen.queryByText("分辨率")).not.toBeInTheDocument();
     expect(screen.queryByText("ISO")).not.toBeInTheDocument();
@@ -1153,43 +1157,6 @@ describe("查看器：大图右键菜单", () => {
   });
 });
 
-// --- 视频播放（M8：内建 <video> + HEVC 回退） ------------------------------------------
-
-describe("查看器：视频播放（M8）", () => {
-  it("video 资产：渲染内建播放器（不再恒占位），海报缩略图作 poster", async () => {
-    thumbMock.mockReset().mockImplementation((id: number) =>
-      id === 9
-        ? Promise.resolve({ status: "ready", path: "C:/thumbs/video-256-v1/9.jpg" })
-        : Promise.resolve({ status: "pending" }),
-    );
-    convertMock.mockReset().mockImplementation((p: string) => `asset://${p}`);
-    detailMock.mockReset().mockResolvedValue(DETAIL);
-    const videoAsset = { ...makeAsset(9, "video", "C0121.MP4"), path: "Y:/照片/C0121.MP4" };
-    renderViewer([videoAsset], 0);
-
-    const video = await screen.findByTestId("viewer-video");
-    expect(video.tagName).toBe("VIDEO");
-    expect(video).toHaveAttribute("src", "asset://Y:/照片/C0121.MP4");
-    await waitFor(() =>
-      expect(video).toHaveAttribute("poster", "asset://C:/thumbs/video-256-v1/9.jpg"),
-    );
-    // 旧契约「恒占位」已死：占位图形不再出现
-    expect(screen.queryByTestId("viewer-placeholder")).not.toBeInTheDocument();
-  });
-
-  it("video onError：回退卡出现，系统播放按钮可点", async () => {
-    thumbMock.mockReset().mockResolvedValue({ status: "unavailable" });
-    convertMock.mockReset().mockImplementation((p: string) => `asset://${p}`);
-    detailMock.mockReset().mockResolvedValue(DETAIL);
-    const videoAsset = { ...makeAsset(9, "video", "HEVC.MP4"), path: "Y:/照片/HEVC.MP4" };
-    renderViewer([videoAsset], 0);
-
-    fireEvent.error(await screen.findByTestId("viewer-video"));
-    expect(await screen.findByTestId("viewer-video-fallback")).toBeInTheDocument();
-    expect(screen.getByTestId("viewer-video-system")).toBeInTheDocument();
-  });
-});
-
 // --- 选片补全（B1）：颜色标签 / 拒绝旗标 -----------------------------------------------
 
 describe("查看器：颜色标签（星级行旁色点）", () => {
@@ -1295,5 +1262,53 @@ describe("查看器：版本区（B2）", () => {
     await screen.findByTestId("viewer-rating");
     await waitFor(() => expect(versionsMock).toHaveBeenCalledWith(1));
     expect(screen.queryByTestId("viewer-versions")).not.toBeInTheDocument();
+  });
+});
+
+// --- AI 选片行（C 阶段） ----------------------------------------------------------------
+
+describe("查看器：AI 选片行（C）", () => {
+  it("已分析：闭眼三态文案 + 清晰度分与软片标黄 + 「AI 建议」徽标", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
+      aiAnalysis: {
+        eyes: { value: "closed", score: 92 },
+        blur: { value: "soft", score: 35 },
+      },
+    });
+    renderViewer();
+    await screen.findByTestId("viewer-ai-eyes");
+
+    const eyes = screen.getByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveAttribute("data-state", "closed");
+    expect(eyes).toHaveTextContent("有人闭眼");
+    const blur = screen.getByTestId("viewer-ai-blur");
+    expect(blur).toHaveAttribute("data-soft", "true");
+    expect(blur).toHaveTextContent("35");
+    // AI 建议徽标（两行各一枚，弱样式层级）
+    expect(screen.getAllByTestId("viewer-ai-badge")).toHaveLength(2);
+  });
+
+  it("已分析无人脸：文案「未检出人脸（无法判定闭眼）」与未分析区分", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
+      aiAnalysis: { blur: { value: "sharp", score: 88 } },
+    });
+    renderViewer();
+    const eyes = await screen.findByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveAttribute("data-state", "no_face");
+    expect(eyes).toHaveTextContent("未检出人脸（无法判定闭眼）");
+    expect(screen.getByTestId("viewer-ai-blur")).toHaveAttribute("data-soft", "false");
+  });
+
+  it("可能闭眼：maybe 文案", async () => {
+    detailMock.mockResolvedValue({
+      ...DETAIL,
+      aiAnalysis: { eyes: { value: "maybe", score: 60 } },
+    });
+    renderViewer();
+    const eyes = await screen.findByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveAttribute("data-state", "maybe");
+    expect(eyes).toHaveTextContent("可能闭眼");
   });
 });

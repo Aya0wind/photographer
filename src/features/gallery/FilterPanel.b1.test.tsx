@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router";
 
 import i18n from "@/i18n";
-import { albumList, smartViewCreate } from "@/ipc/api";
+import { albumList, smartViewCreate, type AiModelStatus } from "@/ipc/api";
+import { useAiStore } from "@/stores/aiStore";
 import {
   FilterPanel,
   buildChips,
@@ -38,7 +40,9 @@ function renderPanel(inputs: SearchInputs = EMPTY_INPUTS, onSaved?: () => void) 
   const onPatch = vi.fn();
   render(
     <I18nextProvider i18n={i18n}>
-      <FilterPanel inputs={inputs} onPatch={onPatch} onSmartViewSaved={onSaved} />
+      <MemoryRouter>
+        <FilterPanel inputs={inputs} onPatch={onPatch} onSmartViewSaved={onSaved} />
+      </MemoryRouter>
     </I18nextProvider>,
   );
   return { onPatch };
@@ -46,6 +50,7 @@ function renderPanel(inputs: SearchInputs = EMPTY_INPUTS, onSaved?: () => void) 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useAiStore.setState({ models: [], modelsLoaded: false, indexStatus: null });
   albumListMock.mockResolvedValue([]);
   createMock.mockReset();
 });
@@ -213,5 +218,104 @@ describe("inputsFromFilters：filters → 面板输入（B1）", () => {
     const inputs = inputsFromFilters({});
     expect(inputs).toEqual(EMPTY_INPUTS);
     expect(inputsFromFilters({ ratingMin: 3 }).favoriteOnly).toBe(false);
+  });
+});
+
+// --- AI 标签区（C 阶段：闭眼两档 + 疑似失焦） ---------------------------------------------
+
+const AI_INDEX_BUSY = {
+  thumb: { pending: 0, running: 0, done: 0, failed: 0, total: 0 },
+  exif: { pending: 0, running: 0, done: 0, failed: 0, total: 0 },
+  ai: { pending: 3, running: 1, done: 0, failed: 0, total: 4 },
+};
+
+function selectionModel(): AiModelStatus {
+  return {
+    id: "eyes",
+    installed: true,
+    bytesTotal: 10 * 1024 * 1024,
+    downloadedBytes: 10 * 1024 * 1024,
+    version: "v1.0",
+    feature: "selection",
+    state: "done",
+  };
+}
+
+describe("筛选面板：AI 标签（C 阶段）", () => {
+  it("未装选片辅助模型：闭眼两档置灰（不触发 onPatch）+ 提示与 ?tab=ai 跳转；失焦恒可用", async () => {
+    const user = userEvent.setup();
+    const { onPatch } = renderPanel();
+
+    const closed = screen.getByTestId("search-ai-eyes-closed");
+    const maybe = screen.getByTestId("search-ai-eyes-maybe");
+    expect(closed).toBeDisabled();
+    expect(maybe).toBeDisabled();
+    const hint = screen.getByTestId("search-ai-model-hint");
+    expect(hint).toHaveTextContent("需下载选片辅助包");
+    expect(screen.getByTestId("search-ai-model-link")).toHaveAttribute("href", "/settings?tab=ai");
+
+    await user.click(screen.getByTestId("search-ai-blur"));
+    expect(onPatch).toHaveBeenCalledWith({ aiBlur: true });
+  });
+
+  it("已装模型：闭眼可用且两档互斥（closed→maybe）；再点同档清除", async () => {
+    const user = userEvent.setup();
+    useAiStore.setState({ models: [selectionModel()], modelsLoaded: true });
+    const { onPatch } = renderPanel();
+
+    expect(screen.getByTestId("search-ai-eyes-closed")).toBeEnabled();
+    expect(screen.queryByTestId("search-ai-model-hint")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("search-ai-eyes-closed"));
+    expect(onPatch).toHaveBeenLastCalledWith({ aiEyes: "closed" });
+
+    // 互斥：面板以 aiEyes="closed" 渲染时点 maybe → "maybe"
+    cleanup();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <FilterPanel inputs={{ ...EMPTY_INPUTS, aiEyes: "closed" }} onPatch={onPatch} />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+    await user.click(screen.getByTestId("search-ai-eyes-maybe"));
+    expect(onPatch).toHaveBeenLastCalledWith({ aiEyes: "maybe" });
+  });
+
+  it("buildFilters：eyes/blur 映射 + 与其它维度组合负载；chips 可单独移除", () => {
+    const combined = buildFilters({
+      ...EMPTY_INPUTS,
+      aiEyes: "closed",
+      aiBlur: true,
+      orientation: "landscape",
+    });
+    expect(combined).toEqual({ eyes: "closed", blur: "soft", orientation: "landscape" });
+    expect(buildFilters(EMPTY_INPUTS).eyes).toBeUndefined();
+    expect(buildFilters(EMPTY_INPUTS).blur).toBeUndefined();
+
+    const chips = buildChips(
+      { ...EMPTY_INPUTS, aiEyes: "maybe", aiBlur: true },
+      (key) => key,
+    );
+    const eyesChip = chips.find((c) => c.key === "ai-eyes");
+    const blurChip = chips.find((c) => c.key === "ai-blur");
+    expect(eyesChip?.label).toBe("search.ai.eyesMaybe");
+    expect(eyesChip?.patch.aiEyes).toBe("none");
+    expect(blurChip?.patch.aiBlur).toBe(false);
+  });
+
+  it("inputsFromFilters 反解：eyes/blur", () => {
+    expect(inputsFromFilters({ eyes: "closed", blur: "soft" })).toMatchObject({
+      aiEyes: "closed",
+      aiBlur: true,
+    });
+    expect(inputsFromFilters({}).aiEyes).toBe("none");
+    expect(inputsFromFilters({}).aiBlur).toBe(false);
+  });
+
+  it("「分析中」提示：AI 通道有未完成项 → 结果可能不全提示", () => {
+    useAiStore.setState({ models: [selectionModel()], modelsLoaded: true, indexStatus: AI_INDEX_BUSY });
+    renderPanel();
+    expect(screen.getByTestId("search-ai-running-hint")).toHaveTextContent("AI 分析进行中，结果可能不全");
   });
 });

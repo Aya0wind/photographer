@@ -24,14 +24,13 @@ import {
 } from "../lib/thumbPipeline";
 import { AssetContextMenu } from "./ContextMenu";
 import AssetThumb from "./AssetThumb";
-import ViewerVideo from "./ViewerVideo";
 import { formatBytes } from "@/lib/format";
 
 /**
  * 全屏沉浸查看器（M3）：
  * - 大图策略按 kind：photo 优先原图 asset 协议（convertFileSrc(path)），加载失败回退
  *   大档缩略图（名义 1280，后端 snap 512）；RAW 无可载原图（inline-JPEG 提取在 M4），
- *   直接用大档缩略图放大显示；视频恒占位（播放是后续里程碑）。
+ *   直接用大档缩略图放大显示。
  * - 交互：wheel 以指针为锚缩放 1x-4x（原生非 passive 监听），scale>1 可拖拽平移，
  *   90° 步进旋转（按钮 / 键盘 . , R，transform 顺序 rotate→scale→translate，
  *   150ms 过渡），双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
@@ -61,6 +60,7 @@ function detailFromAsset(asset: AssetDto): AssetDetailDto {
     camera: asset.camera,
     createdAt: null,
     dupCount: 0,
+    aiAnalysis: null,
   };
 }
 
@@ -297,7 +297,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   useEffect(() => {
     setStage("original");
   }, [asset.id, originalUrl]);
-  const wantsThumb = asset.kind === "photo" || asset.kind === "raw" || asset.kind === "video";
+  const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
   const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
   // 内嵌全幅直出档（>2048 为后端语义标记）：RAW 主显示路径
   const rawEmbed = useAssetThumbUrl(
@@ -323,9 +323,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
 
   let mainSrc: string | null;
   let mainFailed = false;
-  if (asset.kind === "video") {
-    mainSrc = null; // 视频不走图片层：舞台渲染 <ViewerVideo>（M8 内建播放+HEVC 回退）
-  } else if (asset.kind === "photo" && stage === "original" && originalUrl !== null) {
+  if (asset.kind === "photo" && stage === "original" && originalUrl !== null) {
     mainSrc = originalUrl; // img onError → 降档；渲染失败前不作无图判定
   } else if (asset.kind === "photo" && stage === "mid") {
     mainSrc = mid.url; // 在途 null → 走加载提示；确定无图由下方自动降档
@@ -609,6 +607,61 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           : t("viewer.orientation.landscape"),
       });
     }
+    // AI 选片行（C 阶段）：闭眼三态（有人闭眼/可能闭眼/未检出人脸——无人脸≠没闭眼，
+    // 文案区分）+ 清晰度分（软片标黄）。标注「AI 建议」弱样式，与用户打的星/色分层。
+    const ai = d.aiAnalysis;
+    const eyesState =
+      ai === null || ai === undefined
+        ? "not_analyzed"
+        : ai.eyes === undefined
+          ? "no_face"
+          : ai.eyes.value;
+    const eyesText =
+      eyesState === "closed"
+        ? t("viewer.ai.eyes.closed")
+        : eyesState === "maybe"
+          ? t("viewer.ai.eyes.maybe")
+          : eyesState === "no_face"
+            ? t("viewer.ai.eyes.noFace")
+            : eyesState === "not_analyzed"
+              ? t("viewer.ai.eyes.notAnalyzed")
+              : eyesState;
+    const blur = ai?.blur;
+    imageRows.push({
+      label: t("viewer.ai.eyesLabel"),
+      value: (
+        <span key="ai-eyes" className="inline-flex items-center gap-1.5" data-testid="viewer-ai-eyes" data-state={eyesState}>
+          <span className={eyesState === "closed" ? "text-red-400" : undefined}>{eyesText}</span>
+          <span className="rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
+            {t("viewer.ai.badge")}
+          </span>
+        </span>
+      ),
+    });
+    imageRows.push({
+      label: t("viewer.ai.blurLabel"),
+      value: (
+        <span key="ai-blur" className="inline-flex items-center gap-1.5" data-testid="viewer-ai-blur" data-soft={blur?.value === "soft" ? "true" : "false"}>
+          {blur === undefined ? (
+            <span>{t("viewer.ai.eyes.notAnalyzed")}</span>
+          ) : (
+            <>
+              <span className={`tabular-nums ${blur.value === "soft" ? "text-amber-300" : undefined}`}>{Math.round(blur.score)}</span>
+              <span className="inline-flex h-1.5 w-16 overflow-hidden rounded-full bg-panel align-middle">
+                <span
+                  className={`h-full rounded-full ${blur.value === "soft" ? "bg-amber-400" : "bg-sky-400"}`}
+                  style={{ width: `${Math.max(0, Math.min(100, blur.score))}%` }}
+                />
+              </span>
+            </>
+          )}
+          <span className="rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
+            {t("viewer.ai.badge")}
+          </span>
+        </span>
+      ),
+    });
+
     if (imageRows.length > 0) sections.push({ key: "image", rows: imageRows });
 
     // 【拍摄】相机/镜头核心行恒在（缺值「—」）；其余字段有值才渲染
@@ -756,9 +809,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               </svg>
             </button>
             </div>
-            {asset.kind === "video" && (
-              <ViewerVideo path={asset.path} posterUrl={thumb.url} />
-            )}
             {imageLayers.map((layer) => (
               <img
                 key={layer.src}
@@ -844,21 +894,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                   strokeWidth="1.2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  className={asset.kind === "raw" ? "text-sky-400" : "text-violet-400"}
+                  className="text-sky-400"
                   aria-hidden="true"
                 >
-                  {asset.kind === "video" ? (
-                    <>
-                      <rect x="3" y="5" width="18" height="14" rx="2" />
-                      <path d="M10 9.5l5 2.5-5 2.5v-5z" />
-                    </>
-                  ) : (
-                    <>
-                      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                      <circle cx="9" cy="10" r="1.8" />
-                      <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
-                    </>
-                  )}
+                  <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                  <circle cx="9" cy="10" r="1.8" />
+                  <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
                 </svg>
                 <span className="text-xs">{t("viewer.noPreview")}</span>
               </div>

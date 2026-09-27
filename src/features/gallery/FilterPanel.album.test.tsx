@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router";
 
 import i18n from "@/i18n";
 import { albumList } from "@/ipc/api";
@@ -36,7 +37,9 @@ function renderPanel(inputs: SearchInputs = EMPTY_INPUTS, hideAlbum = false) {
     onPatch,
     ...render(
       <I18nextProvider i18n={i18n}>
-        <FilterPanel inputs={inputs} onPatch={onPatch} hideAlbum={hideAlbum} />
+        <MemoryRouter>
+          <FilterPanel inputs={inputs} onPatch={onPatch} hideAlbum={hideAlbum} />
+        </MemoryRouter>
       </I18nextProvider>,
     ),
   };

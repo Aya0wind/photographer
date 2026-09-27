@@ -53,7 +53,7 @@ const burstStatsMock = vi.mocked(burstStats);
 function aiModel(
   id: string,
   state: "idle" | "downloading" | "verifying" | "done" | "failed",
-  feature: "semantic" | "face",
+  feature: "semantic" | "face" | "selection",
   bytesTotal = 150 * 1024 * 1024,
 ) {
   return {
@@ -428,6 +428,23 @@ describe("AI tab（M4 实化）", () => {
     expect(screen.getByTestId("ai-package-delete-semantic")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-package-download-semantic")).not.toBeInTheDocument();
   });
+
+  it("第三包选片辅助（C 阶段）：feature=selection 模型渲染独立包卡（整包状态）", async () => {
+    const user = userEvent.setup();
+    aiModelsStatusMock.mockReset().mockResolvedValue([
+      ...allModels(),
+      aiModel("eyes", "idle", "selection", 90 * 1024 * 1024),
+    ]);
+    renderSettingsPage();
+    await switchTab(user, "ai");
+
+    const pkg = await screen.findByTestId("ai-package-selection");
+    expect(pkg).toHaveAttribute("data-total", "1");
+    expect(within(pkg).getByText("选片辅助模型")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-package-badge-selection")).toHaveTextContent("未安装");
+    expect(screen.getByTestId("ai-package-download-selection")).toBeInTheDocument();
+  });
+
 
   it("整包下载：包卡按钮发起全部未装模型；进度事件聚合到整包进度条", async () => {
     aiModelsStatusMock

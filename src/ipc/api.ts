@@ -14,7 +14,7 @@ import { ipc } from "./index";
 // --- 契约类型 ----------------------------------------------------------------
 
 export type DeviceKind = "volume" | "mtp" | "folder";
-export type FileKind = "photo" | "raw" | "video" | "other";
+export type FileKind = "photo" | "raw" | "other";
 
 export interface DeviceSnapshot {
   scanStatus?: "scanning" | "ready" | "failed";
@@ -138,7 +138,7 @@ export type AppEvent =
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
 
 /** 库内资产大类（与导入侧 FileKind 对齐，不含 other——入库文件必属其一） */
-export type AssetKind = "photo" | "raw" | "video";
+export type AssetKind = "photo" | "raw";
 
 /** 库内资产（assets_page 返回；按 capturedAt DESC 排列，capturedAt 为 NULL 的排最前） */
 export interface AssetDto {
@@ -195,7 +195,7 @@ export interface AssetFormatCount {
 
 /** 搜索/过滤条件（camelCase 平铺进 assets_page 负载；全字段可省略） */
 export interface AssetFilters {
-  /** 类型集合（两档语义：照片=photo+raw，视频=video）；省略=全部。
+  /** 类型集合（照片=photo+raw，RAW=raw）；省略=全部。
    *  M3 二轮起用 kinds 数组（后端 lane 同步加 Vec<AssetKind> 参数），替代单值 kind */
   kinds?: AssetKind[];
   /** RFC3339（后端按绝对时间归一比较）；前端由 "YYYY-MM-DD" 本地日界转 UTC */
@@ -238,6 +238,11 @@ export interface AssetFilters {
   colorLabel?: string;
   /** 拒绝旗标三态过滤（true=仅拒绝 / false=仅未拒绝；省略 = 不限）。后端契约扩展中 */
   rejected?: boolean;
+  /** 闭眼风险（C 阶段 AI 选片）：closed=有人闭眼 | maybe=可能闭眼；省略 = 不过滤。
+   *  单值语义：closed/maybe 互斥（UI chips 二选一）。后端在途契约 */
+  eyes?: "closed" | "maybe";
+  /** 疑似失焦：soft=软片；省略 = 不过滤（无模型依赖，算法内置）。后端在途契约 */
+  blur?: "soft";
   /** 相册子分组精确名（仅 album_assets_page 消费；省略 = 不限层） */
   subgroup?: string;
   /** true = 只看相册根散照片（album_item.subgroup 为 NULL；仅 album_assets_page 消费） */
@@ -305,6 +310,14 @@ export interface AssetDetailDto {
   rating?: number | null;
   /** 旗标（待整理标记） */
   flagged?: boolean | null;
+  /** AI 选片分析（C 阶段；null=未分析）。
+   *  eyes.value：closed=有人闭眼 | maybe=可能闭眼 | no_face=未检出人脸（后端
+   *  归一 token，未知值原样透传）；blur.value：soft=疑似软片。
+   *  score 均为 0-100 置信分。 */
+  aiAnalysis: {
+    eyes?: { value: string; score: number };
+    blur?: { value: string; score: number };
+  } | null;
 }
 
 // --- 安全清卡（M2）：候选预览 → 强确认 → 后端逐文件指纹复验后删除 ---------------
@@ -340,7 +353,7 @@ export interface FileEntryDto {
   mtime: string;
 }
 
-/** 扩展名 → 文件大类（与 Rust 侧 PHOTO_EXTS/RAW_EXTS/VIDEO_EXTS 镜像） */
+/** 扩展名 → 文件大类（与 Rust 侧 PHOTO_EXTS/RAW_EXTS 镜像） */
 const EXT_KIND_TABLE: Record<string, FileKind> = {
   ...Object.fromEntries(
     ["jpg", "jpeg", "png", "heic", "heif", "avif", "tif", "tiff", "bmp", "gif", "webp", "jxl"].map(
@@ -351,12 +364,6 @@ const EXT_KIND_TABLE: Record<string, FileKind> = {
     ["cr2", "cr3", "nef", "arw", "raf", "dng", "orf", "rw2", "r3d", "iiq", "pef", "srw", "x3f", "nev"].map(
       (e) => [e, "raw" as const],
     ),
-  ),
-  ...Object.fromEntries(
-    ["mp4", "mov", "avi", "mkv", "mts", "m2ts", "wmv", "3gp", "avchd"].map((e) => [
-      e,
-      "video" as const,
-    ]),
   ),
 };
 
@@ -523,7 +530,7 @@ export async function cleanApply(jobId: number): Promise<CleanResultDto | null> 
   }
 }
 
-/** 取后端缓存缩略图文件路径（JPG/PNG 等可生成；RAW/视频返回 null）；命令失败静默 null。
+/** 取后端缓存缩略图文件路径（JPG/PNG 等可生成；RAW 无预览时返回 null）；命令失败静默 null。
  *  @param size 期望边长（px），如 256；实际以缓存档位就近为准 */
 export async function thumbGet(path: string, size: number): Promise<string | null> {
   try {
@@ -791,7 +798,7 @@ export async function indexTaskPause(): Promise<void> {
 
 // --- M4 AI：模型管理 / 语义搜索 ----------------------------------------------------
 
-export type AiFeature = "semantic" | "face";
+export type AiFeature = "semantic" | "face" | "selection";
 export type AiModelState = "idle" | "downloading" | "verifying" | "done" | "failed";
 
 /** AI 模型状态（ai_models_status 返回；清单：siglip2-visual/siglip2-text/scrfd/arcface） */
@@ -917,6 +924,29 @@ export async function assetsByIds(ids: number[]): Promise<AssetDto[]> {
   }
 }
 
+/** AI 选片分析负载归一（脏数据容错；非对象/字段缺失 → null/剔除） */
+function normalizeAiAnalysis(value: unknown): {
+  eyes?: { value: string; score: number };
+  blur?: { value: string; score: number };
+} | null {
+  if (value === null || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  const chOf = (v: unknown): { value: string; score: number } | undefined => {
+    if (v === null || typeof v !== "object") return undefined;
+    const c = v as Record<string, unknown>;
+    if (typeof c.value !== "string" || typeof c.score !== "number" || !Number.isFinite(c.score)) {
+      return undefined;
+    }
+    return { value: c.value, score: c.score };
+  };
+  const out: { eyes?: { value: string; score: number }; blur?: { value: string; score: number } } = {};
+  const eyes = chOf(r.eyes);
+  const blur = chOf(r.blur);
+  if (eyes !== undefined) out.eyes = eyes;
+  if (blur !== undefined) out.blur = blur;
+  return out;
+}
+
 /** 单资产全量元数据（查看器 EXIF 面板）；命令失败/不存在/负载异常返回 null。
  *  后端负载 → AssetDetailDto 归一：filename/size/createdAt + duplicate_count（顶层
  *  snake_case，未做 camelCase 重命名）→ dupCount；字段缺失容错（不透传 undefined），
@@ -939,7 +969,7 @@ const numOf = (v: unknown): number | null =>
       typeof v === "number" && Number.isFinite(v) ? v : null;
     const strOf = (v: unknown): string | null =>
       typeof v === "string" && v.length > 0 ? v : null;
-    const kind = r.kind === "raw" || r.kind === "video" ? r.kind : "photo";
+    const kind = r.kind === "raw" ? "raw" : "photo";
     return {
       id: numOf(r.id) ?? 0,
       path: typeof r.path === "string" ? r.path : "",
@@ -973,6 +1003,7 @@ const numOf = (v: unknown): number | null =>
       format: strOf(r.format),
       rating: numOf(r.rating),
       flagged: typeof r.flagged === "boolean" ? r.flagged : null,
+      aiAnalysis: normalizeAiAnalysis(r.aiAnalysis),
     };
   } catch {
     return null;
@@ -1135,7 +1166,7 @@ export async function importJobDelete(jobId: number): Promise<void> {
   await ipc<void>("import_job_delete", { jobId });
 }
 
-/** 用系统默认程序打开文件（open_with_system；视频 HEVC 缺解码器时的回退播放）。
+/** 用系统默认程序打开照片文件（open_with_system）。
  *  不 catch：失败文案透传给调用方提示 */
 export async function openWithSystem(path: string): Promise<void> {
   await ipc<void>("open_with_system", { path });
