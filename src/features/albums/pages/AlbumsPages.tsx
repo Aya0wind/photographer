@@ -24,6 +24,7 @@ import {
   type AssetDto,
 } from "@/ipc/api";
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
+import { isUngroupedAlbum } from "../lib/ungroupedAlbum";
 import { DEFAULT_SMART_TAGS, loadSmartTags } from "../lib/smartTags";
 import AlbumDetailPage from "./AlbumDetailPage";
 
@@ -219,6 +220,7 @@ function ManualAlbumCard({
   onOpen: (album: AlbumDto) => void;
   onMenu: (at: { x: number; y: number }, album: AlbumDto) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       role="button"
@@ -245,6 +247,15 @@ function ManualAlbumCard({
         <span className="block text-[11px] text-text-muted" data-testid="albums-manual-count">
           {album.itemCount}
         </span>
+        {/* 系统保底相册「未分组」：弱标识「默认相册」（禁删/禁改名由菜单入口控制） */}
+        {isUngroupedAlbum(album) && (
+          <span
+            className="mt-0.5 inline-block rounded-full bg-panel px-1.5 py-0.5 text-[10px] leading-none text-text-muted"
+            data-testid="albums-manual-badge-ungrouped"
+          >
+            {t("albums.ungroupedBadge")}
+          </span>
+        )}
       </span>
       {/* 悬浮 ⋯ 菜单钮（与右键同一菜单） */}
       <button
@@ -424,8 +435,11 @@ export function AlbumsIndexPage() {
   }
 
   function cardMenuEntries(album: AlbumDto): ContextMenuEntry[] {
-    return [
-      {
+    // 系统保底相册「未分组」：禁改名（隐藏重命名入口）、禁删（删除项禁用）
+    const ungrouped = isUngroupedAlbum(album);
+    const entries: ContextMenuEntry[] = [];
+    if (!ungrouped) {
+      entries.push({
         key: "rename",
         label: t("albums.rename"),
         onSelect: () => {
@@ -433,28 +447,30 @@ export function AlbumsIndexPage() {
           setRenameName(album.name);
           setRenameError(null);
         },
-      },
-      {
-        key: "dir-rename",
+      });
+    }
+    entries.push({
+      key: "dir-rename",
         label: t("albums.dirRename"),
         onSelect: () => {
           setDirRenaming(album);
           setDirRenameName(album.dirName ?? album.name);
           setDirRenameError(null);
         },
-      },
-      {
-        key: "cover",
-        label: t("albums.setCover"),
-        onSelect: () => setCoverPicking(album),
-      },
-      {
-        key: "delete",
-        label: t("albums.delete"),
-        onSelect: () => setDeleting(album),
-        danger: true,
-      },
-    ];
+      });
+    entries.push({
+      key: "cover",
+      label: t("albums.setCover"),
+      onSelect: () => setCoverPicking(album),
+    });
+    entries.push({
+      key: "delete",
+      label: t("albums.delete"),
+      onSelect: () => setDeleting(album),
+      disabled: ungrouped,
+      danger: true,
+    });
+    return entries;
   }
 
   // --- 智能相册（标签墙，行为照旧） ---------------------------------------------------

@@ -597,6 +597,39 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     await waitFor(() => expect(screen.queryByTestId("album-dir-rename-dialog")).not.toBeInTheDocument());
   });
 
+  it("规格修订：系统保底相册「未分组」——卡片副标签「默认相册」；菜单无重命名入口、删除禁用", async () => {
+    const user = userEvent.setup();
+    albumListMock.mockResolvedValue([
+      { id: 1, name: "未分组", coverAssetId: null, itemCount: 6, createdAt: "2026-09-01" },
+      makeAlbum(2, "旅行", 3),
+    ]);
+    renderRoutes("/albums");
+
+    const cards = await screen.findAllByTestId("albums-manual-card");
+    // 副标签「默认相册」只挂在未分组卡片
+    const ungroupedCard = cards.find((c) => c.getAttribute("data-album-id") === "1");
+    const travelCard = cards.find((c) => c.getAttribute("data-album-id") === "2");
+    expect(ungroupedCard).toBeDefined();
+    expect(within(ungroupedCard as HTMLElement).getByTestId("albums-manual-badge-ungrouped")).toHaveTextContent("默认相册");
+    expect((travelCard as HTMLElement).querySelector('[data-testid="albums-manual-badge-ungrouped"]')).toBeNull();
+
+    // 菜单：未分组无「重命名」入口、删除禁用；普通相册照旧
+    fireEvent.contextMenu(ungroupedCard as HTMLElement, { clientX: 20, clientY: 20 });
+    let menu = await screen.findByTestId("albums-card-context-menu");
+    expect(within(menu).queryByTestId("albums-card-context-menu-item-rename")).not.toBeInTheDocument();
+    expect(within(menu).getByTestId("albums-card-context-menu-item-dir-rename")).toBeInTheDocument();
+    expect(within(menu).getByTestId("albums-card-context-menu-item-delete")).toBeDisabled();
+    await user.click(within(menu).getByTestId("albums-card-context-menu-item-delete"));
+    expect(screen.queryByTestId("album-delete-dialog")).not.toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("albums-card-context-menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(travelCard as HTMLElement, { clientX: 20, clientY: 20 });
+    menu = await screen.findByTestId("albums-card-context-menu");
+    expect(within(menu).getByTestId("albums-card-context-menu-item-rename")).toBeInTheDocument();
+    expect(within(menu).getByTestId("albums-card-context-menu-item-delete")).toBeEnabled();
+  });
+
   it("设为封面：进入选择弹窗，点选照片调 album_cover_set", async () => {
     const user = userEvent.setup();
     albumListMock.mockResolvedValue([makeAlbum(6, "选封面", 4)]);

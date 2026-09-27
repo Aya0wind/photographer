@@ -189,6 +189,7 @@ beforeEach(() => {
   convertMock.mockReset().mockReturnValue("");
   thumbMock.mockReset().mockResolvedValue(null);
   albumListMock.mockReset().mockResolvedValue([
+    { id: 1, name: "未分组", coverAssetId: null, itemCount: 0, createdAt: "2026-09-01" },
     { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2026-09-01" },
   ]);
   albumCreateMock.mockReset().mockResolvedValue({
@@ -471,6 +472,8 @@ describe("方案面板", () => {
     expect(plan).toEqual({
       sourceId: "E:",
       targetRoot: "Y:\\照片\\SmartPhoto",
+      // 相册必选（规格修订）：默认预选系统保底相册「未分组」
+      albumId: 1,
       dirTemplate: "{YYYY}/{MM-DD}",
       nameTemplate: "{原文件名}",
       duplicatePolicy: "skip",
@@ -1212,17 +1215,17 @@ it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾�
   expect(deviceFilesMock).not.toHaveBeenCalled();
 });
 
-// --- 相册目录化：导入位置实时预览（B1 追加包） ---------------------------------------------
+// --- 相册目录化（规格修订）：导入位置实时预览——恒为相册目录路径 -------------------------
 
 describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
-  it("默认不建相册：预览 = 收纳区日期根（Y:\\照片\\SmartPhoto\\2026\\09-18\\）", async () => {
+  it("默认预选「未分组」：预览 = 收纳区/未分组/日期模板（Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\）", async () => {
     seedSession();
     renderWizard("?device=E:");
     await screen.findByTestId("wizard-table-stats");
 
     const preview = screen.getByTestId("wizard-album-path-preview");
     expect(preview).toHaveTextContent("导入位置预览");
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09-18\\");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\");
   });
 
   it("存入已有相册：预览随相册目录更新（相册目录/日期模板）", async () => {
@@ -1231,13 +1234,13 @@ describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
     const user = userEvent.setup();
     await screen.findByTestId("wizard-table-stats");
 
-    await user.click(screen.getByTestId("wizard-album-existing"));
+    // 默认已选未分组；改选青海湖 2026 → 预览切换
     await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
     const preview = screen.getByTestId("wizard-album-path-preview");
     expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\青海湖 2026\\2026\\09-18\\");
   });
 
-  it("新建相册：预览随输入名实时更新；切回不建相册回日期根", async () => {
+  it("新建相册：预览随输入名实时更新；输入为空时按「未分组」兜底", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1250,9 +1253,9 @@ describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
       "Y:\\照片\\SmartPhoto\\婚礼0927\\2026\\09-18\\",
     );
 
-    await user.click(screen.getByTestId("wizard-album-none"));
+    await user.clear(input);
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\2026\\09-18\\",
+      "Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\",
     );
   });
 });
@@ -1260,18 +1263,36 @@ describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
 // --- 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载 -----------------------
 
 describe("ImportWizard：添加到相册步骤", () => {
-  it("默认「不添加」：plan.albumId 不携带（undefined）", async () => {
+  it("规格修订：相册必选，无「不添加」选项；默认预选「未分组」→ plan.albumId=未分组 id", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
     startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
 
     await screen.findByTestId("wizard-table-stats");
-    expect(screen.getByTestId("wizard-album-none")).toBeChecked();
+    // 「不添加」入口已删；默认预选系统保底相册「未分组」
+    expect(screen.queryByTestId("wizard-album-none")).not.toBeInTheDocument();
+    expect(screen.getByTestId("wizard-album-existing")).toBeChecked();
+    const select = await screen.findByTestId("wizard-album-select");
+    expect(select).toHaveValue("1");
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
 
     const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumId).toBeUndefined();
+    expect(plan.albumId).toBe(1);
+  });
+
+  it("未选相册（清单为空）：行内提示「请选择相册」且不启动", async () => {
+    seedSession();
+    albumListMock.mockReset().mockResolvedValue([]);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 35 });
+
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+
+    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("请选择相册");
+    expect(startMock).not.toHaveBeenCalled();
   });
 
   it("「选择已有」：下拉列 album_list，选中后 plan.albumId=该相册 id", async () => {

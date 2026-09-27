@@ -24,6 +24,7 @@ import {
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
 import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
+import { isUngroupedAlbum, UNGROUPED_ALBUM_NAME } from "@/features/albums/lib/ungroupedAlbum";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { seedDevicesFromBackend, useImportStore, type RecentSource, type SourceFile } from "@/stores/importStore";
 import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind } from "./devicePresentation";
@@ -1372,8 +1373,9 @@ export default function ImportWizard() {
   const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
-  // 「添加到相册（可选）」：无 / 选择已有 / 新建；albumId 随 import_start 负载下发
-  const [albumChoice, setAlbumChoice] = useState<"none" | "existing" | "new">("none");
+  // 存入相册（规格修订后必选）：无「不添加」分支；默认预选系统保底相册「未分组」，
+  // 清单到位后按名匹配回填；新建分支照旧。
+  const [albumChoice, setAlbumChoice] = useState<"existing" | "new">("existing");
   const [albumId, setAlbumId] = useState<number | null>(null);
   const [newAlbumName, setNewAlbumName] = useState("");
   const [albums, setAlbums] = useState<AlbumDto[]>([]);
@@ -1387,19 +1389,23 @@ export default function ImportWizard() {
       cancelled = true;
     };
   }, []);
-  // 相册主组织（B1 追加包）：带相册导入落 `相册目录/日期模板/`，无相册落日期根。
-  // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；新建用输入名）。
+  // 默认预选「未分组」（后端按名幂等自动创建；仅在未手选时回填）
+  useEffect(() => {
+    if (albums.length === 0) return;
+    const ungrouped = albums.find((a) => isUngroupedAlbum(a));
+    if (ungrouped) setAlbumId((prev) => (prev === null ? ungrouped.id : prev));
+  }, [albums]);
+  // 相册主组织（必选）：导入落 `相册目录/日期模板/`。
+  // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；未选出时按「未分组」兜底；
+  // 新建分支用输入名）。
   const selectedAlbum = albumChoice === "existing" ? albums.find((a) => a.id === albumId) : undefined;
   const albumDirForPreview =
     albumChoice === "existing"
-      ? (selectedAlbum?.dirName ?? selectedAlbum?.name ?? "")
-      : albumChoice === "new"
-        ? newAlbumName.trim()
-        : "";
-  const importTargetPreview =
-    albumDirForPreview === ""
-      ? locationPreview
-      : previewTemplate(dirTemplate, `${targetRoot}\\${albumDirForPreview}`);
+      ? (selectedAlbum?.dirName ?? selectedAlbum?.name ?? UNGROUPED_ALBUM_NAME)
+      : newAlbumName.trim() === ""
+        ? UNGROUPED_ALBUM_NAME
+        : newAlbumName.trim();
+  const importTargetPreview = previewTemplate(dirTemplate, `${targetRoot}\\${albumDirForPreview}`);
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
@@ -1615,11 +1621,15 @@ export default function ImportWizard() {
 
   async function startImport(): Promise<void> {
     if (!device || !canStart) return;
-    // 「新建相册」分支：先建相册拿 id（重名等错误透出行内提示并中止启动）
+    // 相册必选（规格修订）：存入已有相册需选中；新建分支先建相册拿 id（重名等错误透出行内提示并中止启动）
     let resolvedAlbumId: number | undefined;
-    if (albumChoice === "existing" && albumId !== null) {
+    if (albumChoice === "existing") {
+      if (albumId === null) {
+        setAlbumError(t("wizard.album.required"));
+        return;
+      }
       resolvedAlbumId = albumId;
-    } else if (albumChoice === "new") {
+    } else {
       const name = newAlbumName.trim();
       if (name === "") {
         setAlbumError(t("wizard.album.nameRequired"));
@@ -2124,26 +2134,12 @@ export default function ImportWizard() {
             {t("wizard.skipImported")}
           </label>
 
-          {/* 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载下发 */}
+          {/* 存入相册（必选，规格修订）：已有相册（默认预选「未分组」）/ 新建；
+              albumId 随导入启动负载下发（后端 None 报错） */}
           <fieldset className="mt-4 flex flex-col gap-1" data-testid="wizard-album-section">
             <legend className="mb-1 text-xs font-medium text-text-secondary">
               {t("wizard.album.label")}
             </legend>
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
-              <input
-                type="radio"
-                name="wizard.albumChoice"
-                value="none"
-                checked={albumChoice === "none"}
-                onChange={() => {
-                  setAlbumChoice("none");
-                  setAlbumError(null);
-                }}
-                className="h-3 w-3 accent-[#F0A83C]"
-                data-testid="wizard-album-none"
-              />
-              {t("wizard.album.none")}
-            </label>
             <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
               <input
                 type="radio"
