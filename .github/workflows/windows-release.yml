@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
   workflow_dispatch:
     inputs:
       mode:
@@ -111,7 +112,7 @@ jobs:
           retention-days: 14
 
       - name: Create or update GitHub Release
-        if: github.event_name == 'push' || inputs.mode != 'build-only'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.mode != 'build-only')
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_MODE: ${{ inputs.mode || 'publish' }}

@@ -120,6 +120,8 @@ GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows bu
 
 代码合并或直接推送到 `main` 后会自动构建，并使用当前应用版本创建或更新正式 Release。因此每次准备发布新版本时，应先递增上述三个文件中的版本号。
 
+推送到 `dev` 时也会自动构建安装包用于验证，但不会创建 Release。
+
 ## 数据目录
 
 - 应用数据/模型：`%APPDATA%\com.smartphoto.app`
