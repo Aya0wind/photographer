@@ -110,6 +110,16 @@ cargo clippy --all-targets -- -D warnings
 
 双击 `scripts\build-installer.cmd`（或仓库根执行）：自动下载 ffmpeg 侧车（缺失时）→ release 编译 → 产出 NSIS exe（免管理员）+ WiX msi 到 `installer-output\`。
 
+GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows build and release → Run workflow**，选择运行模式：
+
+- `build-only`：只构建，在本次运行的 Artifacts 中下载 exe 和 msi（保留 14 天）。
+- `draft`：构建后创建或更新 GitHub Release 草稿。
+- `publish`：构建后直接创建正式 GitHub Release；若同版本草稿已存在，则更新安装包并发布草稿。
+
+发布标签留空时会使用 `tauri.conf.json` 中的版本号生成（例如 `v0.1.0`）。发布前需同步更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 的版本号，工作流会校验三者一致。
+
+代码合并或直接推送到 `main` 后会自动构建，并使用当前应用版本创建或更新正式 Release。因此每次准备发布新版本时，应先递增上述三个文件中的版本号。
+
 ## 数据目录
 
 - 应用数据/模型：`%APPDATA%\com.smartphoto.app`

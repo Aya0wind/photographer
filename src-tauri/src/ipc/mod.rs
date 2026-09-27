@@ -121,7 +121,8 @@ pub struct DirEntryDto {
     pub name: String,
     /// 规范化的绝对路径。
     pub path: String,
-    /// 是否含可浏览子目录（浅探测：找到第一个即 true）。
+    /// 是否允许继续展开。目录内容按需读取；这里不预读每个子目录，避免
+    /// 一个包含大量目录的父级产生 N+1 次磁盘或网络访问。
     pub has_subdirs: bool,
 }
 
@@ -172,22 +173,39 @@ pub fn list_dirs(parent: Option<&str>) -> Vec<DirEntryDto> {
     }
 }
 
-/// 盘符根列表（不引第三方依赖：26 个字母逐一探测存在性）。
+/// 盘符根列表。Windows 一次读取逻辑盘位掩码，避免逐盘访问慢映射盘。
+#[cfg(windows)]
 fn drive_roots() -> Vec<DirEntryDto> {
-    let mut out = Vec::new();
-    for letter in b'A'..=b'Z' {
-        let letter = letter as char;
-        let root = format!("{letter}:\\");
-        let path = PathBuf::from(&root);
-        if path.exists() {
-            out.push(DirEntryDto {
+    // GetLogicalDrives 一次读取位掩码，避免对断开的映射盘逐个 Path::exists。
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (b'A'..=b'Z')
+        .enumerate()
+        .filter(|(index, _)| mask & (1 << index) != 0)
+        .map(|(_, letter)| {
+            let letter = letter as char;
+            let root = format!("{letter}:\\");
+            DirEntryDto {
                 name: format!("{letter}:"),
                 path: root,
-                has_subdirs: has_any_subdir(&path),
-            });
-        }
-    }
-    out
+                has_subdirs: true,
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn drive_roots() -> Vec<DirEntryDto> {
+    (b'A'..=b'Z')
+        .filter_map(|letter| {
+            let letter = letter as char;
+            let root = format!("{letter}:\\");
+            PathBuf::from(&root).exists().then_some(DirEntryDto {
+                name: format!("{letter}:"),
+                path: root,
+                has_subdirs: true,
+            })
+        })
+        .collect()
 }
 
 /// 列一层子目录（跳过隐藏/系统属性、黑名单与点前缀名；不含文件）。
@@ -220,12 +238,13 @@ fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
         // entry.path() = root.join(name)：与父路径同形态的绝对路径
         let path = entry.path();
         out.push(DirEntryDto {
-            has_subdirs: has_any_subdir(&path),
+            // 只枚举当前层，子目录是否为空由下一次展开确认。
+            has_subdirs: true,
             name,
             path: path.to_string_lossy().into_owned(),
         });
     }
-    out.sort_by_key(|e| e.name.to_lowercase());
+    out.sort_by_cached_key(|e| e.name.to_lowercase());
     out
 }
 
@@ -249,24 +268,6 @@ fn is_hidden_or_system(entry: &std::fs::DirEntry) -> bool {
 
 #[cfg(not(windows))]
 fn is_hidden_or_system(_entry: &std::fs::DirEntry) -> bool {
-    false
-}
-
-/// 浅探测是否含可浏览子目录（权限不足/空 → false）。
-fn has_any_subdir(path: &Path) -> bool {
-    let Ok(read) = std::fs::read_dir(path) else {
-        return false;
-    };
-    for entry in read.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_browsable_dir_name(&name) || is_hidden_or_system(&entry) {
-            continue;
-        }
-        return true;
-    }
     false
 }
 

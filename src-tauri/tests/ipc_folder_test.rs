@@ -128,12 +128,12 @@ fn fs_list_dirs_lists_child_dirs_one_level() {
         "文件/点前缀/黑名单/隐藏属性不出现"
     );
 
-    // hasSubdirs 浅探测 + 绝对路径 + camelCase 负载
+    // 子级按需确认：当前层目录先标为可展开，不逐个预读。
     let photos = entries.iter().find(|e| e.name == "photos").unwrap();
-    assert!(photos.has_subdirs, "photos 下有 2024");
+    assert!(photos.has_subdirs, "目录应允许按需展开");
     assert!(Path::new(&photos.path).is_absolute(), "路径必须绝对化");
     let empty = entries.iter().find(|e| e.name == "empty_dir").unwrap();
-    assert!(!empty.has_subdirs);
+    assert!(empty.has_subdirs, "空目录也在实际展开时确认");
     let json = serde_json::to_value(photos).unwrap();
     assert!(json.get("hasSubdirs").is_some(), "camelCase: {json}");
 }
@@ -176,7 +176,7 @@ fn fs_list_dirs_preserves_parent_path_form() {
         entries
     );
     // 子树探测也用同形态路径（否则 hasSubdirs 恒 false —— Y:\照片 展开为空的根因）
-    assert!(photos.has_subdirs, "探测子目录不得因形态转换失败");
+    assert!(photos.has_subdirs, "映射盘目录应允许按需展开");
     // 绝不出现剥坏前缀的 UNC\ 残缺形态
     assert!(!photos.path.starts_with(r"UNC\"));
 

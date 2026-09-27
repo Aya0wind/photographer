@@ -542,6 +542,38 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(listMock).toHaveBeenLastCalledWith("C:\\");
   });
 
+  it("大目录展开后只渲染可见行，且加载期间不会重复读取", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    let resolveChildren!: (value: Awaited<ReturnType<typeof fsListDirs>>) => void;
+    const pending = new Promise<Awaited<ReturnType<typeof fsListDirs>>>((resolve) => {
+      resolveChildren = resolve;
+    });
+    listMock
+      .mockResolvedValueOnce([{ name: "D:", path: "D:\\", hasSubdirs: true }])
+      .mockReturnValueOnce(pending);
+
+    renderWizard();
+    const expand = await screen.findByRole("button", { name: "展开 D:\\" });
+    await user.click(expand);
+    expect(await screen.findByText("正在读取…")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "折叠 D:\\" }));
+    await user.click(screen.getByRole("button", { name: "展开 D:\\" }));
+    expect(listMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveChildren(Array.from({ length: 2_000 }, (_, index) => ({
+        name: `目录 ${index}`,
+        path: `D:\\目录 ${index}`,
+        hasSubdirs: true,
+      })));
+      await pending;
+    });
+    await screen.findByText("目录 0");
+    const tree = screen.getByTestId("wizard-fs-tree");
+    expect(within(tree).getAllByTestId("wizard-fs-node").length).toBeLessThan(100);
+  });
+
   it("点选文件夹：folderScan 入库并选中（树高亮），设备区不出现文件夹条目", async () => {
     seedSession();
     const user = userEvent.setup();

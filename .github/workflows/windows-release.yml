@@ -1,0 +1,163 @@
+name: Windows build and release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to do after building the installers
+        required: true
+        default: build-only
+        type: choice
+        options:
+          - build-only
+          - draft
+          - publish
+      tag:
+        description: Optional release tag (defaults to v<app version>)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows installers
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build files
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+
+      - name: Cache FFmpeg sidecar
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+          key: ffmpeg-windows-release-essentials-v1
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify release metadata
+        id: metadata
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tauriVersion = (Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $packageVersion = (Get-Content 'package.json' -Raw | ConvertFrom-Json).version
+          $cargoText = Get-Content 'src-tauri/Cargo.toml' -Raw
+          $cargoMatch = [regex]::Match($cargoText, '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"')
+
+          if (-not $cargoMatch.Success) {
+            throw 'Could not read the package version from src-tauri/Cargo.toml.'
+          }
+          $cargoVersion = $cargoMatch.Groups[1].Value
+          if ($tauriVersion -ne $packageVersion -or $tauriVersion -ne $cargoVersion) {
+            throw "Version mismatch: tauri=$tauriVersion, package=$packageVersion, cargo=$cargoVersion"
+          }
+
+          $tag = $env:INPUT_TAG.Trim()
+          if (-not $tag) {
+            $tag = "v$tauriVersion"
+          }
+          if ($tag -notmatch '^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Invalid release tag '$tag'. Use a semantic version such as v1.2.3."
+          }
+
+          "version=$tauriVersion" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build NSIS and MSI installers
+        shell: cmd
+        run: scripts\build-installer.cmd --nopause
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-hub-windows-x64-${{ steps.metadata.outputs.version }}
+          path: installer-output/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create or update GitHub Release
+        if: github.event_name == 'push' || inputs.mode != 'build-only'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.mode || 'publish' }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(Get-ChildItem 'installer-output' -File | ForEach-Object FullName)
+          if ($assets.Count -eq 0) {
+            throw 'No installer assets were produced.'
+          }
+
+          $releaseJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            if ($env:RELEASE_MODE -eq 'draft' -and -not $release.isDraft) {
+              throw "Release $env:RELEASE_TAG is already published and cannot be changed back to a draft."
+            }
+
+            gh release upload $env:RELEASE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to upload installers to the existing release.'
+            }
+
+            if ($env:RELEASE_MODE -eq 'publish' -and $release.isDraft) {
+              gh release edit $env:RELEASE_TAG --draft=false --latest --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Installers were uploaded, but the draft release could not be published.'
+              }
+            }
+          } else {
+            $arguments = @(
+              'release', 'create', $env:RELEASE_TAG
+            ) + $assets + @(
+              '--repo', $env:GITHUB_REPOSITORY,
+              '--target', $env:GITHUB_SHA,
+              '--title', "Photo Hub $env:RELEASE_TAG",
+              '--generate-notes'
+            )
+            if ($env:RELEASE_MODE -eq 'draft') {
+              $arguments += '--draft'
+            } else {
+              $arguments += '--latest'
+            }
+
+            gh @arguments
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to create the GitHub Release.'
+            }
+          }

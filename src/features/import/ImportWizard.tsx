@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { motion } from "motion/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import {
@@ -735,6 +734,131 @@ function SourceTree({ groups, collapsed, selected, onToggleGroup, onToggleCollap
   );
 }
 
+type FsTreeRow =
+  | { type: "folder"; node: FsDirEntry; depth: number }
+  | { type: "status"; key: string; depth: number; loading: boolean };
+
+/** 文件夹导航也使用虚拟列表：展开数千个子目录时只创建视口附近的行。 */
+function FileSystemTree({
+  roots,
+  expanded,
+  children,
+  loading,
+  selectedPath,
+  onToggle,
+  onSelect,
+}: {
+  roots: FsDirEntry[];
+  expanded: Set<string>;
+  children: Record<string, FsDirEntry[]>;
+  loading: Set<string>;
+  selectedPath: string | null;
+  onToggle: (node: FsDirEntry) => void;
+  onSelect: (path: string) => void;
+}) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rows = useMemo<FsTreeRow[]>(() => {
+    const result: FsTreeRow[] = [];
+    const append = (nodes: FsDirEntry[], depth: number) => {
+      for (const node of nodes) {
+        result.push({ type: "folder", node, depth });
+        if (!expanded.has(node.path)) continue;
+        const loaded = children[node.path];
+        if (loading.has(node.path) || loaded === undefined) {
+          result.push({ type: "status", key: `${node.path}:loading`, depth: depth + 1, loading: true });
+        } else if (loaded.length === 0) {
+          result.push({ type: "status", key: `${node.path}:empty`, depth: depth + 1, loading: false });
+        } else {
+          append(loaded, depth + 1);
+        }
+      }
+    };
+    append(roots, 0);
+    return result;
+  }, [roots, expanded, children, loading]);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 30,
+    overscan: 12,
+    getItemKey: (index) => {
+      const row = rows[index];
+      return row.type === "folder" ? `folder:${row.node.path}` : row.key;
+    },
+  });
+
+  return (
+    <div ref={scrollRef} className="sp-scroll h-full min-h-0 overflow-y-auto px-2 pb-2" data-testid="wizard-fs-tree">
+      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const row = rows[item.index];
+          const content = row.type === "status" ? (
+            <div
+              className="flex h-[30px] items-center gap-2 text-[11px] text-text-muted"
+              style={{ paddingLeft: 26 + row.depth * 14 }}
+            >
+              {row.loading && <span className="h-3 w-3 animate-spin rounded-full border border-text-muted border-t-accent" />}
+              {row.loading ? t("wizard.fs.loading") : t("wizard.fs.empty")}
+            </div>
+          ) : (() => {
+            const node = row.node;
+            const loaded = children[node.path];
+            const isExpanded = expanded.has(node.path);
+            const isLoading = loading.has(node.path);
+            const canExpand = node.hasSubdirs && (loaded === undefined || loaded.length > 0);
+            const isSelected = selectedPath !== null && normalizeFsPath(node.path) === selectedPath;
+            return (
+              <div
+                className={`flex h-[30px] items-center gap-1 rounded-md border border-transparent pr-1.5 transition-colors ${
+                  isSelected ? "border-accent/30 bg-accent/10" : "hover:bg-panel/60"
+                }`}
+                style={{ paddingLeft: 4 + row.depth * 14 }}
+              >
+                {canExpand ? (
+                  <button
+                    type="button"
+                    onClick={() => onToggle(node)}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg hover:text-accent"
+                    aria-label={t(isExpanded ? "wizard.fs.collapse" : "wizard.fs.expand", { dir: node.path })}
+                    data-testid="wizard-fs-toggle"
+                  >
+                    {isLoading ? (
+                      <span className="h-3 w-3 animate-spin rounded-full border border-text-muted border-t-accent" />
+                    ) : (
+                      <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.8"
+                        className={`transition-transform ${isExpanded ? "rotate-90" : ""}`} aria-hidden="true">
+                        <path d="M5 3l5 5-5 5" />
+                      </svg>
+                    )}
+                  </button>
+                ) : <span className="h-6 w-6 shrink-0" aria-hidden="true" />}
+                <button
+                  type="button"
+                  onClick={() => onSelect(node.path)}
+                  className={`flex min-w-0 flex-1 items-center gap-2 py-1 text-left ${isSelected ? "text-accent" : "text-text-secondary"}`}
+                  data-testid="wizard-fs-node"
+                  data-path={node.path}
+                  data-selected={isSelected}
+                  title={node.path}
+                >
+                  <FolderGlyph size={14} className={isSelected ? "text-accent" : "text-text-muted"} />
+                  <span className="truncate text-xs">{node.name}</span>
+                </button>
+              </div>
+            );
+          })();
+          return (
+            <div key={item.key} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 30, transform: `translateY(${item.start}px)` }}>
+              {content}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 
 function FileListView({
   groups,
@@ -1092,6 +1216,54 @@ function ColumnResizeHandle({
   );
 }
 
+function ViewControls({
+  viewMode,
+  tileSize,
+  onViewMode,
+  onTileSize,
+}: {
+  viewMode: WizardViewMode;
+  tileSize: TileSizeKey;
+  onViewMode: (mode: WizardViewMode) => void;
+  onTileSize: (size: TileSizeKey) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="flex rounded-lg border border-edge bg-bg/70 p-0.5" role="radiogroup"
+        aria-label={t("wizard.view.label")} data-testid="wizard-view">
+        {(["list", "grid"] as const).map((option) => (
+          <button key={option} type="button" role="radio" aria-checked={viewMode === option}
+            onClick={() => onViewMode(option)}
+            className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              viewMode === option ? "bg-panel text-text-primary shadow-sm" : "text-text-muted hover:text-text-primary"
+            }`} data-testid={`wizard-view-${option}`}>
+            {t(`wizard.view.${option}`)}
+          </button>
+        ))}
+      </div>
+      {viewMode === "grid" && (
+        <div className="flex rounded-lg border border-edge bg-bg/70 p-0.5" role="radiogroup"
+          aria-label={t("wizard.tileSize.label")} data-testid="wizard-tile-size">
+          {TILE_SIZE_ORDER.map((option) => (
+            <button key={option} type="button" role="radio" aria-checked={tileSize === option}
+              aria-label={t(`wizard.tileSize.${option}`)} title={t(`wizard.tileSize.${option}`)}
+              onClick={() => onTileSize(option)}
+              className={`flex h-6 w-7 items-center justify-center rounded-md transition-colors ${
+                tileSize === option ? "bg-panel text-accent shadow-sm" : "text-text-muted hover:text-text-primary"
+              }`} data-testid={`wizard-tile-size-${option}`}>
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                <rect x={(16 - TILE_SIZE_ICON[option]) / 2} y={(16 - TILE_SIZE_ICON[option]) / 2}
+                  width={TILE_SIZE_ICON[option]} height={TILE_SIZE_ICON[option]} rx="1" />
+              </svg>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ImportWizard() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -1246,6 +1418,8 @@ export default function ImportWizard() {
   const [fsRoots, setFsRoots] = useState<FsDirEntry[] | null>(null);
   const [fsChildren, setFsChildren] = useState<Record<string, FsDirEntry[]>>({});
   const [fsExpanded, setFsExpanded] = useState<Set<string>>(() => new Set());
+  const [fsLoading, setFsLoading] = useState<Set<string>>(() => new Set());
+  const fsLoadingRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     let cancelled = false;
     void fsListDirs().then((roots) => {
@@ -1420,84 +1594,16 @@ export default function ImportWizard() {
       return next;
     });
     if (isExpanded) return;
-    if (!(path in fsChildren)) {
+    if (path in fsChildren || fsLoadingRef.current.has(path)) return;
+    fsLoadingRef.current.add(path);
+    setFsLoading(new Set(fsLoadingRef.current));
+    try {
       const children = await fsListDirs(path);
       setFsChildren((prev) => ({ ...prev, [path]: children }));
+    } finally {
+      fsLoadingRef.current.delete(path);
+      setFsLoading(new Set(fsLoadingRef.current));
     }
-  }
-
-  function renderFsNode(node: FsDirEntry, depth: number) {
-    const isExpanded = fsExpanded.has(node.path);
-    const children = fsChildren[node.path];
-    const isSelected =
-      selectedFolderPath !== null && normalizeFsPath(node.path) === selectedFolderPath;
-    return (
-      <div key={node.path}>
-        <div
-          className={`flex items-center gap-1 border-l-2 py-0.5 pr-1.5 ${
-            isSelected ? "border-accent bg-accent/10" : "border-transparent hover:bg-panel/40"
-          }`}
-          style={{ paddingLeft: 4 + depth * 12 }}
-        >
-          {node.hasSubdirs ? (
-            <button
-              type="button"
-              onClick={() => void toggleFsNode(node)}
-              className="shrink-0 rounded p-0.5 text-text-muted transition-colors hover:text-accent"
-              aria-label={t(isExpanded ? "wizard.fs.collapse" : "wizard.fs.expand", {
-                dir: node.path,
-              })}
-              data-testid="wizard-fs-toggle"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                width="10"
-                height="10"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                className={`transition-transform ${isExpanded ? "rotate-90" : ""}`}
-                aria-hidden="true"
-              >
-                <path d="M5 3l5 5-5 5" />
-              </svg>
-            </button>
-          ) : (
-            <span className="w-3.5 shrink-0" aria-hidden="true" />
-          )}
-          <button
-            type="button"
-            onClick={() => void selectFolder(node.path)}
-            className={`flex min-w-0 flex-1 items-center gap-1 rounded py-0.5 text-left ${
-              isSelected ? "text-accent" : "text-text-secondary"
-            }`}
-            data-testid="wizard-fs-node"
-            data-path={node.path}
-            data-selected={isSelected}
-            title={node.path}
-          >
-            <FolderGlyph size={12} className={isSelected ? "text-accent" : "text-text-muted"} />
-            <span className="truncate font-mono text-[11px]">{node.name}</span>
-          </button>
-        </div>
-        {node.hasSubdirs && isExpanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            transition={{ duration: 0.15, ease: "easeOut" }}
-            className="overflow-hidden"
-          >
-            {children === undefined ? (
-              <p className="py-0.5 pl-9 text-[11px] text-text-muted">…</p>
-            ) : children.length === 0 ? (
-              <p className="py-0.5 pl-9 text-[11px] text-text-muted">{t("wizard.fs.empty")}</p>
-            ) : (
-              children.map((child) => renderFsNode(child, depth + 1))
-            )}
-          </motion.div>
-        )}
-      </div>
-    );
   }
 
   // --- 方案与启动 ----------------------------------------------------------------
@@ -1571,17 +1677,23 @@ export default function ImportWizard() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* 页头 + LR 式导入模式分段条 */}
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4">
-        <h1 className="text-sm font-semibold text-text-primary">{t("wizard.title")}</h1>
+    <div className="flex h-full flex-col bg-bg">
+      <header className="flex h-[68px] shrink-0 items-center gap-4 border-b border-edge bg-surface/70 px-5">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h1 className="text-base font-semibold tracking-tight text-text-primary">{t("wizard.title")}</h1>
+          </div>
+          <p className="mt-0.5 truncate text-[11px] text-text-muted">
+            {t(mode === "copy" ? "wizard.mode.copyDesc" : "wizard.mode.moveDesc")}
+          </p>
+        </div>
         {!isIpcAvailable() && (
           <span className="rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted">
             {t("wizard.ipcUnavailable")}
           </span>
         )}
         <div
-          className="ml-auto flex items-center rounded-md border border-edge bg-bg p-0.5"
+          className="ml-auto flex items-center rounded-lg border border-edge bg-bg/80 p-1 shadow-sm"
           role="radiogroup"
           aria-label={t("wizard.mode.label")}
           data-testid="wizard-mode"
@@ -1597,7 +1709,7 @@ export default function ImportWizard() {
                 // 互斥：切到移动时自动关掉双目的地（后端拒 move+secondTarget）
                 if (option === "move") setSecondEnabled(false);
               }}
-              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+              className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
                 mode === option
                   ? "bg-accent text-black"
                   : "text-text-secondary hover:text-text-primary"
@@ -1609,21 +1721,16 @@ export default function ImportWizard() {
           ))}
         </div>
       </header>
-      <div className="flex h-7 shrink-0 items-center border-b border-edge px-4">
-        <p className="truncate text-[11px] text-text-muted">
-          {t(mode === "copy" ? "wizard.mode.copyDesc" : "wizard.mode.moveDesc")}
-        </p>
-      </div>
 
       <div
-        className="grid min-h-0 flex-1 p-2"
+        className="grid min-h-0 flex-1 gap-0 p-3"
         style={{
           gridTemplateColumns: `${colWidths.left}px 6px minmax(0, 1fr) 6px ${colWidths.right}px`,
         }}
         data-testid="wizard-columns"
       >
         {/* 左栏：源面板（设备 / 文件系统树 / 最近使用，三区可折叠）+ 源文件树 */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.leftPane")}>
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-sm" aria-label={t("wizard.leftPane")}>
           {/* 设备区（可折叠）：设备列表（可点切换，与树选中态同样式）+ 选中设备信息卡 */}
           <PanelSection
             sectionKey="devices"
@@ -1751,13 +1858,26 @@ export default function ImportWizard() {
               </button>
             }
           >
-            <div className="sp-scroll max-h-44 overflow-y-auto px-3 pb-2">
-              {fsRoots === null ? null : fsRoots.length === 0 ? (
+            <div className="h-52 min-h-0">
+              {fsRoots === null ? (
+                <div className="flex h-full items-center justify-center gap-2 text-[11px] text-text-muted">
+                  <span className="h-3 w-3 animate-spin rounded-full border border-text-muted border-t-accent" />
+                  {t("wizard.fs.loading")}
+                </div>
+              ) : fsRoots.length === 0 ? (
                 <p className="px-2 py-1 text-[11px] leading-relaxed text-text-muted">
                   {t("wizard.fs.unavailable")}
                 </p>
               ) : (
-                fsRoots.map((node) => renderFsNode(node, 0))
+                <FileSystemTree
+                  roots={fsRoots}
+                  expanded={fsExpanded}
+                  children={fsChildren}
+                  loading={fsLoading}
+                  selectedPath={selectedFolderPath}
+                  onToggle={(node) => void toggleFsNode(node)}
+                  onSelect={(path) => void selectFolder(path)}
+                />
               )}
             </div>
           </PanelSection>
@@ -1828,30 +1948,33 @@ export default function ImportWizard() {
         />
 
         {/* 中栏：文件区（列表/缩略图双视图，共享勾选与统计；工具栏=统计+全选/反选） */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-edge bg-surface" aria-label={t("wizard.fileTable")}>
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-sm" aria-label={t("wizard.fileTable")}>
           <div
-            className="flex h-9 shrink-0 items-center justify-between border-b border-edge px-3 text-xs"
+            className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-edge bg-panel/20 px-3 text-xs"
             data-testid="wizard-table-stats"
           >
-            <span className="text-text-secondary">
-              {t("wizard.selectedStats", {
-                selected: selectedCount,
-                total: files.length,
-                size: formatBytes(selectedBytes),
-              })}
-            </span>
-            <div className="flex gap-1.5">
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-text-primary">{t("wizard.previewTitle")}</p>
+              <p className="mt-0.5 text-[11px] text-text-muted tabular-nums">
+                {t("wizard.selectedStats", { selected: selectedCount, total: files.length, size: formatBytes(selectedBytes) })}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <ViewControls viewMode={viewMode} tileSize={tileSize}
+                onViewMode={(next) => { setViewMode(next); saveViewMode(next); }}
+                onTileSize={(next) => { setTileSize(next); saveTileSize(next); }} />
+              <span className="mx-0.5 h-5 w-px bg-edge" aria-hidden="true" />
               <button
                 type="button"
                 onClick={selectAll}
-                className="text-[11px] text-text-muted transition-colors hover:text-accent"
+                className="rounded-md px-1.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-panel hover:text-accent"
               >
                 {t("wizard.selectAll")}
               </button>
               <button
                 type="button"
                 onClick={invertSelection}
-                className="text-[11px] text-text-muted transition-colors hover:text-accent"
+                className="rounded-md px-1.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-panel hover:text-accent"
               >
                 {t("wizard.invert")}
               </button>
@@ -1903,90 +2026,12 @@ export default function ImportWizard() {
         />
 
         {/* 右栏：方案面板 */}
-        <section className="flex min-h-0 flex-col overflow-y-auto rounded-lg border border-edge bg-surface p-3" aria-label={t("wizard.planPane")}>
-          <h2 className="text-xs font-semibold text-text-primary">{t("wizard.plan")}</h2>
-
-          {/* 查看方式 + 缩略图档位（均 localStorage 记忆） */}
-          <div className="mt-3 flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-text-secondary">{t("wizard.view.label")}</span>
-            <div className="flex items-stretch gap-1.5">
-              <div
-                className="flex flex-1 rounded-md border border-edge bg-bg p-0.5"
-                role="radiogroup"
-                aria-label={t("wizard.view.label")}
-                data-testid="wizard-view"
-              >
-                {(["list", "grid"] as const).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    role="radio"
-                    aria-checked={viewMode === option}
-                    onClick={() => {
-                      setViewMode(option);
-                      saveViewMode(option);
-                    }}
-                    className={`flex-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
-                      viewMode === option
-                        ? "bg-accent text-black"
-                        : "text-text-secondary hover:text-text-primary"
-                    }`}
-                    data-testid={`wizard-view-${option}`}
-                  >
-                    {t(`wizard.view.${option}`)}
-                  </button>
-                ))}
-              </div>
-              <div
-                className="flex rounded-md border border-edge bg-bg p-0.5"
-                role="radiogroup"
-                aria-label={t("wizard.tileSize.label")}
-                data-testid="wizard-tile-size"
-              >
-                {TILE_SIZE_ORDER.map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    role="radio"
-                    aria-checked={tileSize === option}
-                    aria-label={t(`wizard.tileSize.${option}`)}
-                    title={t(`wizard.tileSize.${option}`)}
-                    onClick={() => {
-                      setTileSize(option);
-                      saveTileSize(option);
-                    }}
-                    className={`flex w-7 items-center justify-center rounded transition-colors ${
-                      tileSize === option
-                        ? "bg-accent text-black"
-                        : "text-text-secondary hover:text-text-primary"
-                    }`}
-                    data-testid={`wizard-tile-size-${option}`}
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      width="12"
-                      height="12"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      aria-hidden="true"
-                    >
-                      <rect
-                        x={(16 - TILE_SIZE_ICON[option]) / 2}
-                        y={(16 - TILE_SIZE_ICON[option]) / 2}
-                        width={TILE_SIZE_ICON[option]}
-                        height={TILE_SIZE_ICON[option]}
-                        rx="1"
-                      />
-                    </svg>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+        <section className="flex min-h-0 flex-col overflow-y-auto rounded-xl border border-edge bg-surface p-4 shadow-sm" aria-label={t("wizard.planPane")}>
+          <h2 className="text-sm font-semibold text-text-primary">{t("wizard.plan")}</h2>
+          <p className="mt-1 text-[11px] leading-relaxed text-text-muted">{t("wizard.planHint")}</p>
 
           {/* 导入位置（库属性，只读）：目标根/模板随库走，在设置中修改 */}
-          <div className="mt-4 flex flex-col gap-1.5">
+          <div className="mt-5 flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-text-secondary">
                 {t("wizard.location.title")}
