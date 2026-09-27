@@ -52,11 +52,37 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install NASM for libjpeg-turbo
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nasm --version=3.2.0 --yes --no-progress
+
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'NASM\nasm.exe'),
+            (Join-Path $env:ChocolateyInstall 'bin\nasm.exe')
+          )
+          $nasmExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $nasmExe) {
+            $command = Get-Command nasm -ErrorAction SilentlyContinue
+            if ($command) {
+              $nasmExe = $command.Source
+            }
+          }
+          if (-not $nasmExe) {
+            throw 'NASM installation completed but nasm.exe was not found.'
+          }
+
+          $nasmDir = Split-Path $nasmExe
+          $nasmDir >> $env:GITHUB_PATH
+          "ASM_NASM=$nasmExe" >> $env:GITHUB_ENV
+          & $nasmExe -v
+
       - name: Cache Rust build files
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
           shared-key: windows-installers
+          key: nasm-3.2.0
           cache-workspace-crates: true
           cache-on-failure: true
 
