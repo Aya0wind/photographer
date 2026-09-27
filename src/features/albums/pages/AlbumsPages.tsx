@@ -22,7 +22,7 @@ import {
   type AlbumDto,
   type AssetDto,
 } from "@/ipc/api";
-import { useAlbumCovers, useManualAlbumCovers } from "../lib/albumCovers";
+import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
 import { loadHiddenTags } from "../lib/hiddenTags";
 import AlbumDetailPage from "./AlbumDetailPage";
 
@@ -136,6 +136,39 @@ function CardCover({
       </svg>
       <span className="px-1 text-center text-[10px] leading-tight text-text-muted">{label}</span>
     </div>
+  );
+}
+
+/** 智能相册封面：搜索期间和缩略图生成/解码期间均显示共享骨架动画。 */
+function SmartAlbumCover({ assetId, tag }: { assetId: number | null | undefined; tag: string }) {
+  if (assetId === undefined) {
+    return (
+      <div
+        className="sp-skeleton h-full w-full"
+        data-testid="albums-tag-cover-loading"
+        data-tag={tag}
+      />
+    );
+  }
+  if (assetId === null) {
+    return (
+      <CardCover
+        url={null}
+        label={tag}
+        testIdImg="albums-tag-cover-img"
+        testIdFallback="albums-tag-cover-fallback"
+        dataTag={tag}
+      />
+    );
+  }
+  return (
+    <AssetThumb
+      asset={{ id: assetId, kind: "photo", name: tag }}
+      size={ALBUM_COVER_THUMB_SIZE}
+      alt=""
+      className="h-full w-full"
+      testId="albums-tag-cover"
+    />
   );
 }
 
@@ -437,7 +470,7 @@ export function AlbumsIndexPage() {
     () => SMART_ALBUM_TAGS.filter((tag) => !loadHiddenTags().includes(tag)),
     [],
   );
-  const tagCovers = useAlbumCovers(visibleTags);
+  const tagCoverAssetIds = useAlbumCoverAssetIds(visibleTags);
 
   return (
     <div className="h-full overflow-y-auto" data-testid="albums-page">
@@ -585,13 +618,7 @@ export function AlbumsIndexPage() {
                   data-tag={tag}
                 >
                   <span className="block h-20 w-full border-b border-edge/60">
-                    <CardCover
-                      url={tagCovers[tag]}
-                      label={tag}
-                      testIdImg="albums-tag-cover-img"
-                      testIdFallback="albums-tag-cover-fallback"
-                      dataTag={tag}
-                    />
+                    <SmartAlbumCover assetId={tagCoverAssetIds[tag]} tag={tag} />
                   </span>
                   <span
                     className="block px-2 py-2 text-sm text-text-secondary transition-colors group-hover:text-accent"

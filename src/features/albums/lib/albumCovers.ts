@@ -4,9 +4,10 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { albumAssetsPage, assetThumbGet, searchSemantic, type AlbumDto } from "@/ipc/api";
 
 /**
- * 智能相册标签封面（/albums）：自动用「该标签语义搜索第一条命中」的缩略图做封面。
+ * 智能相册标签封面（/albums）：自动用「该标签语义搜索第一条命中」做封面。
  * 进页面后台批量预取：固定并发池（≤3，避免与画廊缩略图管线抢 IPC）；
- * 无命中/命令失败/转换失败一律静默 null——调用方渲染占位。
+ * 此处只解析资产 id，图片交给共享 AssetThumb 管线加载，以复用磁盘缓存、
+ * 会话缓存、in-flight 去重、pending 事件重试和加载动画。
  */
 
 /** 封面缩略图名义边长（与画廊网格同 240 → 后端 snap 256 档，复用缓存） */
@@ -14,15 +15,11 @@ export const ALBUM_COVER_THUMB_SIZE = 240;
 /** 封面预取并发上限 */
 export const ALBUM_COVER_CONCURRENCY = 3;
 
-/** 单标签封面 asset URL；任何一步失败/无命中 → null（占位） */
-export async function fetchAlbumCover(tag: string): Promise<string | null> {
+/** 单标签封面资产 id；搜索失败/无命中 → null（占位） */
+export async function fetchAlbumCoverAssetId(tag: string): Promise<number | null> {
   try {
     const hits = await searchSemantic(tag, 1);
-    const hit = hits[0];
-    if (!hit) return null;
-    const result = await assetThumbGet(hit.assetId, ALBUM_COVER_THUMB_SIZE);
-    if (result.status !== "ready") return null; // pending 也当无封面（下轮事件自愈）
-    return convertFileSrc(result.path) || null;
+    return hits[0]?.assetId ?? null;
   } catch {
     return null;
   }
@@ -51,17 +48,17 @@ export async function runTaskPool(
   await Promise.all(workers);
 }
 
-/** tag → 封面 asset URL；缺失键 = 尚未结算（占位），null = 已结算但无图（占位） */
-export function useAlbumCovers(tags: readonly string[]): Record<string, string | null> {
-  const [covers, setCovers] = useState<Record<string, string | null>>({});
+/** tag → 封面资产 id；缺失键 = 搜索中，null = 已结算但无命中。 */
+export function useAlbumCoverAssetIds(tags: readonly string[]): Record<string, number | null> {
+  const [covers, setCovers] = useState<Record<string, number | null>>({});
 
   useEffect(() => {
     let cancelled = false;
     void runTaskPool(
       tags.map((tag) => async () => {
-        const url = await fetchAlbumCover(tag);
+        const assetId = await fetchAlbumCoverAssetId(tag);
         if (cancelled) return;
-        setCovers((prev) => ({ ...prev, [tag]: url }));
+        setCovers((prev) => ({ ...prev, [tag]: assetId }));
       }),
       ALBUM_COVER_CONCURRENCY,
     );

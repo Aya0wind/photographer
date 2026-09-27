@@ -30,6 +30,10 @@ import {
 } from "@/ipc/api";
 import type { AiModelStatus, IndexStatus } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
+import {
+  emitAssetEventForTests,
+  resetThumbPipelineForTests,
+} from "@/features/gallery/lib/thumbPipeline";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -165,6 +169,7 @@ beforeEach(() => {
   aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
   indexStatusMock.mockReset().mockResolvedValue(builtIndex());
   useAiStore.getState().resetForTests();
+  resetThumbPipelineForTests();
 });
 
 describe("M4 路由与侧栏", () => {
@@ -250,7 +255,7 @@ describe("智能相册标签封面", () => {
     renderRoutes("/albums");
 
     const img = await screen.findByTestId("albums-tag-cover-img");
-    expect(img).toHaveAttribute("data-tag", "日落");
+    expect(img.closest('[data-testid="albums-tag"]')).toHaveAttribute("data-tag", "日落");
     expect(img).toHaveAttribute("src", "asset://D:\\cache\\9.jpg");
     expect(searchSemanticMock).toHaveBeenCalledWith("日落", 1);
     expect(thumbMock).toHaveBeenCalledWith(9, 240);
@@ -259,23 +264,39 @@ describe("智能相册标签封面", () => {
     expect(fallbacks).toHaveLength(SMART_ALBUM_TAGS.length - 1);
   });
 
-  it("缩略图缺失 → 全部静默占位（无 img）", async () => {
+  it("语义搜索和缩略图生成期间显示加载动画", async () => {
+    searchSemanticMock.mockImplementation(() => new Promise(() => {}));
+    renderRoutes("/albums");
+
+    const loading = await screen.findAllByTestId("albums-tag-cover-loading");
+    expect(loading).toHaveLength(SMART_ALBUM_TAGS.length);
+    expect(loading[0].className).toContain("sp-skeleton");
+  });
+
+  it("缩略图尚未缓存时保持动画，生成完成事件后自动显示并进入共享缓存", async () => {
     searchSemanticMock.mockImplementation((q: string) =>
       q === "日落" ? Promise.resolve([{ assetId: 9, score: 0.9 }]) : Promise.resolve([]),
     );
+    thumbMock
+      .mockResolvedValueOnce({ status: "pending" })
+      .mockResolvedValue({ status: "ready", path: "D:\\cache\\9.jpg" });
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderRoutes("/albums");
-    await screen.findByTestId("albums-page");
 
-    await waitFor(() =>
-      expect(screen.getAllByTestId("albums-tag-cover-fallback")).toHaveLength(
-        SMART_ALBUM_TAGS.length,
-      ),
-    );
+    const cover = await screen.findByTestId("albums-tag-cover");
+    expect(cover).toHaveAttribute("data-loading", "true");
+    expect(cover.className).toContain("sp-skeleton");
     expect(screen.queryByTestId("albums-tag-cover-img")).not.toBeInTheDocument();
-    // 渐变底占位带标签名（无封面也能识别）
-    const fallbacks = screen.getAllByTestId("albums-tag-cover-fallback");
-    expect(fallbacks[0].className).toContain("bg-gradient-to-br");
-    expect(fallbacks[0]).toHaveTextContent(String(fallbacks[0].getAttribute("data-tag")));
+
+    emitAssetEventForTests({
+      type: "thumbnailReady",
+      assetId: 9,
+      size: 240,
+      path: "D:\\cache\\9.jpg",
+    });
+    const img = await screen.findByTestId("albums-tag-cover-img");
+    expect(img).toHaveAttribute("src", "asset://D:\\cache\\9.jpg");
+    expect(thumbMock).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -13,61 +13,38 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: vi.fn(),
 }));
 
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { assetThumbGet, searchSemantic } from "@/ipc/api";
+import { searchSemantic } from "@/ipc/api";
 import {
   ALBUM_COVER_CONCURRENCY,
-  ALBUM_COVER_THUMB_SIZE,
-  fetchAlbumCover,
+  fetchAlbumCoverAssetId,
   runTaskPool,
 } from "./albumCovers";
 
 const searchSemanticMock = vi.mocked(searchSemantic);
-const assetThumbGetMock = vi.mocked(assetThumbGet);
-const convertMock = vi.mocked(convertFileSrc);
 
 /** 等待微任务+宏任务清空（并发池补位断言用；setTimeout 0 非真实等待） */
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   searchSemanticMock.mockReset().mockResolvedValue([]);
-  assetThumbGetMock.mockReset().mockResolvedValue({ status: "pending" });
-  convertMock.mockReset().mockReturnValue("");
 });
 
-describe("标签封面（fetchAlbumCover）", () => {
-  it("命中：searchSemantic(tag, 1) 首条 → assetThumbGet(240) → convertFileSrc", async () => {
+describe("标签封面资产（fetchAlbumCoverAssetId）", () => {
+  it("命中：searchSemantic(tag, 1) 返回首条资产 id", async () => {
     searchSemanticMock.mockResolvedValue([{ assetId: 9, score: 0.9 }]);
-    assetThumbGetMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\9.jpg" });
-    convertMock.mockReturnValue("asset://D:/cache/9.jpg");
 
-    await expect(fetchAlbumCover("日落")).resolves.toBe("asset://D:/cache/9.jpg");
+    await expect(fetchAlbumCoverAssetId("日落")).resolves.toBe(9);
     expect(searchSemanticMock).toHaveBeenCalledWith("日落", 1);
-    expect(assetThumbGetMock).toHaveBeenCalledWith(9, ALBUM_COVER_THUMB_SIZE);
-    expect(convertMock).toHaveBeenCalledWith("D:\\cache\\9.jpg");
   });
 
   it("无命中 → null（占位）", async () => {
     searchSemanticMock.mockResolvedValue([]);
-    await expect(fetchAlbumCover("雪")).resolves.toBeNull();
-  });
-
-  it("缩略图缺失 → null（占位）", async () => {
-    searchSemanticMock.mockResolvedValue([{ assetId: 1, score: 0.5 }]);
-    assetThumbGetMock.mockResolvedValue({ status: "pending" });
-    await expect(fetchAlbumCover("雪")).resolves.toBeNull();
+    await expect(fetchAlbumCoverAssetId("雪")).resolves.toBeNull();
   });
 
   it("搜索命令失败（模型未就绪等）静默 null", async () => {
     searchSemanticMock.mockRejectedValue("语义模型未就绪");
-    await expect(fetchAlbumCover("雪")).resolves.toBeNull();
-  });
-
-  it("convertFileSrc 空串/抛错 → null", async () => {
-    searchSemanticMock.mockResolvedValue([{ assetId: 1, score: 0.5 }]);
-    assetThumbGetMock.mockResolvedValue({ status: "ready", path: "D:\\cache\\1.jpg" });
-    convertMock.mockReturnValue("");
-    await expect(fetchAlbumCover("雪")).resolves.toBeNull();
+    await expect(fetchAlbumCoverAssetId("雪")).resolves.toBeNull();
   });
 });
 
