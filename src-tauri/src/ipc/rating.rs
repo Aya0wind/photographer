@@ -13,7 +13,17 @@ use tauri::State;
 use super::{run_blocking, SharedState};
 use crate::events::AppEvent;
 
-/// 评分写入核：0-5 校验 → DB 更新 → 派 XMP 边车同步。
+/// XMP 评分投影（用户定案）：DB 真值 → 边车值。
+/// `rejected ? -1 : rating`（星级保留在 DB，边车显示 -1 表示拒绝）。
+pub fn projected_rating(rating: i64, rejected: bool) -> i8 {
+    if rejected {
+        -1
+    } else {
+        rating.clamp(0, 5) as i8
+    }
+}
+
+/// 评分写入核：0-5 校验 → DB 更新 → 按投影（含拒绝态）派 XMP 边车同步。
 /// 资产不存在 / 评分越界返回明确错误。
 pub fn fetch_asset_rating_set(
     state: &super::AppState,
@@ -23,12 +33,18 @@ pub fn fetch_asset_rating_set(
     if !(0..=5).contains(&rating) {
         return Err(format!("评分必须在 0-5：{rating}"));
     }
-    let (path, origin) = {
+    let (path, origin, rejected) = {
         let db = super::active_library_db(state)?;
         db.0.query_row(
-            "SELECT path, origin FROM assets WHERE id = ?1",
+            "SELECT path, origin, rejected FROM assets WHERE id = ?1",
             [asset_id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                ))
+            },
         )
         .map_err(|e| e.to_string())?
     };
@@ -44,13 +60,13 @@ pub fn fetch_asset_rating_set(
     if origin == "external" {
         return Ok(());
     }
-    let rating = rating as u8; // 0-5 已校验
+    let projected = projected_rating(rating, rejected);
     let bus = state.bus.clone();
     state
         .supervisor
         .spawn("xmp", format!("rating-{asset_id}"), move |_| {
             if let Err(error) =
-                crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(&path), rating)
+                crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(&path), projected)
             {
                 bus.publish(AppEvent::AppError {
                     level: "warn".into(),

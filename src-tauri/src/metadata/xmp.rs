@@ -1,5 +1,8 @@
 //! XMP 边车（M5 评分与 LR 互通）：读/改/建 `.xmp`，评分字段
-//! `xmp:Rating`（0-5，LR 原生读写的就是它）。
+//! `xmp:Rating`。写入侧接受 -1..=5：**-1 = 拒绝**（Adobe 业界约定的
+//! 拒绝表示，LR 可识别；用户定案 2026-09-27「XMP 即时投影」）——DB 为
+//! 真值，边车评分 = rejected ? -1 : rating(0-5)；读取侧不认 -1（拒绝是
+//! 应用内状态，不回填 DB）。
 //!
 //! ## 选型（2026-09-20 定案）
 //! - 读取：quick-xml 流式解析（属性与子元素两种形态都认，另兼容
@@ -213,7 +216,7 @@ pub fn sidecar_label(xmp_text: &str) -> Option<&'static str> {
 }
 
 /// 最小边车模板（新建路径）：LR 可直接读的 xmp:Rating。
-fn minimal_template(rating: u8) -> String {
+fn minimal_template(rating: i8) -> String {
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Smart Photo">
@@ -228,13 +231,15 @@ fn minimal_template(rating: u8) -> String {
 }
 
 /// 在文本中把评分写入/更新为 `xmp:Rating`（返回新文本；输入 None = 新建）。
+/// `rating` 接受 -1..=5（-1 = 拒绝投影，见模块注释）；越界值原样写入，
+/// 由调用方（IPC 层投影函数）保证域。
 /// 三条路径，全部字节级保留未触内容：
 /// 1. 已有 `xmp:Rating="N"` 属性 → 原位替换数字；
 /// 2. 已有 `<xmp:Rating>N</xmp:Rating>` 子元素 → 原位替换数字；
 /// 3. 都没有 → 在首个 `<rdf:Description` 开标签插入属性（缺 xmlns:xmp
 ///    声明一并补；无 rdf:Description 时退回整档最小模板——内容太少说明
 ///    不是有效 XMP，不冒险拼接）。
-pub fn write_rating(existing: Option<&str>, rating: u8) -> String {
+pub fn write_rating(existing: Option<&str>, rating: i8) -> String {
     let Some(text) = existing else {
         return minimal_template(rating);
     };
@@ -285,7 +290,7 @@ pub fn write_rating(existing: Option<&str>, rating: u8) -> String {
 
 /// 同步评分到边车（读已有 → 改/建 → 原子写）。返回是否真的落盘。
 /// 文件不存在 → 新建最小模板；已存在的其余内容逐字节保留。
-pub fn sync_rating_to_sidecar(asset_path: &Path, rating: u8) -> Result<(), String> {
+pub fn sync_rating_to_sidecar(asset_path: &Path, rating: i8) -> Result<(), String> {
     let sidecar = sidecar_path(asset_path);
     let existing = std::fs::read_to_string(&sidecar).ok();
     let updated = write_rating(existing.as_deref(), rating);
@@ -521,6 +526,18 @@ mod tests {
         let zero = write_rating(Some(lr), 0);
         assert!(zero.contains(r#"xmp:Rating="0""#));
         assert_eq!(sidecar_rating(&zero), Some(0));
+
+        // -1（拒绝投影，用户定案）：写入路径 + 读取侧不认（拒绝是应用内
+        // 状态，exif 通道不回填 DB）
+        let rejected = write_rating(Some(lr), -1);
+        assert!(rejected.contains(r#"xmp:Rating="-1""#));
+        assert!(rejected.contains("crs:Sharpness"), "其余字节保留");
+        assert_eq!(sidecar_rating(&rejected), None);
+
+        // 拒绝 → 取消：-1 原位替换回星级
+        let restored = write_rating(Some(&rejected), 4);
+        assert!(restored.contains(r#"xmp:Rating="4""#));
+        assert!(!restored.contains(r#"-1"#));
     }
 
     #[test]

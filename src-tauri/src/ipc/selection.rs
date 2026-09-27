@@ -2,8 +2,9 @@
 //!
 //! - 颜色标签：DB 权威 + XMP 边车异步写 `xmp:Label`（与 rating 同策略：
 //!   外部库只读资产跳过边车；LR 标准色名直映，无映射配置）。
-//! - 拒绝状态：应用内选片状态，只写库（roadmap §3：拒绝不进 XMP，与星级
-//!   分层；默认查询不排除已拒绝——只是可筛选项）。
+//! - 拒绝状态：应用内选片状态；XMP 即时投影为 `xmp:Rating = -1`
+//!   （Adobe 业界约定、LR 可识别，用户定案 2026-09-27），星级在 DB 保留；
+//!   默认查询不排除已拒绝——只是可筛选项。
 //! - 回收站：软删标记（in_trash+trashed_at），常规查询全链路默认排除；
 //!   恢复还原可见性；purge 才动 DB 行与物理文件（外部库绝不物理删）。
 //! - 智能视图：前端 AssetFilters 序列化的命名存取，后端不解释只校验
@@ -114,15 +115,78 @@ pub fn fetch_asset_label_set(
     Ok(n)
 }
 
-/// 批量设接受/拒绝核（只写库；XMP 无对应标准字段，roadmap §3 分层定案）。
+/// 批量设接受/拒绝核：DB 更新 → 派 XMP 边车投影同步（用户定案「XMP 即时
+/// 投影」：边车评分 = rejected ? -1 : rating，LR 可识别的拒绝表示；星级在
+/// DB 保留，取消拒绝恢复投影）。与 rating_set 共用同一投影，任一变更后
+/// 边车都按 DB 真值重写。批量逐文件；单文件失败容忍不中断（AppError 上报）；
+/// 边车缺失时新建；外部库只读资产跳过。
 pub fn fetch_asset_reject_set(
     state: &super::AppState,
     asset_ids: &[i64],
     rejected: bool,
 ) -> Result<u64, String> {
     let db = super::active_library_db(state)?;
-    db.assets_reject_set(asset_ids, rejected)
-        .map_err(|e| e.to_string())
+    let n = db
+        .assets_reject_set(asset_ids, rejected)
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(0);
+    }
+    // 边车投影清单（库内复制入册的资产；评分取 DB 当前值做投影）
+    let targets: Vec<(String, i8)> =
+        db.0.prepare(&format!(
+            "SELECT path, origin, rating FROM assets WHERE id IN ({})",
+            (0..asset_ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(rusqlite::params_from_iter(asset_ids.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|(_, origin, _)| origin != "external")
+        .map(|(path, _, rating)| (path, super::rating::projected_rating(rating, rejected)))
+        .collect();
+    if targets.is_empty() {
+        return Ok(n);
+    }
+    let bus = state.bus.clone();
+    state
+        .supervisor
+        .spawn("xmp", format!("reject-batch-{n}"), move |_| {
+            let mut failed = 0usize;
+            for (path, projected) in &targets {
+                if let Err(error) =
+                    crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(path), *projected)
+                {
+                    failed += 1;
+                    if failed == 1 {
+                        bus.publish(AppEvent::AppError {
+                            level: "warn".into(),
+                            message: format!("拒绝状态已入库，但 XMP 边车投影失败：{error}"),
+                            recoverable: true,
+                        });
+                    }
+                }
+            }
+            if failed > 1 {
+                bus.publish(AppEvent::AppError {
+                    level: "warn".into(),
+                    message: format!("拒绝状态已入库，{failed} 个 XMP 边车投影失败"),
+                    recoverable: true,
+                });
+            }
+        });
+    Ok(n)
 }
 
 /// 移入回收站核（软删：in_trash=1 + trashed_at；幂等）。返回新移入数。

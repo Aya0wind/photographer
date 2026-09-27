@@ -6,8 +6,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -15,6 +14,7 @@ use std::time::Duration;
 use common::open_db;
 use db::{AssetFilters, AssetRow};
 use events::AssetKind;
+use ipc::rating::fetch_asset_rating_set;
 use ipc::selection::{
     fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_smart_view_create,
     fetch_smart_view_delete, fetch_smart_view_list, fetch_trash_list, fetch_trash_purge,
@@ -581,4 +581,176 @@ fn smart_view_crud_duplicate_and_invalid_json() {
     fetch_smart_view_delete(&state, created.id).unwrap();
     assert!(fetch_smart_view_list(&state).unwrap().is_empty());
     assert!(fetch_smart_view_delete(&state, created.id).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// XMP 即时投影（用户定案）：边车评分 = rejected ? -1 : rating(0-5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reject_projects_minus_one_and_restore_projects_rating() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let photo_root = dir.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+
+    let photo = photo_root.join("DSC_0010.jpg");
+    std::fs::write(&photo, b"jpeg").unwrap();
+    let id = ins(&db, &photo.to_string_lossy(), None, AssetKind::Photo);
+    let sidecar = xmp::sidecar_path(&photo);
+
+    // 拒绝 → 边车新建且 Rating = -1（DB 评分仍 0）
+    fetch_asset_reject_set(&state, &[id], true).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            sidecar.is_file()
+                && std::fs::read_to_string(&sidecar)
+                    .unwrap()
+                    .contains(r#"xmp:Rating="-1""#)
+        }),
+        "拒绝应投影 xmp:Rating=-1（无边车时新建）"
+    );
+    let db_rating: i64 =
+        db.0.query_row("SELECT rating FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(db_rating, 0, "评分真值保留在 DB");
+
+    // 取消拒绝 → 恢复投影星级（0）
+    fetch_asset_reject_set(&state, &[id], false).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains(r#"xmp:Rating="0""#)
+        }),
+        "取消拒绝应恢复投影星级"
+    );
+}
+
+#[test]
+fn rejected_state_rating_change_still_projects_minus_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let photo_root = dir.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+
+    let photo = photo_root.join("DSC_0011.jpg");
+    std::fs::write(&photo, b"jpeg").unwrap();
+    let id = ins(&db, &photo.to_string_lossy(), None, AssetKind::Photo);
+    let sidecar = xmp::sidecar_path(&photo);
+
+    // 拒绝态下改星级：DB 保留 4，边车仍投影 -1
+    fetch_asset_reject_set(&state, &[id], true).unwrap();
+    fetch_asset_rating_set(&state, id, 4).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains(r#"xmp:Rating="-1""#)
+        }),
+        "拒绝态改星级仍应投影 -1"
+    );
+    let db_rating: i64 =
+        db.0.query_row("SELECT rating FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(db_rating, 4, "星级真值保留在 DB");
+
+    // 取消拒绝 → 恢复投影新星级 4
+    fetch_asset_reject_set(&state, &[id], false).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains(r#"xmp:Rating="4""#)
+        }),
+        "取消拒绝应投影 DB 星级"
+    );
+}
+
+#[test]
+fn label_and_rating_coexist_and_reject_keeps_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let photo_root = dir.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+
+    let photo = photo_root.join("DSC_0012.jpg");
+    std::fs::write(&photo, b"jpeg").unwrap();
+    let id = ins(&db, &photo.to_string_lossy(), None, AssetKind::Photo);
+    let sidecar = xmp::sidecar_path(&photo);
+
+    // 星级 → 颜色：两个独立外科手术共存
+    fetch_asset_rating_set(&state, id, 3).unwrap();
+    fetch_asset_label_set(&state, &[id], Some("red")).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let t = std::fs::read_to_string(&sidecar).unwrap_or_default();
+            t.contains(r#"xmp:Rating="3""#) && t.contains(r#"xmp:Label="Red""#)
+        }),
+        "星级与颜色应共存于同一边车"
+    );
+
+    // 拒绝：Rating 投影 -1，Label 不受扰
+    fetch_asset_reject_set(&state, &[id], true).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            let t = std::fs::read_to_string(&sidecar).unwrap_or_default();
+            t.contains(r#"xmp:Rating="-1""#) && t.contains(r#"xmp:Label="Red""#)
+        }),
+        "拒绝投影不得扰动颜色标签"
+    );
+}
+
+#[test]
+fn reject_batch_tolerates_per_file_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let photo_root = dir.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+
+    let p1 = photo_root.join("DSC_0020.jpg");
+    std::fs::write(&p1, b"j1").unwrap();
+    let id1 = ins(&db, &p1.to_string_lossy(), None, AssetKind::Photo);
+    let p2 = photo_root.join("DSC_0021.jpg");
+    std::fs::write(&p2, b"j2").unwrap();
+    let id2 = ins(&db, &p2.to_string_lossy(), None, AssetKind::Photo);
+
+    // 人为制造 id2 的边车写失败：把边车路径占成目录（rename 落盘必败）
+    std::fs::create_dir_all(xmp::sidecar_path(&p2)).unwrap();
+
+    // 批量拒绝：单文件失败不中断，正常文件照常投影
+    let n = fetch_asset_reject_set(&state, &[id1, id2], true).unwrap();
+    assert_eq!(n, 2, "DB 更新两行");
+    let sidecar1 = xmp::sidecar_path(&p1);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            sidecar1.is_file()
+                && std::fs::read_to_string(&sidecar1)
+                    .unwrap()
+                    .contains(r#"xmp:Rating="-1""#)
+        }),
+        "失败不得中断批量：正常文件仍投影"
+    );
+    assert!(
+        xmp::sidecar_path(&p2).is_dir(),
+        "失败文件保持目录占位（边车未写坏）"
+    );
+    // 清理目录占位
+    std::fs::remove_dir(xmp::sidecar_path(&p2)).unwrap();
 }
