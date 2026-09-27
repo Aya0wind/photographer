@@ -11,7 +11,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import type { AssetDto } from "@/ipc/api";
+import { assetRatingSet, type AssetDto } from "@/ipc/api";
 import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
 import {
   UNKNOWN_GROUP_KEY,
@@ -125,6 +125,7 @@ export interface AssetGridHandle {
   scrollToGroup: (key: string) => void;
   /** 恢复到绝对滚动位置（画廊会话快照重挂载还原用） */
   restoreScroll: (top: number) => void;
+  toggleGroup: (key: string) => void;
 }
 
 export interface ViewportInfo {
@@ -150,6 +151,7 @@ interface AssetGridProps {
   onLongPress?: (asset: AssetDto) => void;
   /** 瓦片左上角 check 圆钮点击（进入多选并选中该资产；多选态=切换选中）；省略不渲染 */
   onCheckClick?: (asset: AssetDto) => void;
+  onFavoriteChange?: (asset: AssetDto, favorite: boolean) => void;
   /** 瓦片右键（自定义菜单；坐标为光标 client 坐标）；省略时不响应 */
   onAssetContextMenu?: (asset: AssetDto, at: { x: number; y: number }) => void;
   /** 多选状态 */
@@ -178,6 +180,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     onCtrlClick,
     onLongPress,
     onCheckClick,
+    onFavoriteChange,
     onAssetContextMenu,
     selection,
     sentinelRef,
@@ -197,6 +200,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
 
   // --- 组头折叠（组件本地状态；切页/刷新不保留） -----------------------------------
   const [collapsedKeys, setCollapsedKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [localFavorites, setLocalFavorites] = useState<ReadonlyMap<number, boolean>>(() => new Map());
   const toggleCollapsed = useCallback((key: string) => {
     setCollapsedKeys((prev) => {
       const next = new Set(prev);
@@ -353,8 +357,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
         el.scrollTop = Math.max(0, top);
         el.dispatchEvent(new Event("scroll"));
       },
+      toggleGroup: toggleCollapsed,
     }),
-    [rows, virtualizer],
+    [rows, virtualizer, toggleCollapsed],
   );
 
   // --- 长按（进入多选）：pointerdown 起 500ms 计时，抬起/离开/滚动取消 ----------------
@@ -526,9 +531,13 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isCursor = cursor !== null && flatIndexById.get(asset.id) === cursor;
                     const isSelected =
                       selection?.active && selection.selected.includes(asset.id);
+                    const isFavorite = localFavorites.get(asset.id) ?? (asset.rating === 5);
                     const inner = (
                       <>
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full" />
+                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-[calc(100%-20px)] w-full" />
+                        <span className="absolute inset-x-0 bottom-0 flex h-5 items-center justify-center bg-panel/90 font-mono text-[10px] tabular-nums text-text-secondary" data-testid="tile-resolution">
+                          {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
+                        </span>
                         {badge && (
                           <span
                             className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
@@ -539,7 +548,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                         {score !== undefined && (
                           <span
-                            className={`absolute bottom-1 right-1 rounded px-1 py-0.5 font-mono text-[10px] leading-none ${
+                            className={`absolute bottom-6 left-1 rounded px-1 py-0.5 font-mono text-[10px] leading-none ${
                               SIMILARITY_BADGE_CLASS[similarityTier(score)]
                             }`}
                             data-testid="search-score-badge"
@@ -590,6 +599,34 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             )}
                           </span>
                         )}
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          aria-label={isFavorite ? "取消收藏" : "收藏"}
+                          aria-pressed={isFavorite}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const favorite = !isFavorite;
+                            setLocalFavorites((current) => new Map(current).set(asset.id, favorite));
+                            void assetRatingSet(asset.id, favorite ? 5 : 0);
+                            onFavoriteChange?.(asset, favorite);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              e.currentTarget.click();
+                            }
+                          }}
+                          className={`absolute bottom-6 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
+                            isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
+                          }`}
+                          data-testid="tile-favorite"
+                          data-asset-id={asset.id}
+                        >
+                          <svg viewBox="0 0 24 24" width="17" height="17" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m12 2 3.1 6.3 7 .9-5 4.9 1.2 7-6.3-3.3-6.3 3.3 1.2-7-5-4.9 7-.9z" /></svg>
+                        </span>
                       </>
                     );
                     const itemWidth = row.widths[itemIndex];
@@ -644,7 +681,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         {inner}
                         {burstCount !== undefined && (
                           <span
-                            className="absolute bottom-1 right-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            className="absolute bottom-6 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}
@@ -683,7 +720,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         {inner}
                         {burstCount !== undefined && (
                           <span
-                            className="absolute bottom-1 right-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                          className="absolute bottom-6 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   assetDetail,
@@ -31,15 +31,15 @@ import { formatBytes } from "@/lib/format";
  *   150ms 过渡），双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
  *   Esc 返回画廊（画廊页不卸载，滚动位置保留）。旋转随资产切换重置，不持久化。
  * - 切图在不可见解码层完成后原子替换可见图层，避免新旧图片交叉叠显。
- * - 右侧 EXIF 面板可收起（assetDetail 全元数据 + 库内重复数）；底部胶片条为当前组
- *   缩略图（240 档与网格共享缓存），当前项 accent 描边，点击跳转；相邻 1 张预取。
+ * - 右侧 EXIF 面板可收起；底部只显示当前照片前后各 8 张缩略图，
+ *   点击最多跳 8 张，没有横向滚动；相邻照片预取。
  */
 
 const VIEWER_MID_SIZE = 2048; // 中间档（后端加 2048 档后生效）：原图渲染失败时的清晰回退
 /** RAW 内嵌全幅直出档（后端语义：RAW && size > 2048 = 提取最大内嵌 JPEG 原样直出） */
 const VIEWER_RAW_EMBED_SIZE = 6000;
 const VIEWER_THUMB_SIZE = 1280; // 名义边长；后端 snap 512 档就近
-const FILM_THUMB_SIZE = 240; // 与网格同档，共享会话缓存
+const FILM_THUMB_SIZE = 240;
 const MIN_SCALE = 1;
 const MAX_SCALE = 4;
 
@@ -86,7 +86,14 @@ function formatValue(value: string | null | undefined): string {
 
 /** 快门格式化："1/250" → "1/250s"（已带 s 或描述性文本原样透传） */
 function formatShutter(value: string): string {
-  return /s$/i.test(value) ? value : `${value}s`;
+  const plain = value.trim().replace(/s$/i, "");
+  const seconds = Number(plain);
+  if (!Number.isFinite(seconds) || seconds <= 0 || plain.includes("/")) {
+    return /s$/i.test(value) ? value : `${value}s`;
+  }
+  if (seconds >= 1) return `${plain}s`;
+  const denominator = Math.round(1 / seconds);
+  return denominator > 1 ? `1/${denominator}s` : `${plain}s`;
 }
 
 /** EXIF 枚举 token → 中文（后端 exif_lite 归一 token 族；未知 token 原样） */
@@ -142,7 +149,7 @@ interface ViewerOverlayProps {
   asset: AssetDto;
   group: AssetGroup;
   index: number;
-  /** 同组内切换（胶片条/箭头/键盘） */
+  /** 当前结果集内切换（缩略图/箭头/键盘） */
   onNavigate: (index: number) => void;
   onClose: () => void;
 }
@@ -150,6 +157,35 @@ interface ViewerOverlayProps {
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [exifOpen, setExifOpen] = useState(true);
+  const toggleFullscreen = useCallback(async () => {
+    if (isTauri()) {
+      const next = !(await getCurrentWindow().isFullscreen());
+      await getCurrentWindow().setFullscreen(next);
+      setFullscreen(next);
+      if (next) setExifOpen(false);
+    } else if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      setFullscreen(false);
+    } else if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+      setFullscreen(true);
+      setExifOpen(false);
+    }
+  }, []);
+  const closeViewer = useCallback(() => {
+    if (fullscreen) {
+      if (isTauri()) void getCurrentWindow().setFullscreen(false);
+      else if (document.fullscreenElement) void document.exitFullscreen();
+    }
+    onClose();
+  }, [fullscreen, onClose]);
+  useEffect(() => {
+    const sync = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
 
   // 大图右键菜单（与瓦片同款：reveal/复制文件/旗标，作用于当前资产）
   const [ctxAt, setCtxAt] = useState<{ x: number; y: number } | null>(null);
@@ -372,7 +408,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [index, group.assets]);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
-  const [exifOpen, setExifOpen] = useState(true);
   const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
   // 切图闪缩修复（M4.5）：切换资产时不回退「基本行集」（行数骤减→面板高度跳变），
   // 保留上一份完整详情的行结构直到新详情到达（值随后一次更新，行不重挂）。
@@ -420,6 +455,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 右键菜单打开时 Esc 让给菜单（不关查看器）。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "F11") {
+        e.preventDefault();
+        void toggleFullscreen();
+        return;
+      }
       const target = e.target;
       if (
         target instanceof HTMLElement &&
@@ -430,15 +470,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       if (e.key === "Escape") {
         if (ctxAt !== null) return; // 菜单自身的 Esc 监听负责关闭
         e.preventDefault();
-        onClose();
+        closeViewer();
       } else if (e.key === "ArrowLeft" && index > 0) {
         onNavigate(index - 1);
       } else if (e.key === "ArrowRight" && index < group.assets.length - 1) {
         onNavigate(index + 1);
-      } else if (e.key === "Home") {
-        onNavigate(0);
-      } else if (e.key === "End") {
-        onNavigate(group.assets.length - 1);
       } else if ([".", "]", "r", "R"].includes(e.key)) {
         rotate(90);
       } else if ([",", "["].includes(e.key)) {
@@ -464,7 +500,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [asset.id, ctxAt, currentRating, group.assets.length, index, onClose, onNavigate, showHint]);
+  }, [asset.id, ctxAt, currentRating, group.assets.length, index, closeViewer, onNavigate, showHint, toggleFullscreen]);
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -477,10 +513,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         { label: t("viewer.filename"), value: formatValue(d.filename) },
         ...(d.format ? [{ label: t("viewer.format"), value: d.format }] : []),
         { label: t("viewer.size"), value: formatBytes(d.size) },
-        {
-          label: t("viewer.path"),
-          value: <span key="path" className="break-all font-mono text-[11px]">{d.path}</span>,
-        },
         { label: t("viewer.importedAt"), value: isoLabel(d.createdAt) },
         { label: t("viewer.capturedAt"), value: isoLabel(d.capturedAt) },
         {
@@ -555,62 +587,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
 
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;
-
-  // 胶片条横向虚拟化：格宽 64 + 间距 6；可视区外不渲染不请求
-  const stripRef = useRef<HTMLDivElement | null>(null);
-  const stripWheelGestureRef = useRef({
-    lastAt: 0,
-    direction: 0,
-    baseIndex: 0,
-    accumulated: 0,
-    appliedSteps: 0,
-    targetIndex: 0,
-  });
-  function handleFilmstripWheel(event: React.WheelEvent<HTMLDivElement>): void {
-    const rawDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-    if (rawDelta === 0) return;
-    event.preventDefault();
-
-    const now = performance.now();
-    const direction = Math.sign(rawDelta);
-    const gesture = stripWheelGestureRef.current;
-    // 180ms 无输入或反向滚动视为新手势；一次连续手势最多切换 8 张。
-    if (now - gesture.lastAt > 180 || gesture.direction !== direction) {
-      gesture.direction = direction;
-      gesture.baseIndex = index;
-      gesture.accumulated = 0;
-      gesture.appliedSteps = 0;
-      gesture.targetIndex = index;
-    }
-    gesture.lastAt = now;
-    // 约一个标准滚轮刻度切一张；高分辨率触控板的小 delta 会累积后再切换。
-    gesture.accumulated += Math.abs(rawDelta);
-    const requestedSteps = Math.min(8, Math.floor(gesture.accumulated / 80));
-    if (requestedSteps <= gesture.appliedSteps) return;
-    gesture.appliedSteps = requestedSteps;
-    const target = Math.max(
-      0,
-      Math.min(group.assets.length - 1, gesture.baseIndex + direction * requestedSteps),
-    );
-    if (target === gesture.targetIndex) return;
-    gesture.targetIndex = target;
-    onNavigate(target);
-  }
-  const stripVirtualizer = useVirtualizer({
-    count: group.assets.length,
-    getScrollElement: () => stripRef.current,
-    estimateSize: () => 70,
-    horizontal: true,
-    overscan: 8,
-  });
-  // 当前项滚动到胶片条中央（切换照片时自动跟随；jsdom 无 scrollTo 静默跳过）
-  useEffect(() => {
-    const el = stripRef.current;
-    if (el && typeof el.scrollTo === "function") {
-      stripVirtualizer.scrollToIndex(index, { align: "center", behavior: "smooth" });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, asset.id]);
+  // 固定 17 个槽位，当前照片始终居中。边界处留空，不让缩略图条逐张伸缩。
 
   return (
     <div
@@ -665,7 +642,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             </svg>
           </button>
         </div>
-      </div>
+
+        </div>
 
       <div className="flex min-h-0 flex-1">
         {/* 左栏整体随详情抽屉伸缩：主图与底部胶片条始终保持同一宽度。 */}
@@ -690,20 +668,28 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             data-rotation={view.rotation}
             style={{ cursor: view.scale > 1 ? "grab" : "default" }}
           >
-            {/* 浏览器图片预览式退出入口：固定在左侧预览区右上角，不占顶栏文字空间。 */}
+            {/* 全屏与退出入口固定在预览区右上角。 */}
+            <div className="pointer-events-auto absolute right-3 top-3 z-20 flex gap-2">
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setExifOpen((open) => !open)} aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} aria-pressed={exifOpen} className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white" data-testid="viewer-exif-toggle">
+              <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7.3" /><path d="M10 9v5" strokeLinecap="round" /><circle cx="10" cy="6" r=".9" fill="currentColor" stroke="none" /></svg>
+            </button>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => void toggleFullscreen()} aria-label={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} title={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} className="flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white" data-testid="viewer-fullscreen">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={fullscreen ? "M2 6h4V2M10 2v4h4M14 10h-4v4M6 14v-4H2" : "M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"} /></svg>
+            </button>
             <button
               type="button"
               onPointerDown={(event) => event.stopPropagation()}
-              onClick={onClose}
+              onClick={closeViewer}
               aria-label={t("viewer.exit")}
               title={t("viewer.exit")}
-              className="pointer-events-auto absolute right-3 top-3 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+              className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
               data-testid="viewer-close"
             >
-              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
                 <path d="M4 4l8 8M12 4l-8 8" />
               </svg>
             </button>
+            </div>
             {asset.kind === "video" && (
               <ViewerVideo path={asset.path} posterUrl={thumb.url} />
             )}
@@ -859,75 +845,32 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           </p>
         </div>
 
-        {/* 底部胶片条属于左侧预览栏；在其上滚轮直接切换当前照片，当前项随后自动居中。 */}
-        <div
-          ref={stripRef}
-          onWheel={handleFilmstripWheel}
-          className="sp-scroll flex h-[76px] shrink-0 items-center overflow-x-auto border-t border-edge px-3"
-          data-testid="viewer-filmstrip"
-        >
-          <div className="relative h-full" style={{ width: stripVirtualizer.getTotalSize() }}>
-            {stripVirtualizer.getVirtualItems().map((vi) => {
-              const item = group.assets[vi.index];
-              const current = vi.index === index;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => onNavigate(vi.index)}
-                  aria-label={item.name}
-                  aria-current={current}
-                  className={`absolute top-0 flex h-16 w-16 overflow-hidden rounded-md border-2 transition-colors ${
-                    current ? "border-accent" : "border-transparent hover:border-edge"
-                  }`}
-                  style={{ transform: `translateX(${vi.start}px)` }}
-                  data-testid="viewer-filmthumb"
-                  data-asset-id={item.id}
-                  data-current={current}
-                >
-                  <AssetThumb
-                    asset={item}
-                    size={FILM_THUMB_SIZE}
-                    className="h-full w-full"
-                    skeleton={false}
-                    miniLabel={String(vi.index + 1)}
-                    testId="viewer-filmthumb-cell"
-                  />
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <div className="flex h-[70px] shrink-0 items-center justify-center gap-1 overflow-hidden border-t border-edge px-2" data-testid="viewer-filmstrip">
+          {Array.from({ length: 17 }, (_, slot) => {
+            const itemIndex = index + slot - 8;
+            const item = group.assets[itemIndex];
+            if (!item) return <span key={`empty-${slot}`} className="h-14 min-w-0 max-w-16 flex-1" data-testid="viewer-filmstrip-slot" aria-hidden="true" />;
+            const current = itemIndex === index;
+            return <span key={`asset-${item.id}`} className="h-14 min-w-0 max-w-16 flex-1" data-testid="viewer-filmstrip-slot">
+              <button type="button" onClick={() => onNavigate(itemIndex)} aria-label={item.name} aria-current={current} className={`flex h-full w-full overflow-hidden rounded-md border-2 transition-colors ${current ? "border-accent" : "border-transparent hover:border-edge"}`} data-testid="viewer-filmthumb" data-asset-id={item.id} data-current={current}>
+                <AssetThumb asset={item} size={FILM_THUMB_SIZE} className="h-full w-full" skeleton={false} miniLabel={String(itemIndex + 1)} testId="viewer-filmthumb-cell" />
+              </button>
+            </span>;
+          })}
         </div>
 
-        {/* 右侧详情是常驻窄轨抽屉：收起后只保留折叠图标宽度。 */}
-            <aside
-              className={`h-full shrink-0 overflow-hidden border-l border-edge bg-surface ${
-                exifOpen ? "w-72" : "w-10"
-              }`}
+        </div>
+
+        {/* 详情关闭时完全收回，预览获得全部可用宽度。 */}
+            {exifOpen && <aside
+              className="h-full w-72 shrink-0 overflow-hidden border-l border-edge bg-surface"
               data-testid="viewer-exif"
-              data-open={exifOpen}
+              data-open="true"
             >
-              <div className={`h-full overflow-y-auto ${exifOpen ? "p-3" : "p-1"}`} data-testid="viewer-exif-scroll">
-                <div className={`mb-1 flex items-center gap-2 ${exifOpen ? "justify-between" : "justify-center"}`}>
-                  {exifOpen && <h2 className="text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>}
-                  <button
-                    type="button"
-                    onClick={() => setExifOpen((open) => !open)}
-                    aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")}
-                    title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")}
-                    aria-pressed={exifOpen}
-                    className="pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-panel hover:text-text-primary"
-                    data-testid="viewer-exif-toggle"
-                  >
-                    <svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <rect x="2.5" y="3" width="13" height="12" rx="1.5" />
-                      <path d="M11.5 3v12" />
-                      <path d={exifOpen ? "M9 6.5L6.5 9 9 11.5" : "M13 6.5L15.5 9 13 11.5"} />
-                    </svg>
-                  </button>
+              <div className="h-full overflow-y-auto p-3" data-testid="viewer-exif-scroll">
+                <div className="mb-1 flex items-center gap-2">
+                  <h2 className="text-xs font-semibold text-text-primary">{t("viewer.exif")}</h2>
                 </div>
-                {exifOpen && (
                 <>
                 {/* 星标条：0-5 星点选（再点同星=清除） */}
                 <div
@@ -987,9 +930,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                   ))}
                 </div>
                 </>
-                )}
               </div>
-            </aside>
+            </aside>}
       </div>
 
       {/* 大图右键菜单（作用于当前资产；Esc/点击外部关闭，期间查看器 Esc 让位） */}

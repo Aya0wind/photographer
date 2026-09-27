@@ -76,43 +76,18 @@ beforeEach(() => {
 // --- Tab 与组渲染 -------------------------------------------------------------------
 
 describe("相似照片：Tab 与组渲染", () => {
-  it("默认完全重复档：组卡片列表 + 组头「N 张 · 完全重复」；切档重新拉取", async () => {
-    listMock.mockResolvedValue([
-      { kind: "exact", assets: [makeAsset(1), makeAsset(2), makeAsset(3)] },
-      { kind: "exact", assets: [makeAsset(4), makeAsset(5)] },
-    ]);
-    const user = userEvent.setup();
+  it("只展示近似组，不提供完全重复入口", async () => {
+    listMock.mockResolvedValue([{ kind: "similar", assets: [makeAsset(1), makeAsset(2)] }]);
     renderSimilar();
-
-    const cards = await screen.findAllByTestId("similar-group");
-    expect(cards).toHaveLength(2);
-    expect(cards[0]).toHaveAttribute("data-kind", "exact");
-    expect(cards[0]).toHaveTextContent("3 张");
-    expect(cards[0]).toHaveTextContent("完全重复");
-    expect(within(cards[0]).getAllByTestId("similar-asset").map((a) => a.getAttribute("data-asset-id"))).toEqual(
-      ["1", "2", "3"],
-    );
-    expect(listMock).toHaveBeenCalledWith("exact", 0, 20);
-
-    // 切到相似照片档：kind 参数变化、列表重拉
-    await user.click(screen.getByTestId("similar-tab-similar"));
-    await waitFor(() => expect(listMock).toHaveBeenCalledWith("similar", 0, 20));
-    expect(screen.getByTestId("similar-tab-similar")).toHaveAttribute("aria-selected", "true");
+    const card = (await screen.findAllByTestId("similar-group"))[0];
+    expect(card).toHaveTextContent("近似");
+    expect(screen.queryByTestId("similar-tab-exact")).not.toBeInTheDocument();
+    expect(listMock).toHaveBeenCalledWith("similar", 0, 20);
   });
 
-  it("该 kind 无重复 → 正面空态文案（两档各验）", async () => {
-    listMock.mockResolvedValue([]);
-    const user = userEvent.setup();
+  it("没有近似照片时展示空态", async () => {
     renderSimilar();
-
-    const empty = await screen.findByTestId("similar-empty");
-    expect(empty).toHaveTextContent("没有完全重复的照片");
-    expect(screen.queryByTestId("similar-group")).not.toBeInTheDocument();
-
-    await user.click(screen.getByTestId("similar-tab-similar"));
-    await waitFor(() =>
-      expect(screen.getByTestId("similar-empty")).toHaveTextContent("没有相似的照片"),
-    );
+    expect(await screen.findByTestId("similar-empty")).toHaveTextContent("没有相似的照片");
   });
 });
 
@@ -185,7 +160,7 @@ describe("相似照片：分页游标", () => {
 
     await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(23));
     // 游标 = 首页组数（skip 计数，非组 id）
-    expect(listMock).toHaveBeenLastCalledWith("exact", 20, 20);
+    expect(listMock).toHaveBeenLastCalledWith("similar", 20, 20);
     // 短页（3 < 20）→ 到底
     expect(screen.queryByTestId("similar-load-more")).not.toBeInTheDocument();
   });
@@ -209,7 +184,7 @@ describe("相似照片：分页游标", () => {
     await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(19));
 
     await user.click(screen.getByTestId("similar-load-more"));
-    await waitFor(() => expect(listMock).toHaveBeenLastCalledWith("exact", 19, 20));
+    await waitFor(() => expect(listMock).toHaveBeenLastCalledWith("similar", 19, 20));
     await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(20));
   });
 });

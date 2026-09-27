@@ -76,6 +76,57 @@ fn query_state(db_dir: &std::path::Path) -> ipc::AppState {
 }
 
 #[test]
+fn count_matches_filtered_pages_and_exif_display_orientation() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let database = common::open_db(db_dir.path());
+    let portrait = ins(
+        &database,
+        "portrait.jpg",
+        None,
+        AssetKind::Photo,
+        None,
+        10,
+        1,
+    );
+    let landscape = ins(
+        &database,
+        "landscape.jpg",
+        None,
+        AssetKind::Photo,
+        None,
+        10,
+        2,
+    );
+    database.0.execute(
+        "UPDATE assets SET width = 6000, height = 4000, orientation = 6, flagged = 1, rating = 5 WHERE id = ?1",
+        [portrait],
+    ).unwrap();
+    database
+        .0
+        .execute(
+            "UPDATE assets SET width = 6000, height = 4000, orientation = 1 WHERE id = ?1",
+            [landscape],
+        )
+        .unwrap();
+    let filters = AssetFilters {
+        orientation: Some("portrait".to_string()),
+        flagged: Some(true),
+        rating_min: Some(5),
+        ..Default::default()
+    };
+    let state = query_state(db_dir.path());
+    let items = page(&state, 0, 100, filters.clone());
+    assert_eq!(
+        items.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![portrait]
+    );
+    assert!(items[0].flagged);
+    assert_eq!(items[0].rating, 5);
+    assert_eq!(database.assets_count(&filters).unwrap(), items.len() as u64);
+    assert_eq!(database.assets_count(&AssetFilters::default()).unwrap(), 2);
+}
+
+#[test]
 fn page_orders_nulls_first_then_captured_desc_with_id_tiebreak() {
     let db_dir = tempfile::tempdir().unwrap();
     let database = common::open_db(db_dir.path());
@@ -407,6 +458,8 @@ fn dtos_serialize_camel_case() {
         thumb_state: 1,
         burst_id: None,
         burst_count: None,
+        flagged: false,
+        rating: 0,
     };
     let json = serde_json::to_value(&dto).unwrap();
     assert_eq!(json["capturedAt"], "2026-01-01T00:00:00.000Z");

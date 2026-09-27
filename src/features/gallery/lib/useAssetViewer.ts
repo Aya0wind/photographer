@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useSearchParams } from "react-router";
 
 import type { AssetDto } from "@/ipc/api";
@@ -5,7 +6,7 @@ import type { AssetGroup } from "./assetGroups";
 import { markAssetViewed } from "./viewMark";
 
 /**
- * 查看器路由接线（画廊/搜索共用）：
+ * 查看器路由接线（画廊/搜索共用，跨日期浏览当前结果集）：
  * 以 /gallery?asset=<id>（或 /search?asset=<id>）的 URL searchParams 表达打开状态——
  * 组件不卸载（虚拟网格滚动位置天然保留）、可深链/可后退，Esc=移除参数返回。
  *
@@ -25,6 +26,12 @@ export interface AssetViewerTarget {
 
 export function useAssetViewer(groups: AssetGroup[]) {
   const [searchParams, setSearchParams] = useSearchParams();
+  // 日期分组只服务网格展示。预览使用当前结果集的完整顺序，翻页可跨日期。
+  const viewerGroup = useMemo<AssetGroup>(() => ({
+    key: "__viewer__",
+    date: null,
+    assets: groups.flatMap((group) => group.assets),
+  }), [groups]);
 
   const assetParam = searchParams.get("asset");
   const assetId =
@@ -32,13 +39,8 @@ export function useAssetViewer(groups: AssetGroup[]) {
 
   let viewer: AssetViewerTarget | null = null;
   if (assetId !== null) {
-    for (const group of groups) {
-      const index = group.assets.findIndex((a) => a.id === assetId);
-      if (index >= 0) {
-        viewer = { asset: group.assets[index], group, index };
-        break;
-      }
-    }
+    const index = viewerGroup.assets.findIndex((a) => a.id === assetId);
+    if (index >= 0) viewer = { asset: viewerGroup.assets[index], group: viewerGroup, index };
   }
 
   return {
@@ -50,7 +52,7 @@ export function useAssetViewer(groups: AssetGroup[]) {
     closeViewer: () => {
       setSearchParams({});
     },
-    /** 同组内切换（查看器左右键/胶片条点击）；切图同样算一次浏览 */
+    /** 在当前结果集切换（可跨日期）；切图同样算一次浏览 */
     navigateTo: (index: number) => {
       if (!viewer) return;
       const next = viewer.group.assets[index];

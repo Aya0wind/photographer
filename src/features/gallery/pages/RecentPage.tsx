@@ -46,7 +46,7 @@ export default function RecentPage() {
   return (
     <div className="h-full" data-testid="recent-page">
       <div
-        className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
+        className="flex h-full w-full flex-col px-4"
         data-testid="recent-content"
       >
         {/* 头部：标题 + 说明 + 尺寸切换 */}

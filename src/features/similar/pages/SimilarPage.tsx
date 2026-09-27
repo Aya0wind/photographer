@@ -5,9 +5,10 @@ import {
   duplicateDelete,
   duplicatesList,
   type DuplicateGroupDto,
-  type DuplicateKind,
 } from "@/ipc/api";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
+import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
+import { useGalleryTileSize, type GalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
 
 /**
  * 相似照片页（M7 F8 两级去重，/similar）：
@@ -32,10 +33,11 @@ interface GroupCardProps {
   group: DuplicateGroupDto;
   index: number;
   onDelete: (index: number, assetIds: number[]) => void;
+  tileSize: GalleryTileSize;
 }
 
 /** 单个重复组卡：组头 + 勾选区 + 删除所选（勾选态由本卡自持） */
-function GroupCard({ group, index, onDelete }: GroupCardProps) {
+function GroupCard({ group, index, onDelete, tileSize }: GroupCardProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
 
@@ -62,7 +64,7 @@ function GroupCard({ group, index, onDelete }: GroupCardProps) {
           {t("similar.groupCount", { count: group.assets.length })}
         </h2>
         <span className="rounded bg-panel px-1.5 py-0.5 text-[10px] leading-none text-text-secondary">
-          {t(group.kind === "exact" ? "similar.kind.exact" : "similar.kind.similar")}
+          {t("similar.kind.similar")}
         </span>
         <span className="text-[10px] text-text-muted">{t("similar.selectHint")}</span>
         <button
@@ -79,7 +81,7 @@ function GroupCard({ group, index, onDelete }: GroupCardProps) {
           {t("similar.deleteSelected", { count: ids.length })}
         </button>
       </div>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-2">
+      <div className={`grid gap-2 ${tileSize === "small" ? "grid-cols-[repeat(auto-fill,minmax(120px,1fr))]" : "grid-cols-[repeat(auto-fill,minmax(200px,1fr))]"}`}>
         {group.assets.map((asset) => {
           const checked = selected.has(asset.id);
           return (
@@ -98,7 +100,7 @@ function GroupCard({ group, index, onDelete }: GroupCardProps) {
             >
               <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
               <span
-                className={`absolute right-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${
+                className={`absolute left-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${
                   checked
                     ? "border-red-400 bg-red-400 text-white"
                     : "border-white/50 bg-black/40 text-transparent"
@@ -161,8 +163,8 @@ function ConfirmDialog({
 
 export default function SimilarPage() {
   const { t } = useTranslation();
+  const [tileSize, setTileSize] = useGalleryTileSize();
 
-  const [kind, setKind] = useState<DuplicateKind>("exact");
   const [groups, setGroups] = useState<DuplicateGroupDto[]>([]);
   /** 服务端游标（已取组数；after 为 0 基组偏移） */
   const [seen, setSeen] = useState(0);
@@ -175,11 +177,11 @@ export default function SimilarPage() {
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const loadFirstPage = useCallback(async (target: DuplicateKind) => {
+  const loadFirstPage = useCallback(async () => {
     setStatus("loading");
     setFeedback(null);
     setError(null);
-    const first = await duplicatesList(target, 0, PAGE_GROUPS);
+    const first = await duplicatesList("similar", 0, PAGE_GROUPS);
     setGroups(first);
     setSeen(first.length);
     setHasMore(first.length === PAGE_GROUPS);
@@ -188,13 +190,13 @@ export default function SimilarPage() {
 
   // 进页 / 切档拉首页
   useEffect(() => {
-    void loadFirstPage(kind);
-  }, [kind, loadFirstPage]);
+    void loadFirstPage();
+  }, [loadFirstPage]);
 
   const loadMore = async () => {
     if (loadingMore) return;
     setLoadingMore(true);
-    const next = await duplicatesList(kind, seen, PAGE_GROUPS);
+    const next = await duplicatesList("similar", seen, PAGE_GROUPS);
     setGroups((current) => [...current, ...next]);
     setSeen((current) => current + next.length);
     if (next.length < PAGE_GROUPS) setHasMore(false);
@@ -229,38 +231,17 @@ export default function SimilarPage() {
     }
   };
 
-  const switchTab = (next: DuplicateKind) => {
-    if (next === kind) return;
-    setKind(next);
-  };
-
   return (
     <div className="h-full" data-testid="similar-page">
       <div
-        className="sp-scroll mx-auto h-full w-full max-w-[1600px] overflow-y-auto px-6"
+        className="sp-scroll h-full w-full overflow-y-auto px-4"
         data-testid="similar-content"
       >
         {/* 头部：标题 + 两档 Tab */}
         <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge">
           <h1 className="text-sm font-semibold text-text-primary">{t("similar.title")}</h1>
           <p className="text-xs text-text-muted">{t("similar.desc")}</p>
-          <div className="ml-auto flex shrink-0 rounded-md border border-edge p-0.5" role="tablist">
-            {(["exact", "similar"] as const).map((k) => (
-              <button
-                key={k}
-                type="button"
-                role="tab"
-                aria-selected={kind === k}
-                onClick={() => switchTab(k)}
-                className={`rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  kind === k ? "bg-accent text-black" : "text-text-secondary hover:text-text-primary"
-                }`}
-                data-testid={`similar-tab-${k}`}
-              >
-                {t(k === "exact" ? "similar.tab.exact" : "similar.tab.similar")}
-              </button>
-            ))}
-          </div>
+          <div className="ml-auto"><TileSizeSwitch value={tileSize} onChange={setTileSize} /></div>
         </div>
 
         {/* 删除反馈 / 错误（行内，切档清除） */}
@@ -288,7 +269,7 @@ export default function SimilarPage() {
             data-testid="similar-empty"
           >
             <p className="text-sm text-text-secondary">
-              {t(kind === "exact" ? "similar.empty.exact" : "similar.empty.similar")}
+              {t("similar.empty.similar")}
             </p>
             <p className="text-xs text-text-muted">{t("similar.emptyHint")}</p>
           </div>
@@ -299,6 +280,7 @@ export default function SimilarPage() {
                 key={`${group.kind}-${group.assets[0]?.id ?? index}-${index}`}
                 group={group}
                 index={index}
+                tileSize={tileSize}
                 onDelete={(groupIndex, ids) => setPending({ index: groupIndex, ids })}
               />
             ))}

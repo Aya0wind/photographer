@@ -23,7 +23,7 @@ import {
   type AssetDto,
 } from "@/ipc/api";
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
-import { loadHiddenTags } from "../lib/hiddenTags";
+import { DEFAULT_SMART_TAGS, loadSmartTags } from "../lib/smartTags";
 import AlbumDetailPage from "./AlbumDetailPage";
 
 /**
@@ -39,50 +39,7 @@ import AlbumDetailPage from "./AlbumDetailPage";
  */
 
 /** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
-export const SMART_ALBUM_TAGS: readonly string[] = [
-  // 原 11 个
-  "人像",
-  "风景",
-  "夜景",
-  "美食",
-  "建筑",
-  "街拍",
-  "动物",
-  "花卉",
-  "雪",
-  "日落",
-  "黑白",
-  // 飞牛词表补充（共 29 个，总 40）
-  "天空云彩",
-  "公园",
-  "山",
-  "湖泊",
-  "海洋",
-  "海滩",
-  "森林",
-  "桥",
-  "河流",
-  "日出日落",
-  "广场",
-  "街道",
-  "花",
-  "烟花",
-  "猫",
-  "狗",
-  "鸟",
-  "合影",
-  "儿童",
-  "城市",
-  "乡村",
-  "道路",
-  "车",
-  "自行车",
-  "飞机",
-  "火车",
-  "船",
-  "雨",
-  "雾",
-];
+export const SMART_ALBUM_TAGS: readonly string[] = DEFAULT_SMART_TAGS;
 
 // --- 共享卡片件（手工 / 智能同款样式） ------------------------------------------------
 
@@ -177,15 +134,22 @@ function SectionHeader({
   title,
   count,
   testId,
+  expanded,
+  onToggle,
 }: {
   title: string;
   count: number;
   testId: string;
+  expanded: boolean;
+  onToggle: () => void;
 }) {
   return (
-    <header className="flex h-10 items-center gap-2" data-testid={testId}>
-      <h2 className="text-[13px] font-semibold text-text-primary">{title}</h2>
-      <span className="text-xs text-text-muted">{count}</span>
+    <header data-testid={testId}>
+      <button type="button" onClick={onToggle} aria-expanded={expanded} className="flex h-10 w-full items-center gap-2 text-left">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" className={`text-text-muted transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
+        <h2 className="text-[13px] font-semibold text-text-primary">{title}</h2>
+        <span className="text-xs text-text-muted">{count}</span>
+      </button>
     </header>
   );
 }
@@ -466,15 +430,19 @@ export function AlbumsIndexPage() {
   }
 
   // --- 智能相册（标签墙，行为照旧） ---------------------------------------------------
-  const visibleTags = useMemo(
-    () => SMART_ALBUM_TAGS.filter((tag) => !loadHiddenTags().includes(tag)),
-    [],
-  );
+  const [visibleTags, setVisibleTags] = useState<string[]>(loadSmartTags);
+  const [manualExpanded, setManualExpanded] = useState(true);
+  const [smartExpanded, setSmartExpanded] = useState(true);
+  useEffect(() => {
+    const refresh = () => setVisibleTags(loadSmartTags());
+    window.addEventListener("smartphoto:tags-changed", refresh);
+    return () => window.removeEventListener("smartphoto:tags-changed", refresh);
+  }, []);
   const tagCoverAssetIds = useAlbumCoverAssetIds(visibleTags);
 
   return (
     <div className="h-full overflow-y-auto" data-testid="albums-page">
-      <div className="mx-auto w-full max-w-[1600px] px-6 pt-4 pb-8">
+      <div className="w-full px-4 pt-4 pb-8">
         {/* 顶部工具条：标题 + 新建相册 */}
         <div className="flex shrink-0 items-center gap-3" data-testid="albums-toolbar">
           <h1 className="text-sm font-semibold text-text-primary">{t("albums.title")}</h1>
@@ -562,8 +530,10 @@ export function AlbumsIndexPage() {
             title={t("albums.manualTitle")}
             count={albums.length}
             testId="albums-manual-header"
+            expanded={manualExpanded}
+            onToggle={() => setManualExpanded((value) => !value)}
           />
-          {albums.length === 0 ? (
+          {manualExpanded && (albums.length === 0 ? (
             <p className="py-4 text-xs text-text-muted" data-testid="albums-manual-empty">
               {t("albums.manualEmpty")}
             </p>
@@ -582,7 +552,7 @@ export function AlbumsIndexPage() {
                 />
               ))}
             </div>
-          )}
+          ))}
         </section>
 
         {/* 智能相册区 */}
@@ -591,8 +561,10 @@ export function AlbumsIndexPage() {
             title={t("albums.smartTitle")}
             count={visibleTags.length}
             testId="albums-smart-header"
+            expanded={smartExpanded}
+            onToggle={() => setSmartExpanded((value) => !value)}
           />
-          {visibleTags.length === 0 ? (
+          {smartExpanded && (visibleTags.length === 0 ? (
             <p className="py-4 text-xs text-text-muted" data-testid="albums-all-hidden">
               {t("albums.allHidden")}
             </p>
@@ -629,7 +601,7 @@ export function AlbumsIndexPage() {
                 </button>
               ))}
             </div>
-          )}
+          ))}
         </section>
       </div>
 
@@ -772,7 +744,7 @@ export function AlbumTagPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="album-tag-page">
-      <div className="mx-auto flex h-11 w-full max-w-[1600px] shrink-0 items-center gap-3 border-b border-edge px-6">
+      <div className="flex h-11 w-full shrink-0 items-center gap-3 border-b border-edge px-4">
         <h1 className="shrink-0 text-sm font-semibold text-text-primary">
           {t("albums.tagTitle", { tag })}
         </h1>
@@ -785,7 +757,7 @@ export function AlbumTagPage() {
           }}
         />
       </div>
-      <div className="mx-auto min-h-0 w-full max-w-[1600px] flex-1 px-6 pt-3">
+      <div className="min-h-0 w-full flex-1 px-4 pt-3">
         {gate.reason !== null && (
           <div className="mb-3">
             <SemanticGateNotice reason={gate.reason} testId="album-tag-gate-notice" />

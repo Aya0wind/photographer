@@ -248,6 +248,7 @@ pub fn run() {
             ipc::import::clean_candidates,
             ipc::import::clean_apply,
             ipc::assets::assets_page,
+            ipc::assets::assets_count,
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
             ipc::assets::camera_list,

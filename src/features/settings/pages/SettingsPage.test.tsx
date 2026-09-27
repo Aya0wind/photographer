@@ -38,7 +38,7 @@ import {
 } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 import { SMART_ALBUM_TAGS } from "@/features/albums/pages/AlbumsPages";
-import { HIDDEN_ALBUM_TAGS_KEY } from "@/features/albums/lib/hiddenTags";
+import { loadSmartTags } from "@/features/albums/lib/smartTags";
 
 const aiModelsStatusMock = vi.mocked(aiModelsStatus);
 const aiModelDownloadMock = vi.mocked(aiModelDownload);
@@ -660,8 +660,8 @@ describe("AI tab（M4 实化）", () => {
 
 // --- 画廊 tab：智能相册显示的标签（M4 二轮，localStorage 简化存储） -------------------
 
-describe("画廊 tab：智能相册显示的标签", () => {
-  it("checkbox 组渲染全部预置标签（默认全显）", async () => {
+describe("画廊 tab：智能相册标签", () => {
+  it("显示全部预置标签，不使用勾选框", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "gallery");
@@ -670,10 +670,10 @@ describe("画廊 tab：智能相册显示的标签", () => {
     const items = within(group).getAllByTestId("settings-album-tag");
     expect(items).toHaveLength(SMART_ALBUM_TAGS.length);
     expect(items[0]).toHaveAttribute("data-tag", SMART_ALBUM_TAGS[0]);
-    expect(items[0]).toHaveAttribute("data-checked", "true");
+    expect(within(group).queryByRole("checkbox")).not.toBeInTheDocument();
   });
 
-  it("取消勾选 → 写入 localStorage 隐藏清单；重新勾选恢复", async () => {
+  it("可以移除和新增标签，并持久化", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "gallery");
@@ -681,15 +681,11 @@ describe("画廊 tab：智能相册显示的标签", () => {
     const first = within(screen.getByTestId("settings-album-tags")).getAllByTestId(
       "settings-album-tag",
     )[0];
-    await user.click(within(first).getByRole("checkbox"));
-    expect(first).toHaveAttribute("data-checked", "false");
-    expect(JSON.parse(localStorage.getItem(HIDDEN_ALBUM_TAGS_KEY) ?? "[]")).toEqual([
-      SMART_ALBUM_TAGS[0],
-    ]);
-
-    await user.click(within(first).getByRole("checkbox"));
-    expect(first).toHaveAttribute("data-checked", "true");
-    expect(JSON.parse(localStorage.getItem(HIDDEN_ALBUM_TAGS_KEY) ?? "[]")).toEqual([]);
+    await user.click(within(first).getByRole("button"));
+    expect(loadSmartTags()).not.toContain(SMART_ALBUM_TAGS[0]);
+    await user.type(screen.getByRole("textbox", { name: "添加标签" }), "星轨");
+    await user.click(screen.getByRole("button", { name: "添加标签" }));
+    expect(loadSmartTags()).toContain("星轨");
   });
 });
 

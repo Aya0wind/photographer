@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 
 import type { AssetKind } from "@/ipc/api";
 import { useAssetThumbUrl } from "../lib/thumbPipeline";
@@ -113,21 +113,19 @@ export default function AssetThumb({
 }: AssetThumbProps) {
   // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线；video 走 ffmpeg 海报（M8）
   const { url, status } = useAssetThumbUrl(asset.id, size, true, priority);
-  const [loaded, setLoaded] = useState(false);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    setLoaded(false);
-    setFailed(false);
-  }, [url]);
+  const imageKey = url === null ? null : `${asset.id}:${url}`;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const [failedKey, setFailedKey] = useState<string | null>(null);
+  const loaded = imageKey !== null && loadedKey === imageKey;
+  const failed = imageKey !== null && failedKey === imageKey;
 
   // WebView2 对内存缓存中的 asset:// 图片偶尔不会再次派发 load；同时原生
   // lazy-loading 与 transform 虚拟列表组合后可能不启动解码。网格本身只
   // 挂载视口+overscan 项，因此直接 eager，并补查缓存图片的 complete 状态。
   const handleImageRef = useCallback((img: HTMLImageElement | null) => {
     if (!img || !img.complete) return;
-    if (img.naturalWidth > 0) setLoaded(true);
-    else setFailed(true);
-  }, []);
+    if (img.naturalWidth > 0) setLoadedKey(imageKey);
+  }, [imageKey]);
 
   const showImg = url !== null && !failed;
   // 加载中（请求在途/排队生成/缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
@@ -141,25 +139,27 @@ export default function AssetThumb({
     >
       {showImg ? (
         <img
+          key={imageKey}
           ref={handleImageRef}
           src={url ?? undefined}
           alt={alt ?? asset.name}
           loading="eager"
           decoding="async"
-          onLoad={() => setLoaded(true)}
-          onError={() => setFailed(true)}
+          onLoad={() => setLoadedKey(imageKey)}
+          onError={() => setFailedKey(imageKey)}
           data-testid={testId ? `${testId}-img` : undefined}
           draggable={false}
           className={`h-full w-full object-cover transition-opacity duration-150 ${
             loaded ? "opacity-100" : "opacity-0"
           }`}
         />
-      ) : miniLabel !== undefined ? (
-        <div className="flex h-full w-full items-center justify-center" data-testid="thumb-mini">
+      ) : miniLabel === undefined ? (
+        <KindPlaceholder kind={asset.kind} name={asset.name} />
+      ) : null}
+      {miniLabel !== undefined && !loaded && (
+        <div className="absolute inset-0 flex items-center justify-center" data-testid="thumb-mini">
           <span className="font-mono text-[10px] tabular-nums text-text-muted">{miniLabel}</span>
         </div>
-      ) : (
-        <KindPlaceholder kind={asset.kind} name={asset.name} />
       )}
       {/* RAW 水印角标：真实缩略图就位后仍可一眼区分 RAW/JPG */}
       {asset.kind === "raw" && (

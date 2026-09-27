@@ -36,11 +36,6 @@ interface NavSection {
   items: NavItem[];
 }
 
-interface DisabledItem {
-  labelKey: string;
-  icon: ReactElement;
-}
-
 function icon(path: ReactElement | ReactElement[], label: string): ReactElement {
   return (
     <svg
@@ -69,12 +64,6 @@ const ICONS = {
       <path d="M1.5 11l3.6-3.2a1 1 0 0 1 1.3 0L10.5 11.5M9 9.2l1.8-1.6a1 1 0 0 1 1.3 0l2.4 2.1" />
     </>,
     "gallery",
-  ),
-  favorites: icon(
-    <>
-      <path d="M8 2.5l1.7 3.4 3.8.5-2.8 2.7.7 3.8L8 11.2l-3.4 1.7.7-3.8L2.5 6.4l3.8-.5z" />
-    </>,
-    "favorites",
   ),
   recent: icon(
     <>
@@ -145,13 +134,13 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery, badge: "assets" },
       { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent, badge: "recentViewed" },
-      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories, badge: "onThisDay" },
     ],
   },
   {
     titleKey: "nav.section.organize",
     items: [
       { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums, badge: "albums" },
+      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories, badge: "onThisDay" },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
     ],
@@ -168,34 +157,6 @@ const SECTIONS: NavSection[] = [
     items: [{ to: "/settings", labelKey: "nav.settings", icon: ICONS.settings }],
   },
 ];
-
-/** 禁用占位项（数据/功能未就绪）：收藏（F5） */
-const DISABLED_ITEMS: Array<{ section: string; item: DisabledItem }> = [
-  { section: "nav.section.browse", item: { labelKey: "nav.favorites", icon: ICONS.favorites } },
-];
-
-/** 禁用占位行：不可点 + 「即将支持」小字 */
-function DisabledNavRow({ item }: { item: DisabledItem }) {
-  const { t } = useTranslation();
-  return (
-    <div
-      className="relative flex cursor-not-allowed items-center gap-3 rounded-md px-3.5 py-2 text-sm text-text-muted/60"
-      aria-disabled="true"
-      data-testid="nav-disabled"
-      data-nav={item.labelKey}
-      title={t("settings.comingSoon")}
-    >
-      {item.icon}
-      <span>{t(item.labelKey)}</span>
-      <span
-        className="ml-auto shrink-0 rounded bg-panel/60 px-1 py-0.5 text-[9px] leading-none text-text-muted"
-        data-testid="nav-disabled-soon"
-      >
-        {t("settings.comingSoon")}
-      </span>
-    </div>
-  );
-}
 
 export default function Sidebar() {
   const { t } = useTranslation();
@@ -293,9 +254,6 @@ export default function Sidebar() {
                     </>
                   )}
                 </NavLink>
-              ))}
-              {DISABLED_ITEMS.filter((d) => d.section === section.titleKey).map((d) => (
-                <DisabledNavRow key={d.item.labelKey} item={d.item} />
               ))}
             </div>
           </div>

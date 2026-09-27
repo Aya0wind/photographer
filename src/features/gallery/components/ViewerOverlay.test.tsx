@@ -38,9 +38,11 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
   convertFileSrc: vi.fn(),
+  isTauri: vi.fn(() => false),
 }));
 
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { clipboardCopyFiles, revealInExplorer } from "@/ipc/api";
 
@@ -120,6 +122,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  vi.mocked(isTauri).mockReturnValue(false);
   revealItemMock.mockReset().mockResolvedValue(undefined);
   revealBatchMock.mockReset().mockResolvedValue(1);
   copyFilesMock.mockReset().mockResolvedValue(undefined);
@@ -134,7 +137,7 @@ beforeEach(() => {
 // --- 打开与图片来源 -----------------------------------------------------------------
 
 describe("查看器：打开与图片来源", () => {
-  it("photo 优先原图 asset 协议；胶片条渲染全组并高亮当前项", async () => {
+  it("photo 优先原图 asset 协议；预览显示当前顺序和总数", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer();
 
@@ -145,10 +148,28 @@ describe("查看器：打开与图片来源", () => {
     expect(screen.getByTestId("viewer-index")).toHaveTextContent("1 / 3");
 
     const strip = screen.getByTestId("viewer-filmstrip");
-    const thumbs = within(strip).getAllByTestId("viewer-filmthumb");
-    expect(thumbs).toHaveLength(3);
-    expect(thumbs[0]).toHaveAttribute("data-current", "true");
-    expect(thumbs[1]).toHaveAttribute("data-current", "false");
+    expect(strip.className).toContain("overflow-hidden");
+    expect(strip.className).not.toContain("overflow-x-auto");
+    expect(within(strip).getAllByTestId("viewer-filmthumb")).toHaveLength(3);
+  });
+
+  it("首次打开就固定 17 个缩略图槽位，翻页时当前照片始终居中", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    function StatefulViewer() {
+      const [index, setIndex] = useState(0);
+      const group = groupAssetsByDate(GROUP_ASSETS)[0];
+      return <I18nextProvider i18n={i18n}><ViewerOverlay asset={GROUP_ASSETS[index]} group={group} index={index} onNavigate={setIndex} onClose={() => {}} /></I18nextProvider>;
+    }
+    render(<StatefulViewer />);
+    const slots = screen.getAllByTestId("viewer-filmstrip-slot");
+    expect(slots).toHaveLength(17);
+    expect(within(slots[8]).getByTestId("viewer-filmthumb")).toHaveAttribute("data-current", "true");
+    expect(slots[7]).toBeEmptyDOMElement();
+    fireEvent.click(screen.getByTestId("viewer-next"));
+    const nextSlots = screen.getAllByTestId("viewer-filmstrip-slot");
+    expect(nextSlots).toHaveLength(17);
+    expect(within(nextSlots[8]).getByTestId("viewer-filmthumb")).toHaveAttribute("data-current", "true");
+    expect(within(nextSlots[7]).getByTestId("viewer-filmthumb")).toHaveAttribute("data-asset-id", "1");
   });
 
   it("photo 原图加载失败（TIF 等）→ 中间档 2048 回退", async () => {
@@ -430,18 +451,20 @@ describe("查看器：左右切换与关闭", () => {
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
+    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("viewer-close"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("胶片条点击跳转；Esc 关闭返回画廊", async () => {
+  it("左右方向键逐张翻页；Esc 关闭返回画廊", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     const { onNavigate, onClose } = renderViewer();
 
-    const thumbs = screen.getAllByTestId("viewer-filmthumb");
-    fireEvent.click(thumbs[2]);
-    expect(onNavigate).toHaveBeenCalledWith(2);
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(onNavigate).toHaveBeenCalledWith(1);
+    fireEvent.keyDown(window, { key: "Home" });
+    fireEvent.keyDown(window, { key: "End" });
+    expect(onNavigate).toHaveBeenCalledTimes(1);
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -453,20 +476,18 @@ describe("查看器：左右切换与关闭", () => {
 
     const preview = screen.getByTestId("viewer-preview-pane");
     const leftPane = screen.getByTestId("viewer-left-pane");
-    const filmstrip = screen.getByTestId("viewer-filmstrip");
     const drawer = await screen.findByTestId("viewer-exif");
     expect(preview.parentElement).toBe(leftPane);
-    expect(filmstrip.parentElement).toBe(leftPane);
+    expect(screen.getByTestId("viewer-filmstrip").parentElement).toBe(leftPane);
     expect(leftPane.parentElement).toBe(drawer.parentElement);
     expect(drawer.className).toContain("shrink-0");
     expect(drawer.className).not.toContain("absolute");
     const close = screen.getByTestId("viewer-close");
-    expect(close.parentElement).toBe(screen.getByTestId("viewer-stage"));
+    expect(close.parentElement?.parentElement).toBe(screen.getByTestId("viewer-stage"));
     expect(close.className).toContain("rounded-full");
 
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
-    expect(screen.getByTestId("viewer-exif").className).toContain("w-10");
+    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
     expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
     expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "true");
@@ -474,6 +495,22 @@ describe("查看器：左右切换与关闭", () => {
 
     fireEvent.click(close);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("F11 切换窗口全屏，进入时自动收起详细信息", async () => {
+    const setFullscreen = vi.fn().mockResolvedValue(undefined);
+    const isFullscreen = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(getCurrentWindow).mockReturnValue({ setFullscreen, isFullscreen } as unknown as ReturnType<typeof getCurrentWindow>);
+    renderViewer();
+    expect(screen.getByTestId("viewer-exif")).toBeInTheDocument();
+    const controls = screen.getByTestId("viewer-fullscreen").parentElement!;
+    expect(controls.firstElementChild).toBe(screen.getByTestId("viewer-exif-toggle"));
+    fireEvent.keyDown(window, { key: "F11" });
+    await waitFor(() => expect(setFullscreen).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
+    fireEvent.keyDown(window, { key: "F11" });
+    await waitFor(() => expect(setFullscreen).toHaveBeenCalledWith(false));
   });
 
   it("相邻预取：512 回退档高优先预热（缩略管线）", async () => {
@@ -503,27 +540,6 @@ describe("查看器：缩放与复位", () => {
 
     fireEvent.wheel(stage, { deltaY: -100 });
     await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.44"));
-  });
-
-  it("底部缩略图条滚轮直接切换当前图片，单次手势最多跨 8 张而不滚动列表", async () => {
-    convertMock.mockImplementation((p: string) => `asset://${p}`);
-    const manyAssets = Array.from({ length: 15 }, (_, i) =>
-      makeAsset(i + 1, "photo", `IMG_${String(i + 1).padStart(4, "0")}.JPG`),
-    );
-    const { onNavigate } = renderViewer(manyAssets, 1);
-    const filmstrip = await screen.findByTestId("viewer-filmstrip");
-    filmstrip.scrollLeft = 0;
-
-    fireEvent.wheel(filmstrip, { deltaY: 10_000 });
-    expect(onNavigate).toHaveBeenLastCalledWith(9);
-    expect(filmstrip.scrollLeft).toBe(0);
-
-    // 同一方向手势已到上限，后续惯性事件不会继续跳；反向视为新手势。
-    fireEvent.wheel(filmstrip, { deltaY: 200 });
-    expect(onNavigate).toHaveBeenCalledTimes(1);
-    fireEvent.wheel(filmstrip, { deltaY: -10_000 });
-    expect(onNavigate).toHaveBeenLastCalledWith(0);
-    expect(filmstrip.scrollLeft).toBe(0);
   });
 
   it("wheel 放大至 1.2x（钳制 1x-4x），双击复位", async () => {
@@ -604,30 +620,13 @@ describe("查看器：旋转（90° 步进）", () => {
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
   });
 
-  it("键盘 Home/End 跳组首/尾（有状态容器驱动 index）", async () => {
+  it("Home/End 不再快速跳到首尾", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    function StatefulViewer() {
-      const [index, setIdx] = useState(1);
-      const group = groupAssetsByDate(GROUP_ASSETS)[0];
-      return (
-        <I18nextProvider i18n={i18n}>
-          <ViewerOverlay
-            asset={GROUP_ASSETS[index]}
-            group={group}
-            index={index}
-            onNavigate={setIdx}
-            onClose={() => {}}
-          />
-        </I18nextProvider>
-      );
-    }
-    render(<StatefulViewer />);
+    const { onNavigate } = renderViewer(GROUP_ASSETS, 1);
     expect(await screen.findByTestId("viewer")).toBeInTheDocument();
-
     fireEvent.keyDown(window, { key: "Home" });
-    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0001.JPG"));
     fireEvent.keyDown(window, { key: "End" });
-    await waitFor(() => expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0003.JPG"));
+    expect(onNavigate).not.toHaveBeenCalled();
   });
 
   it("操作提示：首次 3s 后淡出；? 键重新唤出并再计时（fake timers）", async () => {
@@ -658,49 +657,40 @@ describe("查看器：旋转（90° 步进）", () => {
     }
   });
 
-  it("胶片条选中项自动滚动居中（切换照片时 scrollToIndex center + smooth）", async () => {
+  it("底部缩略图只显示当前照片前后各 8 张，点击最右边最多跳 8 张", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
-    class FakeImage {
-      src = "";
-    }
-    vi.stubGlobal("Image", FakeImage);
-    const calls: Array<Record<string, unknown>> = [];
-    const originalScrollTo = HTMLElement.prototype.scrollTo;
-    HTMLElement.prototype.scrollTo = function (arg?: unknown) {
-      calls.push((arg ?? {}) as Record<string, unknown>);
-    } as typeof HTMLElement.prototype.scrollTo;
-    try {
-      function StatefulViewer() {
-        const [index, setIdx] = useState(0);
-        const group = groupAssetsByDate(GROUP_ASSETS)[0];
-        return (
-          <I18nextProvider i18n={i18n}>
-            <ViewerOverlay
-              asset={GROUP_ASSETS[index]}
-              group={group}
-              index={index}
-              onNavigate={setIdx}
-              onClose={() => {}}
-            />
-          </I18nextProvider>
-        );
-      }
-      render(<StatefulViewer />);
-      expect(await screen.findByTestId("viewer")).toBeInTheDocument();
-      const before = calls.length;
+    const manyAssets = Array.from({ length: 40 }, (_, i) => makeAsset(i + 1, "photo", `IMG_${i + 1}.JPG`));
+    const { onNavigate } = renderViewer(manyAssets, 20);
+    const thumbs = within(screen.getByTestId("viewer-filmstrip")).getAllByTestId("viewer-filmthumb");
+    expect(thumbs).toHaveLength(17);
+    expect(thumbs[0]).toHaveAttribute("data-asset-id", "13");
+    expect(thumbs[16]).toHaveAttribute("data-asset-id", "29");
+    fireEvent.click(thumbs[16]);
+    expect(onNavigate).toHaveBeenCalledWith(28);
+  });
 
-      fireEvent.click(screen.getByTestId("viewer-next"));
-      // 切换后胶片条平滑滚动到新选中项（居中对齐）
-      await waitFor(() => {
-        expect(calls.length).toBeGreaterThan(before);
-        const last = calls[calls.length - 1];
-        expect(last).toMatchObject({ behavior: "smooth" });
-        expect(last).toHaveProperty("left");
-      });
-    } finally {
-      HTMLElement.prototype.scrollTo = originalScrollTo;
-      vi.unstubAllGlobals();
+  it("补页改变缩略图位置时保留已解码的图片，新图加载前显示序号", async () => {
+    const initial = Array.from({ length: 20 }, (_, i) => makeAsset(i + 1, "photo", `IMG_${i + 1}.JPG`));
+    const inserted = Array.from({ length: 4 }, (_, i) => makeAsset(i + 100, "photo", `NEW_${i}.JPG`));
+    thumbMock.mockImplementation(async (id: number) => ({ status: "ready", path: `C:\\thumbs\\${id}.jpg` }));
+    convertMock.mockImplementation((path: string) => `asset://${path}`);
+    function StatefulViewer() {
+      const [items, setItems] = useState(initial);
+      const index = items.findIndex((item) => item.id === 10);
+      return <I18nextProvider i18n={i18n}>
+        <button onClick={() => setItems([...items.slice(0, 4), ...inserted, ...items.slice(4)])} data-testid="append-page">append</button>
+        <ViewerOverlay asset={items[index]} group={{ key: "__viewer__", date: null, assets: items }} index={index} onNavigate={() => {}} onClose={() => {}} />
+      </I18nextProvider>;
     }
+    render(<StatefulViewer />);
+    const tile = (id: number) => screen.getAllByTestId("viewer-filmthumb").find((element) => element.getAttribute("data-asset-id") === String(id));
+    await waitFor(() => expect(tile(5)?.querySelector("img")).not.toBeNull());
+    for (const image of screen.getAllByTestId("viewer-filmthumb-cell-img")) fireEvent.load(image);
+    expect(tile(5)?.querySelector("img")?.className).toContain("opacity-100");
+    fireEvent.click(screen.getByTestId("append-page"));
+    expect(tile(5)?.querySelector("img")?.className).toContain("opacity-100");
+    await waitFor(() => expect(tile(101)?.querySelector("img")).not.toBeNull());
+    expect(within(tile(101)!).getByTestId("thumb-mini")).toBeInTheDocument();
   });
 });
 
@@ -779,7 +769,7 @@ describe("查看器：原子切图与胶片条", () => {
     );
   });
 
-  it("胶片条横向虚拟化：48 张组只渲染可视区格子（DOM 数远小于组总数）", async () => {
+  it("胶片条只渲染当前照片附近，避免加载整组缩略图", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     const bigGroup = Array.from({ length: 48 }, (_, i) =>
       makeAsset(i + 1, "photo", `IMG_${String(i + 1).padStart(4, "0")}.JPG`),
@@ -788,7 +778,7 @@ describe("查看器：原子切图与胶片条", () => {
 
     await screen.findByTestId("viewer");
     const thumbs = screen.getAllByTestId("viewer-filmthumb");
-    expect(thumbs.length).toBeLessThan(48);
+    expect(thumbs.length).toBe(9);
     // 静态迷你占位（序号），无骨架动画
     expect(thumbs[0].querySelector('[data-testid="thumb-mini"]')).not.toBeNull();
     const cell = thumbs[0].querySelector('[data-testid="viewer-filmthumb-cell"]');
@@ -832,7 +822,7 @@ describe("查看器：EXIF 面板", () => {
     expect(rows).toHaveTextContent("—");
     expect(rows).toHaveTextContent("2026-09-18 10:20:30");
     expect(rows).toHaveTextContent("5.0 MB");
-    expect(rows).toHaveTextContent(GROUP_ASSETS[0].path);
+    expect(rows).not.toHaveTextContent(GROUP_ASSETS[0].path);
     expect(rows).toHaveTextContent("2026-09-19 08:00:00");
     const dup = within(rows).getByText("库内重复");
     expect(dup.nextSibling).toHaveTextContent("2 张");
@@ -849,8 +839,7 @@ describe("查看器：EXIF 面板", () => {
 
     // 收起后保留仅容纳折叠图标的窄轨
     await user.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
-    expect(screen.getByTestId("viewer-exif").className).toContain("w-10");
+    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
     expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("viewer-exif-toggle"));
@@ -934,6 +923,14 @@ describe("查看器：EXIF 面板", () => {
     expect(within(shotGroup).getByText("ISO").nextSibling).toHaveTextContent("400");
   });
 
+  it("小于一秒的十进制快门显示分数，文件路径不进入详细信息", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, shutter: "0.02" });
+    renderViewer();
+    const shotGroup = await screen.findByTestId("viewer-exif-group-camera");
+    expect(within(shotGroup).getByText("快门").nextSibling).toHaveTextContent("1/50s");
+    expect(screen.queryByText("文件路径")).not.toBeInTheDocument();
+  });
+
   it("GPS 仅一侧坐标：位置组显示，缺侧为「—」", async () => {
     detailMock.mockResolvedValue({ ...DETAIL, gpsLat: 31.2304 });
     renderViewer();
@@ -965,7 +962,7 @@ describe("查看器：EXIF 面板", () => {
     renderViewer();
 
     const rows = await screen.findByTestId("viewer-exif-rows");
-    expect(rows).toHaveTextContent(GROUP_ASSETS[0].path);
+    expect(rows).not.toHaveTextContent(GROUP_ASSETS[0].path);
     expect(screen.queryByTestId("viewer-exif-loading")).not.toBeInTheDocument();
   });
 });
@@ -999,7 +996,7 @@ describe("查看器：星标条", () => {
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
 
     fireEvent.keyDown(window, { key: "I" });
-    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "false");
+    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
   });
 
   it("详情 rating 驱动星级；点星调 assetRatingSet(id, n)，再点同星=清除（0）", async () => {

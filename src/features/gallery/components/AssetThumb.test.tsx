@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -37,6 +37,22 @@ beforeEach(() => {
 });
 
 describe("AssetThumb 骨架屏（加载中 vs 永久无图）", () => {
+  it("节点复用到另一张照片时先显示序号，解码完成后才显示新图", async () => {
+    thumbMock.mockImplementation(async (id: number) => ({ status: "ready", path: `C:\\thumbs\\${id}.jpg` }));
+    convertMock.mockImplementation((path: string) => `asset://${path}`);
+    const draw = (id: number) => <I18nextProvider i18n={i18n}><AssetThumb asset={{ id, kind: "photo", name: `${id}.jpg` }} size={240} miniLabel={String(id)} skeleton={false} testId="thumb" /></I18nextProvider>;
+    const { rerender } = render(draw(1));
+    await waitFor(() => expect(screen.getByTestId("thumb-img")).toHaveAttribute("src", "asset://C:\\thumbs\\1.jpg"));
+    fireEvent.load(screen.getByTestId("thumb-img"));
+    expect(screen.getByTestId("thumb-img").className).toContain("opacity-100");
+    rerender(draw(2));
+    await waitFor(() => expect(screen.getByTestId("thumb-img")).toHaveAttribute("src", "asset://C:\\thumbs\\2.jpg"));
+    expect(screen.getByTestId("thumb-img").className).toContain("opacity-0");
+    expect(screen.getByTestId("thumb-mini")).toHaveTextContent("2");
+    fireEvent.load(screen.getByTestId("thumb-img"));
+    expect(screen.getByTestId("thumb-img").className).toContain("opacity-100");
+    expect(screen.queryByTestId("thumb-mini")).not.toBeInTheDocument();
+  });
   it("加载中：容器挂 sp-skeleton + kind 图形叠加", async () => {
     thumbMock.mockImplementation(() => new Promise(() => undefined)); // 永不在途结算
     renderThumb("photo", "IMG_0001.JPG");

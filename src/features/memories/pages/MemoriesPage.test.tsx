@@ -86,23 +86,15 @@ describe("那年今天：年份分块渲染", () => {
 
     const blocks = await screen.findAllByTestId("memories-block");
     expect(blocks.map((b) => b.getAttribute("data-year"))).toEqual([
-      String(thisYear),
       String(thisYear - 3),
       String(thisYear - 6),
     ]);
 
-    // 今年块：标题「今天」+ 徽标；块头计数 1 张
-    expect(blocks[0]).toHaveTextContent("今天");
-    expect(within(blocks[0]).getByTestId("memories-today-badge")).toBeInTheDocument();
-
-    // 往年块：N 年前 + 该年张数；无「今天」徽标
-    expect(blocks[1]).toHaveTextContent("3 年前");
-    expect(blocks[1]).toHaveTextContent("2 张");
-    expect(blocks[2]).toHaveTextContent("6 年前");
-    expect(within(blocks[1]).queryByTestId("memories-today-badge")).not.toBeInTheDocument();
-
-    // 卡片共 4 张，块内分布 1/2/1
-    expect(blocks.map((b) => within(b).getAllByTestId("memories-card").length)).toEqual([1, 2, 1]);
+    expect(blocks[0]).toHaveTextContent("3 年前");
+    expect(blocks[0]).toHaveTextContent("2 张");
+    expect(blocks[1]).toHaveTextContent("6 年前");
+    expect(screen.queryByTestId("memories-today-badge")).not.toBeInTheDocument();
+    expect(blocks.map((b) => within(b).getAllByTestId("memories-card").length)).toEqual([2, 1]);
     expect(onThisDayMock).toHaveBeenCalledTimes(1);
   });
 
@@ -116,7 +108,7 @@ describe("那年今天：年份分块渲染", () => {
     expect(screen.queryByTestId("memories-block")).not.toBeInTheDocument();
   });
 
-  it("点击照片进查看器定位该张；组内导航/胶片条不跨年份块", async () => {
+  it("点击照片进查看器定位该张；导航可跨年份块", async () => {
     const thisYear = new Date().getFullYear();
     onThisDayMock.mockResolvedValue([
       makeAsset(10, thisYear - 3),
@@ -134,12 +126,13 @@ describe("那年今天：年份分块渲染", () => {
     expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0010.JPG");
     await waitFor(() => expect(markMock).toHaveBeenCalledWith(10));
 
-    // 胶片条只含同年块（2 张），不跨到 2026 年块
-    expect(screen.getAllByTestId("viewer-filmthumb")).toHaveLength(2);
+    expect(screen.getAllByTestId("viewer-filmthumb")).toHaveLength(3);
 
     // 组内下一张 → 同年第二张
     await user.click(screen.getByTestId("viewer-next"));
     expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0011.JPG");
+    await user.click(screen.getByTestId("viewer-next"));
+    expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0012.JPG");
 
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("viewer")).not.toBeInTheDocument());

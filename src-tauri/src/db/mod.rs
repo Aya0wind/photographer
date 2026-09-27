@@ -301,7 +301,8 @@ pub const CAPTURED_NULL_HIGH: &str = "9999-12-31T23:59:59.999Z";
 /// 同月日的 photo/raw（captured_at 为 RFC3339；'localtime' 把 UTC 存储
 /// 转本地后取 %m-%d）。
 const ON_THIS_DAY_WHERE: &str = "kind IN ('photo', 'raw') AND captured_at IS NOT NULL \
-     AND strftime('%m-%d', captured_at, 'localtime') = ?1";
+     AND strftime('%m-%d', captured_at, 'localtime') = ?1 \
+     AND strftime('%Y', captured_at, 'localtime') < strftime('%Y', 'now', 'localtime')";
 
 /// 资产分页过滤（IPC 载荷，camelCase）。日期为 RFC3339 字符串或纯日期
 /// `YYYY-MM-DD`（IPC 层归一定宽 UTC：纯日期 after=当日 00:00、before=当日
@@ -390,6 +391,8 @@ pub struct AssetPageRow {
     pub thumb_state: i32,
     /// 连拍组 id（M6；未入组 None）。
     pub burst_id: Option<i64>,
+    pub flagged: bool,
+    pub rating: i64,
 }
 
 /// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
@@ -636,13 +639,10 @@ impl Db {
             (CAPTURED_NULL_HIGH.to_string(), 0)
         };
         use rusqlite::types::Value as V;
-        let mut conds: Vec<String> = Vec::new();
         let mut params_vec: Vec<V> = Vec::new();
-        let mut next: usize = 1;
         // 统一槽位构造：?N 显式编号 + params_vec 同序 push（按编号绑定）
-        let mut slot = |params_vec: &mut Vec<V>, v: V| -> String {
-            let s = format!("?{next}");
-            next += 1;
+        let slot = |params_vec: &mut Vec<V>, v: V| -> String {
+            let s = format!("?{}", params_vec.len() + 1);
             params_vec.push(v);
             s
         };
@@ -650,176 +650,7 @@ impl Db {
         // —— 排序哨兵（子查询内 COALESCE 的 NULL 归一）——
         let sentinel_slot = slot(&mut params_vec, V::from(CAPTURED_NULL_HIGH.to_string()));
 
-        // —— 多选 IN / 尾部匹配（各上限 16；空 = 不过滤）——
-        let kinds: Vec<AssetKind> = filters.kinds.iter().take(16).copied().collect();
-        let cameras: Vec<String> = filters.cameras.iter().take(16).cloned().collect();
-        let lenses: Vec<String> = filters.lenses.iter().take(16).cloned().collect();
-        let formats: Vec<String> = filters
-            .formats
-            .iter()
-            .map(|f| f.trim().trim_start_matches('.').to_string())
-            .filter(|f| !f.is_empty())
-            .take(16)
-            .collect();
-        if !kinds.is_empty() {
-            let slots = kinds
-                .iter()
-                .map(|k| slot(&mut params_vec, V::from(k.as_db_str().to_string())))
-                .collect::<Vec<_>>()
-                .join(", ");
-            conds.push(format!("kind IN ({slots})"));
-        }
-        if !cameras.is_empty() {
-            let slots = cameras
-                .iter()
-                .map(|c| slot(&mut params_vec, V::from(c.clone())))
-                .collect::<Vec<_>>()
-                .join(", ");
-            conds.push(format!("camera IN ({slots})"));
-        }
-        if !lenses.is_empty() {
-            let slots = lenses
-                .iter()
-                .map(|l| slot(&mut params_vec, V::from(l.clone())))
-                .collect::<Vec<_>>()
-                .join(", ");
-            conds.push(format!("lens IN ({slots})"));
-        }
-        if !formats.is_empty() {
-            // 扩展名 = 路径尾部 ".ext"（LIKE 对 ASCII 大小写不敏感，等价于
-            // lower(扩展名) IN；无扩展名路径不命中任何模式）
-            let frags = formats
-                .iter()
-                .map(|f| {
-                    let s = slot(&mut params_vec, V::from(format!("%.{f}")));
-                    format!("path LIKE {s}")
-                })
-                .collect::<Vec<_>>();
-            conds.push(format!("({})", frags.join(" OR ")));
-        }
-
-        // —— 日期（RFC3339 定宽字典序比较即时间序）——
-        if let Some(after) = &filters.captured_after {
-            let s = slot(&mut params_vec, V::from(after.clone()));
-            conds.push(format!("captured_at >= {s}"));
-        }
-        if let Some(before) = &filters.captured_before {
-            let s = slot(&mut params_vec, V::from(before.clone()));
-            conds.push(format!("captured_at <= {s}"));
-        }
-
-        // —— 数值范围（闭区间；列 NULL 时比较结果为 NULL → 行被排除，
-        //    即「未知」不冒充任何区间，见 AssetFilters 注释）——
-        let mut range = |conds: &mut Vec<String>,
-                         params_vec: &mut Vec<V>,
-                         expr: &str,
-                         min: Option<f64>,
-                         max: Option<f64>| {
-            for (bound, cmp) in [(min, ">="), (max, "<=")] {
-                if let Some(v) = bound {
-                    let s = slot(params_vec, V::from(v));
-                    conds.push(format!("{expr} {cmp} {s}"));
-                }
-            }
-        };
-        range(
-            &mut conds,
-            &mut params_vec,
-            "CAST(focal_length AS REAL)",
-            filters.focal_min,
-            filters.focal_max,
-        );
-        range(
-            &mut conds,
-            &mut params_vec,
-            "CAST(iso AS REAL)",
-            filters.iso_min.map(|v| v as f64),
-            filters.iso_max.map(|v| v as f64),
-        );
-        range(
-            &mut conds,
-            &mut params_vec,
-            "CAST(f_number AS REAL)",
-            filters.aperture_min,
-            filters.aperture_max,
-        );
-        // 快门秒数：exposure_time 为本应用写入的展示串（"1/250" / "0.4"），
-        // 按写入格式解析——分数串取倒数，其余 CAST REAL。
-        range(
-            &mut conds,
-            &mut params_vec,
-            "CASE WHEN exposure_time LIKE '1/%' THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) ELSE CAST(exposure_time AS REAL) END",
-            filters.shutter_min,
-            filters.shutter_max,
-        );
-        range(
-            &mut conds,
-            &mut params_vec,
-            "CAST(size AS REAL)",
-            filters.size_min.map(|v| v as f64),
-            filters.size_max.map(|v| v as f64),
-        );
-
-        // —— 布尔 / 方向 / GPS ——
-        if let Some(state) = &filters.flash {
-            // flash token 族见 exif_lite 映射：fired 族均含 "fired" 子串，
-            // no_flash 族前缀 "no_flash"；"unknown" 显式取 NULL（未知 ≠ 未闪光）。
-            match state.as_str() {
-                "on" => {
-                    let s = slot(&mut params_vec, V::from("%fired%".to_string()));
-                    conds.push(format!("flash LIKE {s}"));
-                }
-                "off" => {
-                    let s = slot(&mut params_vec, V::from("no_flash%".to_string()));
-                    conds.push(format!("(flash LIKE {s} AND flash IS NOT NULL)"));
-                }
-                "unknown" => conds.push("flash IS NULL".to_string()),
-                _ => {} // 未知 token 容错：不过滤
-            }
-        }
-        match filters.orientation.as_deref() {
-            // width/height 任一 NULL → 比较为 NULL → 排除
-            Some("landscape") => conds.push("width > height".into()),
-            Some("portrait") => conds.push("height > width".into()),
-            _ => {}
-        }
-        if let Some(has) = filters.has_gps {
-            conds.push(if has {
-                "gps_lat IS NOT NULL".into()
-            } else {
-                "gps_lat IS NULL".into()
-            });
-        }
-
-        // —— 评分 / 旗标（0009；NOT NULL 无 NULL 态）——
-        for (bound, cmp) in [(filters.rating_min, ">="), (filters.rating_max, "<=")] {
-            if let Some(v) = bound {
-                let s = slot(&mut params_vec, V::from(v));
-                conds.push(format!("rating {cmp} {s}"));
-            }
-        }
-        if let Some(flag) = filters.flagged {
-            conds.push(if flag {
-                "flagged = 1".into()
-            } else {
-                "flagged = 0".into()
-            });
-        }
-        if let Some(fav) = filters.favorite {
-            conds.push(if fav {
-                "(rating > 0 OR flagged = 1)".into()
-            } else {
-                "rating = 0 AND flagged = 0".into()
-            });
-        }
-
-        // —— 相册维度（0015）：EXISTS 求交，相册不存在命中空集 ——
-        if let Some(album) = filters.album_id {
-            let s = slot(&mut params_vec, V::from(album));
-            conds.push(format!(
-                "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id AND ai.album_id = {s})"
-            ));
-        }
+        let conds = asset_filter_conditions(filters, &mut params_vec);
 
         // —— 游标（归一排序键二元组；cursor_id=0 即第一页短路）——
         let cursor_id_slot = slot(&mut params_vec, V::from(cursor_id));
@@ -835,10 +666,10 @@ impl Db {
         let mut stmt = self.0.prepare(&format!(
             "SELECT id, path, filename, size, kind, captured_at, camera, \
              width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
-             thumb_state, burst_id FROM \
+             thumb_state, burst_id, flagged, rating FROM \
              (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
               a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
-              a.pair_asset_id, a.thumb_state, a.burst_id, \
+              a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
               COALESCE(a.captured_at, {sentinel_slot}) AS k \
               FROM assets a WHERE {all}) \
              WHERE ({cursor_id_slot} = 0 OR k < {cursor_key_slot} \
@@ -847,6 +678,24 @@ impl Db {
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), map_asset_page)?;
         rows.collect()
+    }
+
+    /// 当前筛选条件的真实总数，与 assets_page 复用完全相同的 SQL 条件。
+    pub fn assets_count(&self, filters: &AssetFilters) -> Result<u64> {
+        use rusqlite::types::Value as V;
+        let mut params_vec: Vec<V> = Vec::new();
+        let conditions = asset_filter_conditions(filters, &mut params_vec);
+        let where_sql = if conditions.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            conditions.join(" AND ")
+        };
+        let count: i64 = self.0.query_row(
+            &format!("SELECT COUNT(*) FROM assets a WHERE {where_sql}"),
+            rusqlite::params_from_iter(params_vec),
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
     }
 
     /// 最近添加分页（「最近添加」页数据源）：created_at DESC、id DESC
@@ -867,10 +716,10 @@ impl Db {
         };
         let mut stmt = self.0.prepare(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
              FROM (SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera, \
                     a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, \
-                    a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, \
+                    a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
                     a.created_at AS ck FROM assets a) \
              WHERE (?1 = 0 OR ck < ?2 OR (ck = ?2 AND id < ?1)) \
              ORDER BY ck DESC, id DESC LIMIT ?3",
@@ -1348,10 +1197,10 @@ impl Db {
     pub fn assets_by_cluster(&self, cluster_id: i64, limit: u32) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
              FROM (SELECT DISTINCT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
                     a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, \
-                    a.focal_length, a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, \
+                    a.focal_length, a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, \
                     COALESCE(a.captured_at, ?2) AS k \
                    FROM assets a JOIN faces f ON f.asset_id = a.id \
                    WHERE f.cluster_id = ?1) \
@@ -1686,7 +1535,7 @@ impl Db {
     /// 最近浏览资产（viewed_at DESC；复用画廊分页行结构）。
     pub fn recently_viewed(&self, limit: u32) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state, a.burst_id              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
+            "SELECT a.id, a.path, a.filename, a.size, a.kind, a.captured_at, a.camera,              a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length,              a.lens, a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating              FROM view_history v JOIN assets a ON a.id = v.asset_id              ORDER BY v.viewed_at DESC, v.asset_id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], map_asset_page)?;
         rows.collect()
@@ -1956,7 +1805,7 @@ impl Db {
             .join(", ");
         let sql = format!(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
              FROM assets WHERE id IN ({slots}) ORDER BY created_at ASC, id ASC"
         );
         let mut stmt = self.0.prepare(&sql)?;
@@ -1969,7 +1818,7 @@ impl Db {
     pub fn assets_on_this_day(&self, month_day: &str) -> Result<Vec<AssetPageRow>> {
         let mut stmt = self.0.prepare(&format!(
             "SELECT id, path, filename, size, kind, captured_at, camera, width, height, iso, \
-             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id \
+             f_number, exposure_time, focal_length, lens, pair_asset_id, thumb_state, burst_id, flagged, rating \
              FROM assets \
              WHERE {ON_THIS_DAY_WHERE} \
              ORDER BY substr(captured_at, 1, 4) DESC, captured_at ASC, id ASC",
@@ -2452,6 +2301,192 @@ fn map_album(row: &Row<'_>) -> Result<AlbumRow> {
     })
 }
 
+/// 分页与计数共用条件，避免筛选结果数和实际分页发生口径偏差。
+fn asset_filter_conditions(
+    filters: &AssetFilters,
+    mut params_vec: &mut Vec<rusqlite::types::Value>,
+) -> Vec<String> {
+    use rusqlite::types::Value as V;
+    let mut conds: Vec<String> = Vec::new();
+    let slot = |params_vec: &mut Vec<V>, v: V| -> String {
+        let s = format!("?{}", params_vec.len() + 1);
+        params_vec.push(v);
+        s
+    };
+    // —— 多选 IN / 尾部匹配（各上限 16；空 = 不过滤）——
+    let kinds: Vec<AssetKind> = filters.kinds.iter().take(16).copied().collect();
+    let cameras: Vec<String> = filters.cameras.iter().take(16).cloned().collect();
+    let lenses: Vec<String> = filters.lenses.iter().take(16).cloned().collect();
+    let formats: Vec<String> = filters
+        .formats
+        .iter()
+        .map(|f| f.trim().trim_start_matches('.').to_string())
+        .filter(|f| !f.is_empty())
+        .take(16)
+        .collect();
+    if !kinds.is_empty() {
+        let slots = kinds
+            .iter()
+            .map(|k| slot(&mut params_vec, V::from(k.as_db_str().to_string())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conds.push(format!("kind IN ({slots})"));
+    }
+    if !cameras.is_empty() {
+        let slots = cameras
+            .iter()
+            .map(|c| slot(&mut params_vec, V::from(c.clone())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conds.push(format!("camera IN ({slots})"));
+    }
+    if !lenses.is_empty() {
+        let slots = lenses
+            .iter()
+            .map(|l| slot(&mut params_vec, V::from(l.clone())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conds.push(format!("lens IN ({slots})"));
+    }
+    if !formats.is_empty() {
+        // 扩展名 = 路径尾部 ".ext"（LIKE 对 ASCII 大小写不敏感，等价于
+        // lower(扩展名) IN；无扩展名路径不命中任何模式）
+        let frags = formats
+            .iter()
+            .map(|f| {
+                let s = slot(&mut params_vec, V::from(format!("%.{f}")));
+                format!("path LIKE {s}")
+            })
+            .collect::<Vec<_>>();
+        conds.push(format!("({})", frags.join(" OR ")));
+    }
+
+    // —— 日期（RFC3339 定宽字典序比较即时间序）——
+    if let Some(after) = &filters.captured_after {
+        let s = slot(&mut params_vec, V::from(after.clone()));
+        conds.push(format!("captured_at >= {s}"));
+    }
+    if let Some(before) = &filters.captured_before {
+        let s = slot(&mut params_vec, V::from(before.clone()));
+        conds.push(format!("captured_at <= {s}"));
+    }
+
+    // —— 数值范围（闭区间；列 NULL 时比较结果为 NULL → 行被排除，
+    //    即「未知」不冒充任何区间，见 AssetFilters 注释）——
+    let range = |conds: &mut Vec<String>,
+                 params_vec: &mut Vec<V>,
+                 expr: &str,
+                 min: Option<f64>,
+                 max: Option<f64>| {
+        for (bound, cmp) in [(min, ">="), (max, "<=")] {
+            if let Some(v) = bound {
+                let s = slot(params_vec, V::from(v));
+                conds.push(format!("{expr} {cmp} {s}"));
+            }
+        }
+    };
+    range(
+        &mut conds,
+        &mut params_vec,
+        "CAST(focal_length AS REAL)",
+        filters.focal_min,
+        filters.focal_max,
+    );
+    range(
+        &mut conds,
+        &mut params_vec,
+        "CAST(iso AS REAL)",
+        filters.iso_min.map(|v| v as f64),
+        filters.iso_max.map(|v| v as f64),
+    );
+    range(
+        &mut conds,
+        &mut params_vec,
+        "CAST(f_number AS REAL)",
+        filters.aperture_min,
+        filters.aperture_max,
+    );
+    // 快门秒数：exposure_time 为本应用写入的展示串（"1/250" / "0.4"），
+    // 按写入格式解析——分数串取倒数，其余 CAST REAL。
+    range(
+            &mut conds,
+            &mut params_vec,
+            "CASE WHEN exposure_time LIKE '1/%' THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) ELSE CAST(exposure_time AS REAL) END",
+            filters.shutter_min,
+            filters.shutter_max,
+        );
+    range(
+        &mut conds,
+        &mut params_vec,
+        "CAST(size AS REAL)",
+        filters.size_min.map(|v| v as f64),
+        filters.size_max.map(|v| v as f64),
+    );
+
+    // —— 布尔 / 方向 / GPS ——
+    if let Some(state) = &filters.flash {
+        // flash token 族见 exif_lite 映射：fired 族均含 "fired" 子串，
+        // no_flash 族前缀 "no_flash"；"unknown" 显式取 NULL（未知 ≠ 未闪光）。
+        match state.as_str() {
+            "on" => {
+                let s = slot(&mut params_vec, V::from("%fired%".to_string()));
+                conds.push(format!("flash LIKE {s}"));
+            }
+            "off" => {
+                let s = slot(&mut params_vec, V::from("no_flash%".to_string()));
+                conds.push(format!("(flash LIKE {s} AND flash IS NOT NULL)"));
+            }
+            "unknown" => conds.push("flash IS NULL".to_string()),
+            _ => {} // 未知 token 容错：不过滤
+        }
+    }
+    match filters.orientation.as_deref() {
+            // width/height 任一 NULL → 比较为 NULL → 排除
+            Some("landscape") => conds.push("((orientation BETWEEN 5 AND 8 AND height > width) OR (COALESCE(orientation, 1) NOT BETWEEN 5 AND 8 AND width > height))".into()),
+            Some("portrait") => conds.push("((orientation BETWEEN 5 AND 8 AND width > height) OR (COALESCE(orientation, 1) NOT BETWEEN 5 AND 8 AND height > width))".into()),
+            _ => {}
+        }
+    if let Some(has) = filters.has_gps {
+        conds.push(if has {
+            "gps_lat IS NOT NULL".into()
+        } else {
+            "gps_lat IS NULL".into()
+        });
+    }
+
+    // —— 评分 / 旗标（0009；NOT NULL 无 NULL 态）——
+    for (bound, cmp) in [(filters.rating_min, ">="), (filters.rating_max, "<=")] {
+        if let Some(v) = bound {
+            let s = slot(&mut params_vec, V::from(v));
+            conds.push(format!("rating {cmp} {s}"));
+        }
+    }
+    if let Some(flag) = filters.flagged {
+        conds.push(if flag {
+            "flagged = 1".into()
+        } else {
+            "flagged = 0".into()
+        });
+    }
+    if let Some(fav) = filters.favorite {
+        conds.push(if fav {
+            "(rating > 0 OR flagged = 1)".into()
+        } else {
+            "rating = 0 AND flagged = 0".into()
+        });
+    }
+
+    // —— 相册维度（0015）：EXISTS 求交，相册不存在命中空集 ——
+    if let Some(album) = filters.album_id {
+        let s = slot(&mut params_vec, V::from(album));
+        conds.push(format!(
+            "EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = a.id AND ai.album_id = {s})"
+        ));
+    }
+
+    conds
+}
+
 fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
     Ok(AssetPageRow {
         id: row.get(0)?,
@@ -2471,6 +2506,8 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         pair_id: row.get(14)?,
         thumb_state: row.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
         burst_id: row.get(16)?,
+        flagged: row.get::<_, i64>(17)? != 0,
+        rating: row.get(18)?,
     })
 }
 

@@ -161,6 +161,10 @@ export interface AssetDto {
   burstId?: number | null;
   /** 连拍组员数（照片数，含封面；仅 ≥2 时携带） */
   burstCount?: number | null;
+  /** 收藏星标 */
+  flagged?: boolean;
+  /** 五星代表收藏，与批量收藏操作一致 */
+  rating?: number;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
@@ -220,6 +224,8 @@ export interface AssetFilters {
   sizeMax?: number;
   /** 所属相册（手工相册引用维度；省略 = 不过滤）。相册详情页内不重复携带 */
   albumId?: number;
+  flagged?: boolean;
+  ratingMin?: number;
 }
 
 /** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
@@ -529,6 +535,16 @@ export async function assetsPage(
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
+  }
+}
+
+/** 当前条件的真实匹配总数，独立于已加载分页。 */
+export async function assetsCount(filters?: AssetFilters): Promise<number | null> {
+  try {
+    const count = await ipc<number>("assets_count", filters ? { filters } : {});
+    return typeof count === "number" && Number.isFinite(count) ? count : null;
+  } catch {
+    return null;
   }
 }
 

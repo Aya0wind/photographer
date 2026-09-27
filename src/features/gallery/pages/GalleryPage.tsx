@@ -4,16 +4,14 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import {
-  assetGroupDates,
+  assetsCount,
   assetsPage,
   isIpcAvailable,
   type AssetDto,
-  type AssetGroupDate,
 } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
   groupAssetsByDate,
-  groupKeyOfDate,
   formatDateLabel,
 } from "../lib/assetGroups";
 import { mergeRawJpgCards } from "../lib/mergeRawJpg";
@@ -37,13 +35,13 @@ import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
-import YearRail from "../components/YearRail";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 import {
   FilterChipsRow,
   FilterPanel,
+  QuickFilterBar,
   buildChips,
   buildFilters,
   hasActiveFilters,
@@ -61,7 +59,7 @@ import { motionInitial, useMotionOn } from "@/lib/motion";
  * - 三种数据态：默认（全部资产，keyset 补页 + 会话快照 revalidate）/ 筛选
  *   （assetsPage filters，快照不落盘）/ 语义（searchSemantic 结果同网格带分数角标，
  *   无分页）；修改筛选自动退出语义态
- * - 日期组头折叠（AssetGrid）；右侧年份吸顶条承担日期跳转（chips 条与日历按钮已删）
+ * - 日期组头折叠（AssetGrid）
  * - 多选（M4.5）：选择按钮 / Ctrl+点击 / 长按进入；浮动操作条（收藏/旗标/分享/取消），
  *   Esc 退出；单选=多选下的 N=1
  * - URL 协议：?mode=semantic&q=…（语义直达）、?kind=photo|raw|video（预置类型）
@@ -72,17 +70,6 @@ const PAGE_LIMIT = 100;
 const DEBOUNCE_MS = 300;
 /** 组头完全滚出视口后显示吸顶条（低于此偏移视为仍在组头处） */
 const STICKY_MIN_SCROLL = 48;
-
-/** 年月选择范围：chips 数据的年份边界 ∪ 当前年（空数据退当前年） */
-function yearRange(dates: AssetGroupDate[]): number[] {
-  const now = new Date().getFullYear();
-  const years = new Set<number>([now]);
-  for (const entry of dates) {
-    const y = Number(entry.date?.slice(0, 4));
-    if (Number.isFinite(y) && y > 0) years.add(y);
-  }
-  return [...years].sort((a, b) => b - a);
-}
 
 type GalleryMode = "default" | "filters" | "semantic";
 
@@ -150,6 +137,7 @@ export default function GalleryPage() {
   }
 
   const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
+  const advancedChipCount = chips.filter((chip) => !["favorite", "kind", "orientation", "gps"].includes(chip.key)).length;
 
   // --- URL 协议（全局搜索框 / 类型筛选直达）：?mode=semantic&q= / ?kind= ----------------
   const urlQuery = searchParams.get("q") ?? "";
@@ -188,6 +176,7 @@ export default function GalleryPage() {
   // --- 数据管线（默认/筛选共用 keyset；快照仅默认态） --------------------------------
   const cachedAtMount = gallerySnapshot();
   const [assets, setAssets] = useState<AssetDto[]>(() => cachedAtMount?.assets ?? []);
+  const [totalCount, setTotalCount] = useState<number | null>(null);
   /** 已加载资产（与 state 同步维护，供补页循环同步读取） */
   const assetsRef = useRef<AssetDto[]>(cachedAtMount?.assets ?? []);
   const [status, setStatus] = useState<"loading" | "ready" | "degraded">(() =>
@@ -198,8 +187,16 @@ export default function GalleryPage() {
   const loadSeqRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const [dates, setDates] = useState<AssetGroupDate[]>(() => cachedAtMount?.dates ?? []);
-  const datesRef = useRef<AssetGroupDate[]>(cachedAtMount?.dates ?? []);
+  useEffect(() => {
+    if (semanticMode) return;
+    let cancelled = false;
+    setTotalCount(null);
+    void assetsCount(filtersActive ? appliedFilters : undefined).then((count) => {
+      if (!cancelled) setTotalCount(count);
+    });
+    return () => { cancelled = true; };
+  }, [appliedFilters, filtersActive, semanticMode]);
+
   /** 视口滚动位置（快照保存用；重挂载恢复） */
   const scrollTopRef = useRef(cachedAtMount?.scrollTop ?? 0);
   const gridRef = useRef<AssetGridHandle | null>(null);
@@ -214,7 +211,7 @@ export default function GalleryPage() {
     if (modeRef.current !== "default") return;
     saveGallerySnapshot({
       assets: assetsRef.current,
-      dates: datesRef.current,
+      dates: [],
       hasMore: hasMoreRef.current,
       scrollTop: scrollTopRef.current,
       savedAt: Date.now(),
@@ -272,10 +269,9 @@ export default function GalleryPage() {
           cached !== null &&
           cached.assets.length >= page.length &&
           page.every((a, i) => cached.assets[i].id === a.id);
-        if (!samePrefix) {
-          assetsRef.current = page;
-          setAssets(page);
-        }
+        assetsRef.current = samePrefix ? cached.assets : page;
+        setAssets(assetsRef.current);
+        if (samePrefix) hasMoreRef.current = cached.hasMore;
       }
       if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
       setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
@@ -286,21 +282,6 @@ export default function GalleryPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appliedFilters, debouncedKey, semanticMode, filtersActive]);
-
-  useEffect(() => {
-    if (semanticMode) return;
-    let cancelled = false;
-    void assetGroupDates().then((result) => {
-      if (cancelled) return;
-      datesRef.current = result;
-      setDates(result);
-      persistSnapshot();
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [semanticMode, persistSnapshot]);
 
   // 无限滚动：哨兵进入视口（提前 800px 预载）——默认/筛选态
   useEffect(() => {
@@ -315,30 +296,6 @@ export default function GalleryPage() {
     io.observe(el);
     return () => io.disconnect();
   }, [status, appendPage, assets.length, semanticMode]);
-
-  /** 日期跳转（年份条）：组已加载直接滚；未加载顺序补页直到出现（keyset 无随机访问） */
-  const [pendingJumpKey, setPendingJumpKey] = useState<string | null>(null);
-  useEffect(() => {
-    if (pendingJumpKey === null) return;
-    setPendingJumpKey(null);
-    gridRef.current?.scrollToGroup(pendingJumpKey);
-  }, [pendingJumpKey]);
-
-  const jumpToDate = useCallback(
-    async (date: string | null) => {
-      if (semanticMode) return;
-      const key = groupKeyOfDate(date);
-      const loaded = () => assetsRef.current.some((a) => groupKeyOfDate(a.capturedAt) === key);
-      let guard = 0;
-      while (!loaded() && hasMoreRef.current && guard < 200) {
-        guard += 1;
-        const page = await appendPage();
-        if (page.length === 0) break;
-      }
-      setPendingJumpKey(key);
-    },
-    [appendPage, semanticMode],
-  );
 
   // 重挂载滚动恢复（仅默认态）：快照有位置且首次 ready 后立即还原
   const scrollRestoredRef = useRef(false);
@@ -418,6 +375,11 @@ export default function GalleryPage() {
   const viewerGroups = semanticMode ? semanticGroups : groups;
   const activeGroups = semanticMode ? semanticGroups : displayGroups;
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(viewerGroups);
+  // 预览靠近已加载末尾时提前补页，让跨日期连续翻页也能越过分页边界。
+  useEffect(() => {
+    if (semanticMode || !viewer || !hasMoreRef.current) return;
+    if (viewer.index >= viewer.group.assets.length - 8) void appendPage();
+  }, [semanticMode, viewer?.index, viewer?.group.assets.length, appendPage]);
 
   // Esc 退出语义态（查看器打开时不抢——查看器自身 Esc 优先；多选退出走独立监听）
   useEffect(() => {
@@ -474,9 +436,18 @@ export default function GalleryPage() {
     [selected, loadedById],
   );
 
+  const handleFavoriteChange = useCallback((asset: AssetDto, favorite: boolean) => {
+    const favoriteOnly = parseInputs(appliedKeyRef.current).favoriteOnly;
+    assetsRef.current = favoriteOnly && !favorite
+      ? assetsRef.current.filter((item) => item.id !== asset.id)
+      : assetsRef.current.map((item) => item.id === asset.id ? { ...item, rating: favorite ? 5 : 0 } : item);
+    setAssets(assetsRef.current);
+    if (favoriteOnly && !favorite) setTotalCount((count) => count === null ? null : Math.max(0, count - 1));
+    persistSnapshot();
+  }, [persistSnapshot]);
+
   // 三档尺寸（justify 行高）
   const [tileSize, setTileSize] = useGalleryTileSize();
-  const years = useMemo(() => yearRange(dates), [dates]);
 
   const currentGroup = viewport.group;
   const showSticky =
@@ -535,7 +506,7 @@ export default function GalleryPage() {
     <div className="h-full" data-testid="gallery-page">
       {/* 内容区：水平居中 + 左右对称 padding（修复贴导航边起排/首卡被切） */}
       <div
-        className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6"
+        className="flex h-full w-full flex-col px-4"
         data-testid="gallery-content"
       >
         {/* 顶部工具条：筛选 + 计数 + 尺寸（语义入口唯一=TitleBar 全局搜索框；
@@ -547,19 +518,19 @@ export default function GalleryPage() {
             onClick={() => setPanelOpen((v) => !v)}
             aria-expanded={panelOpen}
             className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
-              panelOpen || chips.length > 0
+              panelOpen || advancedChipCount > 0
                 ? "border-accent text-accent"
                 : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
             }`}
             data-testid="search-filter-toggle"
           >
-            {t("search.filter")}
-            {chips.length > 0 && (
+            {t("search.moreFilters")}
+            {advancedChipCount > 0 && (
               <span
                 className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black"
                 data-testid="search-filter-count"
               >
-                {chips.length}
+                {advancedChipCount}
               </span>
             )}
             <svg
@@ -585,13 +556,15 @@ export default function GalleryPage() {
           >
             {semanticMode
               ? t("search.count", { count: semantic.assets.length })
-              : t("search.count", { count: assets.length })}
+              : t("search.count", { count: totalCount ?? assets.length })}
           </span>
 
           <div className="shrink-0">
             <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           </div>
         </div>
+
+        <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
 
         {/* 语义态状态头：查询词 + 结果数 + 退出（本地语义输入框已删，入口唯一=
             TitleBar 全局搜索框；本行保证语义态一眼可识别、可退出） */}
@@ -627,7 +600,7 @@ export default function GalleryPage() {
         )}
 
         {/* 筛选面板（默认收起；修改筛选自动退出语义态） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} />}
+        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly />}
 
         {/* 激活条件 chips */}
         {!semanticMode && (
@@ -699,6 +672,7 @@ export default function GalleryPage() {
               onCtrlClick={ctrlSelect}
               onLongPress={ctrlSelect}
               onCheckClick={ctrlSelect}
+              onFavoriteChange={handleFavoriteChange}
               onAssetContextMenu={handleTileContextMenu}
               selection={
                 selecting
@@ -714,19 +688,6 @@ export default function GalleryPage() {
               burstBadges={semanticMode ? undefined : burstBadges}
             />
           )}
-          {/* 右侧年份吸顶条：点击跳该年首个日期组（语义结果态隐藏——库级年份与结果集不一致） */}
-          {!semanticMode && (
-            <YearRail
-              years={years}
-              currentYear={
-                viewport.group?.date != null ? Number(viewport.group.date.slice(0, 4)) : null
-              }
-              onJumpYear={(year) => {
-                const hit = dates.find((d) => d.date != null && d.date.startsWith(String(year)));
-                if (hit) void jumpToDate(hit.date);
-              }}
-            />
-          )}
           <AnimatePresence initial={false}>
             {showSticky && (
               <motion.div
@@ -739,13 +700,15 @@ export default function GalleryPage() {
                 data-testid="gallery-sticky-date"
               >
                 <AnimatePresence mode="wait" initial={false}>
-                  <motion.span
+                  <motion.button
+                    type="button"
+                    onClick={() => gridRef.current?.toggleGroup(currentGroup.key)}
                     key={currentGroup.key}
                     initial={motionInitial(motionOn, { opacity: 0, y: 4 })}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
                     transition={{ duration: 0.15, ease: "easeOut" }}
-                    className="text-[13px] font-semibold text-text-primary"
+                    className="pointer-events-auto cursor-pointer text-[13px] font-semibold text-text-primary hover:text-accent"
                   >
                     {currentGroup.date === null
                       ? t("gallery.unknownDate")
@@ -753,7 +716,7 @@ export default function GalleryPage() {
                     <span className="ml-2 text-xs font-normal text-text-muted">
                       {t("gallery.groupCount", { count: currentGroup.assets.length })}
                     </span>
-                  </motion.span>
+                  </motion.button>
                 </AnimatePresence>
               </motion.div>
             )}
@@ -773,6 +736,7 @@ export default function GalleryPage() {
         <SelectionBar
           count={selectedAssets.length}
           assets={selectedAssets}
+          onFavoritesChanged={(items) => items.forEach((asset) => handleFavoriteChange(asset, true))}
           onDone={exitSelection}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
         />

@@ -98,6 +98,7 @@ export default function SelectionBar({
   assets,
   onDone,
   onAddToAlbum,
+  onFavoritesChanged,
   album,
 }: {
   count: number;
@@ -105,6 +106,7 @@ export default function SelectionBar({
   onDone: () => void;
   /** 「加入相册」入口回调（弹窗由上层挂载）；不传则不显示该按钮 */
   onAddToAlbum?: (assets: AssetDto[]) => void;
+  onFavoritesChanged?: (assets: AssetDto[]) => void;
   /** 相册上下文（相册详情页）：额外显示「从相册移除」 */
   album?: SelectionAlbumContext;
 }) {
@@ -132,6 +134,7 @@ export default function SelectionBar({
 
   async function favorite(): Promise<void> {
     for (const asset of assets) await assetRatingSet(asset.id, 5);
+    onFavoritesChanged?.(assets);
     flash(t("selection.done"));
   }
 

@@ -36,8 +36,8 @@ let eventHandlers: Array<(event: AppEvent) => void> = [];
 
 /** 分组 → 导航项（含禁用占位）的期望结构 */
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
-  { section: "浏览", links: ["图库", "最近浏览", "那年今天"], disabled: ["收藏"] },
-  { section: "组织", links: ["相册", "人物", "器材统计"], disabled: [] },
+  { section: "浏览", links: ["图库", "最近浏览"], disabled: [] },
+  { section: "组织", links: ["相册", "那年今天", "人物", "器材统计"], disabled: [] },
   { section: "工具", links: ["导入", "相似照片"], disabled: [] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
@@ -100,16 +100,9 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     expect(screen.queryByRole("link", { name: "搜索" })).not.toBeInTheDocument();
   });
 
-  it("禁用占位（收藏）：不可导航 + 「即将支持」小字", () => {
+  it("收藏不再占用侧栏入口", () => {
     renderSidebar("/gallery");
-
-    const disabled = screen.getAllByTestId("nav-disabled");
-    expect(disabled).toHaveLength(1);
-    for (const item of disabled) {
-      expect(item).toHaveAttribute("aria-disabled", "true");
-      expect(item.querySelector("a")).toBeNull(); // 无链接——不可导航
-      expect(within(item).getByTestId("nav-disabled-soon")).toHaveTextContent("即将支持");
-    }
+    expect(screen.queryByTestId("nav-disabled")).not.toBeInTheDocument();
   });
 
   it("当前路由项带激活标记（aria-current=page 与激活样式）", () => {
@@ -142,7 +135,8 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     const gear = screen.getByRole("link", { name: /器材统计/ });
     const browse = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("浏览"));
     const organize = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("组织"));
-    expect(browse).toContain(memories);
+    expect(browse).not.toContain(memories);
+    expect(organize).toContain(memories);
     expect(organize).toContain(gear);
 
     await user.click(memories);

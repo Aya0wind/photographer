@@ -157,7 +157,7 @@ export default function GearPage() {
   return (
     <div className="h-full" data-testid="gear-page">
       <div
-        className="sp-scroll mx-auto h-full w-full max-w-[1600px] overflow-y-auto px-6"
+        className="sp-scroll h-full w-full overflow-y-auto px-4"
         data-testid="gear-content"
       >
         {/* 头部 */}

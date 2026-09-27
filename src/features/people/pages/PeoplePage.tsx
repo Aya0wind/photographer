@@ -236,7 +236,7 @@ function PersonAssetsView({
 
   return (
     <div className="flex h-full flex-col" data-testid="people-assets-view">
-      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge px-6">
+      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge px-4">
         <button
           type="button"
           onClick={onBack}
@@ -317,7 +317,7 @@ export default function PeoplePage() {
 
   return (
     <div className="h-full overflow-y-auto" data-testid="people-page">
-      <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6 pt-4">
+      <div className="flex h-full w-full flex-col px-4 pt-4">
         <div className="flex shrink-0 items-baseline gap-3">
           <h1 className="text-sm font-semibold text-text-primary">{t("people.title")}</h1>
           {people !== null && people.length > 0 && (

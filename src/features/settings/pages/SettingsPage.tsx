@@ -5,8 +5,7 @@ import { useTranslation } from "react-i18next";
 import { importRootOf } from "@/features/onboarding/onboardingConfig";
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
-import { SMART_ALBUM_TAGS } from "@/features/albums/pages/AlbumsPages";
-import { loadHiddenTags, toggleHiddenTag } from "@/features/albums/lib/hiddenTags";
+import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags } from "@/features/albums/lib/smartTags";
 import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
 
 /**
@@ -102,37 +101,63 @@ export const SELECT_CLASS =
 /** 智能相册显示的标签（简化存储：localStorage，不走 settings） */
 function AlbumTagsSetting() {
   const { t } = useTranslation();
-  const [hidden, setHidden] = useState<string[]>(() => loadHiddenTags());
+  const [tags, setTags] = useState<string[]>(loadSmartTags);
+  const [newTag, setNewTag] = useState("");
+  const [pending, setPending] = useState(() => unindexedTags(loadSmartTags()).length);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const updateTags = (next: string[]) => {
+    saveSmartTags(next);
+    setTags(next);
+    setPending(unindexedTags(next).length);
+    setError(null);
+  };
+  const addTag = () => {
+    const tag = newTag.trim();
+    if (!tag) return;
+    if (!tags.includes(tag)) updateTags([...tags, tag]);
+    setNewTag("");
+  };
+  const build = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await indexNewTags(tags, (done, total) => {
+        setProgress(`${done}/${total}`);
+        setPending(unindexedTags(tags).length);
+      });
+      setPending(unindexedTags(tags).length);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
   return (
-    <SettingRow
-      label={t("settings.albums.visibleTags")}
-      desc={t("settings.albums.visibleTagsDesc")}
-      testId="settings-row-album-tags"
-    >
-      <div
-        className="flex max-w-[360px] flex-wrap justify-end gap-x-3 gap-y-1.5"
-        data-testid="settings-album-tags"
-      >
-        {SMART_ALBUM_TAGS.map((tag) => (
-          <label
-            key={tag}
-            className="flex cursor-pointer items-center gap-1 text-[11px] text-text-secondary"
-            data-testid="settings-album-tag"
-            data-tag={tag}
-            data-checked={!hidden.includes(tag)}
-          >
-            <input
-              type="checkbox"
-              checked={!hidden.includes(tag)}
-              onChange={() => setHidden(toggleHiddenTag(tag))}
-              aria-label={tag}
-              className="h-3 w-3 accent-[#F0A83C]"
-            />
-            {tag}
-          </label>
-        ))}
+    <div className="border-b border-edge/40 py-2" data-testid="settings-row-album-tags">
+      <div className="text-xs text-text-primary">{t("settings.albums.visibleTags")}</div>
+      <div className="mt-0.5 text-[11px] leading-relaxed text-text-muted">{t("settings.albums.visibleTagsDesc")}</div>
+      <div className="mt-3 flex w-full flex-col items-start gap-2" data-testid="settings-album-tags">
+        <div className="flex flex-wrap gap-1.5">
+          {tags.map((tag) => (
+            <span key={tag} className="inline-flex items-center gap-1 rounded-md border border-edge bg-panel px-2 py-1 text-[11px] text-text-secondary" data-testid="settings-album-tag" data-tag={tag}>
+              {tag}
+              <button type="button" onClick={() => updateTags(tags.filter((item) => item !== tag))} aria-label={`${t("settings.albums.removeTag")} ${tag}`} className="ml-0.5 text-text-muted hover:text-red-400">×</button>
+            </span>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <input value={newTag} onChange={(event) => setNewTag(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addTag(); } }} aria-label={t("settings.albums.addTag")} className="h-7 w-28 rounded-md border border-edge bg-bg px-2 text-xs text-text-primary outline-none focus:border-accent" />
+          <button type="button" onClick={addTag} className="h-7 rounded-md border border-edge px-2 text-xs text-text-secondary hover:border-accent">{t("settings.albums.addTag")}</button>
+          <button type="button" onClick={() => void build()} disabled={busy || pending === 0} className="h-7 rounded-md border border-accent px-2 text-xs text-accent disabled:border-edge disabled:text-text-muted" data-testid="settings-index-tags">
+            {busy ? `${t("settings.albums.indexing")} ${progress ?? ""}` : pending > 0 ? `${t("settings.albums.indexTags")} (${pending})` : t("settings.albums.indexed")}
+          </button>
+        </div>
+        {error && <span role="alert" className="text-[11px] text-red-400">{error}</span>}
       </div>
-    </SettingRow>
+    </div>
   );
 }
 
@@ -202,8 +227,8 @@ export default function SettingsPage() {
         })}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <div className="mx-auto flex w-full max-w-2xl flex-col gap-2.5">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div className="flex w-full flex-col gap-2.5">
           {tab === "general" && (
             <>
               <SectionTitle>{t("settings.section.system")}</SectionTitle>

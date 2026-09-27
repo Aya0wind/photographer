@@ -42,6 +42,8 @@ pub struct AssetDto {
     pub burst_id: Option<i64>,
     /// 连拍组成员数（仅入组资产有值；页内批量装配免 N+1）。
     pub burst_count: Option<u32>,
+    pub flagged: bool,
+    pub rating: i64,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -164,6 +166,8 @@ pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
         thumb_state: r.thumb_state,
         burst_id: r.burst_id,
         burst_count: None,
+        flagged: r.flagged,
+        rating: r.rating,
     }
 }
 
@@ -238,6 +242,18 @@ pub fn fetch_assets_page(
     Ok(dtos)
 }
 
+pub fn fetch_assets_count(state: &super::AppState, filters: AssetFilters) -> Result<u64, String> {
+    let mut filters = filters;
+    if let Some(after) = filters.captured_after.take() {
+        filters.captured_after = Some(normalize_date_filter(&after, "起始", false)?);
+    }
+    if let Some(before) = filters.captured_before.take() {
+        filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
+    }
+    let db = super::active_library_db(state)?;
+    db.assets_count(&filters).map_err(|e| e.to_string())
+}
+
 /// 本地时区日期分组（降序；unknown 组置顶）。
 pub fn fetch_asset_group_dates(state: &super::AppState) -> Result<Vec<DateGroupDto>, String> {
     let db = super::active_library_db(state)?;
@@ -289,6 +305,18 @@ pub async fn assets_page(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_assets_page(state, after_id, limit, filters)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn assets_count(
+    state: State<'_, SharedState>,
+    filters: Option<AssetFilters>,
+) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_assets_count(state, filters.unwrap_or_default())
     })
     .await
 }
@@ -447,6 +475,8 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 thumb_state: asset.thumb_state,
                 burst_id: None,
                 burst_count: None,
+                flagged: asset.flagged != 0,
+                rating: asset.rating,
             });
         }
     }

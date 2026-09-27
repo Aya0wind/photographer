@@ -53,6 +53,7 @@ const GPS_OPTIONS: ReadonlyArray<{ value: GpsFilter; labelKey: string }> = [
 
 /** 筛选面板全部输入 */
 export interface SearchInputs {
+  favoriteOnly: boolean;
   kind: KindFilter;
   from: string;
   to: string;
@@ -78,6 +79,7 @@ export interface SearchInputs {
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
+  favoriteOnly: false,
   kind: "all",
   from: "",
   to: "",
@@ -169,6 +171,7 @@ function mbToBytes(value: string): number | undefined {
 /** 全部输入 → AssetFilters（空条件=无过滤；各条件之间 AND，同字段多选 OR） */
 export function buildFilters(inputs: SearchInputs): AssetFilters {
   const filters: AssetFilters = {};
+  if (inputs.favoriteOnly) filters.ratingMin = 5;
   const kinds = kindsOf(inputs.kind);
   if (kinds) filters.kinds = kinds;
   const after = dateToRfc3339(inputs.from, false);
@@ -583,16 +586,64 @@ function FieldRow({ label, children }: { label: string; children: ReactNode }) {
 
 // --- 面板与 chips 行 ----------------------------------------------------------------
 
+/** 图库常用条件常驻工具栏，面板只展示其余条件。 */
+export function QuickFilterBar({
+  inputs,
+  onPatch,
+}: {
+  inputs: SearchInputs;
+  onPatch: (patch: Partial<SearchInputs>) => void;
+}) {
+  const { t } = useTranslation();
+  const applyQuickRange = (key: QuickRangeKey) => {
+    const [from, to] = quickRange(key);
+    onPatch({ from, to });
+  };
+  return (
+    <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-edge/60 py-1.5" data-testid="gallery-quick-filters">
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.kind")}</span>
+      <Segment ariaLabel={t("search.kind")} value={inputs.kind} options={KIND_OPTIONS} onChange={(kind) => onPatch({ kind })} testId="search-kind" />
+      <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.orientation")}</span>
+      <Segment ariaLabel={t("search.orientation")} value={inputs.orientation} options={ORIENTATION_OPTIONS} onChange={(orientation) => onPatch({ orientation })} testId="search-orientation" />
+      <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.gps")}</span>
+      <Segment ariaLabel={t("search.gps")} value={inputs.gps} options={GPS_OPTIONS} onChange={(gps) => onPatch({ gps })} testId="search-gps" />
+      <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
+      <button
+        type="button"
+        onClick={() => onPatch({ favoriteOnly: !inputs.favoriteOnly })}
+        aria-pressed={inputs.favoriteOnly}
+        className={`h-7 shrink-0 rounded-md border px-2.5 text-[11px] font-medium transition-colors ${inputs.favoriteOnly ? "border-amber-400 bg-amber-400/15 text-amber-400" : "border-edge text-text-secondary hover:border-amber-400 hover:text-amber-400"}`}
+        data-testid="gallery-favorite-filter"
+      >
+        {t("gallery.favoriteOnly")}
+      </button>
+      <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.date")}</span>
+      <div className="flex flex-wrap items-center gap-1" data-testid="search-quick-ranges">
+        {(["recent7", "recent30", "thisYear", "lastYear"] as const).map((key) => {
+          const [from, to] = quickRange(key);
+          const active = inputs.from === from && inputs.to === to;
+          return <button key={key} type="button" onClick={() => applyQuickRange(key)} aria-pressed={active} className={`h-7 rounded-md border px-2 text-[11px] transition-colors ${active ? "border-accent bg-accent/10 text-accent" : "border-edge text-text-secondary hover:border-accent hover:text-accent"}`} data-testid={`search-quick-${key}`}>{t(`search.quick.${key}`)}</button>;
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** 筛选面板（受控：inputs/onPatch 由调用方持有；清单自取）。
  *  hideAlbum=相册详情页传入：隐藏「所属相册」维度（详情页本身已在相册上下文内）。 */
 export function FilterPanel({
   inputs,
   onPatch,
   hideAlbum = false,
+  advancedOnly = false,
 }: {
   inputs: SearchInputs;
   onPatch: (patch: Partial<SearchInputs>) => void;
   hideAlbum?: boolean;
+  advancedOnly?: boolean;
 }) {
   const { t } = useTranslation();
 
@@ -630,7 +681,7 @@ export function FilterPanel({
   return (
     <div className="shrink-0 border-b border-edge bg-bg/40 px-2 py-3" data-testid="search-filter-panel">
       <div className="grid grid-cols-1 items-center gap-x-3 gap-y-1 rounded-xl border border-edge/70 bg-surface/70 p-2 shadow-inner shadow-black/20 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        <FieldRow label={t("search.kind")}>
+        {!advancedOnly && <FieldRow label={t("search.kind")}>
           <Segment
             ariaLabel={t("search.kind")}
             value={inputs.kind}
@@ -638,7 +689,7 @@ export function FilterPanel({
             onChange={(kind) => onPatch({ kind })}
             testId="search-kind"
           />
-        </FieldRow>
+        </FieldRow>}
         <FieldRow label={t("search.camera")}>
           <FilterDropdown
             label={t("search.camera")}
@@ -675,7 +726,7 @@ export function FilterPanel({
             testId="search-format"
           />
         </FieldRow>
-        <FieldRow label={t("search.orientation")}>
+        {!advancedOnly && <FieldRow label={t("search.orientation")}>
           <Segment
             ariaLabel={t("search.orientation")}
             value={inputs.orientation}
@@ -683,7 +734,7 @@ export function FilterPanel({
             onChange={(orientation) => onPatch({ orientation })}
             testId="search-orientation"
           />
-        </FieldRow>
+        </FieldRow>}
         <FieldRow label={t("search.flash")}>
           <Segment
             ariaLabel={t("search.flash")}
@@ -693,7 +744,7 @@ export function FilterPanel({
             testId="search-flash"
           />
         </FieldRow>
-        <FieldRow label={t("search.gps")}>
+        {!advancedOnly && <FieldRow label={t("search.gps")}>
           <Segment
             ariaLabel={t("search.gps")}
             value={inputs.gps}
@@ -701,7 +752,7 @@ export function FilterPanel({
             onChange={(gps) => onPatch({ gps })}
             testId="search-gps"
           />
-        </FieldRow>
+        </FieldRow>}
         {!hideAlbum && (
           <FieldRow label={t("search.album")}>
             <AlbumDropdown
@@ -792,7 +843,7 @@ export function FilterPanel({
             data-testid="search-to"
           />
         </FieldRow>
-        <div className="flex items-center gap-0.5" data-testid="search-quick-ranges">
+        {!advancedOnly && <div className="flex items-center gap-0.5" data-testid="search-quick-ranges">
           {(["recent7", "recent30", "thisYear", "lastYear"] as const).map((key) => (
             <button
               key={key}
@@ -804,7 +855,7 @@ export function FilterPanel({
               {t(`search.quick.${key}`)}
             </button>
           ))}
-        </div>
+        </div>}
       </div>
     </div>
   );
@@ -820,6 +871,9 @@ export interface ActiveChip {
 /** 输入 → 激活条件 chips（数字区间拆为 ≥/≤ 两枚，可单独移除） */
 export function buildChips(inputs: SearchInputs, t: (key: string) => string): ActiveChip[] {
   const chips: ActiveChip[] = [];
+  if (inputs.favoriteOnly) {
+    chips.push({ key: "favorite", label: t("nav.favorites"), patch: { ...inputs, favoriteOnly: false } });
+  }
   if (inputs.kind !== "all") {
     chips.push({ key: "kind", label: t(`search.kind.${inputs.kind}`), patch: { ...inputs, kind: "all" } });
   }

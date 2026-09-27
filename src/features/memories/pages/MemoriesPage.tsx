@@ -22,8 +22,6 @@ const CARD_THUMB_PX = 240;
 interface YearBlock extends AssetGroup {
   /** 四位年份 */
   year: number;
-  /** 是否今年（今天的块） */
-  isToday: boolean;
 }
 
 function buildYearBlocks(assets: AssetDto[], currentYear: number): YearBlock[] {
@@ -31,19 +29,18 @@ function buildYearBlocks(assets: AssetDto[], currentYear: number): YearBlock[] {
   const byYear = new Map<number, AssetDto[]>();
   for (const asset of assets) {
     const year = Number(asset.capturedAt?.slice(0, 4));
-    if (!Number.isFinite(year) || year <= 0) continue;
+    if (!Number.isFinite(year) || year <= 0 || year >= currentYear) continue;
     const list = byYear.get(year);
     if (list) list.push(asset);
     else byYear.set(year, [asset]);
   }
   return [...byYear.entries()]
-    .sort((a, b) => b[0] - a[0]) // 年份降序：今年（若有）置顶
+    .sort((a, b) => b[0] - a[0])
     .map(([year, list]) => ({
       key: `year-${year}`,
       date: list[0]?.capturedAt?.slice(0, 10) ?? null,
       assets: list,
       year,
-      isToday: year === currentYear,
     }));
 }
 
@@ -72,7 +69,7 @@ export default function MemoriesPage() {
 
   return (
     <div className="h-full" data-testid="memories-page">
-      <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6">
+      <div className="flex h-full w-full flex-col px-4">
         {/* 头部 */}
         <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge">
           <h1 className="text-sm font-semibold text-text-primary">{t("memories.title")}</h1>
@@ -102,30 +99,20 @@ export default function MemoriesPage() {
                 <section key={block.key} data-testid="memories-block" data-year={block.year}>
                   <div className="flex items-baseline gap-2 pb-2">
                     <h2 className="text-sm font-semibold text-text-primary">
-                      {block.isToday
-                        ? t("memories.today")
-                        : t("memories.yearsAgo", { count: currentYear - block.year })}
+                      {t("memories.yearsAgo", { count: currentYear - block.year })}
                     </h2>
-                    {block.isToday && (
-                      <span
-                        className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-accent"
-                        data-testid="memories-today-badge"
-                      >
-                        {t("memories.todayBadge")}
-                      </span>
-                    )}
                     <span className="font-mono text-[11px] tabular-nums text-text-muted">
                       {t("memories.blockCount", { count: block.assets.length })}
                     </span>
                     <span className="font-mono text-[11px] text-text-muted/70">{block.year}</span>
                   </div>
-                  <div className="sp-scroll flex gap-3 overflow-x-auto pb-2">
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(176px,1fr))] gap-3 pb-2">
                     {block.assets.map((asset) => (
                       <button
                         key={asset.id}
                         type="button"
                         onClick={() => openAsset(asset)}
-                        className="group relative h-32 w-44 shrink-0 overflow-hidden rounded-md border border-edge/60 bg-panel/40 transition-colors hover:border-accent/60"
+                        className="group relative h-32 min-w-0 overflow-hidden rounded-md border border-edge/60 bg-panel/40 transition-colors hover:border-accent/60"
                         data-testid="memories-card"
                         data-asset-id={asset.id}
                         title={asset.name}

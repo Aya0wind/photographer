@@ -182,6 +182,10 @@ export default function AlbumDetailPage() {
   // --- 分组 + 查看器 -------------------------------------------------------------------
   const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
   const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  useEffect(() => {
+    if (!viewer || !hasMoreRef.current) return;
+    if (viewer.index >= viewer.group.assets.length - 8) void appendPage();
+  }, [viewer?.index, viewer?.group.assets.length, appendPage]);
   const [tileSize, setTileSize] = useGalleryTileSize();
 
   const loadedById = useMemo(() => {
@@ -245,7 +249,7 @@ export default function AlbumDetailPage() {
 
   return (
     <div className="h-full" data-testid="album-detail-page" data-album-id={albumId}>
-      <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col px-6">
+      <div className="flex h-full w-full flex-col px-4">
         {/* 页头：相册名（点击重命名）+ 张数 + 添加照片 + 筛选 + 尺寸 */}
         <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge" data-testid="album-detail-toolbar">
           {renaming ? (

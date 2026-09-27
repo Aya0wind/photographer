@@ -170,9 +170,9 @@ fn sidebar_counts_semantics_and_tz_boundary() {
     let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
     assert_eq!(counts.assets, 6, "全 kind 计入资产总数");
     assert_eq!(counts.recent_viewed, 2);
-    // 3 历年 + 1 边界（本地口径今天）= 4；video 与他日不计
+    // 仅往年两张；今年今天与 video、他日均不计
     assert_eq!(
-        counts.on_this_day, 4,
+        counts.on_this_day, 2,
         "本地时区同月日（含 UTC 落前一天的边界样本）: {today}"
     );
     assert_eq!(counts.tags, 40);

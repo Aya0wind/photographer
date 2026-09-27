@@ -93,8 +93,7 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     // EXIF 在导入流读取首段时已同步提取并随资产一起落库，不会另建
     // index_tasks 行。把这些资产计为已完成，避免 UI 误报 0 / total；若未来
     // 存在显式 EXIF 任务，则仍以任务账为准。
-    if dto.exif.pending == 0 && dto.exif.running == 0 && dto.exif.done == 0 && dto.exif.failed == 0
-    {
+    if dto.exif.pending == 0 && dto.exif.running == 0 {
         dto.exif.done = total_assets;
     }
     Ok(dto)

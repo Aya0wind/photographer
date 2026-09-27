@@ -26,6 +26,7 @@ const searchSemanticMock = vi.mocked(searchSemantic);
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
+  localStorage.clear();
   searchSemanticMock.mockReset().mockResolvedValue([]);
 });
 

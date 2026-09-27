@@ -398,13 +398,27 @@ function makeAlbum(id: number, name: string, itemCount: number): AlbumDto {
 }
 
 describe("相册页两区：手工相册 + 智能相册", () => {
+  it("两类相册可以分别折叠和展开", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(1, "旅行", 2)]);
+    const user = userEvent.setup();
+    renderRoutes("/albums");
+    expect(await screen.findByTestId("albums-manual-card")).toBeInTheDocument();
+    expect(screen.getAllByTestId("albums-tag")).toHaveLength(40);
+    await user.click(within(screen.getByTestId("albums-manual-header")).getByRole("button"));
+    expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("albums-tag")).toHaveLength(40);
+    await user.click(within(screen.getByTestId("albums-smart-header")).getByRole("button"));
+    expect(screen.queryByTestId("albums-tag")).not.toBeInTheDocument();
+    await user.click(within(screen.getByTestId("albums-manual-header")).getByRole("button"));
+    expect(screen.getByTestId("albums-manual-card")).toBeInTheDocument();
+  });
   it("album_list 渲染手工区卡片（名称+张数+空封面占位），智能区 40 标签照旧", async () => {
     albumListMock.mockResolvedValue([makeAlbum(1, "青海湖 2026", 12), makeAlbum(2, "空相册", 0)]);
     renderRoutes("/albums");
 
     // 手工区：两分区头 + 两张卡片
     expect(await screen.findByTestId("albums-manual-section")).toBeInTheDocument();
-    expect(screen.getByTestId("albums-manual-header")).toHaveTextContent("手工相册");
+    expect(screen.getByTestId("albums-manual-header")).toHaveTextContent("相册");
     const cards = await screen.findAllByTestId("albums-manual-card");
     expect(cards).toHaveLength(2);
     expect(cards[0]).toHaveAttribute("data-album-id", "1");

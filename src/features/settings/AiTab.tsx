@@ -686,7 +686,7 @@ function IndexStatusSection() {
           const c = status[kind];
           if (!c) return null;
           const running = kicking.has(kind) || c.pending > 0 || c.running > 0;
-          const complete = c.total === 0 || (c.done >= c.total && c.failed === 0);
+          const complete = c.total === 0 || c.done >= c.total;
           return (
             <div
               key={kind}

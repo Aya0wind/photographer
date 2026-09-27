@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { albumAssetsPage, assetThumbGet, searchSemantic, type AlbumDto } from "@/ipc/api";
+import { indexedTagCover, rememberTagCover } from "./smartTags";
 
 /**
  * 智能相册标签封面（/albums）：自动用「该标签语义搜索第一条命中」做封面。
@@ -17,9 +18,13 @@ export const ALBUM_COVER_CONCURRENCY = 3;
 
 /** 单标签封面资产 id；搜索失败/无命中 → null（占位） */
 export async function fetchAlbumCoverAssetId(tag: string): Promise<number | null> {
+  const indexed = indexedTagCover(tag);
+  if (indexed !== undefined) return indexed;
   try {
     const hits = await searchSemantic(tag, 1);
-    return hits[0]?.assetId ?? null;
+    const assetId = hits[0]?.assetId ?? null;
+    rememberTagCover(tag, assetId);
+    return assetId;
   } catch {
     return null;
   }

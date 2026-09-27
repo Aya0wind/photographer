@@ -383,10 +383,8 @@ describe("画廊：空态与降级", () => {
 
 // --- 日期 chips 与跳转 --------------------------------------------------------------
 
-describe("画廊：年份吸顶条与日期跳转", () => {
-
-  it("点击年份跳该年首个日期组（M4.5 A4 年份吸顶条）", async () => {
-    // 两组：2026-09（首屏）+ 2025-05（视口外）
+describe("画廊：日期分组", () => {
+  it("保留日期组，不显示右侧年份按钮", async () => {
     assetsPageMock.mockResolvedValue([
       ...makePage(6, "2026-09-18", 20),
       ...makePage(6, "2025-05-10", 10),
@@ -395,25 +393,10 @@ describe("画廊：年份吸顶条与日期跳转", () => {
       { date: "2026-09-18", count: 6, coverAssetId: 20 },
       { date: "2025-05-10", count: 6, coverAssetId: 10 },
     ]);
-    const user = userEvent.setup();
     renderGallery();
 
     await screen.findAllByTestId("gallery-tile");
-    const rail = await screen.findByTestId("gallery-year-rail");
-    // 年份降序，来自 asset_group_dates（未知日期组不含年份）
-    const years = within(rail).getAllByTestId("gallery-year");
-    expect(years.map((y) => y.getAttribute("data-year"))).toEqual(["2026", "2025"]);
-    // 初始视口在 2026-09 组 → 2026 高亮
-    expect(years[0]).toHaveAttribute("data-active", "true");
-    expect(years[1]).toHaveAttribute("data-active", "false");
-
-    const scroll = screen.getByTestId("gallery-grid-scroll");
-    expect(scroll.scrollTop).toBe(0);
-    await user.click(years[1]);
-
-    // 跳到 2025 首个日期组（组头对齐吸顶条下缘；高亮联动依赖视口首行，
-    // -44 偏移下首行仍是上一组尾部——与 chips/日历跳转同语义，不单独断言）
-    await waitFor(() => expect(scroll.scrollTop).toBeGreaterThan(0));
+    expect(screen.queryByTestId("gallery-year-rail")).not.toBeInTheDocument();
     expect(screen.getByText("2025年5月10日")).toBeInTheDocument();
   });
 });
@@ -467,14 +450,13 @@ describe("RAW+JPG 合并展示", () => {
 // --- 工具条：居中 / 三档尺寸 ---------------------------------------------------------
 
 describe("画廊工具条：居中与尺寸", () => {
-  it("内容区水平居中 + 对称 padding（max-w 容器，chips 与网格同宽对齐）", async () => {
+  it("内容区贴近两侧边缘", async () => {
     assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
     renderGallery();
 
     const content = await screen.findByTestId("gallery-content");
-    expect(content.className).toContain("mx-auto");
-    expect(content.className).toContain("max-w-[1600px]");
-    expect(content.className).toContain("px-6");
+    expect(content.className).toContain("w-full");
+    expect(content.className).toContain("px-4");
   });
 
   it("两档尺寸（justify 行高）：默认大档 220；切小 160 并写 localStorage；无第三档", async () => {

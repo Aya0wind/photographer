@@ -14,6 +14,7 @@ import {
   assetGroupDates,
   assetThumbGet,
   assetsByIds,
+  assetsCount,
   assetsPage,
   cameraList,
   formatList,
@@ -37,6 +38,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     assetsPage: vi.fn(),
+    assetsCount: vi.fn(),
     assetGroupDates: vi.fn(),
     assetThumbGet: vi.fn(),
     cameraList: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const aiModelsStatusMock = vi.mocked(aiModelsStatus);
 const indexStatusMock = vi.mocked(indexStatus);
 const assetsPageMock = vi.mocked(assetsPage);
+const assetsCountMock = vi.mocked(assetsCount);
 const groupDatesMock = vi.mocked(assetGroupDates);
 const thumbMock = vi.mocked(assetThumbGet);
 const cameraListMock = vi.mocked(cameraList);
@@ -167,6 +170,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   assetsPageMock.mockReset().mockResolvedValue([]);
+  assetsCountMock.mockReset().mockResolvedValue(null);
   groupDatesMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
@@ -189,6 +193,27 @@ beforeEach(() => {
 // --- 工具条与默认态 -------------------------------------------------------------------
 
 describe("画廊合并：工具条与默认态", () => {
+  it("总数独立于分页，关闭收藏筛选后恢复完整列表", async () => {
+    const first = makeAsset(1, "2026-09-18");
+    const favorite = { ...makeAsset(2, "2026-09-17"), rating: 5 };
+    assetsPageMock.mockImplementation(async (_after, _limit, filters) =>
+      filters?.ratingMin === 5 ? [favorite] : [first, favorite],
+    );
+    assetsCountMock.mockImplementation(async (filters) => filters?.ratingMin === 5 ? 1 : 412);
+    renderGallery();
+    await waitFor(() => expect(screen.getByTestId("search-count")).toHaveTextContent("412"));
+    expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2);
+    expect(screen.getByTestId("gallery-favorite-filter")).toHaveTextContent("已收藏");
+
+    fireEvent.click(screen.getByTestId("gallery-favorite-filter"));
+    await waitFor(() => expect(screen.getByTestId("search-count")).toHaveTextContent("1"));
+    await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(1));
+
+    fireEvent.click(screen.getByTestId("gallery-favorite-filter"));
+    await waitFor(() => expect(screen.getByTestId("search-count")).toHaveTextContent("412"));
+    await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2));
+  });
+
   it("工具条含筛选/计数/尺寸（语义输入与选择按钮已删）；默认态查询 assetsPage(0,100)（无 filters）", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
     renderGallery();
@@ -331,6 +356,7 @@ describe("画廊合并：筛选面板", () => {
     const calls = assetsPageMock.mock.calls;
     const payload = calls[calls.length - 1]?.[2] as unknown as Record<string, unknown>;
     expect(payload).not.toHaveProperty("camera");
+    expect(screen.getByTestId("search-filter-count")).toHaveTextContent("2");
 
     // 清除入口属于下拉控件本身，而不是菜单内另设一行按钮。
     const menu = screen.getByTestId("search-camera-menu");
@@ -354,6 +380,7 @@ describe("画廊合并：筛选面板", () => {
 
       fireEvent.click(screen.getByTestId("search-filter-toggle"));
       expect(screen.getByTestId("search-filter-panel")).toBeInTheDocument();
+      expect(within(screen.getByTestId("search-filter-panel")).queryByTestId("search-kind")).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByTestId("search-kind-photo"));
       fireEvent.change(screen.getByTestId("search-from"), { target: { value: "2026-01-01" } });
@@ -373,16 +400,16 @@ describe("画廊合并：筛选面板", () => {
     }
   });
 
-  it("激活条件徽标 + chips 单独移除回默认态", async () => {
+  it("常用条件常驻工具栏；chips 单独移除回默认态", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    expect(screen.getByTestId("gallery-quick-filters")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("search-orientation-portrait"));
 
-    await waitFor(() => expect(screen.getByTestId("search-filter-count")).toHaveTextContent("1"));
+    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
     expect(screen.getByTestId("search-chip")).toHaveTextContent("竖拍");
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { orientation: "portrait" }),
