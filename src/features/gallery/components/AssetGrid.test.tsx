@@ -279,3 +279,47 @@ describe("AssetGrid：多选交互", () => {
     expect(onOpenAsset).toHaveBeenCalledTimes(1);
   });
 });
+
+// --- 选片补全（B1）：色点角标 / 拒绝弱化 / 只读态 -----------------------------------------
+
+describe("AssetGrid：颜色标签与拒绝旗标瓦片呈现", () => {
+  it("有 colorLabel：瓦片左下角色点（data-label）；无则不渲染", () => {
+    const labeled = { ...asset(1), colorLabel: "blue" };
+    renderGrid({ groups: groupsOf([labeled, asset(2)]) });
+
+    const dot = screen.getByTestId("tile-color-dot");
+    expect(dot).toHaveAttribute("data-label", "blue");
+    // 只给有标记的资产渲染
+    const tile2 = screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === "2");
+    expect(tile2?.querySelector('[data-testid="tile-color-dot"]')).toBeNull();
+  });
+
+  it("rejected 资产：瓦片弱化（opacity-50）+ 红旗角标 + data-rejected", () => {
+    const rejected = { ...asset(1), rejected: true };
+    renderGrid({ groups: groupsOf([rejected]) });
+
+    const tile = screen.getByTestId("gallery-tile");
+    expect(tile).toHaveAttribute("data-rejected", "true");
+    expect(tile.className).toContain("opacity-50");
+    expect(screen.getByTestId("tile-reject-badge")).toBeInTheDocument();
+  });
+
+  it("正常资产：无弱化与角标（data-rejected 不出现）", () => {
+    renderGrid({ groups: groupsOf([asset(1)]) });
+    expect(screen.getByTestId("gallery-tile").hasAttribute("data-rejected")).toBe(false);
+    expect(screen.queryByTestId("tile-reject-badge")).not.toBeInTheDocument();
+  });
+
+  it("readOnly（回收站只读态）：不渲染收藏星钮，多选仍可用", () => {
+    const onCheckClick = vi.fn();
+    renderGrid({
+      groups: groupsOf([asset(1)]),
+      readOnly: true,
+      selection: { active: true, selected: [], onToggle: () => {} },
+      onCheckClick,
+    });
+
+    expect(screen.queryByTestId("tile-favorite")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tile-check")).toBeInTheDocument();
+  });
+});

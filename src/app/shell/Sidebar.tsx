@@ -116,6 +116,13 @@ const ICONS = {
     </>,
     "import",
   ),
+  trash: icon(
+    <>
+      <path d="M3 4.5h10M6.5 2.5h3M4.5 4.5l.7 8.2a1.5 1.5 0 0 0 1.5 1.4h2.6a1.5 1.5 0 0 0 1.5-1.4l.7-8.2" />
+      <path d="M6.7 7v4.4M9.3 7v4.4" />
+    </>,
+    "trash",
+  ),
   settings: icon(
     <>
       <path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13" />
@@ -150,6 +157,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/import", labelKey: "nav.import", icon: ICONS.import },
       { to: "/similar", labelKey: "nav.similar", icon: ICONS.similar },
+      { to: "/trash", labelKey: "nav.trash", icon: ICONS.trash },
     ],
   },
   {

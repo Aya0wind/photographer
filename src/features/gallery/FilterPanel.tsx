@@ -6,6 +6,7 @@ import {
   cameraList,
   formatList,
   lensList,
+  smartViewCreate,
   type AlbumDto,
   type AssetCameraCount,
   type AssetFilters,
@@ -13,20 +14,28 @@ import {
   type AssetKind,
   type AssetLensCount,
 } from "@/ipc/api";
+import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
 
 /**
  * 筛选面板（M4.5 自 SearchPage 抽取的共享组件，画廊合并后唯一消费方）：
  * - 状态：SearchInputs 单对象（数字区间为原始字符串，构建时校验）；序列化键即防抖键
  * - UI：两行网格——类型/相机/镜头/格式（分段+勾选下拉）、方向/闪光灯/GPS（分段）、
- *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段、相册（单选下拉）
+ *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段、相册（单选下拉）、
+ *   颜色标签（B1 五色点单选）/已拒绝（B1 三态）
  * - 清单：cameraList/albumList 挂载拉一次；lensList/formatList 面板首次展开才拉（少打 IPC）
  * - chips：激活条件清单（每个可单独移除 + 一键清空），由 FilterChipsRow 渲染
+ * - 智能视图（B1）：有激活条件时显示「保存为视图」行（命名 → smart_view_create，
+ *   重名等业务错误行内提示；filtersJson=当前 buildFilters 结果序列化）
  */
 
 export type KindFilter = "all" | "photo" | "raw" | "video";
 type OrientationFilter = "all" | "landscape" | "portrait";
 type FlashFilter = "all" | "on" | "off" | "unknown";
 type GpsFilter = "all" | "yes" | "no";
+/** 颜色标签筛选：all=不限；五色单选 */
+export type ColorFilter = "all" | ColorLabel;
+/** 拒绝旗标三态：all=不限 / yes=仅已拒绝 / no=仅未拒绝 */
+export type RejectedFilter = "all" | "yes" | "no";
 
 const KIND_OPTIONS: ReadonlyArray<{ value: KindFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.kind.all" },
@@ -49,6 +58,11 @@ const GPS_OPTIONS: ReadonlyArray<{ value: GpsFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.gps.all" },
   { value: "yes", labelKey: "search.gps.yes" },
   { value: "no", labelKey: "search.gps.no" },
+];
+const REJECTED_OPTIONS: ReadonlyArray<{ value: RejectedFilter; labelKey: string }> = [
+  { value: "all", labelKey: "search.rejected.all" },
+  { value: "yes", labelKey: "search.rejected.yes" },
+  { value: "no", labelKey: "search.rejected.no" },
 ];
 
 /** 筛选面板全部输入 */
@@ -76,6 +90,10 @@ export interface SearchInputs {
   sizeMax: string;
   /** 所属相册（单选；name 随行携带供 chips 直接展示，序列化进防抖键） */
   album: { id: number; name: string } | null;
+  /** 颜色标签（B1，LR 五色单选；all=不限） */
+  color: ColorFilter;
+  /** 拒绝旗标三态（B1；all=不限） */
+  rejected: RejectedFilter;
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
@@ -100,6 +118,8 @@ export const EMPTY_INPUTS: SearchInputs = {
   sizeMin: "",
   sizeMax: "",
   album: null,
+  color: "all",
+  rejected: "all",
 };
 
 /** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；视频=video；全部=不传） */
@@ -205,7 +225,68 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   const sizeMax = mbToBytes(inputs.sizeMax);
   if (sizeMax !== undefined) filters.sizeMax = sizeMax;
   if (inputs.album !== null) filters.albumId = inputs.album.id;
+  if (inputs.color !== "all") filters.colorLabel = inputs.color;
+  if (inputs.rejected !== "all") filters.rejected = inputs.rejected === "yes";
   return filters;
+}
+
+/** RFC3339 → 本地 "YYYY-MM-DD"（应用已存视图时反解日期；非法回 ""） */
+function rfc3339ToYmd(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** 字节 → MB 输入串（两位小数内还原用户输入；非法回 ""） */
+function bytesToMbStr(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  return String(Number((bytes / (1024 * 1024)).toFixed(2)));
+}
+
+/**
+ * AssetFilters → SearchInputs（B1 智能视图应用：filtersJson 反解回面板输入）。
+ * 覆盖本面板能产出的全部维度；kinds 相册维度 albumId 反解不可行（缺相册名，
+ * 应用后由用户在面板重选）——语义等价性以 buildFilters(inputsFromFilters(f)) 与
+ * f 的关键字段一致为准（见 FilterPanel.b1 测试）。
+ */
+export function inputsFromFilters(filters: AssetFilters): SearchInputs {
+  const inputs: SearchInputs = { ...EMPTY_INPUTS };
+  if (filters.ratingMin !== undefined && filters.ratingMin >= 5) inputs.favoriteOnly = true;
+  const kinds = filters.kinds;
+  if (kinds && kinds.length > 0) {
+    const set = new Set(kinds);
+    if (set.has("photo") && set.has("raw")) inputs.kind = "photo";
+    else if (set.has("raw")) inputs.kind = "raw";
+    else if (set.has("video")) inputs.kind = "video";
+  }
+  if (filters.capturedAfter) inputs.from = rfc3339ToYmd(filters.capturedAfter);
+  if (filters.capturedBefore) inputs.to = rfc3339ToYmd(filters.capturedBefore);
+  if (filters.cameras && filters.cameras.length > 0) inputs.cameras = [...filters.cameras];
+  if (filters.lenses && filters.lenses.length > 0) inputs.lenses = [...filters.lenses];
+  if (filters.formats && filters.formats.length > 0) inputs.formats = [...filters.formats];
+  if (filters.orientation === "landscape" || filters.orientation === "portrait") {
+    inputs.orientation = filters.orientation;
+  }
+  if (filters.flash === "on" || filters.flash === "off" || filters.flash === "unknown") {
+    inputs.flash = filters.flash;
+  }
+  if (filters.hasGps !== undefined) inputs.gps = filters.hasGps ? "yes" : "no";
+  const strOf = (v: number | undefined): string =>
+    v !== undefined && Number.isFinite(v) ? String(v) : "";
+  inputs.focalMin = strOf(filters.focalMin);
+  inputs.focalMax = strOf(filters.focalMax);
+  inputs.isoMin = strOf(filters.isoMin);
+  inputs.isoMax = strOf(filters.isoMax);
+  inputs.apertureMin = strOf(filters.apertureMin);
+  inputs.apertureMax = strOf(filters.apertureMax);
+  inputs.shutterMin = strOf(filters.shutterMin);
+  inputs.shutterMax = strOf(filters.shutterMax);
+  inputs.sizeMin = bytesToMbStr(filters.sizeMin ?? NaN);
+  inputs.sizeMax = bytesToMbStr(filters.sizeMax ?? NaN);
+  if (asColorLabel(filters.colorLabel) !== null) inputs.color = filters.colorLabel as ColorLabel;
+  if (filters.rejected !== undefined) inputs.rejected = filters.rejected ? "yes" : "no";
+  return inputs;
 }
 
 /** 输入 → 序列化键（防抖用；字符串身份稳定） */
@@ -275,6 +356,62 @@ function Segment<T extends string>({
           data-testid={`${testId}-${option.value}`}
         >
           {t(option.labelKey)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** 颜色标签单选（B1，LR 五色点）：全部(不限) + 五色点，aria-checked 单选语义 */
+function ColorSegment({
+  value,
+  onChange,
+  testId,
+}: {
+  value: ColorFilter;
+  onChange: (next: ColorFilter) => void;
+  testId: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className="flex h-7 shrink-0 items-center gap-0.5 rounded-md border border-edge bg-panel/55 p-0.5"
+      role="radiogroup"
+      aria-label={t("search.color")}
+      data-testid={testId}
+    >
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === "all"}
+        onClick={() => onChange("all")}
+        className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+          value === "all" ? "bg-accent text-black" : "text-text-secondary hover:text-text-primary"
+        }`}
+        data-testid={`${testId}-all`}
+      >
+        {t("search.colorAll")}
+      </button>
+      {COLOR_LABELS.map((label) => (
+        <button
+          key={label}
+          type="button"
+          role="radio"
+          aria-checked={value === label}
+          aria-label={t(`gallery.color.${label}`)}
+          title={t(`gallery.color.${label}`)}
+          onClick={() => onChange(value === label ? "all" : label)}
+          className={`rounded p-1 transition-colors ${
+            value === label ? "bg-accent/25" : "hover:bg-panel"
+          }`}
+          data-testid={`${testId}-${label}`}
+        >
+          <span
+            className={`block h-3 w-3 rounded-full ${COLOR_DOT_CLASS[label]} ${COLOR_DOT_RING} ${
+              value === label ? "outline outline-1 outline-accent" : ""
+            }`}
+            aria-hidden="true"
+          />
         </button>
       ))}
     </div>
@@ -632,18 +769,92 @@ export function QuickFilterBar({
   );
 }
 
+/** 智能视图保存行（B1）：有激活条件时出现——命名输入 → smart_view_create；
+ *  重名等后端业务错误行内提示；成功后清空输入并回调上层刷新视图清单。 */
+function SmartViewSaveRow({
+  inputs,
+  onSaved,
+}: {
+  inputs: SearchInputs;
+  onSaved?: () => void;
+}) {
+  const { t } = useTranslation();
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function save(): Promise<void> {
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      setError(t("smartview.nameRequired"));
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const result = await smartViewCreate(trimmed, JSON.stringify(buildFilters(inputs)));
+    setSaving(false);
+    if (!result.ok) {
+      setError(result.error ?? t("smartview.saveUnavailable"));
+      return;
+    }
+    setName("");
+    onSaved?.();
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-edge/60 pt-2" data-testid="smart-view-save-row">
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("smartview.save")}</span>
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => {
+          setName(e.target.value);
+          if (error !== null) setError(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void save();
+          }
+        }}
+        placeholder={t("smartview.namePlaceholder")}
+        aria-label={t("smartview.namePlaceholder")}
+        className={`${INPUT_CLASS} w-44`}
+        data-testid="smart-view-name-input"
+      />
+      <button
+        type="button"
+        onClick={() => void save()}
+        disabled={saving}
+        className="h-7 shrink-0 rounded-md border border-accent/60 bg-accent/10 px-2.5 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+        data-testid="smart-view-save"
+      >
+        {saving ? t("smartview.saving") : t("smartview.saveConfirm")}
+      </button>
+      {error !== null && (
+        <span className="text-[11px] text-red-400" data-testid="smart-view-save-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** 筛选面板（受控：inputs/onPatch 由调用方持有；清单自取）。
- *  hideAlbum=相册详情页传入：隐藏「所属相册」维度（详情页本身已在相册上下文内）。 */
+ *  hideAlbum=相册详情页传入：隐藏「所属相册」维度（详情页本身已在相册上下文内）。
+ *  onSmartViewSaved=智能视图保存成功后回调（上层刷新「已存视图」清单）。 */
 export function FilterPanel({
   inputs,
   onPatch,
   hideAlbum = false,
   advancedOnly = false,
+  onSmartViewSaved,
 }: {
   inputs: SearchInputs;
   onPatch: (patch: Partial<SearchInputs>) => void;
   hideAlbum?: boolean;
   advancedOnly?: boolean;
+  onSmartViewSaved?: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -753,6 +964,22 @@ export function FilterPanel({
             testId="search-gps"
           />
         </FieldRow>}
+        <FieldRow label={t("search.color")}>
+          <ColorSegment
+            value={inputs.color}
+            onChange={(color) => onPatch({ color })}
+            testId="search-color"
+          />
+        </FieldRow>
+        <FieldRow label={t("search.rejected")}>
+          <Segment
+            ariaLabel={t("search.rejected")}
+            value={inputs.rejected}
+            options={REJECTED_OPTIONS}
+            onChange={(rejected) => onPatch({ rejected })}
+            testId="search-rejected"
+          />
+        </FieldRow>
         {!hideAlbum && (
           <FieldRow label={t("search.album")}>
             <AlbumDropdown
@@ -857,6 +1084,8 @@ export function FilterPanel({
           ))}
         </div>}
       </div>
+      {/* 智能视图（B1）：有激活条件才出现保存入口（默认全部资产无保存意义） */}
+      {hasActiveFilters(inputs) && <SmartViewSaveRow inputs={inputs} onSaved={onSmartViewSaved} />}
     </div>
   );
 }
@@ -958,6 +1187,20 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
   rangeChip("aperture", "f/", inputs.apertureMin, inputs.apertureMax, "apertureMin", "apertureMax");
   rangeChip("shutter", "", inputs.shutterMin, inputs.shutterMax, "shutterMin", "shutterMax");
   rangeChip("size", "MB", inputs.sizeMin, inputs.sizeMax, "sizeMin", "sizeMax");
+  if (inputs.color !== "all") {
+    chips.push({
+      key: "color",
+      label: `${t("search.color")} ${t(`gallery.color.${inputs.color}`)}`,
+      patch: { ...inputs, color: "all" },
+    });
+  }
+  if (inputs.rejected !== "all") {
+    chips.push({
+      key: "rejected",
+      label: t(`search.rejected.${inputs.rejected}`),
+      patch: { ...inputs, rejected: "all" },
+    });
+  }
   if (inputs.album !== null) {
     chips.push({ key: "album", label: inputs.album.name, patch: { ...inputs, album: null } });
   }

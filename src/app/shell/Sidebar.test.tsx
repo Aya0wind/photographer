@@ -38,7 +38,7 @@ let eventHandlers: Array<(event: AppEvent) => void> = [];
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
   { section: "浏览", links: ["图库", "最近浏览"], disabled: [] },
   { section: "组织", links: ["相册", "那年今天", "人物", "器材统计"], disabled: [] },
-  { section: "工具", links: ["导入", "相似照片"], disabled: [] },
+  { section: "工具", links: ["导入", "相似照片", "回收站"], disabled: [] },
   { section: "系统", links: ["设置"], disabled: [] },
 ];
 
@@ -50,6 +50,7 @@ function renderSidebar(initialPath: string) {
         <Routes>
           <Route path="/gallery" element={<div>GALLERY_CONTENT</div>} />
           <Route path="/recent" element={<div>RECENT_CONTENT</div>} />
+          <Route path="/trash" element={<div>TRASH_CONTENT</div>} />
           <Route path="/memories" element={<div>MEMORIES_CONTENT</div>} />
           <Route path="/gear" element={<div>GEAR_CONTENT</div>} />
           <Route path="/similar" element={<div>SIMILAR_CONTENT</div>} />
@@ -143,6 +144,20 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     expect(screen.getByText("MEMORIES_CONTENT")).toBeInTheDocument();
     await user.click(gear);
     expect(screen.getByText("GEAR_CONTENT")).toBeInTheDocument();
+  });
+
+  it("B1 回收站入口（工具组，指 /trash，无计数徽标）", async () => {
+    renderSidebar("/gallery");
+    const user = userEvent.setup();
+
+    const trash = screen.getByRole("link", { name: /回收站/ });
+    const tools = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("工具"));
+    expect(tools).toContain(trash);
+    expect(trash).toHaveAttribute("href", "/trash");
+    expect(within(trash).queryByTestId("sidebar-count-badge")).not.toBeInTheDocument();
+
+    await user.click(trash);
+    expect(screen.getByText("TRASH_CONTENT")).toBeInTheDocument();
   });
 
   it("F8 相似照片入口已启用（工具组，指 /similar，不再是占位禁用）", async () => {

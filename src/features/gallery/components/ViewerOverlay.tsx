@@ -6,10 +6,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   assetDetail,
   assetFlagSet,
+  assetLabelSet,
   assetRatingSet,
+  assetRejectSet,
   type AssetDetailDto,
   type AssetDto,
 } from "@/ipc/api";
+import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
 import type { AssetGroup } from "../lib/assetGroups";
 import {
   fetchAssetThumb,
@@ -152,9 +155,11 @@ interface ViewerOverlayProps {
   /** 当前结果集内切换（缩略图/箭头/键盘） */
   onNavigate: (index: number) => void;
   onClose: () => void;
+  /** 本视图内的资产标记变更回传（颜色标签/拒绝旗标；上层同步网格态，可选） */
+  onAssetPatched?: (id: number, patch: Partial<AssetDto>) => void;
 }
 
-export default function ViewerOverlay({ asset, group, index, onNavigate, onClose }: ViewerOverlayProps) {
+export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
@@ -450,6 +455,35 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     await assetFlagSet(asset.id, flagged);
   }
 
+  // --- 颜色标签（B1，LR 五色标）：星级行旁色点点开设置（单资产） -----------------------
+  const [colorDraft, setColorDraft] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    setColorDraft(undefined);
+  }, [asset.id]);
+  const currentColor = colorDraft !== undefined ? asColorLabel(colorDraft) : asColorLabel(asset.colorLabel);
+  const [colorOpen, setColorOpen] = useState(false);
+  useEffect(() => {
+    setColorOpen(false);
+  }, [asset.id]);
+  async function applyColorLabel(label: string | null): Promise<void> {
+    setColorOpen(false);
+    setColorDraft(label);
+    await assetLabelSet([asset.id], label);
+    onAssetPatched?.(asset.id, { colorLabel: label });
+  }
+
+  // --- 拒绝旗标（B1）：与星级分层的独立标记；X 键切换 ---------------------------------
+  const [rejectDraft, setRejectDraft] = useState<boolean | null>(null);
+  useEffect(() => {
+    setRejectDraft(null);
+  }, [asset.id]);
+  const currentRejected = rejectDraft ?? asset.rejected ?? false;
+  async function applyRejected(rejected: boolean): Promise<void> {
+    setRejectDraft(rejected);
+    await assetRejectSet([asset.id], rejected);
+    onAssetPatched?.(asset.id, { rejected });
+  }
+
   // LR 风格查看器快捷键：方向键导航、[]/,./R 旋转、0-5 评分、P/U 旗标、
   // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键；
   // 右键菜单打开时 Esc 让给菜单（不关查看器）。
@@ -486,6 +520,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         void applyFlagged(true);
       } else if (e.key === "u" || e.key === "U") {
         void applyFlagged(false);
+      } else if (e.key === "x" || e.key === "X") {
+        // X = 拒绝旗标切换（LR 同款语义；与星级分层）
+        e.preventDefault();
+        void applyRejected(!currentRejected);
       } else if (e.key === "z" || e.key === "Z") {
         setView((v) =>
           v.scale > MIN_SCALE
@@ -500,7 +538,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [asset.id, ctxAt, currentRating, group.assets.length, index, closeViewer, onNavigate, showHint, toggleFullscreen]);
+  }, [asset.id, ctxAt, currentRating, currentRejected, group.assets.length, index, closeViewer, onNavigate, showHint, toggleFullscreen]);
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -899,6 +937,59 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                       </svg>
                     </button>
                   ))}
+                  {/* 颜色标签（LR 五色标）：当前色点点开设置（单资产） */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setColorOpen((v) => !v)}
+                      aria-expanded={colorOpen}
+                      aria-label={t("viewer.colorLabel")}
+                      title={currentColor === null ? t("viewer.colorLabel") : t(`gallery.color.${currentColor}`)}
+                      className="rounded-full p-1 transition-colors hover:bg-panel"
+                      data-testid="viewer-color"
+                      data-label={currentColor ?? "none"}
+                    >
+                      {currentColor === null ? (
+                        <span className={`block h-3 w-3 rounded-full border border-dashed border-text-muted`} aria-hidden="true" />
+                      ) : (
+                        <span className={`block h-3 w-3 rounded-full ${COLOR_DOT_CLASS[currentColor as ColorLabel]} ${COLOR_DOT_RING}`} aria-hidden="true" />
+                      )}
+                    </button>
+                    {colorOpen && (
+                      <div
+                        className="absolute left-0 top-7 z-10 flex w-max items-center gap-1 rounded-lg border border-edge bg-surface p-1.5 shadow-xl"
+                        data-testid="viewer-color-menu"
+                      >
+                        {COLOR_LABELS.map((label) => (
+                          <button
+                            key={label}
+                            type="button"
+                            title={t(`gallery.color.${label}`)}
+                            aria-label={t(`gallery.color.${label}`)}
+                            onClick={() => void applyColorLabel(label)}
+                            className="rounded-full p-1 transition-transform hover:scale-110"
+                            data-testid="viewer-color-option"
+                            data-label={label}
+                          >
+                            <span className={`block h-3.5 w-3.5 rounded-full ${COLOR_DOT_CLASS[label]} ${COLOR_DOT_RING}`} aria-hidden="true" />
+                          </button>
+                        ))}
+                        <span className="h-4 w-px bg-edge" aria-hidden="true" />
+                        <button
+                          type="button"
+                          onClick={() => void applyColorLabel(null)}
+                          title={t("selection.colorClear")}
+                          aria-label={t("selection.colorClear")}
+                          className="rounded-full p-1 text-text-muted transition-colors hover:bg-panel hover:text-text-primary"
+                          data-testid="viewer-color-clear"
+                        >
+                          <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+                            <path d="M4 4l8 8M12 4l-8 8" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <button
                     type="button"
                     onClick={() => void applyFlagged(!currentFlagged)}
@@ -910,6 +1001,24 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                     data-testid="viewer-flag"
                   >
                     ⚑
+                  </button>
+                  {/* 拒绝旗标（与星级分层；X 键切换） */}
+                  <button
+                    type="button"
+                    onClick={() => void applyRejected(!currentRejected)}
+                    aria-pressed={currentRejected}
+                    title={currentRejected ? t("viewer.rejectClear") : t("viewer.rejectSet")}
+                    className={`rounded px-1.5 py-0.5 text-[11px] transition-colors ${
+                      currentRejected
+                        ? "bg-red-500 text-white"
+                        : "text-text-muted hover:bg-red-400/10 hover:text-red-400"
+                    }`}
+                    data-testid="viewer-reject"
+                  >
+                    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="inline-block align-[-1px]">
+                      <circle cx="8" cy="8" r="5.6" />
+                      <path d="M4.2 11.8l7.6-7.6" />
+                    </svg>
                   </button>
                 </div>
                 <div data-testid="viewer-exif-rows" data-asset-id={visibleDetail.id}>
@@ -936,7 +1045,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
 
       {/* 大图右键菜单（作用于当前资产；Esc/点击外部关闭，期间查看器 Esc 让位） */}
       {ctxAt !== null && (
-        <AssetContextMenu at={ctxAt} assets={[asset]} onClose={() => setCtxAt(null)} />
+        <AssetContextMenu
+          at={ctxAt}
+          assets={[asset]}
+          onClose={() => setCtxAt(null)}
+          onColorLabeled={(_, label) => onAssetPatched?.(asset.id, { colorLabel: label })}
+          onRejected={(_, rejected) => onAssetPatched?.(asset.id, { rejected })}
+        />
       )}
     </div>
   );

@@ -8,6 +8,7 @@ import {
 import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
 import RecentPage from "@/features/gallery/pages/RecentPage";
+import TrashPage from "@/features/gallery/pages/TrashPage";
 import MemoriesPage from "@/features/memories/pages/MemoriesPage";
 import GearPage from "@/features/gear/pages/GearPage";
 import ImportPage from "@/features/import/pages/ImportPage";
@@ -57,6 +58,8 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/gallery" replace /> },
       { path: "gallery", element: <GalleryPage /> },
       { path: "recent", element: <RecentPage /> },
+      // 回收站（B1：软删资产管理——恢复/彻底删除）
+      { path: "trash", element: <TrashPage /> },
       { path: "memories", element: <MemoriesPage /> },
       { path: "gear", element: <GearPage /> },
       { path: "search", element: <SearchRedirect /> },

@@ -6,8 +6,13 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   assetsCount,
   assetsPage,
+  assetTrashMove,
   isIpcAvailable,
+  smartViewDelete,
+  smartViewList,
   type AssetDto,
+  type AssetFilters,
+  type SmartViewDto,
 } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
@@ -34,6 +39,7 @@ import {
 import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import SelectionBar from "../components/SelectionBar";
+import SmartViewsMenu from "../components/SmartViewsMenu";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
@@ -45,6 +51,7 @@ import {
   buildChips,
   buildFilters,
   hasActiveFilters,
+  inputsFromFilters,
   parseInputs,
   serializeInputs,
   EMPTY_INPUTS,
@@ -446,6 +453,95 @@ export default function GalleryPage() {
     persistSnapshot();
   }, [persistSnapshot]);
 
+  // --- 选片补全（B1）：色标/拒绝/移入回收站/反选/智能视图 --------------------------------
+  /** 批量补丁（本地列表乐观更新 + 快照落盘）；色标/拒绝/查看器回传共用 */
+  const patchAssetsByIds = useCallback(
+    (ids: number[], patchOf: (asset: AssetDto) => Partial<AssetDto>) => {
+      if (ids.length === 0) return;
+      const idSet = new Set(ids);
+      assetsRef.current = assetsRef.current.map((a) => (idSet.has(a.id) ? { ...a, ...patchOf(a) } : a));
+      setAssets(assetsRef.current);
+      persistSnapshot();
+    },
+    [persistSnapshot],
+  );
+  const handleColorLabeled = useCallback(
+    (items: AssetDto[], label: string | null) => {
+      patchAssetsByIds(items.map((a) => a.id), () => ({ colorLabel: label }));
+    },
+    [patchAssetsByIds],
+  );
+  const handleRejected = useCallback(
+    (items: AssetDto[], rejected: boolean) => {
+      patchAssetsByIds(items.map((a) => a.id), () => ({ rejected }));
+    },
+    [patchAssetsByIds],
+  );
+  const handleAssetPatched = useCallback(
+    (id: number, patch: Partial<AssetDto>) => {
+      patchAssetsByIds([id], () => patch);
+    },
+    [patchAssetsByIds],
+  );
+
+  /** 反选数据窗口：当前数据管线的全部已加载 id（语义态=语义结果；其余=画廊资产） */
+  const windowIds = useMemo(
+    () => (semanticMode ? semantic.assets.map((a) => a.id) : assets.map((a) => a.id)),
+    [semanticMode, semantic.assets, assets],
+  );
+  const invertSelection = useCallback(
+    (ids: number[]) => setSelected(ids.map((id) => id)),
+    [],
+  );
+
+  /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
+  const [trashConfirm, setTrashConfirm] = useState<{ ids: number[] } | null>(null);
+  const requestTrashMove = useCallback((targets: AssetDto[]) => {
+    setTrashConfirm({ ids: targets.map((a) => a.id) });
+  }, []);
+  async function confirmTrashMove(): Promise<void> {
+    if (trashConfirm === null) return;
+    const ids = trashConfirm.ids;
+    setTrashConfirm(null);
+    await assetTrashMove(ids); // 后端软删；本地乐观剔除（失败靠重进页面重拉兜底）
+    const idSet = new Set(ids);
+    assetsRef.current = assetsRef.current.filter((a) => !idSet.has(a.id));
+    setAssets(assetsRef.current);
+    setTotalCount((count) => (count === null ? null : Math.max(0, count - ids.length)));
+    if (selecting) exitSelection();
+    persistSnapshot();
+  }
+
+  // 智能视图（B1）：清单挂载拉一次 + 面板保存成功后刷新
+  const [smartViews, setSmartViews] = useState<SmartViewDto[]>([]);
+  const refreshSmartViews = useCallback(() => {
+    void smartViewList().then(setSmartViews);
+  }, []);
+  useEffect(() => {
+    refreshSmartViews();
+  }, [refreshSmartViews]);
+  const applySmartView = useCallback(
+    (view: SmartViewDto) => {
+      let filters: AssetFilters = {};
+      try {
+        filters = JSON.parse(view.filtersJson) as AssetFilters;
+      } catch {
+        filters = {}; // 脏数据兜底：反解失败退回「全部资产」
+      }
+      setSemanticGateNotice(false);
+      semantic.reset();
+      setInputs(inputsFromFilters(filters));
+    },
+    [semantic],
+  );
+  const deleteSmartView = useCallback(
+    async (view: SmartViewDto) => {
+      await smartViewDelete(view.id);
+      refreshSmartViews();
+    },
+    [refreshSmartViews],
+  );
+
   // 三档尺寸（justify 行高）
   const [tileSize, setTileSize] = useGalleryTileSize();
 
@@ -549,6 +645,9 @@ export default function GalleryPage() {
             </svg>
           </button>
 
+          {/* 已存视图（B1）：点击应用（filters 反解套用）+ 逐项 × 删除确认 */}
+          <SmartViewsMenu views={smartViews} onApply={applySmartView} onDelete={(v) => void deleteSmartView(v)} />
+
           {/* 计数徽标 */}
           <span
             className="ml-auto shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
@@ -599,8 +698,8 @@ export default function GalleryPage() {
           <SemanticGateNotice reason={semanticGate.reason} testId="gallery-semantic-gate" />
         )}
 
-        {/* 筛选面板（默认收起；修改筛选自动退出语义态） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly />}
+        {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
+        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onSmartViewSaved={refreshSmartViews} />}
 
         {/* 激活条件 chips */}
         {!semanticMode && (
@@ -731,7 +830,7 @@ export default function GalleryPage() {
         )}
       </div>
 
-      {/* 多选浮动操作条（已选 N | 收藏/旗标/分享/加入相册/取消） */}
+      {/* 多选浮动操作条（已选 N | 收藏/旗标/色标/拒绝/分享/加入相册/反选/移入回收站/取消） */}
       {selecting && (
         <SelectionBar
           count={selectedAssets.length}
@@ -739,16 +838,24 @@ export default function GalleryPage() {
           onFavoritesChanged={(items) => items.forEach((asset) => handleFavoriteChange(asset, true))}
           onDone={exitSelection}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
+          onColorLabeled={handleColorLabeled}
+          onRejected={handleRejected}
+          onTrashRequest={requestTrashMove}
+          windowIds={windowIds}
+          onInvert={invertSelection}
         />
       )}
 
-      {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含「加入相册」） */}
+      {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含色标/拒绝/加入相册/移入回收站） */}
       {ctxMenu && (
         <AssetContextMenu
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
           assets={ctxMenu.assets}
           onClose={() => setCtxMenu(null)}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
+          onColorLabeled={handleColorLabeled}
+          onRejected={handleRejected}
+          onTrashRequest={requestTrashMove}
         />
       )}
 
@@ -760,7 +867,47 @@ export default function GalleryPage() {
         />
       )}
 
-      {/* 首次进画廊：快捷键一次性提示条 */}
+      {/* 「移入回收站」确认一步（多选操作条/右键菜单共用；删除默认先入回收站） */}
+      {trashConfirm !== null && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-6"
+          data-testid="trash-move-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("trash.moveTitle")}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTrashConfirm(null);
+          }}
+        >
+          <div className="w-full max-w-sm rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+            <h2 className="text-sm font-semibold text-text-primary" data-testid="trash-move-title">
+              {t("trash.moveTitle")}
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-text-secondary">
+              {t("trash.moveDesc", { count: trashConfirm.ids.length })}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setTrashConfirm(null)}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
+                data-testid="trash-move-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmTrashMove()}
+                className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-500/85"
+                data-testid="trash-move-accept"
+              >
+                {t("trash.moveConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ShortcutsHint />
 
       {/* 全屏查看器 */}
@@ -771,6 +918,7 @@ export default function GalleryPage() {
           index={viewer.index}
           onNavigate={navigateTo}
           onClose={closeViewer}
+          onAssetPatched={handleAssetPatched}
         />
       )}
     </div>

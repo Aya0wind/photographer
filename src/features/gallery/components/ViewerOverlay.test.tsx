@@ -12,7 +12,9 @@ import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import {
   assetDetail,
   assetFlagSet,
+  assetLabelSet,
   assetRatingSet,
+  assetRejectSet,
   assetThumbGet,
   type AssetDetailDto,
   type AssetDto,
@@ -26,6 +28,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetThumbGet: vi.fn(),
     assetFlagSet: vi.fn(),
     assetRatingSet: vi.fn(),
+    assetLabelSet: vi.fn(),
+    assetRejectSet: vi.fn(),
     clipboardCopyFiles: vi.fn(),
     revealInExplorer: vi.fn(),
   };
@@ -54,6 +58,8 @@ const thumbMock = vi.mocked(assetThumbGet);
 const convertMock = vi.mocked(convertFileSrc);
 const ratingMock = vi.mocked(assetRatingSet);
 const flagMock = vi.mocked(assetFlagSet);
+const labelMock = vi.mocked(assetLabelSet);
+const rejectMock = vi.mocked(assetRejectSet);
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -91,7 +97,11 @@ const DETAIL: AssetDetailDto = {
 function renderViewer(
   assets: AssetDto[] = GROUP_ASSETS,
   index = 0,
-  overrides?: { onNavigate?: (i: number) => void; onClose?: () => void },
+  overrides?: {
+    onNavigate?: (i: number) => void;
+    onClose?: () => void;
+    onAssetPatched?: (id: number, patch: Partial<AssetDto>) => void;
+  },
 ) {
   const group: AssetGroup = groupAssetsByDate(assets)[0];
   const onNavigate = vi.fn();
@@ -104,6 +114,7 @@ function renderViewer(
         index={index}
         onNavigate={overrides?.onNavigate ?? onNavigate}
         onClose={overrides?.onClose ?? onClose}
+        onAssetPatched={overrides?.onAssetPatched}
       />
     </I18nextProvider>,
   );
@@ -129,6 +140,8 @@ beforeEach(() => {
   detailMock.mockReset().mockResolvedValue(DETAIL);
   ratingMock.mockReset().mockResolvedValue(undefined);
   flagMock.mockReset().mockResolvedValue(undefined);
+  labelMock.mockReset().mockResolvedValue(undefined);
+  rejectMock.mockReset().mockResolvedValue(undefined);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   resetThumbPipelineForTests();
@@ -1167,5 +1180,74 @@ describe("查看器：视频播放（M8）", () => {
     fireEvent.error(await screen.findByTestId("viewer-video"));
     expect(await screen.findByTestId("viewer-video-fallback")).toBeInTheDocument();
     expect(screen.getByTestId("viewer-video-system")).toBeInTheDocument();
+  });
+});
+
+// --- 选片补全（B1）：颜色标签 / 拒绝旗标 -----------------------------------------------
+
+describe("查看器：颜色标签（星级行旁色点）", () => {
+  it("默认无色标：色点空心；点开菜单选红色 → assetLabelSet([id],'red') + onAssetPatched 回传", async () => {
+    const user = userEvent.setup();
+    const onAssetPatched = vi.fn();
+    renderViewer(GROUP_ASSETS, 0, { onAssetPatched });
+    await screen.findByTestId("viewer-rating");
+
+    expect(screen.getByTestId("viewer-color")).toHaveAttribute("data-label", "none");
+
+    await user.click(screen.getByTestId("viewer-color"));
+    const menu = screen.getByTestId("viewer-color-menu");
+    const red = within(menu)
+      .getAllByTestId("viewer-color-option")
+      .find((el) => el.getAttribute("data-label") === "red");
+    await user.click(red as HTMLElement);
+
+    await waitFor(() => expect(labelMock).toHaveBeenCalledWith([1], "red"));
+    expect(onAssetPatched).toHaveBeenCalledWith(1, { colorLabel: "red" });
+  });
+
+  it("已有色标（asset.colorLabel=green）：色点回显；点清除 → assetLabelSet([id],null)", async () => {
+    const user = userEvent.setup();
+    const onAssetPatched = vi.fn();
+    const labeled = [{ ...GROUP_ASSETS[0], colorLabel: "green" }];
+    renderViewer(labeled, 0, { onAssetPatched });
+    await screen.findByTestId("viewer-rating");
+
+    expect(screen.getByTestId("viewer-color")).toHaveAttribute("data-label", "green");
+
+    await user.click(screen.getByTestId("viewer-color"));
+    await user.click(screen.getByTestId("viewer-color-clear"));
+    await waitFor(() => expect(labelMock).toHaveBeenCalledWith([1], null));
+    expect(onAssetPatched).toHaveBeenCalledWith(1, { colorLabel: null });
+  });
+});
+
+describe("查看器：拒绝旗标（与星级分层）", () => {
+  it("未拒绝：点按钮 → assetRejectSet([id],true)；X 键切换 → false", async () => {
+    const user = userEvent.setup();
+    const onAssetPatched = vi.fn();
+    renderViewer(GROUP_ASSETS, 0, { onAssetPatched });
+    await screen.findByTestId("viewer-rating");
+
+    expect(screen.getByTestId("viewer-reject")).toHaveAttribute("aria-pressed", "false");
+    await user.click(screen.getByTestId("viewer-reject"));
+    await waitFor(() => expect(rejectMock).toHaveBeenCalledWith([1], true));
+    expect(onAssetPatched).toHaveBeenCalledWith(1, { rejected: true });
+
+    // X 键：已拒绝（draft=true）→ 切回 false
+    fireEvent.keyDown(window, { key: "x" });
+    await waitFor(() => expect(rejectMock).toHaveBeenLastCalledWith([1], false));
+    expect(onAssetPatched).toHaveBeenLastCalledWith(1, { rejected: false });
+  });
+
+  it("已拒绝资产：按钮点亮（aria-pressed=true），可再点取消", async () => {
+    const user = userEvent.setup();
+    const rejected = [{ ...GROUP_ASSETS[0], rejected: true }];
+    renderViewer(rejected, 0);
+    await screen.findByTestId("viewer-rating");
+
+    const btn = screen.getByTestId("viewer-reject");
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+    await user.click(btn);
+    await waitFor(() => expect(rejectMock).toHaveBeenCalledWith([1], false));
   });
 });

@@ -165,6 +165,12 @@ export interface AssetDto {
   flagged?: boolean;
   /** 五星代表收藏，与批量收藏操作一致 */
   rating?: number;
+  /** 颜色标签（LR 五色：red/yellow/green/blue/purple）；null=未设置。后端契约扩展中 */
+  colorLabel?: string | null;
+  /** 拒绝旗标（与星级分层的独立标记；筛选/回收站前弱化展示）。后端契约扩展中 */
+  rejected?: boolean;
+  /** 是否在回收站（trash_list 返回 true；常规查询不携带/为 false） */
+  inTrash?: boolean;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
@@ -226,6 +232,10 @@ export interface AssetFilters {
   albumId?: number;
   flagged?: boolean;
   ratingMin?: number;
+  /** 颜色标签（LR 五色之一）；省略 = 不过滤。后端契约扩展中 */
+  colorLabel?: string;
+  /** 拒绝旗标三态过滤（true=仅拒绝 / false=仅未拒绝；省略 = 不限）。后端契约扩展中 */
+  rejected?: boolean;
 }
 
 /** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
@@ -1302,6 +1312,120 @@ export async function assetAlbums(assetId: number): Promise<AlbumDto[]> {
       : [];
   } catch {
     return [];
+  }
+}
+
+// --- 选片补全（B1）：颜色标签 / 拒绝旗标 / 回收站 / 智能视图 ----------------------------
+// 后端 lane 并行实现中：命令未注册时按既有惯例静默降级（写操作 false、列表 []），
+// UI 乐观更新不被传输失败阻塞。
+
+/** 颜色标签枚举（LR 五色；与 AssetDto.colorLabel / AssetFilters.colorLabel 同域） */
+export type ColorLabelKind = "red" | "yellow" | "green" | "blue" | "purple";
+
+/** 批量设置颜色标签（asset_label_set；label=null 清除）。命令失败静默（乐观 UI 由调用方回滚/重拉） */
+export async function assetLabelSet(assetIds: number[], label: string | null): Promise<void> {
+  try {
+    await ipc<void>("asset_label_set", { assetIds, label });
+  } catch {
+    // 静默
+  }
+}
+
+/** 批量设置拒绝旗标（asset_reject_set；与星级分层的独立标记）。命令失败静默 */
+export async function assetRejectSet(assetIds: number[], rejected: boolean): Promise<void> {
+  try {
+    await ipc<void>("asset_reject_set", { assetIds, rejected });
+  } catch {
+    // 静默
+  }
+}
+
+/** 移入回收站（asset_trash_move：软删，常规查询后端自动排除）。命令失败静默 */
+export async function assetTrashMove(assetIds: number[]): Promise<void> {
+  try {
+    await ipc<void>("asset_trash_move", { assetIds });
+  } catch {
+    // 静默
+  }
+}
+
+/** 回收站清单（trash_list；trashedAt DESC keyset：afterId=上一页末条 id，首页传 0）。
+ *  失败/非数组回退 []——UI 自然降级空态。 */
+export async function trashList(afterId: number, limit: number): Promise<AssetDto[]> {
+  try {
+    const list = await ipc<AssetDto[] | null>("trash_list", { afterId, limit });
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 从回收站恢复（trash_restore：常规查询重新可见）。失败 false（调用方提示） */
+export async function trashRestore(assetIds: number[]): Promise<boolean> {
+  try {
+    await ipc<void>("trash_restore", { assetIds });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 彻底删除（trash_purge；deleteFiles=true 连磁盘文件一并删除）。返回实际删除数；
+ *  业务错误原样抛给调用方展示。 */
+export async function trashPurge(assetIds: number[], deleteFiles: boolean): Promise<number> {
+  const deleted = await ipc<number>("trash_purge", { assetIds, deleteFiles });
+  return typeof deleted === "number" && Number.isFinite(deleted) ? deleted : 0;
+}
+
+/** 智能视图（smart_view_list 返回；命名唯一，重名创建由后端报错） */
+export interface SmartViewDto {
+  id: number;
+  name: string;
+  /** buildFilters 结果的 JSON 序列化（apply 由前端反解回 SearchInputs） */
+  filtersJson: string;
+  createdAt: string;
+}
+
+/** 智能视图清单（smart_view_list）；失败/非数组/形状异常回退 [] */
+export async function smartViewList(): Promise<SmartViewDto[]> {
+  try {
+    const list = await ipc<SmartViewDto[] | null>("smart_view_list");
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      (v): v is SmartViewDto =>
+        typeof v?.id === "number" && Number.isFinite(v.id) && typeof v?.name === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+export type SmartViewCreateResult =
+  | { ok: true; view: SmartViewDto }
+  | { ok: false; error: string | null };
+
+/** 新建智能视图（smart_view_create；重名等业务错误透传原始 Err 文案，调用方行内提示） */
+export async function smartViewCreate(name: string, filtersJson: string): Promise<SmartViewCreateResult> {
+  try {
+    const view = await ipc<SmartViewDto>("smart_view_create", { name, filtersJson });
+    if (view === null || typeof view !== "object" || typeof view.id !== "number") {
+      return { ok: false, error: null };
+    }
+    return { ok: true, view };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 删除智能视图（smart_view_delete）；失败 false */
+export async function smartViewDelete(id: number): Promise<boolean> {
+  try {
+    await ipc<void>("smart_view_delete", { id });
+    return true;
+  } catch {
+    return false;
   }
 }
 

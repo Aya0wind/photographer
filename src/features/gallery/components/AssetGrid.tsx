@@ -13,6 +13,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { assetRatingSet, type AssetDto } from "@/ipc/api";
 import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
+import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING } from "../lib/colorLabels";
 import {
   UNKNOWN_GROUP_KEY,
   formatDateLabel,
@@ -170,6 +171,8 @@ interface AssetGridProps {
   scores?: Map<number, number>;
   /** 连拍堆叠角标（M6）：封面 assetId → 连拍张数 N（含封面） */
   burstBadges?: Map<number, number>;
+  /** 只读态（B1 回收站页）：隐藏收藏星钮等写操作入口，仅保留多选/浏览 */
+  readOnly?: boolean;
   scrollTestId?: string;
 }
 
@@ -190,6 +193,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     badges,
     scores,
     burstBadges,
+    readOnly = false,
     scrollTestId = "gallery-grid-scroll",
   },
   ref,
@@ -532,12 +536,35 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isSelected =
                       selection?.active && selection.selected.includes(asset.id);
                     const isFavorite = localFavorites.get(asset.id) ?? (asset.rating === 5);
+                    // 颜色标签（LR 五色标）：瓦片左下角小圆点（有 colorLabel 才显示）
+                    const colorDot = asColorLabel(asset.colorLabel);
+                    // 拒绝旗标：瓦片弱化（整体降不透明度）+ 右上红旗角标
+                    const isRejected = asset.rejected === true;
                     const inner = (
                       <>
                         <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-[calc(100%-20px)] w-full" />
                         <span className="absolute inset-x-0 bottom-0 flex h-5 items-center justify-center bg-panel/90 font-mono text-[10px] tabular-nums text-text-secondary" data-testid="tile-resolution">
                           {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
                         </span>
+                        {colorDot && (
+                          <span
+                            className={`absolute bottom-1.5 left-1.5 z-20 h-2 w-2 rounded-full ${COLOR_DOT_CLASS[colorDot]} ${COLOR_DOT_RING}`}
+                            data-testid="tile-color-dot"
+                            data-label={colorDot}
+                            title={t(`gallery.color.${colorDot}`)}
+                          />
+                        )}
+                        {isRejected && (
+                          <span
+                            className="absolute right-1 top-7 z-10 flex h-4 w-4 items-center justify-center rounded-sm bg-red-500/90 text-white"
+                            data-testid="tile-reject-badge"
+                            title={t("gallery.rejectedBadge")}
+                          >
+                            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M3.5 14V2.5M3.5 3h7l-1 2.5 1 2.5h-7" />
+                            </svg>
+                          </span>
+                        )}
                         {badge && (
                           <span
                             className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
@@ -599,34 +626,36 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             )}
                           </span>
                         )}
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          aria-label={isFavorite ? "取消收藏" : "收藏"}
-                          aria-pressed={isFavorite}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const favorite = !isFavorite;
-                            setLocalFavorites((current) => new Map(current).set(asset.id, favorite));
-                            void assetRatingSet(asset.id, favorite ? 5 : 0);
-                            onFavoriteChange?.(asset, favorite);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" || e.key === " ") {
-                              e.preventDefault();
+                        {!readOnly && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            aria-label={isFavorite ? "取消收藏" : "收藏"}
+                            aria-pressed={isFavorite}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
                               e.stopPropagation();
-                              e.currentTarget.click();
-                            }
-                          }}
-                          className={`absolute bottom-6 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
-                            isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
-                          }`}
-                          data-testid="tile-favorite"
-                          data-asset-id={asset.id}
-                        >
-                          <svg viewBox="0 0 24 24" width="17" height="17" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m12 2 3.1 6.3 7 .9-5 4.9 1.2 7-6.3-3.3-6.3 3.3 1.2-7-5-4.9 7-.9z" /></svg>
-                        </span>
+                              const favorite = !isFavorite;
+                              setLocalFavorites((current) => new Map(current).set(asset.id, favorite));
+                              void assetRatingSet(asset.id, favorite ? 5 : 0);
+                              onFavoriteChange?.(asset, favorite);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                e.currentTarget.click();
+                              }
+                            }}
+                            className={`absolute bottom-6 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
+                              isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
+                            }`}
+                            data-testid="tile-favorite"
+                            data-asset-id={asset.id}
+                          >
+                            <svg viewBox="0 0 24 24" width="17" height="17" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m12 2 3.1 6.3 7 .9-5 4.9 1.2 7-6.3-3.3-6.3 3.3 1.2-7-5-4.9 7-.9z" /></svg>
+                          </span>
+                        )}
                       </>
                     );
                     const itemWidth = row.widths[itemIndex];
@@ -654,7 +683,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         }}
                         className={`group relative isolate touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
-                        } ${selectionClass}`}
+                        } ${selectionClass} ${isRejected ? "opacity-50" : ""}`}
                         style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
@@ -662,6 +691,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-kind={asset.kind}
                         data-cursor={isCursor}
                         data-selected={isSelected}
+                        data-rejected={isRejected || undefined}
                         data-burst={burstCount !== undefined ? burstCount : undefined}
                       >
                         {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
@@ -693,7 +723,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         key={asset.id}
                         className={`relative overflow-hidden rounded-md bg-panel/40 ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
-                        } ${selectionClass}`}
+                        } ${selectionClass} ${isRejected ? "opacity-50" : ""}`}
                         style={{ width: itemWidth, height: row.height }}
                         title={asset.name}
                         data-testid="gallery-tile"
@@ -701,6 +731,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-kind={asset.kind}
                         data-cursor={isCursor}
                         data-selected={isSelected}
+                        data-rejected={isRejected || undefined}
                         data-burst={burstCount !== undefined ? burstCount : undefined}
                       >
                         {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
