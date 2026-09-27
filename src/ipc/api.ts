@@ -1410,10 +1410,11 @@ export interface AlbumSubgroupDto {
   itemCount: number;
 }
 
-/** 相册子分组清单（album_subgroups）；失败/非数组/形状异常回退 [] */
+/** 相册子分组清单（album_subgroups；命令参数名是 id——与 album_assets_page 同款）；
+ *  失败/非数组/形状异常回退 [] */
 export async function albumSubgroups(albumId: number): Promise<AlbumSubgroupDto[]> {
   try {
-    const list = await ipc<unknown>("album_subgroups", { albumId });
+    const list = await ipc<unknown>("album_subgroups", { id: albumId });
     if (!Array.isArray(list)) return [];
     return list.filter(
       (g): g is AlbumSubgroupDto =>
@@ -1424,15 +1425,15 @@ export async function albumSubgroups(albumId: number): Promise<AlbumSubgroupDto[
   }
 }
 
-/** 相册内挪子分组（album_item_move_subgroup）：纯引用移动，subgroup=null 移回根。
- *  失败 false（调用方提示）。 */
+/** 相册内挪子分组（album_item_move_subgroup；命令参数名是 id）：纯引用移动，
+ *  subgroup=null 移回根。失败 false（调用方提示）。 */
 export async function albumItemMoveSubgroup(
   albumId: number,
   assetIds: number[],
   subgroup: string | null,
 ): Promise<boolean> {
   try {
-    await ipc<void>("album_item_move_subgroup", { albumId, assetIds, subgroup });
+    await ipc<void>("album_item_move_subgroup", { id: albumId, assetIds, subgroup });
     return true;
   } catch {
     return false;
