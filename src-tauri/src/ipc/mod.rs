@@ -18,6 +18,7 @@ pub mod selection;
 pub mod settings;
 pub mod system;
 pub mod thumb;
+pub mod versions;
 pub mod watch;
 
 use std::collections::{HashMap, HashSet};

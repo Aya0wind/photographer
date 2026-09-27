@@ -21,6 +21,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0014_HASH_CHANNEL,
     MIGRATION_0015_ALBUMS,
     MIGRATION_0016_SELECTION,
+    MIGRATION_0017_VERSIONS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -388,4 +389,47 @@ CREATE TABLE smart_view (
 );
 
 CREATE INDEX idx_assets_trash ON assets (in_trash, trashed_at);
+"#;
+
+/// 0017（阶段 B2 原片-成片版本关系，roadmap §5）：
+/// - `photo_group`：一次快门的逻辑组（raw=RAW 原片 / sooc=机内 JPEG /
+///   derived=成片派生件）。组行只承载 id（成员在 group_asset），
+///   AUTOINCREMENT 防删除后 id 复用（与 album/smart_view 同款约定）。
+/// - `group_asset`：组×资产多对多（PK(group_id, asset_id)，一资产至多
+///   属一组——应用逻辑保证，membership 行随资产/组删除双向级联）。
+///   孤儿单资产不强制入组（无孪生的 v1 不建组，查询按需兼容）。
+///   组形成：导入引擎 pair 配对（raw+photo）升级为同组建组；存量 pair
+///   数据跑 scripts/backfill_photo_groups.py 幂等回填。
+/// - `asset_relation`：成片→原片的 `derived_from` 显式关系（source 记
+///   lr_export/app_edit；match_basis 记 filename/exif_time/phash_score
+///   组合 JSON；confirmed=用户已确认的强关联）。
+/// - 资产删除级联：group_asset/asset_relation 均随 assets 行消失；
+///   空组行由删除路径清理（assets_delete_rows）。
+const MIGRATION_0017_VERSIONS: &str = r#"
+CREATE TABLE photo_group (
+    id INTEGER PRIMARY KEY AUTOINCREMENT
+);
+
+CREATE TABLE group_asset (
+    group_id INTEGER NOT NULL REFERENCES photo_group (id) ON DELETE CASCADE,
+    asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    role     TEXT    NOT NULL CHECK (role IN ('raw', 'sooc', 'derived')),
+    PRIMARY KEY (group_id, asset_id)
+);
+
+CREATE INDEX idx_group_asset_asset ON group_asset (asset_id);
+
+CREATE TABLE asset_relation (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id         INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    related_asset_id INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    kind             TEXT    NOT NULL CHECK (kind IN ('derived_from')),
+    source           TEXT,
+    match_basis      TEXT,
+    confirmed        INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL
+);
+
+CREATE INDEX idx_asset_relation_asset   ON asset_relation (asset_id);
+CREATE INDEX idx_asset_relation_related ON asset_relation (related_asset_id);
 "#;

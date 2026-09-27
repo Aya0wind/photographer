@@ -377,6 +377,12 @@ pub struct AssetFilters {
     /// 接受/拒绝状态（0016）：true → rejected=1；false → rejected=0。
     /// 默认查询**不排除**已拒绝——只是可筛选项，区别于回收站。
     pub rejected: Option<bool>,
+    /// 版本维度（0017）："raw_only"（只看原片：自身非派生件——raw/sooc/
+    /// 未入组资产都算原片）| "derived_only"（只看成片：自身是派生件）|
+    /// "no_derived"（原片尚无成片：自身非派生件且所在组无派生成员）。
+    /// 其他值容错不过滤。实现为 EXISTS/NOT EXISTS 条件，未入组资产在
+    /// raw_only/no_derived 下天然命中。
+    pub group_role: Option<String>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -2114,6 +2120,11 @@ impl Db {
             &format!("DELETE FROM assets WHERE id IN ({slots})"),
             rusqlite::params_from_iter(ids.iter()),
         )?;
+        // 空组清理（group_asset 随资产级联后，可能留下无成员壳组）
+        tx.execute(
+            "DELETE FROM photo_group WHERE id NOT IN (SELECT DISTINCT group_id FROM group_asset)",
+            [],
+        )?;
         tx.commit()?;
         Ok(n as u64)
     }
@@ -2161,6 +2172,183 @@ impl Db {
             return Err(Error::QueryReturnedNoRows);
         }
         Ok(())
+    }
+
+    // —— 原片-成片版本关系（0017：photo_group / group_asset / asset_relation）——
+
+    /// 资产所属组 id（未入组 None）。
+    pub fn asset_group_of(&self, asset_id: i64) -> Result<Option<i64>> {
+        self.0
+            .query_row(
+                "SELECT group_id FROM group_asset WHERE asset_id = ?1",
+                [asset_id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
+    /// 组成员表（role 升序 = raw→sooc→derived，id tiebreak；版本切换数据源）。
+    pub fn group_members(&self, group_id: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.0.prepare(
+            "SELECT asset_id, role FROM group_asset WHERE group_id = ?1 \
+             ORDER BY CASE role WHEN 'raw' THEN 0 WHEN 'sooc' THEN 1 ELSE 2 END, asset_id",
+        )?;
+        let rows = stmt.query_map(params![group_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// 把派生件挂入原片所在组（成片导回路径）：原片有组 → 追加 derived 成员；
+    /// 无组 → 建组并把原片按 kind 定角色（raw/sooc）后连同派生件一起入组。
+    /// 幂等（PK 冲突时校正 role）。返回 (组 id, 是否新建组)。
+    pub fn group_link_derived(&self, derived_id: i64, source_id: i64) -> Result<(i64, bool)> {
+        let tx = self.0.unchecked_transaction()?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT group_id FROM group_asset WHERE asset_id = ?1",
+                [source_id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        let (target, created) = match existing {
+            Some(g) => (g, false),
+            None => {
+                let kind: String =
+                    tx.query_row("SELECT kind FROM assets WHERE id = ?1", [source_id], |r| {
+                        r.get(0)
+                    })?;
+                let role = match kind.as_str() {
+                    "raw" => "raw",
+                    _ => "sooc",
+                };
+                tx.execute("INSERT INTO photo_group DEFAULT VALUES", [])?;
+                let g = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT OR REPLACE INTO group_asset (group_id, asset_id, role) \
+                     VALUES (?1, ?2, ?3)",
+                    params![g, source_id, role],
+                )?;
+                (g, true)
+            }
+        };
+        tx.execute(
+            "INSERT INTO group_asset (group_id, asset_id, role) VALUES (?1, ?2, 'derived') \
+             ON CONFLICT (group_id, asset_id) DO UPDATE SET role = 'derived'",
+            params![target, derived_id],
+        )?;
+        tx.commit()?;
+        Ok((target, created))
+    }
+
+    /// 落一条派生关系（derived_from；confirmed=1 表示用户已确认的强关联）。
+    /// 返回关系 id。同 (asset_id, related_asset_id, kind) 幂等（IGNORE）。
+    pub fn asset_relation_add(
+        &self,
+        asset_id: i64,
+        related_asset_id: i64,
+        source: Option<&str>,
+        match_basis: Option<&str>,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT OR IGNORE INTO asset_relation \
+             (asset_id, related_asset_id, kind, source, match_basis, confirmed, created_at) \
+             VALUES (?1, ?2, 'derived_from', ?3, ?4, 1, ?5)",
+            params![
+                asset_id,
+                related_asset_id,
+                source,
+                match_basis,
+                now_rfc3339()
+            ],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// 派生关系是否已存在（asset ← related 的 derived_from）。
+    /// （仓储基元：当前导入幂等性由文件级 size+xxhash 去重承担，本方法
+    /// 留作查询基元，测试覆盖。）
+    #[allow(dead_code)]
+    pub fn asset_relation_exists(&self, asset_id: i64, related_asset_id: i64) -> Result<bool> {
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM asset_relation \
+             WHERE asset_id = ?1 AND related_asset_id = ?2 AND kind = 'derived_from'",
+            params![asset_id, related_asset_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 存量回填：由既有 pair_asset_id 双向链建 photo_group（0017 配套，
+    /// 幂等可重跑——已同组的配对直接跳过）。只处理 raw+photo 孪生，角色
+    /// 按 kind 定（raw/sooc）。返回 (回填配对数, 新建组数)。
+    /// 真库用 scripts/backfill_photo_groups.py（同语义 SQL，独立跑）。
+    #[allow(dead_code)]
+    pub fn backfill_photo_groups_from_pairs(&self) -> Result<(u64, u64)> {
+        let pairs: Vec<(i64, i64)> = {
+            let mut stmt = self.0.prepare(
+                "SELECT id, pair_asset_id FROM assets \
+                 WHERE pair_asset_id IS NOT NULL AND id < pair_asset_id ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+        };
+        let mut linked = 0u64;
+        let mut created = 0u64;
+        for (a, b) in pairs {
+            let group_of = |aid: i64| -> Result<Option<i64>> {
+                self.0
+                    .query_row(
+                        "SELECT group_id FROM group_asset WHERE asset_id = ?1",
+                        [aid],
+                        |r| r.get(0),
+                    )
+                    .map(Some)
+                    .or_else(|e| match e {
+                        Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })
+            };
+            let (ga, gb) = (group_of(a)?, group_of(b)?);
+            if ga.is_some() && ga == gb {
+                continue; // 已同组：幂等跳过
+            }
+            let kind_of = |aid: i64| -> Result<String> {
+                self.0
+                    .query_row("SELECT kind FROM assets WHERE id = ?1", [aid], |r| {
+                        r.get::<_, String>(0)
+                    })
+            };
+            let role_of = |k: String| -> Option<&'static str> {
+                match k.as_str() {
+                    "raw" => Some("raw"),
+                    "photo" => Some("sooc"),
+                    _ => None,
+                }
+            };
+            let (ka, kb) = (kind_of(a)?, kind_of(b)?);
+            let (Some(ra), Some(rb)) = (role_of(ka), role_of(kb)) else {
+                continue; // 非 raw+photo 孪生不建组
+            };
+            let before: i64 = self
+                .0
+                .query_row("SELECT COUNT(*) FROM photo_group", [], |r| r.get(0))?;
+            group_pair_on(&self.0, a, ra, b, rb)?;
+            let after: i64 = self
+                .0
+                .query_row("SELECT COUNT(*) FROM photo_group", [], |r| r.get(0))?;
+            linked += 1;
+            created += (after - before).unsigned_abs();
+        }
+        Ok((linked, created))
     }
 
     /// EXIF 提取代际升级自愈（exif-gen-2）：重排**全部** photo/raw 资产的
@@ -2488,7 +2676,8 @@ fn insert_asset_on(conn: &Connection, a: &AssetRow, album_id: Option<i64>) -> Re
 
 /// 按 (同目录, 同 stem, 异扩展名) 找配对伙伴并双向写 pair_asset_id；
 /// 多候选取 id 最小（先入册者）。目录前缀 = 原样前缀（含分隔符）匹配，
-/// stem 大小写折叠（Windows 路径大小写不敏感）。
+/// stem 大小写折叠（Windows 路径大小写不敏感）。找到 RAW+照片孪生时
+/// 同步建组（0017 photo_group：raw+sooc 同组，见 [`group_pair_on`]）。
 fn refresh_asset_pair_on(conn: &Connection, id: i64, path: &str) -> Result<()> {
     let (dir, stem, _ext) = split_dir_stem_ext(path);
     if stem.is_empty() || dir.is_empty() {
@@ -2527,6 +2716,81 @@ fn refresh_asset_pair_on(conn: &Connection, id: i64, path: &str) -> Result<()> {
         conn.execute(
             "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
             params![p, id],
+        )?;
+        // RAW+JPEG 孪生 → photo_group 归组（角色按 kind：raw/sooc）
+        let kind_of = |aid: i64| -> Result<String> {
+            conn.query_row("SELECT kind FROM assets WHERE id = ?1", [aid], |r| {
+                r.get::<_, String>(0)
+            })
+        };
+        let (ka, kb) = (kind_of(id)?, kind_of(p)?);
+        let role_of = |k: &str| -> Option<&'static str> {
+            match k {
+                "raw" => Some("raw"),
+                "photo" => Some("sooc"),
+                _ => None,
+            }
+        };
+        if let (Some(ra), Some(rb)) = (role_of(&ka), role_of(&kb)) {
+            group_pair_on(conn, id, ra, p, rb)?;
+        }
+    }
+    Ok(())
+}
+
+/// 一次快门的 RAW+照片孪生入组（0017）：两边任一已有组则归入该组（两组
+/// 并存时把另一组合并进来，防 pair 拓扑演化出分叉组）；都无组则建新组。
+/// 幂等：重复配对只校正 role 不重复建组。
+fn group_pair_on(
+    conn: &Connection,
+    a_id: i64,
+    a_role: &str,
+    b_id: i64,
+    b_role: &str,
+) -> Result<()> {
+    let group_of = |aid: i64| -> Result<Option<i64>> {
+        conn.query_row(
+            "SELECT group_id FROM group_asset WHERE asset_id = ?1",
+            [aid],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+    };
+    let (ga, gb) = (group_of(a_id)?, group_of(b_id)?);
+    let target = match (ga, gb) {
+        (Some(x), Some(y)) if x == y => x,
+        (Some(x), _) => x,
+        (_, Some(y)) => y,
+        (None, None) => {
+            conn.execute("INSERT INTO photo_group DEFAULT VALUES", [])?;
+            conn.last_insert_rowid()
+        }
+    };
+    // 合并另一组（组员整体并入 target 后删除空壳；UPDATE OR REPLACE 处理
+    // 组员已在 target 的主键冲突）
+    if let Some(g) = gb {
+        if g != target {
+            conn.execute(
+                "UPDATE OR REPLACE group_asset SET group_id = ?2 WHERE group_id = ?1",
+                params![g, target],
+            )?;
+            conn.execute("DELETE FROM photo_group WHERE id = ?1", [g])?;
+        }
+    }
+    // 防御：两资产的其他历史归属一律清除（一资产至多属一组）
+    conn.execute(
+        "DELETE FROM group_asset WHERE asset_id IN (?1, ?2) AND group_id != ?3",
+        params![a_id, b_id, target],
+    )?;
+    for (aid, role) in [(a_id, a_role), (b_id, b_role)] {
+        conn.execute(
+            "INSERT INTO group_asset (group_id, asset_id, role) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (group_id, asset_id) DO UPDATE SET role = excluded.role",
+            params![target, aid, role],
         )?;
     }
     Ok(())
@@ -2738,6 +3002,29 @@ fn asset_filter_conditions(
         } else {
             "rejected = 0".into()
         });
+    }
+
+    // —— 版本维度（0017）：原片/成片 EXISTS 视图（相册页快捷视图后端支撑）——
+    match filters.group_role.as_deref() {
+        Some("raw_only") => conds.push(
+            "NOT EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
+             AND ga.role = 'derived')"
+                .into(),
+        ),
+        Some("derived_only") => conds.push(
+            "EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
+             AND ga.role = 'derived')"
+                .into(),
+        ),
+        Some("no_derived") => conds.push(
+            "NOT EXISTS (SELECT 1 FROM group_asset ga WHERE ga.asset_id = a.id \
+             AND ga.role = 'derived') \
+             AND NOT EXISTS (SELECT 1 FROM group_asset me \
+                 JOIN group_asset other ON other.group_id = me.group_id \
+                 WHERE me.asset_id = a.id AND other.role = 'derived')"
+                .into(),
+        ),
+        _ => {} // 未知 token 容错：不过滤
     }
 
     conds
