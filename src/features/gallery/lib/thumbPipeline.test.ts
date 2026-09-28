@@ -10,6 +10,7 @@ import {
   emitAssetEventForTests,
 } from "./thumbPipeline";
 import { assetThumbGet, type ThumbGetResult } from "@/ipc/api";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -21,6 +22,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const thumbMock = vi.mocked(assetThumbGet);
+const convertMock = vi.mocked(convertFileSrc);
 
 /** 可控在途请求：resolvers 按调用序存放，测试手动放行 */
 let resolvers: Array<(r: ThumbGetResult) => void> = [];
@@ -36,6 +38,7 @@ beforeEach(() => {
   thumbMock.mockReset().mockImplementation(
     () => new Promise<ThumbGetResult>((resolve) => resolvers.push(resolve)),
   );
+  convertMock.mockReset().mockImplementation((p: string) => `asset://${p}`);
 });
 
 describe("缩略图管线：信号量优先级", () => {
@@ -287,5 +290,83 @@ describe("useAssetThumbUrl：pending 周期兜底重拉", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// --- missing 终态（源文件被第三方移动/删除，2026-09-28 边界测试修复） ------------------
+
+describe("missing 终态（源文件被移动/删除）", () => {
+  it("missing 带 cachedPath：返回 missing+尽力 url，并缓存结果（同 key 不再发请求）", async () => {
+    thumbMock.mockResolvedValueOnce({ status: "missing", cachedPath: "C:\\thumbs\\cache\\601.jpg" });
+    const r1 = await fetchAssetThumb(601, 240);
+    expect(r1).toEqual({ kind: "missing", url: "asset://C:\\thumbs\\cache\\601.jpg" });
+
+    // 防风暴：缺失是磁盘事实，同 key 不再发请求；缓存结果保持 missing 语义（带 url）
+    const calls = thumbMock.mock.calls.length;
+    const r2 = await fetchAssetThumb(601, 240);
+    expect(r2).toEqual(r1);
+    expect(thumbMock.mock.calls.length).toBe(calls);
+  });
+
+  it("missing 无 cachedPath / convertFileSrc 抛错（非 Tauri）：url=null 按无缓存处理", async () => {
+    thumbMock.mockResolvedValueOnce({ status: "missing", cachedPath: null });
+    const r1 = await fetchAssetThumb(602, 240);
+    expect(r1).toEqual({ kind: "missing", url: null });
+
+    convertMock.mockImplementationOnce(() => {
+      throw new Error("non-tauri");
+    });
+    thumbMock.mockResolvedValueOnce({ status: "missing", cachedPath: "C:\\gone\\603.jpg" });
+    const r2 = await fetchAssetThumb(603, 240);
+    expect(r2).toEqual({ kind: "missing", url: null });
+  });
+
+  it("hook：missing 是终态（有/无缓存皆然），不排周期重拉", async () => {
+    vi.useFakeTimers();
+    try {
+      thumbMock.mockReset().mockResolvedValue({ status: "missing", cachedPath: "C:\\cache\\604.jpg" });
+      const withCache = renderHook(() => useAssetThumbUrl(604, 6000, true, "high"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(withCache.result.current).toEqual({
+        url: "asset://C:\\cache\\604.jpg",
+        status: "missing",
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS * 4);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(1); // 无周期重发
+
+      thumbMock.mockClear().mockResolvedValue({ status: "missing", cachedPath: null });
+      const noCache = renderHook(() => useAssetThumbUrl(605, 6000, true, "high"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(noCache.result.current).toEqual({ url: null, status: "missing" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS * 4);
+      });
+      expect(thumbMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("missing 后 thumbnailReady：按资产清除缓存，重查取新结果（不复活旧缓存）", async () => {
+    thumbMock.mockResolvedValueOnce({ status: "missing", cachedPath: null });
+    const r1 = await fetchAssetThumb(606, 240);
+    expect(r1).toEqual({ kind: "missing", url: null });
+
+    // 同资产任一档位补齐（如用户把文件移回 + 重扫）：事件清除 failedCache → 重查发新请求
+    emitAssetEventForTests({
+      type: "thumbnailReady",
+      assetId: 606,
+      size: 240,
+      path: "C:\\t\\606.jpg",
+    });
+    thumbMock.mockResolvedValueOnce({ status: "ready", path: "C:\\t\\606.jpg" });
+    const r2 = await fetchAssetThumb(606, 240);
+    expect(r2).toEqual({ kind: "url", url: expect.stringContaining("606") });
   });
 });

@@ -41,7 +41,7 @@ function ComparePane({
   onDecide,
 }: ComparePaneProps) {
   const { t } = useTranslation();
-  const { url } = useAssetThumbUrl(assetId, COMPARE_THUMB_SIZE, true, "high");
+  const { url, status } = useAssetThumbUrl(assetId, COMPARE_THUMB_SIZE, true, "high");
   const stop = (e: React.MouseEvent): void => {
     e.stopPropagation();
   };
@@ -123,6 +123,15 @@ function ComparePane({
             data-testid="culling-compare-raw"
           >
             RAW
+          </span>
+        )}
+        {/* 源缺失角标（管线结算 missing，终态）：有缓存图仍显示，恒标「源缺失」 */}
+        {status === "missing" && (
+          <span
+            className="absolute bottom-1.5 left-1.5 rounded bg-amber-500/85 px-1.5 py-0.5 text-[10px] font-medium leading-none text-black"
+            data-testid="cull-pane-missing"
+          >
+            {t("thumb.missingBadge")}
           </span>
         )}
       </div>

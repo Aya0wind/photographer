@@ -371,6 +371,74 @@ describe("查看器：打开与图片来源", () => {
   });
 });
 
+// --- 源缺失（missing 终态：源文件被第三方移动/删除） -------------------------------------
+
+describe("查看器：源缺失（missing）", () => {
+  it("photo 缺源有历史缓存：降档后显示缓存图 + 琥珀横幅；横幅不阻塞翻图", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockImplementation(async (_id: number, size: number) => {
+      // 2048 档缺源无缓存（不会再有图）→ 降 512 档；512 档有历史缓存尽力展示
+      if (size === 2048) return { status: "missing", cachedPath: null };
+      return { status: "missing", cachedPath: "C:\\thumbs\\cache\\2.jpg" };
+    });
+    const { onNavigate } = renderViewer(GROUP_ASSETS, 1);
+
+    // 原图（磁盘上已不存在）渲染失败 → 逐级降档
+    const img = await screen.findByTestId("viewer-img");
+    expect(img).toHaveAttribute("data-fallback", "original");
+    fireEvent.error(img);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("viewer-img")).toHaveAttribute("data-fallback", "thumb"),
+    );
+    expect(screen.getByTestId("viewer-img")).toHaveAttribute("src", "asset://C:\\thumbs\\cache\\2.jpg");
+    // 顶部琥珀警示横幅
+    const banner = await screen.findByTestId("viewer-missing-banner");
+    expect(banner).toHaveTextContent("源文件已被移动或删除，部分操作不可用");
+    expect(screen.queryByTestId("viewer-missing-placeholder")).not.toBeInTheDocument();
+
+    // 横幅不阻塞翻图
+    fireEvent.click(screen.getByTestId("viewer-next"));
+    expect(onNavigate).toHaveBeenCalledWith(2);
+  });
+
+  it("photo 缺源无任何缓存：居中缺源占位（不空白、不无限转圈）", async () => {
+    // convertFileSrc 返回空 → 无原图可用，直达 512 档；全链 missing 无缓存
+    thumbMock.mockResolvedValue({ status: "missing", cachedPath: null });
+    renderViewer();
+
+    const placeholder = await screen.findByTestId("viewer-missing-placeholder");
+    expect(placeholder).toHaveTextContent("源文件已被移动或删除");
+    expect(screen.getByTestId("viewer-missing-banner")).toBeInTheDocument();
+    // 舞台不留空 img / 不出现加载 spinner（此前真机「stage 空白 + 无限 loading」根因）
+    expect(screen.queryByTestId("viewer-img")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("viewer-loading")).not.toBeInTheDocument());
+  });
+
+  it("RAW 缺源（thumb 结算 missing）：内嵌/显影皆缺 → 缓存缩略图尽力展示 + 横幅", async () => {
+    const rawAssets = [makeAsset(7, "raw", "IMG_0007.CR3"), makeAsset(8, "raw", "IMG_0008.CR3")];
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockImplementation(async (_id: number, size: number) => {
+      if (size === 6000 || size === 2048) return { status: "missing", cachedPath: null };
+      return { status: "missing", cachedPath: "C:\\thumbs\\cache\\7.jpg" };
+    });
+    renderViewer(rawAssets);
+
+    const img = await screen.findByTestId("viewer-img");
+    expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\cache\\7.jpg");
+    expect(img).toHaveAttribute("data-fallback", "thumb");
+    await screen.findByTestId("viewer-missing-banner");
+  });
+
+  it("健康资产（ready）不出现缺源横幅", async () => {
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    thumbMock.mockResolvedValue({ status: "ready", path: "C:\\thumbs\\512\\img1.jpg" });
+    renderViewer();
+    await screen.findByTestId("viewer-img");
+    expect(screen.queryByTestId("viewer-missing-banner")).not.toBeInTheDocument();
+  });
+});
+
 // --- 切换与关闭 ---------------------------------------------------------------------
 
 describe("查看器：左右切换与关闭", () => {

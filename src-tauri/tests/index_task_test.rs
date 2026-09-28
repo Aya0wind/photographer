@@ -318,3 +318,68 @@ fn import_then_index_chain_via_ipc() {
         "导入链自动完成索引"
     );
 }
+
+#[test]
+fn missing_source_keeps_thumb_state_zero_and_completes_on_restore() {
+    // R2（2026-09-28 边界修复）：源文件被第三方移动/删除是**暂态**——
+    // 索引任务失败走 attempts 封顶，但绝不置 thumb_state=2 毒化资产
+    //（旧版真机实证：文件移回后 state=2 永久 unavailable 不自愈）。
+    // 文件移回 + 重排任务 → 正常完成（真机实测 4s 内重新生成成功）。
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    fs::create_dir_all(src.path().join("DCIM")).unwrap();
+    write_real_jpg(&src.path().join("DCIM").join("IMG_0001.jpg"), 1400, 1000);
+    let (_job_id, _stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
+
+    let database = open_db(db_dir.path());
+    let path: String = database
+        .0
+        .query_row(
+            "SELECT path FROM assets WHERE filename = 'IMG_0001.jpg'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let bytes = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+
+    // 缺失期：thumb 任务 attempts 封顶落 failed，但 thumb_state 保持 0
+    index::run_pending(db_dir.path(), 1);
+    assert_eq!(
+        thumb_state(&database, "IMG_0001.jpg"),
+        0,
+        "源缺失不得落 state=2（毒化）"
+    );
+    let tasks = states(&database);
+    assert!(
+        tasks
+            .iter()
+            .any(|(kind, _, state, _)| kind == "thumb" && state == "failed"),
+        "缺失期任务按 attempts 封顶失败: {tasks:?}"
+    );
+
+    // 文件移回（同路径同内容）：重排任务即可完成
+    fs::write(&path, &bytes).unwrap();
+    database
+        .0
+        .execute(
+            "UPDATE index_tasks SET state = 'pending', attempts = 0 \
+             WHERE kind IN ('thumb', 'blur')",
+            [],
+        )
+        .unwrap();
+    index::run_pending(db_dir.path(), 1);
+    assert_eq!(
+        thumb_state(&database, "IMG_0001.jpg"),
+        1,
+        "文件移回后重排任务应完成并翻 state=1"
+    );
+    let tasks = states(&database);
+    assert!(
+        tasks
+            .iter()
+            .any(|(kind, _, state, _)| kind == "thumb" && state == "done"),
+        "移回后 thumb 任务完成: {tasks:?}"
+    );
+}

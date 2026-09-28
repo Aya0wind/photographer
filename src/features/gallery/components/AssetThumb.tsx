@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { AssetKind } from "@/ipc/api";
 import { useAssetThumbUrl } from "../lib/thumbPipeline";
@@ -8,6 +9,8 @@ import { useAssetThumbUrl } from "../lib/thumbPipeline";
  * - photo/raw：进缩略图管线（assetThumbGet→convertFileSrc；未命中占位，
  *   thumbnailReady 重试；RAW 走后端内嵌预览提取，可能较慢——占位期间有水印角标）
  * - RAW 恒叠右上角 RAW 水印角标（半透明深底白字；有真实缩略图后仍可一眼区分）
+ * - missing（源文件被移动/删除）：有历史缓存仍显示缓存图、无缓存回退 kind 占位，
+ *   两种情况都叠右下角「源缺失」琥珀角标（与 failed=不可解码的占位语义分层）
  * - img onLoad 150ms 淡入；解码失败（缓存文件丢失等）回退占位
  */
 
@@ -84,6 +87,7 @@ export default function AssetThumb({
   priority = "low",
   testId,
 }: AssetThumbProps) {
+  const { t } = useTranslation();
   // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线。
   const { url, status } = useAssetThumbUrl(asset.id, size, true, priority);
   const imageKey = url === null ? null : `${asset.id}:${url}`;
@@ -141,6 +145,16 @@ export default function AssetThumb({
           data-testid="thumb-raw-badge"
         >
           RAW
+        </span>
+      )}
+      {/* 源缺失角标：源文件被移动/删除（管线结算 missing，终态）；有缓存图仍显示，
+          但右下角恒标「源缺失」（琥珀系半透明底，样式参考 RAW 角标） */}
+      {status === "missing" && (
+        <span
+          className="absolute bottom-1 right-1 rounded bg-amber-500/85 px-1 py-0.5 text-[9px] font-medium leading-none text-black"
+          data-testid="thumb-missing-badge"
+        >
+          {t("thumb.missingBadge")}
         </span>
       )}
     </div>

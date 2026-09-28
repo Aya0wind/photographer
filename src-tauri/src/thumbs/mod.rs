@@ -330,33 +330,80 @@ pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     cache.exists().then(|| cache.to_string_lossy().into_owned())
 }
 
-/// 缓存路径：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime secs>.jpg`。
-fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
+/// 缓存键的源哈希：xxh64(路径小写)——Windows 路径大小写不敏感。
+fn src_key(src: &Path) -> u64 {
     let mut xxh = Xxh64::new(0);
     xxh.update(src.to_string_lossy().to_lowercase().as_bytes());
+    xxh.digest()
+}
+
+/// 档位目录名：位图 = `<size>`；RAW 按语义细分（内嵌直出 / 2048 显影 /
+/// 低档代际目录，见 [`cache_path`] 注释）。
+fn tier_dir_name(ext: &str, size: u16) -> String {
+    if is_raw_ext(ext) {
+        if is_raw_embed_request(ext, size) {
+            "raw-embed-v1".to_string() // 内嵌全幅直出（相机渲染，零显影）
+        } else if size == 2048 {
+            "2048-raw-full-v1".to_string() // rawler 显影（无内嵌预览机型兜底）
+        } else {
+            // 低档带源代际：升代际自动失效重建
+            format!("raw-{size}-v{RAW_THUMB_GENERATION}")
+        }
+    } else {
+        size.to_string()
+    }
+}
+
+/// 缓存路径：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime secs>.jpg`。
+fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
     let secs = mtime
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let tier = src
+    let ext = src
         .extension()
         .and_then(|e| e.to_str())
-        .filter(|ext| is_raw_ext(ext))
-        .map(|ext| {
-            if is_raw_embed_request(ext, size) {
-                "raw-embed-v1".to_string() // 内嵌全幅直出（相机渲染，零显影）
-            } else if size == 2048 {
-                "2048-raw-full-v1".to_string() // rawler 显影（无内嵌预览机型兜底）
-            } else {
-                // 低档带源代际：升代际自动失效重建
-                format!("raw-{size}-v{RAW_THUMB_GENERATION}")
-            }
-        })
-        .unwrap_or_else(|| size.to_string());
+        .unwrap_or("")
+        .to_ascii_lowercase();
     db_dir
         .join("thumbs")
-        .join(tier)
-        .join(format!("{:016x}-{secs}.jpg", xxh.digest()))
+        .join(tier_dir_name(&ext, size))
+        .join(format!("{:016x}-{secs}.jpg", src_key(src)))
+}
+
+/// 源缺失时的缓存**尽力恢复**（2026-09-28 边界修复）：源文件被第三方
+/// 移动/删除后 `cached()` 必返回 None（拿不到 mtime 算不出精确键），但已
+/// 生成的缓存缩略图仍在盘——在对应档位目录里按 `<xxh64 前缀>` 列举一次，
+/// 命中（任意 mtime 代，取字典序最大 = 最新 mtime）即返回绝对路径。
+/// 目录内同前缀条目数 = 同一源的历史 mtime 代数，一次列举成本可忽略。
+/// 不可解码扩展名/目录不存在/无命中 → None。
+pub fn cached_without_source(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    if !is_decodable(src) {
+        return None;
+    }
+    let size = if is_raw_embed_request(&ext, size) {
+        size
+    } else {
+        snap_size(size)
+    };
+    let dir = db_dir.join("thumbs").join(tier_dir_name(&ext, size));
+    let prefix = format!("{:016x}-", src_key(src));
+    let mut hits: Vec<_> = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name())
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && name.ends_with(".jpg")
+        })
+        .collect();
+    hits.sort(); // 同 16-hex 前缀下按 mtime 秒字典序 → 最后一个 = 最新代
+    hits.pop()
+        .map(|name| dir.join(name).to_string_lossy().into_owned())
 }
 
 /// 生成一枚缩略图：并发许可 + 解码线程 + 超时放弃。

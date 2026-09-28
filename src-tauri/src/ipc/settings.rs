@@ -105,11 +105,16 @@ pub fn settings_get(state: State<SharedState>) -> Settings {
 pub fn settings_set(
     app: AppHandle,
     state: State<SharedState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> Result<(), String> {
     // 画质档位硬校验（2026-09-28 三档画质）：档位驱动模型件选择与指纹
     // 重建，脏值拒绝落盘（读取侧另有 load 兜底，双保险）。
     crate::settings::validate_ai_settings(&settings.ai)?;
+    // 建库路径统一规范化（2026-09-28 边界修复）：onboarding 提交的
+    // photoRoot/dbDir 拒绝盘符相对路径（如 `I:xxx` 按进程 CWD 解析），
+    // 绝对路径归一到 canonical/反斜杠形态后持久化并随 settings://changed
+    // 回传前端；任一非法拒绝整次写入。
+    crate::settings::normalize_library_paths(&mut settings)?;
     SettingsManager::save(&settings, &state.config_dir).map_err(|err| err.to_string())?;
     // 缩略图缓存上限即时生效（M8-③）
     crate::thumbs::set_thumb_cache_cap_bytes(

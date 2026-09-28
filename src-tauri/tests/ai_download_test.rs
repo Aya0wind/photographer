@@ -379,7 +379,7 @@ fn cancel_stops_download_and_cleans_part() {
         &body,
     );
 
-    mgr.download(e).unwrap();
+    mgr.download(e.clone()).unwrap();
     // 等 .part 出现且在涨 → 取消
     let part = root.path().join("m4.onnx.part");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -389,12 +389,19 @@ fn cancel_stops_download_and_cleans_part() {
     }
     mgr.cancel("m4").unwrap();
     let finished = wait_finished(&mgr, "m4");
-    assert!(matches!(
-        finished,
-        AppEvent::AiModelDownloadFinished { ok: false, .. }
-    ));
+    let AppEvent::AiModelDownloadFinished { ok, error, .. } = finished else {
+        unreachable!()
+    };
+    assert!(!ok, "取消事件 ok=false（对外事件名和字段不变）");
+    assert_eq!(error.as_deref(), Some("下载已取消"), "事件 error 保持原语义");
     assert!(!part.exists(), "取消必须清理 .part");
     assert!(!root.path().join("m4.onnx").exists(), "未完成不得落位");
+    // R4（2026-09-28 边界修复）：取消不是失败——不进 failed set，
+    // status() 回 idle（UI 不显示失败徽标），可直接重新发起
+    let status = mgr.status(&e).unwrap();
+    assert_ne!(status.state, "failed", "取消不得记为 failed");
+    assert_eq!(status.state, "idle", "取消后回 idle");
+    assert!(!status.installed);
     // 取消后可再次发起（守卫已除名）
     assert!(mgr.active_count() == 0);
 }

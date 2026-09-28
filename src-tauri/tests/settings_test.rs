@@ -454,3 +454,104 @@ fn validate_ai_settings_rejects_bad_tier() {
     };
     assert!(smart_photo_lib::settings::validate_ai_settings(&bad).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// 库路径规范化（2026-09-28 边界修复：建库统一闸门）
+// ---------------------------------------------------------------------------
+
+use smart_photo_lib::settings::{normalize_library_path, normalize_library_paths};
+
+/// 盘符相对路径（`I:foo`，无根分量 → is_absolute()==false）与普通相对路径
+/// 一律拒绝——真机实证 `I:SmartPhotoedge-photos` 曾按进程 CWD 解析，
+/// DB 落到 src-tauri/ 下还触发 dev watcher 风暴。
+#[test]
+fn normalize_library_path_rejects_non_absolute() {
+    for bad in [
+        "I:SmartPhotoedge-photos",
+        "I:foo\\bar",
+        "relative\\path",
+        "relative/path",
+        "  ",
+    ] {
+        let err = normalize_library_path(bad).unwrap_err();
+        assert!(
+            err.contains("路径必须是绝对路径"),
+            "{bad} 应被拒绝：{err}"
+        );
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn normalize_library_path_folds_forward_slashes_and_dots() {
+    let dir = temp_dir();
+    // 存在于盘：canonicalize（剥 \\?\ verbatim 前缀），正斜杠输入折成反斜杠
+    let raw = dir.path().to_string_lossy().replace('\\', "/");
+    let norm = normalize_library_path(&raw).unwrap();
+    assert_eq!(
+        Path::new(&norm),
+        dir.path(),
+        "正斜杠绝对路径应规范化为反斜杠 canonical 形态"
+    );
+    assert!(!norm.contains(r"\\?\"), "不得带 verbatim 前缀: {norm}");
+
+    // 尚未创建（onboarding 新建库，目录还没落）：组件级逻辑归一
+    let missing = format!("{}/a/./b/../created", raw);
+    let norm2 = normalize_library_path(&missing).unwrap();
+    assert_eq!(
+        Path::new(&norm2),
+        dir.path().join("a").join("created"),
+        "逻辑归一：折叠 . 与 ..、正斜杠折反斜杠（{missing} → {norm2}）"
+    );
+
+    // 已规范化的值再过一遍幂等
+    assert_eq!(normalize_library_path(&norm).unwrap(), norm);
+}
+
+#[test]
+#[cfg(windows)]
+fn normalize_library_paths_rewrites_all_libraries() {
+    let dir = temp_dir();
+    let photo_root = tempfile::tempdir().unwrap();
+    let mut s = Settings::default();
+    s.libraries.push(Library {
+        id: "lib-1".into(),
+        name: "主库".into(),
+        db_dir: format!(
+            "{}/SmartPhoto/db",
+            dir.path().to_string_lossy().replace('\\', "/")
+        ),
+        photo_root: photo_root.path().to_string_lossy().replace('\\', "/"),
+        ..Library::default()
+    });
+    smart_photo_lib::settings::normalize_library_paths(&mut s).unwrap();
+    let lib = &s.libraries[0];
+    assert_eq!(
+        Path::new(&lib.db_dir),
+        dir.path().join("SmartPhoto").join("db"),
+        "dbDir 规范化为反斜杠绝对形态"
+    );
+    assert_eq!(
+        Path::new(&lib.photo_root),
+        photo_root.path(),
+        "photoRoot（存在于盘）取 canonical 形态"
+    );
+}
+
+#[test]
+fn normalize_library_paths_rejects_bad_library_and_keeps_input() {
+    let mut s = Settings::default();
+    s.libraries.push(Library {
+        id: "lib-1".into(),
+        name: "边界库".into(),
+        db_dir: r"I:\SmartPhoto\db".into(),
+        photo_root: "I:edge-photos".into(), // 盘符相对：拒绝整次写入
+        ..Library::default()
+    });
+    let err = normalize_library_paths(&mut s).unwrap_err();
+    assert!(err.contains("路径必须是绝对路径"), "{err}");
+    assert_eq!(
+        s.libraries[0].photo_root, "I:edge-photos",
+        "非法输入不得被就地改写（拒绝语义，非静默修正）"
+    );
+}

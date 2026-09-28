@@ -231,18 +231,26 @@ export default function CullingOverlay({
     mainSrc = rawEmbed.url ?? rawFull.url ?? thumb.url;
     mainFailed = rawEmbed.status === "failed" && rawFull.status === "failed" && thumb.status === "failed";
   }
+  // 源文件被移动/删除（管线终态）：512 档恒请求，其 missing 结算即缺源信号——
+  // 有历史缓存仍尽力显示，无缓存给占位（绝不让面板空白/无限转圈）
+  const missing = thumb.status === "missing";
+  const showMissingPlaceholder = missing && mainSrc === null;
   // photo 原图不可用（非 Tauri 环境/convert 抛错）→ 直达缩略图档
   useEffect(() => {
     if (asset?.kind === "photo" && photoStage === "original" && originalUrl === null) {
       setPhotoStage("thumb");
     }
   }, [asset?.kind, photoStage, originalUrl]);
-  // 中间档确定无图（后端未加 2048 档）→ 自动降到 512 档
+  // 中间档确定无图（后端未加 2048 档）→ 自动降到 512 档；缺源且无缓存同样降档
   useEffect(() => {
-    if (asset?.kind === "photo" && photoStage === "mid" && mid.status === "failed") {
+    if (
+      asset?.kind === "photo" &&
+      photoStage === "mid" &&
+      (mid.status === "failed" || (mid.status === "missing" && mid.url === null))
+    ) {
       setPhotoStage("thumb");
     }
-  }, [asset?.kind, photoStage, mid.status]);
+  }, [asset?.kind, photoStage, mid.status, mid.url]);
 
   // --- 无空窗图层（查看器同款精简版：新图解码完成才替换旧图） ---------------------------
   type ImageLayer = { src: string; phase: "active" | "loading" | "retiring" };
@@ -833,7 +841,7 @@ export default function CullingOverlay({
                   }}
                 />
               ))}
-              {imageLayers.length === 0 && items !== null && (
+              {imageLayers.length === 0 && items !== null && !showMissingPlaceholder && (
                 <div
                   className="h-10 w-10 animate-spin rounded-full border-2 border-edge border-t-accent"
                   data-testid="culling-loading"
@@ -842,6 +850,26 @@ export default function CullingOverlay({
               {imageLayers.length === 0 && mainFailed && (
                 <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="culling-no-preview">
                   <span className="text-xs">{t("culling.overlay.noPreview")}</span>
+                </div>
+              )}
+              {/* 源缺失：小角标恒在（有缓存图也标）；无缓存时居中图标+文案占位 */}
+              {missing && (
+                <div
+                  className="pointer-events-none absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-md border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 text-[11px] text-amber-300"
+                  role="status"
+                  data-testid="cull-pane-missing"
+                >
+                  {t("thumb.missingBadge")}
+                </div>
+              )}
+              {showMissingPlaceholder && (
+                <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="cull-pane-missing-placeholder">
+                  <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400" aria-hidden="true">
+                    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                    <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
+                    <path d="M14.5 5.5l4 4M18.5 5.5l-4 4" />
+                  </svg>
+                  <span className="text-xs text-amber-300">{t("viewer.missingSource")}</span>
                 </div>
               )}
 

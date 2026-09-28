@@ -1041,11 +1041,13 @@ const numOf = (v: unknown): number | null =>
   }
 }
 
-/** asset_thumb_get 三态结果（「排队中≠永久失败」的关键契约） */
+/** asset_thumb_get 四态结果（「排队中≠永久失败」的关键契约） */
 export type ThumbGetResult =
   | { status: "ready"; path: string }
   | { status: "pending" }
-  | { status: "unavailable" };
+  | { status: "unavailable" }
+  /** 源文件已不在磁盘（被移动/删除，终态）。cachedPath 非空=找到历史缓存缩略图（尽力展示） */
+  | { status: "missing"; cachedPath: string | null };
 
 /** 库内资产缩略图（按 assetId 取后端缓存文件绝对路径，调用方自行 convertFileSrc）。
  *  与向导的 thumbGet（按源文件路径，导入前预览用）是两个命令：本命令为 asset_thumb_get。
@@ -1057,9 +1059,16 @@ export async function assetThumbGet(assetId: number, size: number): Promise<Thum
   try {
     const raw = await ipc<unknown>("asset_thumb_get", { assetId, size });
     if (raw !== null && typeof raw === "object") {
-      const r = raw as { status?: unknown; path?: unknown };
+      const r = raw as { status?: unknown; path?: unknown; cachedPath?: unknown };
       if (r.status === "ready" && typeof r.path === "string") {
         return { status: "ready", path: r.path };
+      }
+      if (r.status === "missing") {
+        // cachedPath 可为 null（连历史缓存都没有）；空串归一为 null
+        return {
+          status: "missing",
+          cachedPath: typeof r.cachedPath === "string" && r.cachedPath !== "" ? r.cachedPath : null,
+        };
       }
       if (r.status === "pending" || r.status === "unavailable") {
         return { status: r.status };

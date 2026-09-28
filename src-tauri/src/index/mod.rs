@@ -26,11 +26,14 @@ use crate::db::Db;
 use crate::events::{AppEvent, EventBus};
 use crate::thumbs::SIZE_TIERS;
 
-/// 缩略图任务：生成全部低清档才算 done；任一档失败 → 资产
-/// thumb_state=2（permanent-none，前端占位兜底）+ 任务按 attempts 策略重试。
-/// RAW 只跑 256/512（内嵌 JPEG 源，快）；查看器高清走 raw-embed 直出档
-/// （毫秒级 IO），2048 显影档改为查看器按需兜底——索引期不再为每张 RAW
-/// 花 3-8s 去马赛克（33 张 RAW 的库索引被拖慢数分钟的根因）。
+/// 缩略图任务：生成全部低清档才算 done；档位失败时区分两种归因——
+/// **源缺失**（第三方移动/删除）是暂态：不落 thumb_state、保持 0，按
+/// attempts 策略重试，文件移回后自然完成（2026-09-28 边界修复：此前
+/// 缺失也置 2，真机实证文件移回后永久 unavailable 不自愈）；**文件在盘
+/// 但出不了图**（解码失败）才置 2 永久占位。RAW 只跑 256/512（内嵌
+/// JPEG 源，快）；查看器高清走 raw-embed 直出档（毫秒级 IO），2048
+/// 显影档改为查看器按需兜底——索引期不再为每张 RAW 花 3-8s 去马赛克
+/// （33 张 RAW 的库索引被拖慢数分钟的根因）。
 fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
     let Some((path, kind)) = asset_thumb_target(db, asset_id) else {
         // 资产已被删除（级联应清任务，防御性兜底）：按完成收尾
@@ -47,9 +50,14 @@ fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
     } else {
         SIZE_TIERS
     };
+    // 缺失是暂态（文件可能移回）：任务失败重试即可，不毒化 thumb_state
+    let src_missing = !src.exists();
     for tier in tiers {
         if crate::thumbs::thumb_file(db_dir, &src, *tier).is_none() {
-            let _ = db.set_thumb_state(asset_id, 2);
+            if !src_missing {
+                // 文件在盘仍出不了图（解码失败）：真永久占位
+                let _ = db.set_thumb_state(asset_id, 2);
+            }
             return false;
         }
     }

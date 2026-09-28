@@ -252,6 +252,78 @@ pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 库路径规范化（2026-09-28 边界修复）
+// ---------------------------------------------------------------------------
+
+/// 库路径规范化（onboarding/建库统一闸门）：前端提交的 photoRoot/dbDir
+/// 字符串曾放过盘符相对路径（真机实证 `I:SmartPhotoedge-photos`——用户
+/// 手输少打一个反斜杠），被按进程 CWD 解析后 DB 落到 src-tauri/ 下并触发
+/// dev watcher 风暴。规则：
+/// ① 必须是绝对路径（`Path::is_absolute()`——Windows 上 `I:xxx` 无根
+///    分量因此为 false），否则拒绝；
+/// ② 存在于盘 → `fs::canonicalize`（剥掉 `\\?\` verbatim 前缀）；
+/// ③ 尚未创建（建库时目录还没落）→ 按组件逻辑归一：正斜杠折成反斜杠、
+///    折叠 `.`/`..`，保持绝对形态与用户大小写。
+pub fn normalize_library_path(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(format!("路径必须是绝对路径：{input}"));
+    }
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err(format!("路径必须是绝对路径：{trimmed}"));
+    }
+    let normalized = match std::fs::canonicalize(path) {
+        Ok(canonical) => strip_verbatim_prefix(canonical),
+        Err(_) => logical_normalize(path),
+    };
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+/// 全部库的 db_dir / photo_root 逐一规范化（settings_set 前置；任一非法
+/// 拒绝整次写入，前端提示修正后重提）。既有库路径已是规范形态时幂等。
+pub fn normalize_library_paths(settings: &mut Settings) -> Result<(), String> {
+    for lib in &mut settings.libraries {
+        lib.db_dir = normalize_library_path(&lib.db_dir)?;
+        lib.photo_root = normalize_library_path(&lib.photo_root)?;
+    }
+    Ok(())
+}
+
+/// 剥掉 Windows canonicalize 的 `\\?\` verbatim 前缀（`\\?\UNC\server\…`
+/// 还原为 `\\server\…`），让落盘/回传前端的路径保持常规形态。
+fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest.to_owned())
+    } else {
+        path
+    }
+}
+
+/// 组件级逻辑归一（目标路径尚不存在时的兜底）：`/` 分隔符经 components
+/// 重建自然折成 `\`；`.` 直接跳过；`..` 仅在上一段是普通目录名时折叠
+///（避免把盘根/UNC 段 pop 掉退化成盘符相对路径）。
+fn logical_normalize(path: &Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// 系统行为配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

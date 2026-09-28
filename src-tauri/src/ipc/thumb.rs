@@ -182,9 +182,12 @@ impl Drop for ThumbQueue {
     }
 }
 
-/// 按需缩略图结果三态（前端「排队中≠失败」的关键区分）：
+/// 按需缩略图结果四态（前端「排队中≠失败≠源丢失」的关键区分）：
 /// - Ready：缓存命中，附绝对路径
 /// - Pending：已入队后台生成，`ThumbnailReady` 事件到达后前端重试即 Ready
+/// - Missing：**源文件不在盘**（第三方移动/删除）——终态，不入队不重试；
+///   `cached_path` 尽力恢复已生成过的缓存缩略图（无则 null），查看器可用
+///   它直接展示而不是无限转圈（2026-09-28 边界修复）
 /// - Unavailable：永久不可用（资产不存在 / thumb_state=2 / 不可解码）
 ///   ——此前统一返回 null，前端把「排队中」误判成「无内嵌预览」而过早
 ///   启用 rawler 显影兜底（真机 NAS ARW 219ms 即回落显影的根因）。
@@ -193,12 +196,15 @@ impl Drop for ThumbQueue {
 pub enum ThumbOutcome {
     Ready { path: String },
     Pending,
+    /// 源缺失：`cachedPath` = 恢复出的既有缓存缩略图绝对路径（或 null）。
+    #[serde(rename_all = "camelCase")]
+    Missing { cached_path: Option<String> },
     Unavailable,
 }
 
 /// 按需缩略图（画廊主通道）：命中返回缓存绝对路径；未命中入队后台生成
-/// （完成后 `ThumbnailReady` 事件回执）；无法解码的 RAW/资产不存在返回 Unavailable
-/// （不入队）。
+/// （完成后 `ThumbnailReady` 事件回执）；源文件缺失返回 Missing（终态，
+/// 带尽力恢复的 cached_path）；无法解码/资产不存在返回 Unavailable（不入队）。
 pub fn fetch_asset_thumb(
     state: &super::AppState,
     asset_id: i64,
@@ -221,13 +227,27 @@ pub fn fetch_asset_thumb(
         return Ok(ThumbOutcome::Unavailable); // 资产不存在：不入队
     };
     let src = PathBuf::from(path);
+    let src_exists = src.exists();
     if let Some(hit) = crate::thumbs::cached(&db_dir, &src, size) {
-        if thumb_state != 2 {
-            let _ = db.set_thumb_state(asset_id, 1);
-        }
-        return Ok(ThumbOutcome::Ready { path: hit }); // 命中直返，零事件零入队
+        // 命中直返（零事件零入队）。state=2 也不再保留：源在盘 + 缓存在盘
+        // = 一切正常，顺手治愈（2026-09-28 自愈修复：此前 state 2 命中
+        // 缓存也不翻 1，DB 永久卡占位）。
+        let _ = db.set_thumb_state(asset_id, 1);
+        return Ok(ThumbOutcome::Ready { path: hit });
     }
-    if thumb_state == 2 || !crate::thumbs::is_decodable(&src) {
+    // 源缺失：终态 Missing（不入队——解码注定失败，入队只会让前端无限
+    // Pending 重拉）。cached_path 尽力恢复既有缓存（按 xxh64 前缀扫档位
+    // 目录），查看器/编辑器拿它直接出图而非空白舞台。
+    if !src_exists {
+        let cached_path = crate::thumbs::cached_without_source(&db_dir, &src, size);
+        return Ok(ThumbOutcome::Missing { cached_path });
+    }
+    let decodable = crate::thumbs::is_decodable(&src);
+    if thumb_state == 2 && decodable {
+        // state=2 自愈（2026-09-28）：文件被移回 + 缓存被清的组合下，2 是
+        // 缺失/失败期留下的脏占位——源在盘且可解码就重置 0 走正常入队重生成。
+        let _ = db.set_thumb_state(asset_id, 0);
+    } else if thumb_state == 2 || !decodable {
         return Ok(ThumbOutcome::Unavailable); // 永久占位/不可解码：不入队
     }
     let queued = state.thumb_queue.push(ThumbJob {
@@ -248,8 +268,8 @@ pub fn fetch_asset_thumb(
 }
 
 /// 取缩略图（画廊主通道，asset_id 语义）。解码/IO → 后台线程；错误归一
-/// Unavailable，契约三态 `ThumbOutcome`。命名 asset_thumb_get 与路径语义的
-/// thumb_get_by_path 区分（前端契约）。
+/// Unavailable，契约四态 `ThumbOutcome`（Ready/Pending/Missing/Unavailable）。
+/// 命名 asset_thumb_get 与路径语义的 thumb_get_by_path 区分（前端契约）。
 #[tauri::command]
 pub async fn asset_thumb_get(
     state: State<'_, SharedState>,

@@ -78,14 +78,26 @@ function toAssetUrl(path: string): ThumbGetResult {
   }
 }
 
-/** 管线结果：ready 附 URL；pending=排队生成中；failed=永久不可用 */
+/** 管线结果：ready 附 URL；pending=排队生成中；failed=永久不可用；
+ *  missing=源文件已不在磁盘（终态，url=尽力展示的历史缓存，可 null） */
 export type ThumbResult =
   | { kind: "url"; url: string }
   | { kind: "pending" }
-  | { kind: "failed" };
+  | { kind: "failed" }
+  | { kind: "missing"; url: string | null };
+
+/** 缩略图文件路径 → asset 协议 URL；非 Tauri 环境/转换失败回退 null（按无缓存处理） */
+function toUrlOrNull(path: string): string | null {
+  try {
+    return convertFileSrc(path) || null;
+  } catch {
+    return null;
+  }
+}
 
 /** 取库内资产缩略图（命中会话缓存直接返回；priority：high 插队信号量队列，
- *  low 默认）。pending 不写缓存（事件重试自愈）；failed 缓存避免风暴。 */
+ *  low 默认）。pending 不写缓存（事件重试自愈）；failed/missing 缓存避免风暴
+ *  （缺失是磁盘事实，不会自愈式重试；thumbnailReady 事件按资产整体失效）。 */
 export function fetchAssetThumb(
   assetId: number,
   size: number,
@@ -95,7 +107,7 @@ export function fetchAssetThumb(
   const cached = thumbCache.get(key);
   if (cached !== undefined) return Promise.resolve({ kind: "url", url: cached });
   const failed = failedCache.get(key);
-  if (failed) return Promise.resolve({ kind: "failed" });
+  if (failed !== undefined) return Promise.resolve(failed);
   const running = thumbInflight.get(key);
   if (running) return running;
   const promise = (async () => {
@@ -111,8 +123,18 @@ export function fetchAssetThumb(
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "unavailable") {
-        failedCache.set(key, true);
+        failedCache.set(key, { kind: "failed" });
         return { kind: "failed" } as ThumbResult;
+      }
+      if (result.status === "missing") {
+        // 源文件被移动/删除（终态）：缓存历史缩略图 URL 尽力展示；同 key 不再发请求。
+        // cachedPath 空/转换失败（非 Tauri）按无缓存处理（url=null）
+        const settled = {
+          kind: "missing",
+          url: result.cachedPath ? toUrlOrNull(result.cachedPath) : null,
+        } as ThumbResult;
+        failedCache.set(key, settled);
+        return settled;
       }
       return { kind: "pending" } as ThumbResult; // 排队中：等事件重试
     } catch {
@@ -126,8 +148,8 @@ export function fetchAssetThumb(
   return promise;
 }
 
-/** 永久失败缓存（连续失败/不可解码）；thumbnailReady 事件按资产整体失效 */
-const failedCache = new Map<string, boolean>();
+/** 永久失败/缺失缓存（连续失败/不可解码/源缺失）；thumbnailReady 事件按资产整体失效 */
+const failedCache = new Map<string, ThumbResult>();
 
 /** 预取（查看器相邻预热/胶片条）：静默，失败仅保持占位；默认高优先级 */
 export function prefetchAssetThumb(
@@ -176,10 +198,11 @@ export function onAssetEvent(listener: AssetEventListener): () => void {
 // --- React 绑定 -------------------------------------------------------------------
 
 export interface AssetThumbState {
-  /** asset URL；null=尚未就绪（loading/pending 皆可能） */
+  /** asset URL；null=尚未就绪（loading/pending 皆可能；missing 无缓存时也为 null） */
   url: string | null;
-  /** loading=请求在途或排队生成中（骨架等待）；ready=有图；failed=永久无图 */
-  status: "loading" | "ready" | "failed";
+  /** loading=请求在途或排队生成中（骨架等待）；ready=有图；failed=永久无图；
+   *  missing=源文件已不在磁盘（终态，url=尽力展示的历史缓存，可 null） */
+  status: "loading" | "ready" | "failed" | "missing";
 }
 
 /**
@@ -195,7 +218,8 @@ export const PENDING_RETRY_MS = 2500;
 /**
  * 单资产缩略图（enabled=false 时不请求不订阅）。
  * pending → 保持 loading 等 thumbnailReady 事件重试 + 周期兜底重拉
- * （PENDING_RETRY_MS，事件丢失时自愈）；unavailable → failed。
+ * （PENDING_RETRY_MS，事件丢失时自愈）；unavailable → failed；
+ * missing（源文件被移动/删除）→ 终态，url=尽力展示的历史缓存（可 null）。
  */
 export function useAssetThumbUrl(
   assetId: number,
@@ -217,6 +241,8 @@ export function useAssetThumbUrl(
       if (cancelled) return;
       if (result.kind === "url") setState({ url: result.url, status: "ready" });
       else if (result.kind === "failed") setState({ url: null, status: "failed" });
+      else if (result.kind === "missing") setState({ url: result.url, status: "missing" });
+      // missing 是终态（磁盘事实），不排周期重拉
       // pending：保持 loading——事件重试之外再排一次周期兜底重拉
       else schedulePendingRetry();
     };

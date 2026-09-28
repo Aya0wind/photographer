@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 
@@ -20,6 +20,7 @@ vi.mock("@/features/editor/components/EditorCanvas", () => ({
     cropDraft: unknown;
     onPlaceText: (pos: { x: number; y: number }) => void;
     onStrokeCommit: (points: { x: number; y: number }[]) => void;
+    onImageError: () => void;
   }) => (
     <div
       data-testid="editor-canvas-stub"
@@ -32,6 +33,13 @@ vi.mock("@/features/editor/components/EditorCanvas", () => ({
         onClick={() => props.onPlaceText({ x: 0.25, y: 0.3 })}
       >
         place
+      </button>
+      <button
+        type="button"
+        data-testid="stub-image-error"
+        onClick={() => props.onImageError()}
+      >
+        img-error
       </button>
       <button
         type="button"
@@ -70,6 +78,8 @@ vi.mock("@/features/gallery/lib/thumbPipeline", () => ({
   useAssetThumbUrl: vi.fn(() => ({ url: null, status: "loading" })),
 }));
 
+import { useAssetThumbUrl } from "@/features/gallery/lib/thumbPipeline";
+
 import {
   albumList,
   albumSubgroups,
@@ -83,6 +93,7 @@ const deleteMock = vi.mocked(editRecipeDelete);
 const exportMock = vi.mocked(exportRun);
 const albumListMock = vi.mocked(albumList);
 const albumSubgroupsMock = vi.mocked(albumSubgroups);
+const thumbHookMock = vi.mocked(useAssetThumbUrl);
 
 const ASSET: AssetDto = {
   id: 1,
@@ -112,6 +123,7 @@ beforeEach(() => {
   deleteMock.mockReset();
   exportMock.mockReset();
   albumListMock.mockReset();
+  thumbHookMock.mockReset().mockReturnValue({ url: null, status: "loading" });
   saveMock.mockImplementation(async (_id: number, recipe: EditRecipe) => ({
     recipe,
     updatedAt: "2026-09-28T00:00:00Z",
@@ -316,5 +328,45 @@ describe("EditorOverlay 关闭确认", () => {
     await user.click(screen.getByTestId("editor-close"));
     await user.click(screen.getByTestId("editor-confirm-ok"));
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+// --- 源缺失（missing 终态：源文件被第三方移动/删除） --------------------------------------
+
+describe("EditorOverlay 源缺失（missing）", () => {
+  it("thumb 结算 missing：与 load-failed 同位置显示缺失文案，画布替换、保存/导出禁用 + title 提示", () => {
+    thumbHookMock.mockReturnValue({ url: null, status: "missing" });
+    renderEditor();
+
+    const missing = screen.getByTestId("editor-load-missing");
+    expect(missing).toHaveTextContent("源文件已被移动或删除，无法编辑");
+    // 画布被替换；不再出现无限 loading spinner（此前真机「编辑器无限转圈」根因）
+    expect(screen.queryByTestId("editor-canvas-stub")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("editor-loading")).not.toBeInTheDocument();
+
+    const save = screen.getByTestId("editor-save");
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", "源文件已被移动或删除，无法编辑");
+    const exportBtn = screen.getByTestId("editor-export");
+    expect(exportBtn).toBeDisabled();
+    expect(exportBtn).toHaveAttribute("title", "源文件已被移动或删除，无法编辑");
+  });
+
+  it("missing 有历史缓存 url：同样进入缺失态（编辑/导出作用于源文件，缓存图不可编辑）", () => {
+    thumbHookMock.mockReturnValue({ url: "asset://cache.jpg", status: "missing" });
+    renderEditor();
+
+    expect(screen.getByTestId("editor-load-missing")).toBeInTheDocument();
+    expect(screen.getByTestId("editor-save")).toBeDisabled();
+  });
+
+  it("failed（不可解码）态不受影响：仍显示 load-failed 文案", () => {
+    thumbHookMock.mockReturnValue({ url: null, status: "failed" });
+    renderEditor();
+
+    // photo 的 failed 判定要求原图先加载失败降档到 thumb 档（真机链路同序）
+    fireEvent.click(screen.getByTestId("stub-image-error"));
+    expect(screen.getByTestId("editor-load-failed")).toHaveTextContent("无法加载预览大图");
+    expect(screen.queryByTestId("editor-load-missing")).not.toBeInTheDocument();
   });
 });

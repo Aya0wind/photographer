@@ -307,7 +307,7 @@ pub fn semantic_model_ids(tier: QualityTier) -> [&'static str; 2] {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP agent（全局一份；连接 15s / 读 60s 超时）
+// HTTP agent（全局一份；连接 15s / 读 15s 超时）
 // ---------------------------------------------------------------------------
 
 fn agent() -> &'static ureq::Agent {
@@ -315,7 +315,11 @@ fn agent() -> &'static ureq::Agent {
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(15))
-            .timeout_read(Duration::from_secs(60))
+            // 读超时 15s（2026-09-28 由 60s 收紧）：模型源（HF/GH）是稳定
+            // 流式，15s 无数据即视为僵死连接；同时保证取消/换源最坏 15s 内
+            // 可见——软取消标志只有在阻塞读返回时才能被观测到，60s 会让
+            // 僵死连接下的取消等 30-45s（真机实证）。
+            .timeout_read(Duration::from_secs(15))
             .build()
     })
 }
@@ -707,15 +711,22 @@ impl ModelManager {
         Ok(())
     }
 
-    /// 任务收尾：除名 + 失败登记 + 事件。
-    fn finish(&self, id: &str, outcome: Result<(), String>) {
+    /// 任务收尾：除名 + 失败登记 + 事件。**取消不是失败**（2026-09-28
+    /// 边界修复）：用户主动取消不进 `failed` set（status 回 idle，UI 不
+    /// 显示失败徽标），事件照发 ok:false + error="下载已取消"（对外事件
+    /// 名和字段不变）；仅真失败（网络/SHA）登记 failed。
+    fn finish(&self, id: &str, outcome: DownloadOutcome) {
         self.active
             .lock()
             .expect("ai active mutex poisoned")
             .remove(id);
         let (ok, error) = match outcome {
-            Ok(()) => (true, None),
-            Err(err) => {
+            DownloadOutcome::Installed => (true, None),
+            DownloadOutcome::Cancelled => {
+                // 不登记 failed：前端刷新快照后回 idle
+                (false, Some("下载已取消".into()))
+            }
+            DownloadOutcome::Failed(err) => {
                 self.failed
                     .lock()
                     .expect("ai failed mutex poisoned")
@@ -739,7 +750,8 @@ impl ModelManager {
 
     /// 下载主体（supervisor 线程）：[主源, 镜像] 轮询，网络级失败保留
     /// `.part` 换源续传；SHA 不匹配删 `.part` 整体重来一次；取消清理。
-    fn run_download(&self, entry: &ModelEntry) -> Result<(), String> {
+    /// 返回三态 [`DownloadOutcome`]（取消与失败分开记账）。
+    fn run_download(&self, entry: &ModelEntry) -> DownloadOutcome {
         let active = self
             .active
             .lock()
@@ -755,13 +767,13 @@ impl ModelManager {
             for source in &sources {
                 if active.cancelled.load(Ordering::SeqCst) {
                     let _ = fs::remove_file(&part);
-                    return Err("下载已取消".into());
+                    return DownloadOutcome::Cancelled;
                 }
                 match fetch_source(source, &part, entry, &active, &self.bus) {
-                    FetchOutcome::Installed => return Ok(()),
+                    FetchOutcome::Installed => return DownloadOutcome::Installed,
                     FetchOutcome::Cancelled => {
                         let _ = fs::remove_file(&part);
-                        return Err("下载已取消".into());
+                        return DownloadOutcome::Cancelled;
                     }
                     FetchOutcome::ShaMismatch => {
                         let _ = fs::remove_file(&part); // 校验失败不留脏
@@ -775,15 +787,26 @@ impl ModelManager {
             }
             if sha_mismatch_this_round {
                 if sha_retried {
-                    return Err("SHA256 校验不匹配（已重试一次）".into());
+                    return DownloadOutcome::Failed("SHA256 校验不匹配（已重试一次）".into());
                 }
                 sha_retried = true;
                 continue; // 主源+镜像整体重来一轮
             }
             // 到这里必然两源网络级失败
-            return Err("主源与镜像均不可用（网络失败）".into());
+            return DownloadOutcome::Failed("主源与镜像均不可用（网络失败）".into());
         }
     }
+}
+
+/// 下载终态（取消与失败分离，2026-09-28）：用户取消不进 failed set，
+/// 状态机回 idle；失败才登记 failed（status 显示失败徽标）。
+enum DownloadOutcome {
+    /// 校验通过并落位。
+    Installed,
+    /// 用户取消（`.part` 已由 run_download 清理）。
+    Cancelled,
+    /// 真失败（网络/SHA），携带原因。
+    Failed(String),
 }
 
 /// 单源拉取结果。

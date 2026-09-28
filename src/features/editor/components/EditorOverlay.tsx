@@ -139,6 +139,9 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
     asset.kind === "photo"
       ? photoStage === "thumb" && thumb.status === "failed"
       : rawEmbed.status === "failed" && rawFull.status === "failed" && thumb.status === "failed";
+  // 源文件被移动/删除（管线终态）：即便有历史缓存缩略图，编辑/导出都作用于源文件，
+  // 缺源即无法编辑——画布区替换为缺失文案，保存/导出禁用。
+  const missing = thumb.status === "missing";
 
   const fallbackSize = useMemo<Size | null>(
     () =>
@@ -491,7 +494,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
           <button
             type="button"
             onClick={() => void save()}
-            disabled={saving}
+            disabled={saving || missing}
+            title={missing ? t("editor.missingSource") : undefined}
             className="rounded-md border border-edge px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-save"
           >
@@ -500,7 +504,9 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
           <button
             type="button"
             onClick={() => setExportOpen(true)}
-            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
+            disabled={missing}
+            title={missing ? t("editor.missingSource") : undefined}
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-export"
           >
             {t("editor.export")}
@@ -557,6 +563,15 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted" data-testid="editor-load-failed">
               <span className="text-xs">{t("editor.loadFailed")}</span>
             </div>
+          ) : missing ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted" data-testid="editor-load-missing">
+              <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400" aria-hidden="true">
+                <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
+                <path d="M14.5 5.5l4 4M18.5 5.5l-4 4" />
+              </svg>
+              <span className="text-xs text-amber-300">{t("editor.missingSource")}</span>
+            </div>
           ) : (
             <EditorCanvas
               src={src}
@@ -580,7 +595,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
               }}
             />
           )}
-          {src === null && !failed && (
+          {src === null && !failed && !missing && (
             <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2" data-testid="editor-loading">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-edge border-t-accent" />
             </div>

@@ -86,3 +86,31 @@ describe("AssetThumb 骨架屏（加载中 vs 永久无图）", () => {
     expect(container.querySelector('[data-testid="thumb-raw-badge"]')).not.toBeNull();
   });
 });
+
+// --- 源缺失角标（missing 终态：源文件被移动/删除） --------------------------------------
+
+describe("AssetThumb 源缺失角标（missing）", () => {
+  it("missing+历史缓存：照常显示缓存图 + 右下角「源缺失」角标", async () => {
+    thumbMock.mockResolvedValue({ status: "missing", cachedPath: "C:\\thumbs\\cache\\1.jpg" });
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderThumb("photo", "IMG_0001.JPG");
+
+    const img = await screen.findByTestId("thumb-img");
+    expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\cache\\1.jpg");
+    fireEvent.load(img);
+    expect(screen.getByTestId("thumb-missing-badge")).toHaveTextContent("源缺失");
+    expect(screen.queryByTestId("thumb-photo")).not.toBeInTheDocument();
+  });
+
+  it("missing 无缓存：kind 占位图形 + 同款小角标（failed 占位语义不变）", async () => {
+    thumbMock.mockResolvedValue({ status: "missing", cachedPath: null });
+    renderThumb("photo", "IMG_0001.JPG");
+
+    const container = await screen.findByTestId("thumb");
+    await waitFor(() => expect(screen.getByTestId("thumb-missing-badge")).toBeInTheDocument());
+    expect(screen.getByTestId("thumb-missing-badge")).toHaveTextContent("源缺失");
+    // 无缓存图：kind 占位图形保留，不渲染 img
+    expect(container.querySelector('[data-testid="thumb-photo"]')).not.toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+  });
+});

@@ -341,12 +341,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     mainSrc = thumb.url;
     mainFailed = thumb.status === "failed";
   }
-  // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档
+  // 源缺失（源文件被移动/删除，管线终态）：512 档在任何回退档位都请求，其 missing
+  // 结算即整链缺源信号——有历史缓存时 mainSrc 仍指向缓存 URL（尽力展示），无缓存
+  // 时 mainSrc 为 null，靠下方占位兜底（绝不让舞台空白/无限转圈）。
+  const mainMissing = thumb.status === "missing";
+  const showMissingPlaceholder = mainMissing && mainSrc === null;
+  // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档；
+  // 中间档缺源且无缓存（missing+null，不会再有图）同样降档交给 512 档结算
   useEffect(() => {
-    if (asset.kind === "photo" && stage === "mid" && mid.status === "failed") {
+    if (
+      asset.kind === "photo" &&
+      stage === "mid" &&
+      (mid.status === "failed" || (mid.status === "missing" && mid.url === null))
+    ) {
       setStage("thumb");
     }
-  }, [asset.kind, stage, mid.status]);
+  }, [asset.kind, stage, mid.status, mid.url]);
   // photo 无原图可用（非 Tauri 环境 convertFileSrc 抛错）→ 直达 512 档
   useEffect(() => {
     if (asset.kind === "photo" && stage === "original" && originalUrl === null) {
@@ -384,17 +394,17 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   }, [hasRetiringLayer]);
   // 确定无图：清掉残留图层，显示占位
   useEffect(() => {
-    if (mainFailed) {
+    if (mainFailed || showMissingPlaceholder) {
       setImageLayers([]);
     }
-  }, [mainFailed]);
+  }, [mainFailed, showMissingPlaceholder]);
 
   // 大图加载提示：源在途超过 300ms 才转圈（几十 MB 原图加载慢，避免黑屏误判失败）；
   // 切换期间旧图层兜底显示，仅新图 300ms 仍未 onLoad 才叠加 spinner（快速连按不闪）。
   const [slowLoading, setSlowLoading] = useState(false);
   const awaitingImage =
     imageLayers.some((layer) => layer.phase === "loading") ||
-    (mainSrc === null && !mainFailed);
+    (mainSrc === null && !mainFailed && !showMissingPlaceholder);
   useEffect(() => {
     setSlowLoading(false);
     if (!awaitingImage) return;
@@ -867,6 +877,21 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               </svg>
             </button>
             </div>
+            {/* 源缺失横幅（琥珀警示条）：不阻塞关闭/翻图（pointer-events-none） */}
+            {mainMissing && (
+              <div
+                className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-md border border-amber-400/50 bg-amber-500/15 px-3 py-1.5 text-xs text-amber-300"
+                role="status"
+                data-testid="viewer-missing-banner"
+              >
+                <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M8 5.5v3.5" />
+                  <circle cx="8" cy="11.6" r=".9" fill="currentColor" stroke="none" />
+                  <path d="M8 1.8L15 14H1z" />
+                </svg>
+                {t("viewer.missingSource")}
+              </div>
+            )}
             {imageLayers.map((layer) => (
               <img
                 key={layer.src}
@@ -960,6 +985,28 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                   <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
                 </svg>
                 <span className="text-xs">{t("viewer.noPreview")}</span>
+              </div>
+            )}
+            {/* 缺源且无历史缓存：居中图标+文案占位（绝不留空白舞台） */}
+            {showMissingPlaceholder && (
+              <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-missing-placeholder">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="56"
+                  height="56"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-amber-400"
+                  aria-hidden="true"
+                >
+                  <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                  <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
+                  <path d="M14.5 5.5l4 4M18.5 5.5l-4 4" />
+                </svg>
+                <span className="text-xs text-amber-300">{t("viewer.missingSource")}</span>
               </div>
             )}
             {slowLoading && (
