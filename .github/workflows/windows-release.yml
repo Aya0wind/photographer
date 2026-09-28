@@ -167,7 +167,9 @@ jobs:
             }
 
             if ($env:RELEASE_MODE -eq 'publish' -and $release.isDraft) {
-              gh release edit $env:RELEASE_TAG --draft=false --latest --repo $env:GITHUB_REPOSITORY
+              $pre = $env:RELEASE_TAG -match '-[0-9A-Za-z.]+$'
+              $stability = if ($pre) { '--prerelease' } else { '--latest' }
+              gh release edit $env:RELEASE_TAG --draft=false $stability --repo $env:GITHUB_REPOSITORY
               if ($LASTEXITCODE -ne 0) {
                 throw 'Installers were uploaded, but the draft release could not be published.'
               }
@@ -183,6 +185,8 @@ jobs:
             )
             if ($env:RELEASE_MODE -eq 'draft') {
               $arguments += '--draft'
+            } elseif ($env:RELEASE_TAG -match '-[0-9A-Za-z.]+$') {
+              $arguments += '--prerelease'
             } else {
               $arguments += '--latest'
             }
