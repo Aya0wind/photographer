@@ -74,11 +74,21 @@ fn import_creates_thumb_tasks_only_for_photo_and_raw() {
 
     let database = open_db(db_dir.path());
     let tasks = states(&database);
-    assert_eq!(tasks.len(), 3, "仅图片产生缩略图待办: {tasks:?}");
+    // 0021 起导入期为每张照片建 thumb+eyes+blur 三通道任务（eyes 无模型
+    // 保持 pending 属设计：模型收录后 kick 自然续跑）
+    assert_eq!(tasks.len(), 9, "三通道 × 3 张照片: {tasks:?}");
     assert!(tasks
         .iter()
-        .all(|(kind, _, state, attempts)| kind == "thumb" && state == "pending" && *attempts == 0));
-    assert!(database.asset_id_by_path("MVI_0003.MP4").unwrap().is_none());
+        .all(|(_, _, state, attempts)| state == "pending" && *attempts == 0));
+    assert_eq!(
+        tasks.iter().filter(|(kind, _, _, _)| kind == "thumb").count(),
+        3,
+        "仅图片产生缩略图待办"
+    );
+    assert!(
+        database.asset_id_by_path("MVI_0003.MP4").unwrap().is_none(),
+        "视频不编目"
+    );
     // photo/raw 仍 pending
     assert_eq!(thumb_state(&database, "IMG_0001.jpg"), 0);
 }
@@ -95,13 +105,23 @@ fn worker_completes_tasks_and_generates_three_tiers() {
     assert_eq!(stats.done_files, 1);
 
     let processed = index::run_pending(db_dir.path(), index::worker_count());
-    assert_eq!(processed, 1, "一个待办任务");
+    // thumb+blur 完成；eyes 无模型被跳过、保持 pending（0021 语义）
+    assert_eq!(processed, 2, "thumb+blur 各一件完成");
 
     let database = open_db(db_dir.path());
     let tasks = states(&database);
     assert!(
-        tasks.iter().all(|(_, _, state, _)| state == "done"),
+        tasks
+            .iter()
+            .filter(|(kind, _, _, _)| kind != "eyes")
+            .all(|(_, _, state, _)| state == "done"),
         "{tasks:?}"
+    );
+    assert!(
+        tasks
+            .iter()
+            .any(|(kind, _, state, _)| kind == "eyes" && state == "pending"),
+        "eyes 无模型保持 pending: {tasks:?}"
     );
     assert_eq!(thumb_state(&database, "IMG_0001.jpg"), 1);
 
@@ -177,11 +197,20 @@ fn corrupt_image_fails_with_attempts_then_failed() {
         2,
         "失败资产永久占位（按需兜底不再排队）"
     );
-    // 单 worker 同轮内自动重试到封顶：attempts 1→2→3 落 failed
+    // 单 worker 同轮内自动重试到封顶：attempts 1→2→3 落 failed；eyes 无模型
+    // 保持 pending、blur 成功 done（0021 三通道）
     assert!(
-        tasks
-            .iter()
-            .all(|(_, _, state, attempts)| state == "failed" && *attempts == 3),
+        tasks.iter().any(|(kind, _, state, attempts)| kind == "thumb"
+            && state == "failed"
+            && *attempts == 3),
+        "{tasks:?}"
+    );
+    assert!(
+        tasks.iter().any(|(kind, _, state, _)| kind == "eyes" && state == "pending"),
+        "{tasks:?}"
+    );
+    assert!(
+        tasks.iter().any(|(kind, _, state, _)| kind == "blur" && state == "done"),
         "{tasks:?}"
     );
 }
@@ -202,21 +231,21 @@ fn interrupted_running_tasks_resume_on_startup_path() {
         .execute("UPDATE index_tasks SET state = 'running'", [])
         .unwrap();
 
-    // 启动恢复路径：复位 running → pending，返回待办数
+    // 启动恢复路径：复位 running → pending，返回待办数（三通道）
     let pending = index::resume_pending(db_dir.path());
-    assert_eq!(pending, 1, "running 应复位为 pending");
+    assert_eq!(pending, 3, "running 应复位为 pending（thumb/eyes/blur）");
     let tasks = states(&database);
     assert!(
         tasks.iter().all(|(_, _, state, _)| state == "pending"),
         "{tasks:?}"
     );
 
-    // worker 续跑到完成
-    assert_eq!(index::run_pending(db_dir.path(), 2), 1);
+    // worker 续跑到完成（eyes 无模型跳过保持 pending）
+    assert_eq!(index::run_pending(db_dir.path(), 2), 2);
     assert_eq!(thumb_state(&database, "IMG_0001.jpg"), 1);
 
-    // 无待办时 resume 返回 0（不发事件）
-    assert_eq!(index::resume_pending(db_dir.path()), 0);
+    // eyes 无模型保持 pending → resume 计数恒为该残留（幂等空转）
+    assert_eq!(index::resume_pending(db_dir.path()), 1);
 }
 
 #[test]
@@ -262,11 +291,14 @@ fn import_then_index_chain_via_ipc() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let database = open_db(db_dir.path());
+    // eyes 无模型保持 pending 属设计（模型收录后 kick 续跑）——收敛判据
+    // 排除 eyes 通道
     loop {
         let count: i64 = database
             .0
             .query_row(
-                "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending','running')",
+                "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending','running') \
+                 AND kind != 'eyes'",
                 [],
                 |r| r.get(0),
             )
