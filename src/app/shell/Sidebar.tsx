@@ -188,13 +188,14 @@ export default function Sidebar() {
   useEffect(() => {
     void refreshCullingCount();
   }, [refreshCullingCount, activeLibraryId]);
-  // 人物入口徽标：聚类人脸总数（进 app 拉一次；失败静默 0——后端未就绪不显示）
-  const [peopleFaces, setPeopleFaces] = useState(0);
+  // 人物入口徽标：人物数量（聚类的 person 条目数；进 app 拉一次；
+  // 失败静默 0——后端未就绪不显示）
+  const [peopleCount, setPeopleCount] = useState(0);
   useEffect(() => {
     let cancelled = false;
     void peopleList().then((list) => {
       if (cancelled) return;
-      setPeopleFaces(list.reduce((sum, p) => sum + p.faceCount, 0));
+      setPeopleCount(list.length);
     });
     return () => {
       cancelled = true;
@@ -230,10 +231,10 @@ export default function Sidebar() {
     };
   }, [activeLibraryId]);
 
-  /** 行徽标值（people 走聚类总数；culling 走进行中会话数；其余走 sidebar_counts；
+  /** 行徽标值（people 走人物数量；culling 走进行中会话数；其余走 sidebar_counts；
    *  0/缺数据=不显示） */
   function badgeValueOf(badge: NonNullable<NavItem["badge"]>): number {
-    if (badge === "people") return peopleFaces;
+    if (badge === "people") return peopleCount;
     if (badge === "culling") return cullingActive;
     return counts ? counts[badge] : 0;
   }

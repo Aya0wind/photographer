@@ -181,7 +181,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
 
   // --- 人物入口徽标（保留） ----------------------------------------------------------
 
-  it("人物入口显示聚类人脸总数徽标（faceCount 求和）", async () => {
+  it("人物入口显示人物数量徽标（person 条目数，非 faceCount 求和）", async () => {
     const people: PersonCluster[] = [
       { clusterId: 0, name: "张三", faceCount: 8, coverAssetId: 1 },
       { clusterId: 1, name: null, faceCount: 4, coverAssetId: 2 },
@@ -190,7 +190,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     renderSidebar("/gallery");
 
     const badge = await screen.findByTestId("sidebar-people-badge");
-    expect(badge).toHaveTextContent("12");
+    expect(badge).toHaveTextContent("2");
     const nav = screen.getByRole("navigation", { name: "primary" });
     expect(within(within(nav).getByRole("link", { name: /人物/ })).getByTestId("sidebar-people-badge")).toBe(badge);
   });
@@ -229,8 +229,8 @@ describe("Sidebar：导航计数徽标", () => {
     expect(byKind.has("tags")).toBe(false); // 标签无独立导航入口
     expect(byKind.get("albums")).toBe("40"); // 相册
     expect(byKind.has("onThisDay")).toBe(false); // 0 → 不渲染
-    // 人物徽标照旧（peopleList 数据源）
-    expect(await screen.findByTestId("sidebar-people-badge")).toHaveTextContent("93");
+    // 人物徽标照旧（peopleList 数据源；1 个 person → 1）
+    expect(await screen.findByTestId("sidebar-people-badge")).toHaveTextContent("1");
 
     // 徽标挂在对应导航行内（图库行）
     const galleryLink = screen.getByRole("link", { name: /图库/ });
