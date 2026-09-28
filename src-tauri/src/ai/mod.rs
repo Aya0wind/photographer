@@ -213,9 +213,38 @@ pub struct ModelStatusDto {
 }
 
 /// 内置模型清单（OnceLock 单次解析）。
+///
+/// debug 构建支持 `SMARTPHOTO_DL_TEST_BASE`（如 `http://127.0.0.1:8787`）：
+/// 全部 url/mirrorUrl 重写到本地测试服务器（保留文件名），配合
+/// `scripts/test_dl_server.py` 确定性复现 下载失败/断流续传/SHA 不匹配。
+/// release 构建无此行为；正常开发不带该变量也不受影响。
 pub fn catalog() -> &'static [ModelEntry] {
     static CATALOG: std::sync::OnceLock<Vec<ModelEntry>> = std::sync::OnceLock::new();
-    CATALOG.get_or_init(|| serde_json::from_str(CATALOG_JSON).expect("内置清单必须合法"))
+    CATALOG.get_or_init(|| {
+        let entries: Vec<ModelEntry> =
+            serde_json::from_str(CATALOG_JSON).expect("内置清单必须合法");
+        #[cfg(debug_assertions)]
+        {
+            if let Ok(base) = std::env::var("SMARTPHOTO_DL_TEST_BASE") {
+                let base = base.trim_end_matches('/');
+                // 按 id 重写（URL 原名可能撞名：scrfd 与 scrfd-10g 的原 URL
+                // 文件名同为 model.onnx）；测试服务器按 <id> / <id>.onnx /
+                // <id>.json 顺序解析到本地文件。
+                entries
+                    .into_iter()
+                    .map(|mut e| {
+                        e.url = format!("{base}/{}", e.id);
+                        e.mirror_url = format!("{base}/{}", e.id);
+                        e
+                    })
+                    .collect()
+            } else {
+                entries
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        entries
+    })
 }
 
 // ---------------------------------------------------------------------------
