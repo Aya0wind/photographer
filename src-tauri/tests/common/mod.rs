@@ -142,7 +142,7 @@ pub fn plan_for(target: &Path) -> ImportPlan {
     ImportPlan {
         source_id: "test-src".into(),
         target_root: target.to_path_buf(),
-        dir_template: "{YYYY}/{MM-DD}".into(),
+        // 布局固定（2026-09-28）：无目录模板字段，引擎按 album_home_rel 落位
         name_template: "{原文件名}".into(),
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
@@ -177,22 +177,20 @@ pub fn run_engine(
     (job_id, stats)
 }
 
-/// 相册导入产物的期望目录：`target/{album_dir}/{YYYY}/{MM-DD}`。
-/// album_dir 传 "未分组"（DEFAULT_ALBUM_NAME）即默认兜底相册。
-pub fn expected_album_path(target: &Path, album_dir: &str, expected_rel: &Path) -> PathBuf {
-    target.join(album_dir).join(expected_rel)
+/// 兜底相册「未分组」的导入期望目录：`target/{创建YYYY}/{创建MM}/{dir_name}`
+/// （布局固定公式，从库读 album_home_rel——与引擎同一来源；先
+/// ensure_default_album 固定创建时刻，run_engine 幂等复用同一条）。
+/// 相册内平铺：期望文件 = 该目录直接 join 文件名（无拍摄日内层）。
+pub fn expected_ungrouped_dir(db_dir: &Path, target: &Path) -> PathBuf {
+    target.join(expected_ungrouped_rel(db_dir))
 }
 
-/// 源文件 mtime 推导的期望目标目录（含「未分组」相册段——0018 导入必落
-/// 相册后的默认兜底；无 EXIF 回退 mtime）。
-pub fn expected_subdir(source_dir: &Path, rel: &str) -> PathBuf {
-    let mtime = fs::metadata(source_dir.join(rel.replace('/', "\\")))
-        .unwrap()
-        .modified()
-        .unwrap();
-    let t: DateTime<Utc> = mtime.into();
-    // 0018 起导入必落相册：run_engine 兜底相册为「未分组」，期望路径已含该段
-    PathBuf::from(format!("未分组/{}", t.format("%Y/%m-%d")))
+/// 同 [`expected_ungrouped_dir`]，但只返回相对段（`{创建YYYY}/{创建MM}/
+/// {dir_name}`——第二目的地同公式仅根不同时用）。
+pub fn expected_ungrouped_rel(db_dir: &Path) -> String {
+    let db = open_db(db_dir);
+    let id = db.ensure_default_album().unwrap();
+    db.album_home_rel(id).unwrap().unwrap()
 }
 
 /// plan_for + ensure_default_album（0018 导入必落相册；直接建引擎的测试用）。
@@ -386,7 +384,6 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
     ImportPlan {
         source_id: device_id,
         target_root: target.to_path_buf(),
-        dir_template: "{YYYY}/{MM-DD}".into(),
         name_template: "{原文件名}".into(),
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,

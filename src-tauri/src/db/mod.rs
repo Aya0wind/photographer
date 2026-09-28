@@ -471,9 +471,10 @@ pub struct PersonRow {
 
 /// 相册行（album_list 数据源 / IPC 载荷 AlbumDto，camelCase）：纯引用照片组
 /// 的元数据面——name 全库唯一；dir_name 为物理主目录名（0018，布局
-/// `photoRoot/{dir_name}/{YYYY}/{MM-DD}/`，由显示名净化生成，改显示名不动）；
-/// cover_asset_id 只是封面引用（资产永久删除时 FK SET NULL 自动解除）；
-/// item_count 为引用数（相册为空合法）。
+/// `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`（2026-09-28 定案：外层=相册
+/// 创建时间年月、相册内平铺，见 [`album_home_rel_parts`]），由显示名净化生成，
+/// 改显示名不动）；cover_asset_id 只是封面引用（资产永久删除时 FK SET NULL
+/// 自动解除）；item_count 为引用数（相册为空合法）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlbumRow {
@@ -1348,7 +1349,7 @@ impl Db {
         rows.collect()
     }
 
-    /// 按相册 id 取目录名（相册导入模板 / 物理挪移用）。
+    /// 按相册 id 取目录名（相册改名 / 物理挪移用）。
     pub fn album_dir_name(&self, id: i64) -> Result<Option<String>> {
         self.0
             .query_row("SELECT dir_name FROM album WHERE id = ?1", [id], |r| {
@@ -1361,10 +1362,52 @@ impl Db {
             })
     }
 
+    /// 相册主目录相对段（photoRoot 下，含 dir_name，**无**头尾分隔符）：
+    /// `{创建YYYY}/{创建MM}/{dir_name}`——布局公式只此一处定义（用户定案
+    /// 2026-09-28：时间/相册 + 相册内平铺），导入引擎（dir_template 覆写）、
+    /// 归册挪移（claim）、album 模式导出三调用点共用，不得各自拼。
+    /// 外层两段 = 相册 created_at（UTC 口径，与列存储一致）的字面量段，
+    /// 相册级常量——相册内照片平铺，拍摄日分组在应用 UI（groupAssetsByDate）
+    /// 完成，不落存储层。created_at 解析失败（理论不可能，列 NOT NULL）
+    /// 兜底 dir_name 直挂 photoRoot。段间用 `/`（render_dir 渲染产物同形态，
+    /// Windows Path::join 兼容）。
+    pub fn album_home_rel(&self, id: i64) -> Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT created_at, dir_name FROM album WHERE id = ?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map(|(created_at, dir_name)| album_home_rel_parts(&created_at, &dir_name))
+            .map(Some)
+            .or_else(|e| match e {
+                Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
+    /// 全部相册的主目录相对段（claim 挪移的主相册前缀判定用，
+    /// [`Db::album_home_rel`] 的批量形态）。
+    pub fn album_home_rels(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt =
+            self.0
+                .prepare("SELECT id, created_at, dir_name FROM album ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                album_home_rel_parts(&r.get::<_, String>(1)?, &r.get::<_, String>(2)?),
+            ))
+        })?;
+        rows.collect()
+    }
+
     /// 批量改写资产路径前缀（0018 相册目录 rename / claim 挪移共用）：
-    /// `path` 以 `old_prefix`（含尾分隔符，按字符比较）开头的行改为
-    /// `new_prefix +` 剩余部分，同事务内顺带更新 album.dir_name。
-    /// 返回改写行数。filename 若在新路径下失效由调用方一并处理。
+    /// `path` 以 `old_prefix`（含尾分隔符）开头的行改为 `new_prefix +`
+    /// 剩余部分，同事务内顺带更新 album.dir_name。前缀匹配**分隔符归一**
+    /// （`\` 与 `/` 视为等同——库内 path 存在两种形态：引擎 render_dir
+    /// 产物段内是 `/`、claim/迁移脚本产物是 `\`；替换只动前缀段，剩余
+    /// 部分保留原分隔符）。返回改写行数。filename 若在新路径下失效由
+    /// 调用方一并处理。
     pub fn album_rewrite_paths(
         &self,
         album_id: i64,
@@ -1372,12 +1415,13 @@ impl Db {
         old_prefix: &str,
         new_prefix: &str,
     ) -> Result<u64> {
-        let prefix_chars = old_prefix.chars().count() as i64;
+        let norm_old = old_prefix.replace('\\', "/");
+        let prefix_chars = norm_old.chars().count() as i64;
         let tx = self.0.unchecked_transaction()?;
         let n = tx.execute(
             "UPDATE assets SET path = ?2 || substr(path, ?4 + 1) \
-             WHERE substr(path, 1, ?4) = ?3",
-            params![album_id, new_prefix, old_prefix, prefix_chars],
+             WHERE substr(replace(path, char(92), '/'), 1, ?4) = ?3",
+            params![album_id, new_prefix, norm_old, prefix_chars],
         )?;
         tx.execute(
             "UPDATE album SET dir_name = ?2 WHERE id = ?1",
@@ -1408,15 +1452,6 @@ impl Db {
             return Ok(id);
         }
         Ok(self.album_create(DEFAULT_ALBUM_NAME)?.id)
-    }
-
-    /// 全部相册目录名（挪移守卫：判断资产是否已在某相册主目录内）。
-    pub fn album_dir_names(&self) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT id, dir_name FROM album ORDER BY id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-        rows.collect()
     }
 
     /// 建相册，返回新行（item_count=0、cover=None）。重名由 name UNIQUE
@@ -2880,6 +2915,16 @@ impl Db {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// 布局公式唯一实现（[`Db::album_home_rel`] / [`Db::album_home_rels`] 共用）：
+/// created_at（RFC3339，UTC 口径）+ dir_name → `{YYYY}/{MM}/{dir_name}`；
+/// 解析失败兜底 dir_name 直挂根。存量迁移脚本 scripts/migrate_album_layout.py
+/// 的 new_home_rel 与此同语义（改公式两处同步）。
+pub fn album_home_rel_parts(created_at: &str, dir_name: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|t| format!("{}/{}", t.format("%Y/%m"), dir_name))
+        .unwrap_or_else(|_| dir_name.to_string())
 }
 
 /// 资产入库核（连接/事务通用）：同路径重复导入整行覆盖（REPLACE 换 id 时

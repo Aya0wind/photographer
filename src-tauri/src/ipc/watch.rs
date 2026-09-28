@@ -177,8 +177,8 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
         let plan = ImportPlan {
             source_id: source.id(),
             target_root: std::path::PathBuf::from(&library.photo_root),
-            // 内层模板固定（0018）：album 段由引擎按 dir_name 拼接
-            dir_template: "{YYYY}/{MM-DD}".into(),
+            // 布局固定（2026-09-28）：目录段无计划字段，引擎运行时按
+            // album_home_rel 公式落 `{创建YYYY}/{创建MM}/{dir_name}/`
             name_template: "{原文件名}".into(),
             duplicate_policy: DuplicatePolicy::Skip,
             skip_imported: true,

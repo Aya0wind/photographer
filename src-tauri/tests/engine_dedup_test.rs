@@ -9,7 +9,9 @@ pub use common::{
 
 use std::fs;
 
-use common::{build_source, count_assets, expected_subdir, journal_states, open_db, run_engine};
+use common::{
+    build_source, count_assets, expected_ungrouped_dir, journal_states, open_db, run_engine,
+};
 use events::FileState;
 use settings::DuplicatePolicy;
 
@@ -40,10 +42,7 @@ fn rename_policy_generates_suffix() {
 
     // 预占一个目标路径（内容不同，跳过内容查重干扰：skip_imported=false）
     let jpg = &files[0];
-    let occupied = target
-        .path()
-        .join(expected_subdir(src.path(), &jpg.0))
-        .join("IMG_0001.jpg");
+    let occupied = expected_ungrouped_dir(db_dir.path(), target.path()).join("IMG_0001.jpg");
     fs::create_dir_all(occupied.parent().unwrap()).unwrap();
     fs::write(&occupied, b"occupied").unwrap();
 
@@ -68,13 +67,9 @@ fn skip_policy_path_conflict_marks_skipped() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    let files = build_source(src.path());
+    build_source(src.path()); // 建源树（期望路径不再依赖逐文件 mtime）
 
-    let jpg = &files[0];
-    let occupied = target
-        .path()
-        .join(expected_subdir(src.path(), &jpg.0))
-        .join("IMG_0001.jpg");
+    let occupied = expected_ungrouped_dir(db_dir.path(), target.path()).join("IMG_0001.jpg");
     fs::create_dir_all(occupied.parent().unwrap()).unwrap();
     fs::write(&occupied, b"occupied").unwrap();
 

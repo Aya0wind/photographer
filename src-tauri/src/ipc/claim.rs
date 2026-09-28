@@ -2,18 +2,22 @@
 //!
 //! `album_claim_assets`：归入 = 物理挪移并改主相册。支持从日期根（历史
 //! 遗留）、从未分组、从任意相册主目录挪到目标相册目录
-//! （`photoRoot/{album.dir_name}/{YYYY}/{MM-DD}/`，日期段取 captured_at
-//! 本地时区；无拍摄时间归 `0000/00-00`）。同卷 rename 毫秒级；跨卷
-//! copy（.part 原子落位）+ xxhash 校验 + 删源。XMP 边车随行；DB 路径
-//! 同步更新。挪移成功后：从原主相册移除引用（原主相册为「未分组」时
-//! 保留——它是系统兜底袋，引用不清）+ 目标相册引用建立。已在目标相册
-//! 目录 → 幂等跳过（仅补引用）；外部库（origin=external，文件不在库内）
-//! 拒绝挪移；回收站资产拒绝。
+//! （`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`，布局公式统一走
+//! [`crate::db::Db::album_home_rel`]——外层两段 = 相册创建时间年月
+//! （UTC 口径），相册内平铺，与导入/album 导出同公式；拍摄日分组在应用
+//! UI 完成）。同卷 rename 毫秒级；跨卷 copy（.part 原子落位）+ xxhash
+//! 校验 + 删源。XMP 边车随行；DB 路径同步更新。挪移成功后：从原主相册
+//! 移除引用（原主相册为「未分组」时保留——它是系统兜底袋，引用不清）+
+//! 目标相册引用建立。已在目标相册目录 → 幂等跳过（仅补引用）；外部库
+//! （origin=external，文件不在库内）拒绝挪移；回收站资产拒绝。
 //!
-//! 主相册判定（实现选型）：资产路径落在某相册 `photoRoot/{dir_name}/`
-//! 前缀之下即归属该相册为「主相册」——按路径前缀判定，免额外记录列
-//! （路径即真值，claim/导入两条写入路径天然一致）；「未分组」的照片在
-//! UI 判定为未真正归类（前端读未分组引用或路径前缀均可）。
+//! 主相册判定（实现选型）：资产路径落在某相册主目录
+//! （`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`）前缀之下即归属该相册
+//! 为「主相册」——按路径前缀判定，免额外记录列（路径即真值，claim/导入
+//! 两条写入路径天然一致）。库内 path 存在 `\`（claim 挪移产物）与 `/`
+//! （引擎/导出 render_dir 渲染段）两种分隔符形态，前缀比较统一按 `/`
+//! 归一（[`norm_sep`]）；「未分组」的照片在 UI 判定为未真正归类（前端读
+//! 未分组引用或路径前缀均可）。
 //!
 //! `lr_staging_create`：把所选资产放入「LR 暂存夹」供 Lightroom 导入/
 //! 修改后回传——目标 `photoRoot 所在卷/.lr-staging/{name 或 时间戳}/`。
@@ -74,12 +78,19 @@ fn volume_root_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 相册主目录前缀（含尾分隔符；字符串路径与库内存储形态一致）。
-fn album_prefix(photo_root: &str, dir_name: &str) -> String {
+/// 路径分隔符归一（`\` → `/`）：库内 path 存在反斜杠（claim 挪移 join
+/// 产物）与正斜杠（引擎/导出 render_dir 渲染段）两种形态，前缀判定统一
+/// 按 `/` 比较。
+fn norm_sep(p: &str) -> String {
+    p.replace('\\', "/")
+}
+
+/// 相册主目录前缀（含尾分隔符；相册相对段 album_home_rel 以 `/` 拼接，
+/// 归一后与库内两种分隔符形态均能命中）。
+fn album_prefix(photo_root: &str, home_rel: &str) -> String {
     format!(
-        "{}{}",
-        Path::new(photo_root).join(dir_name).display(),
-        std::path::MAIN_SEPARATOR
+        "{}/",
+        norm_sep(&Path::new(photo_root).join(home_rel).display().to_string())
     )
 }
 
@@ -100,21 +111,6 @@ fn resolve_conflict(dir: &Path, filename: &str) -> PathBuf {
         n += 1;
     }
     candidate
-}
-
-/// captured_at（UTC RFC3339）→ 本地时区 `(YYYY, MM-DD)` 目录段。
-/// 无拍摄时间归 `("0000", "00-00")`（与画廊 unknown 组语义对齐且路径安全）。
-fn date_segments(captured_at: Option<&str>) -> (String, String) {
-    captured_at
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map(|t| {
-            let local = t.with_timezone(&chrono::Local);
-            (
-                local.format("%Y").to_string(),
-                local.format("%m-%d").to_string(),
-            )
-        })
-        .unwrap_or_else(|| ("0000".to_string(), "00-00".to_string()))
 }
 
 /// 挪移单个文件（含 XMP 边车随行）：同卷 rename / 跨卷 copy+校验+删源。
@@ -195,8 +191,9 @@ pub fn fetch_album_claim_assets(
     if !db.album_exists(album_id).map_err(|e| e.to_string())? {
         return Err("相册不存在".into());
     }
-    let dir_name = db
-        .album_dir_name(album_id)
+    // 挪移目标 = 相册主目录（布局公式统一 album_home_rel，与导入/导出一致）
+    let home_rel = db
+        .album_home_rel(album_id)
         .map_err(|e| e.to_string())?
         .ok_or("相册不存在")?;
     let photo_root = state
@@ -207,13 +204,14 @@ pub fn fetch_album_claim_assets(
         .cloned()
         .ok_or("尚未创建库")?
         .photo_root;
-    let target_prefix = album_prefix(&photo_root, &dir_name);
-    // 全相册主目录前缀（主相册判定：路径前缀命中即归属）
+    let target_prefix = album_prefix(&photo_root, &home_rel);
+    // 全相册主目录前缀（主相册判定：路径前缀命中即归属；归一比较兼容
+    // 库内 `\` / `/` 两种分隔符形态）
     let prefixes: Vec<(i64, String)> = db
-        .album_dir_names()
+        .album_home_rels()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .map(|(aid, dir)| (aid, album_prefix(&photo_root, &dir)))
+        .map(|(aid, rel)| (aid, album_prefix(&photo_root, &rel)))
         .collect();
     // 默认相册 id（挪出「未分组」时引用保留——它是不清空的兜底袋）
     let default_album_id: Option<i64> =
@@ -237,17 +235,16 @@ pub fn fetch_album_claim_assets(
                 error,
             });
         };
-        let row: Option<(String, String, Option<String>, i64, u64)> =
+        let row: Option<(String, String, i64, u64)> =
             db.0.query_row(
-                "SELECT path, filename, captured_at, in_trash, size FROM assets WHERE id = ?1",
+                "SELECT path, filename, in_trash, size FROM assets WHERE id = ?1",
                 [asset_id],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, i64>(4)? as u64,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)? as u64,
                     ))
                 },
             )
@@ -257,15 +254,16 @@ pub fn fetch_album_claim_assets(
                 other => Err(other),
             })
             .map_err(|e| e.to_string())?;
-        let Some((path, filename, captured_at, in_trash, size)) = row else {
+        let Some((path, filename, in_trash, size)) = row else {
             continue; // 失效 id：静默跳过（与 album_add_assets 同语义）
         };
         if in_trash != 0 {
             fail("资产在回收站，不能挪移".into());
             continue;
         }
+        let path_norm = norm_sep(&path);
         let src = PathBuf::from(&path);
-        if path.starts_with(&target_prefix) {
+        if path_norm.starts_with(&target_prefix) {
             // 幂等：已在目标相册目录——仅确保引用存在
             let _ = db.album_add_assets(album_id, &[asset_id], subgroup);
             result.skipped += 1;
@@ -274,7 +272,7 @@ pub fn fetch_album_claim_assets(
         // 主相册判定：路径前缀命中的相册（可为他册 / 未分组 / None=日期根）
         let main_album: Option<i64> = prefixes
             .iter()
-            .find(|(_, p)| path.starts_with(p))
+            .find(|(_, p)| path_norm.starts_with(p))
             .map(|(aid, _)| *aid);
         let origin: String =
             db.0.query_row("SELECT origin FROM assets WHERE id = ?1", [asset_id], |r| {
@@ -289,11 +287,11 @@ pub fn fetch_album_claim_assets(
             fail(format!("源文件不在盘：{path}"));
             continue;
         }
-        let (year, month_day) = date_segments(captured_at.as_deref());
+        // 新布局：目标 = 相册主目录平铺（album_home_rel 公式，无拍摄日分层）；
+        // home_rel 段分隔符归一为平台原生（与迁移脚本产物一致，库内两种
+        // 形态前缀判定均兼容——见 norm_sep）
         let dst_dir = Path::new(&photo_root)
-            .join(&dir_name)
-            .join(year)
-            .join(month_day);
+            .join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         let dst = resolve_conflict(&dst_dir, &filename);
         let xxhash: i64 =
             db.0.query_row("SELECT xxhash FROM assets WHERE id = ?1", [asset_id], |r| {

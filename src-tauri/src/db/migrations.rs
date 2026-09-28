@@ -439,9 +439,11 @@ CREATE INDEX idx_asset_relation_asset   ON asset_relation (asset_id);
 CREATE INDEX idx_asset_relation_related ON asset_relation (related_asset_id);
 "#;
 
-/// 0018（阶段 B3 相册物理目录化，用户定案 2026-09-27）：
-/// - `album.dir_name`：相册物理主目录名（布局 `photoRoot/{dir_name}/
-///   {YYYY}/{MM-DD}/`，一次拍摄任务一册）。创建时由显示名净化生成
+/// 0018（阶段 B3 相册物理目录化，用户定案 2026-09-27；布局改版 2026-09-28）：
+/// - `album.dir_name`：相册物理主目录名（布局 `photoRoot/{创建YYYY}/
+///   {创建MM}/{dir_name}/`——外层=相册创建时间年月（UTC 口径）、相册内
+///   平铺；公式统一在 [`crate::db::album_home_rel_parts`]，一次拍摄任务
+///   一册）。创建时由显示名净化生成
 ///   （[`crate::db::sanitize_dir_name`]），显示名改名不动它；受控改目录走
 ///   album_dir_rename（物理 rename + DB 路径批量更新）。NOT NULL UNIQUE 经
 ///   唯一索引实现（SQLite ALTER 加不了 UNIQUE 列）。

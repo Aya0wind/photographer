@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use common::{build_source, count_assets, expected_subdir, open_db, run_engine};
+use common::{build_source, count_assets, expected_ungrouped_dir, open_db, run_engine};
 use events::EventBus;
 use image::DynamicImage;
 use import::engine::ImportMode;
@@ -47,9 +47,7 @@ fn same_volume_move_takes_fast_path_and_backfills_hash() {
             (
                 rel.clone(),
                 content.clone(),
-                target
-                    .path()
-                    .join(expected_subdir(src.path(), rel))
+                expected_ungrouped_dir(db_dir.path(), target.path())
                     .join(rel.rsplit('/').next().unwrap()),
             )
         })

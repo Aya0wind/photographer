@@ -45,9 +45,11 @@ impl Settings {
 /// 库 = 独立数据单元：`db_dir` 数据库目录自包含（SQLite/缩略图/向量/日志），
 /// `photo_root` 照片存储目录与之分离；两者均可迁移。
 ///
-/// M2 起**导入目录属性是库属性**（建库时填写、导入时只读，用户规定
-/// 2026-09-18）：`dir_template` 目录模板与 `import_subdir` 导入子目录随库
-/// 保存；旧 settings.json 缺这两字段时按默认值容错填充（不升 schema）。
+/// 布局属性**不再可配置**（用户定案 2026-09-28）：M2 时代的库级
+/// `dir_template` 目录模板与 `import_subdir` 导入子目录已退役——物理布局
+/// 固定为 `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`（相册内平铺，公式
+/// 唯一来源 [`crate::db::album_home_rel_parts`]）。旧 settings.json 里的
+/// `dirTemplate`/`importSubdir` 残留键 serde 反序列化自动忽略（不升 schema）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Library {
@@ -55,12 +57,6 @@ pub struct Library {
     pub name: String,
     pub db_dir: String,
     pub photo_root: String,
-    /// 导入目录模板（库属性：导入时只读）。
-    #[serde(default = "default_dir_template")]
-    pub dir_template: String,
-    /// 卡/相机导入的专用子目录名（相对 photoRoot 的应用写入区；库属性）。
-    #[serde(default = "default_import_subdir")]
-    pub import_subdir: String,
     /// 配置链是否走完（达芬奇式启动流，用户规定 2026-09-18：每次启动先进
     /// 库选择器）：新建库为 false，走完库配置链置 true；选择器据此决定
     /// 是否继续进入配置向导。旧 settings.json 缺字段 → false，由 load 的
@@ -80,25 +76,13 @@ impl Default for Library {
             name: String::new(),
             db_dir: String::new(),
             photo_root: String::new(),
-            dir_template: default_dir_template(),
-            import_subdir: default_import_subdir(),
             configured: false,
             streams: default_streams(),
         }
     }
 }
 
-/// 库级目录模板默认值（与建库默认一致，见 ImportSettings 注释）。
-fn default_dir_template() -> String {
-    "{YYYY}/{MM-DD}/{原文件名}".to_string()
-}
-
-/// 库级导入子目录默认值。
-fn default_import_subdir() -> String {
-    "SmartPhoto".to_string()
-}
-
-/// 库级并发流数默认值（卷/文件夹源）。
+/// 库级并发流数默认值。
 fn default_streams() -> u32 {
     4
 }
@@ -139,21 +123,16 @@ pub enum IndexSchedule {
     Manual,
 }
 
-/// 设备与导入配置。
+/// 设备与导入配置。目录布局不在其列——布局固定不可配置（2026-09-28
+/// 定案，见 [`Library`] 注释）；旧 settings.json 的 `import.dirTemplate` /
+/// `import.importSubdir` 残留键 serde 自动忽略。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ImportSettings {
     pub prompt_on_device: bool,
     pub skip_imported: bool,
-    /// **已降级（M2 用户规定 2026-09-18）**：目录模板/导入子目录是库属性
-    /// （`Library.dir_template` / `Library.import_subdir`，建库时填写、导入时
-    /// 只读）。本字段保留仅作**创建新库时的默认值**，存量配置不断裂。
-    pub dir_template: String,
     pub duplicate_policy: DuplicatePolicy,
     pub notify_milestones: bool,
-    /// **已降级**：语义同 `dir_template`——新库 `import_subdir` 的默认值
-    /// （spec §5.11：photoRoot 归用户管理，应用只写 `photoRoot\import_subdir`）。
-    pub import_subdir: String,
 }
 
 impl Default for ImportSettings {
@@ -161,10 +140,8 @@ impl Default for ImportSettings {
         Self {
             prompt_on_device: true,
             skip_imported: true,
-            dir_template: default_dir_template(),
             duplicate_policy: DuplicatePolicy::Skip,
             notify_milestones: true,
-            import_subdir: default_import_subdir(),
         }
     }
 }

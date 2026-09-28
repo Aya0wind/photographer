@@ -21,21 +21,13 @@ use import::engine::{Engine, ImportMode, ImportPlan, SecondTarget};
 fn second_for(target: &Path) -> SecondTarget {
     SecondTarget {
         target_root: target.to_path_buf(),
-        dir_template: "{YYYY}/backup".into(),
     }
 }
 
-/// 第二目的地的期望路径（模板 {YYYY}/backup；无 EXIF 回退 mtime）。
-fn expected_second_dst(second_root: &Path, source_dir: &Path, rel: &str) -> PathBuf {
-    let mtime = fs::metadata(source_dir.join(rel.replace('/', "\\")))
-        .unwrap()
-        .modified()
-        .unwrap();
-    let t: chrono::DateTime<chrono::Utc> = mtime.into();
-    second_root
-        .join(t.format("%Y").to_string())
-        .join("backup")
-        .join(rel.rsplit('/').next().unwrap())
+/// 第二目的地的期望路径：与主目的地同布局公式（album_home_rel），仅根
+/// 不同——`{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/`（2026-09-28 定案）。
+fn expected_second_dst(second_root: &Path, home_rel: &str, name: &str) -> PathBuf {
+    second_root.join(home_rel).join(name)
 }
 
 #[test]
@@ -45,6 +37,10 @@ fn dual_target_writes_both_destinations_with_integrity() {
     let target = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let files = build_source(src.path());
+
+    // 先 ensure 兜底相册固定创建时刻（run_engine 幂等复用）；期望根 =
+    // 相册主目录相对段（双目的地共用同一公式）
+    let home_rel = common::expected_ungrouped_rel(db_dir.path());
 
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
         plan.second_target = Some(second_for(second.path()));
@@ -57,13 +53,10 @@ fn dual_target_writes_both_destinations_with_integrity() {
     for (rel, content) in &files {
         let name = rel.rsplit('/').next().unwrap();
         // 主目的地字节一致
-        let primary = target
-            .path()
-            .join(common::expected_subdir(src.path(), rel))
-            .join(name);
+        let primary = target.path().join(&home_rel).join(name);
         assert_eq!(fs::read(&primary).unwrap(), *content, "主目的地: {rel}");
-        // 第二目的地字节一致（独立目录模板）
-        let secondary = expected_second_dst(second.path(), src.path(), rel);
+        // 第二目的地字节一致（同公式仅根不同）
+        let secondary = expected_second_dst(second.path(), &home_rel, name);
         assert_eq!(fs::read(&secondary).unwrap(), *content, "第二目的地: {rel}");
         // journal 双记录：dst + dst2 均落位
         let row = db
@@ -116,19 +109,20 @@ fn second_target_failure_fails_file_without_stray_primary() {
     let second = tempfile::tempdir().unwrap();
     let files = build_source(src.path());
 
-    // 在第二目的地预置普通文件占据年份目录 → 主路落位后第二目的地
-    // 建目录必然失败（走"任一失败判单文件失败 + 主路回滚"路径）
-    for (rel, _) in &files {
-        let year_dir = expected_second_dst(second.path(), src.path(), rel)
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+    // 在第二目的地预置普通文件占据月份目录段 → 第二路落位建目录必然
+    // 失败（走"任一失败判单文件失败 + 主路回滚"路径）；布局段 =
+    // {创建YYYY}/{创建MM}/{dir_name}，占 {MM} 一处即可挡住全部文件
+    {
+        let home_rel = common::expected_ungrouped_rel(db_dir.path());
+        let mut segs = home_rel.split('/');
+        let year = segs.next().unwrap();
+        let month = segs.next().unwrap();
+        fs::create_dir_all(second.path().join(year)).unwrap();
+        let block = second.path().join(year).join(month);
         assert!(
-            fs::write(&year_dir, b"block").is_ok(),
+            fs::write(&block, b"block").is_ok(),
             "占位失败: {}",
-            year_dir.display()
+            block.display()
         );
     }
 
@@ -214,16 +208,15 @@ fn second_target_serde_backward_compat_and_camel_case() {
     assert_eq!(plan.second_target, None);
     assert_eq!(plan.mode, ImportMode::Copy);
 
-    // Some 值 round-trip 且键为 camelCase secondTarget/targetRoot/dirTemplate
+    // Some 值 round-trip 且键为 camelCase secondTarget/targetRoot
+    //（dirTemplate 已随布局写死退役——SecondTarget 只剩 targetRoot）
     let mut dual = plan.clone();
     dual.second_target = Some(SecondTarget {
         target_root: PathBuf::from(r"D:\backup"),
-        dir_template: "{YYYY}/backup".into(),
     });
     let value = serde_json::to_value(&dual).unwrap();
     assert!(value.get("secondTarget").is_some(), "{value}");
     assert_eq!(value["secondTarget"]["targetRoot"], r"D:\backup");
-    assert_eq!(value["secondTarget"]["dirTemplate"], "{YYYY}/backup");
     let back: ImportPlan = serde_json::from_value(value).unwrap();
     assert_eq!(back.second_target, dual.second_target);
 }

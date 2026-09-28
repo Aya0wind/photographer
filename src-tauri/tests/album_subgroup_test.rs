@@ -314,7 +314,6 @@ fn import_with_album_subgroup_and_resume_idempotent() {
         import::engine::ImportPlan {
             source_id: "test-src".into(),
             target_root: target.path().to_path_buf(),
-            dir_template: "{YYYY}/{MM-DD}".into(),
             name_template: "{原文件名}".into(),
             duplicate_policy: settings::DuplicatePolicy::Skip,
             skip_imported: true,

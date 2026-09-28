@@ -12,7 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::{
-    build_source, count_assets, expected_subdir, journal_states, open_db, plan_for, run_engine,
+    build_source, count_assets, expected_ungrouped_dir, journal_states, open_db, plan_for,
+    run_engine,
     DeleteFailSource,
 };
 use devices::volume::VolumeSource;
@@ -32,9 +33,7 @@ fn move_mode_deletes_source_and_cleans_empty_dirs() {
             (
                 rel.clone(),
                 content.clone(),
-                target
-                    .path()
-                    .join(expected_subdir(src.path(), rel))
+                expected_ungrouped_dir(db_dir.path(), target.path())
                     .join(rel.rsplit('/').next().unwrap()),
             )
         })

@@ -64,23 +64,27 @@ pub enum ImportMode {
     Move,
 }
 
-/// F2 双目的地导入的第二目的地：单遍读取同时写第二份（独立目录模板，
-/// 同文件名模板）；第二路同样走 `.part` 暂存 + 长度校验 + journal 记录
-/// （job_files.dst2）。与 move 模式互斥（begin 时拒绝）。
+/// F2 双目的地导入的第二目的地：单遍读取同时写第二份（同布局公式、
+/// 同文件名模板，仅根不同——`{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/`，
+/// 2026-09-28 定案；dir_template 随布局写死一并退役）；第二路同样走
+/// `.part` 暂存 + 长度校验 + journal 记录（job_files.dst2）。与 move 模式
+/// 互斥（begin 时拒绝）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecondTarget {
     pub target_root: PathBuf,
-    pub dir_template: String,
 }
 
-/// 导入计划（IPC 契约，camelCase）。
+/// 导入计划（IPC 契约，camelCase）。布局固定不可配置（用户定案
+/// 2026-09-28）：目录段没有计划字段，运行时由相册统一公式
+/// [`crate::db::Db::album_home_rel`] 派生（`{创建YYYY}/{创建MM}/{dir_name}`，
+/// 相册内平铺）；历史 journal plan_json 里的 `dirTemplate` 键反序列化时
+/// 自动忽略（resume 剩余文件按当前公式重渲染落位）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlan {
     pub source_id: String,
     pub target_root: PathBuf,
-    pub dir_template: String,
     pub name_template: String,
     pub duplicate_policy: DuplicatePolicy,
     pub skip_imported: bool,
@@ -311,22 +315,22 @@ impl Engine {
             base.total_bytes += e.size;
         }
 
-        // 相册物理目录化（0018）：带 album_id 的导入落
-        // `photoRoot/{album.dir_name}/{YYYY}/{MM-DD}/`（相册内层模板固定，
-        // dir_name 作为最外层段前缀拼进 dir_template；随 plan_json 落
-        // journal，resume/retry 自然一致）。album_id 必填（None = 防御性
-        // 报错，IPC 层已有同款校验；历史 journal 的 None 计划走 resume
-        // 路径不经过这里，保留日期根模板仅作历史兼容）。
+        // 相册物理目录化（0018；布局改版用户定案 2026-09-28）：带 album_id
+        // 的导入落 `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`——布局**固定
+        // 不可配置**，统一公式 [`crate::db::Db::album_home_rel`]（外层两段 =
+        // 相册 created_at 的字面量（UTC 口径），相册级常量、相册内**平铺**；
+        // 拍摄日分组在应用 UI（groupAssetsByDate）完成，不落存储层）。第二
+        // 目的地同公式、仅根不同。此处只做相册存在性校验（早失败）；
+        // 模板在 run() 派生，不落 plan_json（相册改名后 resume 自然跟新）。
+        // album_id 必填（None = 防御性报错，IPC 层已有同款校验）。
         match self.plan.album_id {
             Some(album_id) => {
-                let dir_name = self
-                    .db
-                    .album_dir_name(album_id)
+                self.db
+                    .album_home_rel(album_id)
                     .map_err(EngineError::Db)?
                     .ok_or_else(|| {
                         EngineError::InvalidPlan(format!("导入相册 {album_id} 不存在"))
                     })?;
-                self.plan.dir_template = format!("{dir_name}/{{YYYY}}/{{MM-DD}}");
             }
             None => {
                 return Err(EngineError::InvalidPlan("必须选择相册".into()));
@@ -423,6 +427,35 @@ impl Engine {
         }
         let queue = queue.unwrap_or_default();
 
+        // 布局公式派生（固定不可配置，2026-09-28 定案）：目录段 =
+        // album_home_rel（`{创建YYYY}/{创建MM}/{dir_name}`，相册内平铺）。
+        // begin 已对新任务校验相册存在；resume 历史任务在此派生——相册
+        // 被删/无 album_id 的史前计划无法落位，任务判 error 收尾。
+        let dir_template = match self
+            .plan
+            .album_id
+            .and_then(|aid| self.db.album_home_rel(aid).ok().flatten())
+        {
+            Some(template) => template,
+            None => {
+                let message = match self.plan.album_id {
+                    Some(aid) => format!("导入相册 {aid} 不存在（恢复前已被删除）"),
+                    None => "历史任务缺少相册（布局改版前暂停），无法恢复".to_string(),
+                };
+                self.bus.publish(AppEvent::AppError {
+                    level: "error".into(),
+                    message: message.clone(),
+                    recoverable: true,
+                });
+                let _ = self.db.append_log("error", Some(job_id), &message);
+                let _ = self
+                    .db
+                    .finish_job(job_id, "error", &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO)).unwrap_or_default());
+                self.controls.done.store(true, Ordering::SeqCst);
+                return Counters::default().into_stats(Duration::ZERO);
+            }
+        };
+
         let worker_count = worker_count(self.source.kind(), self.plan.streams);
         let (work_tx, work_rx) = mpsc::channel::<FileEntry>();
         for entry in queue {
@@ -441,14 +474,14 @@ impl Engine {
             let controls = self.controls.clone();
             let part_dir = self.plan.target_root.join(PART_DIR);
             let part_seq = Arc::clone(&part_seq);
-            let dir_template = self.plan.dir_template.clone();
+            let dir_template = dir_template.clone();
             let name_template = self.plan.name_template.clone();
             let target_root = self.plan.target_root.clone();
             let second = self
                 .plan
                 .second_target
                 .as_ref()
-                .map(|s| (s.target_root.clone(), s.dir_template.clone()));
+                .map(|s| s.target_root.clone());
             workers.push(std::thread::spawn(move || {
                 loop {
                     if controls.is_cancelled() {
@@ -475,9 +508,7 @@ impl Engine {
                         &target_root,
                         &dir_template,
                         &name_template,
-                        second
-                            .as_ref()
-                            .map(|(root, tpl)| (root.as_path(), tpl.as_str())),
+                        second.as_deref(),
                     );
                     if result_tx.send(outcome).is_err() {
                         break; // 收集端已退出

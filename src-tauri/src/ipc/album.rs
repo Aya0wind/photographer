@@ -180,10 +180,13 @@ pub fn fetch_album_assets_page(
     super::assets::fetch_assets_page(state, after_id, limit, filters)
 }
 
-/// 受控改目录核（0018）：物理 rename（`photoRoot/{old}` → `photoRoot/{new}`，
-/// 结构上恒同卷）+ DB 内库内资产路径前缀批量改写 + album.dir_name 更新。
+/// 受控改目录核（0018）：只动相册主目录的**最后一段** dir_name——新布局
+/// （2026-09-28）父目录 = 创建年月目录（`photoRoot/{创建YYYY}/{创建MM}/`），
+/// 物理 rename `…/{old}` → `…/{new}`（同父恒同卷）+ DB 库内资产路径前缀
+/// 批量改写 + album.dir_name 更新。
 /// - 新目录名经 [`crate::db::sanitize_dir_name`] 净化；与其他相册目录重名
-///   拒绝；目标目录已存在拒绝。
+///   拒绝（album.dir_name 全库 UNIQUE，即便不同创建年月父目录不撞也沿用）；
+///   目标目录已存在拒绝。
 /// - 旧目录不在盘（从未有相册导入/已被外部搬走）→ 只做 DB 改写（记 warn）。
 /// - XMP 边车随目录整体移动（同目录文件）；缩略图缓存键 = (path, mtime)，
 ///   路径变更后自然失效重生成。
@@ -219,8 +222,15 @@ pub fn fetch_album_dir_rename(
         .cloned()
         .ok_or("尚未创建库")?
         .photo_root;
-    let old_path = std::path::Path::new(&photo_root).join(&old_dir);
-    let new_path = std::path::Path::new(&photo_root).join(&new_dir);
+    // 主目录 = photoRoot/{创建YYYY}/{创建MM}/{dir_name}（统一公式；段分隔符
+    // 归一为平台原生——路径改写的旧前缀匹配兼容库内 `\`/`/` 双形态）
+    let old_path = std::path::Path::new(&photo_root).join(
+        db.album_home_rel(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("相册不存在")?
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let new_path = old_path.with_file_name(&new_dir);
     if new_path.exists() {
         return Err(format!("目标目录已存在：{}", new_path.display()));
     }

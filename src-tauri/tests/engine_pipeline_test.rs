@@ -12,7 +12,8 @@ pub use common::{
 use std::fs;
 
 use common::{
-    build_many, build_source, count_assets, expected_subdir, find_part_files, open_db, plan_for,
+    build_many, build_source, count_assets, expected_ungrouped_dir, find_part_files, open_db,
+    plan_for,
     run_engine, shrink,
 };
 use devices::volume::VolumeSource;
@@ -41,9 +42,7 @@ fn copies_files_with_byte_and_hash_integrity() {
     // 字节级比对 + 目标路径按模板落位
     let db = open_db(db_dir.path());
     for (rel, content) in &files {
-        let dst = target
-            .path()
-            .join(expected_subdir(src.path(), rel))
+        let dst = expected_ungrouped_dir(db_dir.path(), target.path())
             .join(rel.rsplit('/').next().unwrap());
         assert_eq!(fs::read(&dst).unwrap(), *content, "字节不一致: {rel}");
         // journal + assets 哈希一致
@@ -136,7 +135,7 @@ fn progress_events_are_throttled() {
 }
 
 #[test]
-fn camera_template_falls_back_for_exifless_files() {
+fn exifless_file_lands_flat_in_album_home() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
@@ -144,29 +143,18 @@ fn camera_template_falls_back_for_exifless_files() {
     fs::create_dir_all(src.path().join("DCIM")).unwrap();
     let nef = shrink(b"II*\0\x00\x00\x00\x08\x00\x00".to_vec(), 1024);
     fs::write(src.path().join("DCIM/DSC_0001.NEF"), &nef).unwrap();
+    // 先 ensure 兜底相册以固定创建时刻（run_engine 幂等复用同一条）
+    let home = expected_ungrouped_dir(db_dir.path(), target.path());
 
-    let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
-        // 0018 修订：带 album_id 的导入内层模板固定 {YYYY}/{MM-DD}——
-        // 自定义 dir_template（含 {相机} 段）不再生效，此处验证其被覆盖
-        plan.dir_template = "{YYYY}/{相机}/{MM-DD}".into();
-    });
+    let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
 
     assert_eq!(stats.done_files, 1);
-    // 期望落在 未分组/<年>/<月-日>/DSC_0001.NEF（相册内层模板固定）
-    let mtime: chrono::DateTime<chrono::Utc> = fs::metadata(src.path().join("DCIM/DSC_0001.NEF"))
-        .unwrap()
-        .modified()
-        .unwrap()
-        .into();
-    let expected = target
-        .path()
-        .join("未分组")
-        .join(mtime.format("%Y").to_string())
-        .join(mtime.format("%m-%d").to_string())
-        .join("DSC_0001.NEF");
+    // 布局固定（2026-09-28）：无拍摄 EXIF 也照常落相册主目录平铺
+    // （目录段为相册级字面量，与逐照片 EXIF 无关）
+    let expected = home.join("DSC_0001.NEF");
     assert!(
         expected.exists(),
-        "相册导入应使用固定内层模板: {}",
+        "应落相册主目录平铺: {}",
         expected.display()
     );
     assert_eq!(fs::read(&expected).unwrap(), nef);
@@ -245,9 +233,7 @@ fn include_filters_queue_to_selected_files() {
     // assets 只有照片；视频与未勾选的 RAW 不落位。
     assert_eq!(count_assets(&db), 1);
     for (rel, content) in &files {
-        let dst = target
-            .path()
-            .join(expected_subdir(src.path(), rel))
+        let dst = expected_ungrouped_dir(db_dir.path(), target.path())
             .join(rel.rsplit('/').next().unwrap());
         if !rel.ends_with("IMG_0001.jpg") {
             assert!(!dst.exists(), "未勾选文件不得导入: {rel}");

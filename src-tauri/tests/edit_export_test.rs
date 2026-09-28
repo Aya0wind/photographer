@@ -1,7 +1,8 @@
 //! 阶段 D 基础编辑与导出（0022）：配方存取/校验夹取、folder 导出（长边
 //! 只缩不放 + JPEG 可解码 + GPS 剥离 + EXIF 拍摄时间保留 + 目标存在报错）、
-//! 旋转后裁剪坐标、album 导出落位（{root}/{dir_name}/{YYYY}/{MM-DD}/ +
-//! subgroup + 重名后缀）、文字/笔迹渲染冒烟、IPC 后台任务链路。
+//! 旋转后裁剪坐标、album 导出落位（{root}/{创建YYYY}/{创建MM}/{dir_name}/
+//! 平铺——与导入/claim 同公式 album_home_rel + subgroup + 重名后缀）、
+//! 文字/笔迹渲染冒烟、IPC 后台任务链路。
 
 mod common;
 
@@ -471,6 +472,15 @@ fn rotate_quarter_then_crop_maps_source_region() {
 fn album_export_placement_subgroup_and_conflict_suffix() {
     let fixture = setup();
     let album = fixture.db.album_create("交付册").unwrap();
+    // 固定创建时间 2026-04-12 → 主目录 2026/04/交付册（与拍摄日 06-01 无关）
+    fixture
+        .db
+        .0
+        .execute(
+            "UPDATE album SET created_at = '2026-04-12T03:00:00.000Z' WHERE id = ?1",
+            [album.id],
+        )
+        .unwrap();
     let id = ins_photo(
         &fixture.db,
         &fixture.photo_root,
@@ -483,13 +493,14 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
     let options = album_options(album.id, Some("成片"));
     let row = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
 
-    // 落位：{root}/{dir_name}/{YYYY}/{MM-DD}/{stem}_edit.jpg（UTC 口径，与导入引擎一致）
+    // 落位：{root}/{创建YYYY}/{创建MM}/{dir_name}/{stem}_edit.jpg（相册内
+    // 平铺——与导入/claim 同公式 album_home_rel；外层=相册创建年月 UTC）
     let dst = PathBuf::from(row.output_path.clone().unwrap());
     let expected = fixture
         .photo_root
-        .join(album.dir_name.clone())
         .join("2026")
-        .join("06-01")
+        .join("04")
+        .join(album.dir_name.clone())
         .join("DSC_0004_edit.jpg");
     assert_eq!(dst, expected, "album 落位路径");
     assert!(dst.is_file());

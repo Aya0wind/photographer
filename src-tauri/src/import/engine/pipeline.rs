@@ -167,8 +167,9 @@ impl PartSink {
 }
 
 /// 单文件单遍复制：流式读 → 哈希/写盘/head 截存 → 长度校验。
-/// dst = target_root + 渲染结果；second=Some((根, 目录模板)) 时同遍双写
-/// 第二目的地（独立目录模板、同文件名模板）。
+/// dst = target_root + 渲染结果；second=Some(根) 时同遍双写第二目的地
+/// （**同布局公式、同文件名模板**，仅根不同——2026-09-28 定案，第二份
+/// 落 `{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/` 平铺）。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_one(
     source: &dyn DeviceSource,
@@ -179,7 +180,7 @@ pub(super) fn copy_one(
     target_root: &Path,
     dir_template: &str,
     name_template: &str,
-    second: Option<(&Path, &str)>,
+    second: Option<&Path>,
 ) -> FileOutcome {
     let fail = |error: String| FileOutcome::Failed {
         entry: entry.clone(),
@@ -220,7 +221,9 @@ pub(super) fn copy_one(
     }
     let meta = exif_lite::parse(&head);
 
-    // 渲染目标路径（{相机}/{镜头} 缺失降级默认段；主/第二目的地同文件名模板）
+    // 渲染目标相对路径（{相机}/{镜头} 缺失降级默认段；主/第二目的地同
+    // 布局公式同文件名模板——dir_template 为相册固定公式（字面量），
+    // 逐照片令牌仅剩文件名段）
     let (stem, ext) = split_stem_ext(&entry.rel_path);
     let ctx = RenderCtx {
         captured_at: resolve_captured(meta.captured_at, entry.mtime),
@@ -229,15 +232,14 @@ pub(super) fn copy_one(
         original_stem: stem,
         ext,
     };
-    let dst = match render_dst(&ctx, dir_template, name_template) {
-        Ok(rel) => target_root.join(rel),
+    let rel = match render_dst(&ctx, dir_template, name_template) {
+        Ok(rel) => rel,
         Err(error) => return fail(error),
     };
+    let dst = target_root.join(&rel);
+    // 第二目的地：同公式、仅根不同
     let (dst2, second_part_dir) = match second {
-        Some((root, tpl)) => match render_dst(&ctx, tpl, name_template) {
-            Ok(rel) => (Some(root.join(rel)), Some(root.join(PART_DIR))),
-            Err(error) => return fail(error),
-        },
+        Some(root) => (Some(root.join(&rel)), Some(root.join(PART_DIR))),
         None => (None, None),
     };
 

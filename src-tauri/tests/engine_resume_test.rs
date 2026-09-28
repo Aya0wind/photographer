@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use common::{
     build_many, count_assets, find_part_files, job_status, journal_states, open_db, pending_count,
-    plan_for, wait_completed, SlowSource,
+    wait_completed, SlowSource,
 };
 use devices::volume::VolumeSource;
 use events::{EventBus, FileState};
@@ -127,13 +127,16 @@ fn resume_after_interruption_redoes_pending_only() {
     fs::create_dir_all(&part_dir).unwrap();
     fs::write(part_dir.join("999.part"), b"half-written").unwrap();
 
-    // 会话二：resume 重建（verified 跳过，pending 重做）
+    // 会话二：resume 重建（verified 跳过，pending 重做；plan 从 journal
+    // 重建——与 ipc::resume_import 同构，布局公式由 plan.album_id 派生）
     let db2 = open_db(db_dir.path());
+    let plan2: import::engine::ImportPlan =
+        serde_json::from_str(&db2.job_plan_json(job_id).unwrap().unwrap()).unwrap();
     let engine = Engine::resume(
         db2,
         bus.clone(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(target.path()),
+        plan2,
         job_id,
     )
     .unwrap();

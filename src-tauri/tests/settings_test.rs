@@ -44,10 +44,8 @@ fn default_settings_match_spec() {
 
     assert!(s.import.prompt_on_device);
     assert!(s.import.skip_imported);
-    assert_eq!(s.import.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
     assert_eq!(s.import.duplicate_policy, DuplicatePolicy::Skip);
     assert!(s.import.notify_milestones);
-    assert_eq!(s.import.import_subdir, "SmartPhoto");
 
     assert!(!s.ai.enable_clip);
     assert!(!s.ai.enable_face);
@@ -77,9 +75,7 @@ fn save_then_load_roundtrip_with_custom_values() {
             name: "主库".to_string(),
             db_dir: r"I:\SmartPhoto\主库".to_string(),
             photo_root: r"Y:\照片".to_string(),
-            // 库属性（M2 下沉）：目录模板/导入子目录随库保存
-            dir_template: "{YYYY}/{相机}/{原文件名}".to_string(),
-            import_subdir: "卡导入区".to_string(),
+            // 布局属性已退役（2026-09-28 固定公式，不可配置）
             // 配置链已走完（达芬奇式启动流：库选择器跳过配置向导的依据）
             configured: true,
             streams: 4,
@@ -87,11 +83,9 @@ fn save_then_load_roundtrip_with_custom_values() {
         active_library_id: Some("lib-1".to_string()),
         onboarding_completed: true,
         import: ImportSettings {
-            dir_template: "{YYYY}/{原文件名}".to_string(),
             duplicate_policy: DuplicatePolicy::Rename,
             skip_imported: false,
             notify_milestones: false,
-            import_subdir: "从卡导入".to_string(),
             ..ImportSettings::default()
         },
         ai: AiSettings {
@@ -115,8 +109,6 @@ fn save_then_load_roundtrip_with_custom_values() {
     assert_eq!(loaded, s);
     // 库属性 roundtrip 逐字段确认（不依赖整体相等）
     let lib = loaded.libraries.first().expect("library kept");
-    assert_eq!(lib.dir_template, "{YYYY}/{相机}/{原文件名}");
-    assert_eq!(lib.import_subdir, "卡导入区");
     assert!(lib.configured, "configured roundtrip 保留");
 }
 
@@ -181,16 +173,18 @@ fn old_json_with_missing_fields_is_filled_with_defaults() {
     assert_eq!(s.system.language, "zh");
 }
 
-/// M2 库属性下沉：旧 settings.json 的 Library 无 dirTemplate/importSubdir
-/// → 加载后为默认值（serde(default) 容错，不升 schema_version）。
+/// 布局属性退役（2026-09-28 固定公式）：旧 settings.json 残留的
+/// dirTemplate/importSubdir 键（库级与 import 级）加载时被忽略，不报错、
+/// 不升 schema_version。
 #[test]
-fn library_dir_attributes_default_when_missing_in_old_settings() {
+fn retired_layout_keys_in_old_settings_are_ignored() {
     let dir = temp_dir();
     fs::write(
         settings_path(dir.path()),
         r#"{"schemaVersion":1,"activeLibraryId":"lib-1","libraries":[
-            {"id":"lib-1","name":"主库","dbDir":"I:\\SmartPhoto\\主库","photoRoot":"Y:\\照片"}
-        ]}"#,
+            {"id":"lib-1","name":"主库","dbDir":"I:\\SmartPhoto\\主库","photoRoot":"Y:\\照片",
+             "dirTemplate":"{YYYY}/{MM-DD}","importSubdir":"卡导入区"}
+        ],"import":{"dirTemplate":"{YYYY}","importSubdir":"旧子目录"}}"#,
     )
     .expect("write old-style settings");
 
@@ -198,13 +192,7 @@ fn library_dir_attributes_default_when_missing_in_old_settings() {
     assert_eq!(s.schema_version, SCHEMA_VERSION, "不升 schema_version");
     let lib = s.libraries.first().expect("library kept");
     assert_eq!(lib.id, "lib-1");
-    assert_eq!(lib.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
-    assert_eq!(lib.import_subdir, "SmartPhoto");
-
-    // Library::default() 同源默认（serde 容错与手工构造一致）
-    let default_lib = Library::default();
-    assert_eq!(default_lib.dir_template, "{YYYY}/{MM-DD}/{原文件名}");
-    assert_eq!(default_lib.import_subdir, "SmartPhoto");
+    assert_eq!(s.import, ImportSettings::default());
 }
 
 /// 达芬奇式启动流（用户规定）：configured 库级标记 + 存量一次性迁移。
@@ -302,19 +290,13 @@ fn serialization_uses_camel_case() {
     assert_eq!(value["activeLibraryId"], serde_json::json!(null));
     assert_eq!(value["onboardingCompleted"], serde_json::json!(false));
     assert_eq!(value["import"]["promptOnDevice"], serde_json::json!(true));
-    assert_eq!(
-        value["import"]["dirTemplate"],
-        serde_json::json!("{YYYY}/{MM-DD}/{原文件名}")
-    );
+    // 布局键已退役：import 序列化产物不再含 dirTemplate
+    assert!(value["import"].get("dirTemplate").is_none());
     assert_eq!(
         value["import"]["duplicatePolicy"],
         serde_json::json!("skip")
     );
     assert_eq!(value["import"]["notifyMilestones"], serde_json::json!(true));
-    assert_eq!(
-        value["import"]["importSubdir"],
-        serde_json::json!("SmartPhoto")
-    );
     assert_eq!(value["ai"]["enableClip"], serde_json::json!(false));
     assert_eq!(value["ai"]["indexSchedule"], serde_json::json!("idleOnly"));
     assert_eq!(value["ai"]["cpuLimitPercent"], serde_json::json!(50));
@@ -329,28 +311,19 @@ fn serialization_uses_camel_case() {
         name: "主库".to_string(),
         db_dir: r"I:\SmartPhoto\主库".to_string(),
         photo_root: r"Y:\照片".to_string(),
-        dir_template: "{YYYY}/{相机}/{原文件名}".to_string(),
-        import_subdir: "卡导入区".to_string(),
         configured: true,
         streams: 3,
     })
     .expect("serialize library");
     assert_eq!(lib["dbDir"], serde_json::json!(r"I:\SmartPhoto\主库"));
     assert_eq!(lib["photoRoot"], serde_json::json!(r"Y:\照片"));
-    assert_eq!(
-        lib["dirTemplate"],
-        serde_json::json!("{YYYY}/{相机}/{原文件名}")
-    );
-    assert_eq!(lib["importSubdir"], serde_json::json!("卡导入区"));
+    // 布局键（dirTemplate/importSubdir）已退役：序列化产物不再包含
+    assert!(lib.get("dirTemplate").is_none());
+    assert!(lib.get("importSubdir").is_none());
     assert_eq!(lib["configured"], serde_json::json!(true));
     assert_eq!(lib["streams"], serde_json::json!(3));
     // 缺省库序列化同样带 camelCase 键与默认值
     let default_lib = serde_json::to_value(Library::default()).expect("serialize default library");
-    assert_eq!(
-        default_lib["dirTemplate"],
-        serde_json::json!("{YYYY}/{MM-DD}/{原文件名}")
-    );
-    assert_eq!(default_lib["importSubdir"], serde_json::json!("SmartPhoto"));
     assert_eq!(default_lib["streams"], serde_json::json!(4));
 }
 
