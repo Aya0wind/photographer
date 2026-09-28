@@ -11,10 +11,23 @@ import {
   burstStats,
   type AiFeature,
   type AiModelStatus,
+  type AiQualityTier,
   type IndexKind,
   type IndexStatus,
   type RebuildKind,
 } from "@/ipc/api";
+import {
+  QUALITY_TIERS,
+  normalizeModelId,
+  requiredModelIds,
+  tierFaceReady,
+  tierModelGaps,
+  tierModelsReady,
+  tierReadyCount,
+  tierSemanticReady,
+  type QualityTier,
+  type TierModelGap,
+} from "@/features/settings/lib/qualityTier";
 import { formatBytes } from "@/lib/format";
 import { useAiStore } from "@/stores/aiStore";
 import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
@@ -26,19 +39,23 @@ import {
 } from "@/features/settings/pages/SettingsPage";
 
 /**
- * 设置页 AI tab（M4 实化）：
- * - 模型管理两包制：按后端清单 feature 字段分两包（语义=visual/text/tokenizer
- *   三件，人脸=scrfd/arcface 两件，src-tauri src/ai/mod.rs CATALOG_JSON）。
- *   操作粒度是包——整包下载（只发起未装模型，逐模型错误隔离，任一失败包卡
- *   标错可整包重试）、整包取消、整包删除（全部结算后统一刷新）；整包进度
- *   为包内在途模型字节聚合，包内各模型进度小字显示，单模型不再有独立操作。
+ * 设置页 AI tab（三档画质版）：
+ * - 画质档位选择器（快速/普通/精准）：档位→所需模型映射（qualityTier.ts 契约常量），
+ *   齐备→确认弹窗（提示后端将自动重建受影响通道索引）直切；缺件→弹窗列缺失件，
+ *   「下载并切换」在下载全部就绪后自动应用档位（aiModelDownloadFinished 事件驱动
+ *   aiStore.refresh，本组件 watch 模型快照），「仅下载」只发起下载；切档本身只走
+ *   settings_set(ai.qualityTier)，无新命令。
+ * - 模型管理：按 feature 分组（语义/人脸），组内逐模型行——名称、tier 徽章
+ *   （快速/普通/精准/共用）、体积、状态与下载进度 + 单模型下载/取消/删除按钮 +
+ *   组级「全部下载」。下载沿用既有事件进度 UI（aiStore.downloadProgress）。
  * - 索引状态与操作区：三类索引（缩略图/EXIF/语义）计数 + 立即索引（indexKickNow，
  *   幂等；ai 模型未就绪透传后端 Err 文案）；index_status 进 tab 拉一次 +
- *   indexTaskProgress 事件驱动重拉（aiStore）。运行态从持久化 indexStatus
- *   派生（pending/running>0）——切页重挂载/重启后状态保留，不丢「进行中」
- * - 高级调参区（④ 扩围）：语义阈值、调度/资源、索引参数、连拍分组全部收进
+ *   indexTaskProgress 事件驱动重拉（aiStore）。切档后的重建进度同样走该通道
+ *   进度条/任务抽屉，不新造 UI。
+ * - 高级调参区：语义阈值（auto/自定义三态）、调度/资源、索引参数、连拍分组全部收进
  *   「高级」折叠分组，勾选「开发人员配置」才显示（localStorage 持久化）
- * - 功能开关门控：语义=feature=semantic 组全部 done；人脸=face 组全部 done
+ * - 功能开关门控（三档化）：语义=当前档语义三件齐备；人脸=当前档检测模型+arcface
+ *   齐备（旧「组内全部 done」在多档变体清单下会误伤普通档用户）
  * - 调度/CPU 滑条（仅用于 AI 推理）/GPU（DirectML 自动回退）
  * - 人脸数据一键清除（红色强确认，两步确认防误触）
  */
@@ -50,17 +67,32 @@ function commit(partial: DeepPartial<Settings>): void {
   void save(useSettingsStore.getState().settings);
 }
 
-/** 模型显示名（未知 id 回退原 id） */
+/** 模型显示名（未知 id 回退原 id；契约 id 与现行清单 id 双收录） */
 const MODEL_NAMES: Record<string, string> = {
   "siglip2-visual": "语义 · 图像编码",
+  "siglip2-vision": "语义 · 图像编码",
   "siglip2-text": "语义 · 文本编码",
   "siglip2-tokenizer": "语义 · 分词器",
+  "siglip2-vision-fp16": "语义 · 图像编码（精准）",
+  "siglip2-text-fp16": "语义 · 文本编码（精准）",
   scrfd: "人脸 · 检测",
+  "scrfd-10g": "人脸 · 检测（快速）",
   arcface: "人脸 · 识别",
 };
 
+function modelDisplayName(id: string): string {
+  return MODEL_NAMES[id] ?? id;
+}
+
 /** 能力分组展示顺序（分组依据=后端清单 feature 字段，非前端硬编码集合） */
 const FEATURE_ORDER: AiFeature[] = ["semantic", "face", "selection"];
+
+/** 按归一 id 建索引（档位表/清单双 id 收敛） */
+function modelsById(models: readonly AiModelStatus[]): Map<string, AiModelStatus> {
+  const map = new Map<string, AiModelStatus>();
+  for (const model of models) map.set(normalizeModelId(model.id), model);
+  return map;
+}
 
 /** 状态徽标（含色） */
 function StateBadge({ model }: { model: AiModelStatus }) {
@@ -79,12 +111,37 @@ function StateBadge({ model }: { model: AiModelStatus }) {
   );
 }
 
-/** 包内单模型紧凑行：名称/状态徽标/体积 + 下载中小字进度。
- *  两包制：操作粒度在包卡，行内不再放单模型按钮。 */
-function PackageModelLine({ model }: { model: AiModelStatus }) {
-  const downloadProgress = useAiStore((s) => s.downloadProgress[model.id]);
+/** 画质档位徽章：快速/普通/精准/共用（null=各档共用件；未发 tier 字段的旧后端同共用） */
+function TierBadge({ tier }: { tier: AiQualityTier | null | undefined }) {
+  const { t } = useTranslation();
+  const key = tier ?? "shared";
+  const map: Record<string, string> = {
+    fast: "bg-sky-400/15 text-sky-300",
+    normal: "bg-accent/15 text-accent",
+    accurate: "bg-violet-400/15 text-violet-300",
+    shared: "bg-panel text-text-muted",
+  };
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${map[key]}`}
+      data-testid={`ai-tier-badge-${key}`}
+    >
+      {t(`settings.ai.tier.badge.${key}`)}
+    </span>
+  );
+}
 
-  // 下载中：事件进度优先（节流 1s），无事件时退模型快照字段
+// --- 模型管理：组内逐模型行（单模型下载/取消/删除） -----------------------------------
+
+/** 逐模型行：名称 + tier 徽章 + 状态徽标 + 体积/下载进度 + 单模型操作按钮。
+ *  下载进度沿用事件驱动 UI（aiStore.downloadProgress，节流 1s；无事件退快照字段）。 */
+function ModelRow({ model }: { model: AiModelStatus }) {
+  const { t } = useTranslation();
+  const refresh = useAiStore((s) => s.refresh);
+  const downloadProgress = useAiStore((s) => s.downloadProgress[model.id]);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // 下载中：事件进度优先，无事件时退模型快照字段
   const progress =
     downloadProgress ??
     (model.state === "downloading" && model.bytesTotal > 0
@@ -95,14 +152,47 @@ function PackageModelLine({ model }: { model: AiModelStatus }) {
       ? Math.min(100, (progress.doneBytes / progress.totalBytes) * 100)
       : 0;
 
+  const active = model.state === "downloading" || model.state === "verifying";
+
+  async function download(): Promise<void> {
+    try {
+      await aiModelDownload(model.id);
+    } catch {
+      // 发起失败：状态以快照为准，行内可重试
+    }
+    void refresh();
+  }
+
+  async function cancel(): Promise<void> {
+    try {
+      await aiModelCancel(model.id);
+    } catch {
+      // 已结束的下载后端会 Err，静默跳过
+    }
+    void refresh();
+  }
+
+  /** 删除已装模型释放磁盘（两步确认；删除无事件回执，结算后统一刷新） */
+  async function remove(): Promise<void> {
+    setConfirmDelete(false);
+    try {
+      await aiModelDelete(model.id);
+    } catch {
+      // 文件被占等失败：状态以快照为准
+    }
+    void refresh();
+  }
+
   return (
     <div
-      className="flex min-h-[32px] items-center justify-between gap-4 py-1"
-      data-model-id={model.id}
+      className="flex min-h-[36px] items-center justify-between gap-4 border-b border-edge/20 py-1.5 last:border-b-0"
+      data-testid={`ai-model-row-${model.id}`}
       data-state={model.state}
+      data-tier={model.tier ?? "shared"}
     >
       <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-secondary">
-        <span className="truncate text-text-primary">{MODEL_NAMES[model.id] ?? model.id}</span>
+        <span className="truncate text-text-primary">{modelDisplayName(model.id)}</span>
+        <TierBadge tier={model.tier} />
         <StateBadge model={model} />
         {model.state === "done" && model.version && (
           <span className="font-mono text-[10px] text-text-muted">{model.version}</span>
@@ -114,7 +204,7 @@ function PackageModelLine({ model }: { model: AiModelStatus }) {
             <span className="font-mono text-[10px] tabular-nums text-text-muted">
               {formatBytes(progress.doneBytes)} / {formatBytes(progress.totalBytes)}
             </span>
-            <div className="h-1 w-24 overflow-hidden rounded bg-panel">
+            <div className="h-1 w-20 overflow-hidden rounded bg-panel">
               <div
                 className="h-full bg-accent transition-[width] duration-300"
                 style={{ width: `${pct}%` }}
@@ -126,17 +216,67 @@ function PackageModelLine({ model }: { model: AiModelStatus }) {
             {formatBytes(model.bytesTotal)}
           </span>
         )}
+        {(model.state === "idle" || model.state === "failed") && (
+          <button
+            type="button"
+            onClick={() => void download()}
+            className="rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+            data-testid={`ai-model-download-${model.id}`}
+          >
+            {model.state === "failed" ? t("settings.ai.model.retry") : t("settings.ai.model.download")}
+          </button>
+        )}
+        {active && (
+          <button
+            type="button"
+            onClick={() => void cancel()}
+            className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid={`ai-model-cancel-${model.id}`}
+          >
+            {t("settings.ai.model.cancel")}
+          </button>
+        )}
+        {model.state === "done" && !active &&
+          (confirmDelete ? (
+            <span className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void remove()}
+                className="rounded-md bg-red-500/90 px-2 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
+                data-testid={`ai-model-delete-confirm-${model.id}`}
+              >
+                {t("settings.ai.model.confirmDelete")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary"
+                data-testid={`ai-model-delete-cancel-${model.id}`}
+              >
+                {t("common.cancel")}
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+              data-testid={`ai-model-delete-${model.id}`}
+            >
+              {t("settings.ai.model.delete")}
+            </button>
+          ))}
       </div>
     </div>
   );
 }
 
-// --- 模型两包制（按后端清单 feature 字段分两包：整包下载/删除/取消 + 聚合进度） -------
+// --- 模型管理：按 feature 分组的卡片（组级「全部下载」+ 聚合进度） ---------------------
 
-/** 整包状态（派生自包内模型快照） */
-type PackageState = "downloading" | "ready" | "partialFailed" | "partial" | "none";
+/** 整组状态（派生自组内模型快照） */
+type GroupState = "downloading" | "ready" | "partialFailed" | "partial" | "none";
 
-function packageState(models: AiModelStatus[]): PackageState {
+function groupState(models: AiModelStatus[]): GroupState {
   const installed = models.filter((m) => m.state === "done").length;
   const active = models.some((m) => m.state === "downloading" || m.state === "verifying");
   const failed = models.some((m) => m.state === "failed");
@@ -146,14 +286,12 @@ function packageState(models: AiModelStatus[]): PackageState {
   return installed === 0 ? "none" : "partial";
 }
 
-/** 包卡片：语义搜索模型 / 人脸识别模型。操作粒度是包——整包下载（只发起
- *  未装模型，逐模型错误隔离）、整包取消、整包删除（全部结算后统一刷新）；
- *  整包进度为包内在下载模型的字节聚合，包内各模型进度以小字展示。 */
-function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiModelStatus[] }) {
+/** 组卡片：语义搜索模型 / 人脸识别模型。操作粒度=逐模型行；组级保留「全部下载」
+ *  （只发起组内未装模型，逐模型错误隔离）与聚合进度条（组内在途模型字节聚合）。 */
+function ModelGroupCard({ feature, models }: { feature: AiFeature; models: AiModelStatus[] }) {
   const { t } = useTranslation();
   const refresh = useAiStore((s) => s.refresh);
   const downloadProgress = useAiStore((s) => s.downloadProgress);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const installed = models.filter((m) => m.state === "done").length;
   const allDone = models.length > 0 && installed === models.length;
@@ -162,10 +300,10 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
   );
   const anyActive = activeModels.length > 0;
   const anyFailed = models.some((m) => m.state === "failed");
-  const badge = packageState(models);
+  const badge = groupState(models);
 
-  // 整包进度：包内在途模型字节聚合（事件进度优先，缺事件退快照字段）
-  const pkgProgress = anyActive
+  // 组级进度：组内在途模型字节聚合（事件进度优先，缺事件退快照字段）
+  const grpProgress = anyActive
     ? activeModels.reduce(
         (acc, m) => {
           const p =
@@ -178,14 +316,13 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
         { doneBytes: 0, totalBytes: 0 },
       )
     : null;
-  const pkgPct =
-    pkgProgress && pkgProgress.totalBytes > 0
-      ? Math.min(100, (pkgProgress.doneBytes / pkgProgress.totalBytes) * 100)
+  const grpPct =
+    grpProgress && grpProgress.totalBytes > 0
+      ? Math.min(100, (grpProgress.doneBytes / grpProgress.totalBytes) * 100)
       : 0;
 
-  /** 整包下载/重试：只发起未装模型（idle/failed），逐模型错误隔离——
-   *  单个失败不中断其余，失败模型留在包内由整包重试再发起 */
-  async function downloadPackage(): Promise<void> {
+  /** 全部下载/重试：只发起组内未装模型（idle/failed），逐模型错误隔离 */
+  async function downloadAll(): Promise<void> {
     for (const model of models) {
       if (model.state !== "idle" && model.state !== "failed") continue;
       try {
@@ -197,34 +334,7 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
     void refresh();
   }
 
-  /** 整包取消：逐个取消包内在途下载 */
-  async function cancelPackage(): Promise<void> {
-    for (const model of activeModels) {
-      try {
-        await aiModelCancel(model.id);
-      } catch {
-        // 已结束的下载后端会 Err，静默跳过
-      }
-    }
-    void refresh();
-  }
-
-  /** 整包删除：删除全部已装模型，全部结算后统一刷新（删除无事件回执，
-   *  不等结算就刷新会拿到过期快照——单模型删除不刷新 bug 的同款时序） */
-  async function deleteInstalled(): Promise<void> {
-    setConfirmDelete(false);
-    for (const model of models) {
-      if (model.state !== "done") continue;
-      try {
-        await aiModelDelete(model.id);
-      } catch {
-        // 隔离：文件被占等单模型失败不阻断其余
-      }
-    }
-    void refresh();
-  }
-
-  const badgeClass: Record<PackageState, string> = {
+  const badgeClass: Record<GroupState, string> = {
     downloading: "bg-accent/15 text-accent",
     ready: "bg-emerald-400/15 text-emerald-400",
     partialFailed: "bg-red-400/15 text-red-400",
@@ -235,7 +345,7 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
   return (
     <div
       className="mt-2 rounded-lg border border-edge p-3"
-      data-testid={`ai-package-${feature}`}
+      data-testid={`ai-model-group-${feature}`}
       data-installed={installed}
       data-total={models.length}
     >
@@ -245,7 +355,7 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
             <span className="font-medium">{t(`settings.ai.package.${feature}`)}</span>
             <span
               className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${badgeClass[badge]}`}
-              data-testid={`ai-package-badge-${feature}`}
+              data-testid={`ai-group-badge-${feature}`}
               data-state={badge}
             >
               {t(`settings.ai.package.state.${badge}`, {
@@ -263,81 +373,345 @@ function ModelPackageCard({ feature, models }: { feature: AiFeature; models: AiM
           {!allDone && (
             <button
               type="button"
-              onClick={() => void downloadPackage()}
+              onClick={() => void downloadAll()}
               className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
-              data-testid={`ai-package-download-${feature}`}
+              data-testid={`ai-group-download-${feature}`}
             >
-              {anyFailed ? t("settings.ai.package.retry") : t("settings.ai.package.download")}
+              {anyFailed ? t("settings.ai.package.retry") : t("settings.ai.model.downloadAll")}
             </button>
           )}
-          {anyActive && (
-            <button
-              type="button"
-              onClick={() => void cancelPackage()}
-              className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-              data-testid={`ai-package-cancel-${feature}`}
-            >
-              {t("settings.ai.package.cancel")}
-            </button>
-          )}
-          {installed > 0 && !anyActive &&
-            (confirmDelete ? (
-              <span className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => void deleteInstalled()}
-                  className="rounded-md bg-red-500/90 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-red-500"
-                  data-testid={`ai-package-delete-confirm-${feature}`}
-                >
-                  {t("settings.ai.package.confirmDelete")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary"
-                  data-testid={`ai-package-delete-cancel-${feature}`}
-                >
-                  {t("common.cancel")}
-                </button>
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(true)}
-                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
-                data-testid={`ai-package-delete-${feature}`}
-              >
-                {t("settings.ai.package.delete")}
-              </button>
-            ))}
         </div>
       </div>
 
-      {pkgProgress && (
+      {grpProgress && (
         <div className="mt-2">
-          <div className="h-1 overflow-hidden rounded bg-panel" data-testid={`ai-package-progress-${feature}`}>
+          <div className="h-1 overflow-hidden rounded bg-panel" data-testid={`ai-group-progress-${feature}`}>
             <div
               className="h-full bg-accent transition-[width] duration-300"
-              style={{ width: `${pkgPct}%` }}
+              style={{ width: `${grpPct}%` }}
             />
           </div>
           <div className="mt-0.5 font-mono text-[10px] tabular-nums text-text-muted">
-            {formatBytes(pkgProgress.doneBytes)} / {formatBytes(pkgProgress.totalBytes)}
+            {formatBytes(grpProgress.doneBytes)} / {formatBytes(grpProgress.totalBytes)}
           </div>
         </div>
       )}
 
       {anyFailed && !anyActive && (
-        <p className="mt-1.5 text-[11px] text-red-400" data-testid={`ai-package-failed-${feature}`}>
+        <p className="mt-1.5 text-[11px] text-red-400" data-testid={`ai-group-failed-${feature}`}>
           {t("settings.ai.package.failedHint")}
         </p>
       )}
 
-      <div className="mt-2 border-t border-edge/40 pt-1" data-testid={`ai-package-models-${feature}`}>
+      <div className="mt-2 border-t border-edge/40 pt-1" data-testid={`ai-group-models-${feature}`}>
         {models.map((model) => (
-          <PackageModelLine key={model.id} model={model} />
+          <ModelRow key={model.id} model={model} />
         ))}
       </div>
+    </div>
+  );
+}
+
+// --- 画质档位选择器（三档：快速/普通/精准） ---------------------------------------------
+
+/** 切档请求的待决弹窗：齐备→确认直切；缺件→列缺失件给下载并切换/仅下载 */
+type TierDialog =
+  | { kind: "confirm"; tier: QualityTier }
+  | { kind: "missing"; tier: QualityTier; gaps: TierModelGap[] }
+  | null;
+
+function QualityTierSection() {
+  const { t } = useTranslation();
+  const settings = useSettingsStore((s) => s.settings);
+  const models = useAiStore((s) => s.models) ?? [];
+  const modelsLoaded = useAiStore((s) => s.modelsLoaded);
+  const refresh = useAiStore((s) => s.refresh);
+  const [dialog, setDialog] = useState<TierDialog>(null);
+  /** 「下载并切换」等待中的目标档：模型齐备后自动应用 */
+  const [pendingTier, setPendingTier] = useState<QualityTier | null>(null);
+
+  const currentTier: QualityTier = settings.ai.qualityTier ?? "normal";
+  const catalogAvailable = modelsLoaded && models.length > 0;
+  const byId = modelsById(models);
+
+  // 下载全部就绪后自动应用档位（快照经 aiModelDownloadFinished → refresh 驱动更新）
+  useEffect(() => {
+    if (pendingTier && catalogAvailable && tierModelsReady(pendingTier, models)) {
+      const tier = pendingTier;
+      setPendingTier(null);
+      commit({ ai: { qualityTier: tier } });
+    }
+  }, [pendingTier, models, catalogAvailable]);
+
+  /** 发起点击档位：齐备→确认弹窗；缺件→缺件弹窗；后端未连接→直切（无门控信息） */
+  function requestTier(tier: QualityTier): void {
+    if (tier === currentTier) return;
+    if (!catalogAvailable) {
+      commit({ ai: { qualityTier: tier } });
+      return;
+    }
+    const gaps = tierModelGaps(tier, models);
+    if (gaps.length === 0) setDialog({ kind: "confirm", tier });
+    else setDialog({ kind: "missing", tier, gaps });
+  }
+
+  /** 发起缺件下载（逐模型错误隔离；清单未收录的件无法发起，跳过） */
+  async function downloadGaps(gaps: TierModelGap[]): Promise<void> {
+    for (const gap of gaps) {
+      if (!gap.status) continue;
+      try {
+        await aiModelDownload(gap.status.id);
+      } catch {
+        // 隔离：继续下一个模型
+      }
+    }
+    void refresh();
+  }
+
+  const pendingReady = pendingTier ? tierReadyCount(pendingTier, models) : null;
+  const pendingFailed =
+    pendingTier && catalogAvailable
+      ? tierModelGaps(pendingTier, models).some((g) => g.status?.state === "failed")
+      : false;
+
+  return (
+    <div data-testid="ai-quality-tier" data-tier={currentTier}>
+      <SectionTitle>{t("settings.section.aiQuality")}</SectionTitle>
+
+      {/* 档位选择（segmented：每档一行说明 + 就绪状态） */}
+      <div
+        role="radiogroup"
+        aria-label={t("settings.ai.qualityTier")}
+        className="mt-1 flex flex-col gap-1.5"
+      >
+        {QUALITY_TIERS.map((tier) => {
+          const selected = tier === currentTier;
+          const count = catalogAvailable ? tierReadyCount(tier, models) : null;
+          return (
+            <button
+              key={tier}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              onClick={() => requestTier(tier)}
+              className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                selected
+                  ? "border-accent bg-accent/10"
+                  : "border-edge hover:border-accent/60"
+              }`}
+              data-testid={`ai-tier-option-${tier}`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-xs font-medium ${selected ? "text-accent" : "text-text-primary"}`}
+                >
+                  {t(`settings.ai.tier.${tier}`)}
+                </span>
+                {tier === "normal" && (
+                  <span className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-text-muted">
+                    {t("settings.ai.tier.defaultTag")}
+                  </span>
+                )}
+                {count !== null && (
+                  <span
+                    className={`ml-auto text-[11px] ${
+                      count.ready === count.total ? "text-emerald-400" : "text-text-muted"
+                    }`}
+                    data-testid={`ai-tier-option-status-${tier}`}
+                  >
+                    {count.ready === count.total
+                      ? t("settings.ai.tier.state.ready")
+                      : t("settings.ai.tier.state.missing", { count: count.total - count.ready })}
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 text-[11px] text-text-muted">
+                {t(`settings.ai.tier.${tier}.desc`)}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 当前档所需模型清单及安装状态 */}
+      {catalogAvailable && (
+        <div className="mt-2 rounded-lg border border-edge/60 p-2" data-testid="ai-tier-models">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+            {t("settings.ai.tier.modelsTitle", { tier: t(`settings.ai.tier.${currentTier}`) })}
+          </div>
+          {requiredModelIds(currentTier).map((id) => {
+            const status = byId.get(id) ?? null;
+            return (
+              <div
+                key={id}
+                className="flex min-h-[28px] items-center justify-between gap-4 py-1"
+                data-testid={`ai-tier-model-${id}`}
+                data-state={status?.state ?? "missing"}
+              >
+                <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-secondary">
+                  <span className="truncate text-text-primary">{modelDisplayName(id)}</span>
+                  <TierBadge tier={status?.tier ?? null} />
+                </div>
+                <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">
+                  {status
+                    ? `${t(`settings.ai.model.state.${status.state}`)} · ${formatBytes(status.bytesTotal)}`
+                    : t("settings.ai.tier.notInCatalog")}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 「下载并切换」等待横幅：就绪后自动应用；可取消等待 */}
+      {pendingTier && (
+        <div
+          className="mt-2 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2"
+          data-testid="ai-tier-pending"
+          data-tier={pendingTier}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-[11px] text-text-secondary">
+              {catalogAvailable && pendingReady
+                ? t("settings.ai.tier.pending", {
+                    tier: t(`settings.ai.tier.${pendingTier}`),
+                    ready: pendingReady.ready,
+                    total: pendingReady.total,
+                  })
+                : t("settings.ai.tier.pendingNoCount", {
+                    tier: t(`settings.ai.tier.${pendingTier}`),
+                  })}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPendingTier(null)}
+              className="shrink-0 rounded-md border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid="ai-tier-pending-cancel"
+            >
+              {t("settings.ai.tier.pendingCancel")}
+            </button>
+          </div>
+          {pendingFailed && (
+            <p className="mt-1 text-[11px] text-red-400" data-testid="ai-tier-pending-failed">
+              {t("settings.ai.tier.pendingFailed")}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* 齐备直切确认弹窗：切换即生效，后端自动重建受影响通道索引 */}
+      {dialog?.kind === "confirm" && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("settings.ai.tier.switchTitle")}
+          data-testid="ai-tier-switch-confirm"
+        >
+          <div className="w-[380px] rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+            <h2 className="text-sm font-semibold text-text-primary">
+              {t("settings.ai.tier.switchTitle")}
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-text-secondary">
+              {t("settings.ai.tier.switchTo", { tier: t(`settings.ai.tier.${dialog.tier}`) })}
+              {t("settings.ai.tier.switchRebuildNote")}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDialog(null)}
+                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary"
+                data-testid="ai-tier-switch-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  commit({ ai: { qualityTier: dialog.tier } });
+                  setDialog(null);
+                }}
+                className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+                data-testid="ai-tier-switch-confirm-yes"
+              >
+                {t("settings.ai.tier.switchYes")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 缺件弹窗：列缺失件 + 下载并切换 / 仅下载 */}
+      {dialog?.kind === "missing" && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("settings.ai.tier.missingTitle")}
+          data-testid="ai-tier-missing-dialog"
+        >
+          <div className="w-[420px] rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+            <h2 className="text-sm font-semibold text-text-primary">
+              {t("settings.ai.tier.missingTitle")}
+            </h2>
+            <p className="mt-1 text-[11px] text-text-secondary">
+              {t("settings.ai.tier.missingDesc", {
+                tier: t(`settings.ai.tier.${dialog.tier}`),
+                count: dialog.gaps.length,
+              })}
+            </p>
+            <div className="mt-2 flex flex-col" data-testid="ai-tier-missing-list">
+              {dialog.gaps.map((gap) => (
+                <div
+                  key={gap.id}
+                  className="flex items-center justify-between gap-4 border-b border-edge/30 py-1.5 last:border-b-0"
+                  data-testid={`ai-tier-missing-item-${gap.id}`}
+                >
+                  <span className="min-w-0 truncate text-[11px] text-text-primary">
+                    {modelDisplayName(gap.id)}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] tabular-nums text-text-muted">
+                    {gap.status ? formatBytes(gap.status.bytesTotal) : t("settings.ai.tier.notInCatalog")}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDialog(null)}
+                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary"
+                data-testid="ai-tier-missing-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void downloadGaps(dialog.gaps);
+                  setDialog(null);
+                }}
+                className="rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                data-testid="ai-tier-download-only"
+              >
+                {t("settings.ai.tier.downloadOnly")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingTier(dialog.tier);
+                  void downloadGaps(dialog.gaps);
+                  setDialog(null);
+                }}
+                className="rounded-md bg-accent px-2.5 py-1 text-[11px] font-medium text-black transition-colors hover:brightness-110"
+                data-testid="ai-tier-download-switch"
+              >
+                {t("settings.ai.tier.downloadSwitch")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -794,44 +1168,95 @@ function AdvancedSection() {
   );
 }
 
-/** 语义相似度阈值：低于该分的结果过滤（0 = 不过滤）。
- *  实测 SigLIP2 cos 区间压缩：无关内容 top≈0.087、相关簇≈0.099+，
- *  阈值过高全灭、过低任何查询返回 top-N≈全库（进哪个智能相册都是
- *  全部照片的真机复现根因）。④ 起收进「高级」折叠分组。 */
+/** 语义相似度阈值三态：auto（默认，跟随模型：普通档 0.09 / 精准档 fp16 标定值）
+ *  / 自定义数值（0-1 钳制）。settings.ai.semanticMinScore=null 即 auto 语义。 */
 function SemanticThresholdRow() {
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
+  const value = settings.ai.semanticMinScore;
+  const auto = value === null || value === undefined;
+
   return (
     <SettingRow
       label={t("settings.ai.semanticThreshold")}
       desc={t("settings.ai.semanticThresholdDesc")}
+      testId="settings-row-semantic-threshold"
     >
-      <span className="flex items-center gap-2">
-        <input
-          type="number"
-          min={0}
-          max={1}
-          step={0.01}
-          value={settings.ai.semanticMinScore}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            if (Number.isFinite(v)) {
-              commit({ ai: { semanticMinScore: Math.min(1, Math.max(0, v)) } });
-            }
-          }}
-          aria-label={t("settings.ai.semanticThreshold")}
-          className="w-20 rounded border border-edge bg-bg px-2 py-1 font-mono text-xs text-text-primary outline-none focus:border-accent"
-          data-testid="ai-semantic-threshold"
-        />
-        <button
-          type="button"
-          onClick={() => commit({ ai: { semanticMinScore: 0.09 } })}
-          className="rounded border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-          data-testid="ai-semantic-threshold-reset"
-        >
-          {t("settings.ai.semanticThresholdReset")}
-        </button>
-      </span>
+      <div className="flex flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          <div
+            role="radiogroup"
+            aria-label={t("settings.ai.semanticThresholdMode")}
+            className="flex rounded-md border border-edge bg-bg p-0.5"
+            data-testid="ai-semantic-threshold-mode"
+            data-mode={auto ? "auto" : "custom"}
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={auto}
+              onClick={() => {
+                if (!auto) commit({ ai: { semanticMinScore: null } });
+              }}
+              className={`rounded px-2 py-1 text-[11px] transition-colors ${
+                auto ? "bg-accent text-black" : "text-text-secondary hover:text-text-primary"
+              }`}
+              data-testid="ai-semantic-threshold-auto"
+            >
+              {t("settings.ai.semanticThresholdAuto")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!auto}
+              onClick={() => {
+                if (auto) commit({ ai: { semanticMinScore: 0.09 } });
+              }}
+              className={`rounded px-2 py-1 text-[11px] transition-colors ${
+                !auto ? "bg-accent text-black" : "text-text-secondary hover:text-text-primary"
+              }`}
+              data-testid="ai-semantic-threshold-custom"
+            >
+              {t("settings.ai.semanticThresholdCustom")}
+            </button>
+          </div>
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            disabled={auto}
+            value={auto ? "" : String(value)}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) {
+                commit({ ai: { semanticMinScore: Math.min(1, Math.max(0, v)) } });
+              }
+            }}
+            aria-label={t("settings.ai.semanticThreshold")}
+            className="w-20 rounded border border-edge bg-bg px-2 py-1 font-mono text-xs text-text-primary outline-none focus:border-accent disabled:opacity-40"
+            data-testid="ai-semantic-threshold"
+          />
+          {!auto && (
+            <button
+              type="button"
+              onClick={() => commit({ ai: { semanticMinScore: null } })}
+              className="rounded border border-edge px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid="ai-semantic-threshold-reset"
+            >
+              {t("settings.ai.semanticThresholdResetAuto")}
+            </button>
+          )}
+        </div>
+        {auto && (
+          <span
+            className="text-[10px] text-text-muted"
+            data-testid="ai-semantic-threshold-auto-hint"
+          >
+            {t("settings.ai.semanticThresholdAutoHint")}
+          </span>
+        )}
+      </div>
     </SettingRow>
   );
 }
@@ -902,20 +1327,17 @@ export default function AiTab() {
     void refresh();
   }, [refresh]);
 
-  // 按能力分组（分组依据=后端清单 feature 字段：语义三件/人脸两件）
+  // 按能力分组（分组依据=后端清单 feature 字段；空组不渲染卡片）
   const byFeature = new Map<AiFeature, AiModelStatus[]>(
     FEATURE_ORDER.map((feature) => [feature, [] as AiModelStatus[]]),
   );
   for (const model of models) {
     byFeature.get(model.feature)?.push(model);
   }
-  /** 组就绪=组内全部模型 done（空组=后端清单缺失，视为未就绪） */
-  const groupReady = (feature: AiFeature): boolean => {
-    const list = byFeature.get(feature) ?? [];
-    return list.length > 0 && list.every((m) => m.state === "done");
-  };
-  const semanticReady = groupReady("semantic");
-  const faceReady = groupReady("face");
+  /** 功能门控（三档化）：语义=当前档语义三件；人脸=当前档检测件+arcface */
+  const currentTier: QualityTier = settings.ai.qualityTier ?? "normal";
+  const semanticReady = tierSemanticReady(currentTier, models);
+  const faceReady = tierFaceReady(currentTier, models);
 
   // 人脸数据清除：两步强确认
   const [faceConfirm, setFaceConfirm] = useState(false);
@@ -923,28 +1345,33 @@ export default function AiTab() {
 
   return (
     <>
-      <SectionTitle>{t("settings.section.ai")}</SectionTitle>
+      {/* 画质档位选择器（快速/普通/精准；显眼置顶） */}
+      <QualityTierSection />
 
-      {/* 模型状态区（两包制：操作粒度是包） */}
+      {/* 模型状态区（按 feature 分组，组内逐模型行） */}
+      <SectionTitle>{t("settings.section.ai")}</SectionTitle>
       <div data-testid="ai-model-list">
         {!modelsLoaded ? (
           <p className="py-3 text-[11px] text-text-muted">{t("settings.ai.model.loading")}</p>
         ) : models.length === 0 ? (
           <p className="py-3 text-[11px] text-text-muted">{t("gallery.ipcUnavailable")}</p>
         ) : (
-          FEATURE_ORDER.map((feature) => (
-            <ModelPackageCard key={feature} feature={feature} models={byFeature.get(feature) ?? []} />
-          ))
+          FEATURE_ORDER.map((feature) => {
+            const groupModels = byFeature.get(feature) ?? [];
+            return groupModels.length > 0 ? (
+              <ModelGroupCard key={feature} feature={feature} models={groupModels} />
+            ) : null;
+          })
         )}
       </div>
 
-      {/* 区块：状态、立即索引、重建 */}
+      {/* 区块：状态、立即索引、重建（切档后的重建进度同样走此通道/任务抽屉） */}
       <IndexStatusSection />
 
       {/* 高级调参（折叠分组，开发人员配置开关门控） */}
       <AdvancedSection />
 
-      {/* 功能开关（模型门控） */}
+      {/* 功能开关（模型门控：按当前档所需件） */}
       <SectionTitle>{t("settings.section.aiFeatures")}</SectionTitle>
       <SettingRow
         label={t("settings.ai.semantic")}

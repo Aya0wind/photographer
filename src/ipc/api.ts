@@ -814,8 +814,11 @@ export async function indexTaskPause(): Promise<void> {
 
 export type AiFeature = "semantic" | "face" | "selection";
 export type AiModelState = "idle" | "downloading" | "verifying" | "done" | "failed";
+/** AI 三档画质（契约：settings.ai.qualityTier 同域；ModelEntry.tier 归属档位） */
+export type AiQualityTier = "fast" | "normal" | "accurate";
 
-/** AI 模型状态（ai_models_status 返回；清单：siglip2-visual/siglip2-text/scrfd/arcface） */
+/** AI 模型状态（ai_models_status 返回；清单：siglip2-visual/siglip2-text/scrfd/arcface
+ *  + 三档画质新件 scrfd-10g / siglip2-vision-fp16 / siglip2-text-fp16） */
 export interface AiModelStatus {
   id: string;
   /** 旧字段兼容（=state==="done"） */
@@ -825,6 +828,9 @@ export interface AiModelStatus {
   version: string | null;
   feature: AiFeature;
   state: AiModelState;
+  /** 画质档位归属（三档画质契约）：fast/normal/accurate=该档专用件，
+   *  null=各档共用件（如 tokenizer）。旧后端未发此字段时视为 null（共用）。 */
+  tier?: AiQualityTier | null;
 }
 
 /** 模型清单（ai_models_status 失败/非数组回退 []——UI 显示后端未连接态） */

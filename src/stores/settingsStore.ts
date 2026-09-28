@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 
 import { ipc } from "@/ipc";
+import type { AiQualityTier } from "@/ipc/api";
 
 /** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储。
  *  导入整理规则随库走：dirTemplate（含 {原文件名} 的完整模板）与 importSubdir（应用写入区名）；
@@ -48,9 +49,13 @@ export interface Settings {
     indexSchedule: "idleOnly" | "afterImport" | "manual";
     cpuLimitPercent: number;
     useGpu: boolean;
-    /** 语义检索相似度阈值（cos 0..1）；低于该分的结果过滤，0 = 不过滤。
+    /** 语义检索相似度阈值（cos 0..1)；低于该分的结果过滤，0 = 不过滤。
+     *  null=跟随模型自动（普通档 0.09 / 精准档 fp16 标定值，由后端按档取值）。
      *  与 Rust 侧 AiSettings.semantic_min_score 同名映射（camelCase） */
-    semanticMinScore: number;
+    semanticMinScore: number | null;
+    /** AI 三档画质（快速/普通/精准）：决定语义/人脸用哪组模型。切档只写设置，
+     *  受影响通道的索引重建由后端指纹机制自动触发（无新命令）。 */
+    qualityTier: AiQualityTier;
     /** 嵌入输入边长（px；Rust 侧 serde camelCase 对齐 embed_input_size） */
     embedInputSize: number;
     /** 人脸检测阈值（0..1，scrfd 置信度门限） */
@@ -102,7 +107,8 @@ export const DEFAULT_SETTINGS: Settings = {
     indexSchedule: "idleOnly",
     cpuLimitPercent: 50,
     useGpu: true,
-    semanticMinScore: 0.09,
+    semanticMinScore: null,
+    qualityTier: "normal",
     embedInputSize: 256,
     faceDetectThreshold: 0.5,
     faceClusterThreshold: 0.4,
