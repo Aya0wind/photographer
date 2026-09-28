@@ -145,6 +145,8 @@ export type AppEvent =
       newAssetId?: number | null;
       error?: string | null;
     }
+  /** 联拍收片（阶段 E-1；拍摄后新对象落卡即广播，UI 据此刷新设备文件列表） */
+  | { type: "tetheringObjectAdded"; pnpId: string; objectName: string; objectSize: number | null }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -1859,6 +1861,110 @@ export async function exportRun(
       return { ok: false, error: null };
     }
     return { ok: false, error: message };
+  }
+}
+
+// --- 阶段 E-1：WPD 零驱动联拍（相机能力探测 / 触发拍摄） ----------------------------
+// 契约（与后端 lane 共同遵守）：pnpId = WPD PnP 设备 id，与设备列表 device.id 同源。
+// 注意：清点命令叫 tethering_camera_list——gallery 的 camera_list（库内相机型号
+// 计数）已占用无前缀名，前后端两侧都必须避开该撞名。收片事件 tetheringObjectAdded
+// 走唯一事件通道 app://event（见 AppEvent 联合）。
+
+/** 联拍能力位（camera_probe / tethering_camera_list 报告；全部按后端探测为准，
+ *  UI 永远按报告渲染，不做品牌名承诺） */
+export interface CameraInfo {
+  /** WPD PnP 设备 id（与设备列表 id 同源） */
+  pnpId: string;
+  name: string;
+  capabilities: {
+    /** 文件传输（现有 WPD 导入通道） */
+    fileTransfer: boolean;
+    /** 标准 PTP InitiateCapture（0x100E）可触发拍摄 */
+    standardCapture: boolean;
+    /** Nikon 厂商扩展码（0x90C0）可触发拍摄 */
+    vendorCaptureNikon: boolean;
+    /** OBJECT_ADDED 事件订阅（拍摄后自动收片） */
+    objectAddedEvents: boolean;
+    liveView: boolean;
+  };
+}
+
+/** camera_capture 结果：error=null 且 objectName 非 null = 成功触发并等到收片；
+ *  error 非 null 为后端业务错误文案（UI 直接展示）；error=null 且 objectName=null
+ *  表示 invoke 不可用等传输层失败（UI 用通用失败文案） */
+export interface CameraCaptureResult {
+  objectName: string | null;
+  objectSize: number | null;
+  error: string | null;
+}
+
+/** 脏数据容错：后端载荷 → CameraInfo 归一（形状异常返回 null，调用方按未探测处理） */
+function normalizeCameraInfo(value: unknown): CameraInfo | null {
+  if (value === null || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  if (typeof r.pnpId !== "string" || r.pnpId === "") return null;
+  const caps =
+    r.capabilities !== null && typeof r.capabilities === "object"
+      ? (r.capabilities as Record<string, unknown>)
+      : {};
+  const cap = (v: unknown): boolean => v === true;
+  return {
+    pnpId: r.pnpId,
+    name: typeof r.name === "string" && r.name !== "" ? r.name : r.pnpId,
+    capabilities: {
+      fileTransfer: cap(caps.fileTransfer),
+      standardCapture: cap(caps.standardCapture),
+      vendorCaptureNikon: cap(caps.vendorCaptureNikon),
+      objectAddedEvents: cap(caps.objectAddedEvents),
+      liveView: cap(caps.liveView),
+    },
+  };
+}
+
+/** 已连接相机清单（tethering_camera_list；失败/非数组/条目异常回退 []） */
+export async function tetheringCameraList(): Promise<CameraInfo[]> {
+  try {
+    const list = await ipc<unknown>("tethering_camera_list");
+    if (!Array.isArray(list)) return [];
+    return list.map(normalizeCameraInfo).filter((c): c is CameraInfo => c !== null);
+  } catch {
+    return [];
+  }
+}
+
+/** 探测单台相机联拍能力（camera_probe）；失败/形状异常返回 null（UI 显示「未探测」，
+ *  不显示拍摄入口——后端在途时自然降级） */
+export async function cameraProbe(pnpId: string): Promise<CameraInfo | null> {
+  try {
+    return normalizeCameraInfo(await ipc<unknown>("camera_probe", { pnpId }));
+  } catch {
+    return null;
+  }
+}
+
+/** 触发拍摄（camera_capture；timeoutMs 可选，缺省用后端默认）。
+ *  业务错误（如设备被占用）透传 Err 文案；invoke 不可用时 error=null（通用文案）。 */
+export async function cameraCapture(pnpId: string, timeoutMs?: number): Promise<CameraCaptureResult> {
+  const payload: Record<string, unknown> = { pnpId };
+  if (timeoutMs !== undefined) payload.timeoutMs = timeoutMs;
+  try {
+    const raw = await ipc<unknown>("camera_capture", payload);
+    if (raw === null || typeof raw !== "object") {
+      return { objectName: null, objectSize: null, error: null };
+    }
+    const r = raw as Record<string, unknown>;
+    return {
+      objectName: typeof r.objectName === "string" && r.objectName !== "" ? r.objectName : null,
+      objectSize:
+        typeof r.objectSize === "number" && Number.isFinite(r.objectSize) ? r.objectSize : null,
+      error: typeof r.error === "string" && r.error !== "" ? r.error : null,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) {
+      return { objectName: null, objectSize: null, error: null };
+    }
+    return { objectName: null, objectSize: null, error: message };
   }
 }
 
