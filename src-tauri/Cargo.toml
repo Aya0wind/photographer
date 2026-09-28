@@ -85,6 +85,9 @@ windows = { version = "0.61", features = [
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",
 ] }
+# windows::core::implement 宏展开引用 windows_core:: 路径，需具名直依赖。
+# 与 windows 0.61 同版本同代码（其本身依赖 windows-core），零新增编译产物。
+windows-core = "0.61"
 
 [dev-dependencies]
 tempfile = "3"

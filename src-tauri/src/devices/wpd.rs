@@ -260,6 +260,18 @@ pub fn invalidate_device(pnp: &str) {
     let _ = pnp;
 }
 
+/// 联拍（tethering）COM 操作调度：复用同一 worker 池（COM 生命周期归宿
+/// worker 线程、超时与旧连接隔离同套语义）。`data:{pnp}` 通道与导入互斥
+/// （WPD 会话独占），`probe:{pnp}` 通道与数据操作分离。
+#[cfg(windows)]
+pub(crate) fn schedule_com_operation<T: Send + 'static>(
+    lane: &str,
+    timeout: std::time::Duration,
+    operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
+) -> DeviceResult<T> {
+    worker::schedule(lane, timeout, operation)
+}
+
 /// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
 /// lib 目标内无调用点（集成测试经 #[path] 模块树引用）——豁免 dead_code。
 #[cfg(windows)]
@@ -345,10 +357,19 @@ mod worker {
             panic!("注入测试 panic")
         })
     }
+    /// 通用调度（tethering 等新调用方复用 worker 池；lane 命名由调用方
+    /// 决定，与既有 data:/probe: 通道语义一致）。
+    pub(super) fn schedule<T: Send + 'static>(
+        lane: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
+    ) -> DeviceResult<T> {
+        pool().call(lane, timeout, operation)
+    }
 }
 
 #[cfg(windows)]
-mod com {
+pub(crate) mod com {
     use std::sync::atomic::Ordering;
 
     use chrono::{DateTime, Utc};
@@ -382,15 +403,18 @@ mod com {
     const CLSID_PORTABLE_DEVICE_MANAGER: GUID =
         GUID::from_u128(0x0af10cec_2ecd_4b92_9581_34f6ae0637f3);
     const CLSID_PORTABLE_DEVICE: GUID = GUID::from_u128(0x728a21c5_3d9e_48d7_9810_864848f0f404);
-    const CLSID_PORTABLE_DEVICE_VALUES: GUID =
+    /// tethering（SendCommand 参数组装）复用。
+    pub(crate) const CLSID_PORTABLE_DEVICE_VALUES: GUID =
         GUID::from_u128(0x0c15d503_d017_47ce_9016_7b3f978721cc);
-    const CLSID_PORTABLE_DEVICE_KEY_COLLECTION: GUID =
+    /// tethering（新对象属性批量读）复用。
+    pub(crate) const CLSID_PORTABLE_DEVICE_KEY_COLLECTION: GUID =
         GUID::from_u128(0xde2d022d_2480_43be_97f0_d1fa2cf98f4f);
-    const CLSID_PORTABLE_DEVICE_PROPVARIANT_COLLECTION: GUID =
+    /// tethering（MTP 操作码参数表）复用。
+    pub(crate) const CLSID_PORTABLE_DEVICE_PROPVARIANT_COLLECTION: GUID =
         GUID::from_u128(0x08a99e2f_6d6d_4b80_af5a_baf2bcbe4cb9);
 
     /// HRESULT → 设备错误语义（spec §5.1：UI 需区分“可提示操作设备”与“拔线”）。
-    fn hr_error(hr: HRESULT) -> DeviceError {
+    pub(crate) fn hr_error(hr: HRESULT) -> DeviceError {
         match hr.0 as u32 {
             0x8007_0005 => DeviceError::AccessDenied, // E_ACCESSDENIED：相机未切 PC 模式 / 手机锁定
             0x8007_0015 | 0x8007_048F | 0x8007_04C7 => DeviceError::Disconnected, // NOT_READY / DEVICE_NOT_CONNECTED / CANCELLED：传输中拔线
@@ -398,7 +422,7 @@ mod com {
         }
     }
 
-    fn win_error(e: WinError) -> DeviceError {
+    pub(crate) fn win_error(e: WinError) -> DeviceError {
         hr_error(e.code())
     }
 
@@ -413,12 +437,12 @@ mod com {
     ///   Explorer 同款用法）——沿用现有 apartment，**绝不
     ///   CoUninitialize**（不注销他人/宿主的初始化，泄漏的引用至多延长
     ///   apartment 生命周期到进程退出，无害）。
-    pub(super) struct ComApartment {
+    pub(crate) struct ComApartment {
         owned: bool,
     }
 
     impl ComApartment {
-        pub(super) fn init() -> Result<Self, WinError> {
+        pub(crate) fn init() -> Result<Self, WinError> {
             // SAFETY: 无指针参数，仅改变当前线程 COM 状态
             let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             match super::com_apartment_owned(hr.0) {
@@ -437,14 +461,14 @@ mod com {
         }
     }
 
-    fn to_wide(s: &str) -> Vec<u16> {
+    pub(crate) fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
     /// 拷贝 PWSTR → String（不取得所有权；释放由调用方负责）。
     ///
     /// SAFETY: p 必须为 NULL 或指向 NUL 结尾的合法宽字符串。
-    unsafe fn pwstr_to_string(p: PWSTR) -> String {
+    pub(crate) unsafe fn pwstr_to_string(p: PWSTR) -> String {
         if p.is_null() {
             return String::new();
         }
@@ -459,7 +483,7 @@ mod com {
     /// 释放 WPD API 以 CoTaskMem 分配并转移给调用方的字符串。
     ///
     /// SAFETY: p 必须来自 WPD API 的出参且未被重复释放。
-    unsafe fn free_pwstr(p: PWSTR) {
+    pub(crate) unsafe fn free_pwstr(p: PWSTR) {
         if !p.is_null() {
             // SAFETY: 见函数级注释
             unsafe { CoTaskMemFree(Some(p.as_ptr() as *const core::ffi::c_void)) };
@@ -613,7 +637,7 @@ mod com {
         Ok(out)
     }
 
-    fn open_device(pnp_id: &str) -> DeviceResult<IPortableDevice> {
+    pub(crate) fn open_device(pnp_id: &str) -> DeviceResult<IPortableDevice> {
         super::super::timed_worker::checkpoint()?;
         // SAFETY: CLSID 为静态常量；无外部聚合
         let client_info: IPortableDeviceValues = unsafe {
@@ -824,7 +848,10 @@ mod com {
     }
 
     /// 读取字符串属性（GetStringValue；返回缓冲由 API 分配，须 CoTaskMemFree）。
-    fn string_prop(values: &IPortableDeviceValues, key: *const PROPERTYKEY) -> Option<String> {
+    pub(crate) fn string_prop(
+        values: &IPortableDeviceValues,
+        key: *const PROPERTYKEY,
+    ) -> Option<String> {
         // SAFETY: key 为静态常量
         let p = unsafe { values.GetStringValue(key) }.ok()?;
         // SAFETY: GetStringValue 的出参为 NUL 结尾宽字符串

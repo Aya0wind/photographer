@@ -32,6 +32,8 @@ pub mod migrate;
 pub mod settings;
 #[path = "../../src/tasks/mod.rs"]
 pub mod tasks;
+#[path = "../../src/tethering/mod.rs"]
+pub mod tethering;
 #[path = "../../src/thumbs/mod.rs"]
 pub mod thumbs;
 

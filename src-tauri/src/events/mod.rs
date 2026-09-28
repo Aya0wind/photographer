@@ -291,6 +291,16 @@ pub enum AppEvent {
         error: Option<String>,
     },
 
+    // 联机拍摄（阶段 E-1「WPD 零驱动联拍」；导入落库走既有导入管线，
+    // 本事件只通知「新对象已到达」——前端接 tethering_camera_list /
+    // camera_probe / camera_capture 命令组）
+    /// 拍摄产生的新对象已到达相机（OBJECT_ADDED → Advise 管线）。
+    TetheringObjectAdded {
+        pnp_id: String,
+        object_name: String,
+        object_size: u64,
+    },
+
     // 错误
     AppError {
         level: String,

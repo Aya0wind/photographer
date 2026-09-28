@@ -9,8 +9,9 @@ mod index;
 mod ipc;
 mod metadata;
 mod migrate;
-pub mod settings;
 mod tasks;
+pub mod settings;
+mod tethering;
 mod thumbs;
 mod tray;
 
@@ -320,6 +321,11 @@ pub fn run() {
             ipc::watch::watch_folder_add,
             ipc::watch::watch_folder_remove,
             ipc::device::event_ping,
+            // 联机拍摄（阶段 E-1；tethering_ 前缀原因见 ipc/tethering.rs——
+            // camera_list 已被相机型号统计占用，Tauri 命令名全局唯一）
+            ipc::tethering::tethering_camera_list,
+            ipc::tethering::camera_probe,
+            ipc::tethering::camera_capture,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

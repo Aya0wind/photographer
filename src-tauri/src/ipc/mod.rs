@@ -18,6 +18,7 @@ pub mod reconcile;
 pub mod selection;
 pub mod settings;
 pub mod system;
+pub mod tethering;
 pub mod thumb;
 pub mod versions;
 pub mod watch;
