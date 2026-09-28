@@ -78,6 +78,7 @@ describe("TetherStartDialog 联拍启动弹窗", () => {
     renderDialog();
 
     expect(await screen.findByTestId("tether-start-empty")).toHaveTextContent("未发现可联拍的相机");
+    expect(screen.getByTestId("tether-start-sony-hint")).toHaveTextContent("PC Remote");
     listMock.mockResolvedValue([camera("CAM_A", "A7R V")]);
     fireEvent.click(screen.getByTestId("tether-start-refresh"));
     expect(await screen.findByTestId("tether-start-camera-CAM_A")).toBeInTheDocument();

@@ -1231,5 +1231,6 @@
   "albums.tetherRefresh": "重新扫描",
   "albums.tetherScanning": "扫描相机中…",
   "albums.tetherCameraUnsupported": "该相机不支持触发拍摄",
-  "albums.tetherStartFailed": "开启拍摄会话失败"
+  "albums.tetherStartFailed": "开启拍摄会话失败",
+  "albums.tetherSonyHint": "Sony 机身需处于 PC Remote（遥控）模式；若已连接仍看不到，需先安装联拍支持包（SDK）——见 scripts/build-sony-bridge.cmd"
 }

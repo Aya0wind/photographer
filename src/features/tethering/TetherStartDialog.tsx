@@ -79,9 +79,14 @@ export default function TetherStartDialog({
 
         <div className="mt-2 flex max-h-64 flex-col gap-2 overflow-y-auto" data-testid="tether-start-list">
           {cameras !== null && cameras.length === 0 && (
-            <p className="rounded-md border border-edge bg-bg p-3 text-[11px] leading-relaxed text-text-muted" data-testid="tether-start-empty">
-              {t("albums.tetherNoCamera")}
-            </p>
+            <div>
+              <p className="rounded-md border border-edge bg-bg p-3 text-[11px] leading-relaxed text-text-muted" data-testid="tether-start-empty">
+                {t("albums.tetherNoCamera")}
+              </p>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-text-muted" data-testid="tether-start-sony-hint">
+                {t("albums.tetherSonyHint")}
+              </p>
+            </div>
           )}
           {(cameras ?? []).map((camera) => {
             const capable = canTriggerCapture(camera.capabilities);

@@ -1231,5 +1231,6 @@
   "albums.tetherRefresh": "再スキャン",
   "albums.tetherScanning": "カメラをスキャン中…",
   "albums.tetherCameraUnsupported": "このカメラはリモート撮影に非対応",
-  "albums.tetherStartFailed": "撮影セッションの開始に失敗しました"
+  "albums.tetherStartFailed": "撮影セッションの開始に失敗しました",
+  "albums.tetherSonyHint": "Sony ボディは PC リモートモード必須。接続済みでも一覧に表示されない場合は SDK サポートパックのインストールが必要です（scripts/build-sony-bridge.cmd 参照）"
 }

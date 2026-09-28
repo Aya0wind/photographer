@@ -1245,5 +1245,6 @@
   "albums.tetherRefresh": "Rescan",
   "albums.tetherScanning": "Scanning cameras…",
   "albums.tetherCameraUnsupported": "This camera does not support remote capture",
-  "albums.tetherStartFailed": "Failed to start capture session"
+  "albums.tetherStartFailed": "Failed to start capture session",
+  "albums.tetherSonyHint": "Sony bodies must be in PC Remote mode; if connected but not listed, install the capture support pack (SDK) first — see scripts/build-sony-bridge.cmd"
 }

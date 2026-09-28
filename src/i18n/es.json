@@ -1245,5 +1245,6 @@
   "albums.tetherRefresh": "Volver a escanear",
   "albums.tetherScanning": "Escaneando cámaras…",
   "albums.tetherCameraUnsupported": "Esta cámara no admite disparo remoto",
-  "albums.tetherStartFailed": "No se pudo iniciar la sesión de captura"
+  "albums.tetherStartFailed": "No se pudo iniciar la sesión de captura",
+  "albums.tetherSonyHint": "Los cuerpos Sony deben estar en modo PC Remote; si están conectados pero no aparecen, instala primero el paquete de soporte (SDK): scripts/build-sony-bridge.cmd"
 }
