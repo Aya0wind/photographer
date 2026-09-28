@@ -59,6 +59,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     editRecipeSave: vi.fn(),
+    assetMetadataGet: vi.fn(),
+    assetMetadataSave: vi.fn(),
     editRecipeDelete: vi.fn(),
     exportRun: vi.fn(),
     albumList: vi.fn(),
@@ -83,6 +85,8 @@ import { useAssetThumbUrl } from "@/features/gallery/lib/thumbPipeline";
 import {
   albumList,
   albumSubgroups,
+  assetMetadataGet,
+  assetMetadataSave,
   editRecipeDelete,
   editRecipeSave,
   exportRun,
@@ -119,6 +123,8 @@ function renderEditor(initial: { recipe: EditRecipe | null; updatedAt: string | 
 }
 
 beforeEach(() => {
+  vi.mocked(assetMetadataGet).mockReset().mockResolvedValue({ title: "", description: "", author: "", copyright: "", keywords: [], capturedAt: "2026-09-18T10:00:00+08:00", camera: "Canon EOS R5", lens: "", gpsLat: null, gpsLon: null });
+  vi.mocked(assetMetadataSave).mockReset().mockImplementation(async (_id, value) => value);
   saveMock.mockReset();
   deleteMock.mockReset();
   exportMock.mockReset();
@@ -199,8 +205,10 @@ describe("EditorOverlay 编辑操作与撤销", () => {
   it("旋转 90° 步进 + 撤销复位", async () => {
     const user = userEvent.setup();
     renderEditor();
+    await user.click(screen.getByTestId("editor-tool-crop"));
     await user.click(screen.getByTestId("editor-rotate-cw"));
     expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("1");
+    await user.click(screen.getByTestId("editor-tool-crop"));
     await user.click(screen.getByTestId("editor-rotate-cw"));
     expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("2");
     await user.click(screen.getByTestId("editor-undo"));
@@ -247,6 +255,7 @@ describe("EditorOverlay 保存/重置", () => {
       },
       updatedAt: "x",
     });
+    await user.click(screen.getByTestId("editor-tool-crop"));
     await user.click(screen.getByTestId("editor-rotate-cw")); // 制造本地改动（quarter 2→3）
     await user.click(screen.getByTestId("editor-reset"));
     expect(screen.getByTestId("editor-confirm-dialog")).toBeInTheDocument();
@@ -261,6 +270,7 @@ describe("EditorOverlay 导出对话框", () => {
   it("folder 缺目录 → 确认禁用并提示；album 缺相册同理；选相册后可导出", async () => {
     const user = userEvent.setup();
     renderEditor();
+    await user.click(screen.getByTestId("editor-tool-output"));
     await user.click(screen.getByTestId("editor-export"));
 
     const dialog = screen.getByTestId("export-dialog");
@@ -296,6 +306,7 @@ describe("EditorOverlay 导出对话框", () => {
   it("folder 模式目录必填（只读输入经系统选择器选取）；文件名默认 {stem}_edit.jpg", async () => {
     const user = userEvent.setup();
     renderEditor();
+    await user.click(screen.getByTestId("editor-tool-output"));
     await user.click(screen.getByTestId("editor-export"));
     expect(screen.getByTestId("editor-output-dir")).toHaveAttribute("readonly");
     expect(screen.getByTestId("editor-output-filename")).toHaveValue("DSC_1234_edit.jpg");
@@ -368,5 +379,61 @@ describe("EditorOverlay 源缺失（missing）", () => {
     fireEvent.click(screen.getByTestId("stub-image-error"));
     expect(screen.getByTestId("editor-load-failed")).toHaveTextContent("无法加载预览大图");
     expect(screen.queryByTestId("editor-load-missing")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("编辑器的新布局与元数据", () => {
+  it("只切换裁剪选项卡不会裁掉照片或产生未保存标记", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByTestId("editor-tool-crop"));
+    await user.click(screen.getByTestId("editor-tool-metadata"));
+    expect(screen.queryByTestId("editor-dirty")).not.toBeInTheDocument();
+    expect(screen.getByTestId("editor-undo")).toBeDisabled();
+  });
+
+  it("元数据在图库内保存，保存后关闭无需再次确认", async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderEditor();
+    await user.click(screen.getByTestId("editor-tool-metadata"));
+    const title = await screen.findByTestId("editor-meta-title");
+    await user.type(title, "雨后的叶子");
+    await user.type(screen.getByTestId("editor-meta-author"), "小明");
+    await user.click(screen.getByTestId("editor-save"));
+    await waitFor(() => expect(assetMetadataSave).toHaveBeenCalledWith(1, expect.objectContaining({ title: "雨后的叶子", author: "小明", camera: "Canon EOS R5" })));
+    await waitFor(() => expect(screen.queryByTestId("editor-dirty")).not.toBeInTheDocument());
+    await user.click(screen.getByTestId("editor-close"));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("元数据保存失败会保留未保存状态和输入", async () => {
+    const user = userEvent.setup();
+    vi.mocked(assetMetadataSave).mockRejectedValue(new Error("磁盘不可写"));
+    renderEditor();
+    await user.click(screen.getByTestId("editor-tool-metadata"));
+    await user.type(await screen.findByTestId("editor-meta-title"), "待保存");
+    await user.click(screen.getByTestId("editor-save"));
+    await waitFor(() => expect(screen.getByTestId("editor-toast")).toHaveTextContent("磁盘不可写"));
+    expect(screen.getByTestId("editor-meta-title")).toHaveValue("待保存");
+    expect(screen.getByTestId("editor-dirty")).toBeInTheDocument();
+    expect(saveMock).not.toHaveBeenCalled();
+  });
+
+  it("调整参与撤销与保存；缩放只改变预览，裁剪工具不显示右侧栏", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    expect(screen.queryByTestId("editor-sidebar")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("editor-zoom-in"));
+    expect(screen.getByTestId("editor-zoom-fit")).toHaveTextContent("125%");
+    await user.click(screen.getByTestId("editor-tool-adjust"));
+    expect(screen.getByTestId("editor-zoom-fit")).toHaveTextContent("100%");
+    fireEvent.change(screen.getByTestId("editor-adjust-brightness"), { target: { value: 25 } });
+    await user.click(screen.getByTestId("editor-save"));
+    await waitFor(() => expect(saveMock).toHaveBeenLastCalledWith(1, expect.objectContaining({ adjustments: { brightness: 25, contrast: 0, saturation: 0 } })));
+    await user.click(screen.getByTestId("editor-undo"));
+    expect(screen.getByTestId("editor-adjust-brightness")).toHaveValue("0");
+    await user.click(screen.getByTestId("editor-tool-crop"));
+    expect(screen.queryByTestId("editor-sidebar")).not.toBeInTheDocument();
   });
 });

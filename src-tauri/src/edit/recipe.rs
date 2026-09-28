@@ -76,6 +76,14 @@ impl Default for OutputPrefs {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Adjustments {
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+}
+
 /// 编辑配方（version 1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +91,8 @@ pub struct EditRecipe {
     pub version: u32,
     #[serde(default)]
     pub rotate_quarter: u32,
+    #[serde(default)]
+    pub adjustments: Option<Adjustments>,
     #[serde(default)]
     pub crop: Option<CropRect>,
     #[serde(default)]
@@ -120,13 +130,25 @@ fn clamp01(v: f64) -> f64 {
 /// - 颜色非 `#RRGGBB` → 「颜色格式非法」；
 /// - 结构不匹配（字段类型错/缺必填）→ serde 错误透传。
 pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
-    let mut recipe: EditRecipe = serde_json::from_value(value.clone())
-        .map_err(|e| format!("编辑配方结构非法: {e}"))?;
+    let mut recipe: EditRecipe =
+        serde_json::from_value(value.clone()).map_err(|e| format!("编辑配方结构非法: {e}"))?;
     if recipe.version != RECIPE_VERSION {
         return Err(format!(
             "编辑配方版本不支持（当前支持 {RECIPE_VERSION}，收到 {}）",
             recipe.version
         ));
+    }
+    if let Some(adjustments) = recipe.adjustments.as_mut() {
+        for v in [
+            &mut adjustments.brightness,
+            &mut adjustments.contrast,
+            &mut adjustments.saturation,
+        ] {
+            if !v.is_finite() {
+                return Err("调整数值无效".into());
+            }
+            *v = v.clamp(-100.0, 100.0);
+        }
     }
     if recipe.rotate_quarter > 3 {
         return Err(format!(
@@ -214,7 +236,10 @@ mod tests {
         assert!((recipe.brush_strokes[0].width_rel - 1.0).abs() < 1e-9);
         assert_eq!(recipe.output.long_edge, None);
         assert_eq!(recipe.output.quality, 100);
-        assert_eq!(parse_color(&recipe.text_layers[0].color), Some([255, 255, 51]));
+        assert_eq!(
+            parse_color(&recipe.text_layers[0].color),
+            Some([255, 255, 51])
+        );
     }
 
     #[test]

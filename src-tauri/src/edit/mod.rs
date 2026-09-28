@@ -31,6 +31,7 @@
 pub mod export;
 pub mod ipc;
 pub mod meta;
+pub mod metadata;
 pub mod recipe;
 pub mod render;
 pub mod text;

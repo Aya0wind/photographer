@@ -162,11 +162,6 @@ pub enum AppEvent {
         current_file: String,
         bytes_per_sec: f64,
     },
-    /// 进度里程碑（25/50/75/100%）：系统通知订阅者据此发桌面通知
-    ImportMilestoneReached {
-        job_id: i64,
-        percent: u32,
-    },
     ImportPaused {
         job_id: i64,
     },

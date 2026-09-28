@@ -170,3 +170,54 @@ fn unique_spawn_coalesces_automatic_and_manual_triggers() {
     assert!(tasks::wait_done(&again, Duration::from_secs(1)));
     assert_eq!(ran.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn coalesced_wakeup_runs_again_after_queue_was_drained() {
+    let supervisor = TaskSupervisor::new(EventBus::new());
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let counter = Arc::clone(&runs);
+    let handle = supervisor
+        .spawn_coalesced("index", "library-a".into(), move |_| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                drained_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        })
+        .unwrap();
+    drained_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..20 {
+        assert!(supervisor
+            .spawn_coalesced("index", "library-a".into(), |_| {
+                panic!("同名请求应合并，不能并行执行");
+            })
+            .is_none());
+    }
+    release_tx.send(()).unwrap();
+    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    let counter = Arc::clone(&runs);
+    let handle = supervisor
+        .spawn_coalesced("index", "library-a".into(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
+    assert_eq!(runs.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn coalesced_panic_releases_registration() {
+    let supervisor = TaskSupervisor::new(EventBus::new());
+    let handle = supervisor
+        .spawn_coalesced("index", "library-a".into(), |_| {
+            panic!("注入失败");
+        })
+        .unwrap();
+    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
+    let handle = supervisor
+        .spawn_coalesced("index", "library-a".into(), |_| {})
+        .unwrap();
+    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
+}

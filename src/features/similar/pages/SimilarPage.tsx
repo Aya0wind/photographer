@@ -1,21 +1,24 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
   duplicateDelete,
   duplicatesList,
   type DuplicateGroupDto,
+  type AssetDto,
 } from "@/ipc/api";
+import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
+import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
 import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import { useGalleryTileSize, type GalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
 
 /**
  * 相似照片页（M7 F8 两级去重，/similar）：
- * - 两档 Tab：exact = (size, xxhash) 完全重复；similar = pHash 汉明 ≤6 近似
+ * - 相似组：pHash 汉明 ≤6 近似
  *   （RAW+JPG 孪生后端已排除；连拍组内不排除——正是挑片场景）
- * - 组卡片列表：组头「N 张 · 完全重复/近似」，组内缩略图走 thumbPipeline
- *   240 档（AssetThumb 与画廊同款）；点选要删的照片 → 「删除所选」二次确认
+ * - 组卡片列表：组头「N 张 · 近似」，组内缩略图走 thumbPipeline
+ *   240 档（AssetThumb 与画廊同款）；点击照片预览；独立勾选要删的照片 → 「删除所选」二次确认
  *   → duplicateDelete（返回实际删除数）
  * - 删除后乐观更新：组内剔除已删项，<2 张的组整卡移除（后端同样不再返回）；
  *   游标 seen 同步减去消失的组数——after 是 0 基组偏移（skip 计数），
@@ -34,10 +37,11 @@ interface GroupCardProps {
   index: number;
   onDelete: (index: number, assetIds: number[]) => void;
   tileSize: GalleryTileSize;
+  onOpen: (asset: AssetDto) => void;
 }
 
 /** 单个重复组卡：组头 + 勾选区 + 删除所选（勾选态由本卡自持） */
-function GroupCard({ group, index, onDelete, tileSize }: GroupCardProps) {
+function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
 
@@ -85,11 +89,8 @@ function GroupCard({ group, index, onDelete, tileSize }: GroupCardProps) {
         {group.assets.map((asset) => {
           const checked = selected.has(asset.id);
           return (
-            <button
+            <div
               key={asset.id}
-              type="button"
-              onClick={() => toggle(asset.id)}
-              aria-pressed={checked}
               className={`relative aspect-[4/3] overflow-hidden rounded-md border transition-colors ${
                 checked ? "border-red-400 ring-1 ring-red-400/60" : "border-edge/60 hover:border-accent/60"
               }`}
@@ -98,19 +99,20 @@ function GroupCard({ group, index, onDelete, tileSize }: GroupCardProps) {
               data-selected={checked ? "true" : undefined}
               title={asset.name}
             >
-              <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
-              <span
+              <button type="button" onClick={() => onOpen(asset)} className="h-full w-full" aria-label={asset.name} data-testid="similar-asset-preview">
+                <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
+              </button>
+              <button type="button" onClick={() => toggle(asset.id)} aria-pressed={checked} aria-label={t("similar.selectPhoto")}
                 className={`absolute left-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${
                   checked
                     ? "border-red-400 bg-red-400 text-white"
                     : "border-white/50 bg-black/40 text-transparent"
                 }`}
-                aria-hidden="true"
                 data-testid="similar-asset-check"
               >
                 ✓
-              </span>
-            </button>
+              </button>
+            </div>
           );
         })}
       </div>
@@ -176,6 +178,12 @@ export default function SimilarPage() {
   const [deleting, setDeleting] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const viewerGroups = useMemo(() => [{
+    key: "similar", date: null,
+    assets: [...new Map(groups.flatMap((group) => group.assets).map((asset) => [asset.id, asset])).values()],
+  }], [groups]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups);
 
   const loadFirstPage = useCallback(async () => {
     setStatus("loading");
@@ -281,6 +289,7 @@ export default function SimilarPage() {
                 group={group}
                 index={index}
                 tileSize={tileSize}
+                onOpen={openAsset}
                 onDelete={(groupIndex, ids) => setPending({ index: groupIndex, ids })}
               />
             ))}
@@ -298,6 +307,9 @@ export default function SimilarPage() {
           </div>
         )}
       </div>
+
+      {viewer && <ViewerOverlay asset={viewer.asset} group={viewer.group} index={viewer.index}
+        onNavigate={navigateTo} onClose={closeViewer} onVersionSelect={selectVersion} />}
 
       {pending !== null && (
         <ConfirmDialog

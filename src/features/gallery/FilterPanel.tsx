@@ -8,28 +8,24 @@ import {
   cameraList,
   formatList,
   lensList,
-  smartViewCreate,
   type AlbumDto,
   type AssetCameraCount,
   type AssetFilters,
   type AssetFormatCount,
-  type AssetKind,
   type AssetLensCount,
-} from "@/ipc/api";import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
+} from "@/ipc/api";
+import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
 
 /**
  * 筛选面板（M4.5 自 SearchPage 抽取的共享组件，画廊合并后唯一消费方）：
  * - 状态：SearchInputs 单对象（数字区间为原始字符串，构建时校验）；序列化键即防抖键
- * - UI：两行网格——类型/相机/镜头/格式（分段+勾选下拉）、方向/闪光灯/GPS（分段）、
+ * - UI：网格——相机/镜头/格式（勾选下拉）、方向/闪光灯/GPS（分段）、
  *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段、相册（单选下拉）、
  *   颜色标签（B1 五色点单选）/已拒绝（B1 三态）
- * - 清单：cameraList/albumList 挂载拉一次；lensList/formatList 面板首次展开才拉（少打 IPC）
+ * - 清单：cameraList/lensList/albumList 面板展开时读取；格式在常用栏或面板挂载时读取
  * - chips：激活条件清单（每个可单独移除 + 一键清空），由 FilterChipsRow 渲染
- * - 智能视图（B1）：有激活条件时显示「保存为视图」行（命名 → smart_view_create，
- *   重名等业务错误行内提示；filtersJson=当前 buildFilters 结果序列化）
  */
 
-export type KindFilter = "all" | "photo" | "raw";
 type OrientationFilter = "all" | "landscape" | "portrait";
 type FlashFilter = "all" | "on" | "off" | "unknown";
 type GpsFilter = "all" | "yes" | "no";
@@ -40,11 +36,6 @@ export type RejectedFilter = "all" | "yes" | "no";
 /** 闭眼风险（C 阶段 AI 选片）：none=不限；closed/maybe 与后端 filters.eyes 单值对应（互斥） */
 export type AiEyesFilter = "none" | "closed" | "maybe";
 
-const KIND_OPTIONS: ReadonlyArray<{ value: KindFilter; labelKey: string }> = [
-  { value: "all", labelKey: "search.kind.all" },
-  { value: "photo", labelKey: "search.kind.photo" },
-  { value: "raw", labelKey: "search.kind.raw" },
-];
 const ORIENTATION_OPTIONS: ReadonlyArray<{ value: OrientationFilter; labelKey: string }> = [
   { value: "all", labelKey: "search.orientation.all" },
   { value: "landscape", labelKey: "search.orientation.landscape" },
@@ -70,7 +61,6 @@ const REJECTED_OPTIONS: ReadonlyArray<{ value: RejectedFilter; labelKey: string 
 /** 筛选面板全部输入 */
 export interface SearchInputs {
   favoriteOnly: boolean;
-  kind: KindFilter;
   from: string;
   to: string;
   cameras: string[];
@@ -104,7 +94,6 @@ export interface SearchInputs {
 
 export const EMPTY_INPUTS: SearchInputs = {
   favoriteOnly: false,
-  kind: "all",
   from: "",
   to: "",
   cameras: [],
@@ -129,13 +118,6 @@ export const EMPTY_INPUTS: SearchInputs = {
   aiEyes: "none",
   aiBlur: false,
 };
-
-/** UI 档位 → filters.kinds（照片=photo+raw；RAW=单列；全部=不传） */
-function kindsOf(kind: KindFilter): AssetKind[] | undefined {
-  if (kind === "photo") return ["photo", "raw"];
-  if (kind === "raw") return ["raw"];
-  return undefined;
-}
 
 type QuickRangeKey = "recent7" | "recent30" | "thisYear" | "lastYear";
 
@@ -199,8 +181,6 @@ function mbToBytes(value: string): number | undefined {
 export function buildFilters(inputs: SearchInputs): AssetFilters {
   const filters: AssetFilters = {};
   if (inputs.favoriteOnly) filters.ratingMin = 5;
-  const kinds = kindsOf(inputs.kind);
-  if (kinds) filters.kinds = kinds;
   const after = dateToRfc3339(inputs.from, false);
   if (inputs.from && after) filters.capturedAfter = after;
   const before = dateToRfc3339(inputs.to, true);
@@ -239,66 +219,6 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   return filters;
 }
 
-/** RFC3339 → 本地 "YYYY-MM-DD"（应用已存视图时反解日期；非法回 ""） */
-function rfc3339ToYmd(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/** 字节 → MB 输入串（两位小数内还原用户输入；非法回 ""） */
-function bytesToMbStr(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "";
-  return String(Number((bytes / (1024 * 1024)).toFixed(2)));
-}
-
-/**
- * AssetFilters → SearchInputs（B1 智能视图应用：filtersJson 反解回面板输入）。
- * 覆盖本面板能产出的全部维度；kinds 相册维度 albumId 反解不可行（缺相册名，
- * 应用后由用户在面板重选）——语义等价性以 buildFilters(inputsFromFilters(f)) 与
- * f 的关键字段一致为准（见 FilterPanel.b1 测试）。
- */
-export function inputsFromFilters(filters: AssetFilters): SearchInputs {
-  const inputs: SearchInputs = { ...EMPTY_INPUTS };
-  if (filters.ratingMin !== undefined && filters.ratingMin >= 5) inputs.favoriteOnly = true;
-  const kinds = filters.kinds;
-  if (kinds && kinds.length > 0) {
-    const set = new Set(kinds);
-    if (set.has("photo") && set.has("raw")) inputs.kind = "photo";
-    else if (set.has("raw")) inputs.kind = "raw";
-  }
-  if (filters.capturedAfter) inputs.from = rfc3339ToYmd(filters.capturedAfter);
-  if (filters.capturedBefore) inputs.to = rfc3339ToYmd(filters.capturedBefore);
-  if (filters.cameras && filters.cameras.length > 0) inputs.cameras = [...filters.cameras];
-  if (filters.lenses && filters.lenses.length > 0) inputs.lenses = [...filters.lenses];
-  if (filters.formats && filters.formats.length > 0) inputs.formats = [...filters.formats];
-  if (filters.orientation === "landscape" || filters.orientation === "portrait") {
-    inputs.orientation = filters.orientation;
-  }
-  if (filters.flash === "on" || filters.flash === "off" || filters.flash === "unknown") {
-    inputs.flash = filters.flash;
-  }
-  if (filters.hasGps !== undefined) inputs.gps = filters.hasGps ? "yes" : "no";
-  const strOf = (v: number | undefined): string =>
-    v !== undefined && Number.isFinite(v) ? String(v) : "";
-  inputs.focalMin = strOf(filters.focalMin);
-  inputs.focalMax = strOf(filters.focalMax);
-  inputs.isoMin = strOf(filters.isoMin);
-  inputs.isoMax = strOf(filters.isoMax);
-  inputs.apertureMin = strOf(filters.apertureMin);
-  inputs.apertureMax = strOf(filters.apertureMax);
-  inputs.shutterMin = strOf(filters.shutterMin);
-  inputs.shutterMax = strOf(filters.shutterMax);
-  inputs.sizeMin = bytesToMbStr(filters.sizeMin ?? NaN);
-  inputs.sizeMax = bytesToMbStr(filters.sizeMax ?? NaN);
-  if (asColorLabel(filters.colorLabel) !== null) inputs.color = filters.colorLabel as ColorLabel;
-  if (filters.rejected !== undefined) inputs.rejected = filters.rejected ? "yes" : "no";
-  if (filters.eyes === "closed" || filters.eyes === "maybe") inputs.aiEyes = filters.eyes;
-  if (filters.blur === "soft") inputs.aiBlur = true;
-  return inputs;
-}
-
 /** 输入 → 序列化键（防抖用；字符串身份稳定） */
 export function serializeInputs(inputs: SearchInputs): string {
   return JSON.stringify(inputs);
@@ -329,7 +249,7 @@ export function hasActiveFilters(inputs: SearchInputs): boolean {
 const INPUT_CLASS =
   "h-7 rounded-md border border-edge bg-panel/55 px-2 font-mono text-[11px] text-text-primary placeholder:text-text-muted/60 outline-none transition-colors hover:border-text-muted/70 focus:border-accent focus:ring-1 focus:ring-accent/20";
 
-/** 分段单选（类型/方向/闪光灯/GPS 共用）；testId 透传到组与各按钮 */
+/** 分段单选（方向/闪光灯/GPS 共用）；testId 透传到组与各按钮 */
 function Segment<T extends string>({
   ariaLabel,
   value,
@@ -733,6 +653,21 @@ function FieldRow({ label, children }: { label: string; children: ReactNode }) {
 
 // --- 面板与 chips 行 ----------------------------------------------------------------
 
+/** 按库内实际格式筛选，允许同时选择多个格式。 */
+function FormatFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch: Partial<SearchInputs>) => void }) {
+  const { t } = useTranslation();
+  const [options, setOptions] = useState<AssetFormatCount[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void formatList().then((list) => { if (!cancelled) setOptions(list); });
+    return () => { cancelled = true; };
+  }, []);
+  return <FilterDropdown label={t("search.format")} allLabel={t("search.formatAll")} emptyLabel={t("search.formatEmpty")}
+    options={options.map((o) => ({ value: o.format, count: o.count }))} selected={inputs.formats}
+    onToggle={(format) => onPatch({ formats: toggleIn(inputs.formats, format) })}
+    onClear={() => onPatch({ formats: [] })} testId="search-format" />;
+}
+
 /** 图库常用条件常驻工具栏，面板只展示其余条件。 */
 export function QuickFilterBar({
   inputs,
@@ -748,8 +683,8 @@ export function QuickFilterBar({
   };
   return (
     <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-edge/60 py-1.5" data-testid="gallery-quick-filters">
-      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.kind")}</span>
-      <Segment ariaLabel={t("search.kind")} value={inputs.kind} options={KIND_OPTIONS} onChange={(kind) => onPatch({ kind })} testId="search-kind" />
+      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.format")}</span>
+      <FormatFilter inputs={inputs} onPatch={onPatch} />
       <span className="h-5 w-px shrink-0 bg-edge" aria-hidden="true" />
       <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.orientation")}</span>
       <Segment ariaLabel={t("search.orientation")} value={inputs.orientation} options={ORIENTATION_OPTIONS} onChange={(orientation) => onPatch({ orientation })} testId="search-orientation" />
@@ -873,99 +808,25 @@ function AiTagsField({
   );
 }
 
-/** 智能视图保存行（B1）：有激活条件时出现——命名输入 → smart_view_create；
- *  重名等后端业务错误行内提示；成功后清空输入并回调上层刷新视图清单。 */
-function SmartViewSaveRow({
-  inputs,
-  onSaved,
-}: {
-  inputs: SearchInputs;
-  onSaved?: () => void;
-}) {
-  const { t } = useTranslation();
-  const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  async function save(): Promise<void> {
-    const trimmed = name.trim();
-    if (trimmed === "") {
-      setError(t("smartview.nameRequired"));
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    const result = await smartViewCreate(trimmed, JSON.stringify(buildFilters(inputs)));
-    setSaving(false);
-    if (!result.ok) {
-      setError(result.error ?? t("smartview.saveUnavailable"));
-      return;
-    }
-    setName("");
-    onSaved?.();
-  }
-
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-edge/60 pt-2" data-testid="smart-view-save-row">
-      <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("smartview.save")}</span>
-      <input
-        type="text"
-        value={name}
-        onChange={(e) => {
-          setName(e.target.value);
-          if (error !== null) setError(null);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            void save();
-          }
-        }}
-        placeholder={t("smartview.namePlaceholder")}
-        aria-label={t("smartview.namePlaceholder")}
-        className={`${INPUT_CLASS} w-44`}
-        data-testid="smart-view-name-input"
-      />
-      <button
-        type="button"
-        onClick={() => void save()}
-        disabled={saving}
-        className="h-7 shrink-0 rounded-md border border-accent/60 bg-accent/10 px-2.5 text-[11px] font-medium text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
-        data-testid="smart-view-save"
-      >
-        {saving ? t("smartview.saving") : t("smartview.saveConfirm")}
-      </button>
-      {error !== null && (
-        <span className="text-[11px] text-red-400" data-testid="smart-view-save-error" role="alert">
-          {error}
-        </span>
-      )}
-    </div>
-  );
-}
-
 /** 筛选面板（受控：inputs/onPatch 由调用方持有；清单自取）。
  *  hideAlbum=相册详情页传入：隐藏「所属相册」维度（详情页本身已在相册上下文内）。
- *  onSmartViewSaved=智能视图保存成功后回调（上层刷新「已存视图」清单）。 */
+ */
 export function FilterPanel({
   inputs,
   onPatch,
   hideAlbum = false,
   advancedOnly = false,
-  onSmartViewSaved,
 }: {
   inputs: SearchInputs;
   onPatch: (patch: Partial<SearchInputs>) => void;
   hideAlbum?: boolean;
   advancedOnly?: boolean;
-  onSmartViewSaved?: () => void;
 }) {
   const { t } = useTranslation();
 
   // 相机/相册清单挂载拉一次；镜头/格式首次渲染面板才拉（面板即「首次展开」）
   const [cameraOptions, setCameraOptions] = useState<AssetCameraCount[]>([]);
   const [lensOptions, setLensOptions] = useState<AssetLensCount[]>([]);
-  const [formatOptions, setFormatOptions] = useState<AssetFormatCount[]>([]);
   const [albumOptions, setAlbumOptions] = useState<AlbumDto[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -974,9 +835,6 @@ export function FilterPanel({
     });
     void lensList().then((list) => {
       if (!cancelled) setLensOptions(list);
-    });
-    void formatList().then((list) => {
-      if (!cancelled) setFormatOptions(list);
     });
     if (!hideAlbum) {
       void albumList().then((list) => {
@@ -996,15 +854,6 @@ export function FilterPanel({
   return (
     <div className="shrink-0 border-b border-edge bg-bg/40 px-2 py-3" data-testid="search-filter-panel">
       <div className="grid grid-cols-1 items-center gap-x-3 gap-y-1 rounded-xl border border-edge/70 bg-surface/70 p-2 shadow-inner shadow-black/20 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {!advancedOnly && <FieldRow label={t("search.kind")}>
-          <Segment
-            ariaLabel={t("search.kind")}
-            value={inputs.kind}
-            options={KIND_OPTIONS}
-            onChange={(kind) => onPatch({ kind })}
-            testId="search-kind"
-          />
-        </FieldRow>}
         <FieldRow label={t("search.camera")}>
           <FilterDropdown
             label={t("search.camera")}
@@ -1029,18 +878,7 @@ export function FilterPanel({
             testId="search-lens"
           />
         </FieldRow>
-        <FieldRow label={t("search.format")}>
-          <FilterDropdown
-            label={t("search.format")}
-            allLabel={t("search.formatAll")}
-            emptyLabel={t("search.formatEmpty")}
-            options={formatOptions.map((o) => ({ value: o.format, count: o.count }))}
-            selected={inputs.formats}
-            onToggle={(format) => onPatch({ formats: toggleIn(inputs.formats, format) })}
-            onClear={() => onPatch({ formats: [] })}
-            testId="search-format"
-          />
-        </FieldRow>
+        {!advancedOnly && <FieldRow label={t("search.format")}><FormatFilter inputs={inputs} onPatch={onPatch} /></FieldRow>}
         {!advancedOnly && <FieldRow label={t("search.orientation")}>
           <Segment
             ariaLabel={t("search.orientation")}
@@ -1196,7 +1034,6 @@ export function FilterPanel({
         </div>}
       </div>
       {/* 智能视图（B1）：有激活条件才出现保存入口（默认全部资产无保存意义） */}
-      {hasActiveFilters(inputs) && <SmartViewSaveRow inputs={inputs} onSaved={onSmartViewSaved} />}
     </div>
   );
 }
@@ -1213,9 +1050,6 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
   const chips: ActiveChip[] = [];
   if (inputs.favoriteOnly) {
     chips.push({ key: "favorite", label: t("nav.favorites"), patch: { ...inputs, favoriteOnly: false } });
-  }
-  if (inputs.kind !== "all") {
-    chips.push({ key: "kind", label: t(`search.kind.${inputs.kind}`), patch: { ...inputs, kind: "all" } });
   }
   if (inputs.from) {
     chips.push({ key: "from", label: `${t("search.dateFrom")} ${inputs.from}`, patch: { ...inputs, from: "" } });

@@ -643,7 +643,11 @@ pub fn kick_eyes_if_ready(
     }
     let manager = std::sync::Arc::new(manager.clone());
     let bus = bus.clone();
-    let _ = supervisor.spawn_unique("index", "eyes-backfill".into(), move |_| {
-        run_eyes_backfill(&db_dir, &manager, &bus);
-    });
+    let _ = supervisor.spawn_coalesced(
+        "index",
+        format!("eyes-backfill:{}", db_dir.display()),
+        move |_| {
+            run_eyes_backfill(&db_dir, &manager, &bus);
+        },
+    );
 }

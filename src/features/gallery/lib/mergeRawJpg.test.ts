@@ -40,9 +40,9 @@ describe("mergeRawJpgCards（RAW+JPG 合并展示）", () => {
     expect(badges.get(4)).toBe("RAW+JPG");
   });
 
-  it("只有 RAW 的 pair：合并为一张但不打 RAW+JPG 角标（水印由 tile 内部负责）", () => {
+  it("同格式的历史 pair 不合并，防止隐藏不同照片", () => {
     const { cards, badges } = mergeRawJpgCards([a(1, "raw", 7), a(2, "raw", 7)], true);
-    expect(cards.map((c) => c.id)).toEqual([1]);
+    expect(cards.map((c) => c.id)).toEqual([1, 2]);
     expect(badges.size).toBe(0);
   });
 

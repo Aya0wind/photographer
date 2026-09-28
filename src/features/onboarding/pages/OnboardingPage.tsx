@@ -37,8 +37,8 @@ function newLibraryDraft(): OnboardingDraft {
     dbDir: "",
     photoRoot: "",
     duplicatePolicy: "skip",
-    notifyMilestones: true,
     aiChoice: "all",
+    qualityTier: "normal",
   };
 }
 
@@ -49,8 +49,8 @@ function draftFromLibrary(library: Library): OnboardingDraft {
     dbDir: library.dbDir,
     photoRoot: library.photoRoot,
     duplicatePolicy: "skip",
-    notifyMilestones: true,
     aiChoice: "all",
+    qualityTier: library.aiQualityTier ?? "normal",
   };
 }
 
@@ -62,7 +62,7 @@ function canProceed(step: number, draft: OnboardingDraft): boolean {
         draft.dbDir.trim().length > 0 &&
         draft.photoRoot.trim().length > 0
       );
-    // 步骤 2 只收集查重策略/通知偏好，无必填校验（目录布局已固定）
+    // 步骤 2 只收集查重策略，无必填校验（目录布局已固定）
     default:
       return true;
   }
@@ -108,6 +108,7 @@ export default function OnboardingPage() {
       photoRoot: draft.photoRoot.trim(),
       streams: existing?.streams ?? 4,
       configured: true,
+      aiQualityTier: draft.qualityTier,
     };
     const libraries = editId
       ? current.libraries.map((lib) => (lib.id === editId ? library : lib))
@@ -122,9 +123,8 @@ export default function OnboardingPage() {
       import: {
         ...current.import,
         duplicatePolicy: draft.duplicatePolicy,
-        notifyMilestones: draft.notifyMilestones,
       },
-      ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice] },
+      ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice], qualityTier: draft.qualityTier },
     });
     useSettingsStore.getState().setLibraryChosen(true);
     // 新库启用：清上一个库的会话态（快照/缩略图缓存/store）
@@ -234,7 +234,7 @@ export default function OnboardingPage() {
             >
               {step === 0 && <LibraryStep draft={draft} onChange={patch} />}
               {step === 1 && <ImportSchemeStep draft={draft} onChange={patch} />}
-              {step === 2 && <AiStep value={draft.aiChoice} onChange={(c) => patch({ aiChoice: c })} />}
+              {step === 2 && <AiStep draft={draft} onChange={patch} />}
               {step === 3 && <DoneStep draft={draft} />}
             </motion.div>
           </AnimatePresence>

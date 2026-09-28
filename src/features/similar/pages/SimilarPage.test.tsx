@@ -108,8 +108,8 @@ describe("相似照片：勾选删除", () => {
 
     // 勾选两张
     const tiles = within(card).getAllByTestId("similar-asset");
-    await user.click(tiles[1]);
-    await user.click(tiles[2]);
+    await user.click(within(tiles[1]).getByTestId("similar-asset-check"));
+    await user.click(within(tiles[2]).getByTestId("similar-asset-check"));
     expect(tiles[1]).toHaveAttribute("data-selected", "true");
     expect(tiles[0]).not.toHaveAttribute("data-selected");
     expect(deleteButton).toHaveTextContent("删除所选（2）");
@@ -136,7 +136,7 @@ describe("相似照片：勾选删除", () => {
     renderSimilar();
 
     const card = (await screen.findAllByTestId("similar-group"))[0];
-    await user.click(within(card).getAllByTestId("similar-asset")[0]);
+    await user.click(within(card).getAllByTestId("similar-asset-check")[0]);
     await user.click(within(card).getByTestId("similar-group-delete"));
     await user.click(screen.getByTestId("similar-confirm-yes"));
 
@@ -177,7 +177,7 @@ describe("相似照片：分页游标", () => {
     // 删除第一组全部两张 → 组卡移除，seen 20→19
     const first = screen.getAllByTestId("similar-group")[0];
     for (const tile of within(first).getAllByTestId("similar-asset")) {
-      await user.click(tile);
+      await user.click(within(tile).getByTestId("similar-asset-check"));
     }
     await user.click(within(first).getByTestId("similar-group-delete"));
     await user.click(screen.getByTestId("similar-confirm-yes"));
@@ -187,4 +187,19 @@ describe("相似照片：分页游标", () => {
     await waitFor(() => expect(listMock).toHaveBeenLastCalledWith("similar", 19, 20));
     await waitFor(() => expect(screen.getAllByTestId("similar-group")).toHaveLength(20));
   });
+});
+
+it("图片点击打开预览，勾选删除按钮独立操作", async () => {
+  listMock.mockResolvedValue([groupOf([1, 2])]);
+  const user = userEvent.setup();
+  renderSimilar();
+  const cards = await screen.findAllByTestId("similar-asset");
+  await user.click(within(cards[0]).getByTestId("similar-asset-preview"));
+  expect(await screen.findByTestId("viewer")).toBeInTheDocument();
+  expect(cards[0]).not.toHaveAttribute("data-selected");
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByTestId("viewer")).not.toBeInTheDocument());
+  await user.click(within(cards[0]).getByTestId("similar-asset-check"));
+  expect(cards[0]).toHaveAttribute("data-selected", "true");
+  expect(screen.queryByTestId("viewer")).not.toBeInTheDocument();
 });

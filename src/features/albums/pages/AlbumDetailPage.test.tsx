@@ -258,8 +258,8 @@ describe("相册详情页：页头与筛选", () => {
       const panel = screen.getByTestId("search-filter-panel");
       // 相册上下文：不渲染所属相册维度（本页已在相册内）
       expect(within(panel).queryByTestId("search-album-button")).not.toBeInTheDocument();
-      // 类型=照片 → kinds=[photo, raw] 透传
-      fireEvent.click(within(panel).getByTestId("search-kind-photo"));
+      // 竖拍方向条件透传
+      fireEvent.click(within(panel).getByTestId("search-orientation-portrait"));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400);
       });
@@ -267,7 +267,7 @@ describe("相册详情页：页头与筛选", () => {
       const last = assetsPageMock.mock.calls[assetsPageMock.mock.calls.length - 1];
       expect(last?.[0]).toBe(1);
       expect(last?.[1]).toBe(0);
-      expect(last?.[3]).toMatchObject({ kinds: ["photo", "raw"] });
+      expect(last?.[3]).toMatchObject({ orientation: "portrait" });
     } finally {
       vi.useRealTimers();
     }

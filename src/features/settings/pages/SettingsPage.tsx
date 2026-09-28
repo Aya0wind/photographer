@@ -407,13 +407,6 @@ export default function SettingsPage() {
                   <option value="ask">{t("onboarding.scheme.dup.ask")}</option>
                 </select>
               </SettingRow>
-              <SettingRow label={t("onboarding.scheme.notify")}>
-                <Toggle
-                  checked={settings.import.notifyMilestones}
-                  label={t("onboarding.scheme.notify")}
-                  onChange={(next) => commit({ import: { notifyMilestones: next } })}
-                />
-              </SettingRow>
               <SettingRow label={t("settings.dualDest")} desc={t("settings.dualDestDesc")}>
                 <span className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-text-muted">
                   {t("settings.comingSoon")}

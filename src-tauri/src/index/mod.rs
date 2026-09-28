@@ -264,9 +264,13 @@ pub fn worker_count() -> usize {
 /// 导入完成后的钩子：派一个 supervisor 任务把当前待办全速跑完。
 /// job 不等它（importSessionFinished 只代表文件入库）。
 pub fn kick(db_dir: PathBuf, supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>) {
-    let _ = supervisor.spawn_unique("index", "index-worker-pool".into(), move |_| {
-        run_pending(&db_dir, worker_count());
-    });
+    let _ = supervisor.spawn_coalesced(
+        "index",
+        format!("index-worker-pool:{}", db_dir.display()),
+        move |_| {
+            run_pending(&db_dir, worker_count());
+        },
+    );
 }
 
 /// 启动恢复：复位遗留 running → pending，返回待办数（pending+running）。

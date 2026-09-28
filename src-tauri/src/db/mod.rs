@@ -433,7 +433,7 @@ pub struct AssetPageRow {
     pub exposure_time: Option<String>,
     pub focal_length: Option<String>,
     pub lens: Option<String>,
-    /// RAW/JPG 配对资产 id（无配对为 None）。
+    /// RAW/JPG 展示组 id（双方资产 ID 的较小值，无配对为 None）。
     pub pair_id: Option<i64>,
     /// 缩略图状态（0 pending / 1 done / 2 permanent-none）。
     pub thumb_state: i32,
@@ -498,17 +498,6 @@ pub struct DateGroupRow {
     pub count: u64,
     /// 组内同排序首张（最新/最大 id）的资产 id。
     pub cover_asset_id: i64,
-}
-
-/// 智能视图行（0016 smart_view 表；IPC 载荷 SmartViewDto 同构 camelCase）。
-/// filters_json 为前端 AssetFilters 序列化——后端不解释只存取。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SmartViewRow {
-    pub id: i64,
-    pub name: String,
-    pub filters_json: String,
-    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +875,12 @@ impl Db {
         album_id: Option<i64>,
         album_subgroup: Option<&str>,
     ) -> Result<()> {
-        let tx = self.0.unchecked_transaction()?;
+        // 导入和索引同时写库：先取得写锁再查询，避免 deferred 事务读完
+        // 后升级写锁遇到 SQLITE_BUSY_SNAPSHOT（busy_timeout 无法等待）。
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.0,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         insert_asset_on(&tx, a, album_id, album_subgroup)?;
         tx.commit()
     }
@@ -1320,7 +1314,7 @@ impl Db {
     /// 封面资产 = 封面人脸所在资产，缺失回退簇内最大框人脸的资产。
     pub fn people_list(&self) -> Result<Vec<PersonRow>> {
         let mut stmt = self.0.prepare(
-            "SELECT p.id, p.name, COUNT(f.id), \
+            "SELECT p.id, p.name, COUNT(DISTINCT f.asset_id), \
                (SELECT f2.asset_id FROM faces f2 WHERE f2.id = p.cover_face_id), \
                (SELECT f3.asset_id FROM faces f3 WHERE f3.cluster_id = p.id \
                  AND f3.asset_id IN (SELECT id FROM assets WHERE in_trash = 0) \
@@ -1328,7 +1322,7 @@ impl Db {
              FROM people p JOIN faces f ON f.cluster_id = p.id \
              JOIN assets a ON a.id = f.asset_id AND a.in_trash = 0 \
              GROUP BY p.id \
-             ORDER BY COUNT(f.id) DESC, p.id ASC",
+             ORDER BY COUNT(DISTINCT f.asset_id) DESC, p.id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(PersonRow {
@@ -1890,6 +1884,11 @@ impl Db {
                 deep.gps_lat,
                 deep.gps_lon,
             ],
+        )?;
+        // Restore explicit metadata, including fields cleared by the user.
+        self.0.execute(
+            "UPDATE assets SET lens=NULLIF(json_extract((SELECT value FROM asset_metadata WHERE asset_id=?1),'$.lens'),''), artist=NULLIF(json_extract((SELECT value FROM asset_metadata WHERE asset_id=?1),'$.author'),''), gps_lat=json_extract((SELECT value FROM asset_metadata WHERE asset_id=?1),'$.gpsLat'), gps_lon=json_extract((SELECT value FROM asset_metadata WHERE asset_id=?1),'$.gpsLon') WHERE id=?1 AND EXISTS (SELECT 1 FROM asset_metadata WHERE asset_id=?1)",
+            [id],
         )?;
         Ok(())
     }
@@ -2487,51 +2486,6 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(n as u64)
-    }
-
-    // —— 智能视图（0016：AssetFilters 序列化的命名存取，后端不解释）——
-
-    /// 智能视图列表（created_at DESC、id DESC）。
-    pub fn smart_view_list(&self) -> Result<Vec<SmartViewRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT id, name, filters_json, created_at FROM smart_view \
-             ORDER BY created_at DESC, id DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SmartViewRow {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                filters_json: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// 建智能视图（重名由 name UNIQUE 兜底，错误透传由 IPC 层转文案）。
-    pub fn smart_view_create(&self, name: &str, filters_json: &str) -> Result<SmartViewRow> {
-        let created_at = now_rfc3339();
-        self.0.execute(
-            "INSERT INTO smart_view (name, filters_json, created_at) VALUES (?1, ?2, ?3)",
-            params![name, filters_json, created_at],
-        )?;
-        Ok(SmartViewRow {
-            id: self.0.last_insert_rowid(),
-            name: name.to_string(),
-            filters_json: filters_json.to_string(),
-            created_at,
-        })
-    }
-
-    /// 删智能视图；不存在报错（幂等删除由 IPC 语义定）。
-    pub fn smart_view_delete(&self, id: i64) -> Result<()> {
-        let n = self
-            .0
-            .execute("DELETE FROM smart_view WHERE id = ?1", params![id])?;
-        if n == 0 {
-            return Err(Error::QueryReturnedNoRows);
-        }
-        Ok(())
     }
 
     // —— AI 辅助选片（0021：ai_analysis，eyes/blur 两通道）——
@@ -3614,8 +3568,9 @@ fn asset_filter_conditions(
 }
 
 fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
+    let id: i64 = row.get(0)?;
     Ok(AssetPageRow {
-        id: row.get(0)?,
+        id,
         path: row.get(1)?,
         filename: row.get(2)?,
         size: row.get::<_, i64>(3)? as u64,
@@ -3629,7 +3584,8 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         exposure_time: row.get(11)?,
         focal_length: row.get(12)?,
         lens: row.get(13)?,
-        pair_id: row.get(14)?,
+        // 数据库保存双向伙伴引用；展示契约需要两侧共有的组 ID。
+        pair_id: row.get::<_, Option<i64>>(14)?.map(|partner| partner.min(id)),
         thumb_state: row.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
         burst_id: row.get(16)?,
         flagged: row.get::<_, i64>(17)? != 0,

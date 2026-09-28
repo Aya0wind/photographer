@@ -1,3 +1,4 @@
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -215,8 +216,9 @@ export default function AlbumDetailPage() {
   }
 
   // --- 分组 + 查看器 -------------------------------------------------------------------
-  const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  const { cards, badges } = usePhotoCards(assets);
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets);
   useEffect(() => {
     if (!viewer || !hasMoreRef.current) return;
     if (viewer.index >= viewer.group.assets.length - 8) void appendPage();
@@ -407,7 +409,7 @@ export default function AlbumDetailPage() {
             onClick={() => void startCulling()}
             disabled={cullBusy || itemCount === 0}
             title={subgroup === null ? t("albums.cullHint") : t("albums.cullHintSubgroup", { subgroup })}
-            className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="album-cull-start"
             data-busy={cullBusy}
           >
@@ -543,6 +545,7 @@ export default function AlbumDetailPage() {
             </div>
           ) : (
             <AssetGrid
+              badges={badges}
               groups={groups}
               onOpenAsset={openAsset}
               onCtrlClick={ctrlSelect}
@@ -615,6 +618,11 @@ export default function AlbumDetailPage() {
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}
+          onAssetPatched={(id, patch) => {
+            assetsRef.current = assetsRef.current.map((photo) => photo.id === id ? { ...photo, ...patch } : photo);
+            setAssets(assetsRef.current);
+          }}
+          onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
         />

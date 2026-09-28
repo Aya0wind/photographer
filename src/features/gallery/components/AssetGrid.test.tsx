@@ -46,6 +46,26 @@ function renderGrid(props: Partial<React.ComponentProps<typeof AssetGrid>> & { g
   );
 }
 
+describe("虚拟行布局刷新", () => {
+  it("语义结果替换和图大小变化后立即重算下一组位置，不需要折叠展开", () => {
+    const first: AssetGroup[] = [
+      { key: "a", date: "2026-09-18", assets: [asset(1)] },
+      { key: "b", date: null, assets: [asset(2)] },
+    ];
+    const { rerender } = renderGrid({ groups: first, layout: "justify", tile: 120 });
+    const next: AssetGroup[] = [
+      { key: "a", date: "2026-09-18", assets: [asset(3)] },
+      { key: "b", date: null, assets: [asset(4)] },
+    ];
+    rerender(<I18nextProvider i18n={i18n}><AssetGrid groups={next} layout="justify" tile={320} /></I18nextProvider>);
+    const secondHeader = screen.getAllByTestId("gallery-group")[1].parentElement!;
+    expect(secondHeader.style.transform).toBe("translateY(364px)");
+    const tile = screen.getAllByTestId("gallery-tile")[0];
+    expect(tile.style.height).toBe("320px");
+    expect(tile.closest("[data-index]")!.getAttribute("style")).toContain("translateY(40px)");
+  });
+});
+
 // --- justify 算法（纯函数） -----------------------------------------------------------
 
 describe("justifyItems 贪心切行", () => {

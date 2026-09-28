@@ -762,3 +762,46 @@ fn export_run_ipc_background_job_and_events() {
         .unwrap();
     assert_eq!(stale.len(), 1, "孤儿任务被收尸为 error");
 }
+
+
+#[test]
+fn metadata_edits_are_per_asset_survive_reindex_and_leave_original_unchanged() {
+    let fixture = setup();
+    let bytes = build_source_jpeg(24, 16);
+    let id = ins_photo(&fixture.db, &fixture.photo_root, "edited-meta.jpg", &bytes, Some("2026-06-28T15:30:00"));
+    let other = ins_photo(&fixture.db, &fixture.photo_root, "other-meta.jpg", &bytes, None);
+    let mut metadata = edit::metadata::get(&fixture.db, id).unwrap();
+    metadata.title = "  雨后  ".into();
+    metadata.author = "摄影师".into();
+    metadata.lens = "".into();
+    metadata.captured_at = Some("2026-09-28T09:00:00+08:00".into());
+    metadata.keywords = vec!["树叶".into(), "树叶".into(), " ".into()];
+    let saved = edit::metadata::save(&fixture.db, id, metadata).unwrap();
+    assert_eq!(saved.title, "雨后");
+    assert_eq!(saved.keywords, vec!["树叶"]);
+    fixture.db.update_asset_deep_exif(id, &metadata::exif_lite::parse(&bytes)).unwrap();
+    let asset = fixture.db.asset_by_id(id).unwrap().unwrap();
+    assert_eq!(asset.artist.as_deref(), Some("摄影师"));
+    assert_eq!(asset.lens, None);
+    assert_eq!(asset.gps_lat, None);
+    assert_eq!(asset.captured_at.as_deref(), Some("2026-09-28T09:00:00+08:00"));
+    assert_eq!(edit::metadata::get(&fixture.db, id).unwrap(), saved);
+    assert!(edit::metadata::get(&fixture.db, other).unwrap().title.is_empty());
+    assert_eq!(std::fs::read(fixture.photo_root.join("edited-meta.jpg")).unwrap(), bytes);
+    let mut invalid = saved.clone(); invalid.gps_lat = Some(200.0); invalid.gps_lon = Some(10.0);
+    assert!(edit::metadata::save(&fixture.db, id, invalid).is_err());
+    assert_eq!(edit::metadata::get(&fixture.db, id).unwrap(), saved);
+}
+
+#[test]
+fn adjustments_render_black_and_white_and_clamp_invalid_ranges() {
+    let recipe = edit::recipe::parse_recipe(&serde_json::json!({"version":1,"adjustments":{"brightness":200,"contrast":-200,"saturation":0}})).unwrap();
+    assert_eq!(recipe.adjustments.unwrap().brightness, 100.0);
+    assert_eq!(recipe.adjustments.unwrap().contrast, -100.0);
+    let mut image = image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 0]));
+    edit::render::apply_adjustments(&mut image, edit::recipe::Adjustments { saturation: -100.0, ..Default::default() });
+    assert_eq!(image.get_pixel(0, 0).0, [54, 54, 54]);
+    let mut image = image::RgbImage::from_pixel(1, 1, image::Rgb([40, 80, 120]));
+    edit::render::apply_adjustments(&mut image, edit::recipe::Adjustments { brightness: 100.0, ..Default::default() });
+    assert_eq!(image.get_pixel(0, 0).0, [80, 160, 240]);
+}

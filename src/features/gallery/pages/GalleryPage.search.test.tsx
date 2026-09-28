@@ -176,7 +176,7 @@ beforeEach(() => {
   convertMock.mockReset().mockReturnValue("");
   cameraListMock.mockReset().mockResolvedValue([]);
   lensListMock.mockReset().mockResolvedValue([]);
-  formatListMock.mockReset().mockResolvedValue([]);
+  formatListMock.mockReset().mockResolvedValue([{ format: "JPG", count: 10 }, { format: "NEF", count: 5 }]);
   vi.mocked(searchSemantic).mockReset().mockResolvedValue([]);
   vi.mocked(assetsByIds).mockReset().mockResolvedValue([]);
   // 语义门禁默认就绪（模型全装 + 索引已建）；各用例按需覆写为被拦态
@@ -232,7 +232,7 @@ describe("画廊合并：工具条与默认态", () => {
   it("/search 重定向 /gallery（参数透传）", () => {
     render(
       <I18nextProvider i18n={i18n}>
-        <MemoryRouter initialEntries={["/search?kind=raw"]}>
+        <MemoryRouter initialEntries={["/search?format=NEF"]}>
           <Routes>
             <Route path="/search" element={<SearchRedirect />} />
             <Route path="/gallery" element={<GalleryPage />} />
@@ -240,7 +240,7 @@ describe("画廊合并：工具条与默认态", () => {
         </MemoryRouter>
       </I18nextProvider>,
     );
-    // 重定向后画廊挂载并按 kind=raw 查询
+    // 重定向后画廊挂载并按 format=NEF 查询
     expect(screen.getByTestId("gallery-skeleton")).toBeInTheDocument();
   });
 });
@@ -285,16 +285,16 @@ describe("画廊合并：URL 协议", () => {
     await waitFor(() => expect(screen.getByTestId("gallery-empty")).toBeInTheDocument());
   });
 
-  it("?kind=raw → 预置 RAW 类型筛选（kinds=[raw]）", async () => {
+  it("?format=NEF → 预置 NEF 格式筛选", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
-    renderGallery("/gallery?kind=raw");
+    renderGallery("/gallery?format=NEF");
 
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["NEF"] }),
     );
   });
 
-  it("?kind 撤离：同路径无参导航清筛选回默认态（回归：URL 进入的筛选永久滞留）", async () => {
+  it("?format 撤离：同路径无参导航清筛选回默认态（回归：URL 进入的筛选永久滞留）", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
     function NavClean() {
       const navigate = useNavigate();
@@ -306,7 +306,7 @@ describe("画廊合并：URL 协议", () => {
     }
     render(
       <I18nextProvider i18n={i18n}>
-        <MemoryRouter initialEntries={["/gallery?kind=raw"]}>
+        <MemoryRouter initialEntries={["/gallery?format=NEF"]}>
           <Routes>
             <Route
               path="/gallery"
@@ -323,9 +323,9 @@ describe("画廊合并：URL 协议", () => {
     );
 
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["NEF"] }),
     );
-    // 同路径去掉 ?kind（侧栏图库链接等）：筛选必须同步撤销回默认查询
+    // 同路径去掉 ?format（侧栏图库链接等）：筛选必须同步撤销回默认查询
     fireEvent.click(screen.getByTestId("nav-clean"));
     await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100));
   });
@@ -380,9 +380,10 @@ describe("画廊合并：筛选面板", () => {
 
       fireEvent.click(screen.getByTestId("search-filter-toggle"));
       expect(screen.getByTestId("search-filter-panel")).toBeInTheDocument();
-      expect(within(screen.getByTestId("search-filter-panel")).queryByTestId("search-kind")).not.toBeInTheDocument();
+      expect(within(screen.getByTestId("search-filter-panel")).queryByTestId("search-format-button")).not.toBeInTheDocument();
 
-      fireEvent.click(screen.getByTestId("search-kind-photo"));
+      fireEvent.click(screen.getByTestId("search-format-button"));
+      fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /JPG/ }));
       fireEvent.change(screen.getByTestId("search-from"), { target: { value: "2026-01-01" } });
       await act(async () => {
         await vi.advanceTimersByTimeAsync(300);
@@ -390,7 +391,7 @@ describe("画廊合并：筛选面板", () => {
 
       const last = assetsPageMock.mock.calls[assetsPageMock.mock.calls.length - 1];
       expect(last?.[2]).toMatchObject({
-        kinds: ["photo", "raw"],
+        formats: ["JPG"],
         capturedAfter: expect.any(String),
       });
       // 条件变更只发一次查询（防抖）
@@ -398,6 +399,23 @@ describe("画廊合并：筛选面板", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("格式下拉支持多选和清空；筛选不会生成照片/RAW分类，页面不再提供已存视图", async () => {
+    assetsPageMock.mockResolvedValue([makeAsset(1, "2026-09-18")]);
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+    expect(screen.queryByText("已存视图")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("search-format-button"));
+    const menu = await screen.findByTestId("search-format-menu");
+    fireEvent.click(within(menu).getByRole("checkbox", { name: /JPG/ }));
+    fireEvent.click(within(menu).getByRole("checkbox", { name: /NEF/ }));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["JPG", "NEF"] }));
+    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("search-format-clear"));
+    await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100));
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    expect(screen.queryByText("保存为视图")).not.toBeInTheDocument();
   });
 
   it("常用条件常驻工具栏；chips 单独移除回默认态", async () => {
@@ -440,9 +458,10 @@ describe("画廊合并：三态切换", () => {
 
     // 展开筛选面板改条件 → 退出语义态（分数角标消失、走 assetsPage filters）
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
-    fireEvent.click(screen.getByTestId("search-kind-raw"));
+    fireEvent.click(screen.getByTestId("search-format-button"));
+    fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /NEF/ }));
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["NEF"] }),
     );
     await waitFor(() =>
       expect(screen.queryByTestId("search-score-badge")).not.toBeInTheDocument(),
@@ -456,7 +475,8 @@ describe("画廊合并：三态切换", () => {
     expect(screen.getByTestId("gallery-empty-import")).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
-    fireEvent.click(screen.getByTestId("search-kind-raw"));
+    fireEvent.click(screen.getByTestId("search-format-button"));
+    fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /NEF/ }));
     await waitFor(() => expect(screen.getByTestId("search-empty")).toBeInTheDocument());
     expect(screen.queryByTestId("gallery-empty-import")).not.toBeInTheDocument();
   });

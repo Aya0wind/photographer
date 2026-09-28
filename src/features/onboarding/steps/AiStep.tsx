@@ -1,26 +1,27 @@
 import { useTranslation } from "react-i18next";
 
-import { AI_CHOICES, type AiChoice } from "../types";
+import { QUALITY_TIERS } from "@/features/settings/lib/qualityTier";
+import { AI_CHOICES, type OnboardingDraft } from "../types";
 
 interface Props {
-  value: AiChoice;
-  onChange: (choice: AiChoice) => void;
+  draft: OnboardingDraft;
+  onChange: (patch: Partial<OnboardingDraft>) => void;
 }
 
-/** 步骤 3：AI 三选一——全部开启 / 仅语义搜索 / 全部关闭 */
-export default function AiStep({ value, onChange }: Props) {
+/** 步骤 3：选择 AI 功能和处理方案，沿用设置页的档位契约。 */
+export default function AiStep({ draft, onChange }: Props) {
   const { t } = useTranslation();
 
   return (
     <div className="flex flex-col gap-4">
       <div className="grid gap-3">
         {AI_CHOICES.map((choice) => {
-          const selected = value === choice;
+          const selected = draft.aiChoice === choice;
           return (
             <button
               key={choice}
               type="button"
-              onClick={() => onChange(choice)}
+              onClick={() => onChange({ aiChoice: choice })}
               aria-pressed={selected}
               className={`rounded-lg border p-4 text-left transition-colors ${
                 selected
@@ -38,6 +39,39 @@ export default function AiStep({ value, onChange }: Props) {
           );
         })}
       </div>
+      {draft.aiChoice !== "none" && (
+        <fieldset className="flex flex-col gap-2">
+          <legend className="mb-2 text-sm font-medium text-text-primary">
+            {t("onboarding.ai.qualityTier")}
+          </legend>
+          <div className="grid grid-cols-3 gap-2">
+            {QUALITY_TIERS.map((tier) => (
+              <label
+                key={tier}
+                className={`cursor-pointer rounded-lg border p-3 ${
+                  draft.qualityTier === tier ? "border-accent bg-panel/60" : "border-edge"
+                }`}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="radio"
+                    name="qualityTier"
+                    value={tier}
+                    checked={draft.qualityTier === tier}
+                    onChange={() => onChange({ qualityTier: tier })}
+                    className="h-3.5 w-3.5 accent-[#F0A83C]"
+                  />
+                  {t(`onboarding.ai.tier.${tier}`)}
+                </span>
+                <p className="mt-2 text-xs leading-relaxed text-text-secondary">
+                  {t(`settings.ai.tier.${tier}.desc`)}
+                </p>
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-text-muted">{t("onboarding.ai.qualityNote")}</p>
+        </fieldset>
+      )}
       <p className="text-xs text-text-muted">{t("onboarding.ai.note")}</p>
     </div>
   );

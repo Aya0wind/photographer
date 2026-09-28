@@ -123,6 +123,25 @@ pub struct TaskSupervisor {
     next_id: AtomicU64,
     /// id -> (kind, name)；Arc 以便任务线程收尾时自行摘除。
     running: Arc<Mutex<HashMap<u64, (String, String)>>>,
+    coalesced: Arc<Mutex<HashMap<(String, String), Arc<AtomicBool>>>>,
+}
+
+struct CoalescedGuard {
+    entries: Arc<Mutex<HashMap<(String, String), Arc<AtomicBool>>>>,
+    key: (String, String),
+    dirty: Arc<AtomicBool>,
+}
+
+impl Drop for CoalescedGuard {
+    fn drop(&mut self) {
+        let mut entries = self.entries.lock().expect("coalesced mutex poisoned");
+        if entries
+            .get(&self.key)
+            .is_some_and(|v| Arc::ptr_eq(v, &self.dirty))
+        {
+            entries.remove(&self.key);
+        }
+    }
 }
 
 impl TaskSupervisor {
@@ -131,6 +150,7 @@ impl TaskSupervisor {
             bus,
             next_id: AtomicU64::new(1),
             running: Arc::new(Mutex::new(HashMap::new())),
+            coalesced: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -147,11 +167,49 @@ impl TaskSupervisor {
 
     /// 按 `(kind, name)` 幂等派发。已有同名任务运行时不再新建线程，调用方
     /// 可把自动触发与手动触发安全地汇入同一后台管线。
+    #[allow(dead_code)] // 保留一次性去重接口；持续消费队列使用 spawn_coalesced。
     pub fn spawn_unique<F>(&self, kind: &'static str, name: String, body: F) -> Option<TaskHandle>
     where
         F: FnOnce(TaskControls) + Send + 'static,
     {
         self.spawn_impl(kind, name, body, true)
+    }
+
+    /// 同名请求合并，但不丢弃：运行期间的新请求使任务在收尾前再执行一轮。
+    /// 检查待唤醒标志和退出登记共用一把锁，堵住队列刚空时的丢唤醒窗口。
+    pub fn spawn_coalesced<F>(
+        &self,
+        kind: &'static str,
+        name: String,
+        mut body: F,
+    ) -> Option<TaskHandle>
+    where
+        F: FnMut(TaskControls) + Send + 'static,
+    {
+        let key = (kind.to_string(), name.clone());
+        let dirty = Arc::new(AtomicBool::new(false));
+        {
+            let mut entries = self.coalesced.lock().expect("coalesced mutex poisoned");
+            if let Some(existing) = entries.get(&key) {
+                existing.store(true, Ordering::SeqCst);
+                return None;
+            }
+            entries.insert(key.clone(), Arc::clone(&dirty));
+        }
+        // panic 或线程启动失败时也释放登记，后续请求仍可重新派发。
+        let guard = CoalescedGuard {
+            entries: Arc::clone(&self.coalesced),
+            key,
+            dirty,
+        };
+        Some(self.spawn(kind, name, move |controls| loop {
+            body(controls.clone());
+            let mut entries = guard.entries.lock().expect("coalesced mutex poisoned");
+            if !guard.dirty.swap(false, Ordering::SeqCst) || controls.is_cancelled() {
+                entries.remove(&guard.key);
+                break;
+            }
+        }))
     }
 
     fn spawn_impl<F>(

@@ -1,3 +1,4 @@
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -237,25 +238,18 @@ function ManualAlbumCard({
       data-testid="albums-manual-card"
       data-album-id={album.id}
     >
-      <span className="block h-20 w-full border-b border-edge/60">
+      <span className="relative block h-20 w-full border-b border-edge/60">
         <CardCover url={cover} label={album.name} testIdImg="albums-manual-cover" testIdFallback="albums-manual-cover-fallback" />
+        <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white" data-testid="albums-manual-count">{album.itemCount} 张</span>
+        {isUngroupedAlbum(album) && <span className="absolute bottom-1.5 right-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white" data-testid="albums-manual-badge-ungrouped">{t("albums.ungroupedBadge")}</span>}
       </span>
       <span className="block px-2 py-2 text-sm text-text-secondary">
         <span className="block truncate" data-testid="albums-manual-name" title={album.name}>
           {album.name}
         </span>
-        <span className="block text-[11px] text-text-muted" data-testid="albums-manual-count">
-          {album.itemCount}
+        <span className="mt-1 block text-[11px] text-text-muted" data-testid="albums-manual-created">
+          {Number.isNaN(new Date(album.createdAt).getTime()) ? "–" : new Date(album.createdAt).toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" })} 创建
         </span>
-        {/* 系统保底相册「未分组」：弱标识「默认相册」（禁删/禁改名由菜单入口控制） */}
-        {isUngroupedAlbum(album) && (
-          <span
-            className="mt-0.5 inline-block rounded-full bg-panel px-1.5 py-0.5 text-[10px] leading-none text-text-muted"
-            data-testid="albums-manual-badge-ungrouped"
-          >
-            {t("albums.ungroupedBadge")}
-          </span>
-        )}
       </span>
       {/* 悬浮 ⋯ 菜单钮（与右键同一菜单） */}
       <button
@@ -266,7 +260,7 @@ function ManualAlbumCard({
           const rect = e.currentTarget.getBoundingClientRect();
           onMenu({ x: rect.left, y: rect.bottom + 2 }, album);
         }}
-        className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded bg-black/45 text-xs leading-none text-white opacity-0 transition-opacity hover:bg-black/70 group-hover:opacity-100"
+        className="absolute left-1 top-1 flex h-5 w-5 items-center justify-center rounded bg-black/45 text-xs leading-none text-white opacity-0 transition-opacity hover:bg-black/70 group-hover:opacity-100"
         data-testid="albums-card-menu"
         data-album-id={album.id}
       >
@@ -550,7 +544,7 @@ export function AlbumsIndexPage() {
                   setNewName("");
                   setCreateError(null);
                 }}
-                className="flex h-7 items-center gap-1.5 rounded-md border border-edge px-2.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                className="flex h-8 items-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
                 data-testid="albums-new-button"
               >
                 <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
@@ -834,8 +828,9 @@ export function AlbumTagPage() {
   const gate = useSemanticGate();
   const [lastQuery, setLastQuery] = useState(tag);
   // 标签结果同样可点开查看器（与画廊/搜索页一致）
-  const groups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  const { cards } = usePhotoCards(semantic.assets);
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, semantic.assets);
 
   // 标签变化（含首挂载）→ 自动语义搜索（门禁未过不发——直接展示拦截提示）
   useEffect(() => {
@@ -881,6 +876,7 @@ export function AlbumTagPage() {
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}
+          onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
         />

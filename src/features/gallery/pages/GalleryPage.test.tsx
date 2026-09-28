@@ -14,6 +14,7 @@ import {
   assetGroupDates,
   assetThumbGet,
   assetsPage,
+  assetVersions,
   isIpcAvailable,
   type AssetDto,
 } from "@/ipc/api";
@@ -24,6 +25,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     assetsPage: vi.fn(),
+    assetVersions: vi.fn(),
     assetGroupDates: vi.fn(),
     assetThumbGet: vi.fn(),
     isIpcAvailable: vi.fn(() => true),
@@ -142,6 +144,7 @@ function triggerSentinel(): void {
 }
 
 beforeEach(() => {
+  vi.mocked(assetVersions).mockReset().mockResolvedValue({ groupId: null, members: [] });
   assetsPageMock.mockReset().mockResolvedValue([]);
   groupDatesMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
@@ -413,6 +416,10 @@ describe("RAW+JPG 合并展示", () => {
 
   it("pairId 成对合并为一张卡（代表=JPG）+ RAW+JPG 角标；点击开 JPG 版", async () => {
     assetsPageMock.mockResolvedValue(pairAssets());
+    vi.mocked(assetVersions).mockResolvedValue({ groupId: 9, members: [
+      { assetId: 1, role: "sooc", name: "IMG_0001.JPG", thumbReady: true },
+      { assetId: 2, role: "raw", name: "IMG_0002.CR3", thumbReady: true },
+    ] });
     const user = userEvent.setup();
     renderGallery();
 
@@ -426,6 +433,14 @@ describe("RAW+JPG 合并展示", () => {
 
     await user.click(merged!);
     expect(await screen.findByTestId("viewer-name")).toHaveTextContent("IMG_0001.JPG");
+    await screen.findByTestId("viewer-versions");
+    expect(screen.queryByTestId("viewer-format-switch")).not.toBeInTheDocument();
+    await user.click(screen.getAllByTestId("viewer-version-chip").find((chip) => chip.dataset.role === "raw")!);
+    expect(await screen.findByTestId("viewer-name")).toHaveTextContent("IMG_0002.CR3");
+    expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2);
+    expect(screen.getAllByTestId("viewer-filmthumb")).toHaveLength(2);
+    await user.click(screen.getAllByTestId("viewer-version-chip").find((chip) => chip.dataset.role === "sooc")!);
+    expect(screen.getByTestId("viewer-name")).toHaveTextContent("IMG_0001.JPG");
   });
 
   it("设置关闭合并 → RAW/JPG 分开展示（3 张卡，无合并角标；RAW 卡有水印）", async () => {

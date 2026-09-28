@@ -9,7 +9,7 @@
 //!   DROPFILES + 双 NUL 结尾宽字符列表）。纯 Win32 clipboard API +
 //!   STA CoInitializeEx（run_blocking 线程内，幂等）。
 //! - `reveal_in_explorer(paths)`：按父目录分组 SHOpenFolderAndSelectItems
-//!   （每组一窗选中），PIDL 解析失败的文件跳过，组 API 失败回退
+//!   （每组一窗选中），PIDL 解析或组 API 失败回退
 //!   `explorer /select,"path"`。
 
 use tauri::State;
@@ -260,7 +260,7 @@ fn group_by_parent(paths: &[String]) -> Vec<(String, Vec<String>)> {
 
 /// 在资源管理器中定位文件（多文件单窗选中）：按父目录分组，每组
 /// SHOpenFolderAndSelectItems（父目录 PIDL + 子项 PIDL 列表）；
-/// SHParseDisplayName 失败的文件跳过；组 API 失败回退
+/// SHParseDisplayName 或组 API 失败回退
 /// `explorer /select,"path"` 逐文件。返回定位成功的文件数。
 pub fn fetch_reveal_in_explorer(paths: &[String]) -> Result<u32, String> {
     // reveal 不要求全有或全无：不存在的文件在 PIDL 解析层自然跳过，
@@ -285,13 +285,55 @@ pub fn fetch_reveal_in_explorer(paths: &[String]) -> Result<u32, String> {
     }
 }
 
-/// Win32 分组定位实现：每组一次 SHOpenFolderAndSelectItems（单窗多选），
-/// 失败回退 explorer /select。
+/// 后台线程的 COM 初始化与释放必须配对。
+#[cfg(windows)]
+struct ShellApartment(bool);
+
+#[cfg(windows)]
+impl ShellApartment {
+    fn initialize() -> Result<Self, String> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_ok() {
+            // S_OK 与 S_FALSE 都增加 COM 引用计数，必须配对释放。
+            Ok(Self(true))
+        } else if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
+            // 后台线程已初始化为 MTA；可使用已有 apartment，不替它释放。
+            Ok(Self(false))
+        } else {
+            Err(format!("初始化资源管理器接口失败: {hr:?}"))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ShellApartment {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+/// 子项指针借用完整 PIDL 的最后一段；调用结束前完整 PIDL 必须保持存活。
+#[cfg(windows)]
+unsafe fn child_pidls(
+    absolute: &[*const windows::Win32::UI::Shell::Common::ITEMIDLIST],
+) -> Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> {
+    absolute
+        .iter()
+        .map(|pidl| windows::Win32::UI::Shell::ILFindLastID(*pidl).cast_const())
+        .collect()
+}
+
+/// Win32 分组定位：每组一次 SHOpenFolderAndSelectItems，失败回退 explorer /select。
 #[cfg(windows)]
 fn reveal_grouped(files: &[String]) -> Result<u32, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ILFree, SHOpenFolderAndSelectItems, SHParseDisplayName};
+
+    let _apartment = ShellApartment::initialize()?;
 
     let to_wide = |s: &str| -> Vec<u16> {
         std::ffi::OsStr::new(s)
@@ -326,18 +368,33 @@ fn reveal_grouped(files: &[String]) -> Result<u32, String> {
                         pidls.push(pidl);
                         parsed_files.push(file);
                     }
-                    // 解析失败的文件跳过（不回退：右键定位的容忍语义）
+                    // 解析失败的文件稍后逐个回退。
                 }
                 if pidls.is_empty() {
                     ILFree(Some(folder_pidl));
+                    for file in &group {
+                        if explorer_select_fallback(file) {
+                            revealed += 1;
+                        }
+                    }
                 } else {
-                    let result = SHOpenFolderAndSelectItems(folder_pidl, Some(&pidls), 0);
+                    // apidl 必须相对于 folder_pidl；不能传 SHParseDisplayName
+                    // 产生的完整 PIDL，否则打开目录后不能正确选中文件。
+                    let children = child_pidls(&pidls);
+                    let result = SHOpenFolderAndSelectItems(folder_pidl, Some(&children), 0);
                     ILFree(Some(folder_pidl));
                     for p in &pidls {
                         ILFree(Some(*p));
                     }
                     match result {
-                        Ok(()) => revealed += parsed_files.len() as u32,
+                        Ok(()) => {
+                            revealed += parsed_files.len() as u32;
+                            for file in &group {
+                                if !parsed_files.contains(&file) && explorer_select_fallback(file) {
+                                    revealed += 1;
+                                }
+                            }
+                        }
                         Err(_) => {
                             // 组 API 失败（Explorer 忙等）：逐文件 explorer /select
                             for file in &group {
@@ -357,15 +414,22 @@ fn reveal_grouped(files: &[String]) -> Result<u32, String> {
             }
         }
     }
-    Ok(revealed)
+    if revealed == 0 {
+        Err("无法在资源管理器中选中文件".into())
+    } else {
+        Ok(revealed)
+    }
 }
 
 /// `explorer /select,"path"` 回退（尽力语义：explorer.exe 退出码不可靠，
 /// spawn 成功即计入）。窗口不前台聚焦风险由 Explorer 自身决定。
 #[cfg(windows)]
 fn explorer_select_fallback(path: &str) -> bool {
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{path}"))
+    use std::os::windows::process::CommandExt;
+    // Explorer 需要 /select,"文件路径"；Command::arg 会把整个参数加引号，
+    // 导致带空格/逗号的路径失去 /select 的解析语义。有效文件名不含双引号。
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{path}\""))
         .spawn()
         .is_ok()
 }
@@ -488,6 +552,52 @@ mod tests {
         let groups = group_by_parent(&files);
         assert_eq!(groups.len(), 1, "同目录 20 张 → 单组（单窗多选）");
         assert_eq!(groups[0].1.len(), 20);
+    }
+
+    /// 使用真实 Shell PIDL 验证：父目录 + 子项必须还原为原文件，而非重复
+    /// 拼接完整路径。不会打开资源管理器，也不占用剪贴板。
+    #[cfg(windows)]
+    #[test]
+    fn explorer_selection_uses_relative_children_with_unicode_spaces_and_commas() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::{
+            Common::ITEMIDLIST, ILCombine, ILFree, ILIsEqual, SHParseDisplayName,
+        };
+
+        let _apartment = ShellApartment::initialize().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("照片 目录,子目录");
+        std::fs::create_dir_all(&folder).unwrap();
+        let files = [folder.join("照片 1,原图.jpg"), folder.join("second.raw")];
+        for file in &files {
+            std::fs::write(file, b"x").unwrap();
+        }
+        unsafe fn parse(path: &std::path::Path) -> *mut ITEMIDLIST {
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut pidl = std::ptr::null_mut();
+            SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).unwrap();
+            assert!(!pidl.is_null());
+            pidl
+        }
+        unsafe {
+            let parent = parse(&folder);
+            let absolute: Vec<*const ITEMIDLIST> =
+                files.iter().map(|file| parse(file).cast_const()).collect();
+            let children = child_pidls(&absolute);
+            for (full, child) in absolute.iter().zip(children) {
+                assert_ne!(*full, child, "不能把完整路径作为相对子项传入");
+                let combined = ILCombine(Some(parent), Some(child));
+                assert!(!combined.is_null());
+                let matches = ILIsEqual(combined, *full).as_bool();
+                ILFree(Some(combined));
+                assert!(matches, "父目录 + 相对子项应还原原文件");
+            }
+            for pidl in absolute {
+                ILFree(Some(pidl));
+            }
+            ILFree(Some(parent));
+        }
     }
 
     // -----------------------------------------------------------------

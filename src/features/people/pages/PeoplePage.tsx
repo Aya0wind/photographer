@@ -1,3 +1,4 @@
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -231,8 +232,9 @@ function PersonAssetsView({
     };
   }, [person.clusterId]);
 
-  const groups = useMemo(() => groupAssetsByDate(assets ?? []), [assets]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  const { cards, badges } = usePhotoCards(assets ?? []);
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets ?? []);
 
   return (
     <div className="flex h-full flex-col" data-testid="people-assets-view">
@@ -269,7 +271,7 @@ function PersonAssetsView({
             <p className="text-sm text-text-secondary">{t("people.assetsEmpty")}</p>
           </div>
         ) : (
-          <AssetGrid groups={groups} onOpenAsset={(asset) => openAsset(asset)} scrollTestId="people-grid-scroll" />
+          <AssetGrid badges={badges} groups={groups} onOpenAsset={(asset) => openAsset(asset)} scrollTestId="people-grid-scroll" />
         )}
       </div>
 
@@ -278,6 +280,7 @@ function PersonAssetsView({
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}
+          onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
         />

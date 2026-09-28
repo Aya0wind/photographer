@@ -118,15 +118,15 @@ fn migration_is_idempotent_and_version_stable() {
     {
         let db = Db::open(&path).expect("open");
         db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 24);
+        assert_eq!(user_version(&db), 25);
         db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 24, "重复迁移不得推进 user_version");
+        assert_eq!(user_version(&db), 25, "重复迁移不得推进 user_version");
     }
 
     // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
     let db = Db::open(&path).expect("reopen");
     db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 24);
+    assert_eq!(user_version(&db), 25);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
@@ -212,6 +212,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
         // 0022：edit_recipe / export_job 表 CREATE 不可重放
         db.0.execute("DROP TABLE edit_recipe", []).unwrap();
         db.0.execute("DROP TABLE export_job", []).unwrap();
+        db.0.execute("DROP TABLE asset_metadata", []).unwrap();
         // 0024：选片三表 CREATE 不可重放（0023 为空占位无对象）
         db.0.execute("DROP TABLE cull_decision", []).unwrap();
         db.0.execute("DROP TABLE cull_session_asset", []).unwrap();
@@ -241,7 +242,7 @@ fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
 
     let db = Db::open(&path).unwrap();
     db.migrate().unwrap();
-    assert_eq!(user_version(&db), 24);
+    assert_eq!(user_version(&db), 25);
     let rows: Vec<(String, String)> =
         db.0.prepare("SELECT kind, state FROM index_tasks")
             .unwrap()

@@ -7,7 +7,6 @@
 //!   默认查询不排除已拒绝——只是可筛选项。
 //! - 回收站：软删标记（in_trash+trashed_at），常规查询全链路默认排除；
 //!   恢复还原可见性；purge 才动 DB 行与物理文件（外部库绝不物理删）。
-//! - 智能视图：前端 AssetFilters 序列化的命名存取，后端不解释只校验
 //!   JSON 合法性。
 //!
 //! 全部走 active_library_db + run_blocking（铁律：DB/磁盘 IO 不上主线程）。
@@ -19,11 +18,6 @@ use tauri::State;
 use super::{run_blocking, SharedState};
 use crate::events::AppEvent;
 
-pub use crate::db::SmartViewRow;
-
-/// SmartViewDto 的 Rust 面别名（serde 输出 `{id, name, filtersJson,
-/// createdAt}`）。
-pub type SmartViewDto = SmartViewRow;
 
 /// LR 标准颜色标签（应用内小写 token；xmp:Label 写首字母大写标准色名）。
 pub const COLOR_LABELS: &[&str] = &["red", "yellow", "green", "blue", "purple"];
@@ -260,47 +254,6 @@ pub fn fetch_trash_purge(
     Ok(deleted)
 }
 
-/// 智能视图列表核（createdAt DESC）。
-pub fn fetch_smart_view_list(state: &super::AppState) -> Result<Vec<SmartViewDto>, String> {
-    let db = super::active_library_db(state)?;
-    db.smart_view_list().map_err(|e| e.to_string())
-}
-
-/// 建智能视图核：名称 trim/空拒绝；filters_json 必须是合法 JSON（后端不
-/// 解释只存取）；重名报错。
-pub fn fetch_smart_view_create(
-    state: &super::AppState,
-    name: &str,
-    filters_json: &str,
-) -> Result<SmartViewDto, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("智能视图名不能为空".into());
-    }
-    serde_json::from_str::<serde_json::Value>(filters_json)
-        .map_err(|e| format!("filters_json 不是合法 JSON: {e}"))?;
-    let db = super::active_library_db(state)?;
-    db.smart_view_create(name, filters_json.trim())
-        .map_err(|e| {
-            if matches!(
-                &e,
-                rusqlite::Error::SqliteFailure(ffi_err, _)
-                    if ffi_err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-            ) {
-                format!("同名智能视图已存在：{name}")
-            } else {
-                e.to_string()
-            }
-        })
-}
-
-/// 删智能视图核；不存在报错。
-pub fn fetch_smart_view_delete(state: &super::AppState, id: i64) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
-    db.smart_view_delete(id)
-        .map_err(|_| "智能视图不存在".to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Tauri 命令壳（async + spawn_blocking）
 // ---------------------------------------------------------------------------
@@ -382,32 +335,4 @@ pub async fn trash_purge(
         fetch_trash_purge(state, &asset_ids, delete_files)
     })
     .await
-}
-
-/// 智能视图列表。
-#[tauri::command]
-pub async fn smart_view_list(state: State<'_, SharedState>) -> Result<Vec<SmartViewDto>, String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, fetch_smart_view_list).await
-}
-
-/// 建智能视图（重名/空名/非法 JSON 报错）。
-#[tauri::command]
-pub async fn smart_view_create(
-    state: State<'_, SharedState>,
-    name: String,
-    filters_json: String,
-) -> Result<SmartViewDto, String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, move |state| {
-        fetch_smart_view_create(state, &name, &filters_json)
-    })
-    .await
-}
-
-/// 删智能视图。
-#[tauri::command]
-pub async fn smart_view_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, move |state| fetch_smart_view_delete(state, id)).await
 }

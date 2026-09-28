@@ -1,7 +1,7 @@
 //! 选片补全（0016，阶段 B1）：颜色标签（批量 + 非法拒绝 + XMP 边车写回 +
 //! xmp:Label 清除）、接受/拒绝状态（筛选 + 默认查询不排除）、应用内回收站
 //! 全链路（移入 → 常规查询不可见 → 列表/还原 → 清空物理删除 + 引用级联）、
-//! 智能视图 CRUD（重名/非法 JSON 拒绝）。
+//! 与 XMP 边车同步。
 
 mod common;
 
@@ -16,8 +16,7 @@ use db::{AssetFilters, AssetRow};
 use events::AssetKind;
 use ipc::rating::fetch_asset_rating_set;
 use ipc::selection::{
-    fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_smart_view_create,
-    fetch_smart_view_delete, fetch_smart_view_list, fetch_trash_list, fetch_trash_purge,
+    fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_trash_list, fetch_trash_purge,
     fetch_trash_restore,
 };
 use metadata::xmp;
@@ -542,45 +541,6 @@ fn trash_purge_deletes_rows_files_and_cascades_references() {
     assert_eq!(fetch_trash_purge(&state, &[c], true).unwrap(), 0);
     // 常规查询回到干净状态
     assert_eq!(db.sidebar_assets_count().unwrap(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// 智能视图
-// ---------------------------------------------------------------------------
-
-#[test]
-fn smart_view_crud_duplicate_and_invalid_json() {
-    let (_dir, state, _db) = setup();
-
-    let created = fetch_smart_view_create(
-        &state,
-        "  人像 5 星  ",
-        r#"{"ratingMin":4,"kinds":["photo","raw"]}"#,
-    )
-    .unwrap();
-    assert_eq!(created.name, "人像 5 星");
-    assert_eq!(
-        created.filters_json,
-        r#"{"ratingMin":4,"kinds":["photo","raw"]}"#
-    );
-
-    let list = fetch_smart_view_list(&state).unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].id, created.id);
-
-    // 重名拒绝
-    let dup = fetch_smart_view_create(&state, "人像 5 星", "{}");
-    assert!(dup.is_err());
-    assert!(dup.err().unwrap().contains("同名智能视图已存在"));
-
-    // 非法 JSON / 空名拒绝
-    assert!(fetch_smart_view_create(&state, "坏视图", "{not json").is_err());
-    assert!(fetch_smart_view_create(&state, "   ", "{}").is_err());
-
-    // 删除 + 不存在报错
-    fetch_smart_view_delete(&state, created.id).unwrap();
-    assert!(fetch_smart_view_list(&state).unwrap().is_empty());
-    assert!(fetch_smart_view_delete(&state, created.id).is_err());
 }
 
 // ---------------------------------------------------------------------------

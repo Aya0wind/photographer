@@ -213,3 +213,53 @@ fn journal_reflects_final_states() {
             .unwrap();
     assert_eq!(count, 4);
 }
+
+#[test]
+fn indexing_follows_slow_import_and_restarts_for_later_photos() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    for n in 0..4 {
+        image::RgbImage::from_pixel(48, 32, image::Rgb([n * 40, 80, 120]))
+            .save(src.path().join(format!("photo-{n}.jpg")))
+            .unwrap();
+    }
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(800));
+    let mut plan = ipc_plan(&state, target.path());
+    plan.streams = 1;
+    start_import(&state, plan).unwrap();
+    let started = std::time::Instant::now();
+    let mut indexed_while_importing = false;
+    loop {
+        let db = active_library_db(&state).unwrap();
+        let assets = common::count_assets(&db);
+        let indexed: i64 =
+            db.0.query_row(
+                "SELECT COUNT(*) FROM index_tasks WHERE kind = 'thumb' AND state = 'done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if indexed > 0 && assets < 4 {
+            indexed_while_importing = true;
+        }
+        if assets == 4 && indexed == 4 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "新增照片没有自动续跑索引"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        indexed_while_importing,
+        "必须在导入结束前处理已经落库的照片"
+    );
+    assert!(wait_done(&state, Duration::from_secs(5)));
+    let started = std::time::Instant::now();
+    while state.supervisor.running_count() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

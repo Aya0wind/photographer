@@ -11,6 +11,19 @@ use crate::devices::folder::FOLDER_ID_PREFIX;
 use crate::devices::volume::is_ignored_dir;
 use crate::devices::{DeviceSource, SourceKind};
 
+/// 已存在的目录无需再向文件服务器发 mkdir；并发创建后复查目录，
+/// 避免部分 SMB 服务将已存在目录报为 Windows ERROR_ALREADY_EXISTS。
+pub(super) fn ensure_directory(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    match fs::create_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(_) if path.is_dir() => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// 文件系统源的根目录（嵌套守卫与移动后空目录清理用）；MTP 无路径语义 → None。
 pub(super) fn source_root_of(source: &dyn DeviceSource) -> Option<PathBuf> {
     let id = source.id();

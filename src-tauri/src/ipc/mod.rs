@@ -521,6 +521,60 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
     }
 }
 
+/// 已落库照片分批唤醒索引。导入结尾仍做一次无节流触发，覆盖最后一批。
+fn follow_import_indexing(
+    engine: &mut Engine,
+    db_dir: PathBuf,
+    manager: crate::ai::ModelManager,
+    bus: EventBus,
+    supervisor: Arc<crate::tasks::TaskSupervisor>,
+    enable_clip: bool,
+    enable_face: bool,
+) {
+    engine.set_on_asset_imported(move || {
+        let db_dir = db_dir.clone();
+        let manager = manager.clone();
+        let bus = bus.clone();
+        let dispatch_supervisor = Arc::clone(&supervisor);
+        supervisor.spawn_coalesced(
+            "index",
+            format!("import-follow:{}", db_dir.display()),
+            move |_| {
+                crate::index::kick(db_dir.clone(), &dispatch_supervisor);
+                if enable_clip {
+                    crate::ai::semantic::kick_semantic_if_ready(
+                        db_dir.clone(),
+                        &manager,
+                        &bus,
+                        &dispatch_supervisor,
+                    );
+                }
+                if enable_face {
+                    crate::ai::face::kick_face_if_ready(
+                        db_dir.clone(),
+                        &manager,
+                        &bus,
+                        &dispatch_supervisor,
+                    );
+                }
+                crate::ai::selection::kick_eyes_if_ready(
+                    db_dir.clone(),
+                    &manager,
+                    &bus,
+                    &dispatch_supervisor,
+                );
+                if let Ok(db) = open_library_db(&db_dir) {
+                    bus.publish(crate::events::AppEvent::IndexTaskResumed {
+                        pending: db.pending_index_count().unwrap_or(0),
+                    });
+                }
+                // 分批限频在后台做；期间收到的通知保留，暂停导入也不会漏掉最后一张。
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            },
+        );
+    });
+}
+
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
 /// 0018 修订（导入必落相册）：启动即确保默认相册「未分组」存在（按名幂等）；
 /// `album_id = None` 报错「必须选择相册」（引擎内另有同款防御，双保险）。
@@ -549,7 +603,7 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
     let controls = engine.controls();
-    // 索引任务钩子：engine.run 收尾后全核跑待办（job 不等它）
+    // 索引跟随已入库照片；engine.run 收尾后再唤醒一次，覆盖最后一批。
     let index_db_dir = PathBuf::from(
         &state
             .settings
@@ -576,6 +630,15 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
         .enable_face;
     let burst_params = crate::bursts::BurstParams::from_settings(
         &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
+    follow_import_indexing(
+        &mut engine,
+        index_db_dir.clone(),
+        ai_manager.clone(),
+        ai_bus.clone(),
+        Arc::clone(&index_supervisor),
+        enable_clip,
+        enable_face,
     );
     let handle = state
         .supervisor
@@ -641,7 +704,7 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, job_id)?;
     let source = import_source(state, &device_id, &plan.target_root)?;
-    let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
+    let mut engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     let controls = engine.controls();
     let index_db_dir = PathBuf::from(
@@ -670,6 +733,15 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
         .enable_face;
     let burst_params = crate::bursts::BurstParams::from_settings(
         &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
+    follow_import_indexing(
+        &mut engine,
+        index_db_dir.clone(),
+        ai_manager.clone(),
+        ai_bus.clone(),
+        Arc::clone(&index_supervisor),
+        enable_clip,
+        enable_face,
     );
     let handle = state
         .supervisor
@@ -807,7 +879,7 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, new_id)?;
     let source = import_source(state, &device_id, &plan.target_root)?;
-    let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
+    let mut engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     let controls = engine.controls();
     let index_db_dir = PathBuf::from(
@@ -836,6 +908,15 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
         .enable_face;
     let burst_params = crate::bursts::BurstParams::from_settings(
         &state.settings.lock().expect("settings mutex poisoned").ai,
+    );
+    follow_import_indexing(
+        &mut engine,
+        index_db_dir.clone(),
+        ai_manager.clone(),
+        ai_bus.clone(),
+        Arc::clone(&index_supervisor),
+        enable_clip,
+        enable_face,
     );
     let handle = state
         .supervisor

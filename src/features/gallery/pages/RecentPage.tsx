@@ -1,3 +1,4 @@
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -39,8 +40,9 @@ export default function RecentPage() {
     };
   }, []);
 
-  const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(groups);
+  const { cards, badges } = usePhotoCards(assets);
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets);
   const [tileSize, setTileSize] = useGalleryTileSize();
 
   return (
@@ -77,6 +79,7 @@ export default function RecentPage() {
             </div>
           ) : (
             <AssetGrid
+              badges={badges}
               groups={groups}
               onOpenAsset={openAsset}
               tile={GALLERY_TILE_PX[tileSize]}
@@ -91,6 +94,7 @@ export default function RecentPage() {
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}
+          onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
         />

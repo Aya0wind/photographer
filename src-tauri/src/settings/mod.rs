@@ -25,6 +25,7 @@ pub struct Settings {
     pub libraries: Vec<Library>,
     pub active_library_id: Option<String>,
     pub import: ImportSettings,
+    pub gallery: GallerySettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
     /// 存储与缓存策略（M8-③：缩略图缓存 LRU 上限等）。
@@ -67,6 +68,8 @@ pub struct Library {
     /// MTP 源后端仍强制单流，此处值仅作用于卷/文件夹源。
     #[serde(default = "default_streams")]
     pub streams: u32,
+    /// 库级 AI 档位；None 仅用于迁移旧全局配置。
+    pub ai_quality_tier: Option<String>,
 }
 
 impl Default for Library {
@@ -78,6 +81,7 @@ impl Default for Library {
             photo_root: String::new(),
             configured: false,
             streams: default_streams(),
+            ai_quality_tier: None,
         }
     }
 }
@@ -95,12 +99,66 @@ impl Default for Settings {
             libraries: Vec::new(),
             active_library_id: None,
             import: ImportSettings::default(),
+            gallery: GallerySettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),
             storage: StorageSettings::default(),
             watch_folders: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GallerySettings {
+    pub merge_raw_jpg: bool,
+}
+
+impl Default for GallerySettings {
+    fn default() -> Self {
+        Self {
+            merge_raw_jpg: true,
+        }
+    }
+}
+
+/// ai.qualityTier 是当前库的运行时投影；持久化真值属于每个 Library。
+pub fn normalize_library_quality_tiers(
+    settings: &mut Settings,
+    previous: &Settings,
+) -> Result<(), String> {
+    for lib in &mut settings.libraries {
+        if lib.ai_quality_tier.is_none() {
+            let existing = previous.libraries.iter().find(|old| old.id == lib.id);
+            lib.ai_quality_tier = Some(
+                existing
+                    .and_then(|old| old.ai_quality_tier.clone())
+                    .unwrap_or_else(|| {
+                        if existing.is_some() {
+                            previous.ai.quality_tier.clone()
+                        } else {
+                            default_quality_tier()
+                        }
+                    }),
+            );
+        }
+        if !matches!(lib.ai_quality_tier.as_deref(), Some("fast" | "normal" | "accurate")) {
+            return Err(format!("库 {} 的 AI 档位无效", lib.name));
+        }
+    }
+    let changed_here = settings.active_library_id == previous.active_library_id
+        && settings.ai.quality_tier != previous.ai.quality_tier;
+    if let Some(lib) = settings
+        .libraries
+        .iter_mut()
+        .find(|lib| Some(&lib.id) == settings.active_library_id.as_ref())
+    {
+        if changed_here {
+            lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
+        }
+        settings.ai.quality_tier = lib.ai_quality_tier.clone().unwrap_or_else(default_quality_tier);
+    }
+    Ok(())
 }
 
 /// 查重策略。
@@ -132,7 +190,6 @@ pub struct ImportSettings {
     pub prompt_on_device: bool,
     pub skip_imported: bool,
     pub duplicate_policy: DuplicatePolicy,
-    pub notify_milestones: bool,
 }
 
 impl Default for ImportSettings {
@@ -141,7 +198,6 @@ impl Default for ImportSettings {
             prompt_on_device: true,
             skip_imported: true,
             duplicate_policy: DuplicatePolicy::Skip,
-            notify_milestones: true,
         }
     }
 }
@@ -382,6 +438,18 @@ impl SettingsManager {
                 settings.schema_version = SCHEMA_VERSION;
                 migrate_legacy_libraries(&mut settings);
                 migrate_legacy_ai_settings(&mut settings);
+                // 旧库首次迁移时各自记住旧档位，之后不再跟随全局投影。
+                for lib in &mut settings.libraries {
+                    if lib.ai_quality_tier.is_none() {
+                        lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
+                    }
+                    if !matches!(lib.ai_quality_tier.as_deref(), Some("fast" | "normal" | "accurate")) {
+                        lib.ai_quality_tier = Some(default_quality_tier());
+                    }
+                }
+                if let Some(tier) = settings.active_library().and_then(|lib| lib.ai_quality_tier.clone()) {
+                    settings.ai.quality_tier = tier;
+                }
                 Ok(settings)
             }
             Err(_parse_error) => {

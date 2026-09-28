@@ -29,6 +29,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0022_EDIT_EXPORT,
     MIGRATION_0023_RESERVED,
     MIGRATION_0024_CULLING,
+    MIGRATION_0025_EDITABLE_METADATA,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -595,4 +596,12 @@ CREATE TABLE cull_decision (
 
 CREATE INDEX idx_cull_decision_session ON cull_decision (session_id);
 CREATE INDEX idx_cull_decision_asset  ON cull_decision (asset_id);
+"#;
+
+/// Explicit library metadata survives source EXIF reindexing.
+const MIGRATION_0025_EDITABLE_METADATA: &str = r#"
+CREATE TABLE asset_metadata (
+    asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    value TEXT NOT NULL
+);
 "#;

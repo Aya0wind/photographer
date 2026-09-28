@@ -1,5 +1,5 @@
 //! 引擎流水线（单遍复制）：字节级完整性、哈希/journal/资产一致、
-//! 里程碑序列、进度节流、模板降级、`.part` 无残留、ImportPlan 契约。
+//! 进度节流、模板降级、`.part` 无残留、ImportPlan 契约。
 
 mod common;
 
@@ -71,41 +71,6 @@ fn copies_files_with_byte_and_hash_integrity() {
 }
 
 #[test]
-fn milestones_fire_in_order() {
-    let src = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
-    build_source(src.path());
-    // 追加一个等大 JPEG，视频不参与；共四张图片，每文件 25%。
-    let mut extra = shrink(vec![0xff, 0xd8, 0xff, 0xe0], 4096);
-    extra[10] = 1;
-    fs::write(src.path().join("DCIM/100CANON/IMG_0004.JPG"), &extra).unwrap();
-
-    let bus = EventBus::new();
-    let mut rx = bus.subscribe();
-    let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
-    // 0018 导入必落相册：引擎兜底校验前先落「未分组」
-    plan.album_id = Some(db.ensure_default_album().unwrap());
-    let engine = Engine::new(
-        db,
-        bus.clone(),
-        Box::new(VolumeSource::new(src.path())),
-        plan,
-    );
-    let stats = engine.run();
-
-    assert_eq!(stats.done_files, 4);
-    let mut milestones = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::ImportMilestoneReached { percent, .. } = ev {
-            milestones.push(percent);
-        }
-    }
-    assert_eq!(milestones, vec![25, 50, 75, 100]);
-}
-
-#[test]
 fn progress_events_are_throttled() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
@@ -171,6 +136,37 @@ fn no_part_residue_after_success() {
 
     assert!(!target.path().join(".smartphoto-part").exists());
     assert!(find_part_files(target.path()).is_empty());
+}
+
+#[test]
+fn parallel_import_reuses_existing_staging_directory() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_many(src.path(), 32);
+    fs::create_dir_all(target.path().join(".smartphoto-part")).unwrap();
+    let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
+        plan.streams = 4;
+    });
+    assert_eq!(stats.done_files, 32);
+    assert_eq!(stats.failed_files, 0);
+    assert_eq!(count_assets(&open_db(db_dir.path())), 32);
+    assert!(find_part_files(target.path()).is_empty());
+}
+
+#[test]
+fn staging_path_occupied_by_file_is_reported_without_overwriting_it() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_source(src.path());
+    let blocker = target.path().join(".smartphoto-part");
+    fs::write(&blocker, b"keep me").unwrap();
+    let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
+    assert_eq!(stats.done_files, 0);
+    assert_eq!(stats.failed_files, 3);
+    assert_eq!(fs::read(&blocker).unwrap(), b"keep me");
+    assert_eq!(count_assets(&open_db(db_dir.path())), 0);
 }
 
 #[test]

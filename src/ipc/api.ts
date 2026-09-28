@@ -176,7 +176,7 @@ export interface AssetDto {
   capturedAt: string | null;
   camera: string | null;
   sizeBytes: number;
-  /** RAW+JPG 配对 id（同一拍摄的两格式同值）；后端契约扩展中，缺省/单条均不成对 */
+  /** RAW+JPG 展示组 id（两侧资产 ID 的较小值，同一拍摄的两格式同值） */
   pairId?: number | null;
   /** 像素宽（EXIF 深提取回填，~95% 资产有值）；缺失时前端 justify 网格按 4:3 兜底 */
   width?: number | null;
@@ -1603,58 +1603,6 @@ export async function trashPurge(assetIds: number[], deleteFiles: boolean): Prom
   return typeof deleted === "number" && Number.isFinite(deleted) ? deleted : 0;
 }
 
-/** 智能视图（smart_view_list 返回；命名唯一，重名创建由后端报错） */
-export interface SmartViewDto {
-  id: number;
-  name: string;
-  /** buildFilters 结果的 JSON 序列化（apply 由前端反解回 SearchInputs） */
-  filtersJson: string;
-  createdAt: string;
-}
-
-/** 智能视图清单（smart_view_list）；失败/非数组/形状异常回退 [] */
-export async function smartViewList(): Promise<SmartViewDto[]> {
-  try {
-    const list = await ipc<SmartViewDto[] | null>("smart_view_list");
-    if (!Array.isArray(list)) return [];
-    return list.filter(
-      (v): v is SmartViewDto =>
-        typeof v?.id === "number" && Number.isFinite(v.id) && typeof v?.name === "string",
-    );
-  } catch {
-    return [];
-  }
-}
-
-export type SmartViewCreateResult =
-  | { ok: true; view: SmartViewDto }
-  | { ok: false; error: string | null };
-
-/** 新建智能视图（smart_view_create；重名等业务错误透传原始 Err 文案，调用方行内提示） */
-export async function smartViewCreate(name: string, filtersJson: string): Promise<SmartViewCreateResult> {
-  try {
-    const view = await ipc<SmartViewDto>("smart_view_create", { name, filtersJson });
-    if (view === null || typeof view !== "object" || typeof view.id !== "number") {
-      return { ok: false, error: null };
-    }
-    return { ok: true, view };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
-    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
-    return { ok: false, error: message };
-  }
-}
-
-/** 删除智能视图（smart_view_delete）；失败 false */
-export async function smartViewDelete(id: number): Promise<boolean> {
-  try {
-    await ipc<void>("smart_view_delete", { id });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // --- B2：资产版本关系（RAW+机内JPEG 孪生展示；子分组为纯子文件夹，无内建成片语义） ----------------
 
 /** 版本组成员（role: raw=原片 RAW | sooc=机内 JPEG | derived=成片；未入组 null） */
@@ -1699,6 +1647,18 @@ export async function assetVersions(assetId: number): Promise<AssetVersions | nu
   }
 }
 
+/** User metadata stored per photo in the current library. */
+export interface EditableMetadata {
+  title: string; description: string; author: string; copyright: string; keywords: string[];
+  capturedAt: string | null; camera: string; lens: string; gpsLat: number | null; gpsLon: number | null;
+}
+export async function assetMetadataGet(assetId: number): Promise<EditableMetadata> {
+  return ipc<EditableMetadata>("asset_metadata_get", { assetId });
+}
+export async function assetMetadataSave(assetId: number, metadata: EditableMetadata): Promise<EditableMetadata> {
+  return ipc<EditableMetadata>("asset_metadata_save", { assetId, metadata });
+}
+
 // --- 阶段 D：非破坏编辑配方 + JPEG 导出 ----------------------------------------------
 // 契约（与后端 lane 共同遵守，字段名不得偏移）：
 // - rotateQuarter 顺时针 90° 步进，先旋转后裁剪；crop 相对「旋转后图像」归一化；
@@ -1740,9 +1700,12 @@ export interface EditRecipeOutput {
 }
 
 /** 非破坏编辑配方（后端 edit_recipe 表存储的同一 JSON） */
+export interface EditAdjustments { brightness: number; contrast: number; saturation: number; }
+
 export interface EditRecipe {
   version: 1;
   rotateQuarter: 0 | 1 | 2 | 3;
+  adjustments?: EditAdjustments;
   crop: EditRecipeCrop | null;
   textLayers: EditRecipeTextLayer[];
   brushStrokes: EditRecipeBrushStroke[];
@@ -1838,6 +1801,10 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
     crop,
     textLayers,
     brushStrokes,
+    ...(r.adjustments && typeof r.adjustments === "object" ? { adjustments: Object.fromEntries(["brightness", "contrast", "saturation"].map((key) => {
+      const value = (r.adjustments as Record<string, unknown>)[key];
+      return [key, typeof value === "number" && Number.isFinite(value) ? Math.max(-100, Math.min(100, value)) : 0];
+    })) as unknown as EditAdjustments } : {}),
     output: {
       longEdge: Number.isNaN(longEdge) ? null : longEdge,
       quality: Number.isNaN(quality) ? 90 : Math.min(100, Math.max(1, Math.round(quality))),

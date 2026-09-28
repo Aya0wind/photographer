@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
-import type { AssetDto } from "@/ipc/api";
+import { assetsByIds, type AssetDto } from "@/ipc/api";
 import type { AssetGroup } from "./assetGroups";
 import { markAssetViewed } from "./viewMark";
 
@@ -24,8 +24,10 @@ export interface AssetViewerTarget {
   index: number;
 }
 
-export function useAssetViewer(groups: AssetGroup[]) {
+export function useAssetViewer(groups: AssetGroup[], sourceAssets: AssetDto[] = []) {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [version, setVersion] = useState<{ anchorId: number; asset: AssetDto } | null>(null);
+  const versionRequest = useRef(0);
   // 日期分组只服务网格展示。预览使用当前结果集的完整顺序，翻页可跨日期。
   const viewerGroup = useMemo<AssetGroup>(() => ({
     key: "__viewer__",
@@ -36,20 +38,36 @@ export function useAssetViewer(groups: AssetGroup[]) {
   const assetParam = searchParams.get("asset");
   const assetId =
     assetParam !== null && /^\d+$/.test(assetParam) ? Number(assetParam) : null;
+  const activeAnchor = useRef(assetId);
+  activeAnchor.current = assetId;
 
   let viewer: AssetViewerTarget | null = null;
   if (assetId !== null) {
-    const index = viewerGroup.assets.findIndex((a) => a.id === assetId);
-    if (index >= 0) viewer = { asset: viewerGroup.assets[index], group: viewerGroup, index };
+    const original = viewerGroup.assets.find((a) => a.id === assetId)
+      ?? sourceAssets.find((a) => a.id === assetId);
+    let index = viewerGroup.assets.findIndex((a) => a.id === assetId);
+    // 后一页加载 JPG 后，原先的 RAW 卡会被合并；已打开的预览仍属于该组。
+    if (index < 0 && typeof original?.pairId === "number") {
+      index = viewerGroup.assets.findIndex((a) => a.pairId === original.pairId);
+    }
+    if (index >= 0) viewer = {
+      asset: version?.anchorId === assetId ? version.asset : original ?? viewerGroup.assets[index],
+      group: viewerGroup,
+      index,
+    };
   }
 
   return {
     viewer,
     openAsset: (asset: AssetDto) => {
+      ++versionRequest.current;
+      setVersion(null);
       markAssetViewed(asset.id);
       setSearchParams({ asset: String(asset.id) });
     },
     closeViewer: () => {
+      ++versionRequest.current;
+      setVersion(null);
       setSearchParams({});
     },
     /** 在当前结果集切换（可跨日期）；切图同样算一次浏览 */
@@ -57,8 +75,26 @@ export function useAssetViewer(groups: AssetGroup[]) {
       if (!viewer) return;
       const next = viewer.group.assets[index];
       if (next) {
+        ++versionRequest.current;
+        setVersion(null);
         markAssetViewed(next.id);
         setSearchParams({ asset: String(next.id) });
+      }
+    },
+    /** 格式/版本切换只替换预览文件，不插入网格或改变胶片条的位置。 */
+    selectVersion: async (id: number) => {
+      if (!viewer || assetId === null) return;
+      const anchorId = assetId;
+      const request = ++versionRequest.current;
+      try {
+        const known = sourceAssets.find((a) => a.id === id)
+          ?? viewerGroup.assets.find((a) => a.id === id);
+        const selected = known ?? (await assetsByIds([id])).find((a) => a.id === id);
+        if (!selected || activeAnchor.current !== anchorId || request !== versionRequest.current) return;
+        markAssetViewed(selected.id);
+        setVersion({ anchorId, asset: selected });
+      } catch {
+        // 已删除/不可访问的版本保持当前预览。
       }
     },
   };

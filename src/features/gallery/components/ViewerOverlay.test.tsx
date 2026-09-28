@@ -1305,6 +1305,23 @@ const VERSIONS_GROUP: AssetVersions = {
 };
 
 describe("查看器：版本区（B2）", () => {
+  it("RAW+JPG 只在详情版本区切换，JPG 使用简洁名称", async () => {
+    versionsMock.mockResolvedValue({ groupId: 5, members: [
+      { assetId: 1, role: "raw", name: "IMG_0001.NEF", thumbReady: true },
+      { assetId: 9, role: "sooc", name: "IMG_0001.JPG", thumbReady: true },
+    ] });
+    const user = userEvent.setup();
+    const onVersionSelect = vi.fn();
+    renderViewer(GROUP_ASSETS, 0, { onVersionSelect });
+    await screen.findByTestId("viewer-versions");
+    expect(screen.queryByTestId("viewer-format-switch")).not.toBeInTheDocument();
+    const chip = screen.getAllByTestId("viewer-version-chip").find((node) => node.dataset.role === "sooc")!;
+    expect(chip).toHaveTextContent("JPG");
+    expect(chip).not.toHaveTextContent("机内");
+    await user.click(chip);
+    expect(onVersionSelect).toHaveBeenCalledWith(9);
+  });
+
   it("多成员：渲染 RAW/成片 chips（成片带标），当前项高亮；点击 → onVersionSelect(成员 id)", async () => {
     const user = userEvent.setup();
     versionsMock.mockResolvedValue(VERSIONS_GROUP);

@@ -92,6 +92,8 @@ export const useAiStore = create<AiState>((set, get) => ({
         void get().refresh();
         break;
       }
+      case "importFileProgress":
+      case "importSessionFinished":
       case "indexTaskResumed": {
         void get().refreshIndexStatus();
         break;

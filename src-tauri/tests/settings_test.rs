@@ -17,6 +17,17 @@ fn settings_path(dir: &Path) -> PathBuf {
     dir.join("settings.json")
 }
 
+#[test]
+fn retired_import_notifications_are_ignored() {
+    let settings: Settings = serde_json::from_value(serde_json::json!({
+        "import": { "notifyMilestones": true, "duplicatePolicy": "rename" }
+    }))
+    .unwrap();
+    assert_eq!(settings.import.duplicate_policy, DuplicatePolicy::Rename);
+    let serialized = serde_json::to_value(settings).unwrap();
+    assert!(serialized["import"].get("notifyMilestones").is_none());
+}
+
 fn corrupt_backups(dir: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir).expect("failed to read dir") {
@@ -45,7 +56,6 @@ fn default_settings_match_spec() {
     assert!(s.import.prompt_on_device);
     assert!(s.import.skip_imported);
     assert_eq!(s.import.duplicate_policy, DuplicatePolicy::Skip);
-    assert!(s.import.notify_milestones);
 
     assert!(!s.ai.enable_clip);
     assert!(!s.ai.enable_face);
@@ -79,13 +89,13 @@ fn save_then_load_roundtrip_with_custom_values() {
             // 配置链已走完（达芬奇式启动流：库选择器跳过配置向导的依据）
             configured: true,
             streams: 4,
+            ai_quality_tier: Some("normal".into()),
         }],
         active_library_id: Some("lib-1".to_string()),
         onboarding_completed: true,
         import: ImportSettings {
             duplicate_policy: DuplicatePolicy::Rename,
             skip_imported: false,
-            notify_milestones: false,
             ..ImportSettings::default()
         },
         ai: AiSettings {
@@ -296,7 +306,7 @@ fn serialization_uses_camel_case() {
         value["import"]["duplicatePolicy"],
         serde_json::json!("skip")
     );
-    assert_eq!(value["import"]["notifyMilestones"], serde_json::json!(true));
+    assert!(value["import"].get("notifyMilestones").is_none());
     assert_eq!(value["ai"]["enableClip"], serde_json::json!(false));
     assert_eq!(value["ai"]["indexSchedule"], serde_json::json!("idleOnly"));
     assert_eq!(value["ai"]["cpuLimitPercent"], serde_json::json!(50));
@@ -313,6 +323,7 @@ fn serialization_uses_camel_case() {
         photo_root: r"Y:\照片".to_string(),
         configured: true,
         streams: 3,
+        ai_quality_tier: Some("accurate".into()),
     })
     .expect("serialize library");
     assert_eq!(lib["dbDir"], serde_json::json!(r"I:\SmartPhoto\主库"));
@@ -322,6 +333,7 @@ fn serialization_uses_camel_case() {
     assert!(lib.get("importSubdir").is_none());
     assert_eq!(lib["configured"], serde_json::json!(true));
     assert_eq!(lib["streams"], serde_json::json!(3));
+    assert_eq!(lib["aiQualityTier"], serde_json::json!("accurate"));
     // 缺省库序列化同样带 camelCase 键与默认值
     let default_lib = serde_json::to_value(Library::default()).expect("serialize default library");
     assert_eq!(default_lib["streams"], serde_json::json!(4));
@@ -353,6 +365,49 @@ fn active_library_lookup_follows_active_id() {
     // 指向不存在的 id -> None（注册表脏数据容错）
     s.active_library_id = Some("lib-missing".to_string());
     assert!(s.active_library().is_none());
+}
+
+#[test]
+fn library_quality_tiers_are_independent_across_switches_and_edits() {
+    use smart_photo_lib::settings::normalize_library_quality_tiers;
+    let mut previous = Settings::default();
+    previous.libraries = vec![
+        Library { id: "main".into(), ai_quality_tier: Some("normal".into()), ..Library::default() },
+        Library { id: "new".into(), ai_quality_tier: Some("fast".into()), ..Library::default() },
+    ];
+    previous.active_library_id = Some("main".into());
+    let mut switched = previous.clone();
+    switched.active_library_id = Some("new".into());
+    normalize_library_quality_tiers(&mut switched, &previous).unwrap();
+    assert_eq!(switched.ai.quality_tier, "fast");
+    let mut edited = switched.clone();
+    edited.ai.quality_tier = "accurate".into();
+    normalize_library_quality_tiers(&mut edited, &switched).unwrap();
+    assert_eq!(edited.libraries[1].ai_quality_tier.as_deref(), Some("accurate"));
+    assert_eq!(edited.libraries[0].ai_quality_tier.as_deref(), Some("normal"));
+    let mut back = edited.clone();
+    back.active_library_id = Some("main".into());
+    normalize_library_quality_tiers(&mut back, &edited).unwrap();
+    assert_eq!(back.ai.quality_tier, "normal");
+    let dir = temp_dir();
+    SettingsManager::save(&back, dir.path()).unwrap();
+    assert_eq!(SettingsManager::load(dir.path()).unwrap().libraries, back.libraries);
+}
+
+#[test]
+fn legacy_quality_tier_is_migrated_per_library_and_gallery_preference_roundtrips() {
+    let dir = temp_dir();
+    fs::write(settings_path(dir.path()), serde_json::json!({
+        "activeLibraryId": "old",
+        "libraries": [{"id":"old"}],
+        "ai": {"qualityTier":"accurate"},
+        "gallery": {"mergeRawJpg":false}
+    }).to_string()).unwrap();
+    let loaded = SettingsManager::load(dir.path()).unwrap();
+    assert_eq!(loaded.libraries[0].ai_quality_tier.as_deref(), Some("accurate"));
+    assert!(!loaded.gallery.merge_raw_jpg);
+    SettingsManager::save(&loaded, dir.path()).unwrap();
+    assert_eq!(SettingsManager::load(dir.path()).unwrap(), loaded);
 }
 
 /// 语义阈值默认值：None = auto（2026-09-28 三档画质起随语义模型变体自适应：

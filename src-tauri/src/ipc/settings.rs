@@ -191,6 +191,8 @@ pub fn settings_set(
     // 画质档位硬校验（2026-09-28 三档画质）：档位驱动模型件选择与指纹
     // 重建，脏值拒绝落盘（读取侧另有 load 兜底，双保险）。
     crate::settings::validate_ai_settings(&settings.ai)?;
+    let previous = state.settings.lock().expect("settings mutex poisoned").clone();
+    crate::settings::normalize_library_quality_tiers(&mut settings, &previous)?;
     // 建库路径统一规范化（2026-09-28 边界修复）：onboarding 提交的
     // photoRoot/dbDir 拒绝盘符相对路径（如 `I:xxx` 按进程 CWD 解析），
     // 绝对路径归一到 canonical/反斜杠形态后持久化并随 settings://changed
@@ -221,16 +223,25 @@ pub fn settings_set(
     );
     // 参数指纹比对：变更通道后台自动重建（无库/无变更为 no-op）
     let ai_snapshot = settings.ai.clone();
+    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     if let Some(library) = settings.active_library() {
+        let library_id = library.id.clone();
         let db_dir = std::path::PathBuf::from(&library.db_dir);
         let shared = state.inner().clone();
         state
             .supervisor
             .spawn("index", "params-fingerprint-check".into(), move |_| {
+                {
+                    let current = shared.settings.lock().expect("settings mutex poisoned");
+                    if current.active_library_id.as_deref() != Some(&library_id)
+                        || current.ai != ai_snapshot
+                    {
+                        return; // 切库/再次修改后的迟到任务不可重建旧库。
+                    }
+                }
                 super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
             });
     }
-    *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     app.emit("settings://changed", &settings)
         .map_err(|err| err.to_string())?;
     Ok(())

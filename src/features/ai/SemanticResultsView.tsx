@@ -1,3 +1,4 @@
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -92,7 +93,8 @@ export default function SemanticResultsView({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const indexing = useAiIndexingProgress();
-  const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
+  const { cards, badges } = usePhotoCards(assets);
+  const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
 
   if (status === "loading") {
     return (
@@ -165,7 +167,7 @@ export default function SemanticResultsView({
   return (
     <div className="relative h-full min-h-0">
       <SemanticIndexingBanner progress={indexing} />
-      <AssetGrid groups={groups} tile={200} scores={scores} onOpenAsset={onOpenAsset} scrollTestId={scrollTestId} />
+      <AssetGrid groups={groups} badges={badges} tile={200} scores={scores} onOpenAsset={onOpenAsset} scrollTestId={scrollTestId} />
     </div>
   );
 }

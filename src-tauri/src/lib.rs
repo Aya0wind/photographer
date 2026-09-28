@@ -36,7 +36,6 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         // 自启动默认不启用，由设置页通过命令开关。
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -195,8 +194,6 @@ pub fn run() {
             spawn_event_forwarder(app.handle().clone(), bus.clone(), supervisor_handle.clone());
             // 后台线程 2：设备编排（热插拔 → 建源 → 扫描 → 注册表 + DeviceScanned）
             ipc::device_manager::spawn(app.state::<ipc::SharedState>().inner().clone());
-            // 后台线程 3：系统通知（会话开始/结束 + 里程碑）
-            spawn_notification_subscriber(app.handle().clone());
             // 后台线程 4：热插拔检测（隐藏顶层窗口泵）
             let _hotplug = hotplug::spawn_hotplug_thread(bus.clone());
             // 后台线程 5：监视文件夹轮询（F4 v1：5min 一轮，新文件自动入册）
@@ -262,6 +259,8 @@ pub fn run() {
             ipc::assets::assets_count,
             ipc::assets::asset_group_dates,
             ipc::assets::asset_detail,
+            edit::metadata::asset_metadata_get,
+            edit::metadata::asset_metadata_save,
             ipc::assets::camera_list,
             ipc::assets::burst_stats,
             ipc::insights::on_this_day,
@@ -317,9 +316,6 @@ pub fn run() {
             ipc::selection::trash_list,
             ipc::selection::trash_restore,
             ipc::selection::trash_purge,
-            ipc::selection::smart_view_list,
-            ipc::selection::smart_view_create,
-            ipc::selection::smart_view_delete,
             ipc::versions::asset_versions,
             edit::ipc::edit_recipe_get,
             edit::ipc::edit_recipe_save,
@@ -380,59 +376,6 @@ fn spawn_event_forwarder(
             });
         });
     });
-}
-
-/// 系统通知：会话开始/结束 + 里程碑（读 settings.import.notify_milestones）。
-fn spawn_notification_subscriber(app: AppHandle) {
-    use tauri_plugin_notification::NotificationExt;
-
-    fn notify_enabled(app: &AppHandle) -> bool {
-        app.state::<ipc::SharedState>()
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .import
-            .notify_milestones
-    }
-    fn notify(app: &AppHandle, title: &str, body: &str) {
-        let _ = app.notification().builder().title(title).body(body).show();
-    }
-
-    std::thread::Builder::new()
-        .name("notify-subscriber".into())
-        .spawn(move || {
-            let bus = app.state::<ipc::SharedState>().bus.clone();
-            let mut rx = bus.subscribe();
-            loop {
-                let Ok(event) = rx.blocking_recv() else {
-                    continue;
-                };
-                let message = match event {
-                    AppEvent::ImportSessionStarted { total_files, .. } => {
-                        Some(("导入已开始", format!("共 {total_files} 个文件")))
-                    }
-                    AppEvent::ImportMilestoneReached { percent, .. } => {
-                        Some(("导入进度", format!("已完成 {percent}%")))
-                    }
-                    AppEvent::ImportSessionFinished { stats, .. } => Some((
-                        "导入完成",
-                        format!(
-                            "成功 {} · 跳过 {} · 失败 {}",
-                            stats.done_files, stats.skipped_duplicates, stats.failed_files
-                        ),
-                    )),
-                    _ => None,
-                };
-                let Some((title, body)) = message else {
-                    continue;
-                };
-                if !notify_enabled(&app) {
-                    continue;
-                }
-                notify(&app, title, &body);
-            }
-        })
-        .expect("spawn notify subscriber");
 }
 
 use crate::settings::{Settings, SettingsManager};

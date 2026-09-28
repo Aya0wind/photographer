@@ -435,6 +435,7 @@ pub fn semantic_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
 pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
+        crate::ai::face::FACE_INDEX_GENERATION,
         ai.index_params_version as u64,
         u64::from(ai.embed_input_size), // 版本语义变更兜底参与
         ai.face_detect_threshold.to_bits() as u64,

@@ -44,7 +44,7 @@ use crate::import::templates::unique_path;
 use crate::settings::DuplicatePolicy;
 
 use dedup::{exact_hit, loose_hit};
-use fsutil::{cleanup_empty_dirs, rfc3339, source_root_of};
+use fsutil::{cleanup_empty_dirs, ensure_directory, rfc3339, source_root_of};
 use pipeline::{copy_one, CopiedFile, FileOutcome};
 
 /// 进度事件最小间隔（spec：≥100ms）。
@@ -161,7 +161,7 @@ impl EngineControls {
     }
 }
 
-/// 会话计数（JobStats 的累加器）。里程碑按“已结算”字节（done+skipped+failed）
+/// 会话计数（JobStats 的累加器）。进度按“已结算”字节（done+skipped+failed）
 /// 占比计算——跳过/失败的文件同样终结了处理。
 #[derive(Debug, Default, Clone, Copy)]
 struct Counters {
@@ -222,6 +222,7 @@ pub struct Engine {
     plan: ImportPlan,
     controls: EngineControls,
     prepared: Option<Prepared>,
+    on_asset_imported: Option<Box<dyn FnMut() + Send>>,
 }
 
 impl Engine {
@@ -289,12 +290,18 @@ impl Engine {
                 done: Arc::new(AtomicBool::new(false)),
             },
             prepared,
+            on_asset_imported: None,
         }
     }
 
     /// 控制柄（pause/cancel 与 run 并行使用）。
     pub fn controls(&self) -> EngineControls {
         self.controls.clone()
+    }
+
+    /// 仅在文件落位并成功入库后通知后台索引；复制中的文件不可索引。
+    pub fn set_on_asset_imported(&mut self, callback: impl FnMut() + Send + 'static) {
+        self.on_asset_imported = Some(Box::new(callback));
     }
 
     /// 建新任务：计划校验 → 自我嵌套守卫 → 枚举源 → 宽松查重预判 →
@@ -439,16 +446,12 @@ impl Engine {
         // 追加净化子组段，None = 平铺现状）。
         // begin 已对新任务校验相册存在；resume 历史任务在此派生——相册
         // 被删/无 album_id 的史前计划无法落位，任务判 error 收尾。
-        let dir_template = match self
-            .plan
-            .album_id
-            .and_then(|aid| {
-                self.db
-                    .album_item_home_rel(aid, self.plan.album_subgroup.as_deref())
-                    .ok()
-                    .flatten()
-            })
-        {
+        let dir_template = match self.plan.album_id.and_then(|aid| {
+            self.db
+                .album_item_home_rel(aid, self.plan.album_subgroup.as_deref())
+                .ok()
+                .flatten()
+        }) {
             Some(template) => template,
             None => {
                 let message = match self.plan.album_id {
@@ -461,9 +464,12 @@ impl Engine {
                     recoverable: true,
                 });
                 let _ = self.db.append_log("error", Some(job_id), &message);
-                let _ = self
-                    .db
-                    .finish_job(job_id, "error", &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO)).unwrap_or_default());
+                let _ = self.db.finish_job(
+                    job_id,
+                    "error",
+                    &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO))
+                        .unwrap_or_default(),
+                );
                 self.controls.done.store(true, Ordering::SeqCst);
                 return Counters::default().into_stats(Duration::ZERO);
             }
@@ -479,13 +485,30 @@ impl Engine {
         let (result_tx, result_rx) = mpsc::channel::<FileOutcome>();
         let part_seq = Arc::new(AtomicU64::new(0));
 
+        // 暂存目录只在启动工作线程前创建一次。网络共享盘可能在并发 mkdir
+        // 时返回 183，且目录元数据尚未传播；不能让每个文件重复参与创建。
+        let part_dir = self.plan.target_root.join(PART_DIR);
+        let staging_error = ensure_directory(&part_dir)
+            .map_err(|e| format!("创建暂存目录失败（{}）: {e}", part_dir.display()))
+            .and_then(|()| {
+                if let Some(second) = &self.plan.second_target {
+                    let dir = second.target_root.join(PART_DIR);
+                    ensure_directory(&dir).map_err(|e| {
+                        format!("创建第二目的地暂存目录失败（{}）: {e}", dir.display())
+                    })?;
+                }
+                Ok(())
+            })
+            .err();
+
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let source = Arc::clone(&self.source);
             let work_rx = Arc::clone(&work_rx);
             let result_tx = result_tx.clone();
             let controls = self.controls.clone();
-            let part_dir = self.plan.target_root.join(PART_DIR);
+            let part_dir = part_dir.clone();
+            let staging_error = staging_error.clone();
             let part_seq = Arc::clone(&part_seq);
             let dir_template = dir_template.clone();
             let name_template = self.plan.name_template.clone();
@@ -512,17 +535,24 @@ impl Engine {
                         Err(_) => break, // 队列已空/关闭
                     };
                     let seq = part_seq.fetch_add(1, Ordering::Relaxed);
-                    let outcome = copy_one(
-                        &*source,
-                        &part_dir,
-                        seq,
-                        self.plan.mode == ImportMode::Move,
-                        &entry,
-                        &target_root,
-                        &dir_template,
-                        &name_template,
-                        second.as_deref(),
-                    );
+                    let outcome = if let Some(error) = &staging_error {
+                        FileOutcome::Failed {
+                            entry,
+                            error: error.clone(),
+                        }
+                    } else {
+                        copy_one(
+                            &*source,
+                            &part_dir,
+                            seq,
+                            self.plan.mode == ImportMode::Move,
+                            &entry,
+                            &target_root,
+                            &dir_template,
+                            &name_template,
+                            second.as_deref(),
+                        )
+                    };
                     if result_tx.send(outcome).is_err() {
                         break; // 收集端已退出
                     }
@@ -532,7 +562,6 @@ impl Engine {
         drop(result_tx);
 
         let mut progress = Throttle::new(PROGRESS_INTERVAL);
-        let mut next_milestone: u32 = 25;
         let mut last_completed_src = String::new();
 
         for outcome in result_rx {
@@ -541,6 +570,9 @@ impl Engine {
                     let entry = &copied.entry;
                     match self.finish_copy(job_id, &copied) {
                         Ok((FileState::Verified, dst)) => {
+                            if let Some(callback) = self.on_asset_imported.as_mut() {
+                                callback();
+                            }
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
@@ -650,7 +682,7 @@ impl Engine {
                 }
             }
 
-            // 节流进度 + 里程碑（按已结算字节占比：done+skipped+failed）
+            // 节流进度（按已结算字节占比：done+skipped+failed）
             if progress.should_fire() {
                 let secs = started.elapsed().as_secs_f64();
                 self.bus.publish(AppEvent::ImportFileProgress {
@@ -665,18 +697,6 @@ impl Engine {
                         0.0
                     },
                 });
-            }
-            if let Some(percent) = (counters.settled_bytes() * 100)
-                .checked_div(counters.total_bytes)
-                .map(|p| p as u32)
-            {
-                while next_milestone <= 100 && percent >= next_milestone {
-                    self.bus.publish(AppEvent::ImportMilestoneReached {
-                        job_id,
-                        percent: next_milestone,
-                    });
-                    next_milestone += 25;
-                }
             }
         }
 
@@ -768,9 +788,9 @@ impl Engine {
         if let Some(second) = &self.plan.second_target {
             roots.push(second.target_root.clone());
         }
-        let _ = fs::create_dir_all(&self.plan.target_root);
+        let _ = ensure_directory(&self.plan.target_root);
         if let Some(second) = &self.plan.second_target {
-            let _ = fs::create_dir_all(&second.target_root);
+            let _ = ensure_directory(&second.target_root);
         }
         let Ok(source_canon) = fs::canonicalize(&source_root) else {
             return Ok(());
@@ -901,14 +921,13 @@ impl Engine {
 
         // 原子落位：主路先行；第二目的地任一步失败则回滚主路（要么双落位要么全无）
         if let Some(parent) = final_dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
+            ensure_directory(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
         }
         fs::rename(&copied.part, &final_dst).map_err(|e| format!("落位失败: {e}"))?;
         if let (Some(final_dst2), Some(part2)) = (&final_dst2, &copied.part2) {
             let second = (|| -> Result<(), String> {
                 if let Some(parent) = final_dst2.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|e| format!("创建第二目的地目录失败: {e}"))?;
+                    ensure_directory(parent).map_err(|e| format!("创建第二目的地目录失败: {e}"))?;
                 }
                 fs::rename(part2, final_dst2).map_err(|e| format!("第二目的地落位失败: {e}"))
             })();

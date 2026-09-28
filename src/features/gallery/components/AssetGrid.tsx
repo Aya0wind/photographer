@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -262,6 +263,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
+    getItemKey: (i) => rows[i].type === "header"
+      ? `header:${rows[i].group.key}`
+      : `tiles:${rows[i].group.key}:${rows[i].assets.map((asset) => asset.id).join(",")}`,
     estimateSize: (i) =>
       rows[i].type === "header"
         ? rows[i].collapsed
@@ -270,6 +274,12 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
         : rows[i].height + GAP,
     overscan: 6,
   });
+
+  // 搜索替换结果、图片尺寸补齐、切换大小都会改变行高；旧测量不能按
+  // 数字下标复用到新行。绘制前清缓存，避免标题/照片相互覆盖。
+  useLayoutEffect(() => {
+    virtualizer.measure();
+  }, [rows, virtualizer]);
 
   // --- 键盘导航（#8）：网格聚焦后 ←→↑↓ 移动高亮（outline accent），Enter 打开查看器 ---
   const [cursor, setCursor] = useState<number | null>(null);

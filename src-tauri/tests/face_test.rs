@@ -417,7 +417,7 @@ fn face_cluster_sums_and_people_list_contract() {
             PersonRow {
                 id: p_big,
                 name: None,
-                face_count: 2,
+                face_count: 1,
                 cover_asset_id: Some(a),
             },
             PersonRow {
@@ -996,4 +996,99 @@ fn real_scrfd_arcface_pipeline() {
         let d = cos(&emb0, emb1);
         eprintln!("同人图内不同脸 cos(0,1)={d:.4}（观察聚类阈值 0.4 的裕度）");
     }
+}
+
+#[test]
+fn empty_or_unusable_faces_complete_index_without_creating_people() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    for name in ["empty", "tiny", "low", "zero"] {
+        db.insert_asset(&asset_row(
+            &format!("X:/p/{name}.jpg"),
+            AssetKind::Photo,
+            None,
+        ))
+        .unwrap();
+    }
+    let manager = ai::ModelManager::new(
+        dir.path().join("models"),
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    let infer: face::FaceInfer = std::sync::Arc::new(move |db, id| {
+        let (path, _) = db.thumb_info_by_id(id).unwrap().unwrap();
+        let mut det = face::DetectedFace {
+            box_x: 10.0,
+            box_y: 10.0,
+            box_w: 100.0,
+            box_h: 100.0,
+            score: 0.9,
+            kps: [[0.0; 2]; 5],
+        };
+        if path.contains("tiny") {
+            det.box_w = 6.0;
+        }
+        if path.contains("low") {
+            det.score = 0.1;
+        }
+        let faces = if path.contains("empty") {
+            vec![]
+        } else {
+            vec![(
+                det,
+                if path.contains("zero") {
+                    vec![0.0; FACE_EMBED_DIM]
+                } else {
+                    rand_unit(41)
+                },
+            )]
+        };
+        Some(face::FacePayload {
+            src_w: 512,
+            src_h: 512,
+            faces,
+        })
+    });
+    assert_eq!(
+        face::run_face_backfill_with(
+            dir.path(),
+            std::sync::Arc::new(manager),
+            &events::EventBus::new(),
+            infer
+        ),
+        4
+    );
+    assert_eq!(face_count(&db), 0);
+    assert_eq!(person_count(&db), 0);
+    let indexed: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE face_indexed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, 4);
+}
+#[test]
+fn face_identity_requires_visible_size_and_landmarks() {
+    let mut det = face::DetectedFace {
+        box_x: 10.0,
+        box_y: 10.0,
+        box_w: 80.0,
+        box_h: 100.0,
+        score: 0.9,
+        kps: [
+            [25.0, 30.0],
+            [60.0, 30.0],
+            [40.0, 45.0],
+            [30.0, 65.0],
+            [55.0, 65.0],
+        ],
+    };
+    assert!(face::usable_face(&det, 0.5));
+    det.box_w = 6.0;
+    assert!(!face::usable_face(&det, 0.5));
+    det.box_w = 80.0;
+    det.kps = [[0.0; 2]; 5];
+    assert!(!face::usable_face(&det, 0.5));
 }

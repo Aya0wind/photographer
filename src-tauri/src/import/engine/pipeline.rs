@@ -80,12 +80,10 @@ struct PartSink {
 impl PartSink {
     /// 在两个暂存目录各建 `{seq}.part`（第二目录 None 则只建主路）。
     fn create(part_dir: &Path, second_dir: Option<&Path>, seq: u64) -> Result<Self, String> {
-        fs::create_dir_all(part_dir).map_err(|e| format!("创建暂存目录失败: {e}"))?;
         let part = part_dir.join(format!("{seq}.part"));
         let out = File::create(&part).map_err(|e| format!("创建临时文件失败: {e}"))?;
         let (out2, part2) = match second_dir {
             Some(dir) => {
-                fs::create_dir_all(dir).map_err(|e| format!("创建第二目的地暂存目录失败: {e}"))?;
                 let part2 = dir.join(format!("{seq}.part"));
                 let out2 =
                     File::create(&part2).map_err(|e| format!("创建第二目的地临时文件失败: {e}"))?;
@@ -252,9 +250,6 @@ pub(super) fn copy_one(
     if move_mode && second.is_none() && !dst.exists() {
         if let Some(src) = source.local_path(&entry.id) {
             if samevol::same_volume(&src, part_dir) {
-                if let Err(e) = fs::create_dir_all(part_dir) {
-                    return fail(format!("创建暂存目录失败: {e}"));
-                }
                 let part_path = part_dir.join(format!("{seq}.part"));
                 if fs::rename(&src, &part_path).is_ok() {
                     return FileOutcome::Copied(Box::new(CopiedFile {

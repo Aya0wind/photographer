@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -26,7 +26,7 @@ import {
  * - 所有提交都经 konvaMapping 换算回归一化 recipe 字段。
  */
 
-export type EditorTool = "view" | "crop" | "text" | "brush";
+export type EditorTool = "view" | "crop" | "text" | "brush" | "adjust" | "filters" | "metadata" | "output";
 
 const TEXT_NODE_NAME = "editor-text-layer";
 const STAGE_PADDING = 24;
@@ -86,6 +86,8 @@ function rotatedImageAttrs(
 
 interface EditorCanvasProps {
   src: string | null;
+  zoom?: number;
+  onZoom?: (factor: number) => void;
   /** naturalWidth/Height 为 0 时的兜底尺寸（EXIF 宽高；jsdom 测试路径） */
   fallbackSize: Size | null;
   recipe: EditRecipe;
@@ -111,6 +113,8 @@ interface EditorCanvasProps {
 
 export default function EditorCanvas({
   src,
+  zoom = 1,
+  onZoom,
   fallbackSize,
   recipe,
   tool,
@@ -129,8 +133,45 @@ export default function EditorCanvas({
   onImageError,
 }: EditorCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const panRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+  function stopPanning(): void {
+    const pan = panRef.current;
+    panRef.current = null;
+    setPanning(false);
+    if (pan && containerRef.current?.hasPointerCapture(pan.pointerId)) containerRef.current.releasePointerCapture(pan.pointerId);
+  }
+  useEffect(() => {
+    stopPanning();
+  }, [tool, src]);
+  const zoomRef = useRef(onZoom);
+  zoomRef.current = onZoom;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const wheel = (event: WheelEvent) => {
+      if (!zoomRef.current || event.deltaY === 0) return;
+      event.preventDefault();
+      zoomRef.current(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+    };
+    container.addEventListener("wheel", wheel, { passive: false });
+    return () => container.removeEventListener("wheel", wheel);
+  }, []);
   const [avail, setAvail] = useState<Size>({ width: 912, height: 600 });
   const image = useHtmlImage(src, onImageError);
+  const adjustedImage = useMemo(() => {
+    if (!image || !recipe.adjustments) return image;
+    const a = recipe.adjustments;
+    const preview = document.createElement("canvas");
+    const ratio = Math.min(1, 2048 / Math.max(image.naturalWidth, image.naturalHeight));
+    preview.width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    preview.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+    const ctx = preview.getContext("2d");
+    if (!ctx) return image;
+    ctx.filter = `brightness(${1 + a.brightness / 100}) contrast(${1 + a.contrast / 100}) saturate(${1 + a.saturation / 100})`;
+    ctx.drawImage(image, 0, 0, preview.width, preview.height);
+    return preview;
+  }, [image, recipe.adjustments]);
   const readyRef = useRef(onImageReady);
   readyRef.current = onImageReady;
 
@@ -205,13 +246,13 @@ export default function EditorCanvas({
   let dispH: number;
   let scale: number;
   if (tool === "crop") {
-    scale = Math.min(inner.width / rot.w, inner.height / rot.h);
+    scale = Math.min(inner.width / rot.w, inner.height / rot.h) * zoom;
     dispW = rot.w * scale;
     dispH = rot.h * scale;
   } else {
     const canvasPxW = crop.w * rot.w;
     const canvasPxH = crop.h * rot.h;
-    scale = Math.min(inner.width / canvasPxW, inner.height / canvasPxH);
+    scale = Math.min(inner.width / canvasPxW, inner.height / canvasPxH) * zoom;
     dispW = canvasPxW * scale;
     dispH = canvasPxH * scale;
   }
@@ -282,11 +323,28 @@ export default function EditorCanvas({
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;
 
   const cursor =
-    tool === "brush" || tool === "text" ? "crosshair" : tool === "crop" ? "default" : "default";
+    tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
-    <div ref={containerRef} className="relative flex min-h-0 flex-1 items-center justify-center">
-      <div className="relative" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter}>
+    <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
+      style={{ cursor, touchAction: tool === "view" ? "none" : undefined }}
+      onPointerDown={(event) => {
+        const viewport = event.currentTarget;
+        if (tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
+        event.preventDefault();
+        panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
+        viewport.setPointerCapture(event.pointerId);
+        setPanning(true);
+      }}
+      onPointerMove={(event) => {
+        const pan = panRef.current;
+        if (!pan || event.pointerId !== pan.pointerId) return;
+        event.currentTarget.scrollLeft = pan.left + pan.x - event.clientX;
+        event.currentTarget.scrollTop = pan.top + pan.y - event.clientY;
+      }}
+      onPointerUp={stopPanning} onPointerCancel={stopPanning} onLostPointerCapture={stopPanning}
+    >
+      <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter}>
         <Stage
           width={dispW}
           height={dispH}
@@ -301,7 +359,7 @@ export default function EditorCanvas({
           <Layer clip={cropMode ? undefined : { x: 0, y: 0, width: dispW, height: dispH }}>
             <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
               <KonvaImage
-                image={image}
+                image={adjustedImage ?? image}
                 {...rotatedImageAttrs(baseW, baseH, quarter, scale)}
                 listening={false}
               />
@@ -324,9 +382,8 @@ export default function EditorCanvas({
                   y={cropRect.y}
                   width={cropRect.width}
                   height={cropRect.height}
-                  stroke="#F0A83C"
-                  strokeWidth={1.5}
-                  dash={[6, 4]}
+                  stroke="#FFFFFF"
+                  strokeWidth={2}
                   draggable
                   onDragMove={(e) => {
                     const node = e.target;
@@ -357,10 +414,10 @@ export default function EditorCanvas({
                   rotateEnabled={false}
                   keepRatio={cropRatio !== null}
                   enabledAnchors={cropRatio === null ? undefined : ["top-left", "top-right", "bottom-left", "bottom-right"]}
-                  anchorFill="#F0A83C"
+                  anchorFill="#FFFFFF"
                   anchorStroke="#000000"
-                  anchorSize={8}
-                  borderStroke="#F0A83C"
+                  anchorSize={10}
+                  borderStroke="#FFFFFF"
                   boundBoxFunc={(_old, box) => {
                     const width = Math.min(Math.max(box.width, 8), dispW);
                     const height = Math.min(Math.max(box.height, 8), dispH);
@@ -480,10 +537,10 @@ export default function EditorCanvas({
                     ref={textTrRef}
                     rotateEnabled={false}
                     enabledAnchors={["top-left", "top-right", "bottom-left", "bottom-right"]}
-                    anchorFill="#F0A83C"
+                    anchorFill="#FFFFFF"
                     anchorStroke="#000000"
-                    anchorSize={8}
-                    borderStroke="#F0A83C"
+                    anchorSize={10}
+                    borderStroke="#FFFFFF"
                     boundBoxFunc={(_old, box) => ({ ...box, rotation: 0 })}
                   />
                 )}

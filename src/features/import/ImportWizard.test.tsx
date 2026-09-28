@@ -370,10 +370,9 @@ describe("方案面板", () => {
 
     const card = await screen.findByTestId("wizard-location-card");
     expect(card).toHaveTextContent("Y:\\照片");
-    // 目录布局固定（dirTemplate 配置退役）：展示时间/相册公式，非库模板
-    expect(screen.getByTestId("wizard-preview")).toHaveTextContent(
-      "{相册创建年}\\{相册创建月}\\{相册目录}",
-    );
+    expect(screen.queryByTestId("wizard-preview")).not.toBeInTheDocument();
+    expect(card).not.toHaveTextContent("目标根");
+    expect(card).not.toHaveTextContent("目录布局");
     expect(card).not.toHaveTextContent("{YYYY}/{MM-DD}");
     // 目标根/布局均不可编辑（原输入与下拉已移除）
     expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();

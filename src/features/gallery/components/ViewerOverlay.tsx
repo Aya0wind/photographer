@@ -507,7 +507,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     onAssetPatched?.(asset.id, { rejected });
   }
 
-  // --- 版本关系（B2）：原片/机内JPEG/成片 chips（点击换 asset；孤片不渲染） -------------
+  // --- 版本关系（B2）：RAW/JPG/成片 chips（点击换 asset；孤片不渲染） -------------
   const [versions, setVersions] = useState<AssetVersions | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1195,7 +1195,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                     </svg>
                   </button>
                 </div>
-                {/* 版本区（B2）：原片/机内JPEG/成片成员 chips；当前项高亮；孤片不渲染 */}
+                {/* 版本区（B2）：RAW/JPG/成片成员 chips；当前项高亮；孤片不渲染 */}
                 {versionMembers !== null && (
                   <div className="mb-2 border-b border-edge/60 pb-2" data-testid="viewer-versions">
                     <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
@@ -1295,6 +1295,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           initial={{ recipe: editRecipe, updatedAt: null }}
           onClose={() => setEditorOpen(false)}
           onSaved={(recipe) => setEditRecipe(recipe)}
+          onMetadataSaved={(metadata) => {
+            onAssetPatched?.(asset.id, { capturedAt: metadata.capturedAt, camera: metadata.camera || null });
+            void assetDetail(asset.id).then((value) => { if (value) setDetail(value); });
+          }}
         />
       )}
     </div>

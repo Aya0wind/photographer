@@ -884,7 +884,9 @@ fn raw_jpg_pairing_bidirectional_and_replace_remap() {
         .iter()
         .find(|x| x.path.ends_with("IMG_0001.NEF"))
         .unwrap();
-    assert_eq!(raw_dto.pair_id, Some(new_jpg_id));
+    assert_eq!(raw_dto.pair_id, Some(raw_id.min(new_jpg_id)));
+    let jpg_dto = page_items.iter().find(|x| x.id == new_jpg_id).unwrap();
+    assert_eq!(jpg_dto.pair_id, raw_dto.pair_id, "两侧共有一个展示分组 ID");
 }
 
 #[test]

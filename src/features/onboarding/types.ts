@@ -6,11 +6,11 @@ export interface OnboardingDraft {
   libraryName: string;
   dbDir: string;
   photoRoot: string;
-  // 步骤 2：库的整理规则（查重策略/通知；目录布局已固定，不再可配置）
+  // 步骤 2：库的整理规则（目录布局固定，仅选择查重策略）
   duplicatePolicy: Settings["import"]["duplicatePolicy"];
-  notifyMilestones: boolean;
   // 步骤 3：AI 三选一
   aiChoice: AiChoice;
+  qualityTier: Settings["ai"]["qualityTier"];
 }
 
 export type AiChoice = "all" | "semantic" | "none";

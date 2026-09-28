@@ -6,6 +6,7 @@ import type { AssetGroup } from "@/features/gallery/lib/assetGroups";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
+import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 
 /**
  * 那年今天（M7 F6，/memories）：历年同月日资产按年份分块横滚。
@@ -64,8 +65,9 @@ export default function MemoriesPage() {
 
   // 以本地时区今天的年份分块（契约：后端按本地月-日匹配）
   const currentYear = new Date().getFullYear();
-  const blocks = useMemo(() => buildYearBlocks(assets, currentYear), [assets, currentYear]);
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(blocks);
+  const { cards, badges } = usePhotoCards(assets);
+  const blocks = useMemo(() => buildYearBlocks(cards, currentYear), [cards, currentYear]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(blocks, assets);
 
   return (
     <div className="h-full" data-testid="memories-page">
@@ -118,6 +120,11 @@ export default function MemoriesPage() {
                         title={asset.name}
                       >
                         <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
+                        {badges.has(asset.id) && (
+                          <span className="absolute right-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                            {badges.get(asset.id)}
+                          </span>
+                        )}
                       </button>
                     ))}
                   </div>
@@ -133,6 +140,7 @@ export default function MemoriesPage() {
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}
+          onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
         />

@@ -347,7 +347,12 @@ pub fn run_semantic_backfill(
                                 bus.publish(AppEvent::IndexTaskProgress {
                                     kind: "ai".into(),
                                     done: *global_done,
-                                    total,
+                                    // 导入仍在追加照片，总数不能冻结在本轮启动时。
+                                    total: db
+                                        .ai_index_progress()
+                                        .map(|(_, total)| total)
+                                        .unwrap_or(total)
+                                        .max(*global_done),
                                 });
                             }
                         }
@@ -380,12 +385,21 @@ pub fn kick_semantic_if_ready(
         return;
     }
     let embedder: Arc<dyn SemanticEmbedder> = Arc::new(manager.clone());
-    let vision_model =
-        super::semantic_model_ids(manager.ai_params().quality_tier)[0].to_string();
+    let vision_model = super::semantic_model_ids(manager.ai_params().quality_tier)[0].to_string();
     let bus = bus.clone();
-    let _ = supervisor.spawn_unique("index", "semantic-backfill".into(), move |_| {
-        run_semantic_backfill(&db_dir, embedder, &bus, worker_count_for_ai(), &vision_model);
-    });
+    let _ = supervisor.spawn_coalesced(
+        "index",
+        format!("semantic-backfill:{}", db_dir.display()),
+        move |_| {
+            run_semantic_backfill(
+                &db_dir,
+                Arc::clone(&embedder),
+                &bus,
+                worker_count_for_ai(),
+                &vision_model,
+            );
+        },
+    );
 }
 
 /// 语义分数显示标定（经验锚点；阈值过滤仍用原始分数，见
@@ -424,7 +438,7 @@ pub const SEMANTIC_SCORE_CEILING_FP16: f32 = 0.06;
 pub fn semantic_default_min_score(tier: super::QualityTier) -> f32 {
     match tier {
         super::QualityTier::Accurate => 0.03, // fp16 标定（2026-09-28，数值见上）
-        _ => 0.09, // int8 标定工作点（2026-09-21）
+        _ => 0.09,                            // int8 标定工作点（2026-09-21）
     }
 }
 

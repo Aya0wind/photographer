@@ -81,7 +81,7 @@ fn develop_raw(src: &Path) -> Option<DynamicImage> {
 fn rotate_quarter(img: RgbImage, quarter: u32) -> RgbImage {
     use image::imageops;
     match quarter % 4 {
-        1 => imageops::rotate90(&img),  // 顺时针 90°
+        1 => imageops::rotate90(&img), // 顺时针 90°
         2 => imageops::rotate180(&img),
         3 => imageops::rotate270(&img), // 顺时针 270°
         _ => img,
@@ -93,8 +93,12 @@ fn crop_normalized(img: &RgbImage, crop: super::recipe::CropRect) -> RgbImage {
     let (w, h) = (u64::from(img.width()), u64::from(img.height()));
     let x0 = (crop.x * w as f64).floor().clamp(0.0, w as f64) as u64;
     let y0 = (crop.y * h as f64).floor().clamp(0.0, h as f64) as u64;
-    let x1 = ((crop.x + crop.w) * w as f64).ceil().clamp(x0 as f64, w as f64) as u64;
-    let y1 = ((crop.y + crop.h) * h as f64).ceil().clamp(y0 as f64, h as f64) as u64;
+    let x1 = ((crop.x + crop.w) * w as f64)
+        .ceil()
+        .clamp(x0 as f64, w as f64) as u64;
+    let y1 = ((crop.y + crop.h) * h as f64)
+        .ceil()
+        .clamp(y0 as f64, h as f64) as u64;
     let (cw, ch) = ((x1 - x0) as u32, (y1 - y0) as u32);
     if cw == 0 || ch == 0 {
         return img.clone(); // 极端夹取（如 1px 高图）：不裁
@@ -105,13 +109,20 @@ fn crop_normalized(img: &RgbImage, crop: super::recipe::CropRect) -> RgbImage {
 /// 完整渲染：解码 → 转正 → 旋转 → 裁剪 → 文字/笔迹 → 只缩不放。
 /// `long_edge` 为**已合并的终值**（导出 options → 配方 output 的缺省序，
 /// 见 [`crate::edit::export`]；渲染层不再看配方里的 output.longEdge）。
-pub fn render_recipe(src: &Path, recipe: &EditRecipe, long_edge: Option<u32>) -> Result<Rendered, String> {
+pub fn render_recipe(
+    src: &Path,
+    recipe: &EditRecipe,
+    long_edge: Option<u32>,
+) -> Result<Rendered, String> {
     let upright = decode_upright(src)?;
     let rotated = rotate_quarter(upright, recipe.rotate_quarter);
     let mut canvas = match recipe.crop {
         Some(crop) => crop_normalized(&rotated, crop),
         None => rotated,
     };
+    if let Some(adjustments) = recipe.adjustments {
+        apply_adjustments(&mut canvas, adjustments);
+    }
     for layer in &recipe.text_layers {
         draw_text_layer(&mut canvas, layer);
     }
@@ -120,6 +131,21 @@ pub fn render_recipe(src: &Path, recipe: &EditRecipe, long_edge: Option<u32>) ->
     }
     let canvas = resize_long_edge(canvas, long_edge);
     Ok(Rendered { image: canvas })
+}
+
+/// Match preview brightness → contrast → saturation filters, using sRGB values.
+pub fn apply_adjustments(img: &mut RgbImage, a: super::recipe::Adjustments) {
+    let brightness = 1.0 + a.brightness / 100.0;
+    let contrast = 1.0 + a.contrast / 100.0;
+    let saturation = 1.0 + a.saturation / 100.0;
+    for pixel in img.pixels_mut() {
+        let channels = pixel
+            .0
+            .map(|v| ((f64::from(v) * brightness - 127.5) * contrast + 127.5).clamp(0.0, 255.0));
+        let luma = channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+        pixel.0 =
+            channels.map(|v| (luma + saturation * (v - luma)).round().clamp(0.0, 255.0) as u8);
+    }
 }
 
 /// 长边限制的缩放（Lanczos3，只缩不放；None/大于源 = 原尺寸）。

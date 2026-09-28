@@ -5,6 +5,9 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   albumList,
+  assetMetadataGet,
+  assetMetadataSave,
+  type EditableMetadata,
   albumSubgroups,
   editRecipeDelete,
   editRecipeSave,
@@ -34,6 +37,7 @@ import {
 } from "../lib/exportOptions";
 import EditorCanvas, { type EditorTool } from "./EditorCanvas";
 import ExportDialog from "./ExportDialog";
+import MetadataFields from "./MetadataFields";
 
 /**
  * 全屏编辑浮层（阶段 D 前端）：
@@ -87,9 +91,10 @@ interface EditorOverlayProps {
   onClose: () => void;
   /** 配方保存/重置后回传查看器（刷新「已编辑」角标与详情行） */
   onSaved?: (recipe: EditRecipe | null) => void;
+  onMetadataSaved?: (metadata: EditableMetadata) => void;
 }
 
-export default function EditorOverlay({ asset, initial, onClose, onSaved }: EditorOverlayProps) {
+export default function EditorOverlay({ asset, initial, onClose, onSaved, onMetadataSaved }: EditorOverlayProps) {
   const { t } = useTranslation();
 
   // --- 配方状态机（撤销栈） -----------------------------------------------------------
@@ -109,8 +114,24 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
     () => recipeForPersist(savedRecipe ?? defaultRecipe()),
     [savedRecipe],
   );
-  const dirty = !recipeEquals(recipeForPersist(present), baseline);
+  const recipeDirty = !recipeEquals(recipeForPersist(present), baseline);
 
+  const [metadata, setMetadata] = useState<EditableMetadata | null>(null);
+  const [savedMetadata, setSavedMetadata] = useState<EditableMetadata | null>(null);
+  const [metadataError, setMetadataError] = useState<string | null>(null);
+  const [metadataRetry, setMetadataRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setMetadataError(null);
+    void assetMetadataGet(asset.id).then((value) => {
+      if (!cancelled && value) { setMetadata(value); setSavedMetadata(value); }
+      else if (!cancelled) setMetadataError("无法读取照片信息");
+    }).catch((error: unknown) => { if (!cancelled) setMetadataError(errorMessage(error) || "无法读取照片信息"); });
+    return () => { cancelled = true; };
+  }, [asset.id, metadataRetry]);
+  const metadataDirty = metadata !== null && JSON.stringify(metadata) !== JSON.stringify(savedMetadata);
+  const dirty = recipeDirty || metadataDirty;
+  const [zoom, setZoom] = useState(1);
   // --- 图源（复用查看器分级回退链） ---------------------------------------------------
   const originalUrl = useMemo(
     () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
@@ -173,9 +194,13 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
 
   const selectTool = useCallback(
     (next: EditorTool) => {
+      if (next === tool) return;
+      if (tool === "crop" && cropDraft && next !== "crop") {
+        const crop = clampCrop(cropDraft);
+        dispatch({ type: "cropApply", crop: isFullCrop(crop) ? null : crop });
+      }
       if (next === "crop") {
-        const rot = rotatedSize(ctxRef.current, present.rotateQuarter);
-        setCropDraft(present.crop ?? fitCropRect(null, rot.w / rot.h));
+        setCropDraft(present.crop ?? { x: 0, y: 0, w: 1, h: 1 });
         setCropRatio(null);
       } else {
         setCropDraft(null);
@@ -183,8 +208,9 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
       }
       if (next !== "text") setSelectedTextId(null);
       setTool(next);
+      setZoom(1);
     },
-    [present.crop, present.rotateQuarter],
+    [present.crop, present.rotateQuarter, tool, cropDraft],
   );
 
   function applyCropDraft(): void {
@@ -194,6 +220,19 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
     setTool("view");
     setCropDraft(null);
     setCropRatio(null);
+  }
+
+  function rotateImage(delta: 1 | -1): void {
+    let next = history;
+    if (tool === "crop" && cropDraft) {
+      const crop = clampCrop(cropDraft);
+      const action = { type: "cropApply" as const, crop: isFullCrop(crop) ? null : crop };
+      next = recipeReducer(next, action, ctxRef.current);
+      dispatch(action);
+    }
+    next = recipeReducer(next, { type: "rotate", delta }, ctxRef.current);
+    dispatch({ type: "rotate", delta });
+    if (tool === "crop") { setCropDraft(next.present.crop ?? { x: 0, y: 0, w: 1, h: 1 }); setCropRatio(null); }
   }
 
   // --- 图层提交回调（Konva 交互层 → recipe 真理源） ------------------------------------
@@ -264,6 +303,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
     };
   }, [exportDraft.mode, exportDraft.albumId]);
 
+  useEffect(() => {
+    if (!savedMetadata) return;
+    setExportDraft((draft) => ({ ...draft, author: savedMetadata.author, copyright: savedMetadata.copyright, keywords: savedMetadata.keywords.join(", ") }));
+  }, [savedMetadata]);
+
   async function pickOutputDir(): Promise<void> {
     try {
       const dir = await openDialog({ directory: true });
@@ -326,7 +370,14 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
     if (saving) return;
     setSaving(true);
     try {
-      const state = await editRecipeSave(asset.id, recipeForPersist(present));
+      if (metadataDirty && metadata) {
+        const saved = await assetMetadataSave(asset.id, metadata);
+        setMetadata(saved); setSavedMetadata(saved);
+        onMetadataSaved?.(saved);
+      }
+      const toSave = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft)) ? null : clampCrop(cropDraft) }, ctxRef.current).present : present;
+      const state = await editRecipeSave(asset.id, recipeForPersist(toSave));
+      if (tool === "crop" && cropDraft) { applyCropDraft(); }
       setSavedRecipe(state.recipe);
       onSaved?.(state.recipe);
       setToast({ kind: "save-ok" });
@@ -357,7 +408,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
 
   async function runExport(options: ExportOptions): Promise<void> {
     setExportOpen(false);
-    const result = await exportRun(asset.id, recipeForPersist(present), options);
+    const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft)) ? null : clampCrop(cropDraft) }, ctxRef.current).present : present;
+    const result = await exportRun(asset.id, recipeForPersist(recipe), options);
     if (!result.ok) {
       setToast({
         kind: "export-error",
@@ -396,6 +448,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
         else requestClose();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (!missing) void save();
+        return;
+      }
       if (inInput) return;
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
@@ -416,35 +473,36 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;
 
+  const TOOL_ICONS: Record<EditorTool, React.ReactNode> = {
+    view: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m4 17 5-5 4 4 3-3 4 4" /></>,
+    crop: <><path d="M6 3v15h15M3 6h15v15" /></>,
+    adjust: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2" /></>,
+    filters: <><circle cx="9" cy="9" r="5" /><circle cx="15" cy="15" r="5" /></>,
+    text: <><path d="M5 5h14M12 5v14M8 19h8" /></>,
+    brush: <><path d="m5 15 10-11 5 5-11 10H4zM13 6l5 5" /></>,
+    metadata: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7h.01" /></>,
+    output: <><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" /></>,
+  };
   const toolButton = (id: EditorTool, label: string, testId: string) => (
-    <button
-      type="button"
-      onClick={() => selectTool(id)}
-      aria-pressed={tool === id}
-      title={label}
-      className={`flex h-9 w-9 items-center justify-center rounded-md border text-xs transition-colors ${
-        tool === id
-          ? "border-accent bg-accent/10 text-accent"
-          : "border-transparent text-text-secondary hover:bg-panel hover:text-text-primary"
-      }`}
-      data-testid={testId}
-      data-active={tool === id}
-    >
-      {label.slice(0, 1)}
+    <button type="button" role="tab" aria-selected={tool === id} aria-label={label} onClick={() => selectTool(id)} title={label}
+      className={`flex h-14 min-w-14 flex-col items-center justify-center gap-1 border-b-2 px-3 text-[11px] transition-colors ${tool === id ? "border-accent text-accent" : "border-transparent text-text-secondary hover:bg-panel/40 hover:text-text-primary"}`}
+      data-testid={testId} data-active={tool === id}>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{TOOL_ICONS[id]}</svg>{label}
     </button>
   );
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex flex-col bg-black/95"
+      className="fixed inset-0 z-[60] flex flex-col bg-[#202020]"
       role="dialog"
       aria-modal="true"
       aria-label={t("editor.title")}
       data-testid="editor-overlay"
     >
       {/* 顶栏 */}
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4">
-        <h2 className="flex min-w-0 items-baseline gap-2 text-sm font-semibold text-text-primary">
+      <div className="relative flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4" data-testid="editor-titlebar">
+        <div className="absolute inset-0" data-tauri-drag-region data-testid="editor-window-drag-region" />
+        <h2 className="pointer-events-none relative flex min-w-0 items-baseline gap-2 text-sm font-semibold text-text-primary">
           <span>{t("editor.title")}</span>
           <span className="truncate font-mono text-xs font-normal text-text-muted" title={asset.name} data-testid="editor-asset-name">
             {asset.name}
@@ -460,7 +518,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
             </span>
           )}
         </h2>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="relative ml-auto flex items-center gap-2">
           <button
             type="button"
             onClick={() => dispatch({ type: "undo" })}
@@ -496,17 +554,17 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
             onClick={() => void save()}
             disabled={saving || missing}
             title={missing ? t("editor.missingSource") : undefined}
-            className="rounded-md border border-edge px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-9 rounded-md bg-accent px-4 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-save"
           >
-            {t("editor.save")}
+            保存更改
           </button>
           <button
             type="button"
             onClick={() => setExportOpen(true)}
             disabled={missing}
             title={missing ? t("editor.missingSource") : undefined}
-            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className="h-9 rounded-md border border-edge bg-panel/40 px-4 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-export"
           >
             {t("editor.export")}
@@ -523,40 +581,24 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        {/* 工具栏 */}
-        <div className="flex w-14 shrink-0 flex-col items-center gap-1.5 border-r border-edge py-3" data-testid="editor-toolrail">
-          {toolButton("view", t("editor.tool.view"), "editor-tool-view")}
-          {toolButton("crop", t("editor.tool.crop"), "editor-tool-crop")}
-          {toolButton("text", t("editor.tool.text"), "editor-tool-text")}
-          {toolButton("brush", t("editor.tool.brush"), "editor-tool-brush")}
-          <span className="my-1 h-px w-8 bg-edge" aria-hidden="true" />
-          <button
-            type="button"
-            onClick={() => dispatch({ type: "rotate", delta: -1 })}
-            title={t("editor.rotateCcw")}
-            className="flex h-9 w-9 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
-            data-testid="editor-rotate-ccw"
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3.5 6.5a5 5 0 1 1 1.2 5.4" />
-              <path d="M3.2 3.2v3.3h3.3" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => dispatch({ type: "rotate", delta: 1 })}
-            title={t("editor.rotateCw")}
-            className="flex h-9 w-9 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
-            data-testid="editor-rotate-cw"
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12.5 6.5a5 5 0 1 0-1.2 5.4" />
-              <path d="M12.8 3.2v3.3H9.5" />
-            </svg>
-          </button>
+      <div className="relative grid min-h-16 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-edge/40 px-4">
+        <div className="mr-auto flex shrink-0 items-center gap-1 rounded-lg border border-edge/60 bg-black/10 p-1">
+          <button type="button" aria-label="缩小" onClick={() => setZoom((v) => Math.max(0.25, v / 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-out">−</button>
+          <button type="button" onClick={() => setZoom(1)} className="h-8 min-w-16 rounded px-2 text-xs tabular-nums text-text-secondary hover:bg-panel" title="适应窗口" data-testid="editor-zoom-fit">{Math.round(zoom * 100)}%</button>
+          <button type="button" aria-label="放大" onClick={() => setZoom((v) => Math.min(4, v * 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
         </div>
-
+        <div role="tablist" aria-label="编辑工具" className="flex items-center justify-center" data-testid="editor-toolrail">
+          {toolButton("view", "查看", "editor-tool-view")}
+          {toolButton("crop", "裁剪与旋转", "editor-tool-crop")}
+          {toolButton("adjust", "调整", "editor-tool-adjust")}
+          {toolButton("filters", "滤镜", "editor-tool-filters")}
+          {toolButton("text", "文字", "editor-tool-text")}
+          {toolButton("brush", "画笔", "editor-tool-brush")}
+          {toolButton("metadata", "元数据", "editor-tool-metadata")}
+          {toolButton("output", "导出设置", "editor-tool-output")}
+        </div>
+      </div>
+      <div className="flex min-h-0 flex-1">
         {/* 画布区 */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           {failed ? (
@@ -575,6 +617,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
           ) : (
             <EditorCanvas
               src={src}
+              zoom={zoom}
+              onZoom={(factor) => setZoom((value) => Math.min(4, Math.max(0.25, value * factor)))}
               fallbackSize={fallbackSize}
               recipe={present}
               tool={tool}
@@ -600,17 +644,38 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-edge border-t-accent" />
             </div>
           )}
-        </div>
-
-        {/* 右侧栏：工具选项 + 输出设置 */}
-        <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
-          {/* 工具选项 */}
           {tool === "crop" && cropDraft !== null && (
-            <section data-testid="editor-crop-options">
+            <section className="mx-auto w-full max-w-2xl shrink-0 px-5 pb-5 pt-3 text-center" data-testid="editor-crop-options">
+              <div className="mb-2 flex items-center justify-center gap-4">
+          <button
+            type="button"
+            onClick={() => rotateImage(-1)}
+            title={t("editor.rotateCcw")}
+            className="flex h-9 w-9 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
+            data-testid="editor-rotate-ccw"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3.5 6.5a5 5 0 1 1 1.2 5.4" />
+              <path d="M3.2 3.2v3.3h3.3" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => rotateImage(1)}
+            title={t("editor.rotateCw")}
+            className="flex h-9 w-9 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
+            data-testid="editor-rotate-cw"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12.5 6.5a5 5 0 1 0-1.2 5.4" />
+              <path d="M12.8 3.2v3.3H9.5" />
+            </svg>
+          </button>
+<span className="min-w-12 text-sm tabular-nums text-text-secondary">{present.rotateQuarter * 90}°</span></div>
               <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
                 {t("editor.crop.presets")}
               </h3>
-              <div className="mb-2 flex flex-wrap gap-1" data-testid="editor-crop-presets">
+              <div className="mb-2 flex flex-wrap justify-center gap-2" data-testid="editor-crop-presets">
                 {([
                   ["free", null],
                   ["1:1", 1],
@@ -639,7 +704,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
                 ))}
               </div>
               <p className="mb-2 text-[11px] leading-relaxed text-text-muted">{t("editor.crop.hint")}</p>
-              <div className="flex gap-2">
+              <div className="mx-auto flex max-w-xs gap-2">
                 <button
                   type="button"
                   onClick={applyCropDraft}
@@ -674,6 +739,19 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
             </section>
           )}
 
+        </div>
+
+        {/* 右侧栏：工具选项 + 输出设置 */}
+        {["text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
+          {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
+            setMetadata(value);
+            setExportDraft((draft) => ({ ...draft, author: value.author, copyright: value.copyright, keywords: value.keywords.join(", "), removeGps: value.gpsLat === null && value.gpsLon === null }));
+          }} /> : metadataError ? <div role="alert" className="space-y-3 text-sm text-red-400"><p>{metadataError}</p><button type="button" className="rounded-md border border-edge px-3 py-2 text-text-primary" onClick={() => setMetadataRetry((v) => v + 1)}>重新加载</button></div> : <div className="flex items-center gap-3 text-sm text-text-muted"><span className="h-5 w-5 animate-spin rounded-full border-2 border-edge border-t-accent" />正在读取照片信息…</div>)}
+          {tool === "adjust" && <section className="space-y-6"><h3 className="text-sm font-semibold text-text-primary">光线与色彩</h3>{([['brightness', '亮度'], ['contrast', '对比度'], ['saturation', '饱和度']] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-3 flex justify-between text-xs text-text-secondary">{label}<span className="tabular-nums">{present.adjustments?.[key] ?? 0}</span></span><input type="range" min="-100" max="100" value={present.adjustments?.[key] ?? 0} onPointerDown={handleGestureStart} onPointerUp={handleGestureEnd} onChange={(e) => dispatch({ type: "adjust", patch: { [key]: Number(e.target.value) }, record: gestureSnapshotRef.current === null })} className="w-full accent-[#F0A83C]" data-testid={`editor-adjust-${key}`} /></label>)}<button type="button" className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary" onClick={() => dispatch({ type: "adjust", patch: { brightness: 0, contrast: 0, saturation: 0 } })}>重置调整</button></section>}
+          {tool === "filters" && <section className="space-y-4"><h3 className="text-sm font-semibold text-text-primary">滤镜</h3><div className="grid grid-cols-2 gap-2">{([
+            ["原图", 0, 0, 0], ["鲜明", 5, 15, 25], ["柔和", 8, -15, -10], ["黑白", 0, 10, -100],
+          ] as const).map(([name, brightness, contrast, saturation]) => <button key={name} type="button" onClick={() => dispatch({ type: "adjust", patch: { brightness, contrast, saturation } })} aria-pressed={(present.adjustments?.brightness ?? 0) === brightness && (present.adjustments?.contrast ?? 0) === contrast && (present.adjustments?.saturation ?? 0) === saturation} className="h-20 rounded-lg border border-edge bg-panel text-sm text-text-secondary hover:border-accent aria-pressed:border-accent aria-pressed:bg-accent/10 aria-pressed:text-accent">{name}</button>)}</div></section>}
+          {/* 工具选项 */}
           {tool === "text" && (
             <section data-testid="editor-text-options">
               <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
@@ -799,7 +877,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
           )}
 
           {/* 输出设置 */}
-          <section className="border-t border-edge/60 pt-3" data-testid="editor-output-panel">
+          {tool === "output" && <section className="space-y-2" data-testid="editor-output-panel">
             <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
               {t("editor.output.title")}
             </h3>
@@ -936,52 +1014,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved }: Edit
               </label>
             </div>
 
-            <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-text-secondary">
-              <input
-                type="checkbox"
-                checked={exportDraft.removeGps}
-                onChange={(e) => setExportDraft((d) => ({ ...d, removeGps: e.target.checked }))}
-                className="h-3.5 w-3.5 accent-[#F0A83C]"
-                data-testid="editor-removegps"
-              />
-              {t("editor.output.removeGps")}
-            </label>
-
-            <div className="mt-2 grid grid-cols-2 gap-2">
-              <label className="block">
-                <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.copyright")}</span>
-                <input
-                  type="text"
-                  value={exportDraft.copyright}
-                  onChange={(e) => setExportDraft((d) => ({ ...d, copyright: e.target.value }))}
-                  className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none focus:border-accent"
-                  data-testid="editor-copyright"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.author")}</span>
-                <input
-                  type="text"
-                  value={exportDraft.author}
-                  onChange={(e) => setExportDraft((d) => ({ ...d, author: e.target.value }))}
-                  className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none focus:border-accent"
-                  data-testid="editor-author"
-                />
-              </label>
-            </div>
-            <label className="mt-2 block">
-              <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.keywords")}</span>
-              <input
-                type="text"
-                value={exportDraft.keywords}
-                onChange={(e) => setExportDraft((d) => ({ ...d, keywords: e.target.value }))}
-                placeholder={t("editor.output.keywordsPlaceholder")}
-                className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none placeholder:text-text-muted/60 focus:border-accent"
-                data-testid="editor-keywords"
-              />
-            </label>
-          </section>
-        </aside>
+          </section>}
+        </aside>}
       </div>
 
       {/* 导出确认弹窗 */}

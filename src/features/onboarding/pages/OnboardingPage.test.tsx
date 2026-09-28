@@ -115,7 +115,9 @@ describe("OnboardingPage 向导", () => {
     );
   });
 
-  it("完整流程：走完四步并以正确负载提交设置", async () => {
+  it.each([
+    ["fast", "快速"], ["normal", "普通"], ["accurate", "精确"],
+  ])("完整流程：选择 %s 方案并以正确负载提交设置", async (tier, tierLabel) => {
     renderWizard();
 
     // 目录不再预填（2026-09-28）：手填两目录后才能进下一步
@@ -128,10 +130,19 @@ describe("OnboardingPage 向导", () => {
     expect(await screen.findByText("目录布局（固定）")).toBeDefined();
     expect(screen.getByText("{相册创建年}\\{相册创建月}\\{相册目录}")).toBeInTheDocument();
     expect(screen.queryByLabelText("目录命名模板")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
 
     // 步骤2 → 步骤3：选"仅语义搜索"
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     fireEvent.click(await screen.findByText("仅语义搜索"));
+    expect(screen.getByRole("radio", { name: /^普通/ })).toBeChecked();
+    fireEvent.click(screen.getByRole("radio", { name: new RegExp(`^${tierLabel}`) }));
+    // 暂时关闭 AI 不丢失所选方案，重新开启时保留。
+    fireEvent.click(screen.getByText("全部关闭"));
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("仅语义搜索"));
+    expect(screen.getByRole("radio", { name: new RegExp(`^${tierLabel}`) })).toBeChecked();
     expect(screen.getByText("仅语义搜索").closest("button")?.getAttribute("aria-pressed")).toBe(
       "true",
     );
@@ -139,6 +150,8 @@ describe("OnboardingPage 向导", () => {
     // 步骤3 → 步骤4：确认摘要后提交
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     expect(await screen.findByText("开始使用 Photo Hub")).toBeDefined();
+    expect(screen.queryByText("目录布局（固定）")).not.toBeInTheDocument();
+    expect(screen.getByText(tierLabel)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "开始使用 Photo Hub" }));
 
     await waitFor(() => expect(ipcMock).toHaveBeenCalledWith("settings_set", expect.anything()));
@@ -157,10 +170,13 @@ describe("OnboardingPage 向导", () => {
     expect(libraries[0]["dirTemplate"]).toBeUndefined();
     expect(libraries[0]["importSubdir"]).toBeUndefined();
     expect(libraries[0]["configured"]).toBe(true);
+    expect(libraries[0]["aiQualityTier"]).toBe(tier);
     const ai = settings["ai"] as Record<string, unknown>;
     expect(ai["enableClip"]).toBe(true);
     expect(ai["enableFace"]).toBe(false);
     expect(ai["enableSceneTags"]).toBe(false);
+    expect(ai["qualityTier"]).toBe(tier);
+    expect((settings["import"] as Record<string, unknown>)["notifyMilestones"]).toBeUndefined();
     // store 本地状态同步（守卫放行依赖它）
     expect(useSettingsStore.getState().settings.onboardingCompleted).toBe(true);
     expect(useSettingsStore.getState().settings.activeLibraryId).toBe(

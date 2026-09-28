@@ -20,6 +20,8 @@ export interface Library {
   streams: number;
   /** 配置链是否已完成（未完成的库打开时引导回向导补完） */
   configured: boolean;
+  /** 独立照片库的 AI 档位；缺省仅用于旧配置迁移。 */
+  aiQualityTier?: AiQualityTier;
 }
 
 export interface Settings {
@@ -31,7 +33,6 @@ export interface Settings {
     promptOnDevice: boolean;
     skipImported: boolean;
     duplicatePolicy: "skip" | "rename" | "ask";
-    notifyMilestones: boolean;
   };
   /** 画廊展示（M3+）：RAW+JPG 同 pairId 合并为一张卡（优先 JPG 缩略图 + RAW+JPG 角标） */
   gallery: {
@@ -88,7 +89,6 @@ export const DEFAULT_SETTINGS: Settings = {
     promptOnDevice: true,
     skipImported: true,
     duplicatePolicy: "skip",
-    notifyMilestones: true,
   },
   gallery: {
     mergeRawJpg: true,
@@ -164,6 +164,26 @@ function mergeDeep<T>(base: T, patch: unknown): T {
 // 供引导向导等处复用（草稿编辑 → 局部 patch 合并）
 export { clone, mergeDeep };
 
+/** ai.qualityTier 仅是当前库的投影；切库时从目标库恢复，修改时只写当前库。 */
+export function normalizeLibraryQuality(next: Settings, previous?: Settings): Settings {
+  const result = clone(next);
+  for (const lib of result.libraries) {
+    const old = previous?.libraries.find((item) => item.id === lib.id);
+    const legacyTier = previous
+      ? old ? previous.ai.qualityTier : "normal"
+      : result.ai.qualityTier;
+    lib.aiQualityTier ??= old?.aiQualityTier ?? legacyTier;
+  }
+  const active = result.libraries.find((lib) => lib.id === result.activeLibraryId);
+  if (active) {
+    if (previous && result.activeLibraryId === previous.activeLibraryId && result.ai.qualityTier !== previous.ai.qualityTier) {
+      active.aiQualityTier = result.ai.qualityTier;
+    }
+    result.ai.qualityTier = active.aiQualityTier ?? "normal";
+  }
+  return result;
+}
+
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: clone(DEFAULT_SETTINGS),
   loaded: false,
@@ -173,7 +193,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     try {
       const remote = await ipc<Settings>("settings_get");
       // 远端可能是旧 schema，用默认值兜底合并，避免字段缺失
-      set({ settings: mergeDeep(clone(DEFAULT_SETTINGS), remote), loaded: true });
+      set({ settings: normalizeLibraryQuality(mergeDeep(clone(DEFAULT_SETTINGS), remote)), loaded: true });
     } catch {
       // Rust 命令由并行任务实现，可能尚不存在；绝不能抛错
       set({ settings: clone(DEFAULT_SETTINGS), loaded: true });
@@ -181,10 +201,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   save: async (next: Settings) => {
+    const normalized = normalizeLibraryQuality(next, get().settings);
     // 先更新本地，再尝试持久化；失败时本地仍保持新值
-    set({ settings: clone(next) });
+    set({ settings: normalized });
     try {
-      await ipc("settings_set", { settings: next });
+      await ipc("settings_set", { settings: normalized });
     } catch (e) {
       // 持久化失败不阻断 UI，但必须在控制台留痕（便于 DevTools 排查）
       console.error("settings_set failed:", e);
@@ -192,7 +213,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   update: (partial: DeepPartial<Settings>) => {
-    set({ settings: mergeDeep(clone(get().settings), partial) });
+    set({ settings: normalizeLibraryQuality(mergeDeep(clone(get().settings), partial), get().settings) });
   },
 
   setLibraryChosen: (chosen) => {
@@ -213,7 +234,7 @@ export async function initSettings(): Promise<void> {
   try {
     await listen<Settings>("settings://changed", (event) => {
       useSettingsStore.setState({
-        settings: mergeDeep(clone(DEFAULT_SETTINGS), event.payload),
+        settings: normalizeLibraryQuality(mergeDeep(clone(DEFAULT_SETTINGS), event.payload)),
       });
     });
   } catch {

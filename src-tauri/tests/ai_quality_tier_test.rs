@@ -138,10 +138,10 @@ fn fingerprint_linkage_matrix() {
         semantic_params_fingerprint(&normal),
         "normal→accurate 换 fp16 件 → 语义指纹必变 → 重建语义"
     );
-    assert_eq!(
+    assert_ne!(
         face_params_fingerprint(&normal),
         legacy_face_fingerprint(&normal),
-        "normal 人脸指纹必须与升级前一致"
+        "人脸质量规则升级必须重建旧的低质量归类"
     );
 
     // 联动矩阵：切换方向 × 受影响通道
@@ -220,7 +220,10 @@ fn ready_follows_current_tier_and_recovers_on_switch_back() {
 
     // 切 fast：scrfd-10g 缺 → 人脸 not ready；语义仍 int8 → ready
     set_tier(QualityTier::Fast);
-    assert!(!state.ai.face_models_ready(), "缺 scrfd-10g → 人脸 not ready");
+    assert!(
+        !state.ai.face_models_ready(),
+        "缺 scrfd-10g → 人脸 not ready"
+    );
     assert!(state.ai.semantic_ready(), "fast 语义同 int8 → 仍 ready");
 
     // 切 accurate：fp16 双塔缺 → 语义 not ready；人脸同 34G 件 → ready
@@ -234,7 +237,10 @@ fn ready_follows_current_tier_and_recovers_on_switch_back() {
     assert!(state.ai.face_models_ready());
 
     // 装齐 fast/accurate 件后全部档位 ready
-    install_fake_models(&models, &["scrfd-10g", "siglip2-visual-fp16", "siglip2-text-fp16"]);
+    install_fake_models(
+        &models,
+        &["scrfd-10g", "siglip2-visual-fp16", "siglip2-text-fp16"],
+    );
     for tier in [
         QualityTier::Fast,
         QualityTier::Normal,
@@ -255,7 +261,8 @@ fn write_jpeg(dir: &Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
         image::Rgb([((x * 7) % 256) as u8, ((y * 13) % 256) as u8, 128])
     });
     let path = dir.join(name);
-    img.save_with_format(&path, image::ImageFormat::Jpeg).unwrap();
+    img.save_with_format(&path, image::ImageFormat::Jpeg)
+        .unwrap();
     path
 }
 
@@ -277,7 +284,8 @@ fn tier_file_count(db_dir: &Path, tier: &str) -> usize {
 fn detection_source_accurate_prefers_2048_with_512_fallback() {
     let src_dir = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let tiered = |p: &Path| ai::face::detection_source_tiered(db_dir.path(), p, QualityTier::Accurate);
+    let tiered =
+        |p: &Path| ai::face::detection_source_tiered(db_dir.path(), p, QualityTier::Accurate);
 
     // ① 全未命中 → 同步生成 2048（精准档吃显影成本，不再落 512）
     let a = write_jpeg(src_dir.path(), "a.jpg", 800, 600);
@@ -297,17 +305,17 @@ fn detection_source_accurate_prefers_2048_with_512_fallback() {
     let before2048 = tier_file_count(db_dir.path(), "2048");
     let got = tiered(&c).expect("2048 命中");
     assert_eq!(tier_dir_of(&got), "2048");
-    assert_eq!(tier_file_count(db_dir.path(), "512"), before512, "不得顺手生成 512");
+    assert_eq!(
+        tier_file_count(db_dir.path(), "512"),
+        before512,
+        "不得顺手生成 512"
+    );
     assert_eq!(tier_file_count(db_dir.path(), "2048"), before2048);
 
     // ④ fast/normal 维持既有策略（全未命中生成最便宜 512 档）
     let d = write_jpeg(src_dir.path(), "d.jpg", 800, 600);
-    let got = ai::face::detection_source_tiered(
-        db_dir.path(),
-        &d,
-        QualityTier::Fast,
-    )
-    .expect("fast 全未命中应生成 512");
+    let got = ai::face::detection_source_tiered(db_dir.path(), &d, QualityTier::Fast)
+        .expect("fast 全未命中应生成 512");
     assert_eq!(tier_dir_of(&got), "512", "fast 维持 512 生成: {got}");
 
     // ⑤ 源不存在 → None
@@ -358,23 +366,21 @@ fn asset_row(path: &str) -> db::AssetRow {
 }
 
 fn task_rows(db: &db::Db, kind: &str) -> i64 {
-    db.0
-        .query_row(
-            "SELECT COUNT(*) FROM index_tasks WHERE kind = ?1",
-            [kind],
-            |r| r.get(0),
-        )
-        .unwrap()
+    db.0.query_row(
+        "SELECT COUNT(*) FROM index_tasks WHERE kind = ?1",
+        [kind],
+        |r| r.get(0),
+    )
+    .unwrap()
 }
 
 fn indexed_flag(db: &db::Db, column: &str) -> i64 {
-    db.0
-        .query_row(
-            &format!("SELECT COUNT(*) FROM assets WHERE {column} IS NOT NULL"),
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
+    db.0.query_row(
+        &format!("SELECT COUNT(*) FROM assets WHERE {column} IS NOT NULL"),
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
 }
 
 /// 切档后自动重建的通道集合（check_params_and_rebuild 的指纹联动）：
@@ -409,7 +415,8 @@ fn tier_switch_rebuilds_expected_channel_set() {
     }
     let db = common::open_db(&db_dir);
     for n in 1..=3 {
-        db.insert_asset(&asset_row(&format!("X:/p/n{n}.jpg"))).unwrap();
+        db.insert_asset(&asset_row(&format!("X:/p/n{n}.jpg")))
+            .unwrap();
     }
     db.set_ai_indexed(1).unwrap();
     db.set_face_indexed(1).unwrap();
@@ -452,8 +459,7 @@ fn tier_switch_rebuilds_expected_channel_set() {
         [],
     )
     .unwrap();
-    db.0
-        .execute("DELETE FROM index_tasks WHERE kind IN ('ai', 'face')", [])
+    db.0.execute("DELETE FROM index_tasks WHERE kind IN ('ai', 'face')", [])
         .unwrap();
     ipc::indexing::check_params_and_rebuild(&state, &db_dir, &tier_settings("accurate"));
     assert_eq!(
@@ -476,10 +482,7 @@ fn tier_switch_rebuilds_expected_channel_set() {
         "semantic={}",
         semantic_params_fingerprint(&accurate)
     )));
-    assert!(content.contains(&format!(
-        "face={}",
-        face_params_fingerprint(&accurate)
-    )));
+    assert!(content.contains(&format!("face={}", face_params_fingerprint(&accurate))));
 }
 
 // ---------------------------------------------------------------------------
@@ -569,16 +572,18 @@ fn fp16_semantic_calibration_and_throughput() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("APPDATA")
-                .map(|appdata| {
-                    std::path::PathBuf::from(appdata).join(r"com.smartphoto.app\models")
-                })
+                .map(|appdata| std::path::PathBuf::from(appdata).join(r"com.smartphoto.app\models"))
                 .expect("APPDATA")
         });
     let db_dir = std::env::var("SMARTPHOTO_FP16_LIBRARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(r"I:\SmartPhoto\主库"));
 
-    for id in ["siglip2-visual-fp16", "siglip2-text-fp16", "siglip2-tokenizer"] {
+    for id in [
+        "siglip2-visual-fp16",
+        "siglip2-text-fp16",
+        "siglip2-tokenizer",
+    ] {
         assert!(
             models.join(format!("{id}.onnx")).is_file(),
             "{id} 未落位（{}）——先在设置页下载或手动放置",
@@ -600,7 +605,15 @@ fn fp16_semantic_calibration_and_throughput() {
         Ok("normal") => QualityTier::Normal,
         _ => QualityTier::Accurate,
     };
-    eprintln!("标定档位：{}（{}）", tier.as_str(), if matches!(tier, QualityTier::Accurate) { "fp16" } else { "int8" });
+    eprintln!(
+        "标定档位：{}（{}）",
+        tier.as_str(),
+        if matches!(tier, QualityTier::Accurate) {
+            "fp16"
+        } else {
+            "int8"
+        }
+    );
     manager.set_ai_params(ai::AiIndexParams {
         quality_tier: tier,
         use_gpu,
@@ -609,14 +622,13 @@ fn fp16_semantic_calibration_and_throughput() {
     let embedder: std::sync::Arc<dyn SemanticEmbedder> = std::sync::Arc::new(manager);
 
     let db = common::open_db(&db_dir);
-    let paths: Vec<String> = db
-        .0
-        .prepare("SELECT path FROM assets WHERE kind IN ('photo','raw') ORDER BY id")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(0))
-        .unwrap()
-        .flatten()
-        .collect();
+    let paths: Vec<String> =
+        db.0.prepare("SELECT path FROM assets WHERE kind IN ('photo','raw') ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .flatten()
+            .collect();
     assert!(!paths.is_empty(), "真库无照片资产");
     eprintln!("标定库：{} 张（{}）", paths.len(), db_dir.display());
 
@@ -645,7 +657,13 @@ fn fp16_semantic_calibration_and_throughput() {
     }
 
     // —— 分数带：查询嵌入 vs 图像向量 cos ——
-    let absurd = ["手术台", "无人机航拍", "税务审计报表", "深海钻井平台", "考古发掘现场"];
+    let absurd = [
+        "手术台",
+        "无人机航拍",
+        "税务审计报表",
+        "深海钻井平台",
+        "考古发掘现场",
+    ];
     let content = ["猫", "狗", "海边", "日落", "人像"];
     let band = |label: &str, words: &[&str]| {
         for q in words {

@@ -11,7 +11,7 @@ interface Props {
 const DUPLICATE_OPTIONS: OnboardingDraft["duplicatePolicy"][] = ["skip", "rename", "ask"];
 
 /** 步骤 2：整理规则——目录布局固定（时间/相册+平铺，2026-09-28 定案不再可配置），
- *  仅收集查重策略与里程碑通知偏好 */
+ *  仅收集查重策略 */
 export default function ImportSchemeStep({ draft, onChange }: Props) {
   const { t } = useTranslation();
 
@@ -19,9 +19,9 @@ export default function ImportSchemeStep({ draft, onChange }: Props) {
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1.5">
         <p className="text-sm font-medium text-text-primary">{t("onboarding.scheme.layout")}</p>
-        <div className="rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-secondary">
+        <p className="text-sm text-text-secondary">
           {FIXED_ALBUM_LAYOUT}
-        </div>
+        </p>
         <p className="text-xs text-text-muted">{t("onboarding.scheme.layoutNote")}</p>
         <p className="text-xs text-text-muted">{t("onboarding.scheme.storageNote")}</p>
       </div>
@@ -45,15 +45,6 @@ export default function ImportSchemeStep({ draft, onChange }: Props) {
         ))}
       </fieldset>
 
-      <label className="flex cursor-pointer items-center gap-2.5 text-sm text-text-secondary">
-        <input
-          type="checkbox"
-          checked={draft.notifyMilestones}
-          onChange={(e) => onChange({ notifyMilestones: e.target.checked })}
-          className="h-3.5 w-3.5 accent-[#F0A83C]"
-        />
-        {t("onboarding.scheme.notify")}
-      </label>
     </div>
   );
 }

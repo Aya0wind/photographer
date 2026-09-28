@@ -430,9 +430,10 @@ describe("相册页两区：手工相册 + 智能相册", () => {
       "青海湖 2026",
       "空相册",
     ]);
+    expect(screen.getAllByTestId("albums-manual-created")[0]).toHaveTextContent("2026/09/01 创建");
     expect(screen.getAllByTestId("albums-manual-count").map((c) => c.textContent)).toEqual([
-      "12",
-      "0",
+      "12 张",
+      "0 张",
     ]);
     // 未指定封面且未取到首张 → 占位图形
     expect(screen.getAllByTestId("albums-manual-cover-fallback")).toHaveLength(2);

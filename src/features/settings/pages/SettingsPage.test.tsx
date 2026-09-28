@@ -1,3 +1,4 @@
+import { useImportStore } from "@/stores/importStore";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -144,6 +145,7 @@ beforeEach(() => {
   indexKickNowMock.mockReset().mockResolvedValue(undefined);
   burstStatsMock.mockReset().mockResolvedValue(null);
   useAiStore.getState().resetForTests();
+  useImportStore.setState({ activeJobs: {} });
   localStorage.clear();
 });
 
@@ -419,22 +421,10 @@ describe("AI tab（M4 实化）", () => {
     expect(screen.getByTestId("ai-model-group-face")).toHaveAttribute("data-installed", "0");
     expect(screen.getByText("人脸识别模型")).toBeInTheDocument();
 
-    // 逐模型行：名称/tier 徽章/状态
-    const lines = within(screen.getByTestId("ai-group-models-semantic")).getAllByText(
-      /语义 · /,
-    );
-    expect(lines).toHaveLength(3);
-    expect(
-      within(screen.getByTestId("ai-group-models-face")).getByText("人脸 · 检测"),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("ai-model-row-siglip2-visual")).toHaveAttribute("data-tier", "normal");
-    expect(screen.getByTestId("ai-model-row-siglip2-tokenizer")).toHaveAttribute("data-tier", "shared");
+    expect(screen.queryByTestId("ai-model-row-siglip2-visual")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ai-group-delete-semantic")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-group-download-face")).toHaveTextContent("下载");
 
-    // 单模型操作：已装行删除；未装行下载；组级「全部下载」
-    expect(screen.getByTestId("ai-model-delete-siglip2-visual")).toBeInTheDocument();
-    expect(screen.getByTestId("ai-model-download-scrfd")).toBeInTheDocument();
-    expect(screen.getByTestId("ai-model-download-arcface")).toBeInTheDocument();
-    expect(screen.getByTestId("ai-group-download-face")).toHaveTextContent("全部下载");
   });
 
   it("第三包选片辅助（C 阶段）：feature=selection 模型渲染独立组卡（整组状态）", async () => {
@@ -482,7 +472,7 @@ describe("AI tab（M4 实化）", () => {
     await waitFor(() =>
       expect(screen.getByTestId("ai-group-badge-face")).toHaveTextContent("下载中"),
     );
-    expect(screen.getByTestId("ai-model-cancel-scrfd")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-group-cancel-face")).toBeInTheDocument();
 
     // 事件进度（节流 1s）聚合到组级：scrfd 1MB/2MB + arcface 2MB/4MB = 3MB/6MB
     act(() => {
@@ -502,7 +492,7 @@ describe("AI tab（M4 实化）", () => {
     expect(await screen.findByTestId("ai-group-progress-face")).toBeInTheDocument();
     expect(screen.getByTestId("ai-model-group-face")).toHaveTextContent("3.0 MB / 6.0 MB");
     // 组内单模型行进度小字仍在
-    expect(screen.getByTestId("ai-model-group-face")).toHaveTextContent("1.0 MB / 2.0 MB");
+    expect(screen.queryByTestId("ai-model-row-scrfd")).not.toBeInTheDocument();
   });
 
   it("单模型取消：行按钮取消该在途下载", async () => {
@@ -522,9 +512,10 @@ describe("AI tab（M4 实化）", () => {
     renderSettingsPage();
     await gotoAiTab(user);
 
-    await user.click(await screen.findByTestId("ai-model-cancel-scrfd"));
-    await waitFor(() => expect(aiModelCancelMock).toHaveBeenCalledTimes(1));
+    await user.click(await screen.findByTestId("ai-group-cancel-face"));
+    await waitFor(() => expect(aiModelCancelMock).toHaveBeenCalledTimes(2));
     expect(aiModelCancelMock).toHaveBeenCalledWith("scrfd");
+    expect(aiModelCancelMock).toHaveBeenCalledWith("arcface");
   });
 
   it("单模型删除：两步确认（可取消）；确认后删除该模型并即时刷新", async () => {
@@ -548,22 +539,22 @@ describe("AI tab（M4 实化）", () => {
     expect(await screen.findByTestId("ai-group-badge-semantic")).toHaveTextContent("已就绪");
 
     // 取消路径：不发删除
-    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
-    await user.click(screen.getByTestId("ai-model-delete-cancel-siglip2-visual"));
-    expect(screen.queryByTestId("ai-model-delete-confirm-siglip2-visual")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("ai-group-delete-semantic"));
+    await user.click(screen.getByTestId("ai-group-delete-cancel-semantic"));
+    expect(screen.queryByTestId("ai-group-delete-confirm-semantic")).not.toBeInTheDocument();
     expect(aiModelDeleteMock).not.toHaveBeenCalled();
 
     // 确认路径：只删该模型，结算后刷新快照 3→2
-    await user.click(screen.getByTestId("ai-model-delete-siglip2-visual"));
-    await user.click(screen.getByTestId("ai-model-delete-confirm-siglip2-visual"));
+    await user.click(screen.getByTestId("ai-group-delete-semantic"));
+    await user.click(screen.getByTestId("ai-group-delete-confirm-semantic"));
     await waitFor(() => expect(aiModelDeleteMock).toHaveBeenCalledWith("siglip2-visual"));
 
     // 不切选项卡：组卡即时翻「已安装 2/3」
     await waitFor(() => {
-      expect(screen.getByTestId("ai-model-group-semantic")).toHaveAttribute("data-installed", "2");
+      expect(screen.getByTestId("ai-model-group-semantic")).toHaveAttribute("data-installed", "0");
     });
-    expect(screen.getByTestId("ai-group-badge-semantic")).toHaveTextContent("已安装 2/3");
-    expect(screen.getByTestId("ai-model-download-siglip2-visual")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-group-badge-semantic")).toHaveTextContent("未安装");
+    expect(screen.getByTestId("ai-group-download-semantic")).toBeInTheDocument();
   });
 
   it("组级全部下载只发起未装模型（已装不重复发起）；部分安装显示 N/M", async () => {
@@ -577,8 +568,8 @@ describe("AI tab（M4 实化）", () => {
     renderSettingsPage();
     await gotoAiTab(user);
 
-    expect(await screen.findByTestId("ai-group-badge-semantic")).toHaveTextContent("已安装 1/3");
-    expect(screen.getByTestId("ai-group-download-semantic")).toHaveTextContent("全部下载");
+    expect(await screen.findByTestId("ai-group-badge-semantic")).toHaveTextContent("未安装完整");
+    expect(screen.getByTestId("ai-group-download-semantic")).toHaveTextContent("下载");
 
     await user.click(screen.getByTestId("ai-group-download-semantic"));
     await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
@@ -599,10 +590,10 @@ describe("AI tab（M4 实化）", () => {
     await gotoAiTab(user);
 
     expect(await screen.findByTestId("ai-group-badge-semantic")).toHaveTextContent("部分失败");
-    expect(screen.getByTestId("ai-group-failed-semantic")).toHaveTextContent("全部重试");
+    expect(screen.getByTestId("ai-group-failed-hint-semantic")).toHaveTextContent("重试");
     expect(screen.getByTestId("ai-group-download-semantic")).toHaveTextContent("重试下载");
     // 失败行按钮文案为「重试」
-    expect(screen.getByTestId("ai-model-download-siglip2-tokenizer")).toHaveTextContent("重试");
+    expect(screen.queryByTestId("ai-model-download-siglip2-tokenizer")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("ai-group-download-semantic"));
     // 只重试未装的 tokenizer；visual/text 已装不发起
@@ -748,6 +739,20 @@ describe("AI tab：索引状态与操作", () => {
     expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("已完成 117");
     expect(screen.getByTestId("index-count-exif")).toHaveTextContent("待处理 0");
     expect(screen.getByTestId("index-count-ai")).toHaveTextContent("45 / 120");
+  });
+
+  it("导入尚未结束时，索引追上当前照片显示等待新照片", async () => {
+    indexStatusMock.mockResolvedValue(statusOf({ thumb: { pending: 0, done: 120 } }));
+    useImportStore.setState({ activeJobs: {
+      7: { jobId: 7, status: "running", totalFiles: 200, totalBytes: 2000,
+        doneFiles: 120, doneBytes: 1200, bytesPerSec: 100, currentFile: "photo.jpg" },
+    } });
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "ai");
+    expect(await screen.findByTestId("index-kick-thumb")).toHaveTextContent("等待新照片");
+    act(() => useImportStore.setState({ activeJobs: {} }));
+    expect(screen.getByTestId("index-kick-thumb")).toHaveTextContent("已完成");
   });
 
   it("ai 行显示失败数（任务账 failed>0 时可见，失败不可再隐藏）", async () => {

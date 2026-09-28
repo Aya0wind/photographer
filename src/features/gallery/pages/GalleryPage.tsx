@@ -4,26 +4,20 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import {
-  assetsByIds,
   assetsCount,
   assetsPage,
   assetTrashMove,
   cullSessionCreate,
   isIpcAvailable,
-  smartViewDelete,
-  smartViewList,
   type AssetDto,
-  type AssetFilters,
-  type SmartViewDto,
 } from "@/ipc/api";
 import { collectAssetIdsByFilters } from "@/features/culling/lib/cullingCore";
 import { useCullingStore } from "@/features/culling/cullingStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 import {
   groupAssetsByDate,
   formatDateLabel,
 } from "../lib/assetGroups";
-import { mergeRawJpgCards } from "../lib/mergeRawJpg";
+import { usePhotoCards } from "../lib/usePhotoCards";
 import { collapseBursts } from "../lib/burstStacks";
 import {
   gallerySnapshot,
@@ -44,7 +38,6 @@ import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import LrStagingDialog from "../components/LrStagingDialog";
 import SelectionBar from "../components/SelectionBar";
-import SmartViewsMenu from "../components/SmartViewsMenu";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
@@ -56,7 +49,6 @@ import {
   buildChips,
   buildFilters,
   hasActiveFilters,
-  inputsFromFilters,
   parseInputs,
   serializeInputs,
   EMPTY_INPUTS,
@@ -74,7 +66,7 @@ import { motionInitial, useMotionOn } from "@/lib/motion";
  * - 日期组头折叠（AssetGrid）
  * - 多选（M4.5）：选择按钮 / Ctrl+点击 / 长按进入；浮动操作条（收藏/旗标/分享/取消），
  *   Esc 退出；单选=多选下的 N=1
- * - URL 协议：?mode=semantic&q=…（语义直达）、?kind=photo|raw（预置类型）
+ * - URL 协议：?mode=semantic&q=…（语义直达）、?format=JPG|NEF…（预置格式）
  * - 快照缓存：仅默认态落盘（筛选/语义态不落）；? 键快捷键速查见 AppShell
  */
 
@@ -149,12 +141,12 @@ export default function GalleryPage() {
   }
 
   const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
-  const advancedChipCount = chips.filter((chip) => !["favorite", "kind", "orientation", "gps"].includes(chip.key)).length;
+  const advancedChipCount = chips.filter((chip) => !["favorite", "orientation", "gps", "from", "to"].includes(chip.key) && !chip.key.startsWith("format:")).length;
 
-  // --- URL 协议（全局搜索框 / 类型筛选直达）：?mode=semantic&q= / ?kind= ----------------
+  // --- URL 协议（全局搜索框 / 格式筛选直达）：?mode=semantic&q= / ?format= ----------------
   const urlQuery = searchParams.get("q") ?? "";
   const appliedUrlQueryRef = useRef<string | null>(null);
-  const appliedUrlKindRef = useRef<string | null>(null);
+  const appliedUrlFormatRef = useRef<string | null>(null);
   useEffect(() => {
     const urlMode = searchParams.get("mode");
     if (urlMode === "semantic" && urlQuery !== "" && appliedUrlQueryRef.current !== urlQuery) {
@@ -168,19 +160,13 @@ export default function GalleryPage() {
       appliedUrlQueryRef.current = null;
       semantic.reset();
     }
-    const urlKind = searchParams.get("kind");
-    if (urlKind === "photo" || urlKind === "raw") {
-      if (appliedUrlKindRef.current !== urlKind) {
-        appliedUrlKindRef.current = urlKind;
-        setInputs((prev) => (prev.kind === urlKind ? prev : { ...prev, kind: urlKind }));
-      }
-    } else if (urlKind === null && appliedUrlKindRef.current !== null) {
-      // 参数消失（同路径无参导航，如侧栏图库链接）：同步撤筛选——
-      // 此前只清 ref 不清 state，?kind 进入的筛选会永久滞留且 UI 无从察觉。
-      // 清回规范空值 "all"（chips/筛选面板以 !== "all" 判定；置 undefined 会
-      // 产生幽灵 chip 且类型不合法）
-      appliedUrlKindRef.current = null;
-      setInputs((prev) => (prev.kind === "all" ? prev : { ...prev, kind: "all" }));
+    const urlFormat = searchParams.get("format");
+    if (urlFormat && appliedUrlFormatRef.current !== urlFormat) {
+      appliedUrlFormatRef.current = urlFormat;
+      setInputs((prev) => ({ ...prev, formats: [urlFormat] }));
+    } else if (!urlFormat && appliedUrlFormatRef.current !== null) {
+      appliedUrlFormatRef.current = null;
+      setInputs((prev) => ({ ...prev, formats: [] }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, urlQuery]);
@@ -359,13 +345,10 @@ export default function GalleryPage() {
   }, [selecting, exitSelection]);
 
   // --- 展示分组与查看器 ---------------------------------------------------------------
-  const mergeEnabled = useSettingsStore((s) => s.settings.gallery?.mergeRawJpg ?? true);
-  const { cards, badges } = useMemo(
-    () => mergeRawJpgCards(assets, mergeEnabled),
-    [assets, mergeEnabled],
-  );
+  const { cards, badges } = usePhotoCards(assets);
+  const semanticCards = usePhotoCards(semantic.assets);
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
-  const semanticGroups = useMemo(() => groupAssetsByDate(semantic.assets), [semantic.assets]);
+  const semanticGroups = useMemo(() => groupAssetsByDate(semanticCards.cards), [semanticCards.cards]);
 
   // 连拍堆叠折叠（M6）：仅画廊资产管线（语义结果不折叠）；查看器/胶片条仍用
   // 未折叠全量组（点击堆叠卡打开封面，胶片条天然顺序翻完整组）。折叠在
@@ -386,7 +369,7 @@ export default function GalleryPage() {
   // 查看器/选中查找用全量组；网格/视口/吸顶用折叠展示组
   const viewerGroups = semanticMode ? semanticGroups : groups;
   const activeGroups = semanticMode ? semanticGroups : displayGroups;
-  const { viewer, openAsset, closeViewer, navigateTo } = useAssetViewer(viewerGroups);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups, semanticMode ? semantic.assets : assets);
   // 预览靠近已加载末尾时提前补页，让跨日期连续翻页也能越过分页边界。
   useEffect(() => {
     if (semanticMode || !viewer || !hasMoreRef.current) return;
@@ -501,26 +484,6 @@ export default function GalleryPage() {
     [],
   );
 
-  /** 版本切换（B2 查看器版本区）：成员在已加载窗口内直接换 asset；不在（如被
-   *  groupRole 过滤滤掉）时经 assets_by_ids 取回补进窗口，再走 URL 协议换 asset */
-  const handleVersionSelect = useCallback(
-    (assetId: number) => {
-      const known = viewerGroups.flatMap((g) => g.assets).find((a) => a.id === assetId);
-      if (known !== undefined) {
-        openAsset(known);
-        return;
-      }
-      void assetsByIds([assetId]).then((list) => {
-        const asset = list.find((a) => a.id === assetId);
-        if (asset === undefined) return;
-        assetsRef.current = [asset, ...assetsRef.current];
-        setAssets(assetsRef.current);
-        openAsset(asset);
-      });
-    },
-    [openAsset, viewerGroups],
-  );
-
   /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
   const [trashConfirm, setTrashConfirm] = useState<{ ids: number[] } | null>(null);
   const requestTrashMove = useCallback((targets: AssetDto[]) => {
@@ -538,12 +501,6 @@ export default function GalleryPage() {
     if (selecting) exitSelection();
     persistSnapshot();
   }
-
-  // 智能视图（B1）：清单挂载拉一次 + 面板保存成功后刷新
-  const [smartViews, setSmartViews] = useState<SmartViewDto[]>([]);
-  const refreshSmartViews = useCallback(() => {
-    void smartViewList().then(setSmartViews);
-  }, []);
 
   // --- 「从此筛选选片」（Culling V1）：当前结果资产 id 快照开会话 ---------------------
   // 语义态直接取内存结果；默认/筛选态现有 API 只 keyset 分页——按查询参数循环
@@ -573,31 +530,6 @@ export default function GalleryPage() {
       setCullBusy(false);
     }
   }
-  useEffect(() => {
-    refreshSmartViews();
-  }, [refreshSmartViews]);
-  const applySmartView = useCallback(
-    (view: SmartViewDto) => {
-      let filters: AssetFilters = {};
-      try {
-        filters = JSON.parse(view.filtersJson) as AssetFilters;
-      } catch {
-        filters = {}; // 脏数据兜底：反解失败退回「全部资产」
-      }
-      setSemanticGateNotice(false);
-      semantic.reset();
-      setInputs(inputsFromFilters(filters));
-    },
-    [semantic],
-  );
-  const deleteSmartView = useCallback(
-    async (view: SmartViewDto) => {
-      await smartViewDelete(view.id);
-      refreshSmartViews();
-    },
-    [refreshSmartViews],
-  );
-
   // 三档尺寸（justify 行高）
   const [tileSize, setTileSize] = useGalleryTileSize();
 
@@ -701,8 +633,11 @@ export default function GalleryPage() {
             </svg>
           </button>
 
-          {/* 已存视图（B1）：点击应用（filters 反解套用）+ 逐项 × 删除确认 */}
-          <SmartViewsMenu views={smartViews} onApply={applySmartView} onDelete={(v) => void deleteSmartView(v)} />
+
+          <button type="button" onClick={() => navigate("/import")} className="flex h-8 shrink-0 items-center gap-2 rounded-md border border-accent/60 bg-accent/10 px-3 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-accent" data-testid="gallery-import">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" /></svg>
+            {t("nav.import")}
+          </button>
 
           {/* 从此筛选选片（Culling V1）：当前结果 id 快照开会话（语义态取内存结果） */}
           <div className="flex shrink-0 items-center gap-1.5">
@@ -710,7 +645,7 @@ export default function GalleryPage() {
               type="button"
               onClick={() => void startCullingFromFilter()}
               disabled={cullBusy || (semanticMode ? semantic.assets.length === 0 : (totalCount ?? assets.length) === 0)}
-              className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-8 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
               data-testid="gallery-cull-start"
               data-busy={cullBusy}
             >
@@ -774,7 +709,7 @@ export default function GalleryPage() {
         )}
 
         {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onSmartViewSaved={refreshSmartViews} />}
+        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly />}
 
         {/* 激活条件 chips */}
         {!semanticMode && (
@@ -857,7 +792,7 @@ export default function GalleryPage() {
               onViewportChange={handleViewportChange}
               layout="justify"
               tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
-              badges={semanticMode ? undefined : badges}
+              badges={semanticMode ? semanticCards.badges : badges}
               scores={semanticMode ? semantic.scores : undefined}
               burstBadges={semanticMode ? undefined : burstBadges}
             />
@@ -1001,7 +936,7 @@ export default function GalleryPage() {
           onNavigate={navigateTo}
           onClose={closeViewer}
           onAssetPatched={handleAssetPatched}
-          onVersionSelect={handleVersionSelect}
+          onVersionSelect={selectVersion}
         />
       )}
     </div>

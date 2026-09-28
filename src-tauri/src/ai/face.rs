@@ -565,14 +565,62 @@ impl ModelManager {
         let faces = detect_faces(self, img)?;
         let mut out = Vec::with_capacity(faces.len().min(MAX_FACES_PER_IMAGE));
         for face in faces.into_iter().take(MAX_FACES_PER_IMAGE) {
+            // 能检测到小人脸不等于能可靠识别身份。几像素的远景框经放大
+            // 后特征趋同，容易把完全不同的照片塞进同一个人物。
+            if !usable_face(&face, self.ai_params().face_detect_threshold) {
+                continue;
+            }
             let Some(crop) = align_face(img, &face.kps) else {
                 continue;
             };
+            if !usable_crop(&crop) {
+                continue;
+            }
             let emb = self.embed_aligned(&crop)?;
+            if !usable_embedding(&emb) {
+                continue;
+            }
             out.push((face, emb));
         }
         Ok(out)
     }
+}
+
+/// 识别质量规则代际：升级后只重建人脸索引，清除旧的低质量归类。
+pub const FACE_INDEX_GENERATION: u64 = 2;
+const MIN_FACE_PIXELS: f32 = 24.0;
+
+pub fn usable_face(face: &DetectedFace, threshold: f32) -> bool {
+    let eye_span = ((face.kps[0][0] - face.kps[1][0]).powi(2)
+        + (face.kps[0][1] - face.kps[1][1]).powi(2))
+    .sqrt();
+    face.score.is_finite()
+        && face.score >= threshold
+        && [face.box_x, face.box_y, face.box_w, face.box_h]
+            .iter()
+            .all(|v| v.is_finite())
+        && face.box_w >= MIN_FACE_PIXELS
+        && face.box_h >= MIN_FACE_PIXELS
+        && face.kps.iter().flatten().all(|v| v.is_finite())
+        && eye_span >= 8.0
+}
+
+fn usable_crop(crop: &RgbImage) -> bool {
+    let mut sum = 0.0f64;
+    let mut squares = 0.0f64;
+    for pixel in crop.pixels() {
+        let value = (f64::from(pixel[0]) + f64::from(pixel[1]) + f64::from(pixel[2])) / 3.0;
+        sum += value;
+        squares += value * value;
+    }
+    let n = f64::from(crop.width()) * f64::from(crop.height());
+    n > 0.0 && squares / n - (sum / n).powi(2) >= 4.0
+}
+
+fn usable_embedding(embedding: &[f32]) -> bool {
+    embedding.len() == FACE_EMBED_DIM
+        && embedding.iter().all(|v| v.is_finite())
+        && embedding.iter().map(|v| v * v).sum::<f32>() > f32::EPSILON
 }
 
 fn normalize(mut v: Vec<f32>) -> Vec<f32> {
@@ -828,11 +876,26 @@ fn commit_face_payload(
     };
     let mut clusterer = cache.lock().expect("clusterer mutex poisoned");
     for (face, emb) in &payload.faces {
+        // 消费边界再校验；无有效人脸也正常完成索引，但不创建人物。
+        if !face.score.is_finite()
+            || face.score < manager.ai_params().face_detect_threshold
+            || ![face.box_x, face.box_y, face.box_w, face.box_h]
+                .iter()
+                .all(|v| v.is_finite())
+            || face.box_w < MIN_FACE_PIXELS
+            || face.box_h < MIN_FACE_PIXELS
+            || !usable_embedding(emb)
+        {
+            continue;
+        }
+        let [x, y, w, h] = normalized_box(face, payload.src_w, payload.src_h);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
         let Ok(cluster_id) = assign_cluster(db, &mut clusterer, emb) else {
             return false;
         };
         clusterer.absorb(cluster_id, emb);
-        let [x, y, w, h] = normalized_box(face, payload.src_w, payload.src_h);
         let Ok(face_id) = db.insert_face(asset_id, x, y, w, h, emb, Some(cluster_id)) else {
             return false;
         };
@@ -1055,7 +1118,11 @@ pub fn kick_face_if_ready(
     }
     let manager = std::sync::Arc::new(manager.clone());
     let bus = bus.clone();
-    let _ = supervisor.spawn_unique("index", "face-backfill".into(), move |_| {
-        run_face_backfill(&db_dir, manager, &bus);
-    });
+    let _ = supervisor.spawn_coalesced(
+        "index",
+        format!("face-backfill:{}", db_dir.display()),
+        move |_| {
+            run_face_backfill(&db_dir, Arc::clone(&manager), &bus);
+        },
+    );
 }

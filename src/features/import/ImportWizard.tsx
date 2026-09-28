@@ -25,7 +25,7 @@ import {
   type ImportPlan,
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
-import { FIXED_ALBUM_LAYOUT, importRootOf } from "@/features/onboarding/onboardingConfig";
+import { importRootOf } from "@/features/onboarding/onboardingConfig";
 import {
   isUngroupedAlbum,
   subgroupSuggestions,
@@ -2085,31 +2085,9 @@ export default function ImportWizard() {
               data-testid="wizard-location-card"
             >
               {activeLibrary ? (
-                <>
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="shrink-0 text-[11px] text-text-muted">
-                      {t("wizard.location.root")}
-                    </span>
-                    <span
-                      className="truncate font-mono text-[11px] text-text-primary"
-                      title={targetRoot}
-                    >
-                      {targetRoot}
-                    </span>
-                  </div>
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="shrink-0 text-[11px] text-text-muted">
-                      {t("wizard.location.layout")}
-                    </span>
-                    <span
-                      className="truncate font-mono text-[11px] text-text-secondary"
-                      title={FIXED_ALBUM_LAYOUT}
-                      data-testid="wizard-preview"
-                    >
-                      {FIXED_ALBUM_LAYOUT}
-                    </span>
-                  </div>
-                </>
+                <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
+                  {targetRoot}
+                </span>
               ) : (
                 <p className="text-[11px] leading-relaxed text-text-muted">
                   {t("wizard.location.noLibrary")}

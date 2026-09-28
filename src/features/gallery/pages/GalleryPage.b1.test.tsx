@@ -19,17 +19,13 @@ import {
   assetThumbGet,
   assetTrashMove,
   assetsPage,
-  smartViewCreate,
-  smartViewDelete,
-  smartViewList,
   type AssetDto,
-  type SmartViewDto,
 } from "@/ipc/api";
 
 /**
  * 画廊选片补全（B1，页面级接线）：颜色标签三入口（操作条/右键/瓦片角标回显）、
  * 拒绝旗标（操作条/右键 + 瓦片弱化）、移入回收站（确认一步 + 乐观剔除）、
- * 智能视图（下拉应用 / × 删除确认 / 面板保存后刷新）、反选。
+ * 反选。
  */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -42,9 +38,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetLabelSet: vi.fn(),
     assetRejectSet: vi.fn(),
     assetTrashMove: vi.fn(),
-    smartViewList: vi.fn(),
-    smartViewCreate: vi.fn(),
-    smartViewDelete: vi.fn(),
     lrStagingCreate: vi.fn(),
     revealInExplorer: vi.fn(),
   };
@@ -61,9 +54,6 @@ const labelMock = vi.mocked(assetLabelSet);
 const rejectMock = vi.mocked(assetRejectSet);
 const trashMoveMock = vi.mocked(assetTrashMove);
 const stagingMock = vi.mocked(lrStagingCreate);
-const viewListMock = vi.mocked(smartViewList);
-const viewCreateMock = vi.mocked(smartViewCreate);
-const viewDeleteMock = vi.mocked(smartViewDelete);
 
 function makeAsset(id: number, extra?: Partial<AssetDto>): AssetDto {
   return {
@@ -78,12 +68,6 @@ function makeAsset(id: number, extra?: Partial<AssetDto>): AssetDto {
   };
 }
 
-const VIEW: SmartViewDto = {
-  id: 9,
-  name: "红色横拍",
-  filtersJson: JSON.stringify({ colorLabel: "red", orientation: "landscape" }),
-  createdAt: "2026-09-27T08:00:00",
-};
 
 function tileOf(id: number): HTMLElement {
   const tile = screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === String(id));
@@ -124,9 +108,6 @@ beforeEach(() => {
   labelMock.mockReset().mockResolvedValue(undefined);
   rejectMock.mockReset().mockResolvedValue(undefined);
   trashMoveMock.mockReset().mockResolvedValue(undefined);
-  viewListMock.mockReset().mockResolvedValue([VIEW]);
-  viewCreateMock.mockReset();
-  viewDeleteMock.mockReset().mockResolvedValue(true);
   stagingMock.mockReset().mockResolvedValue({
     dir: "I:\\SmartPhoto\\主库\\LR\\0927-2",
     created: 2,
@@ -264,60 +245,6 @@ describe("画廊：移入回收站（B1）", () => {
     await user.click(screen.getByTestId("trash-move-cancel"));
     expect(trashMoveMock).not.toHaveBeenCalled();
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(3);
-  });
-});
-
-// --- 智能视图 ---------------------------------------------------------------------------
-
-describe("画廊：已存视图（B1）", () => {
-  it("挂载拉取清单；下拉应用 → filters 反解为筛选条件（chips 出现）", async () => {
-    const user = userEvent.setup();
-    renderGallery();
-    await screen.findAllByTestId("gallery-tile");
-    expect(viewListMock).toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("smart-views-toggle"));
-    const menu = screen.getByTestId("smart-views-menu");
-    await user.click(within(menu).getByTestId("smart-view-apply"));
-
-    // colorLabel=red + orientation=landscape 反解为面板输入 → chips 出现
-    await waitFor(() => expect(screen.getByTestId("search-filter-chips")).toBeInTheDocument());
-    const chips = screen.getAllByTestId("search-chip").map((c) => c.getAttribute("data-chip"));
-    expect(chips).toContain("color");
-    expect(chips).toContain("orientation");
-  });
-
-  it("视图 × 删除：行内确认两键 → smart_view_delete + 清单刷新", async () => {
-    const user = userEvent.setup();
-    viewListMock.mockReset().mockResolvedValueOnce([VIEW]).mockResolvedValue([]);
-    renderGallery();
-    await screen.findAllByTestId("gallery-tile");
-
-    await user.click(screen.getByTestId("smart-views-toggle"));
-    await user.click(within(screen.getByTestId("smart-views-menu")).getByTestId("smart-view-delete"));
-
-    // 未确认前不删除
-    expect(viewDeleteMock).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("smart-view-delete-confirm"));
-    await waitFor(() => expect(viewDeleteMock).toHaveBeenCalledWith(9));
-    await waitFor(() => expect(viewListMock).toHaveBeenCalledTimes(2));
-  });
-
-  it("面板「保存为视图」成功 → 触发清单刷新", async () => {
-    const user = userEvent.setup();
-    viewCreateMock.mockResolvedValue({ ok: true, view: { id: 2, name: "V", filtersJson: "{}", createdAt: "" } });
-    renderGallery();
-    await screen.findAllByTestId("gallery-tile");
-
-    // 打开筛选面板（画廊以 advancedOnly 渲染）并设置一个条件
-    await user.click(screen.getByTestId("search-filter-toggle"));
-    await user.click(screen.getByTestId("search-color-purple"));
-
-    await user.type(screen.getByTestId("smart-view-name-input"), "紫色");
-    await user.click(screen.getByTestId("smart-view-save"));
-    await waitFor(() => expect(viewCreateMock).toHaveBeenCalledWith("紫色", expect.any(String)));
-    await waitFor(() => expect(viewListMock).toHaveBeenCalledTimes(2));
   });
 });
 

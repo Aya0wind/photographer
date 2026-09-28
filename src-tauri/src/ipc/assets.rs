@@ -34,7 +34,7 @@ pub struct AssetDto {
     pub exposure_time: Option<String>,
     pub focal_length: Option<String>,
     pub lens: Option<String>,
-    /// RAW/JPG 配对资产 id（无配对 null）。
+    /// RAW/JPG 展示组 id（两侧同值，无配对 null）。
     pub pair_id: Option<i64>,
     /// 缩略图状态 0 pending / 1 done / 2 permanent-none。
     pub thumb_state: i32,
@@ -328,7 +328,7 @@ pub fn fetch_asset_detail(
         format: format_of(&asset.path),
         megapixels: megapixels_of(asset.width, asset.height),
         aspect: aspect_of(asset.width, asset.height, asset.orientation),
-        pair_id: asset.pair_asset_id,
+        pair_id: asset.pair_asset_id.map(|partner| partner.min(id)),
         duplicate_count,
         ai_analysis,
         asset,
@@ -515,7 +515,7 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 exposure_time: asset.exposure_time,
                 focal_length: asset.focal_length,
                 lens: asset.lens,
-                pair_id: asset.pair_asset_id,
+                pair_id: asset.pair_asset_id.map(|partner| partner.min(*id)),
                 thumb_state: asset.thumb_state,
                 burst_id: None,
                 burst_count: None,

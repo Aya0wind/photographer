@@ -1,5 +1,6 @@
 import type {
   EditRecipe,
+  EditAdjustments,
   EditRecipeBrushStroke,
   EditRecipeCrop,
   EditRecipeOutput,
@@ -41,6 +42,7 @@ export interface RecipeHistory {
 export type TextLayerPatch = Partial<Omit<EditRecipeTextLayer, "id">>;
 
 export type RecipeAction =
+  | { type: "adjust"; patch: Partial<EditAdjustments>; record?: boolean }
   | { type: "rotate"; delta: 1 | -1 }
   | { type: "cropApply"; crop: EditRecipeCrop | null }
   | { type: "textAdd"; layer: EditRecipeTextLayer }
@@ -81,7 +83,7 @@ export function rotatedSize(ctx: RecipeContext, quarter: number): { w: number; h
 }
 
 function pushHistory(state: RecipeHistory, next: EditRecipe): RecipeHistory {
-  if (next === state.present) return state;
+  if (next === state.present || recipeEquals(next, state.present)) return state;
   return { past: [...state.past, state.present], present: next, future: [] };
 }
 
@@ -181,6 +183,11 @@ export function recipeReducer(
 ): RecipeHistory {
   const present = state.present;
   switch (action.type) {
+    case "adjust": {
+      const adjustments = { brightness: 0, contrast: 0, saturation: 0, ...present.adjustments, ...action.patch };
+      const next = { ...present, adjustments };
+      return action.record === false ? { ...state, present: next } : pushHistory(state, next);
+    }
     case "rotate":
       return pushHistory(state, applyRotate(present, action.delta, ctx));
     case "cropApply":
@@ -271,6 +278,7 @@ export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
 export function recipeForPersist(recipe: EditRecipe): EditRecipe {
   return {
     ...recipe,
+    ...(recipe.adjustments && Object.values(recipe.adjustments).every((value) => value === 0) ? { adjustments: undefined } : {}),
     textLayers: recipe.textLayers.filter((l) => l.text.trim() !== ""),
     brushStrokes: recipe.brushStrokes.filter((s) => s.points.length > 0),
   };
