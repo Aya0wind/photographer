@@ -107,11 +107,7 @@ impl Db {
     /// 相册时间线全量 asset id（快照解析用）：与 album_assets_page 完全同
     /// 语义——in_trash=0、kind photo/raw、subgroup 过滤（None = 整册）、
     /// 拍摄时间序（NULL 最先 + 时间降序 + id 降序 tiebreak）。
-    pub fn cull_album_asset_ids(
-        &self,
-        album_id: i64,
-        subgroup: Option<&str>,
-    ) -> Result<Vec<i64>> {
+    pub fn cull_album_asset_ids(&self, album_id: i64, subgroup: Option<&str>) -> Result<Vec<i64>> {
         let sql = match subgroup {
             Some(_) => {
                 "SELECT a.id FROM assets a \
@@ -129,10 +125,9 @@ impl Db {
             }
         };
         let mut stmt = self.0.prepare(sql)?;
-        let rows = stmt.query_map(
-            params![album_id, subgroup, CAPTURED_NULL_HIGH],
-            |r| r.get(0),
-        )?;
+        let rows = stmt.query_map(params![album_id, subgroup, CAPTURED_NULL_HIGH], |r| {
+            r.get(0)
+        })?;
         rows.collect()
     }
 
@@ -141,16 +136,14 @@ impl Db {
     /// （筛选快照无稳定来源身份，所有 query 会话同轮次池）。
     pub fn cull_scope_sessions(&self, scope: &CullScope) -> Result<u64> {
         let n: i64 = match scope {
-            CullScope::Album { album_id, subgroup } => {
-                self.0.query_row(
-                    "SELECT COUNT(*) FROM cull_session \
+            CullScope::Album { album_id, subgroup } => self.0.query_row(
+                "SELECT COUNT(*) FROM cull_session \
                      WHERE json_extract(scope, '$.kind') = 'album' \
                        AND json_extract(scope, '$.albumId') = ?1 \
                        AND json_extract(scope, '$.subgroup') IS ?2",
-                    params![album_id, subgroup],
-                    |r| r.get(0),
-                )?
-            }
+                params![album_id, subgroup],
+                |r| r.get(0),
+            )?,
             CullScope::Query { .. } => self.0.query_row(
                 "SELECT COUNT(*) FROM cull_session \
                  WHERE json_extract(scope, '$.kind') = 'query'",
@@ -308,9 +301,8 @@ impl Db {
                    decision = excluded.decision, origin = excluded.origin, \
                    decided_at = excluded.decided_at",
             )?;
-            let mut clear = tx.prepare(
-                "DELETE FROM cull_decision WHERE session_id = ?1 AND asset_id = ?2",
-            )?;
+            let mut clear =
+                tx.prepare("DELETE FROM cull_decision WHERE session_id = ?1 AND asset_id = ?2")?;
             for d in decisions {
                 if !in_snapshot.contains(&d.asset_id) {
                     ignored += 1;
@@ -372,19 +364,19 @@ impl Db {
     /// 弃置会话：只删 session 行——快照/决定经 FK ON DELETE CASCADE 随灭，
     /// 主库资产/旗标/星级/拒绝态绝不动。
     pub fn cull_session_discard(&self, id: i64) -> Result<bool> {
-        let n = self.0.execute("DELETE FROM cull_session WHERE id = ?1", params![id])?;
+        let n = self
+            .0
+            .execute("DELETE FROM cull_session WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
 
     /// 同名会话存在性（默认名/改名去重用；表无唯一约束，重复名只是 UI 含混）。
     pub fn cull_name_taken(&self, name: &str) -> Result<bool> {
-        let n: i64 = self
-            .0
-            .query_row(
-                "SELECT COUNT(*) FROM cull_session WHERE name = ?1",
-                params![name],
-                |r| r.get(0),
-            )?;
+        let n: i64 = self.0.query_row(
+            "SELECT COUNT(*) FROM cull_session WHERE name = ?1",
+            params![name],
+            |r| r.get(0),
+        )?;
         Ok(n > 0)
     }
 
@@ -452,8 +444,7 @@ impl Db {
         // **全组成员参与比拼**（已决定的也计入基准——用户已剔除最锐帧时，
         // 其余组员按「其余组员」整体建议剔除，不偷偷晋升次锐为 accepted）；
         // 同分取快照序先者；组内全无 blur 分 → 不入表（整组不动）。
-        let mut sharpest: std::collections::HashMap<i64, usize> =
-            std::collections::HashMap::new();
+        let mut sharpest: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         for (idx, r) in rows.iter().enumerate() {
             if r.burst_size < 2 {
                 continue;
@@ -493,9 +484,7 @@ impl Db {
                 }
             }
             // ② blur：值集命中 → 剔除建议（weak 值集为空 = 不启用）
-            if rules.blur_enabled
-                && blur_hits(rules.blur_sensitivity, r.blur_value.as_deref())
-            {
+            if rules.blur_enabled && blur_hits(rules.blur_sensitivity, r.blur_value.as_deref()) {
                 suggestion = Some(false);
             }
             // ③ burstKeepSharpest：最锐组员 → accepted（仅在未被 ①② 建议
@@ -519,10 +508,7 @@ impl Db {
             //    rejected 建议不受限
             match suggestion {
                 Some(true) => {
-                    if rules
-                        .max_accepted
-                        .is_some_and(|cap| accepted_count >= cap)
-                    {
+                    if rules.max_accepted.is_some_and(|cap| accepted_count >= cap) {
                         continue;
                     }
                     accepted_count += 1;

@@ -86,7 +86,8 @@ function allModels(
   }) as Array<import("@/ipc/api").AiModelStatus>;
 }
 
-import i18n from "@/i18n";
+import i18n, { setAppLanguage } from "@/i18n";
+import { initAppLanguage } from "@/i18n/settingsLanguage";
 import SettingsPage from "./SettingsPage";
 import {
   DEFAULT_SETTINGS,
@@ -149,6 +150,26 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+it("五种语言可选，切换立即更新界面并保存全局偏好", async () => {
+  const stop = initAppLanguage();
+  try {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    const select = screen.getByTestId("settings-language");
+    expect(within(select).getAllByRole("option").map((option) => option.getAttribute("value")))
+      .toEqual(["zh", "zh-TW", "en", "ja", "es"]);
+    await user.selectOptions(select, "en");
+    await screen.findByText("Language");
+    expect(useSettingsStore.getState().settings.system.language).toBe("en");
+    expect(ipcMock).toHaveBeenCalledWith("settings_set", {
+      settings: expect.objectContaining({ system: expect.objectContaining({ language: "en" }) }),
+    });
+  } finally {
+    stop();
+    await act(async () => { await setAppLanguage("zh"); });
+  }
+});
+
 describe("选项卡", () => {
   it("四个选项卡；切换渲染对应分组", async () => {
     const user = userEvent.setup();
@@ -161,7 +182,7 @@ describe("选项卡", () => {
     // 默认常规：关闭行为/开机自启/语言
     expect(screen.getByTestId("settings-row-close-behavior")).toBeInTheDocument();
     expect(screen.getByLabelText("开机自启")).toBeInTheDocument();
-    expect(screen.getByTestId("settings-language")).toBeDisabled();
+    expect(screen.getByTestId("settings-language")).toBeEnabled();
     expect(screen.queryByTestId("settings-current-library")).not.toBeInTheDocument();
 
     // 导入

@@ -18,7 +18,6 @@ use tauri::State;
 use super::{run_blocking, SharedState};
 use crate::events::AppEvent;
 
-
 /// LR 标准颜色标签（应用内小写 token；xmp:Label 写首字母大写标准色名）。
 pub const COLOR_LABELS: &[&str] = &["red", "yellow", "green", "blue", "purple"];
 

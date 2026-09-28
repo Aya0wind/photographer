@@ -81,11 +81,11 @@ pub fn parse(head: &[u8]) -> MetaLite {
         camera: camera_string(&exif),
         width: dims.map(|d| d.0),
         height: dims.map(|d| d.1),
-        iso: uint_field(&exif, 0x8827).map(|v| v as u32),
+        iso: uint_field(&exif, 0x8827).filter(|v| *v > 0).map(u32::from),
         f_number: rational_field(&exif, 0x829D).and_then(format_f_number),
         exposure_time: rational_field(&exif, 0x829A).and_then(format_exposure_time),
         focal_length: rational_field(&exif, 0x920A).and_then(format_focal_length),
-        lens: ascii_value(&exif, exif::Tag::LensModel).filter(|s| !s.is_empty()),
+        lens: ascii_value(&exif, exif::Tag::LensModel).and_then(equipment_text),
         deep: deep_exif(&exif),
     }
 }
@@ -309,7 +309,7 @@ fn rational_field(exif: &exif::Exif, tag: u16) -> Option<(u32, u32)> {
 
 /// 小数展示：保留至多 4 位并去尾零（28/10 → "2.8"；40/10 → "4"）。
 fn trim_decimal(num: u32, den: u32) -> Option<String> {
-    if den == 0 {
+    if num == 0 || den == 0 {
         return None;
     }
     let value = num as f64 / den as f64;
@@ -320,7 +320,7 @@ fn trim_decimal(num: u32, den: u32) -> Option<String> {
     if text.ends_with('.') {
         text.pop();
     }
-    (!text.is_empty() && text != "-0").then_some(text)
+    (!text.is_empty() && text != "0" && text != "-0").then_some(text)
 }
 
 /// f/ 值：纯小数（"2.8"）。
@@ -533,8 +533,8 @@ fn tiff_raw_dimensions(head: &[u8]) -> Option<(u32, u32)> {
 /// camera = Make + " " + Model，缺失一侧则用另一侧，多余空格折叠为一个。
 fn camera_string(exif: &exif::Exif) -> Option<String> {
     let combined = match (
-        ascii_value(exif, exif::Tag::Make),
-        ascii_value(exif, exif::Tag::Model),
+        ascii_value(exif, exif::Tag::Make).and_then(equipment_text),
+        ascii_value(exif, exif::Tag::Model).and_then(equipment_text),
     ) {
         (Some(make), Some(model)) => format!("{make} {model}"),
         (Some(make), None) => make,
@@ -543,4 +543,27 @@ fn camera_string(exif: &exif::Exif) -> Option<String> {
     };
     let collapsed = combined.split_whitespace().collect::<Vec<_>>().join(" ");
     (!collapsed.is_empty()).then_some(collapsed)
+}
+
+/// EXIF writers use these labels for missing equipment, rather than actual names.
+pub const MISSING_EQUIPMENT_TEXT: &[&str] = &[
+    "",
+    "-",
+    "--",
+    "---",
+    "----",
+    "—",
+    "–",
+    "n/a",
+    "na",
+    "unknown",
+    "none",
+    "null",
+    "not available",
+];
+
+fn equipment_text(text: String) -> Option<String> {
+    let text = text.trim();
+    (!MISSING_EQUIPMENT_TEXT.contains(&text.to_ascii_lowercase().as_str()))
+        .then(|| text.to_string())
 }

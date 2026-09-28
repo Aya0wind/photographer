@@ -12,6 +12,7 @@ import ImportWizard, {
   TILE_SIZE_KEY,
   VIEW_MODE_STORAGE_KEY,
   resetThumbCacheForTests,
+  fetchThumbUrl,
 } from "./ImportWizard";
 import { resetImportStoreForTests, useImportStore, type SourceFile } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -26,6 +27,7 @@ import {
   FIXED_PLAN_DIR_TEMPLATE,
   importStart,
   thumbGet,
+  deviceThumbGet,
   type ImportPlan,
 } from "@/ipc/api";
 
@@ -39,6 +41,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
     thumbGet: vi.fn(),
+    deviceThumbGet: vi.fn(),
     albumList: vi.fn(),
     albumSubgroups: vi.fn(),
     albumCreate: vi.fn(),
@@ -63,6 +66,7 @@ const deviceFilesMock = vi.mocked(deviceFiles);
 const deviceListMock = vi.mocked(deviceList);
 const convertMock = vi.mocked(convertFileSrc);
 const thumbMock = vi.mocked(thumbGet);
+const deviceThumbMock = vi.mocked(deviceThumbGet);
 const albumListMock = vi.mocked(albumList);
 const albumSubgroupsMock = vi.mocked(albumSubgroups);
 const albumCreateMock = vi.mocked(albumCreate);
@@ -182,6 +186,8 @@ beforeAll(() => {
 beforeEach(() => {
   resetImportStoreForTests();
   resetThumbCacheForTests();
+  localStorage.setItem(VIEW_MODE_STORAGE_KEY, "list");
+  deviceThumbMock.mockReset().mockResolvedValue(null);
   startMock.mockReset().mockResolvedValue({ ok: false, error: null });
   scanMock.mockReset().mockResolvedValue(null);
   listMock.mockReset().mockResolvedValue([]);
@@ -200,13 +206,59 @@ beforeEach(() => {
     ok: true,
     album: { id: 9, name: "新相册", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
   });
-  localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
+  localStorage.setItem(VIEW_MODE_STORAGE_KEY, "list");
   localStorage.removeItem(PANEL_COLLAPSE_KEY);
   localStorage.removeItem(COL_WIDTHS_KEY);
   localStorage.removeItem(TILE_SIZE_KEY);
 });
 
 describe("ImportWizard 布局与设备", () => {
+  it("首次打开默认展示缩略图，附加选项收起，未选照片不能启动导入", async () => {
+    seedSession();
+    localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
+    renderWizard("?device=E:");
+    expect(await screen.findByTestId("wizard-file-grid")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-advanced")).not.toHaveAttribute("open");
+    expect(screen.getByTestId("wizard-import-summary")).toHaveTextContent("已选 4 张");
+    await userEvent.setup().click(screen.getByRole("button", { name: "反选" }));
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
+    expect(screen.getByTestId("wizard-import-summary")).toHaveTextContent("请至少选择一张照片");
+  });
+
+  it("MTP 清单保留持久对象 ID，扫描完成后读取相机缩略资源", async () => {
+    seedSession();
+    useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "scanning" }], sourceFiles: {
+      "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 42, kind: "raw", objectId: "persistent-42", mtime: "today" }],
+    } });
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
+    deviceThumbMock.mockResolvedValue("C:\\thumbCache\\mtp.jpg");
+    convertMock.mockImplementation((path) => `asset://${path}`);
+    renderWizard("?device=MTP:CAM");
+    expect(await screen.findByText("扫描后加载预览")).toBeInTheDocument();
+    expect(deviceThumbMock).not.toHaveBeenCalled();
+    act(() => useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "ready" }] }));
+    expect(await screen.findByRole("img", { name: "A.NEF" })).toHaveAttribute("src", "asset://C:\\thumbCache\\mtp.jpg");
+    expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:42", 256);
+    expect(thumbMock).not.toHaveBeenCalled();
+  });
+
+  it("临时失败后可重试，图片实际加载完成才结束加载动画", async () => {
+    seedSession();
+    useImportStore.setState({ sourceFiles: { "E:": [files()[2]] } });
+    thumbMock.mockResolvedValueOnce(null).mockResolvedValue("C:\\thumbCache\\retry.jpg");
+    convertMock.mockImplementation((path) => `asset://${path}`);
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "重试" }));
+    const image = await screen.findByRole("img", { name: "IMG_0003.JPG" });
+    expect(screen.getByText("加载预览…")).toBeInTheDocument();
+    fireEvent.load(image);
+    expect(image).toHaveClass("opacity-100");
+    expect(screen.queryByText("加载预览…")).not.toBeInTheDocument();
+    expect(thumbMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 1");
+  });
   it("无设备时左栏显示空态", () => {
     renderWizard();
 
@@ -218,7 +270,7 @@ describe("ImportWizard 布局与设备", () => {
 
     renderWizard();
 
-    expect(await screen.findByText("SanDisk 64G")).toBeInTheDocument();
+    expect((await screen.findAllByText("SanDisk 64G"))[0]).toBeInTheDocument();
     expect(deviceListMock).toHaveBeenCalled();
   });
 
@@ -227,7 +279,7 @@ describe("ImportWizard 布局与设备", () => {
 
     renderWizard("?device=E:");
 
-    expect(await screen.findByText("SanDisk 64G")).toBeInTheDocument();
+    expect((await screen.findAllByText("SanDisk 64G"))[0]).toBeInTheDocument();
     const info = screen.getByTestId("wizard-device-info");
     expect(info).toHaveTextContent("读卡器");
     expect(info).toHaveTextContent("100 MB");
@@ -318,7 +370,7 @@ describe("源文件树与文件列表", () => {
     expect(stats).toHaveTextContent("已选 4 / 4");
 
     // 取消整组 DCIM/100CANON
-    await user.click(screen.getByRole("checkbox", { name: '选择目录 DCIM/100CANON' }));
+    await user.click(within(screen.getByTestId("wizard-tree")).getByRole("checkbox", { name: '选择目录 DCIM/100CANON' }));
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
 
     // 反选：另一组被取消，本组恢复
@@ -426,7 +478,7 @@ describe("方案面板", () => {
   });
 
   it("plan.streams 从库属性合成：库值 3 → 3；MTP 恒 1", async () => {
-    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
+    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()], sourceFiles: { "E:": files(), "MTP:CAM": [{ path: "A.JPG", dir: "", name: "A.JPG", kind: "photo", size: 10 }] } });
     useSettingsStore.setState((s) => ({
       settings: {
         ...s.settings,
@@ -810,12 +862,12 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
   });
 
-  it("M2 缩略图：photo 走 thumb_get(256)→convertFileSrc(小图路径)；RAW 不调 thumb_get", async () => {
+  it("照片和 RAW 都通过后端缩略图显示，不加载原文件", async () => {
     seedSession();
     const user = userEvent.setup();
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     thumbMock.mockImplementation(async (path: string) =>
-      path === "E:/DCIM/101CANON/IMG_0003.JPG" ? "C:\\thumbCache\\0003_256.jpg" : null,
+      path.endsWith("IMG_0003.JPG") ? "C:\\thumbCache\\0003_256.jpg" : path.endsWith("IMG_0001.CR3") ? "C:\\thumbCache\\0001_256.jpg" : null,
     );
     renderWizard("?device=E:");
 
@@ -825,9 +877,8 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(img).toHaveAttribute("src", "asset://C:\\thumbCache\\0003_256.jpg");
     expect(thumbMock).toHaveBeenCalledWith("E:/DCIM/101CANON/IMG_0003.JPG", 256);
     expect(convertMock).toHaveBeenCalledWith("C:\\thumbCache\\0003_256.jpg");
-    // RAW 不请求缩略图（后端返回 null 的语义在前端直接短路）
-    expect(thumbMock).not.toHaveBeenCalledWith(expect.stringContaining("IMG_0001.CR3"), 256);
-    expect(screen.queryByRole("img", { name: "IMG_0001.CR3" })).not.toBeInTheDocument();
+    expect(thumbMock).toHaveBeenCalledWith("E:/DCIM/100CANON/IMG_0001.CR3", 256);
+    expect(await screen.findByRole("img", { name: "IMG_0001.CR3" })).toHaveAttribute("src", "asset://C:\\thumbCache\\0001_256.jpg");
   });
 
   it("folder 源 absPath = id 去 FOLDER: 前缀 + / + relPath（作为 thumb_get 入参）", async () => {
@@ -852,7 +903,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     );
   });
 
-  it("MTP 源无文件系统路径：photo 恒占位、不调 thumb_get", async () => {
+  it("没有对象 ID 的旧 MTP 清单保持明确占位，不错误请求本地路径", async () => {
     useImportStore.setState({
       devices: [mtpDevice()],
       sourceFiles: {
@@ -920,9 +971,8 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
   it("缩略图加载中占位带骨架动画（sp-skeleton）；结算无图退静态", async () => {
     seedSession();
     let resolveThumb: (value: string | null) => void = () => {};
-    thumbMock.mockImplementationOnce(
-      () => new Promise<string | null>((resolve) => (resolveThumb = resolve)),
-    );
+    thumbMock.mockImplementation((path) => path.endsWith("IMG_0003.JPG")
+      ? new Promise<string | null>((resolve) => (resolveThumb = resolve)) : Promise.resolve(null));
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1068,6 +1118,7 @@ describe("双目的地（M2）", () => {
     expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
     expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
 
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
     await user.click(screen.getByTestId("wizard-second-toggle"));
     const panel = await screen.findByTestId("wizard-second-panel");
     expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
@@ -1093,6 +1144,7 @@ describe("双目的地（M2）", () => {
     renderWizard("?device=E:");
     const user = userEvent.setup();
 
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
     await user.click(screen.getByTestId("wizard-second-toggle"));
     await user.click(await screen.findByTestId("wizard-second-browse"));
 
@@ -1106,7 +1158,8 @@ describe("双目的地（M2）", () => {
     renderWizard("?device=E:");
     const user = userEvent.setup();
 
-    await user.click(await screen.findByTestId("wizard-second-toggle"));
+    if (!(await screen.findByTestId("wizard-advanced")).hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    await user.click(screen.getByTestId("wizard-second-toggle"));
     await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
     await user.click(screen.getByRole("button", { name: "开始导入" }));
 
@@ -1124,7 +1177,8 @@ describe("双目的地（M2）", () => {
     const user = userEvent.setup();
 
     // 复制态开启双目的地并填写
-    await user.click(await screen.findByTestId("wizard-second-toggle"));
+    if (!(await screen.findByTestId("wizard-advanced")).hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    await user.click(screen.getByTestId("wizard-second-toggle"));
     await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
     expect(screen.getByTestId("wizard-second-toggle")).toBeChecked();
 
@@ -1443,4 +1497,58 @@ describe("ImportWizard：添加到相册步骤", () => {
     const plan = startMock.mock.calls[0][0] as ImportPlan;
     expect(plan.albumId).toBe(9);
   });
+});
+
+
+it("中间的目录勾选支持部分选中、整组取消，并同步两个视图", async () => {
+  seedSession();
+  const user = userEvent.setup();
+  renderWizard("?device=E:");
+  const list = await screen.findByTestId("wizard-file-list");
+  const group = within(list).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
+  expect(group).toBeChecked();
+  await user.click(within(list).getByRole("checkbox", { name: "IMG_0001.CR3" }));
+  expect(group).toBePartiallyChecked();
+  await user.click(group);
+  expect(group).toBeChecked();
+  await user.click(group);
+  expect(group).not.toBeChecked();
+  expect(within(list).getByText("IMG_0001.CR3")).toBeVisible();
+  expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
+  await user.click(screen.getByTestId("wizard-view-grid"));
+  const grid = screen.getByTestId("wizard-file-grid");
+  const gridGroup = within(grid).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
+  expect(gridGroup).not.toBeChecked();
+  await user.click(gridGroup);
+  expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+});
+
+it("空读卡器显示未插卡，不会被默认选中或请求扫描清单", async () => {
+  seedSession();
+  useImportStore.setState({ devices: [
+    { ...volumeDevice(), id: "G:", name: "读卡器 (G:)", mediaPresent: false, filesByKind: { photo: 0, raw: 0, other: 0 } },
+    volumeDevice(),
+  ] });
+  renderWizard("?device=G:");
+  const rows = await screen.findAllByTestId("wizard-device-item");
+  expect(rows[0]).toBeDisabled();
+  expect(rows[0]).toHaveTextContent("未插卡");
+  expect(rows[1]).toHaveAttribute("data-selected", "true");
+  expect(deviceFilesMock).not.toHaveBeenCalledWith("G:");
+});
+
+
+it("快速滚动时跳过已离开预加载区域且尚未开始的预览请求", async () => {
+  const releases: Array<() => void> = [];
+  thumbMock.mockImplementation(() => new Promise((resolve) => releases.push(() => resolve(null))));
+  const busy = Array.from({ length: 8 }, (_, i) => fetchThumbUrl(`busy-${i}.ARW`));
+  await waitFor(() => expect(thumbMock).toHaveBeenCalledTimes(8));
+  let visible = true;
+  const skipped = fetchThumbUrl("offscreen.ARW", "", () => visible);
+  visible = false;
+  releases[0]();
+  await expect(skipped).resolves.toBeNull();
+  expect(thumbMock).not.toHaveBeenCalledWith("offscreen.ARW", 256);
+  releases.slice(1).forEach((release) => release());
+  await Promise.all(busy);
 });

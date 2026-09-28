@@ -30,6 +30,7 @@ import {
   type AlbumDto,
 } from "@/ipc/api";
 import type { AiModelStatus, IndexStatus } from "@/ipc/api";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useAiStore } from "@/stores/aiStore";
 import {
   emitAssetEventForTests,
@@ -650,4 +651,20 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     await user.click(options[1]);
     await waitFor(() => expect(albumCoverSetMock).toHaveBeenCalledWith(6, 22));
   });
+});
+
+
+it.each(["normal", "accurate"] as const)("智能相册只要求当前 %s 档语义模型，不误报其他档缺失", async (tier) => {
+  useSettingsStore.setState((s) => ({ settings: { ...s.settings, ai: { ...s.settings.ai, qualityTier: tier } } }));
+  const catalog = [...readyModels(), gateModel("siglip2-visual-fp16", "semantic", "idle"), gateModel("siglip2-text-fp16", "semantic", "idle")].map((m) => ({
+    ...m, state: (m.id === "siglip2-tokenizer" || (tier === "accurate" ? m.id.endsWith("fp16") : !m.id.endsWith("fp16"))) ? "done" as const : "idle" as const,
+  }));
+  aiModelsStatusMock.mockResolvedValue(catalog);
+  useAiStore.setState({ models: catalog, modelsLoaded: true, indexStatus: builtIndex() });
+  renderRoutes("/albums");
+  const user = userEvent.setup();
+  await user.click((await screen.findAllByTestId("albums-tag"))[0]);
+  expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
+  expect(screen.queryByTestId("albums-gate-notice")).not.toBeInTheDocument();
+  useSettingsStore.setState((s) => ({ settings: { ...s.settings, ai: { ...s.settings.ai, qualityTier: "normal" } } }));
 });

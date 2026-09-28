@@ -125,8 +125,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     setMetadataError(null);
     void assetMetadataGet(asset.id).then((value) => {
       if (!cancelled && value) { setMetadata(value); setSavedMetadata(value); }
-      else if (!cancelled) setMetadataError("无法读取照片信息");
-    }).catch((error: unknown) => { if (!cancelled) setMetadataError(errorMessage(error) || "无法读取照片信息"); });
+      else if (!cancelled) setMetadataError("editor.metadata.readFailed");
+    }).catch((error: unknown) => { if (!cancelled) setMetadataError(errorMessage(error) || "editor.metadata.readFailed"); });
     return () => { cancelled = true; };
   }, [asset.id, metadataRetry]);
   const metadataDirty = metadata !== null && JSON.stringify(metadata) !== JSON.stringify(savedMetadata);
@@ -557,8 +557,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
             className="h-9 rounded-md bg-accent px-4 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-save"
           >
-            保存更改
-          </button>
+            {t("editor.saveChanges")}</button>
           <button
             type="button"
             onClick={() => setExportOpen(true)}
@@ -583,19 +582,19 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
       <div className="relative grid min-h-16 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-2 border-b border-edge/40 px-4">
         <div className="mr-auto flex shrink-0 items-center gap-1 rounded-lg border border-edge/60 bg-black/10 p-1">
-          <button type="button" aria-label="缩小" onClick={() => setZoom((v) => Math.max(0.25, v / 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-out">−</button>
-          <button type="button" onClick={() => setZoom(1)} className="h-8 min-w-16 rounded px-2 text-xs tabular-nums text-text-secondary hover:bg-panel" title="适应窗口" data-testid="editor-zoom-fit">{Math.round(zoom * 100)}%</button>
-          <button type="button" aria-label="放大" onClick={() => setZoom((v) => Math.min(4, v * 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
+          <button type="button" aria-label={t("editor.zoomOut")} onClick={() => setZoom((v) => Math.max(0.25, v / 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-out">−</button>
+          <button type="button" onClick={() => setZoom(1)} className="h-8 min-w-16 rounded px-2 text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} data-testid="editor-zoom-fit">{Math.round(zoom * 100)}%</button>
+          <button type="button" aria-label={t("editor.zoomIn")} onClick={() => setZoom((v) => Math.min(4, v * 1.25))} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
         </div>
-        <div role="tablist" aria-label="编辑工具" className="flex items-center justify-center" data-testid="editor-toolrail">
-          {toolButton("view", "查看", "editor-tool-view")}
-          {toolButton("crop", "裁剪与旋转", "editor-tool-crop")}
-          {toolButton("adjust", "调整", "editor-tool-adjust")}
-          {toolButton("filters", "滤镜", "editor-tool-filters")}
-          {toolButton("text", "文字", "editor-tool-text")}
-          {toolButton("brush", "画笔", "editor-tool-brush")}
-          {toolButton("metadata", "元数据", "editor-tool-metadata")}
-          {toolButton("output", "导出设置", "editor-tool-output")}
+        <div role="tablist" aria-label={t("editor.tools")} className="flex items-center justify-center" data-testid="editor-toolrail">
+          {toolButton("view", t("editor.tool.view"), "editor-tool-view")}
+          {toolButton("crop", t("editor.tool.cropRotate"), "editor-tool-crop")}
+          {toolButton("adjust", t("editor.tool.adjust"), "editor-tool-adjust")}
+          {toolButton("filters", t("editor.tool.filters"), "editor-tool-filters")}
+          {toolButton("text", t("editor.tool.text"), "editor-tool-text")}
+          {toolButton("brush", t("editor.tool.brush"), "editor-tool-brush")}
+          {toolButton("metadata", t("editor.tool.metadata"), "editor-tool-metadata")}
+          {toolButton("output", t("editor.tool.output"), "editor-tool-output")}
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
@@ -746,10 +745,10 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);
             setExportDraft((draft) => ({ ...draft, author: value.author, copyright: value.copyright, keywords: value.keywords.join(", "), removeGps: value.gpsLat === null && value.gpsLon === null }));
-          }} /> : metadataError ? <div role="alert" className="space-y-3 text-sm text-red-400"><p>{metadataError}</p><button type="button" className="rounded-md border border-edge px-3 py-2 text-text-primary" onClick={() => setMetadataRetry((v) => v + 1)}>重新加载</button></div> : <div className="flex items-center gap-3 text-sm text-text-muted"><span className="h-5 w-5 animate-spin rounded-full border-2 border-edge border-t-accent" />正在读取照片信息…</div>)}
-          {tool === "adjust" && <section className="space-y-6"><h3 className="text-sm font-semibold text-text-primary">光线与色彩</h3>{([['brightness', '亮度'], ['contrast', '对比度'], ['saturation', '饱和度']] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-3 flex justify-between text-xs text-text-secondary">{label}<span className="tabular-nums">{present.adjustments?.[key] ?? 0}</span></span><input type="range" min="-100" max="100" value={present.adjustments?.[key] ?? 0} onPointerDown={handleGestureStart} onPointerUp={handleGestureEnd} onChange={(e) => dispatch({ type: "adjust", patch: { [key]: Number(e.target.value) }, record: gestureSnapshotRef.current === null })} className="w-full accent-[#F0A83C]" data-testid={`editor-adjust-${key}`} /></label>)}<button type="button" className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary" onClick={() => dispatch({ type: "adjust", patch: { brightness: 0, contrast: 0, saturation: 0 } })}>重置调整</button></section>}
-          {tool === "filters" && <section className="space-y-4"><h3 className="text-sm font-semibold text-text-primary">滤镜</h3><div className="grid grid-cols-2 gap-2">{([
-            ["原图", 0, 0, 0], ["鲜明", 5, 15, 25], ["柔和", 8, -15, -10], ["黑白", 0, 10, -100],
+          }} /> : metadataError ? <div role="alert" className="space-y-3 text-sm text-red-400"><p>{t(metadataError, { defaultValue: metadataError })}</p><button type="button" className="rounded-md border border-edge px-3 py-2 text-text-primary" onClick={() => setMetadataRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : <div className="flex items-center gap-3 text-sm text-text-muted"><span className="h-5 w-5 animate-spin rounded-full border-2 border-edge border-t-accent" />{t("editor.metadata.loading")}</div>)}
+          {tool === "adjust" && <section className="space-y-6"><h3 className="text-sm font-semibold text-text-primary">{t("editor.adjust.title")}</h3>{([['brightness', t("editor.adjust.brightness")], ['contrast', t("editor.adjust.contrast")], ['saturation', t("editor.adjust.saturation")]] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-3 flex justify-between text-xs text-text-secondary">{label}<span className="tabular-nums">{present.adjustments?.[key] ?? 0}</span></span><input type="range" min="-100" max="100" value={present.adjustments?.[key] ?? 0} onPointerDown={handleGestureStart} onPointerUp={handleGestureEnd} onChange={(e) => dispatch({ type: "adjust", patch: { [key]: Number(e.target.value) }, record: gestureSnapshotRef.current === null })} className="w-full accent-[#F0A83C]" data-testid={`editor-adjust-${key}`} /></label>)}<button type="button" className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary" onClick={() => dispatch({ type: "adjust", patch: { brightness: 0, contrast: 0, saturation: 0 } })}>{t("editor.adjust.reset")}</button></section>}
+          {tool === "filters" && <section className="space-y-4"><h3 className="text-sm font-semibold text-text-primary">{t("editor.tool.filters")}</h3><div className="grid grid-cols-2 gap-2">{([
+            [t("editor.filter.original"), 0, 0, 0], [t("editor.filter.vivid"), 5, 15, 25], [t("editor.filter.soft"), 8, -15, -10], [t("editor.filter.monochrome"), 0, 10, -100],
           ] as const).map(([name, brightness, contrast, saturation]) => <button key={name} type="button" onClick={() => dispatch({ type: "adjust", patch: { brightness, contrast, saturation } })} aria-pressed={(present.adjustments?.brightness ?? 0) === brightness && (present.adjustments?.contrast ?? 0) === contrast && (present.adjustments?.saturation ?? 0) === saturation} className="h-20 rounded-lg border border-edge bg-panel text-sm text-text-secondary hover:border-accent aria-pressed:border-accent aria-pressed:bg-accent/10 aria-pressed:text-accent">{name}</button>)}</div></section>}
           {/* 工具选项 */}
           {tool === "text" && (

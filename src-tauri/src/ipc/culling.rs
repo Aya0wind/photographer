@@ -146,13 +146,10 @@ pub fn fetch_cull_session_create(
     let db = super::active_library_db(state)?;
     let (asset_ids, source_desc) = match &scope {
         CullScope::Album { album_id, subgroup } => {
-            let album_name: String = db
-                .0
-                .query_row(
-                    "SELECT name FROM album WHERE id = ?1",
-                    [*album_id],
-                    |r| r.get(0),
-                )
+            let album_name: String =
+                db.0.query_row("SELECT name FROM album WHERE id = ?1", [*album_id], |r| {
+                    r.get(0)
+                })
                 .map_err(|_| "相册不存在".to_string())?;
             let ids = db
                 .cull_album_asset_ids(*album_id, subgroup.as_deref())
@@ -174,10 +171,9 @@ pub fn fetch_cull_session_create(
                     .map(|i| format!("?{}", i + 1))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let mut stmt = db
-                    .0
-                    .prepare(&format!("SELECT id FROM assets WHERE id IN ({slots})"))
-                    .map_err(|e| e.to_string())?;
+                let mut stmt =
+                    db.0.prepare(&format!("SELECT id FROM assets WHERE id IN ({slots})"))
+                        .map_err(|e| e.to_string())?;
                 let rows = stmt
                     .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                         r.get::<_, i64>(0)
@@ -420,9 +416,7 @@ pub fn fetch_cull_session_finish(
         } else {
             0
         },
-        applied_rating: apply
-            .accepted_rating
-            .map(|_| accepted.len() as u64),
+        applied_rating: apply.accepted_rating.map(|_| accepted.len() as u64),
         rejected: if apply.reject_rejected {
             rejected.len() as u64
         } else {
@@ -447,7 +441,9 @@ pub async fn cull_session_create(
 
 /// 会话列表（updated_at DESC；进行中在前；计数 SQL 派生）。
 #[tauri::command]
-pub async fn cull_session_list(state: State<'_, SharedState>) -> Result<Vec<CullSessionDto>, String> {
+pub async fn cull_session_list(
+    state: State<'_, SharedState>,
+) -> Result<Vec<CullSessionDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_cull_session_list).await
 }
@@ -459,7 +455,10 @@ pub async fn cull_session_open(
     session_id: i64,
 ) -> Result<CullSessionDetailDto, String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| fetch_cull_session_open(state, session_id)).await
+    run_blocking(shared, move |state| {
+        fetch_cull_session_open(state, session_id)
+    })
+    .await
 }
 
 /// 批量决定 upsert（decision=null 回未定；快照外 id 忽略并计数返回）。
@@ -497,7 +496,10 @@ pub async fn cull_session_discard(
     session_id: i64,
 ) -> Result<(), String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| fetch_cull_session_discard(state, session_id)).await
+    run_blocking(shared, move |state| {
+        fetch_cull_session_discard(state, session_id)
+    })
+    .await
 }
 
 /// 收尾：已选/已剔除映射到旗标/星级/拒绝（含 XMP 投影）+ finished_at。
@@ -577,7 +579,10 @@ pub struct CullPrescanDto {
 }
 
 fn bucket(ids: Vec<i64>) -> CullPrescanBucketDto {
-    CullPrescanBucketDto { count: ids.len() as u64, asset_ids: ids }
+    CullPrescanBucketDto {
+        count: ids.len() as u64,
+        asset_ids: ids,
+    }
 }
 
 /// 敏感度校验：weak/normal/strong 之外拒绝。

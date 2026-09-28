@@ -67,7 +67,9 @@ impl DeviceSource for VolumeSource {
     }
 
     fn name(&self) -> String {
-        volume_label(&self.root).unwrap_or_else(|| self.root.to_string_lossy().into_owned())
+        volume_label(&self.root)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.root.to_string_lossy().into_owned())
     }
 
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
@@ -149,8 +151,7 @@ pub(crate) fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     IGNORED_DIRS.contains(&name.as_ref()) || name.starts_with('.')
 }
 
-/// 查询卷标（GetVolumeInformationW）；未挂载/无标签/失败时返回 None，
-/// 调用方回退到根路径展示。
+/// 查询卷标；已挂载但没有卷标时返回空字符串，与未插卡区分。
 #[cfg(windows)]
 fn volume_label(root: &Path) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
@@ -183,11 +184,7 @@ fn volume_label(root: &Path) -> Option<String> {
         return None;
     }
     let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-    if len == 0 {
-        None
-    } else {
-        Some(String::from_utf16_lossy(&name[..len]))
-    }
+    Some(String::from_utf16_lossy(&name[..len]))
 }
 
 #[cfg(not(windows))]

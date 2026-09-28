@@ -142,7 +142,10 @@ pub fn normalize_library_quality_tiers(
                     }),
             );
         }
-        if !matches!(lib.ai_quality_tier.as_deref(), Some("fast" | "normal" | "accurate")) {
+        if !matches!(
+            lib.ai_quality_tier.as_deref(),
+            Some("fast" | "normal" | "accurate")
+        ) {
             return Err(format!("库 {} 的 AI 档位无效", lib.name));
         }
     }
@@ -156,7 +159,10 @@ pub fn normalize_library_quality_tiers(
         if changed_here {
             lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
         }
-        settings.ai.quality_tier = lib.ai_quality_tier.clone().unwrap_or_else(default_quality_tier);
+        settings.ai.quality_tier = lib
+            .ai_quality_tier
+            .clone()
+            .unwrap_or_else(default_quality_tier);
     }
     Ok(())
 }
@@ -443,11 +449,17 @@ impl SettingsManager {
                     if lib.ai_quality_tier.is_none() {
                         lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
                     }
-                    if !matches!(lib.ai_quality_tier.as_deref(), Some("fast" | "normal" | "accurate")) {
+                    if !matches!(
+                        lib.ai_quality_tier.as_deref(),
+                        Some("fast" | "normal" | "accurate")
+                    ) {
                         lib.ai_quality_tier = Some(default_quality_tier());
                     }
                 }
-                if let Some(tier) = settings.active_library().and_then(|lib| lib.ai_quality_tier.clone()) {
+                if let Some(tier) = settings
+                    .active_library()
+                    .and_then(|lib| lib.ai_quality_tier.clone())
+                {
                     settings.ai.quality_tier = tier;
                 }
                 Ok(settings)

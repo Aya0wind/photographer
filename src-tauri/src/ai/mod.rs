@@ -645,13 +645,20 @@ impl ModelManager {
             .collect()
     }
 
-    /// 发起下载：已在队（同模型）直接返回（去重）；否则登记 + supervisor
+    /// 发起下载：全局已安装或已在队（同模型）直接返回；否则登记 + supervisor
     /// 后台执行。结果经 `aiModelDownloadFinished` 事件回报。
     pub fn download(&self, entry: ModelEntry) -> Result<(), String> {
         {
             let mut active = self.active.lock().expect("ai active mutex poisoned");
             if active.contains_key(&entry.id) {
                 return Ok(()); // 去重：已在下载
+            }
+            // 成功下载经 SHA 校验后才落到最终路径。共用文件独立于库，
+            // 重启或切换库后也无需再下载；与任务登记在同一锁内防重复请求。
+            if fs::metadata(self.final_path(&entry.id))
+                .is_ok_and(|meta| meta.is_file() && meta.len() == entry.bytes_total)
+            {
+                return Ok(());
             }
             active.insert(
                 entry.id.clone(),

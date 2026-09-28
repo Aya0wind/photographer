@@ -107,36 +107,36 @@ function formatShutter(value: string): string {
 
 /** EXIF 枚举 token → 中文（后端 exif_lite 归一 token 族；未知 token 原样） */
 const FLASH_ZH: Record<string, string> = {
-  fired: "闪光",
-  no_flash: "未闪光",
-  no_flash_function_not_fired: "未闪光（无闪光功能）",
-  flash_fired_compulsory: "闪光（强制）",
+  fired: "viewer.value.flash_zh.fired",
+  no_flash: "viewer.value.flash_zh.no_flash",
+  no_flash_function_not_fired: "viewer.value.flash_zh.no_flash_function_not_fired",
+  flash_fired_compulsory: "viewer.value.flash_zh.flash_fired_compulsory",
 };
 const METERING_ZH: Record<string, string> = {
-  average: "平均测光",
-  center_weighted_average: "中央重点",
-  pattern: "矩阵测光",
-  spot: "点测光",
-  multi_spot: "多点测光",
-  partial: "局部测光",
+  average: "viewer.value.metering_zh.average",
+  center_weighted_average: "viewer.value.metering_zh.center_weighted_average",
+  pattern: "viewer.value.metering_zh.pattern",
+  spot: "viewer.value.metering_zh.spot",
+  multi_spot: "viewer.value.metering_zh.multi_spot",
+  partial: "viewer.value.metering_zh.partial",
 };
-const WB_ZH: Record<string, string> = { auto: "自动", manual: "手动" };
+const WB_ZH: Record<string, string> = { auto: "viewer.value.wb_zh.auto", manual: "viewer.value.wb_zh.manual" };
 const PROGRAM_ZH: Record<string, string> = {
-  manual: "手动 (M)",
-  program_auto: "程序自动 (P)",
-  aperture_priority: "光圈优先 (A)",
-  shutter_priority: "快门优先 (S)",
-  creative: "创意程序",
-  action: "动作程序",
-  portrait_mode: "人像",
-  landscape_mode: "风景",
-  bulb: "B 门",
+  manual: "viewer.value.program_zh.manual",
+  program_auto: "viewer.value.program_zh.program_auto",
+  aperture_priority: "viewer.value.program_zh.aperture_priority",
+  shutter_priority: "viewer.value.program_zh.shutter_priority",
+  creative: "viewer.value.program_zh.creative",
+  action: "viewer.value.program_zh.action",
+  portrait_mode: "viewer.value.program_zh.portrait_mode",
+  landscape_mode: "viewer.value.program_zh.landscape_mode",
+  bulb: "viewer.value.program_zh.bulb",
 };
 
 /** 枚举字段展示：token 查表，非 token（自由文本）原样，空 → "—" */
-function formatToken(value: string | null | undefined, table: Record<string, string>): string {
+function formatToken(value: string | null | undefined, table: Record<string, string>, translate: (key: string) => string): string {
   if (value === null || value === undefined || value === "") return "—";
-  return table[value] ?? value;
+  return table[value] ? translate(table[value]) : value;
 }
 
 /** EXIF orientation（1-8）→ 拍摄方向：5-8 为竖拍（含镜像竖拍），1-4 为横拍 */
@@ -675,9 +675,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     imageRows.push({
       label: t("viewer.ai.eyesLabel"),
       value: (
-        <span key="ai-eyes" className="inline-flex items-center gap-1.5" data-testid="viewer-ai-eyes" data-state={eyesState}>
-          <span className={eyesState === "closed" ? "text-red-400" : undefined}>{eyesText}</span>
-          <span className="rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
+        <span key="ai-eyes" className="flex w-full min-w-0 items-center justify-end gap-1.5" data-testid="viewer-ai-eyes" data-state={eyesState}>
+          <span title={eyesText} className={`min-w-0 truncate ${eyesState === "closed" ? "text-red-400" : ""}`}>{eyesText}</span>
+          <span className="shrink-0 whitespace-nowrap rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
             {t("viewer.ai.badge")}
           </span>
         </span>
@@ -686,13 +686,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     imageRows.push({
       label: t("viewer.ai.blurLabel"),
       value: (
-        <span key="ai-blur" className="inline-flex items-center gap-1.5" data-testid="viewer-ai-blur" data-soft={blur?.value === "soft" ? "true" : "false"}>
+        <span key="ai-blur" className="flex w-full min-w-0 items-center justify-end gap-1.5" data-testid="viewer-ai-blur" data-soft={blur?.value === "soft" ? "true" : "false"}>
           {blur === undefined ? (
-            <span>{t("viewer.ai.eyes.notAnalyzed")}</span>
+            <span className="min-w-0 truncate" title={t("viewer.ai.eyes.notAnalyzed")}>{t("viewer.ai.eyes.notAnalyzed")}</span>
           ) : (
             <>
               <span className={`tabular-nums ${blur.value === "soft" ? "text-amber-300" : undefined}`}>{Math.round(blur.score)}</span>
-              <span className="inline-flex h-1.5 w-16 overflow-hidden rounded-full bg-panel align-middle">
+              <span className="inline-flex h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-panel align-middle">
                 <span
                   className={`h-full rounded-full ${blur.value === "soft" ? "bg-amber-400" : "bg-sky-400"}`}
                   style={{ width: `${Math.max(0, Math.min(100, blur.score))}%` }}
@@ -700,7 +700,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               </span>
             </>
           )}
-          <span className="rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
+          <span className="shrink-0 whitespace-nowrap rounded bg-panel px-1 py-0.5 text-[9px] font-normal leading-none text-text-muted" data-testid="viewer-ai-badge">
             {t("viewer.ai.badge")}
           </span>
         </span>
@@ -722,15 +722,15 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     }
     if (d.shutter) shotRows.push({ label: t("viewer.shutter"), value: formatShutter(d.shutter) });
     if (d.iso != null) shotRows.push({ label: t("viewer.iso"), value: String(d.iso) });
-    if (d.flash) shotRows.push({ label: t("viewer.flash"), value: formatToken(d.flash, FLASH_ZH) });
+    if (d.flash) shotRows.push({ label: t("viewer.flash"), value: formatToken(d.flash, FLASH_ZH, t) });
     if (d.meteringMode) {
-      shotRows.push({ label: t("viewer.meteringMode"), value: formatToken(d.meteringMode, METERING_ZH) });
+      shotRows.push({ label: t("viewer.meteringMode"), value: formatToken(d.meteringMode, METERING_ZH, t) });
     }
     if (d.whiteBalance) {
-      shotRows.push({ label: t("viewer.whiteBalance"), value: formatToken(d.whiteBalance, WB_ZH) });
+      shotRows.push({ label: t("viewer.whiteBalance"), value: formatToken(d.whiteBalance, WB_ZH, t) });
     }
     if (d.exposureProgram) {
-      shotRows.push({ label: t("viewer.exposureProgram"), value: formatToken(d.exposureProgram, PROGRAM_ZH) });
+      shotRows.push({ label: t("viewer.exposureProgram"), value: formatToken(d.exposureProgram, PROGRAM_ZH, t) });
     }
     if (d.software) shotRows.push({ label: t("viewer.software"), value: d.software });
     if (d.artist) shotRows.push({ label: t("viewer.artist"), value: d.artist });
@@ -1265,7 +1265,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                         {section.rows.map((row) => (
                           <div key={row.label} className="flex items-baseline justify-between gap-2 text-xs">
                             <dt className="shrink-0 text-text-muted">{row.label}</dt>
-                            <dd className="min-w-0 text-right text-text-secondary">{row.value}</dd>
+                            <dd className="min-w-0 flex-1 text-right text-text-secondary">{row.value}</dd>
                           </div>
                         ))}
                       </dl>

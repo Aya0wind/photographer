@@ -1,4 +1,5 @@
 import { searchSemantic, type SemanticHit } from "@/ipc/api";
+import i18n from "@/i18n";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { loadHiddenTags } from "./hiddenTags";
 
@@ -8,6 +9,12 @@ export const DEFAULT_SMART_TAGS = [
   "广场", "街道", "花", "烟花", "猫", "狗", "鸟", "合影", "儿童", "城市", "乡村",
   "道路", "车", "自行车", "飞机", "火车", "船", "雨", "雾",
 ] as const;
+
+/** 只翻译内置标签的显示名，检索词和缓存键保持稳定，用户自定义名称原样显示。 */
+export function smartTagLabel(tag: string): string {
+  const index = (DEFAULT_SMART_TAGS as readonly string[]).indexOf(tag);
+  return index < 0 ? tag : i18n.t(`albums.smartTag.${index}`, { defaultValue: tag });
+}
 
 const TAGS_KEY = "smartphoto.albums.tags.v2";
 const INDEX_KEY = "smartphoto.albums.tagIndex.v2";

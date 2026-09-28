@@ -27,7 +27,7 @@ const GROUPS: ReadonlyArray<ShortcutGroup> = [
     items: [
       { keys: "← → ↑ ↓", labelKey: "shortcuts.gallery.move" },
       { keys: "Enter", labelKey: "shortcuts.gallery.open" },
-      { keys: "Ctrl+点击 / 长按", labelKey: "shortcuts.gallery.select" },
+      { keys: "shortcuts.selectKeys", labelKey: "shortcuts.gallery.select" },
       { keys: "Esc", labelKey: "shortcuts.gallery.exitSelect" },
     ],
   },
@@ -35,7 +35,7 @@ const GROUPS: ReadonlyArray<ShortcutGroup> = [
     titleKey: "shortcuts.group.viewer",
     items: [
       { keys: "← →", labelKey: "shortcuts.viewer.nav" },
-      { keys: "滚轮 / Z / 双击", labelKey: "shortcuts.viewer.zoom" },
+      { keys: "shortcuts.zoomKeys", labelKey: "shortcuts.viewer.zoom" },
       { keys: "[ ] / , . / R", labelKey: "shortcuts.viewer.rotate" },
       { keys: "1–5 / 0", labelKey: "shortcuts.viewer.rating" },
       { keys: "P / U", labelKey: "shortcuts.viewer.flag" },
@@ -124,7 +124,7 @@ export default function ShortcutsModal({
                         className="flex items-center justify-between gap-4 text-xs"
                       >
                         <dt className="shrink-0 rounded border border-edge bg-bg px-1.5 py-0.5 font-mono text-[10px] text-text-secondary">
-                          {item.keys}
+                          {item.keys.startsWith("shortcuts.") ? t(item.keys) : item.keys}
                         </dt>
                         <dd className="min-w-0 text-right text-text-secondary">
                           {t(item.labelKey)}

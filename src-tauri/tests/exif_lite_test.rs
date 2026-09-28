@@ -707,3 +707,58 @@ fn bad_truncated_sof_yields_none_not_panic() {
     assert_eq!(meta.width, None);
     assert_eq!(meta.height, None);
 }
+
+#[test]
+fn placeholder_equipment_and_zero_capture_values_are_unknown() {
+    let fields: Vec<exif::Field> = [
+        (exif::Tag::Make, exif::Value::Ascii(vec![b"---".to_vec()])),
+        (exif::Tag::Model, exif::Value::Ascii(vec![b"N/A".to_vec()])),
+        (
+            exif::Tag::LensModel,
+            exif::Value::Ascii(vec![b"---".to_vec()]),
+        ),
+        (
+            exif::Tag::PhotographicSensitivity,
+            exif::Value::Short(vec![0]),
+        ),
+        (
+            exif::Tag::FNumber,
+            exif::Value::Rational(vec![exif::Rational { num: 0, denom: 1 }]),
+        ),
+        (
+            exif::Tag::FocalLength,
+            exif::Value::Rational(vec![exif::Rational { num: 0, denom: 1 }]),
+        ),
+        (
+            exif::Tag::ExposureTime,
+            exif::Value::Rational(vec![exif::Rational { num: 0, denom: 1 }]),
+        ),
+    ]
+    .into_iter()
+    .map(|(tag, value)| exif::Field {
+        tag,
+        ifd_num: exif::In::PRIMARY,
+        value,
+    })
+    .collect();
+    let mut writer = exif::experimental::Writer::new();
+    for field in &fields {
+        writer.push_field(field);
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    writer.write(&mut bytes, true).unwrap();
+    let meta = parse(bytes.get_ref());
+    assert!(meta.camera.is_none());
+    assert!(meta.lens.is_none());
+    assert!(meta.iso.is_none());
+    assert!(meta.f_number.is_none());
+    assert!(meta.focal_length.is_none());
+    assert!(meta.exposure_time.is_none());
+    // A valid camera component survives when its partner is a placeholder.
+    assert_eq!(
+        parse(&build_tiff("Sony", "---", None, None))
+            .camera
+            .as_deref(),
+        Some("Sony")
+    );
+}

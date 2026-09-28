@@ -1,4 +1,5 @@
 import type { AssetDto } from "@/ipc/api";
+import { getIntlLocale } from "@/i18n";
 
 /**
  * 画廊/搜索共用的日期分组（M3）：
@@ -50,10 +51,12 @@ export function groupAssetsByDate(assets: AssetDto[]): AssetGroup[] {
 }
 
 /** 组头日期文案："2026-09-18" → "2026年9月18日"（未知组的「未知日期」由调用方以 i18n 呈现） */
-export function formatDateLabel(date: string): string {
+export function formatDateLabel(date: string, locale = getIntlLocale()): string {
   const [y, m, d] = date.slice(0, 10).split("-");
   if (!y || !m || !d) return date;
-  return `${Number(y)}年${Number(m)}月${Number(d)}日`;
+  const localDate = new Date(Number(y), Number(m) - 1, Number(d));
+  if (Number.isNaN(localDate.getTime())) return date;
+  return new Intl.DateTimeFormat(locale, { year: "numeric", month: "long", day: "numeric" }).format(localDate);
 }
 
 /** chips 条短文案："2026-09-18" → "09-18"（年份在 title 提示中完整给出） */

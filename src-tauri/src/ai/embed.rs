@@ -230,8 +230,7 @@ impl ModelManager {
             slots.visual = None; // 丢弃 DML 会话：重建走 execution_providers 的 CPU 分支
         };
         let vision_model = super::semantic_model_ids(self.ai_params().quality_tier)[0];
-        let (shape, flat) =
-            super::run_with_dml_fallback(use_gpu, vision_model, extract, reset)?;
+        let (shape, flat) = super::run_with_dml_fallback(use_gpu, vision_model, extract, reset)?;
         let (rows, dim_out) = match shape.len() {
             // [B, 768]：整块按行切
             2 => (shape[0] as usize, shape[1] as usize),

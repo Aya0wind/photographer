@@ -17,6 +17,8 @@ export type DeviceKind = "volume" | "mtp" | "folder";
 export type FileKind = "photo" | "raw" | "other";
 
 export interface DeviceSnapshot {
+  /** 空读卡器槽位可见，但不能扫描或导入。旧事件省略时按已插卡处理。 */
+  mediaPresent?: boolean;
   scanStatus?: "scanning" | "ready" | "failed";
   scanError?: string | null;
   id: string;
@@ -158,6 +160,8 @@ export type AppEvent =
     }
   /** 联拍收片（阶段 E-1；拍摄后新对象落卡即广播，UI 据此刷新设备文件列表） */
   | { type: "tetheringObjectAdded"; pnpId: string; objectName: string; objectSize: number | null }
+  | { type: "tetheringPhotoAdded"; sessionId: string; libraryId: string; albumId: number; assetId: number; name: string }
+  | { type: "tetheringStatus"; sessionId: string; connected: boolean; error: string | null }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -559,10 +563,15 @@ export async function cleanApply(jobId: number): Promise<CleanResultDto | null> 
  *  @param size 期望边长（px），如 256；实际以缓存档位就近为准 */
 export async function thumbGet(path: string, size: number): Promise<string | null> {
   try {
-    return await ipc<string | null>("thumb_get", { path, size });
+    return await ipc<string | null>("thumb_get_by_path", { path, size });
   } catch {
     return null;
   }
+}
+
+/** 导入前读取相机提供的小预览，不复制整张原图。 */
+export async function deviceThumbGet(deviceId: string, objectId: string, version: string, size: number): Promise<string | null> {
+  return ipc<string | null>("device_thumb_get", { deviceId, objectId, version, size });
 }
 
 // --- M3 画廊命令封装 --------------------------------------------------------------
@@ -855,10 +864,11 @@ export async function aiModelsStatus(): Promise<AiModelStatus[]> {
 }
 
 /** 开始下载模型；命令失败静默（UI 状态以 status 轮询/事件为准） */
-export async function aiModelDownload(id: string): Promise<void> {
+export async function aiModelDownload(id: string, strict = false): Promise<void> {
   try {
     await ipc<void>("ai_model_download", { id });
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
   }
 }
 
@@ -1952,6 +1962,189 @@ export async function cameraProbe(pnpId: string): Promise<CameraInfo | null> {
     return normalizeCameraInfo(await ipc<unknown>("camera_probe", { pnpId }));
   } catch {
     return null;
+  }
+}
+
+// --- 联拍会话（tethering_*：独立窗口 + 相册锚定 + 免导入任务入册） ---------------------
+
+/** 相机拍摄参数（tethering_settings 报告）：id 恒为 shutter/aperture/iso 之一
+ *  （后端契约），options 为可选值表（value=设置用值，label=展示文案）。 */
+export interface TetherSettingOption {
+  value: string;
+  label: string;
+}
+export interface TetherCameraSetting {
+  id: string;
+  current: string;
+  writable: boolean;
+  options: TetherSettingOption[];
+}
+
+/** 会话内已入册照片（胶片条；后端只留最近 64 张）。 */
+export interface TetherPhoto {
+  id: number;
+  name: string;
+  kind: string;
+}
+
+/** 联拍会话（tethering_session/start 返回；后端全局单会话）。 */
+export interface TetherSessionDto {
+  id: string;
+  libraryId: string;
+  albumId: number;
+  albumName: string;
+  camera: CameraInfo;
+  settings: TetherCameraSetting[];
+  photos: TetherPhoto[];
+  connected: boolean;
+  receiving: boolean;
+  error: string | null;
+}
+
+/** 脏数据容错：未知形状 → null（调用方按会话已结束处理）。 */
+function normalizeTetherSession(value: unknown): TetherSessionDto | null {
+  if (value === null || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  if (typeof r.id !== "string" || typeof r.albumId !== "number") return null;
+  const camera = normalizeCameraInfo(r.camera);
+  if (camera === null) return null;
+  return {
+    id: r.id,
+    libraryId: typeof r.libraryId === "string" ? r.libraryId : "",
+    albumId: r.albumId,
+    albumName: typeof r.albumName === "string" ? r.albumName : "",
+    camera,
+    settings: normalizeTetherSettings(r.settings),
+    photos: Array.isArray(r.photos)
+      ? r.photos
+          .filter((p): p is Record<string, unknown> => p !== null && typeof p === "object")
+          .filter((p) => typeof p.id === "number" && typeof p.name === "string")
+          .map((p) => ({ id: p.id as number, name: p.name as string, kind: typeof p.kind === "string" ? p.kind as string : "photo" }))
+      : [],
+    connected: r.connected === true,
+    receiving: r.receiving === true,
+    error: typeof r.error === "string" && r.error !== "" ? r.error : null,
+  };
+}
+
+function normalizeTetherSettings(value: unknown): TetherCameraSetting[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((s): s is Record<string, unknown> => s !== null && typeof s === "object")
+    .filter((s) => typeof s.id === "string" && typeof s.current === "string")
+    .map((s) => ({
+      id: s.id as string,
+      current: s.current as string,
+      writable: s.writable === true,
+      options: Array.isArray(s.options)
+        ? s.options
+            .filter((o): o is Record<string, unknown> => o !== null && typeof o === "object")
+            .filter((o) => typeof o.value === "string")
+            .map((o) => ({
+              value: o.value as string,
+              label: typeof o.label === "string" ? o.label : (o.value as string),
+            }))
+        : [],
+    }));
+}
+
+export type TetherStartResult =
+  | { ok: true; session: TetherSessionDto }
+  | { ok: false; error: string | null };
+
+/** 开启联拍会话并打开独立拍摄窗口（tethering_start）：后端创建 `tethering` 窗口
+ *  （窗口关闭即自动结束会话）。业务错误（相机被占/已有会话/相册不存在）透传。 */
+export async function tetheringStart(albumId: number, cameraId: string): Promise<TetherStartResult> {
+  try {
+    const raw = await ipc<unknown>("tethering_start", { albumId, cameraId });
+    const session = normalizeTetherSession(raw);
+    if (session === null) return { ok: false, error: null };
+    return { ok: true, session };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 拉取会话快照（tethering_session）；会话已结束/形状异常返回 null。 */
+export async function tetheringSession(sessionId: string): Promise<TetherSessionDto | null> {
+  try {
+    return normalizeTetherSession(await ipc<unknown>("tethering_session", { sessionId }));
+  } catch {
+    return null;
+  }
+}
+
+/** 刷新拍摄参数（tethering_settings）；失败返回 null（UI 保持旧值）。 */
+export async function tetheringSettings(sessionId: string): Promise<TetherCameraSetting[] | null> {
+  try {
+    const raw = await ipc<unknown>("tethering_settings", { sessionId });
+    return normalizeTetherSettings(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** 设置拍摄参数（tethering_setting_set）并返回刷新后的全量参数。
+ *  不 catch：业务错误（参数无效/相机拒绝）文案透传给调用方。 */
+export async function tetheringSettingSet(
+  sessionId: string,
+  id: string,
+  value: string,
+): Promise<TetherCameraSetting[]> {
+  return normalizeTetherSettings(
+    await ipc<unknown>("tethering_setting_set", { sessionId, id, value }),
+  );
+}
+
+export type TetherCaptureResult = { ok: true } | { ok: false; error: string | null };
+
+/** 按快门（tethering_capture）：触发拍摄 + 同步等待收片入册。
+ *  业务错误透传；invoke 不可用 error=null（通用文案）。 */
+export async function tetheringCapture(sessionId: string): Promise<TetherCaptureResult> {
+  try {
+    await ipc<unknown>("tethering_capture", { sessionId });
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 取一帧实时取景（tethering_frame）：JPEG data URL；相机忙（拍摄/收片中）或
+ *  不支持 live view 时返回 null（UI 保持上一帧不闪烁）。 */
+export async function tetheringFrame(sessionId: string): Promise<string | null> {
+  try {
+    const value = await ipc<unknown>("tethering_frame", { sessionId });
+    return typeof value === "string" && value.startsWith("data:image/") ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 会话内照片预览（tethering_photo_preview；size>512 取 2048 档）：缩略图
+ *  data URL；尚未生成/失败返回 null。 */
+export async function tetheringPhotoPreview(
+  sessionId: string,
+  assetId: number,
+  size: number,
+): Promise<string | null> {
+  try {
+    const value = await ipc<unknown>("tethering_photo_preview", { sessionId, assetId, size });
+    return typeof value === "string" && value.startsWith("data:image/") ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 结束会话（tethering_stop）：幂等；失败静默（窗口关闭路径后端兜底）。 */
+export async function tetheringStop(sessionId: string): Promise<void> {
+  try {
+    await ipc<unknown>("tethering_stop", { sessionId });
+  } catch {
+    // 会话已结束/后端在途：无操作
   }
 }
 

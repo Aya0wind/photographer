@@ -2,18 +2,21 @@ import { useTranslation } from "react-i18next";
 
 import { QUALITY_TIERS } from "@/features/settings/lib/qualityTier";
 import { AI_CHOICES, type OnboardingDraft } from "../types";
+import AiDownloadPanel from "./AiDownloadPanel";
 
 interface Props {
   draft: OnboardingDraft;
   onChange: (patch: Partial<OnboardingDraft>) => void;
+  preparing?: boolean;
 }
 
 /** 步骤 3：选择 AI 功能和处理方案，沿用设置页的档位契约。 */
-export default function AiStep({ draft, onChange }: Props) {
+export default function AiStep({ draft, onChange, preparing = false }: Props) {
   const { t } = useTranslation();
 
   return (
     <div className="flex flex-col gap-4">
+      <AiDownloadPanel draft={draft} preparing={preparing} />
       <div className="grid gap-3">
         {AI_CHOICES.map((choice) => {
           const selected = draft.aiChoice === choice;

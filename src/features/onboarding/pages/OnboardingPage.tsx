@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "motion/react";
 import { useTranslation } from "react-i18next";
@@ -12,10 +12,13 @@ import AiStep from "../steps/AiStep";
 import DoneStep from "../steps/DoneStep";
 import ImportSchemeStep from "../steps/ImportSchemeStep";
 import LibraryStep from "../steps/LibraryStep";
-import { SUGGESTED_LIBRARY_NAME } from "../onboardingConfig";
+import { suggestedLibraryName } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
 import { resetLibrarySession } from "@/lib/librarySession";
+import { useAiStore } from "@/stores/aiStore";
+import { gapsForIds } from "@/features/settings/lib/qualityTier";
+import { aiSetupPackages } from "../aiSetup";
 
 const STEP_TITLES = [
   "onboarding.step.library",
@@ -33,7 +36,7 @@ function makeLibraryId(): string {
 /** 新建库草稿：只默认库名；目录留空由用户自选（2026-09-28 用户定规） */
 function newLibraryDraft(): OnboardingDraft {
   return {
-    libraryName: SUGGESTED_LIBRARY_NAME,
+    libraryName: suggestedLibraryName(),
     dbDir: "",
     photoRoot: "",
     duplicatePolicy: "skip",
@@ -78,6 +81,10 @@ export default function OnboardingPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const loaded = useSettingsStore((s) => s.loaded);
+  const models = useAiStore((s) => s.models);
+  const [preparingAi, setPreparingAi] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // 补完模式：URL ?library=<id> 指向既有库；无效/缺失时按新建处理
   const editId = searchParams.get("library");
@@ -93,9 +100,17 @@ export default function OnboardingPage() {
   // 设置未加载完成前等待（补完模式需要既有库数据；避免用默认值覆盖真实设置）
   if (!loaded) return null;
 
-  const patch = (p: Partial<OnboardingDraft>) => setDraft((d) => ({ ...d, ...p }));
+  const requiredIds = aiSetupPackages(draft).flatMap((group) => group.ids);
+  const aiReady = requiredIds.length === 0 || gapsForIds(requiredIds, models).length === 0;
+  const patch = (p: Partial<OnboardingDraft>) => {
+    if (p.aiChoice !== undefined || p.qualityTier !== undefined) setPreparingAi(false);
+    setDraft((d) => ({ ...d, ...p }));
+  };
 
   const commit = async () => {
+    if (saving) return;
+    if (!aiReady) { setPreparingAi(true); setStep(2); return; }
+    setSaving(true);
     const current = useSettingsStore.getState().settings;
     // 并发流数是库属性：补完模式保留库既有值（NewLibraryDialog 新建的带过来），新建默认 4
     const existing = editId
@@ -223,7 +238,7 @@ export default function OnboardingPage() {
         </div>
 
         {/* 步骤内容：固定框架内的滚动区 */}
-        <div className="sp-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge bg-surface p-6">
+        <div ref={contentRef} className="sp-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge bg-surface p-6">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={step}
@@ -234,7 +249,7 @@ export default function OnboardingPage() {
             >
               {step === 0 && <LibraryStep draft={draft} onChange={patch} />}
               {step === 1 && <ImportSchemeStep draft={draft} onChange={patch} />}
-              {step === 2 && <AiStep draft={draft} onChange={patch} />}
+              {step === 2 && <AiStep draft={draft} onChange={patch} preparing={preparingAi} />}
               {step === 3 && <DoneStep draft={draft} />}
             </motion.div>
           </AnimatePresence>
@@ -263,6 +278,7 @@ export default function OnboardingPage() {
               <button
                 type="button"
                 onClick={() => void commit()}
+                disabled={saving}
                 className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
               >
                 {t("onboarding.done.start")}
@@ -270,11 +286,18 @@ export default function OnboardingPage() {
             ) : (
               <button
                 type="button"
-                onClick={() => setStep((s) => s + 1)}
-                disabled={!canProceed(step, draft)}
+                onClick={() => {
+                  if (step === 2 && !aiReady) {
+                    setPreparingAi(true);
+                    if (contentRef.current) contentRef.current.scrollTop = 0;
+                    return;
+                  }
+                  setStep((s) => s + 1);
+                }}
+                disabled={!canProceed(step, draft) || (step === 2 && preparingAi && !aiReady)}
                 className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {t("common.next")}
+                {t(step === 2 && !aiReady ? preparingAi ? "onboarding.ai.downloading" : "onboarding.ai.downloadAndContinue" : "common.next")}
               </button>
             )}
           </div>

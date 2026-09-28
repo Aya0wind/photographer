@@ -1,26 +1,12 @@
 //! 存量设备枚举与「设备」语义过滤（启动补扫 + 热插共用，单一事实源）。
 //!
-//! 背景（2026-09-18 两次实测反馈）：① app 重启窗口内插入的相机收不到
-//! WM_DEVICECHANGE，仅靠热插事件驱动会永久漏注册——启动时需主动枚举
-//! 存量设备，走与热插完全相同的 `DeviceArrived` → 建源 → 扫描 → 注册 →
-//! `DeviceScanned` 链路（lib.rs `spawn_device_orchestrator` 在订阅总线后
-//! 调 [`enumerate_present_devices`] 并发布）。② 映射网络盘（Y:/Z:）在
-//! 会话/网络恢复时也会触发 DBT 卷到达事件，混进设备区——「设备」语义
-//! 必须过滤：**仅有媒体的可移动介质（读卡器/U 盘/照片光盘）可注册**；
-//! 本地硬盘（FIXED）与网络盘（REMOTE）不是导入源。
-//!
-//! 过滤决策拆成纯函数 [`is_registrable_volume`]（单测见
-//! tests/device_present_test.rs）；Win32 探测封装为 [`probe_volume`]，
-//! 启动枚举与热插 DBT_DEVTYP_VOLUME 到达分支共用（**只滤到达，不滤
-//! 移除**——拔盘瞬间 GetDriveTypeW 已失效，移除事件必须照发才能清注册表）。
-//! 文件系统树浏览（fs_list_dirs）不过滤：从 NAS 文件夹导入是合法场景。
-//!
-//! WPD 存量：`IPortableDeviceManager::GetDevices`（`wpd::enumerate_mtp_devices`，
-//! COM 初始化由 wpd.rs 每入口自带且幂等，编排线程无需预初始化）。
+//! 启动、轮询与热插拔共用卷探测。可移动介质须已插卡；CFexpress 等报告为
+//! 固定磁盘的外接介质，还须通过硬件热插属性验证。本地硬盘和网络盘不注册。
+//! 空读卡器仅供来源列表展示，不参与扫描；WPD 的盘符别名由卷通道管理。
 
 // GetDriveTypeW 返回值（Win32 ABI 固定；windows crate 该组常量在未启用的
 // feature 内，此处照抄数值——与 wpd.rs CLSID 同策略）。仅
-// DRIVE_REMOVABLE/DRIVE_CDROM 进入 lib 判定，其余供测试矩阵与文档完整性。
+// 可移动/光盘与经硬件属性验证的外接固定卷进入判定。
 #[allow(dead_code)]
 pub const DRIVE_UNKNOWN: u32 = 0;
 #[allow(dead_code)]
@@ -42,6 +28,69 @@ pub fn is_registrable_volume(drive_type: u32, media_present: bool) -> bool {
     media_present && matches!(drive_type, DRIVE_REMOVABLE | DRIVE_CDROM)
 }
 
+/// CFexpress 等外接介质也可能报告 DRIVE_FIXED；必须再查硬件热插属性。
+pub fn is_importable_volume(drive_type: u32, media_present: bool, external: bool) -> bool {
+    is_registrable_volume(drive_type, media_present)
+        || (drive_type == DRIVE_FIXED && media_present && external)
+}
+
+#[cfg(windows)]
+fn is_external_volume(drive: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        },
+        System::{
+            Ioctl::{IOCTL_STORAGE_GET_HOTPLUG_INFO, STORAGE_HOTPLUG_INFO},
+            IO::DeviceIoControl,
+        },
+    };
+    let path: Vec<u16> = format!("\\\\.\\{drive}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // 零访问权限即可查询属性，不读取或修改介质内容。
+    let Ok(handle) = (unsafe {
+        CreateFileW(
+            PCWSTR(path.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }) else {
+        return false;
+    };
+    let mut info = STORAGE_HOTPLUG_INFO {
+        Size: std::mem::size_of::<STORAGE_HOTPLUG_INFO>() as u32,
+        ..Default::default()
+    };
+    let mut returned = 0;
+    let result = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_GET_HOTPLUG_INFO,
+            None,
+            0,
+            Some((&mut info as *mut STORAGE_HOTPLUG_INFO).cast()),
+            info.Size,
+            Some(&mut returned),
+            None,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result.is_ok()
+        && returned >= std::mem::size_of::<STORAGE_HOTPLUG_INFO>() as u32
+        && (info.MediaRemovable || info.DeviceHotplug)
+}
+
 /// 探测盘符是否应注册为设备：应注册返回 `Some(展示名)`（卷标，缺失回退
 /// 盘符），否则 None。启动枚举与热插卷到达分支共用（单一事实源）。
 #[cfg(windows)]
@@ -59,11 +108,42 @@ pub fn probe_volume(drive: &str) -> Option<String> {
         unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(PCWSTR(root.as_ptr())) };
     // 媒体探测：空卡槽/未就绪 GetVolumeInformationW 失败 → None（= 无媒体）
     let media = volume::drive_label(drive);
-    if is_registrable_volume(drive_type, media.is_some()) {
-        Some(media.unwrap_or_else(|| drive.to_string()))
+    if is_importable_volume(
+        drive_type,
+        media.is_some(),
+        drive_type == DRIVE_FIXED && is_external_volume(drive),
+    ) {
+        Some(
+            media
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| drive.to_string()),
+        )
     } else {
         None
     }
+}
+
+/// 空读卡器仍显示在来源列表，但不能注册、扫描或触发相机连接提示。
+#[cfg(windows)]
+pub fn enumerate_empty_readers() -> Vec<String> {
+    use windows::core::PCWSTR;
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    super::hotplug::unitmask_to_drives(mask)
+        .into_iter()
+        .filter(|drive| {
+            let root: Vec<u16> = format!("{drive}\\").encode_utf16().chain(Some(0)).collect();
+            let kind = unsafe {
+                windows::Win32::Storage::FileSystem::GetDriveTypeW(PCWSTR(root.as_ptr()))
+            };
+            (kind == DRIVE_REMOVABLE || (kind == DRIVE_FIXED && is_external_volume(drive)))
+                && super::volume::drive_label(drive).is_none()
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn enumerate_empty_readers() -> Vec<String> {
+    Vec::new()
 }
 
 /// 非 Windows 桩（本产品仅面向 Windows）。

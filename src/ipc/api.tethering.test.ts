@@ -6,6 +6,14 @@ import {
   cameraCapture,
   cameraProbe,
   tetheringCameraList,
+  tetheringSession,
+  tetheringSettingSet,
+  tetheringSettings,
+  tetheringStart,
+  tetheringCapture,
+  tetheringFrame,
+  tetheringPhotoPreview,
+  tetheringStop,
   type CameraInfo,
 } from "./api";
 
@@ -124,5 +132,117 @@ describe("联拍 IPC 封装（阶段 E-1）", () => {
 
     await expect(cameraCapture("CAM_B")).resolves.toEqual({ objectName: null, objectSize: null, error: null });
     await expect(cameraCapture("CAM_B")).resolves.toEqual({ objectName: null, objectSize: null, error: null });
+  });
+});
+
+const SESSION_DTO = {
+  id: "s1",
+  libraryId: "lib-1",
+  albumId: 7,
+  albumName: "棚拍",
+  camera: { ...NIKON_CAMERA },
+  settings: [
+    {
+      id: "shutter",
+      current: "125",
+      writable: true,
+      options: [
+        { value: "125", label: "1/125" },
+        { value: "250", label: "1/250" },
+      ],
+    },
+    { id: "iso", current: "400", writable: false, options: [] },
+  ],
+  photos: [{ id: 9, name: "DSC_0001.JPG", kind: "photo" }],
+  connected: true,
+  receiving: false,
+  error: null,
+};
+
+describe("联拍会话 IPC 封装（tethering_*）", () => {
+  it("tetheringStart：{albumId, cameraId} 负载；成功归一会话；业务错误透传", async () => {
+    invokeMock.mockResolvedValueOnce(SESSION_DTO);
+    const ok = await tetheringStart(7, NIKON_CAMERA.pnpId);
+    expect(invokeMock).toHaveBeenCalledWith("tethering_start", {
+      albumId: 7,
+      cameraId: NIKON_CAMERA.pnpId,
+    });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.session.albumName).toBe("棚拍");
+      expect(ok.session.settings).toHaveLength(2);
+      expect(ok.session.settings[0].options[1].label).toBe("1/250");
+    }
+
+    invokeMock.mockRejectedValueOnce(new Error("已有联机拍摄窗口"));
+    const failed = await tetheringStart(7, "x");
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error).toBe("已有联机拍摄窗口");
+  });
+
+  it("tetheringSession/tetheringSettings：形状异常归 null（会话已结束语义）", async () => {
+    invokeMock.mockResolvedValueOnce(SESSION_DTO);
+    expect((await tetheringSession("s1"))?.albumId).toBe(7);
+
+    invokeMock.mockResolvedValueOnce({ nonsense: true });
+    expect(await tetheringSession("s1")).toBeNull();
+
+    invokeMock.mockRejectedValueOnce(new Error("command tethering_session not found"));
+    expect(await tetheringSession("s1")).toBeNull();
+
+    invokeMock.mockResolvedValueOnce(SESSION_DTO.settings);
+    expect((await tetheringSettings("s1"))?.[1].writable).toBe(false);
+  });
+
+  it("tetheringSettingSet：载荷完整；业务错误不 catch 直接上抛", async () => {
+    invokeMock.mockResolvedValueOnce(SESSION_DTO.settings);
+    await tetheringSettingSet("s1", "shutter", "250");
+    expect(invokeMock).toHaveBeenCalledWith("tethering_setting_set", {
+      sessionId: "s1",
+      id: "shutter",
+      value: "250",
+    });
+
+    invokeMock.mockRejectedValueOnce(new Error("无效拍摄参数"));
+    await expect(tetheringSettingSet("s1", "iso", "abc")).rejects.toThrow("无效拍摄参数");
+  });
+
+  it("tetheringCapture：ok / 业务错误文案 / 不可用 error=null", async () => {
+    invokeMock.mockResolvedValueOnce(null);
+    expect((await tetheringCapture("s1")).ok).toBe(true);
+
+    invokeMock.mockRejectedValueOnce(new Error("相机已断开"));
+    const failed = await tetheringCapture("s1");
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error).toBe("相机已断开");
+
+    invokeMock.mockRejectedValueOnce(new Error("__TAURI_INTERNALS__"));
+    const unavailable = await tetheringCapture("s1");
+    expect(unavailable.ok).toBe(false);
+    if (!unavailable.ok) expect(unavailable.error).toBeNull();
+  });
+
+  it("tetheringFrame/tetheringPhotoPreview：data URL 直传；null/异形归 null", async () => {
+    invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,AAA");
+    expect(await tetheringFrame("s1")).toBe("data:image/jpeg;base64,AAA");
+
+    invokeMock.mockResolvedValueOnce(null);
+    expect(await tetheringFrame("s1")).toBeNull();
+
+    invokeMock.mockResolvedValueOnce("not-a-url");
+    expect(await tetheringFrame("s1")).toBeNull();
+
+    invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,BBB");
+    expect(await tetheringPhotoPreview("s1", 9, 256)).toBe("data:image/jpeg;base64,BBB");
+    expect(invokeMock).toHaveBeenCalledWith("tethering_photo_preview", {
+      sessionId: "s1",
+      assetId: 9,
+      size: 256,
+    });
+  });
+
+  it("tetheringStop：失败静默（窗口销毁路径由后端兜底）", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("anything"));
+    await expect(tetheringStop("s1")).resolves.toBeUndefined();
   });
 });

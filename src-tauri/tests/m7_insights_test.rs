@@ -478,3 +478,109 @@ fn similar_hamming_boundary_excludes_distance_7() {
     assert!(groups.is_empty(), "距离 7（且四段全异）不成组");
     let _ = src;
 }
+
+#[test]
+fn missing_equipment_is_excluded_from_lists_buckets_and_ranges_in_existing_libraries() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    // Direct inserts exercise historical database rows without an EXIF rebuild.
+    let invalid = [
+        None,
+        Some("---"),
+        Some("  --  "),
+        Some("N/A"),
+        Some("unknown"),
+        Some("0"),
+        Some("0.0"),
+        Some("0/0"),
+        Some("1/0"),
+        Some("12junk"),
+        Some("1.2.3"),
+        Some("-1"),
+        Some("1/2/3"),
+    ];
+    for (i, value) in invalid.iter().enumerate() {
+        let mut row = asset(&format!("invalid{i}.jpg"), None);
+        row.camera = Some(["---", "N/A", "  unknown  "][i % 3].into());
+        row.lens = Some("---".into());
+        row.iso = Some(0);
+        row.f_number = value.map(str::to_string);
+        row.focal_length = value.map(str::to_string);
+        row.exposure_time = value.map(str::to_string);
+        db.insert_asset(&row).unwrap();
+    }
+    let mut valid = asset("valid.jpg", None);
+    valid.lens = Some("  Third-party 23mm F1.4  ".into());
+    valid.focal_length = Some("23".into());
+    valid.f_number = Some("1.4".into());
+    valid.iso = Some(100);
+    valid.exposure_time = Some("2/1000".into());
+    db.insert_asset(&valid).unwrap();
+    let valid_id = db.asset_id_by_path("valid.jpg").unwrap().unwrap();
+
+    // Missing one field must not discard valid fields of the same photograph.
+    let mut partial = asset("partial.jpg", None);
+    partial.lens = Some("N/A".into());
+    partial.iso = Some(200);
+    db.insert_asset(&partial).unwrap();
+    assert_eq!(db.camera_list().unwrap()[0].count, 2);
+    let lenses = db.lens_list().unwrap();
+    assert_eq!(lenses.len(), 1);
+    assert_eq!(lenses[0].camera, "Third-party 23mm F1.4");
+    assert_eq!(lenses[0].count, 1);
+    let buckets = db.gear_bucket_counts().unwrap();
+    assert_eq!(buckets[..6].iter().sum::<i64>(), 1);
+    assert_eq!(buckets[6..13].iter().sum::<i64>(), 2);
+    assert_eq!(buckets[13..19].iter().sum::<i64>(), 1);
+    assert_eq!(buckets[19..].iter().sum::<i64>(), 1);
+    assert_eq!(buckets[0], 1);
+    assert_eq!(buckets[13], 1);
+    assert_eq!(buckets[24], 1);
+
+    let cases = [
+        db::AssetFilters {
+            aperture_max: Some(1.4),
+            ..Default::default()
+        },
+        db::AssetFilters {
+            focal_max: Some(24.0),
+            ..Default::default()
+        },
+        db::AssetFilters {
+            iso_max: Some(100),
+            ..Default::default()
+        },
+        db::AssetFilters {
+            shutter_max: Some(1.0 / 500.0),
+            ..Default::default()
+        },
+        db::AssetFilters {
+            lenses: vec!["Third-party 23mm F1.4".into()],
+            ..Default::default()
+        },
+    ];
+    for filters in cases {
+        assert_eq!(db.assets_count(&filters).unwrap(), 1);
+        let rows = db.assets_page(0, 100, &filters).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, valid_id);
+    }
+    for placeholder in ["---", "N/A", "unknown"] {
+        for filters in [
+            db::AssetFilters {
+                lenses: vec![placeholder.into()],
+                ..Default::default()
+            },
+            db::AssetFilters {
+                cameras: vec![placeholder.into()],
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(db.assets_count(&filters).unwrap(), 0);
+        }
+    }
+    assert_eq!(
+        db.assets_count(&db::AssetFilters::default()).unwrap(),
+        invalid.len() as u64 + 2
+    );
+}

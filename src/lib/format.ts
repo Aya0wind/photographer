@@ -1,4 +1,5 @@
 /** 展示层格式化助手（字节/速度/耗时/时间戳），任务中心与向导共用 */
+import i18n from "@/i18n";
 
 const UNITS = ["B", "KB", "MB", "GB", "TB"] as const;
 
@@ -32,9 +33,9 @@ export function formatDuration(ms: number | null | undefined): string {
   if (totalSeconds < 60) return `${(ms / 1000).toFixed(1)} s`;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}分${String(seconds).padStart(2, "0")}秒`;
+  if (minutes < 60) return i18n.t("format.durationMinutes", { minutes, seconds: String(seconds).padStart(2, "0") });
   const hours = Math.floor(minutes / 60);
-  return `${hours}时${String(minutes % 60).padStart(2, "0")}分`;
+  return i18n.t("format.durationHours", { hours, minutes: String(minutes % 60).padStart(2, "0") });
 }
 
 function pad(n: number): string {

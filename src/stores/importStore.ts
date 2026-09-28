@@ -31,6 +31,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 
 /** 源文件（M1 由扫描结果注入；后端文件枚举命令接入前可能为空） */
 export interface SourceFile {
+  /** MTP 的持久对象 ID；与用于导入范围的相对路径分开。 */
+  objectId?: string;
+  mtime?: string;
   /** 完整路径 */
   path: string;
   /** 所属目录（树分组键） */
@@ -337,7 +340,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
               id: event.id, name: event.name, kind: event.kind,
               filesByKind: { photo: 0, raw: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
             }),
-            scanStatus: "scanning", scanError: null,
+            mediaPresent: true, scanStatus: "scanning", scanError: null,
           }),
           scanning: [
             ...s.scanning.filter((d) => d.id !== event.id),
@@ -376,7 +379,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
           for (const entry of event.files) {
             const slash = entry.relPath.lastIndexOf("/");
             const name = entry.relPath.slice(slash + 1);
-            files.set(entry.relPath, { path: entry.relPath, dir: slash < 0 ? "" : entry.relPath.slice(0, slash), name, size: entry.size, kind: kindFromName(name) });
+            files.set(entry.relPath, { objectId: entry.id, mtime: entry.mtime, path: entry.relPath, dir: slash < 0 ? "" : entry.relPath.slice(0, slash), name, size: entry.size, kind: kindFromName(name) });
           }
           return { sourceFiles: { ...s.sourceFiles, [event.id]: [...files.values()] } };
         });
@@ -664,7 +667,8 @@ export async function seedDevicesFromBackend(): Promise<void> {
     for (const snapshot of snapshots) {
       if (!changed(snapshot.id)) next = upsertDevice(next, snapshot);
     }
-    const ids = new Set(next.map((d) => d.id));
+    // 空槽位保留展示，但清掉上一张卡的文件清单和连接提示。
+    const ids = new Set(next.filter((d) => d.mediaPresent !== false).map((d) => d.id));
     for (const id of promptedDevices) if (!ids.has(id)) promptedDevices.delete(id);
     return {
       devices: next,

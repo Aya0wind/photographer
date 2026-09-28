@@ -1092,3 +1092,59 @@ fn face_identity_requires_visible_size_and_landmarks() {
     det.kps = [[0.0; 2]; 5];
     assert!(!face::usable_face(&det, 0.5));
 }
+
+#[test]
+fn nonface_embedding_is_not_a_person_even_when_finite_and_normalized() {
+    let blank = rand_unit(19);
+    let valid = rand_unit(92);
+    assert!(!face::identity_has_signal(&blank, &[blank.clone()]));
+    assert!(face::identity_has_signal(&valid, &[blank]));
+    assert!(!face::identity_has_signal(
+        &vec![f32::NAN; FACE_EMBED_DIM],
+        &[valid]
+    ));
+}
+
+#[test]
+fn uncertain_identity_is_not_forced_into_the_nearest_person() {
+    let mut c = OnlineClusterer::new(0.4);
+    let mut a = vec![0.0; FACE_EMBED_DIM];
+    a[0] = 1.0;
+    let mut b = vec![0.0; FACE_EMBED_DIM];
+    b[0] = 0.6;
+    b[1] = 0.8;
+    c.absorb(1, &a);
+    c.absorb(2, &b);
+    let middle = normalize(a.iter().zip(&b).map(|(a, b)| a + b).collect());
+    assert_eq!(
+        c.decide(&middle, &Default::default()),
+        face::IdentityMatch::Ambiguous
+    );
+    assert_eq!(
+        c.decide(&a, &Default::default()),
+        face::IdentityMatch::Certain(1)
+    );
+    assert_ne!(
+        c.decide(&a, &std::collections::HashSet::from([1])),
+        face::IdentityMatch::Certain(1)
+    );
+}
+
+#[test]
+fn stable_face_anchors_prevent_centroid_drift_from_absorbing_other_people() {
+    let mut c = OnlineClusterer::new(0.4);
+    let mut a = vec![0.0; FACE_EMBED_DIM];
+    a[0] = 1.0;
+    let mut b = vec![0.0; FACE_EMBED_DIM];
+    b[1] = 1.0;
+    for _ in 0..3 {
+        c.absorb(1, &a);
+    }
+    for _ in 0..100 {
+        c.absorb(1, &b);
+    }
+    assert_eq!(
+        c.decide(&b, &Default::default()),
+        face::IdentityMatch::Ambiguous
+    );
+}

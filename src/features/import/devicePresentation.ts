@@ -10,7 +10,7 @@ export function devicePresentationKind(
   device: Pick<DeviceSnapshot, "kind" | "name">,
 ): DevicePresentationKind {
   if (device.kind === "folder") return "folder";
-  if (device.kind === "volume" || STORAGE_NAME.test(device.name)) return "reader";
+  if (device.kind === "volume" || STORAGE_NAME.test(device.name) || /^[a-z]:[\\/]?$/i.test(device.name.trim())) return "reader";
   return "camera";
 }
 

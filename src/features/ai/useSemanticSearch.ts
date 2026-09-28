@@ -8,6 +8,8 @@ import {
   type SemanticHit,
 } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { tierSemanticReady } from "@/features/settings/lib/qualityTier";
 
 /**
  * 语义搜索（M4）：searchSemantic → 命中 id → assets_by_ids 回填 AssetDto。
@@ -122,13 +124,14 @@ export interface SemanticGate {
 
 /**
  * 语义搜索前置门禁（判据从已有 store/IPC 派生，不新增后端）：
- * - models：语义三件（feature=semantic：visual/text/tokenizer）未全部 done → 禁
+ * - models：当前库档位需要的语义三件（visual/text/tokenizer）未全部 done → 禁
  * - index：语义索引从未跑过（index_status 的 ai.total==0）且库内有资产
  *   （thumb/exif 通道 total>0 佐证非空库——空库不算未建立）→ 禁
  * 状态未加载（modelsLoaded=false）时放行——加载窗口内由后端拒绝兜底
  * （searchSemantic Err → modelNotReady 引导卡）；挂载即拉一次两份快照。
  */
 export function useSemanticGate(): SemanticGate {
+  const tier = useSettingsStore((s) => s.settings.ai.qualityTier);
   const models = useAiStore((s) => s.models);
   const modelsLoaded = useAiStore((s) => s.modelsLoaded);
   const indexStatus = useAiStore((s) => s.indexStatus);
@@ -141,8 +144,7 @@ export function useSemanticGate(): SemanticGate {
   }, [refresh, refreshIndexStatus]);
 
   if (!modelsLoaded) return { blocked: false, reason: null };
-  const semanticModels = models.filter((m) => m.feature === "semantic");
-  if (semanticModels.length === 0 || semanticModels.some((m) => m.state !== "done")) {
+  if (!tierSemanticReady(tier, models)) {
     return { blocked: true, reason: "models" };
   }
   if (indexStatus !== null && indexStatus.ai.total === 0) {

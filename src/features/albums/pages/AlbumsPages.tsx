@@ -2,6 +2,7 @@ import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
+import { getIntlLocale } from "@/i18n";
 
 import SemanticResultsView, {
   SemanticQueryInput,
@@ -26,7 +27,7 @@ import {
 } from "@/ipc/api";
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
 import { isUngroupedAlbum } from "../lib/ungroupedAlbum";
-import { DEFAULT_SMART_TAGS, loadSmartTags } from "../lib/smartTags";
+import { DEFAULT_SMART_TAGS, loadSmartTags, smartTagLabel } from "../lib/smartTags";
 import AlbumDetailPage from "./AlbumDetailPage";
 
 /**
@@ -115,7 +116,7 @@ function SmartAlbumCover({ assetId, tag }: { assetId: number | null | undefined;
     return (
       <CardCover
         url={null}
-        label={tag}
+        label={smartTagLabel(tag)}
         testIdImg="albums-tag-cover-img"
         testIdFallback="albums-tag-cover-fallback"
         dataTag={tag}
@@ -240,7 +241,7 @@ function ManualAlbumCard({
     >
       <span className="relative block h-20 w-full border-b border-edge/60">
         <CardCover url={cover} label={album.name} testIdImg="albums-manual-cover" testIdFallback="albums-manual-cover-fallback" />
-        <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white" data-testid="albums-manual-count">{album.itemCount} 张</span>
+        <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white" data-testid="albums-manual-count">{t("albums.itemCountBadge", { count: album.itemCount })}</span>
         {isUngroupedAlbum(album) && <span className="absolute bottom-1.5 right-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white" data-testid="albums-manual-badge-ungrouped">{t("albums.ungroupedBadge")}</span>}
       </span>
       <span className="block px-2 py-2 text-sm text-text-secondary">
@@ -248,7 +249,7 @@ function ManualAlbumCard({
           {album.name}
         </span>
         <span className="mt-1 block text-[11px] text-text-muted" data-testid="albums-manual-created">
-          {Number.isNaN(new Date(album.createdAt).getTime()) ? "–" : new Date(album.createdAt).toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" })} 创建
+          {t("albums.createdDate", { date: Number.isNaN(new Date(album.createdAt).getTime()) ? "–" : new Date(album.createdAt).toLocaleDateString(getIntlLocale(), { year: "numeric", month: "2-digit", day: "2-digit" }) })}
         </span>
       </span>
       {/* 悬浮 ⋯ 菜单钮（与右键同一菜单） */}
@@ -634,7 +635,7 @@ export function AlbumsIndexPage() {
                     className="block px-2 py-2 text-sm text-text-secondary transition-colors group-hover:text-accent"
                     data-testid="albums-tag-label"
                   >
-                    {tag}
+                    {smartTagLabel(tag)}
                   </span>
                 </button>
               ))}
@@ -845,7 +846,7 @@ export function AlbumTagPage() {
     <div className="flex h-full flex-col" data-testid="album-tag-page">
       <div className="flex h-11 w-full shrink-0 items-center gap-3 border-b border-edge px-4">
         <h1 className="shrink-0 text-sm font-semibold text-text-primary">
-          {t("albums.tagTitle", { tag })}
+          {t("albums.tagTitle", { tag: smartTagLabel(tag) })}
         </h1>
         <SemanticQueryInput
           busy={semantic.status === "loading"}

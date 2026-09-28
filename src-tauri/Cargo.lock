@@ -4971,6 +4971,7 @@ name = "smart-photo"
 version = "0.1.0-alpha"
 dependencies = [
  "ab_glyph",
+ "base64 0.22.1",
  "chrono",
  "image",
  "img-parts",

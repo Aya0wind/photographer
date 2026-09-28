@@ -1003,7 +1003,7 @@ export default function CullingOverlay({
             className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
             data-testid="culling-accept"
           >
-            {t("culling.overlay.accept")} <span className="font-mono opacity-60">空格</span>
+            {t("culling.overlay.accept")} <span className="font-mono opacity-60">{t("shortcuts.space")}</span>
           </button>
           <button
             type="button"

@@ -43,6 +43,11 @@ fn present_volume_enumeration_smoke_on_real_machine() {
     // 真机烟测：不 panic、条目为盘符形态、本地系统盘绝不出现
     //（C: 固定盘被过滤；测试机若插着有媒体的可移动盘会出现——只做性质断言）
     let volumes = enumerate_present_volumes();
+    let empty = devices::present::enumerate_empty_readers();
+    eprintln!("present volumes: {volumes:?}; empty readers: {empty:?}");
+    assert!(empty
+        .iter()
+        .all(|id| !volumes.iter().any(|(drive, _)| id == drive)));
     for (drive, label) in &volumes {
         assert_eq!(drive.len(), 2, "盘符形态 X: : {drive}");
         assert!(drive.ends_with(':'));
@@ -60,4 +65,31 @@ fn bitmask_decode_reuses_hotplug_semantics() {
     assert_eq!(unitmask_to_drives(0b101), ["A:", "C:"]);
     assert_eq!(unitmask_to_drives(1 << 25), ["Z:"]);
     assert!(unitmask_to_drives(0).is_empty());
+}
+
+#[test]
+fn external_fixed_media_and_wpd_aliases() {
+    use devices::present::is_importable_volume;
+    assert!(is_importable_volume(DRIVE_FIXED, true, true));
+    assert!(!is_importable_volume(DRIVE_FIXED, true, false));
+    assert!(!is_importable_volume(DRIVE_FIXED, false, true));
+    assert!(!is_importable_volume(DRIVE_REMOTE, true, true));
+    for name in ["G:", "J:\\", " l:/ "] {
+        assert!(devices::wpd::is_volume_alias(name), "{name}");
+    }
+    for name in ["ILCE-7RM5", "EOS R5", "G: camera", "", "相机"] {
+        assert!(!devices::wpd::is_volume_alias(name), "{name}");
+    }
+}
+
+#[test]
+#[ignore = "需要实际 RAW 文件；通过 SMART_PHOTO_RAW_SAMPLE 指定，只读源文件"]
+fn real_card_raw_preview() {
+    let sample = std::env::var("SMART_PHOTO_RAW_SAMPLE").expect("RAW sample path");
+    let temp = tempfile::tempdir().unwrap();
+    let path = thumbs::thumb_file(temp.path(), std::path::Path::new(&sample), 256)
+        .expect("实际 RAW 应能提取嵌入预览并生成缩略图");
+    let img = image::open(path).unwrap();
+    assert!(img.width() > 0 && img.height() > 0);
+    assert!(img.width() <= 256 && img.height() <= 256);
 }

@@ -194,11 +194,15 @@ impl Drop for ThumbQueue {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ThumbOutcome {
-    Ready { path: String },
+    Ready {
+        path: String,
+    },
     Pending,
     /// 源缺失：`cachedPath` = 恢复出的既有缓存缩略图绝对路径（或 null）。
     #[serde(rename_all = "camelCase")]
-    Missing { cached_path: Option<String> },
+    Missing {
+        cached_path: Option<String>,
+    },
     Unavailable,
 }
 
@@ -310,4 +314,96 @@ pub async fn thumb_get_by_path(
     .ok()
     .flatten();
     Ok(thumb)
+}
+
+/// 相机导入预览缓存。先取内存中的源代理，释放注册表锁后才访问设备。
+pub fn fetch_device_thumb(
+    state: &super::AppState,
+    device_id: &str,
+    object_id: &str,
+    version: &str,
+    size: u16,
+) -> Result<Option<String>, String> {
+    let key = crate::devices::normalize_device_id(device_id);
+    let source = state
+        .devices
+        .lock()
+        .map_err(|_| "设备状态不可用")?
+        .get(&key)
+        .map(|entry| Arc::clone(&entry.source))
+        .ok_or("设备已断开")?;
+    let library = state
+        .settings
+        .lock()
+        .map_err(|_| "库状态不可用")?
+        .active_library()
+        .cloned()
+        .ok_or("请先打开照片库")?;
+    let size = crate::thumbs::snap_size(size);
+    let cache_key =
+        serde_json::to_vec(&(key, object_id, version, size)).map_err(|e| e.to_string())?;
+    let dir = PathBuf::from(library.db_dir)
+        .join("thumbs")
+        .join("import-device");
+    let target = dir.join(format!(
+        "{:016x}.jpg",
+        xxhash_rust::xxh64::xxh64(&cache_key, 0)
+    ));
+    if target.is_file() {
+        return Ok(Some(target.to_string_lossy().into_owned()));
+    }
+    let Some(bytes) = source.thumbnail(object_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Ok(None);
+    }
+    if !state
+        .devices
+        .lock()
+        .map_err(|_| "设备状态不可用")?
+        .get(&source.id())
+        .is_some_and(|entry| Arc::ptr_eq(&entry.source, &source))
+    {
+        return Err("设备已断开或重新连接".into());
+    }
+    // 编码体和解码尺寸都有上限，异常设备资源不会变成一次原图解码。
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|e| format!("无法读取相机预览: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let temporary = dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = image
+        .thumbnail(size as u32, size as u32)
+        .to_rgb8()
+        .save_with_format(&temporary, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())
+        .and_then(|_| std::fs::rename(&temporary, &target).map_err(|e| e.to_string()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result?;
+    Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub async fn device_thumb_get(
+    state: State<'_, SharedState>,
+    device_id: String,
+    object_id: String,
+    version: String,
+    size: u16,
+) -> Result<Option<String>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_device_thumb(state, &device_id, &object_id, &version, size)
+    })
+    .await
 }

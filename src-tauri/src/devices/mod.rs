@@ -76,6 +76,10 @@ pub trait DeviceSource: Send + Sync {
     fn local_path(&self, _id: &str) -> Option<std::path::PathBuf> {
         None
     }
+    /// 设备提供的缩略资源；不支持时返回 None，不能为预览传输整个原文件。
+    fn thumbnail(&self, _id: &str) -> DeviceResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
     /// 删除源文件（M2 move 模式：校验入册后删源）。
     /// 默认不支持（仅实现该能力的源可参与移动导入）。
     fn delete(&self, _id: &str) -> DeviceResult<()> {

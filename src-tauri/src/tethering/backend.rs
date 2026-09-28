@@ -136,6 +136,21 @@ impl TetherError {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraSetting {
+    pub id: String,
+    pub current: String,
+    pub writable: bool,
+    pub options: Vec<CameraSettingOption>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CameraSettingOption {
+    pub value: String,
+    pub label: String,
+}
+
 // ---------------------------------------------------------------------------
 // CameraBackend trait
 // ---------------------------------------------------------------------------
@@ -170,6 +185,34 @@ pub trait CameraBackend: Send + Sync {
 
     /// 断开：清理会话态/能力缓存并隔离旧连接（不产生新错误路径）。
     fn disconnect(&self, pnp_id: &str);
+
+    fn settings(&self, _pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
+        Ok(Vec::new())
+    }
+    fn set_setting(&self, _pnp_id: &str, _id: &str, _value: &str) -> Result<(), TetherError> {
+        Err(TetherError::Other("相机不支持参数控制".into()))
+    }
+    fn live_view_frame(&self, _pnp_id: &str) -> Result<Vec<u8>, TetherError> {
+        Err(TetherError::Other("相机不支持实时取景".into()))
+    }
+
+    fn trigger_capture(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        self.capture_still(pnp_id, Duration::from_secs(20))
+            .map(|object| vec![object])
+    }
+    fn poll_objects(&self, _pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        Ok(Vec::new())
+    }
+    fn open_captured(
+        &self,
+        pnp_id: &str,
+        object: &CapturedObject,
+    ) -> Result<Box<dyn std::io::Read + Send>, TetherError> {
+        use crate::devices::DeviceSource;
+        crate::devices::wpd::WpdSource::new(pnp_id, pnp_id)
+            .stream(&object.object_id)
+            .map_err(Into::into)
+    }
 
     /// 触发一次静物拍摄：按能力选 0x90C0（优先，Nikon 对标准码报
     /// Parameter Not Supported）或 0x100E，订阅 OBJECT_ADDED 等待新对象，
@@ -213,7 +256,10 @@ impl CameraBackendRegistry {
     /// v1 构造：WPD MTP 后端（L0 文件通道 + L1 透传合一）。
     fn v1() -> Self {
         Self {
-            backends: vec![std::sync::Arc::new(WpdMtpBackend::new())],
+            backends: vec![
+                std::sync::Arc::new(WpdMtpBackend::new()),
+                std::sync::Arc::new(super::sony_backend::SonyBackend::default()),
+            ],
         }
     }
 
@@ -267,6 +313,6 @@ mod tests {
         assert_eq!(registry.primary().id(), "wpd-mtp");
         assert!(registry.get("wpd-mtp").is_some());
         assert!(registry.get("nope").is_none());
-        assert_eq!(registry.all().len(), 1);
+        assert_eq!(registry.all().len(), 2);
     }
 }

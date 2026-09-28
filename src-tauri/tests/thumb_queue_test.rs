@@ -430,3 +430,69 @@ fn cached_without_source_picks_newest_generation_by_prefix() {
     let txt = src_dir.path().join("a.txt");
     assert!(thumbs::cached_without_source(db_dir.path(), &txt, 256).is_none());
 }
+
+// 导入前的 MTP 预览：只请求设备缩略资源，不能为铺屏复制原图。
+struct PreviewCamera {
+    bytes: Option<Vec<u8>>,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl devices::DeviceSource for PreviewCamera {
+    fn id(&self) -> String { "preview-camera".into() }
+    fn name(&self) -> String { "测试相机".into() }
+    fn kind(&self) -> events::SourceKind { events::SourceKind::Mtp }
+    fn list(&self) -> devices::DeviceResult<Vec<devices::FileEntry>> { panic!("预览不应重新扫描") }
+    fn open_head(&self, _: &str, _: u64) -> devices::DeviceResult<Vec<u8>> { panic!("预览不应读取原图") }
+    fn stream(&self, _: &str) -> devices::DeviceResult<Box<dyn std::io::Read + Send>> { panic!("预览不应传输原图") }
+    fn thumbnail(&self, id: &str) -> devices::DeviceResult<Option<Vec<u8>>> {
+        assert_eq!(id, "persistent-photo");
+        self.requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.bytes.clone())
+    }
+}
+fn register_preview_camera(state: &ipc::AppState, bytes: Option<Vec<u8>>) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source: std::sync::Arc<dyn devices::DeviceSource> = std::sync::Arc::new(PreviewCamera { bytes, requests: requests.clone() });
+    let snapshot = devices::orchestrator::DeviceSnapshot {
+        id: "preview-camera".into(), name: "测试相机".into(), kind: events::SourceKind::Mtp,
+        files_by_kind: Default::default(), bytes_total: 0, new_files: 0,
+    };
+    state.devices.lock().unwrap().insert("preview-camera".into(), ipc::DeviceEntry::ready(source, snapshot));
+    requests
+}
+#[test]
+fn import_device_preview_is_resized_cached_and_invalidated_by_file_version() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_with_library(root.path(), root.path(), Duration::ZERO);
+    let photo = root.path().join("preview.jpg");
+    write_jpg(&photo, 640, 480);
+    let requests = register_preview_camera(&state, Some(std::fs::read(photo).unwrap()));
+    let path = ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v1", 256).unwrap().unwrap();
+    let preview = image::open(&path).unwrap();
+    assert!(preview.width() <= thumbs::snap_size(256) as u32);
+    assert!(preview.height() <= thumbs::snap_size(256) as u32);
+    assert_eq!(ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v1", 256).unwrap(), Some(path.clone()));
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let changed = ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v2", 256).unwrap().unwrap();
+    assert_ne!(path, changed);
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    state.devices.lock().unwrap().remove("preview-camera");
+    assert!(ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v1", 256).is_err(), "断开的相机不返回旧会话预览");
+}
+#[test]
+fn unsupported_device_preview_can_be_retried_without_original_transfer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_with_library(root.path(), root.path(), Duration::ZERO);
+    let requests = register_preview_camera(&state, None);
+    for _ in 0..2 {
+        assert_eq!(ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v1", 256).unwrap(), None);
+    }
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+#[test]
+fn malformed_device_preview_is_not_written_to_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state_with_library(root.path(), root.path(), Duration::ZERO);
+    register_preview_camera(&state, Some(vec![1, 2, 3]));
+    assert!(ipc::thumb::fetch_device_thumb(&state, "preview-camera", "persistent-photo", "v1", 256).is_err());
+    assert!(!root.path().join("thumbs/import-device").exists());
+}

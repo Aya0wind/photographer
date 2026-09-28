@@ -459,3 +459,17 @@ it("扫描中的增量可立即读取，扫描完成保留文件避免二次枚�
   emit({ type: "deviceScanned", id: "cam", kind: "mtp", name: "相机", snapshot: { ...snapshot("cam"), kind: "mtp" } });
   expect(useImportStore.getState().sourceFiles.cam).toHaveLength(2);
 });
+
+
+it("卡拔出后保留空槽位展示，清理旧卡清单；再插卡立即进入扫描状态", async () => {
+  const original = snapshot("G:");
+  useImportStore.setState({ devices: [original], sourceFiles: { "G:": [{ path: "A.ARW", name: "A.ARW", dir: "", kind: "raw", size: 10 }] }, promptQueue: ["G:"] });
+  deviceListMock.mockResolvedValueOnce([{ ...original, mediaPresent: false }]);
+  await seedDevicesFromBackend();
+  expect(useImportStore.getState().devices[0].mediaPresent).toBe(false);
+  expect(useImportStore.getState().sourceFiles["G:"]).toBeUndefined();
+  expect(useImportStore.getState().promptQueue).toEqual([]);
+  emit({ type: "deviceArrived", id: "G:", name: "SD 卡", kind: "volume" });
+  expect(useImportStore.getState().devices[0].mediaPresent).toBe(true);
+  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+});

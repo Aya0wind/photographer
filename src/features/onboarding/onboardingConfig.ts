@@ -2,7 +2,11 @@
  * 首次引导默认值（达芬奇式库模型，spec §5.11）。只默认库名；目录一律
  * 留空由用户自选（用户定规 2026-09-28：开发机路径不适合做默认路径）。
  */
+import i18n from "@/i18n";
 export const SUGGESTED_LIBRARY_NAME = "主库";
+export function suggestedLibraryName(): string {
+  return i18n.t("library.defaultName", { defaultValue: SUGGESTED_LIBRARY_NAME });
+}
 
 /**
  * 固定目录布局公式（dirTemplate/importSubdir 配置退役，2026-09-28 定案）：

@@ -3,7 +3,7 @@
 //!
 //! 铁律（2026-09-18）：涉及磁盘 IO / WPD COM / 网络(NAS) 的命令一律
 //! async + spawn_blocking 后台执行（同步命令跑主线程会冻结窗口）；
-//! `device_list` 只读内存注册表快照，保留同步。
+//! `device_list` 还查询空读卡器的介质状态，同样放到后台。
 
 use tauri::State;
 
@@ -23,6 +23,7 @@ pub struct DeviceSnapshotInfo {
     pub bytes_total: u64,
     pub new_files: u64,
     pub connected: bool,
+    pub media_present: bool,
     pub scan_status: &'static str,
     pub scan_error: Option<String>,
 }
@@ -37,31 +38,53 @@ impl From<&DeviceSnapshot> for DeviceSnapshotInfo {
             bytes_total: snapshot.bytes_total,
             new_files: snapshot.new_files,
             connected: true,
+            media_present: true,
             scan_status: "ready",
             scan_error: None,
         }
     }
 }
 
-/// 当前接入设备（注册表缓存，含最近扫描快照）。纯内存读，保留同步。
+/// 当前接入设备与空读卡器；磁盘探测在后台执行，且不持有注册表锁。
 #[tauri::command]
-pub fn device_list(state: State<SharedState>) -> Vec<DeviceSnapshotInfo> {
-    let devices = state.devices.lock().expect("devices mutex poisoned");
-    devices
-        .values()
-        .map(|entry| {
-            let mut info = DeviceSnapshotInfo::from(&entry.snapshot);
-            match &entry.scan {
-                super::DeviceScan::Scanning => info.scan_status = "scanning",
-                super::DeviceScan::Ready => {}
-                super::DeviceScan::Failed(message, _) => {
-                    info.scan_status = "failed";
-                    info.scan_error = Some(message.clone());
+pub async fn device_list(state: State<'_, SharedState>) -> Result<Vec<DeviceSnapshotInfo>, String> {
+    run_blocking(state.inner().clone(), |state| {
+        let empty_readers = crate::devices::present::enumerate_empty_readers();
+        let devices = state.devices.lock().expect("devices mutex poisoned");
+        let mut result: Vec<_> = devices
+            .values()
+            .map(|entry| {
+                let mut info = DeviceSnapshotInfo::from(&entry.snapshot);
+                match &entry.scan {
+                    super::DeviceScan::Scanning => info.scan_status = "scanning",
+                    super::DeviceScan::Ready => {}
+                    super::DeviceScan::Failed(message, _) => {
+                        info.scan_status = "failed";
+                        info.scan_error = Some(message.clone());
+                    }
                 }
-            }
-            info
-        })
-        .collect()
+                info
+            })
+            .filter(|info| !empty_readers.contains(&info.id))
+            .collect();
+        for id in empty_readers {
+            result.push(DeviceSnapshotInfo {
+                name: format!("读卡器 ({id})"),
+                id,
+                kind: SourceKind::Volume,
+                files_by_kind: Default::default(),
+                bytes_total: 0,
+                new_files: 0,
+                connected: true,
+                media_present: false,
+                scan_status: "ready",
+                scan_error: None,
+            });
+        }
+        result.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(result)
+    })
+    .await
 }
 
 /// 扫描指定设备（刷新统计与 new_files），返回快照。

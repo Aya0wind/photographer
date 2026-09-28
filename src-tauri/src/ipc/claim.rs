@@ -296,8 +296,8 @@ pub fn fetch_album_claim_assets(
         // 新布局：目标 = 相册主目录平铺（album_home_rel 公式，无拍摄日分层）；
         // home_rel 段分隔符归一为平台原生（与迁移脚本产物一致，库内两种
         // 形态前缀判定均兼容——见 norm_sep）
-        let dst_dir = Path::new(&photo_root)
-            .join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let dst_dir =
+            Path::new(&photo_root).join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         let dst = resolve_conflict(&dst_dir, &filename);
         let xxhash: i64 =
             db.0.query_row("SELECT xxhash FROM assets WHERE id = ?1", [asset_id], |r| {

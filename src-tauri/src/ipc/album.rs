@@ -172,8 +172,8 @@ pub fn fetch_album_item_move_subgroup(
         .photo_root;
     // home_rel 段分隔符归一为平台原生（库内两种形态前缀判定均兼容——见
     // claim 的 norm_sep）
-    let dst_dir =
-        std::path::Path::new(&photo_root).join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let dst_dir = std::path::Path::new(&photo_root)
+        .join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
     let dst_dir_norm = super::claim::norm_sep(&dst_dir.to_string_lossy());
 
     let mut moved: u64 = 0;
@@ -225,9 +225,7 @@ pub fn fetch_album_item_move_subgroup(
                 continue;
             }
             let dst = super::claim::resolve_conflict(&dst_dir, &filename);
-            if let Err(e) =
-                super::claim::move_file_with_sidecar(&src, &dst, size, xxhash as u64)
-            {
+            if let Err(e) = super::claim::move_file_with_sidecar(&src, &dst, size, xxhash as u64) {
                 fail(&mut failures, e);
                 continue; // 物理失败：该行账本不动
             }
@@ -235,11 +233,7 @@ pub fn fetch_album_item_move_subgroup(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| filename.clone());
-            if let Err(e) = db.asset_update_path(
-                asset_id,
-                &dst.to_string_lossy(),
-                &new_name,
-            ) {
+            if let Err(e) = db.asset_update_path(asset_id, &dst.to_string_lossy(), &new_name) {
                 fail(&mut failures, format!("库路径更新失败: {e}"));
                 continue;
             }

@@ -302,6 +302,19 @@ fn downloads_full_body_verifies_sha_and_installs() {
     assert!(status.installed);
     assert_eq!(status.state, "done");
     assert_eq!(status.downloaded_bytes, body.len() as u64);
+
+    // 新管理器模拟重启/后续建库；多个入口重复请求也复用全局文件。
+    let restored = manager(root.path());
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let restored = restored.clone();
+            let e = e.clone();
+            scope.spawn(move || restored.download(e).unwrap());
+        }
+    });
+    assert_eq!(restored.active_count(), 0, "已安装资源不登记下载任务");
+    assert_eq!(server.hits_of("/ok"), 1, "只发生首次下载的网络请求");
+    assert_eq!(restored.status(&e).unwrap().state, "done");
 }
 
 #[test]
@@ -393,7 +406,11 @@ fn cancel_stops_download_and_cleans_part() {
         unreachable!()
     };
     assert!(!ok, "取消事件 ok=false（对外事件名和字段不变）");
-    assert_eq!(error.as_deref(), Some("下载已取消"), "事件 error 保持原语义");
+    assert_eq!(
+        error.as_deref(),
+        Some("下载已取消"),
+        "事件 error 保持原语义"
+    );
     assert!(!part.exists(), "取消必须清理 .part");
     assert!(!root.path().join("m4.onnx").exists(), "未完成不得落位");
     // R4（2026-09-28 边界修复）：取消不是失败——不进 failed set，

@@ -165,7 +165,11 @@ pub async fn library_relocate(
     .await?;
     if apply {
         // settings 已在后台落盘并更新内存快照；事件通知前端刷新
-        let snapshot = state.settings.lock().expect("settings mutex poisoned").clone();
+        let snapshot = state
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .clone();
         let _ = app.emit("settings://changed", &snapshot);
     }
     Ok(dto)
@@ -191,7 +195,11 @@ pub fn settings_set(
     // 画质档位硬校验（2026-09-28 三档画质）：档位驱动模型件选择与指纹
     // 重建，脏值拒绝落盘（读取侧另有 load 兜底，双保险）。
     crate::settings::validate_ai_settings(&settings.ai)?;
-    let previous = state.settings.lock().expect("settings mutex poisoned").clone();
+    let previous = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
     crate::settings::normalize_library_quality_tiers(&mut settings, &previous)?;
     // 建库路径统一规范化（2026-09-28 边界修复）：onboarding 提交的
     // photoRoot/dbDir 拒绝盘符相对路径（如 `I:xxx` 按进程 CWD 解析），

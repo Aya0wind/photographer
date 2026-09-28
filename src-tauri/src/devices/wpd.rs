@@ -16,6 +16,15 @@ use crate::events::SourceKind;
 // 纯函数（跨平台，单测见 tests/devices_test.rs）
 // ---------------------------------------------------------------------------
 
+/// WPD 也会暴露盘符（包括空卡槽）；这些由文件系统卷通道统一管理。
+pub fn is_volume_alias(name: &str) -> bool {
+    let name = name.trim().as_bytes();
+    matches!(name.len(), 2 | 3)
+        && name[0].is_ascii_alphabetic()
+        && name[1] == b':'
+        && (name.len() == 2 || matches!(name[2], b'\\' | b'/'))
+}
+
 /// MTP 层级路径拼接（统一 `/` 分隔）。
 pub fn join_rel_path(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
@@ -157,6 +166,10 @@ pub static WPD_RELEASE_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 impl DeviceSource for WpdSource {
+    #[cfg(windows)]
+    fn thumbnail(&self, id: &str) -> DeviceResult<Option<Vec<u8>>> {
+        worker::thumbnail(&self.pnp_id, id)
+    }
     /// 规范化（小写）的 PnP id：启动枚举（小写）与热插到达（大写）两种
     /// 形式收敛为同一标识（注册表 key / jobs.device_id 单一事实源）。
     /// COM 调用仍用原始 `pnp_id` 串（Windows 设备路径大小写不敏感）。
@@ -326,6 +339,12 @@ mod worker {
         let (id, obj) = (pnp.to_owned(), obj.to_owned());
         pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
             com::open_head(&id, &obj, max)
+        })
+    }
+    pub(super) fn thumbnail(pnp: &str, obj: &str) -> DeviceResult<Option<Vec<u8>>> {
+        let (id, obj) = (pnp.to_owned(), obj.to_owned());
+        pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
+            com::thumbnail(&id, &obj)
         })
     }
     pub(super) fn stream(
@@ -522,7 +541,9 @@ pub(crate) mod com {
             let pnp = unsafe { pwstr_to_string(id_ptr) };
             if !pnp.is_empty() {
                 let name = friendly_name(&manager, &pnp).unwrap_or_else(|| pnp_display_name(&pnp));
-                out.push((pnp, name));
+                if !super::is_volume_alias(&name) {
+                    out.push((pnp, name));
+                }
             }
             // SAFETY: GetDevices 分配的 PnP 字符串由调用方释放
             unsafe { free_pwstr(id_ptr) };
@@ -1062,6 +1083,63 @@ pub(crate) mod com {
             remaining -= got as u64;
         }
         Ok(out)
+    }
+
+    /// 只读 WPD 缩略资源。部分相机不提供该资源；此时明确返回无预览。
+    pub fn thumbnail(pnp_id: &str, obj_id: &str) -> DeviceResult<Option<Vec<u8>>> {
+        use windows::Win32::Devices::PortableDevices::WPD_RESOURCE_THUMBNAIL;
+        let _com = ComApartment::init().map_err(win_error)?;
+        let device = open_device(pnp_id)?;
+        let content = unsafe { device.Content() }.map_err(win_error)?;
+        let resolved = resolve_object_id(&content, obj_id);
+        let resources = unsafe { content.Transfer() }.map_err(win_error)?;
+        let wide = to_wide(&resolved);
+        let mut stream = None;
+        let mut optimal = 0u32;
+        if let Err(error) = unsafe {
+            resources.GetStream(
+                PCWSTR(wide.as_ptr()),
+                &WPD_RESOURCE_THUMBNAIL,
+                STGM_READ.0,
+                &mut optimal,
+                &mut stream,
+            )
+        } {
+            let error = win_error(error);
+            return if matches!(error, DeviceError::Disconnected | DeviceError::AccessDenied) {
+                Err(error)
+            } else {
+                Ok(None)
+            };
+        }
+        let Some(stream) = stream else {
+            return Ok(None);
+        };
+        const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            super::super::timed_worker::checkpoint()?;
+            let mut got = 0u32;
+            let hr = unsafe {
+                stream.Read(
+                    chunk.as_mut_ptr().cast(),
+                    chunk.len() as u32,
+                    Some(&mut got),
+                )
+            };
+            if hr.is_err() {
+                return Err(hr_error(hr));
+            }
+            if got == 0 {
+                break;
+            }
+            if bytes.len() + got as usize > MAX_PREVIEW_BYTES {
+                return Ok(None);
+            }
+            bytes.extend_from_slice(&chunk[..got as usize]);
+        }
+        Ok((!bytes.is_empty()).then_some(bytes))
     }
 
     pub fn stream_channel(

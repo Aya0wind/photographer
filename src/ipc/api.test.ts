@@ -13,6 +13,8 @@ import {
   assetDetail,
   assetGroupDates,
   assetThumbGet,
+  thumbGet,
+  deviceThumbGet,
   assetsByIds,
   assetsPage,
   assetViewMark,
@@ -51,6 +53,17 @@ import {
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
+
+it("导入预览调用已注册的路径命令，相机预览传持久对象 ID", async () => {
+  invokeMock.mockResolvedValueOnce("C:\\cache\\preview.jpg");
+  expect(await thumbGet("E:\\照片\\A.NEF", 256)).toBe("C:\\cache\\preview.jpg");
+  expect(invokeMock).toHaveBeenCalledWith("thumb_get_by_path", { path: "E:\\照片\\A.NEF", size: 256 });
+  invokeMock.mockResolvedValueOnce(null);
+  await deviceThumbGet("camera", "persistent-id", "mtime:123", 256);
+  expect(invokeMock).toHaveBeenCalledWith("device_thumb_get", {
+    deviceId: "camera", objectId: "persistent-id", version: "mtime:123", size: 256,
+  });
+});
 
 const PLAN: ImportPlan = {
   sourceId: "E:",

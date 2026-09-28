@@ -1,0 +1,366 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
+import { useTranslation } from "react-i18next";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import {
+  subscribeAppEvents,
+  tetheringCapture,
+  tetheringFrame,
+  tetheringPhotoPreview,
+  tetheringSession,
+  tetheringSettingSet,
+  tetheringSettings,
+  tetheringStop,
+  type TetherCameraSetting,
+  type TetherSessionDto,
+} from "@/ipc/api";
+
+/**
+ * 联机拍摄独立窗口（/tethering?session=<id>；后端 tethering_start 创建本窗口，
+ * 窗口销毁即自动结束会话）。LR 式布局：
+ * - 顶部：自绘标题栏（decorations=false）——相册名/相机名/连接状态 + 最小化/关闭
+ * - 中央：实时取景（tethering_frame 轮询 ~120ms；不支持时回落最近一张成片）
+ * - 右栏：相机参数（shutter/aperture/iso 下拉；tethering_setting_set 即时生效）
+ * - 底部：本次会话胶片条（tetheringPhotoAdded 事件驱动 + 预览）
+ * 会话态以后端为唯一真值（独立 webview 的 store 是空会话，不读主窗口状态）。
+ */
+
+const FRAME_POLL_MS = 120;
+
+/** 后端契约的三个固定参数 id → 本地化标签；未知 id 原样展示。 */
+function settingLabel(id: string, t: (k: string) => string): string {
+  if (id === "shutter") return t("tether.setting.shutter");
+  if (id === "aperture") return t("tether.setting.aperture");
+  if (id === "iso") return t("tether.setting.iso");
+  return id;
+}
+
+export default function TetheringWindowPage() {
+  const { t } = useTranslation();
+  const [params] = useSearchParams();
+  const sessionId = params.get("session") ?? "";
+
+  const [session, setSession] = useState<TetherSessionDto | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [frame, setFrame] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const [settingErrors, setSettingErrors] = useState<Record<string, string>>({});
+  const [previews, setPreviews] = useState<Record<number, string>>({});
+  const photosRef = useRef<number[]>([]);
+
+  const liveViewSupported = session?.camera.capabilities.liveView === true;
+  const connected = session?.connected === true;
+  const receiving = session?.receiving === true;
+  const photos = session?.photos ?? [];
+
+  // 会话快照：挂载拉一次；photoAdded/status 事件增量合并（轻路径，不整页重拉）
+  const mergeSession = useCallback((next: TetherSessionDto) => {
+    setSession(next);
+    const ids = next.photos.map((p) => p.id);
+    photosRef.current = ids;
+    setPreviews((prev) => {
+      const keep: Record<number, string> = {};
+      for (const id of ids) if (prev[id] !== undefined) keep[id] = prev[id];
+      return keep;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (sessionId === "") return;
+    let cancelled = false;
+    void tetheringSession(sessionId).then((dto) => {
+      if (cancelled) return;
+      setLoaded(true);
+      if (dto !== null) mergeSession(dto);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, mergeSession]);
+
+  // 事件：新片入册（胶片条 + 预览拉取）/ 连接状态
+  useEffect(() => {
+    if (sessionId === "") return;
+    let off: (() => void) | null = null;
+    let cancelled = false;
+    void subscribeAppEvents((event) => {
+      if (event.type === "tetheringPhotoAdded" && event.sessionId === sessionId) {
+        setSession((prev) =>
+          prev === null
+            ? prev
+            : {
+                ...prev,
+                photos: [...prev.photos, { id: event.assetId, name: event.name, kind: "photo" }].slice(-64),
+              },
+        );
+      } else if (event.type === "tetheringStatus" && event.sessionId === sessionId) {
+        setSession((prev) =>
+          prev === null ? prev : { ...prev, connected: event.connected, error: event.error },
+        );
+      }
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else off = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [sessionId]);
+
+  // 实时取景轮询：拿不到帧保持上一帧（不闪烁）；拍摄/收片期间后端返回 null
+  useEffect(() => {
+    if (sessionId === "" || !liveViewSupported || !connected) return;
+    let stopped = false;
+    let timer: number | null = null;
+    const tick = () => {
+      void tetheringFrame(sessionId).then((url) => {
+        if (stopped) return;
+        if (url !== null) setFrame(url);
+        timer = window.setTimeout(tick, FRAME_POLL_MS);
+      });
+    };
+    tick();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [sessionId, liveViewSupported, connected]);
+
+  // 胶片条预览：为还没有预览的照片拉缩略图（新片到达后缩略图生成有延迟，重试 3 次）
+  useEffect(() => {
+    if (sessionId === "") return;
+    let cancelled = false;
+    const missing = photos.map((p) => p.id).filter((id) => previews[id] === undefined);
+    if (missing.length === 0) return;
+    const attempt = (id: number, round: number) => {
+      if (cancelled) return;
+      void tetheringPhotoPreview(sessionId, id, 256).then((url) => {
+        if (cancelled || url === null) {
+          if (!cancelled && round < 3) window.setTimeout(() => attempt(id, round + 1), 1500);
+          return;
+        }
+        setPreviews((prev) => (prev[id] === undefined ? { ...prev, [id]: url } : prev));
+      });
+    };
+    for (const id of missing.slice(-8)) attempt(id, 0);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, photos, previews]);
+
+  async function closeWindow(): Promise<void> {
+    if (sessionId !== "") await tetheringStop(sessionId);
+    void getCurrentWindow().close();
+  }
+
+  async function applySetting(setting: TetherCameraSetting, value: string): Promise<void> {
+    if (sessionId === "" || !setting.writable || value === setting.current) return;
+    setSettingErrors((prev) => {
+      const next = { ...prev };
+      delete next[setting.id];
+      return next;
+    });
+    try {
+      const next = await tetheringSettingSet(sessionId, setting.id, value);
+      setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSettingErrors((prev) => ({ ...prev, [setting.id]: message }));
+    }
+  }
+
+  async function shoot(): Promise<void> {
+    if (sessionId === "" || capturing) return;
+    setCapturing(true);
+    setCaptureError(null);
+    const result = await tetheringCapture(sessionId);
+    if (!result.ok) setCaptureError(result.error ?? t("tether.captureFailed"));
+    setCapturing(false);
+  }
+
+  // --- 渲染 ----------------------------------------------------------------------------
+  if (sessionId === "") {
+    return (
+      <div className="flex h-screen items-center justify-center bg-bg text-sm text-text-muted">
+        {t("tether.sessionEnded")}
+      </div>
+    );
+  }
+  if (!loaded) {
+    return <div className="h-screen bg-bg" data-testid="tether-loading" />;
+  }
+  if (session === null) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 bg-bg" data-testid="tether-ended">
+        <p className="text-sm text-text-secondary">{t("tether.sessionEnded")}</p>
+        <button
+          type="button"
+          onClick={() => void getCurrentWindow().close()}
+          className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
+          data-testid="tether-ended-close"
+        >
+          {t("tether.close")}
+        </button>
+      </div>
+    );
+  }
+
+  const lastPhoto = photos.length > 0 ? photos[photos.length - 1] : null;
+  const mainImage = liveViewSupported ? frame : lastPhoto !== null ? (previews[lastPhoto.id] ?? null) : null;
+
+  return (
+    <div className="flex h-screen flex-col bg-bg text-text-primary" data-testid="tether-window">
+      {/* 自绘标题栏（decorations=false） */}
+      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-edge bg-surface pl-3" data-tauri-drag-region data-testid="tether-titlebar">
+        <span className="text-xs font-semibold" data-testid="tether-title">{t("tether.windowTitle")}</span>
+        <span className="text-[11px] text-text-muted">
+          {t("tether.albumTarget")}：{session.albumName} · {session.camera.name}
+        </span>
+        <span
+          className={`ml-2 rounded-full px-2 py-0.5 text-[10px] ${connected ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}
+          data-testid="tether-connection"
+        >
+          {connected ? (receiving ? t("tether.receiving") : t("tether.liveView")) : t("tether.disconnected")}
+        </span>
+        <div className="ml-auto flex items-center" data-tauri-drag-region={false}>
+          <button
+            type="button"
+            onClick={() => void getCurrentWindow().minimize()}
+            className="flex h-10 w-11 items-center justify-center text-text-muted transition-colors hover:bg-panel hover:text-text-primary"
+            aria-label="minimize"
+          >
+            —
+          </button>
+          <button
+            type="button"
+            onClick={() => void closeWindow()}
+            className="flex h-10 w-11 items-center justify-center text-text-muted transition-colors hover:bg-red-500 hover:text-white"
+            aria-label="close"
+            data-testid="tether-close"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {session.error !== null && (
+        <div className="flex items-center justify-between gap-3 border-b border-red-400/30 bg-red-400/10 px-3 py-1.5 text-[11px] text-red-400" data-testid="tether-error-banner">
+          <span className="truncate">{session.error}</span>
+        </div>
+      )}
+      {!connected && (
+        <div className="border-b border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-[11px] text-amber-300" data-testid="tether-disconnect-banner">
+          {t("tether.disconnected")}
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1">
+        {/* 中央：取景画面 */}
+        <div className="relative flex min-w-0 flex-1 items-center justify-center bg-black" data-testid="tether-view">
+          {mainImage !== null ? (
+            <img src={mainImage} alt="live view" className="max-h-full max-w-full object-contain" data-testid="tether-view-img" />
+          ) : (
+            <div className="flex flex-col items-center gap-2 text-xs text-white/40">
+              <span>{liveViewSupported ? t("tether.liveViewWaiting") : t("tether.liveViewUnsupported")}</span>
+              {!liveViewSupported && lastPhoto === null && <span className="text-[11px]">{t("tether.noPhotos")}</span>}
+            </div>
+          )}
+          {capturing && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40" data-testid="tether-capturing">
+              <span className="rounded-full bg-black/70 px-4 py-2 text-xs text-white">{t("tether.capturing")}</span>
+            </div>
+          )}
+          {captureError !== null && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-md bg-red-500/90 px-3 py-1.5 text-[11px] text-white" data-testid="tether-capture-error">
+              {captureError}
+            </div>
+          )}
+        </div>
+
+        {/* 右栏：相机参数 + 快门 */}
+        <aside className="sp-scroll flex w-64 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="tether-settings-panel">
+          <div className="flex items-center justify-between">
+            <h2 className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{t("tether.settings")}</h2>
+            <button
+              type="button"
+              onClick={() => {
+                if (sessionId !== "") void tetheringSettings(sessionId).then((next) => {
+                  if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+                });
+              }}
+              className="rounded border border-edge px-1.5 py-0.5 text-[10px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              data-testid="tether-settings-refresh"
+            >
+              {t("tether.refreshSettings")}
+            </button>
+          </div>
+          {session.settings.map((setting) => (
+            <label key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
+              <span className="flex items-center justify-between">
+                {settingLabel(setting.id, t)}
+                {!setting.writable && <span className="text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
+              </span>
+              <select
+                value={setting.current}
+                disabled={!setting.writable || !connected}
+                onChange={(e) => void applySetting(setting, e.target.value)}
+                className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40"
+              >
+                {setting.options.length > 0 ? (
+                  setting.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))
+                ) : (
+                  <option value={setting.current}>{setting.current}</option>
+                )}
+              </select>
+              {settingErrors[setting.id] !== undefined && (
+                <span className="text-[10px] text-red-400">
+                  {t("tether.settingFailed")}：{settingErrors[setting.id]}
+                </span>
+              )}
+            </label>
+          ))}
+          <button
+            type="button"
+            onClick={() => void shoot()}
+            disabled={capturing || !connected}
+            className="mx-auto mt-2 flex h-20 w-20 shrink-0 items-center justify-center rounded-full border-4 border-red-500/70 bg-red-500/15 text-[11px] font-semibold text-red-400 shadow-lg transition-all hover:bg-red-500/30 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:text-text-muted"
+            data-testid="tether-shutter"
+            aria-label={t("tether.shutter")}
+          >
+            {capturing ? t("tether.capturing") : t("tether.shutter")}
+          </button>
+        </aside>
+      </div>
+
+      {/* 底部：会话胶片条 */}
+      <div className="flex h-24 shrink-0 items-center gap-2 overflow-x-auto border-t border-edge bg-surface px-3" data-testid="tether-filmstrip">
+        {photos.length === 0 && (
+          <span className="text-[11px] text-text-muted">{t("tether.noPhotos")}</span>
+        )}
+        {[...photos].reverse().map((photo) => (
+          <div
+            key={photo.id}
+            className="flex h-[88px] w-[88px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-edge bg-bg"
+            title={photo.name}
+            data-testid={`tether-film-${photo.id}`}
+          >
+            {previews[photo.id] !== undefined ? (
+              <img src={previews[photo.id]} alt={photo.name} className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-[10px] text-text-muted">…</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

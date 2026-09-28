@@ -30,14 +30,14 @@
 //! - 识别（garavv/arcface-onnx 模型卡 pin 死）：112×112 NHWC RGB
 //!   `[1,112,112,3]`，`(px - 127.5) / 128` → 512 维 → L2 归一化。
 //!
-//! ## 在线聚类（v1，用户定案 2026-09-19）
-//! 新脸与现有簇心（成员归一化向量的均值）最大 cos ≥ [`CLUSTER_COS_THRESHOLD`]
-//! → 归簇（簇心滑动平均更新）；否则新建簇。簇人数 > 500 的近簇合并 v1 **不做**
-//! （误合并不可逆，等 M8 真库观察误聚率再定，见 [`OnlineClusterer`] 注释）。
+//! ## 保守的人物归类
+//! 先排除几何异常和接近空白图的无身份特征，再比较簇心与固定参考脸。
+//! 最佳候选与次佳候选难以区分、或参考脸不支持时保留为未归类人脸；
+//! 同一张照片的不同人脸不能进入同一人物，防止错误簇持续吸收成员。
 //! 聚类为顺序敏感的单遍状态 → 回填阶段 2 单线程消费（见 run_face_backfill）；
 //! 簇心缓存在进程内（重启后从 faces 表重建）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -577,7 +577,7 @@ impl ModelManager {
                 continue;
             }
             let emb = self.embed_aligned(&crop)?;
-            if !usable_embedding(&emb) {
+            if !identity_has_signal(&emb, &nonface_references(self)?) {
                 continue;
             }
             out.push((face, emb));
@@ -587,7 +587,7 @@ impl ModelManager {
 }
 
 /// 识别质量规则代际：升级后只重建人脸索引，清除旧的低质量归类。
-pub const FACE_INDEX_GENERATION: u64 = 2;
+pub const FACE_INDEX_GENERATION: u64 = 3;
 const MIN_FACE_PIXELS: f32 = 24.0;
 
 pub fn usable_face(face: &DetectedFace, threshold: f32) -> bool {
@@ -603,6 +603,59 @@ pub fn usable_face(face: &DetectedFace, threshold: f32) -> bool {
         && face.box_h >= MIN_FACE_PIXELS
         && face.kps.iter().flatten().all(|v| v.is_finite())
         && eye_span >= 8.0
+        && eye_span >= face.box_w * 0.15
+        && eye_span <= face.box_w * 0.85
+        && face.kps.iter().all(|p| {
+            p[0] >= face.box_x - face.box_w * 0.15
+                && p[0] <= face.box_x + face.box_w * 1.15
+                && p[1] >= face.box_y - face.box_h * 0.15
+                && p[1] <= face.box_y + face.box_h * 1.15
+        })
+        && (face.kps[0][1] - face.kps[1][1]).abs() <= eye_span * 0.5
+        && face.kps[2][1] > (face.kps[0][1] + face.kps[1][1]) * 0.5
+        && (face.kps[3][1] + face.kps[4][1]) * 0.5 > face.kps[2][1]
+}
+
+/// ArcFace 对空白/无信息裁片也会输出非零向量，不能只检查向量范数。
+/// 用同一个识别模型生成负样本参考：与无信息输入相似的特征直接拒绝归类。
+fn nonface_references(manager: &ModelManager) -> Result<Vec<Vec<f32>>, String> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, Vec<Vec<f32>>>>> =
+        std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("nonface reference cache");
+    let key = manager.model_path("arcface");
+    if let Some(references) = cache.get(&key) {
+        return Ok(references.clone());
+    }
+    let references: Vec<Vec<f32>> = [0, 128, 255]
+        .into_iter()
+        .map(|value| {
+            manager.embed_aligned(&RgbImage::from_pixel(
+                ALIGNED_SIZE,
+                ALIGNED_SIZE,
+                image::Rgb([value; 3]),
+            ))
+        })
+        .collect::<Result<_, _>>()?;
+    if references.iter().any(|v| !usable_embedding(v)) {
+        return Err("无效的人脸识别参考特征".into());
+    }
+    cache.insert(key, references.clone());
+    Ok(references)
+}
+
+pub fn identity_has_signal(embedding: &[f32], nonfaces: &[Vec<f32>]) -> bool {
+    usable_embedding(embedding)
+        && !nonfaces.is_empty()
+        && nonfaces
+            .iter()
+            .all(|reference| usable_embedding(reference) && cosine(embedding, reference) < 0.8)
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
 fn usable_crop(crop: &RgbImage) -> bool {
@@ -637,13 +690,21 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 // 在线聚类
 // ---------------------------------------------------------------------------
 
-/// 在线聚类器（簇心 = 成员归一化向量的均值；比较时再归一化，argmax cos）。
-/// 簇人数 > 500 的近簇合并 v1 不做：误合并不可逆且无人工纠簇界面，
-/// 等 M8 真库实测误聚率再定（当前阈值 0.4 下 Immich 同款经验无爆炸合并）。
+/// 在线聚类器：移动簇心匹配须同时获得固定参考脸支持。
+/// 不确定匹配保留未归类，不自动创建兜底人物或吸收进已有簇。
 #[derive(Debug, Default)]
 pub struct OnlineClusterer {
     sums: HashMap<i64, (Vec<f32>, u32)>,
+    /// 稳定参考脸，最多三张；避免仅靠移动簇心产生连续误吸收。
+    anchors: HashMap<i64, Vec<Vec<f32>>>,
     threshold: f32,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum IdentityMatch {
+    Certain(i64),
+    Ambiguous,
+    Novel,
 }
 
 impl OnlineClusterer {
@@ -653,16 +714,26 @@ impl OnlineClusterer {
     pub fn new(threshold: f32) -> Self {
         Self {
             sums: HashMap::new(),
+            anchors: HashMap::new(),
             threshold,
         }
     }
 
     /// 从持久化簇和恢复（重启后首脸重建缓存）。
     pub fn from_sums(sums: HashMap<i64, (Vec<f32>, u32)>, threshold: f32) -> Self {
-        Self { sums, threshold }
+        let anchors = sums
+            .iter()
+            .map(|(id, (sum, _))| (*id, vec![normalize(sum.clone())]))
+            .collect();
+        Self {
+            sums,
+            anchors,
+            threshold,
+        }
     }
 
     /// 最佳匹配簇：(cluster_id, cos)。空聚类返回 None。
+    #[allow(dead_code)] // 集成测试引用
     pub fn best_match(&self, vec: &[f32]) -> Option<(i64, f32)> {
         self.sums
             .iter()
@@ -676,6 +747,10 @@ impl OnlineClusterer {
 
     /// 簇心滑动平均吸收新成员（sum += vec, count += 1）。
     pub fn absorb(&mut self, cluster_id: i64, vec: &[f32]) {
+        let anchors = self.anchors.entry(cluster_id).or_default();
+        if anchors.len() < 3 {
+            anchors.push(vec.to_vec());
+        }
         let entry = self
             .sums
             .entry(cluster_id)
@@ -686,12 +761,49 @@ impl OnlineClusterer {
         entry.1 += 1;
     }
 
-    /// 归簇判定：最佳簇 cos ≥ 阈值 → 该簇；否则 None（调用方开新簇）。
+    /// 测试兼容入口；生产用 decide 区分新人物与不确定匹配。
+    #[allow(dead_code)] // 集成测试引用
     pub fn assign(&self, vec: &[f32]) -> Option<i64> {
-        match self.best_match(vec) {
-            Some((id, cos)) if cos >= self.threshold => Some(id),
+        match self.decide(vec, &HashSet::new()) {
+            IdentityMatch::Certain(id) => Some(id),
             _ => None,
         }
+    }
+
+    pub fn decide(&self, vec: &[f32], excluded: &HashSet<i64>) -> IdentityMatch {
+        if !usable_embedding(vec) {
+            return IdentityMatch::Ambiguous;
+        }
+        let mut candidates: Vec<_> = self
+            .sums
+            .iter()
+            .filter(|(id, _)| !excluded.contains(id))
+            .map(|(id, (sum, _))| (*id, cosine(&normalize(sum.clone()), vec)))
+            .collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let Some(&(id, score)) = candidates.first() else {
+            return IdentityMatch::Novel;
+        };
+        if score < self.threshold {
+            return IdentityMatch::Novel;
+        }
+        if candidates
+            .get(1)
+            .is_some_and(|(_, runner_up)| score - runner_up < 0.08)
+        {
+            return IdentityMatch::Ambiguous;
+        }
+        let Some(anchors) = self.anchors.get(&id) else {
+            return IdentityMatch::Ambiguous;
+        };
+        let agreeing = anchors
+            .iter()
+            .filter(|anchor| cosine(anchor, vec) >= self.threshold)
+            .count();
+        if agreeing * 2 <= anchors.len() {
+            return IdentityMatch::Ambiguous;
+        }
+        IdentityMatch::Certain(id)
     }
 
     /// 簇数（测试/观测）。
@@ -733,7 +845,11 @@ fn cluster_cache(
     let sums = db
         .face_cluster_sums()
         .map_err(|e| format!("读取簇心失败: {e}"))?;
-    let clusterer = std::sync::Arc::new(Mutex::new(OnlineClusterer::from_sums(sums, threshold)));
+    let mut clusterer = OnlineClusterer::from_sums(sums, threshold);
+    clusterer.anchors = db
+        .face_cluster_anchors()
+        .map_err(|e| format!("读取参考人脸失败: {e}"))?;
+    let clusterer = std::sync::Arc::new(Mutex::new(clusterer));
     pool.insert(key, std::sync::Arc::clone(&clusterer));
     Ok(clusterer)
 }
@@ -747,12 +863,17 @@ pub fn invalidate_cluster_cache(db_dir: &Path) {
 }
 
 /// 在线归簇：命中阈值 → 簇 id；否则建新簇（people 落行 + 缓存吸收）。
-fn assign_cluster(db: &Db, clusterer: &mut OnlineClusterer, emb: &[f32]) -> Result<i64, String> {
-    if let Some(id) = clusterer.assign(emb) {
-        return Ok(id);
+fn assign_cluster(
+    db: &Db,
+    clusterer: &mut OnlineClusterer,
+    emb: &[f32],
+    excluded: &HashSet<i64>,
+) -> Result<Option<i64>, String> {
+    match clusterer.decide(emb, excluded) {
+        IdentityMatch::Certain(id) => Ok(Some(id)),
+        IdentityMatch::Ambiguous => Ok(None),
+        IdentityMatch::Novel => db.create_person().map(Some).map_err(|e| e.to_string()),
     }
-    let id = db.create_person().map_err(|e| e.to_string())?;
-    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +973,8 @@ fn commit_face_payload(
         return false;
     };
     let mut clusterer = cache.lock().expect("clusterer mutex poisoned");
+    // 同一张合影的不同人脸不能被自动归为同一个人物。
+    let mut assigned = HashSet::new();
     for (face, emb) in &payload.faces {
         // 消费边界再校验；无有效人脸也正常完成索引，但不创建人物。
         if !face.score.is_finite()
@@ -869,15 +992,18 @@ fn commit_face_payload(
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
-        let Ok(cluster_id) = assign_cluster(db, &mut clusterer, emb) else {
+        let Ok(cluster_id) = assign_cluster(db, &mut clusterer, emb, &assigned) else {
             return false;
         };
-        clusterer.absorb(cluster_id, emb);
-        let Ok(face_id) = db.insert_face(asset_id, x, y, w, h, emb, Some(cluster_id)) else {
+        let Ok(face_id) = db.insert_face(asset_id, x, y, w, h, emb, cluster_id) else {
             return false;
         };
         // 封面 = 簇内最大框人脸（归一化面积，同一空间内自洽；首张无条件担任）
-        let _ = db.maybe_promote_cover(face_id, cluster_id, w * h);
+        if let Some(cluster_id) = cluster_id {
+            clusterer.absorb(cluster_id, emb);
+            assigned.insert(cluster_id);
+            let _ = db.maybe_promote_cover(face_id, cluster_id, w * h);
+        }
     }
     db.set_face_indexed(asset_id).is_ok()
 }

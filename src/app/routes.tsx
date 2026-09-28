@@ -19,6 +19,7 @@ import PeoplePage from "@/features/people/pages/PeoplePage";
 import CullingPage from "@/features/culling/pages/CullingPage";
 import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsPages";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
+import TetheringWindowPage from "@/features/tethering/TetheringWindowPage";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
@@ -52,6 +53,9 @@ export const router = createBrowserRouter([
   { path: "/library-picker", element: <LibraryPickerPage /> },
   // 新建库配置链 / 未配置库补完（?library=<id>）：独立于主壳全屏展示
   { path: "/onboarding", element: <OnboardingPage /> },
+  // 联机拍摄独立窗口（后端 tethering_start 创建的第二 webview 加载；独立于
+  // 主壳守卫——该窗口的 store 是全新会话态，会话真值全部来自后端命令）
+  { path: "/tethering", element: <TetheringWindowPage /> },
   {
     path: "/",
     element: <GatedShell />,

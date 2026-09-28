@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AssetKind, CullDecisionValue } from "@/ipc/api";
@@ -42,6 +43,8 @@ function ComparePane({
 }: ComparePaneProps) {
   const { t } = useTranslation();
   const { url, status } = useAssetThumbUrl(assetId, COMPARE_THUMB_SIZE, true, "high");
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const stop = (e: React.MouseEvent): void => {
     e.stopPropagation();
   };
@@ -78,12 +81,22 @@ function ComparePane({
             loading="eager"
             decoding="async"
             draggable={false}
+            onLoad={() => setLoadedUrl(url)}
+            onError={() => setFailedUrl(url)}
             className="absolute inset-0 h-full w-full object-contain"
           />
         ) : (
           <span className="absolute inset-0 flex items-center justify-center font-mono text-xs text-text-muted">
             {name}
           </span>
+        )}
+        {(status === "loading" || (url !== null && loadedUrl !== url && failedUrl !== url)) && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-panel/50" role="status">
+            <span className="h-7 w-7 animate-spin rounded-full border-2 border-edge border-t-accent" />
+          </div>
+        )}
+        {(status === "failed" || (url !== null && failedUrl === url)) && (
+          <span className="absolute inset-0 flex items-center justify-center text-xs text-text-muted">{t("thumb.unavailable")}</span>
         )}
         {/* 屏位号 1-4（键盘选焦提示） */}
         <span
@@ -203,11 +216,11 @@ export default function CullCompareGrid({
 
   return (
     <div
-      className="relative flex min-h-0 flex-1 flex-col"
+      className="absolute inset-0 flex min-h-0 flex-col"
       data-testid="culling-compare-grid"
       data-count={count}
     >
-      <div className={`grid min-h-0 flex-1 gap-1.5 p-1.5 ${columns}`}>
+      <div className={`grid min-h-0 flex-1 gap-1.5 p-1.5 ${columns} ${count === 4 ? "grid-rows-2" : "grid-rows-1"}`}>
         {panes.map((member, pane) => (
           <ComparePane
             key={member.assetId}
@@ -224,7 +237,7 @@ export default function CullCompareGrid({
         ))}
       </div>
       <p
-        className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded bg-black/40 px-2 py-0.5 font-mono text-[10px] text-text-muted/80"
+        className="shrink-0 px-3 py-2 text-center text-xs text-text-muted"
         data-testid="culling-compare-keys-hint"
       >
         {t("culling.overlay.compareKeysHint")}

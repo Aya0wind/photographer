@@ -640,7 +640,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                           <span
                             role="button"
                             tabIndex={0}
-                            aria-label={isFavorite ? "取消收藏" : "收藏"}
+                            aria-label={isFavorite ? t("gallery.favoriteRemove") : t("gallery.favoriteAdd")}
                             aria-pressed={isFavorite}
                             onPointerDown={(e) => e.stopPropagation()}
                             onClick={(e) => {

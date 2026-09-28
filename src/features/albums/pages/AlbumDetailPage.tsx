@@ -35,6 +35,8 @@ import {
   EMPTY_INPUTS,
 } from "@/features/gallery/FilterPanel";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { subscribeAppEvents } from "@/ipc/api";
+import TetherStartDialog from "@/features/tethering/TetherStartDialog";
 import { GALLERY_JUSTIFY_ROW_PX, useGalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
 
 /**
@@ -304,6 +306,29 @@ export default function AlbumDetailPage() {
   // --- 「添加照片」入口（v1：提示到图库多选加入） ---------------------------------------
   const [addHintOpen, setAddHintOpen] = useState(false);
 
+  // --- 「联机拍摄」入口（阶段 E）：弹窗选相机，后端开独立拍摄窗口 -----------------------
+  const [tetherOpen, setTetherOpen] = useState(false);
+
+  // 联拍新片入册（独立拍摄窗口触发）→ 本相册列表与计数即时刷新
+  useEffect(() => {
+    let off: (() => void) | null = null;
+    let cancelled = false;
+    void subscribeAppEvents((event) => {
+      if (event.type !== "tetheringPhotoAdded" || event.albumId !== albumId) return;
+      setReloadToken((v) => v + 1);
+      void refreshMeta();
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else off = fn;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [albumId, refreshMeta]);
+
   // --- 「选片」入口（Culling V1）：当前作用域（根/子组）一键开会话 → /culling 续选 ---
   const [cullBusy, setCullBusy] = useState(false);
   async function startCulling(): Promise<void> {
@@ -401,6 +426,17 @@ export default function AlbumDetailPage() {
                 {chips.length}
               </span>
             )}
+          </button>
+
+          {/* 联机拍摄（阶段 E）：先选相册再开拍——独立窗口内调参/取景/按快门，新片直接入本相册 */}
+          <button
+            type="button"
+            onClick={() => setTetherOpen(true)}
+            title={t("albums.tetherHint")}
+            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="album-tether-start"
+          >
+            {t("albums.tether")}
           </button>
 
           {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
@@ -625,6 +661,13 @@ export default function AlbumDetailPage() {
           onVersionSelect={selectVersion}
           onNavigate={navigateTo}
           onClose={closeViewer}
+        />
+      )}
+      {tetherOpen && (
+        <TetherStartDialog
+          albumId={albumId}
+          albumName={albumName}
+          onClose={() => setTetherOpen(false)}
         />
       )}
     </div>

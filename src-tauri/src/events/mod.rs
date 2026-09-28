@@ -296,6 +296,19 @@ pub enum AppEvent {
         object_size: u64,
     },
 
+    TetheringPhotoAdded {
+        session_id: String,
+        library_id: String,
+        album_id: i64,
+        asset_id: i64,
+        name: String,
+    },
+    TetheringStatus {
+        session_id: String,
+        connected: bool,
+        error: Option<String>,
+    },
+
     // 错误
     AppError {
         level: String,

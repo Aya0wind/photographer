@@ -15,6 +15,12 @@ const openMock = vi.mocked(openDialog);
 import OnboardingPage from "./OnboardingPage";
 import { NEW_LIBRARY_DRAFT_KEY } from "@/features/library/NewLibraryDialog";
 import "@/i18n";
+import { useAiStore } from "@/stores/aiStore";
+import type { AiModelStatus } from "@/ipc/api";
+
+function readyModels(): AiModelStatus[] {
+  return ["siglip2-visual", "siglip2-text", "siglip2-tokenizer", "siglip2-visual-fp16", "siglip2-text-fp16", "scrfd", "scrfd-10g", "arcface", "facemesh"].map((id) => ({ id, state: "done", installed: true, bytesTotal: 100, downloadedBytes: 100, version: "1", feature: id.startsWith("siglip2") ? "semantic" : id === "facemesh" ? "selection" : "face" }));
+}
 import {
   DEFAULT_SETTINGS,
   clone,
@@ -80,7 +86,9 @@ const OLD_UNCONFIGURED: Library = { ...FRESH_LIB, id: "lib-old", name: "老库" 
 describe("OnboardingPage 向导", () => {
   beforeEach(() => {
     primeStore();
-    ipcMock.mockClear();
+    ipcMock.mockReset().mockImplementation(async (cmd) => cmd === "ai_models_status" ? readyModels() : undefined);
+    useAiStore.getState().resetForTests();
+    useAiStore.setState({ models: readyModels(), modelsLoaded: true });
     openMock.mockReset();
     sessionStorage.removeItem(NEW_LIBRARY_DRAFT_KEY);
   });
@@ -379,4 +387,46 @@ describe("退出与回退（取消 / 上一步 / 步骤指示器）", () => {
     expect(useSettingsStore.getState().settings.libraries).toHaveLength(1);
     expect(sessionStorage.getItem(NEW_LIBRARY_DRAFT_KEY)).toBeNull();
   });
+});
+
+
+it("开启 AI 时下载所选档位所需资源，下载未完成不能建库", async () => {
+  primeStore();
+  let catalog = readyModels().map((m) => m.id === "siglip2-text" ? { ...m, state: "idle" as const, installed: false, downloadedBytes: 0 } : m);
+  useAiStore.setState({ models: catalog, modelsLoaded: true });
+  ipcMock.mockReset().mockImplementation(async (cmd) => cmd === "ai_models_status" ? catalog : undefined);
+  renderWizardAt("/onboarding");
+  fireEvent.change(screen.getByLabelText("数据库目录"), { target: { value: "D:\\db" } });
+  fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\\photos" } });
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByText("仅语义搜索"));
+  fireEvent.click(screen.getByRole("button", { name: "下载 AI 资源" }));
+  await waitFor(() => expect(ipcMock).toHaveBeenCalledWith("ai_model_download", { id: "siglip2-text" }));
+  expect(ipcMock.mock.calls.filter(([cmd]) => cmd === "ai_model_download").map(([, args]) => args))
+    .toEqual([{ id: "siglip2-text" }]); // 复用已装 visual/tokenizer，不重复下载。
+  expect(screen.getByRole("button", { name: "正在准备…" })).toBeDisabled();
+  expect(screen.getByRole("progressbar", { name: "语义搜索模型" })).toBeInTheDocument();
+  expect(ipcMock.mock.calls.some(([cmd]) => cmd === "settings_set")).toBe(false);
+  catalog = readyModels();
+  await useAiStore.getState().refresh();
+  fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByRole("button", { name: "开始使用 Photo Hub" }));
+  await screen.findByTestId("gallery-probe");
+});
+
+it("未开启 AI 可直接完成建库，不要求下载模型", async () => {
+  primeStore();
+  useAiStore.setState({ models: [], modelsLoaded: true });
+  ipcMock.mockReset().mockImplementation(async () => undefined);
+  renderWizardAt("/onboarding");
+  fireEvent.change(screen.getByLabelText("数据库目录"), { target: { value: "D:\\db" } });
+  fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\\photos" } });
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByText("全部关闭"));
+  fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+  fireEvent.click(await screen.findByRole("button", { name: "开始使用 Photo Hub" }));
+  await screen.findByTestId("gallery-probe");
+  expect(ipcMock.mock.calls.some(([cmd]) => cmd === "ai_model_download")).toBe(false);
 });

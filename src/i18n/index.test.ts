@@ -1,10 +1,59 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 // 注意：zh.json 必须以 ?raw 读取 —— 直接 import 会经 JSON.parse，
 // 重复 key 被静默覆盖，无法检测。
 import zhRaw from "./zh.json?raw";
 import zh from "./zh.json";
-import i18n from "./index";
+import i18n, { normalizeLanguage, setAppLanguage } from "./index";
+import enRaw from "./en.json?raw";
+import jaRaw from "./ja.json?raw";
+import esRaw from "./es.json?raw";
+import traditionalRaw from "./zh-TW.json?raw";
+import { formatDateLabel } from "@/features/gallery/lib/assetGroups";
+import { smartTagLabel } from "@/features/albums/lib/smartTags";
+
+afterEach(async () => { await setAppLanguage("zh"); });
+
+describe("语言包完整性", () => {
+  it.each([['en', enRaw], ['ja', jaRaw], ['es', esRaw], ['zh-TW', traditionalRaw]])("%s 包含全部文案并保留插值变量", (_language, raw) => {
+    const pack: Record<string, string> = JSON.parse(raw);
+    const keys = [...raw.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)].map((match) => match[1]);
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const [key, source] of Object.entries(zh)) {
+      expect(pack[key], key).toBeTruthy();
+      expect([...pack[key].matchAll(/\{\{(.*?)\}\}/g)].map((m) => m[1]).sort(), key)
+        .toEqual([...source.matchAll(/\{\{(.*?)\}\}/g)].map((m) => m[1]).sort());
+    }
+  });
+
+  it.each([['zh-Hant-HK', 'zh-TW'], ['zh_CN', 'zh'], ['en-GB', 'en'], ['ja-JP', 'ja'], ['es-MX', 'es'], ['unknown', 'zh']])("兼容语言代码 %s", (code, expected) => {
+    expect(normalizeLanguage(code)).toBe(expected);
+  });
+
+  it.each([['en', 'Gallery'], ['ja', 'ギャラリー'], ['es', 'Galería'], ['zh-TW', '圖庫']])("%s 可离线加载并切换", async (language, label) => {
+    await setAppLanguage(language);
+    expect(i18n.t('nav.gallery')).toBe(label);
+    expect(document.documentElement.lang).not.toBe('zh-CN');
+    for (const key of Object.keys(zh)) expect(i18n.exists(key, { lng: language, fallbackLng: false }), key).toBe(true);
+  });
+
+  it("快速切换只应用最后的选择", async () => {
+    await Promise.all([setAppLanguage('es'), setAppLanguage('ja'), setAppLanguage('en')]);
+    expect(i18n.language).toBe('en');
+  });
+
+  it("日期、计数和内置标签随语言切换，自定义标签保持原样", async () => {
+    await setAppLanguage('en');
+    expect(formatDateLabel('2026-09-29')).toBe('September 29, 2026');
+    expect(i18n.t('gallery.groupCount', { count: 1 })).toBe('1 photo');
+    expect(i18n.t('gallery.groupCount', { count: 2 })).toBe('2 photos');
+    expect(smartTagLabel('风景')).toBe('Landscape');
+    expect(smartTagLabel('我的旅行')).toBe('我的旅行');
+    await setAppLanguage('es');
+    expect(i18n.t('gallery.groupCount', { count: 1 })).toBe('1 foto');
+    expect(i18n.t('gallery.groupCount', { count: 2 })).toBe('2 fotos');
+  });
+});
 
 /** 关键 key 清单：侧栏导航 + 各占位页 + 设置页 + 向导/通用按钮（防漏文案） */
 const CRITICAL_KEYS = [

@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
+import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
-import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags } from "@/features/albums/lib/smartTags";
+import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags, smartTagLabel } from "@/features/albums/lib/smartTags";
 import { useSettingsStore, type DeepPartial, type Library, type Settings } from "@/stores/settingsStore";
 
 /**
@@ -179,8 +180,8 @@ function AlbumTagsSetting() {
         <div className="flex flex-wrap gap-1.5">
           {tags.map((tag) => (
             <span key={tag} className="inline-flex items-center gap-1 rounded-md border border-edge bg-panel px-2 py-1 text-[11px] text-text-secondary" data-testid="settings-album-tag" data-tag={tag}>
-              {tag}
-              <button type="button" onClick={() => updateTags(tags.filter((item) => item !== tag))} aria-label={`${t("settings.albums.removeTag")} ${tag}`} className="ml-0.5 text-text-muted hover:text-red-400">×</button>
+              {smartTagLabel(tag)}
+              <button type="button" onClick={() => updateTags(tags.filter((item) => item !== tag))} aria-label={`${t("settings.albums.removeTag")} ${smartTagLabel(tag)}`} className="ml-0.5 text-text-muted hover:text-red-400">×</button>
             </span>
           ))}
         </div>
@@ -312,13 +313,13 @@ export default function SettingsPage() {
               </SettingRow>
               <SettingRow label={t("settings.language")} desc={t("settings.languageDesc")}>
                 <select
-                  disabled
-                  value={settings.system.language}
+                  value={normalizeLanguage(settings.system.language)}
+                  onChange={(event) => commit({ system: { language: event.target.value } })}
                   aria-label={t("settings.language")}
                   className={SELECT_CLASS}
                   data-testid="settings-language"
                 >
-                  <option value="zh">{t("settings.languageZh")}</option>
+                  {APP_LANGUAGES.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
                 </select>
               </SettingRow>
 

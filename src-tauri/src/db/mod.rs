@@ -885,6 +885,24 @@ impl Db {
         tx.commit()
     }
 
+    /// Tethered captures must keep their chosen album; deletion is an error rather
+    /// than silently registering an ungrouped photo. Check and insert share a lock.
+    pub fn insert_captured_asset(&self, asset: &AssetRow, album_id: i64) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.0,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM album WHERE id=?1)",
+            [album_id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        insert_asset_on(&tx, asset, Some(album_id), None)?;
+        tx.commit()
+    }
+
     // —— 索引任务（index_tasks）——
 
     /// 为缩略图状态仍未完成、但任务账缺失的资产补种待办。旧版本清理过
@@ -931,7 +949,11 @@ impl Db {
     /// 斜杠方向不敏感前缀匹配，尾段原样保留）。重写行同步复位 thumb_state=0
     /// 并重排 thumb 任务（缓存按路径哈希寻址，换根即失效需重建；其余通道
     /// 按 asset id 寻址不受影响）。单事务完成。返回 (重写数, 未受影响数)。
-    pub fn rewrite_asset_roots(&self, old_root: &str, new_root: &str) -> Result<(u64, u64), String> {
+    pub fn rewrite_asset_roots(
+        &self,
+        old_root: &str,
+        new_root: &str,
+    ) -> Result<(u64, u64), String> {
         let tx = self.0.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut stmt = tx
             .prepare("SELECT id, path FROM assets")
@@ -955,8 +977,11 @@ impl Db {
             } else {
                 format!("{new_root}\\{tail}")
             };
-            tx.execute("UPDATE assets SET path = ?2 WHERE id = ?1", params![id, new_path])
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE assets SET path = ?2 WHERE id = ?1",
+                params![id, new_path],
+            )
+            .map_err(|e| e.to_string())?;
             tx.execute(
                 "UPDATE assets SET thumb_state = 0 WHERE id = ?1",
                 params![id],
@@ -1310,6 +1335,28 @@ impl Db {
         Ok(sums)
     }
 
+    /// 每个人物最早的三张参考脸。重启后保持相同锚点，不退化为只比较簇心。
+    pub fn face_cluster_anchors(&self) -> Result<HashMap<i64, Vec<Vec<f32>>>> {
+        let mut stmt = self.0.prepare(
+            "SELECT cluster_id, embedding FROM (SELECT cluster_id, embedding, \
+             ROW_NUMBER() OVER (PARTITION BY cluster_id ORDER BY id) AS rank \
+             FROM faces WHERE cluster_id IS NOT NULL) WHERE rank <= 3 ORDER BY cluster_id, rank",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut anchors: HashMap<i64, Vec<Vec<f32>>> = HashMap::new();
+        for row in rows {
+            let (id, blob) = row?;
+            let vector = blob
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            anchors.entry(id).or_default().push(vector);
+        }
+        Ok(anchors)
+    }
+
     /// 人物簇列表（face_count 降序、id 升序稳定排序；空簇不返回）。
     /// 封面资产 = 封面人脸所在资产，缺失回退簇内最大框人脸的资产。
     pub fn people_list(&self) -> Result<Vec<PersonRow>> {
@@ -1466,9 +1513,9 @@ impl Db {
     /// 全部相册的主目录相对段（claim 挪移的主相册前缀判定用，
     /// [`Db::album_home_rel`] 的批量形态）。
     pub fn album_home_rels(&self) -> Result<Vec<(i64, String)>> {
-        let mut stmt =
-            self.0
-                .prepare("SELECT id, created_at, dir_name FROM album ORDER BY id")?;
+        let mut stmt = self
+            .0
+            .prepare("SELECT id, created_at, dir_name FROM album ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1795,11 +1842,12 @@ impl Db {
     /// 相机聚合（搜索页相机勾选）：camera 非空分组计数，count 降序、
     /// camera 升序稳定排序。
     pub fn camera_list(&self) -> Result<Vec<CameraCountRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT camera, COUNT(*) FROM assets \
-             WHERE camera IS NOT NULL AND camera != '' AND in_trash = 0 AND kind IN ('photo', 'raw') \
-             GROUP BY camera ORDER BY COUNT(*) DESC, camera ASC",
-        )?;
+        let value = equipment_text_sql("camera");
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {value}, COUNT(*) FROM assets \
+             WHERE {value} IS NOT NULL AND in_trash = 0 AND kind IN ('photo', 'raw') \
+             GROUP BY {value} ORDER BY COUNT(*) DESC, {value} ASC",
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(CameraCountRow {
                 camera: row.get(0)?,
@@ -1812,11 +1860,12 @@ impl Db {
     /// 镜头聚合（搜索页镜头勾选）：lens 非空分组计数，count 降序、
     /// lens 升序稳定排序（与 camera_list 同构）。
     pub fn lens_list(&self) -> Result<Vec<CameraCountRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT lens, COUNT(*) FROM assets \
-             WHERE lens IS NOT NULL AND lens != '' AND in_trash = 0 AND kind IN ('photo', 'raw') \
-             GROUP BY lens ORDER BY COUNT(*) DESC, lens ASC",
-        )?;
+        let value = equipment_text_sql("lens");
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT {value}, COUNT(*) FROM assets \
+             WHERE {value} IS NOT NULL AND in_trash = 0 AND kind IN ('photo', 'raw') \
+             GROUP BY {value} ORDER BY COUNT(*) DESC, {value} ASC",
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(CameraCountRow {
                 camera: row.get(0)?,
@@ -2254,15 +2303,16 @@ impl Db {
             .query_row("SELECT COUNT(*) FROM album", [], |r| r.get(0))
     }
 
-    /// 器材统计桶计数（单遍 SQL：子查询把 exposure_time 展示串解析成秒，
-    /// 外层 CASE 分桶；GLOB 守卫挡住非数值串——CAST('垃圾' AS REAL)=0 会
-    /// 污染快桶）。快门桶序：>1s / 1-1/2 / 1/2-1/8 / 1/8-1/60 / 1/60-1/500 /
-    /// ≤1/500（秒）；光圈序：≤1.4/1.4-2.8/2.8-4/4-5.6/5.6-8/>8；焦段序：
-    /// <24/24-50/50-85/85-135/135-200/≥200；ISO 序：≤100/…/1600-3200/>3200。
+    /// Only valid, positive capture values participate in equipment buckets.
+    /// The same expressions are used by range filters, including for legacy rows.
     pub fn gear_bucket_counts(&self) -> Result<Vec<i64>, String> {
+        let focal = positive_decimal_sql("focal_length");
+        let iso = positive_decimal_sql("iso");
+        let aperture = positive_decimal_sql("f_number");
+        let shutter = exposure_seconds_sql("exposure_time");
         let mut stmt = self
             .0
-            .prepare(
+            .prepare(&format!(
                 "SELECT \
                     SUM(CASE WHEN f < 24 THEN 1 ELSE 0 END), \
                     SUM(CASE WHEN f >= 24 AND f < 50 THEN 1 ELSE 0 END), \
@@ -2290,17 +2340,10 @@ impl Db {
                     SUM(CASE WHEN sec < 1.0/60 AND sec > 1.0/500 THEN 1 ELSE 0 END), \
                     SUM(CASE WHEN sec <= 1.0/500 THEN 1 ELSE 0 END) \
                  FROM ( \
-                    SELECT CASE WHEN focal_length GLOB '[0-9]*' \
-                            THEN CAST(focal_length AS REAL) END AS f, iso, \
-                    CASE WHEN f_number GLOB '[0-9]*' \
-                         THEN CAST(f_number AS REAL) END AS ap, \
-                    CASE WHEN exposure_time GLOB '1/[0-9]*' \
-                         THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) \
-                         WHEN exposure_time GLOB '[0-9]*' \
-                         THEN CAST(exposure_time AS REAL) END AS sec \
+                    SELECT {focal} AS f, {iso} AS iso, {aperture} AS ap, {shutter} AS sec \
                     FROM assets WHERE kind IN ('photo', 'raw') AND in_trash = 0 \
                  )",
-            )
+            ))
             .map_err(|e| e.to_string())?;
         let counts = stmt
             .query_row([], |r| {
@@ -3020,7 +3063,6 @@ pub fn strip_root_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     }
 }
 
-
 /// 布局公式唯一实现（[`Db::album_home_rel`] / [`Db::album_home_rels`] 共用）：
 /// created_at（RFC3339，UTC 口径）+ dir_name → `{YYYY}/{MM}/{dir_name}`；
 /// 解析失败兜底 dir_name 直挂根。存量迁移脚本 scripts/migrate_album_layout.py
@@ -3325,6 +3367,38 @@ pub fn sanitize_dir_name(raw: &str) -> String {
     out
 }
 
+/// SQL CAST alone accepts nonnumeric labels as zero and numeric prefixes as real
+/// values. Require the entire decimal to be valid and positive; NULL then never
+/// matches a range or a bucket. Column expressions are internal, never user input.
+fn positive_decimal_sql(column: &str) -> String {
+    let value = format!("trim({column})");
+    format!(
+        "(CASE WHEN {value} <> '' AND {value} NOT GLOB '*[^0-9.]*' \
+        AND {value} GLOB '*[0-9]*' \
+        AND length({value}) - length(replace({value}, '.', '')) <= 1 \
+        AND CAST({value} AS REAL) > 0 THEN CAST({value} AS REAL) END)"
+    )
+}
+
+fn exposure_seconds_sql(column: &str) -> String {
+    let numerator = positive_decimal_sql(&format!("substr({column}, 1, instr({column}, '/') - 1)"));
+    let denominator = positive_decimal_sql(&format!("substr({column}, instr({column}, '/') + 1)"));
+    let decimal = positive_decimal_sql(column);
+    format!(
+        "(CASE WHEN instr({column}, '/') > 0 THEN {numerator} / {denominator} ELSE {decimal} END)"
+    )
+}
+
+fn equipment_text_sql(column: &str) -> String {
+    let missing = crate::metadata::exif_lite::MISSING_EQUIPMENT_TEXT
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value = format!("trim({column}, char(9) || char(10) || char(13) || ' ')");
+    format!("(CASE WHEN lower({value}) NOT IN ({missing}) THEN {value} END)")
+}
+
 /// 分页与计数共用条件，避免筛选结果数和实际分页发生口径偏差。
 fn asset_filter_conditions(
     filters: &AssetFilters,
@@ -3362,18 +3436,18 @@ fn asset_filter_conditions(
     if !cameras.is_empty() {
         let slots = cameras
             .iter()
-            .map(|c| slot(params_vec, V::from(c.clone())))
+            .map(|c| slot(params_vec, V::from(c.trim().to_string())))
             .collect::<Vec<_>>()
             .join(", ");
-        conds.push(format!("camera IN ({slots})"));
+        conds.push(format!("{} IN ({slots})", equipment_text_sql("camera")));
     }
     if !lenses.is_empty() {
         let slots = lenses
             .iter()
-            .map(|l| slot(params_vec, V::from(l.clone())))
+            .map(|l| slot(params_vec, V::from(l.trim().to_string())))
             .collect::<Vec<_>>()
             .join(", ");
-        conds.push(format!("lens IN ({slots})"));
+        conds.push(format!("{} IN ({slots})", equipment_text_sql("lens")));
     }
     if !formats.is_empty() {
         // 扩展名 = 路径尾部 ".ext"（LIKE 对 ASCII 大小写不敏感，等价于
@@ -3415,33 +3489,31 @@ fn asset_filter_conditions(
     range(
         &mut conds,
         params_vec,
-        "CAST(focal_length AS REAL)",
+        &positive_decimal_sql("focal_length"),
         filters.focal_min,
         filters.focal_max,
     );
     range(
         &mut conds,
         params_vec,
-        "CAST(iso AS REAL)",
+        &positive_decimal_sql("iso"),
         filters.iso_min.map(|v| v as f64),
         filters.iso_max.map(|v| v as f64),
     );
     range(
         &mut conds,
         params_vec,
-        "CAST(f_number AS REAL)",
+        &positive_decimal_sql("f_number"),
         filters.aperture_min,
         filters.aperture_max,
     );
-    // 快门秒数：exposure_time 为本应用写入的展示串（"1/250" / "0.4"），
-    // 按写入格式解析——分数串取倒数，其余 CAST REAL。
     range(
-            &mut conds,
-            params_vec,
-            "CASE WHEN exposure_time LIKE '1/%' THEN 1.0 / CAST(substr(exposure_time, 3) AS REAL) ELSE CAST(exposure_time AS REAL) END",
-            filters.shutter_min,
-            filters.shutter_max,
-        );
+        &mut conds,
+        params_vec,
+        &exposure_seconds_sql("exposure_time"),
+        filters.shutter_min,
+        filters.shutter_max,
+    );
     range(
         &mut conds,
         params_vec,
@@ -3585,7 +3657,9 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         focal_length: row.get(12)?,
         lens: row.get(13)?,
         // 数据库保存双向伙伴引用；展示契约需要两侧共有的组 ID。
-        pair_id: row.get::<_, Option<i64>>(14)?.map(|partner| partner.min(id)),
+        pair_id: row
+            .get::<_, Option<i64>>(14)?
+            .map(|partner| partner.min(id)),
         thumb_state: row.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
         burst_id: row.get(16)?,
         flagged: row.get::<_, i64>(17)? != 0,

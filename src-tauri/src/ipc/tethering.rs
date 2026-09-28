@@ -203,3 +203,163 @@ pub async fn camera_capture(
     })
     .await
 }
+// The dedicated window shares the app state, but each session pins its destination.
+#[tauri::command]
+pub async fn tethering_start(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+    album_id: i64,
+    camera_id: String,
+) -> Result<super::super::tethering::session::SessionDto, String> {
+    let shared = state.inner().clone();
+    let dto = tauri::async_runtime::spawn_blocking(move || {
+        super::super::tethering::session::start(shared, album_id, &camera_id)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let id = dto.id.clone();
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "tethering",
+        tauri::WebviewUrl::App(format!("tethering?session={id}").into()),
+    )
+    .title("Photo Hub · Tethered Capture")
+    .inner_size(1100.0, 760.0)
+    .min_inner_size(860.0, 600.0)
+    .decorations(false)
+    .build();
+    match window {
+        Ok(window) => {
+            let close_id = id.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    super::super::tethering::session::stop(&close_id);
+                }
+            });
+            Ok(dto)
+        }
+        Err(e) => {
+            super::super::tethering::session::stop(&id);
+            Err(format!("无法打开拍摄窗口：{e}"))
+        }
+    }
+}
+#[tauri::command]
+pub async fn tethering_session(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<super::super::tethering::session::SessionDto, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let session = super::super::tethering::session::get(&session_id)?;
+        Ok(session.dto())
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_settings(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<Vec<super::super::tethering::backend::CameraSetting>, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        super::super::tethering::session::get(&session_id)?.refresh_settings()
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_setting_set(
+    state: State<'_, SharedState>,
+    session_id: String,
+    id: String,
+    value: String,
+) -> Result<Vec<super::super::tethering::backend::CameraSetting>, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let session = super::super::tethering::session::get(&session_id)?;
+        {
+            let _guard = session.operation.lock().unwrap();
+            session
+                .backend
+                .set_setting(&session.camera.pnp_id, &id, &value)
+                .map_err(|e| e.to_string())?;
+        }
+        session.refresh_settings()
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_capture(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<(), String> {
+    let shared = state.inner().clone();
+    let work = shared.clone();
+    run_blocking(shared, move |_| {
+        super::super::tethering::session::capture(&work, &session_id)
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_frame(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let session = super::super::tethering::session::get(&session_id)?;
+        let Ok(_guard) = session.operation.try_lock() else {
+            return Ok(None);
+        };
+        let bytes = session
+            .backend
+            .live_view_frame(&session.camera.pnp_id)
+            .map_err(|e| e.to_string())?;
+        use base64::Engine;
+        Ok(Some(format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )))
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_photo_preview(
+    state: State<'_, SharedState>,
+    session_id: String,
+    asset_id: i64,
+    size: u16,
+) -> Result<Option<String>, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let session = super::super::tethering::session::get(&session_id)?;
+        let db = super::open_library_db(std::path::Path::new(&session.library.db_dir))?;
+        let row = db
+            .asset_by_id(asset_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("照片不存在")?;
+        let path = crate::thumbs::thumb_file(
+            std::path::Path::new(&session.library.db_dir),
+            std::path::Path::new(&row.path),
+            if size > 512 { 2048 } else { 256 },
+        );
+        match path {
+            Some(path) => {
+                use base64::Engine;
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                Ok(Some(format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )))
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+}
+#[tauri::command]
+pub async fn tethering_stop(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<(), String> {
+    run_blocking(state.inner().clone(), move |_| {
+        super::super::tethering::session::stop(&session_id);
+        Ok(())
+    })
+    .await
+}
