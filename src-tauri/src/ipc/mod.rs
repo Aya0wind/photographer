@@ -5,6 +5,7 @@ pub mod ai;
 pub mod album;
 pub mod assets;
 pub mod claim;
+pub mod culling;
 pub mod device;
 pub mod device_manager;
 pub mod duplicates;

@@ -9,6 +9,9 @@
 
 mod migrations;
 
+/// 选片会话仓储（0024 三表；独立子模块——并行 lane 常改本文件，缩小冲突面）。
+pub mod culling;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;

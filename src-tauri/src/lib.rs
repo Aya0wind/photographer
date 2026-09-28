@@ -329,6 +329,14 @@ pub fn run() {
             ipc::tethering::tethering_camera_list,
             ipc::tethering::camera_probe,
             ipc::tethering::camera_capture,
+            // 选片会话（0024 V1）：会话持久化 + 决定读写 + 收尾映射
+            ipc::culling::cull_session_create,
+            ipc::culling::cull_session_list,
+            ipc::culling::cull_session_open,
+            ipc::culling::cull_decision_apply,
+            ipc::culling::cull_session_rename,
+            ipc::culling::cull_session_discard,
+            ipc::culling::cull_session_finish,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

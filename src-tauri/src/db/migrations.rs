@@ -27,6 +27,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0020_DROP_DERIVED_RELATIONS,
     MIGRATION_0021_AI_SELECTION,
     MIGRATION_0022_EDIT_EXPORT,
+    MIGRATION_0023_RESERVED,
+    MIGRATION_0024_CULLING,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -542,4 +544,55 @@ CREATE TABLE export_job (
 
 CREATE INDEX idx_export_job_asset  ON export_job (asset_id, id);
 CREATE INDEX idx_export_job_status ON export_job (status, id);
+"#;
+
+/// 0023（空占位，保号）：编号预留给并行 lane（AI/目录系）——本 lane 落地
+/// 选片迁移 0024（编号已由用户批准的方案 docs/plans/2026-09-28-culling-
+/// proposal.md §1 固定）。空 SQL = 仅推进 user_version 的 no-op，无任何 DDL。
+const MIGRATION_0023_RESERVED: &str = "";
+
+/// 0024（选片会话 V1，proposal §1 两表 + 快照表）：
+/// - `cull_session`：选片会话一等实体。scope 为创建时来源 JSON（kind=
+///   album{albumId,subgroup} | query{assetIds}——query 的 assetIds 是创建时
+///   传入序的**来源记录**，当前快照真值在 cull_session_asset，两侧允许随
+///   资产删除漂移）；name 不设唯一约束（同来源多轮会话由应用层命名规则
+///   区分）。proposal §1 的 order_key/last_asset_id 不落列：快照序由
+///   cull_session_asset.seq 承载，断点由 decision 覆盖推导（proposal 原注）。
+/// - `cull_session_asset`：快照有序资产 id（seq 从 0 起，PK(session_id, seq)；
+///   同一 asset 允许多次出现——应用层去重后写入）。**读路径注意**：V1 open
+///   全量返回（万张内可接受），V2 加 keyset 分页时按 (session_id, seq) 游标。
+/// - `cull_decision`：每会话每资产至多一条决定（未定 = 无行）。
+///   origin manual|ai（AI 只预标记，用户可翻转——V3 写入）。
+/// - 级联：会话删除 → 快照/决定行随灭；资产删除 → 两侧 asset_id 行随灭
+///   （快照缩水、计数纯派生自然收敛）。asset_id 单列索引支撑级联反查。
+const MIGRATION_0024_CULLING: &str = r#"
+CREATE TABLE cull_session (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    scope       TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    finished_at TEXT
+);
+
+CREATE TABLE cull_session_asset (
+    session_id INTEGER NOT NULL REFERENCES cull_session (id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    PRIMARY KEY (session_id, seq)
+);
+
+CREATE INDEX idx_cull_session_asset_asset ON cull_session_asset (asset_id);
+
+CREATE TABLE cull_decision (
+    session_id INTEGER NOT NULL REFERENCES cull_session (id) ON DELETE CASCADE,
+    asset_id   INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    decision   TEXT    NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+    origin     TEXT    NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'ai')),
+    decided_at TEXT    NOT NULL,
+    PRIMARY KEY (session_id, asset_id)
+);
+
+CREATE INDEX idx_cull_decision_session ON cull_decision (session_id);
+CREATE INDEX idx_cull_decision_asset  ON cull_decision (asset_id);
 "#;
