@@ -202,12 +202,12 @@ fn payload(n: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn catalog_has_eight_models_with_full_metadata() {
+fn catalog_has_nine_models_with_full_metadata() {
     let catalog = ai::catalog();
     assert_eq!(
         catalog.len(),
-        8,
-        "siglip2-visual/text/tokenizer + fp16 双塔 + scrfd/scrfd-10g/arcface"
+        9,
+        "siglip2-visual/text/tokenizer + fp16 双塔 + scrfd/scrfd-10g/arcface + facemesh（0021 eyes）"
     );
     let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
     for expect in [
@@ -219,6 +219,7 @@ fn catalog_has_eight_models_with_full_metadata() {
         "scrfd",
         "scrfd-10g",
         "arcface",
+        "facemesh",
     ] {
         assert!(ids.contains(&expect), "缺 {expect}: {ids:?}");
     }
@@ -235,12 +236,16 @@ fn catalog_has_eight_models_with_full_metadata() {
     );
     for m in catalog {
         assert!(m.url.starts_with("https://"), "{} url", m.id);
-        assert!(m.mirror_url.contains("hf-mirror.com"), "{} mirror", m.id);
+        // facemesh 例外：GitHub Releases 件，hf-mirror 不镜像 → mirror 填
+        // 同主源（重试语义，见 CATALOG 注释）
+        if m.id != "facemesh" {
+            assert!(m.mirror_url.contains("hf-mirror.com"), "{} mirror", m.id);
+        }
         assert_eq!(m.sha256.len(), 64, "{} sha256", m.id);
         assert!(m.bytes_total > 0, "{} bytesTotal", m.id);
         assert!(!m.version.is_empty(), "{} version", m.id);
         assert!(
-            m.feature == "semantic" || m.feature == "face",
+            m.feature == "semantic" || m.feature == "face" || m.feature == "selection",
             "{} feature",
             m.id
         );
@@ -248,14 +253,7 @@ fn catalog_has_eight_models_with_full_metadata() {
     // tier 归属真值表（2026-09-28 三档画质）：
     // normal 独占 = int8 双塔 + scrfd；fast 独占 = scrfd-10g；accurate 独占
     // = fp16 双塔；共用（null）= tokenizer + arcface
-    let tier_of = |id: &str| {
-        catalog
-            .iter()
-            .find(|m| m.id == id)
-            .unwrap()
-            .tier
-            .clone()
-    };
+    let tier_of = |id: &str| catalog.iter().find(|m| m.id == id).unwrap().tier.clone();
     assert_eq!(tier_of("siglip2-visual").as_deref(), Some("normal"));
     assert_eq!(tier_of("siglip2-text").as_deref(), Some("normal"));
     assert_eq!(tier_of("scrfd").as_deref(), Some("normal"));
@@ -264,6 +262,11 @@ fn catalog_has_eight_models_with_full_metadata() {
     assert_eq!(tier_of("siglip2-text-fp16").as_deref(), Some("accurate"));
     assert_eq!(tier_of("siglip2-tokenizer"), None, "tokenizer 各档共用");
     assert_eq!(tier_of("arcface"), None, "arcface 各档共用（既定决策不换）");
+    assert_eq!(
+        tier_of("facemesh"),
+        None,
+        "facemesh 各档共用（eyes 通道不分档）"
+    );
 }
 
 #[test]

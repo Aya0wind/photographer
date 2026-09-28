@@ -126,8 +126,13 @@ pub fn settings_set(
         quality_tier: crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
             .unwrap_or_default(),
     });
-    // 选片分析参数快照刷新（blur 软阈值 worker 侧即时读新值，0021）
+    // 选片分析参数快照刷新（blur 软阈值 + eyes EAR 阈值 worker 侧即时读
+    // 新值，0021；EAR 阈值变更经 selection 指纹重排 eyes 任务）
     crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);
+    crate::ai::selection::set_eyes_ear_thresholds(
+        settings.ai.eyes_ear_closed,
+        settings.ai.eyes_ear_maybe,
+    );
     // 参数指纹比对：变更通道后台自动重建（无库/无变更为 no-op）
     let ai_snapshot = settings.ai.clone();
     if let Some(library) = settings.active_library() {

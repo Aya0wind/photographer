@@ -598,6 +598,13 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
                     &index_supervisor,
                 );
             }
+            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
+            crate::ai::selection::kick_eyes_if_ready(
+                index_db_dir.clone(),
+                &ai_manager,
+                &ai_bus,
+                &index_supervisor,
+            );
             // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
             crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
@@ -685,6 +692,13 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
                     &index_supervisor,
                 );
             }
+            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
+            crate::ai::selection::kick_eyes_if_ready(
+                index_db_dir.clone(),
+                &ai_manager,
+                &ai_bus,
+                &index_supervisor,
+            );
             // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
             crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
@@ -844,6 +858,13 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
                     &index_supervisor,
                 );
             }
+            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
+            crate::ai::selection::kick_eyes_if_ready(
+                index_db_dir.clone(),
+                &ai_manager,
+                &ai_bus,
+                &index_supervisor,
+            );
             // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
             crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });

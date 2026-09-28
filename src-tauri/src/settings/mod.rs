@@ -192,6 +192,20 @@ pub struct AiSettings {
     /// 失焦」建议标签，绝不自动定罪——运动模糊/浅景深天然误报）。改了经
     /// selection 指纹比对重排 blur 任务。
     pub blur_soft_threshold: f32,
+    /// 闭眼判定 EAR 阈（MediaPipe 468 点 EAR，越小越闭；默认 0.13）。
+    /// 低于判 closed（有人闭眼）。**真库标定（2026-09-28，方法同语义阈值
+    /// 轮）**：497 张主库全量跑 eyes 通道（facemesh-ear-v1，335 张检出
+    /// 人脸），逐脸双眼 min EAR 分布 p10=0.089 / p25=0.145 / p50=0.241；
+    /// 对最低 12 张与 0.10-0.22 边界带逐张肉眼核验——EAR ≤ 0.13 眼睑环
+    /// 贴合（真闭眼/眨眼瞬间），0.13-0.20 半睁/眯眼，≥ 0.22 确定睁眼。
+    /// 0.13 取「闭眼簇上沿」并略保守（覆盖 19.4% 检出脸资产——家庭库
+    /// 连拍/群像占比所致）；0.13-0.16 区间眯眼样本归 maybe 不硬判。
+    pub eyes_ear_closed: f32,
+    /// 疑似闭眼 EAR 上阈（默认 0.20）：[closed, maybe) 判 maybe。0.20 =
+    /// 睁眼主体带下沿（0.19-0.20 仍见眯眼/单眼窄样本，0.219 起确认全睁；
+    /// 标定同上）。改任一 EAR 阈值经 selection 指纹重排 eyes 任务
+    /// （分析结果随阈值变）。
+    pub eyes_ear_maybe: f32,
 }
 
 impl Default for AiSettings {
@@ -213,6 +227,8 @@ impl Default for AiSettings {
             burst_hamming_max: 10,
             burst_min_size: 2,
             blur_soft_threshold: 30.0,
+            eyes_ear_closed: 0.13,
+            eyes_ear_maybe: 0.20,
         }
     }
 }
@@ -226,10 +242,7 @@ fn default_quality_tier() -> String {
 /// quality_tier 必须是三档之一——档位驱动模型件选择与指纹重建，脏值
 /// 会让推理层与 marker 各自兜底成不一致状态。
 pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
-    if matches!(
-        ai.quality_tier.as_str(),
-        "fast" | "normal" | "accurate"
-    ) {
+    if matches!(ai.quality_tier.as_str(), "fast" | "normal" | "accurate") {
         Ok(())
     } else {
         Err(format!(

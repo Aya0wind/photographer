@@ -9,8 +9,8 @@ mod index;
 mod ipc;
 mod metadata;
 mod migrate;
-mod tasks;
 pub mod settings;
+mod tasks;
 mod tethering;
 mod thumbs;
 mod tray;
@@ -89,8 +89,12 @@ pub fn run() {
                 quality_tier: crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
                     .unwrap_or_default(),
             });
-            // 选片分析参数快照（blur 软阈值 worker 侧读取，0021）
+            // 选片分析参数快照（blur 软阈值 + eyes EAR 阈值 worker 侧读取，0021）
             crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);
+            crate::ai::selection::set_eyes_ear_thresholds(
+                settings.ai.eyes_ear_closed,
+                settings.ai.eyes_ear_maybe,
+            );
             let ai_for_kick = ai.clone();
             let ai_settings_snapshot = settings.ai.clone();
             app.manage(std::sync::Arc::new(AppState {

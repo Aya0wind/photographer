@@ -139,13 +139,11 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
                     db.create_phash_tasks_for_unindexed()
                         .map_err(|e| format!("创建 pHash 任务失败: {e}"))?;
                 }
-                // 0021 选片分析通道：eyes 依赖闭眼模型（未收录 → 明确错误，
-                // 任务账可先建档）；blur 无模型依赖始终可用
+                // 0021 选片分析通道：eyes 依赖闭眼模型 facemesh（未下载 →
+                // 明确错误，任务账可先建档）；blur 无模型依赖始终可用
                 "eyes" => {
                     if !state.ai.selection_eyes_ready() {
-                        return Err(
-                            "闭眼检测模型未收录（选型未过：许可证/格式，详见模型清单）".into()
-                        );
+                        return Err("闭眼检测模型未下载，请先在设置中下载模型（facemesh）".into());
                     }
                     db.create_eyes_tasks_for_unindexed()
                         .map_err(|e| format!("创建闭眼任务失败: {e}"))?;
@@ -163,7 +161,18 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             }
             db.retry_failed_index_tasks(kind)
                 .map_err(|e| format!("重试失败索引任务失败: {e}"))?;
-            crate::index::kick(db_dir, &supervisor);
+            // eyes 任务不被 index worker 池认领（step 白名单外，模型会话
+            // 在闭眼回填 worker）→ 走专属回填入口；其余通道走通用池
+            if kind == "eyes" {
+                crate::ai::selection::kick_eyes_if_ready(
+                    db_dir.clone(),
+                    &state.ai,
+                    &state.bus,
+                    &supervisor,
+                );
+            } else {
+                crate::index::kick(db_dir, &supervisor);
+            }
             Ok(())
         }
         "ai" => {
@@ -493,18 +502,28 @@ fn face_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
     }
 }
 
-/// 选片分析指纹（0021：blur 阈值/算法版本 + eyes 模型就绪态；f32 用
-/// to_bits 保精确比较）。阈值变更 → 两通道任务重排（分析结果随阈值变）。
+/// 选片分析指纹（0021：blur 阈值/算法版本 + eyes EAR 阈值/模型版本；f32
+/// 用 to_bits 保精确比较）。任一阈值变更 → 两通道任务重排（分析结果随
+/// 阈值变）；eyes 算法版本（facemesh 换件/判据改动）同样折叠。
 pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
         ai.index_params_version as u64,
         ai.blur_soft_threshold.to_bits() as u64,
+        ai.eyes_ear_closed.to_bits() as u64,
+        ai.eyes_ear_maybe.to_bits() as u64,
     ] {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    hash
+    let mut h = hash;
+    for tag in [
+        crate::ai::selection::BLUR_ALGO_VERSION,
+        crate::ai::selection::EYES_ALGO_VERSION,
+    ] {
+        h = fnv_str(h, tag);
+    }
+    h
 }
 
 /// 连拍分组指纹（版本 + gap/hamming/min——改参数只重组不重算 pHash）。

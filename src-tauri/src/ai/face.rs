@@ -118,9 +118,10 @@ impl ModelManager {
             .all(|id| self.model_path(id).is_file())
     }
 
-    /// 闭眼检测模型是否就绪（feature="selection" 清单条目全部落盘）。
-    /// 今日清单无 selection 条目 → 恒 false：eyes 通道跳过并计数，
-    /// 任务保持 pending（模型收录后 kick 自然续跑）。
+    /// 闭眼检测模型是否就绪（feature="selection" 清单条目全部落盘：
+    /// 2026-09-28 起 = facemesh，MediaPipe Face Landmarker 478 点 ONNX）。
+    /// 未安装 → eyes 通道跳过并计数，任务保持 pending（下载完成后
+    /// eyes-postinstall watch 自然续跑）。
     pub fn selection_eyes_ready(&self) -> bool {
         let ids: Vec<String> = super::catalog()
             .iter()
@@ -446,9 +447,15 @@ pub fn similarity_matrix(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<[[f
 
 /// 按 2×3 相似矩阵逆向映射 + 双线性采样，输出 ALIGNED_SIZE² 裁剪。
 pub fn warp_similarity(img: &RgbImage, m: &[[f32; 3]; 2]) -> RgbImage {
+    warp_similarity_sized(img, m, ALIGNED_SIZE)
+}
+
+/// [`warp_similarity`] 的尺寸推广（eyes 通道 facemesh 256² 裁剪复用，
+/// 2026-09-28）：按 2×3 相似矩阵逆向映射 + 双线性采样，输出 `size`² 裁剪。
+pub fn warp_similarity_sized(img: &RgbImage, m: &[[f32; 3]; 2], size: u32) -> RgbImage {
     let (w, h) = (img.width() as i64, img.height() as i64);
     let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    let mut out = RgbImage::new(ALIGNED_SIZE, ALIGNED_SIZE);
+    let mut out = RgbImage::new(size, size);
     if det.abs() < f32::EPSILON {
         return out;
     }
@@ -456,8 +463,8 @@ pub fn warp_similarity(img: &RgbImage, m: &[[f32; 3]; 2]) -> RgbImage {
         [m[1][1] / det, -m[0][1] / det],
         [-m[1][0] / det, m[0][0] / det],
     ];
-    for y in 0..ALIGNED_SIZE {
-        for x in 0..ALIGNED_SIZE {
+    for y in 0..size {
+        for x in 0..size {
             let (dx, dy) = (x as f32 - m[0][2], y as f32 - m[1][2]);
             let sx = inv[0][0] * dx + inv[0][1] * dy;
             let sy = inv[1][0] * dx + inv[1][1] * dy;
@@ -790,7 +797,8 @@ fn infer_face_payload(
     asset_id: i64,
 ) -> Option<FacePayload> {
     let (path, _) = db.thumb_info_by_id(asset_id).ok().flatten()?; // 资产已删除（级联清任务前的防御兜底）
-    let thumb = detection_source_tiered(db_dir, Path::new(&path), manager.ai_params().quality_tier)?;
+    let thumb =
+        detection_source_tiered(db_dir, Path::new(&path), manager.ai_params().quality_tier)?;
     let img = image::ImageReader::open(&thumb)
         .ok()
         .and_then(|r| r.decode().ok())

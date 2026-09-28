@@ -61,14 +61,24 @@ const CHUNK: usize = 256 * 1024;
 ///   google/siglip2-base-patch16-256 = Apache-2.0，与现件一致，无新增
 ///   许可负担）。
 ///
-/// feature="selection"（闭眼检测，0021 选型 2026-09-27）：**暂无条目**。
-/// 评估结论——HuggingFace 许可证干净（Apache-2.0）的 open/closed eye
-/// 分类器（dima806/closed_eyes_image_detection、MrKrauzer/
-/// closed-eyes-image-detection）均为 ViT-base（~330MB）且无 ONNX 权重；
-/// MIT+ONNX 的 notgoodkeeper/cnn-based-drowsiness-detection 是整图驾驶
-/// 困倦分类，语义/标签不适用于双眼裁剪。按定案「不塞来源不明的权重」
-/// 停止收录：eyes 通道代码就绪（ai::selection，trait 注入可测），模型
-/// 收录（含 ONNX 会话实现与输入规格）待找到合规小模型后落地。
+/// feature="selection"（闭眼检测，0021 选型 2026-09-27 → 实装 2026-09-28）：
+/// - 前一稿停摆结论（无合规小模型）作废原因：改为收录 **MediaPipe Face
+///   Landmarker 478 点 ONNX**（yakhyo/mediapipe-face-mesh-onnx 导出），
+///   走 EAR 眼部长宽比几何判据而非端到端「闭眼分类器」——不需要大分类
+///   模型，Apache-2.0 干净件即可满足。license 证据：导出仓 LICENSE =
+///   Apache-2.0（2026-09-28 核实 https://github.com/yakhyo/
+///   mediapipe-face-mesh-onnx）；权重按其 README 系从 Google MediaPipe
+///   `face_landmarker.task`（face_landmarks_detector.tflite）反量化导出，
+///   MediaPipe 本体 Apache-2.0，权重可再分发。
+/// - 文件：GitHub Releases `releases/download/weights/
+///   face_landmarker_Nx3x256x256.onnx`，4.86MB，sha256 实测 pin 死。
+///   hf-mirror 只镜像 HuggingFace 不镜像 GitHub Releases → mirrorUrl
+///   填同 GitHub 主源（重试语义，无第二源）。
+/// - 实装校准注记（2026-09-28 Python/ONNXRuntime 实测，详见
+///   ai::selection eyes 段注释）：468 点眼睑网格与官方 face_landmarker
+///   对齐良好；**虹膜点（468-477）系统性漂移不可用**；score 头输出
+///   与导出仓 docstring（"confident faces 20-40"）不符（正脸裁剪
+///   logit −8~−31 且与背景无判别力）→ 两者在实现中均不作判据。
 ///
 /// 语义模型选型（2026-09-19 调研定案）：目标为 SigLIP 2（多语言中文直搜、
 /// 检索优于 CLIP），但可用 ONNX 量化转换版的 URL/SHA 需先核实——以下暂以
@@ -154,6 +164,16 @@ const CATALOG_JSON: &str = r#"[
     "version": "v1",
     "feature": "face",
     "tier": null
+  },
+  {
+    "id": "facemesh",
+    "url": "https://github.com/yakhyo/mediapipe-face-mesh-onnx/releases/download/weights/face_landmarker_Nx3x256x256.onnx",
+    "mirrorUrl": "https://github.com/yakhyo/mediapipe-face-mesh-onnx/releases/download/weights/face_landmarker_Nx3x256x256.onnx",
+    "sha256": "111795f8703cdeb6d0c68a9f3cc966a0f23f8786bb00f4577a11f461fc4276ac",
+    "bytesTotal": 4864717,
+    "version": "mediapipe-face-landmarker-478-v1",
+    "feature": "selection",
+    "tier": null
   }
 ]"#;
 
@@ -167,7 +187,7 @@ pub struct ModelEntry {
     pub sha256: String,
     pub bytes_total: u64,
     pub version: String,
-    /// "semantic" | "face"（"selection" 预留：闭眼模型选型未过，暂无条目）
+    /// "semantic" | "face" | "selection"（selection = 闭眼检测 facemesh）
     pub feature: String,
     /// 画质档位归属（2026-09-28 三档画质）：Some("fast"|"normal"|"accurate")
     /// = 该档独占件；None = 各档共用件（arcface / tokenizer）。
@@ -279,8 +299,8 @@ fn agent() -> &'static ureq::Agent {
 /// 运行时节点报错（真机 2026-09-21：SigLIP2 int8 的 LayerNormFusion 在
 /// RTX 5070 Ti 的 DML 上 E_INVALIDARG——ort 的逐算子回落只覆盖"不支持"，
 /// 不覆盖"执行即炸"）。某模型（"scrfd"/"scrfd-10g"/"arcface"/"siglip2-visual"
-/// /"siglip2-text"/"siglip2-visual-fp16"/"siglip2-text-fp16"）运行时故障只毒化
-/// 该模型——重建纯 CPU 会话时**其他模型保住 DML**（此前全局一位，单模型炸
+/// /"siglip2-text"/"siglip2-visual-fp16"/"siglip2-text-fp16"/"facemesh"）
+/// 运行时故障只毒化该模型——重建纯 CPU 会话时**其他模型保住 DML**（此前全局一位，单模型炸
 /// 会连坐全部通道）。推理层捕获错误后丢弃该模型的 DML 会话重建（见
 /// run_with_dml_fallback）。
 fn poison_flags() -> &'static Mutex<HashMap<String, bool>> {

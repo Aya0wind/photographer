@@ -46,8 +46,7 @@ pub fn fetch_search_semantic(
         return Err("查询不能为空".into());
     }
     if !state.ai.semantic_ready() {
-        let [visual, text] =
-            crate::ai::semantic_model_ids(state.ai.ai_params().quality_tier);
+        let [visual, text] = crate::ai::semantic_model_ids(state.ai.ai_params().quality_tier);
         return Err(format!(
             "语义检索模型未下载（{visual} / {text} / siglip2-tokenizer，             请先在设置页下载）"
         ));
@@ -65,8 +64,7 @@ pub fn fetch_search_semantic(
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (
             settings.ai.semantic_min_score,
-            crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
-                .unwrap_or_default(),
+            crate::ai::QualityTier::from_setting(&settings.ai.quality_tier).unwrap_or_default(),
         )
     };
     let hits = crate::ai::semantic::search(
@@ -158,6 +156,7 @@ pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Res
     let shared = state.inner().clone();
     let is_semantic = id.starts_with("siglip2");
     let is_face = id.starts_with("scrfd") || id == "arcface";
+    let is_selection = id == crate::ai::selection::FACEMESH_MODEL_ID;
     run_blocking(shared.clone(), move |state| {
         let entry = crate::ai::catalog()
             .iter()
@@ -172,6 +171,9 @@ pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Res
     }
     if is_face {
         spawn_face_post_install_watch(&shared);
+    }
+    if is_selection {
+        spawn_eyes_post_install_watch(&shared);
     }
     Ok(())
 }
@@ -242,6 +244,37 @@ fn spawn_face_post_install_watch(state: &SharedState) {
                             &shared.supervisor,
                         );
                     }
+                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+
+/// facemesh 下载完成后的自动触发（0021 eyes 通道，2026-09-28 实装）：
+/// 轮询就绪 → 闭眼回填 + 补跑参数指纹比对（semantic/face watch 同款；
+/// eyes 无 enable 开关——选片分析随任务账自动跑，模型未装时通道本就
+/// 跳过不产出）。轮询上限 20 分钟。
+fn spawn_eyes_post_install_watch(state: &SharedState) {
+    let shared = std::sync::Arc::clone(state);
+    let supervisor = std::sync::Arc::clone(&state.supervisor);
+    supervisor.spawn("ai-postinstall", "eyes-watch".into(), move |_| {
+        for _ in 0..600 {
+            let (library, ai_snapshot) = {
+                let settings = shared.settings.lock().expect("settings mutex poisoned");
+                (settings.active_library().cloned(), settings.ai.clone())
+            };
+            if shared.ai.selection_eyes_ready() {
+                if let Some(library) = library {
+                    let db_dir = std::path::PathBuf::from(&library.db_dir);
+                    crate::ai::selection::kick_eyes_if_ready(
+                        db_dir.clone(),
+                        &shared.ai,
+                        &shared.bus,
+                        &shared.supervisor,
+                    );
                     super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
                 }
                 return;
