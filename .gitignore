@@ -32,3 +32,12 @@ hh.json
 # 本地二进制文件不入库
 src-tauri/binaries/
 installer-output/
+
+# 相机厂商 SDK（许可禁止入库：头文件/import 库不可再分发）
+# Sony RemoteCli / Canon EDSDK / Nikon SDK / Fuji FTLPTP 解压后放这里或任意位置，
+# 由 scripts/build-*-bridge.cmd 按路径消费（详见 docs/tethering-sdks.md）
+vendor/sony-sdk/
+vendor/edsdk/
+vendor/nikon-sdk/
+vendor/fuji-sdk/
+**/bridge-build/
