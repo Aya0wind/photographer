@@ -10,11 +10,14 @@ import {
   assetRatingSet,
   assetRejectSet,
   assetVersions,
+  editRecipeGet,
   type AssetDetailDto,
   type AssetDto,
   type AssetVersions,
+  type EditRecipe,
   type VersionMember,
 } from "@/ipc/api";
+import EditorOverlay from "@/features/editor/components/EditorOverlay";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
 import type { AssetGroup } from "../lib/assetGroups";
 import {
@@ -510,6 +513,20 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const versionMembers: VersionMember[] | null =
     versions !== null && versions.members.length > 1 ? versions.members : null;
 
+  // --- 编辑器（阶段 D）：配方状态（角标/详情行）+ 全屏编辑浮层 --------------------------
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editRecipe, setEditRecipe] = useState<EditRecipe | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setEditRecipe(null);
+    void editRecipeGet(asset.id).then((state) => {
+      if (!cancelled) setEditRecipe(state.recipe);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset.id]);
+
   // LR 风格查看器快捷键：方向键导航、[]/,./R 旋转、0-5 评分、P/U 旗标、
   // Z 在适应窗口与 2 倍之间切换、I 开关信息抽屉。输入控件内不截获按键；
   // 右键菜单打开时 Esc 让给菜单（不关查看器）。
@@ -527,6 +544,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       ) {
         return;
       }
+      // 编辑浮层打开时，查看器快捷键全部让位（编辑器有自己的键位处理）
+      if (editorOpen) return;
       if (e.key === "Escape") {
         if (ctxAt !== null) return; // 菜单自身的 Esc 监听负责关闭
         e.preventDefault();
@@ -564,7 +583,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [asset.id, ctxAt, currentRating, currentRejected, group.assets.length, index, closeViewer, onNavigate, showHint, toggleFullscreen]);
+  }, [asset.id, ctxAt, currentRating, currentRejected, editorOpen, group.assets.length, index, closeViewer, onNavigate, showHint, toggleFullscreen]);
 
   const exifSections = useMemo<ExifSection[]>(() => {
     const d = visibleDetail;
@@ -585,6 +604,22 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             <span key="dup" className={d.dupCount > 0 ? "font-medium text-accent" : undefined}>
               {t("viewer.dupItems", { count: d.dupCount })}
             </span>
+          ),
+        },
+        // 编辑配方（阶段 D）：已保存/无；点击进入编辑器
+        {
+          label: t("viewer.editRecipe"),
+          value: (
+            <button
+              key="edit-recipe"
+              type="button"
+              onClick={() => setEditorOpen(true)}
+              className={editRecipe !== null ? "font-medium text-accent hover:brightness-110" : "text-text-secondary hover:text-accent"}
+              data-testid="viewer-recipe-state"
+              data-saved={editRecipe !== null}
+            >
+              {editRecipe !== null ? t("viewer.editRecipeSaved") : t("viewer.editRecipeNone")}
+            </button>
           ),
         },
       ],
@@ -702,7 +737,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       });
     }
     return sections;
-  }, [visibleDetail, t]);
+  }, [visibleDetail, editRecipe, t]);
 
   const hasPrev = index > 0;
   const hasNext = index < group.assets.length - 1;
@@ -733,6 +768,29 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           </span>
         </div>
         <div className="pointer-events-none relative ml-auto flex items-center gap-2">
+          {/* 编辑（阶段 D）：打开非破坏编辑浮层；已保存配方时按钮高亮 + 「已编辑」角标 */}
+          <button
+            type="button"
+            onClick={() => setEditorOpen(true)}
+            title={editRecipe !== null ? t("viewer.editEdited") : t("viewer.edit")}
+            className={`pointer-events-auto relative rounded-md border px-2.5 py-1 text-xs transition-colors ${
+              editRecipe !== null
+                ? "border-accent/70 bg-accent/10 text-accent"
+                : "border-edge text-text-secondary hover:border-accent hover:text-accent"
+            }`}
+            data-testid="viewer-edit"
+            data-edited={editRecipe !== null}
+          >
+            {t("viewer.edit")}
+            {editRecipe !== null && (
+              <span
+                className="absolute -right-1.5 -top-1.5 rounded-full bg-accent px-1 text-[9px] font-medium leading-[14px] text-black"
+                data-testid="viewer-edit-badge"
+              >
+                {t("viewer.editBadge")}
+              </span>
+            )}
+          </button>
           {/* 旋转：90° 步进（逆/顺时针），150ms 过渡；随资产切换重置 */}
           <button
             type="button"
@@ -1180,6 +1238,16 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           onClose={() => setCtxAt(null)}
           onColorLabeled={(_, label) => onAssetPatched?.(asset.id, { colorLabel: label })}
           onRejected={(_, rejected) => onAssetPatched?.(asset.id, { rejected })}
+        />
+      )}
+
+      {/* 非破坏编辑浮层（阶段 D）：保存/重置后回写角标与详情行状态 */}
+      {editorOpen && (
+        <EditorOverlay
+          asset={asset}
+          initial={{ recipe: editRecipe, updatedAt: null }}
+          onClose={() => setEditorOpen(false)}
+          onSaved={(recipe) => setEditRecipe(recipe)}
         />
       )}
     </div>

@@ -19,10 +19,12 @@
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2",
     "i18next": "^26.4.2",
+    "konva": "^10.7.0",
     "motion": "^13.4.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-i18next": "^17.0.14",
+    "react-konva": "^19.3.0",
     "react-router": "^8.4.0",
     "tailwindcss": "^4.3.3",
     "zustand": "^5.0.15"

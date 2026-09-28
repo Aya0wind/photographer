@@ -133,6 +133,18 @@ export type AppEvent =
   | { type: "aiModelDownloadProgress"; id: string; doneBytes: number; totalBytes: number }
   /** AI 模型下载结束（ok=false 时 error 为原因文案） */
   | { type: "aiModelDownloadFinished"; id: string; ok: boolean; error?: string | null }
+  /** 导出任务阶段推进（阶段 D；phase = render|encode|write|register） */
+  | { type: "exportTaskProgress"; jobId: number; assetId: number; phase: string }
+  /** 导出收尾（阶段 D；folder 模式带 outputPath，album 模式附带新资产 id） */
+  | {
+      type: "exportTaskFinished";
+      jobId: number;
+      assetId: number;
+      ok: boolean;
+      outputPath?: string | null;
+      newAssetId?: number | null;
+      error?: string | null;
+    }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -1636,6 +1648,217 @@ export async function assetVersions(assetId: number): Promise<AssetVersions | nu
     return { groupId, members };
   } catch {
     return null;
+  }
+}
+
+// --- 阶段 D：非破坏编辑配方 + JPEG 导出 ----------------------------------------------
+// 契约（与后端 lane 共同遵守，字段名不得偏移）：
+// - rotateQuarter 顺时针 90° 步进，先旋转后裁剪；crop 相对「旋转后图像」归一化；
+// - 文字/笔迹坐标相对「裁剪后画布」归一化（画布宽=1；sizeRel=字高/画布宽、
+//   widthRel=笔宽/画布宽；文字锚点=文本框左上角左对齐，多行 \n）。
+// - 保存配方仅写本应用数据库（非破坏）；导出才生成新 JPEG（album 模式后端自动
+//   命名 {stem}_edit.jpg，前端不传文件名）。
+
+/** 裁剪矩形（相对旋转后图像归一化，x/y/w/h ∈ [0,1]） */
+export interface EditRecipeCrop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 文字图层（多行用 \n；sizeRel=字高/画布宽） */
+export interface EditRecipeTextLayer {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  sizeRel: number;
+  color: string;
+}
+
+/** 画笔笔迹（widthRel=笔宽/画布宽；points 为裁剪后画布归一化折线） */
+export interface EditRecipeBrushStroke {
+  id: string;
+  color: string;
+  widthRel: number;
+  points: { x: number; y: number }[];
+}
+
+/** 输出尺寸/质量（配方内嵌；longEdge=null = 原尺寸） */
+export interface EditRecipeOutput {
+  longEdge: number | null;
+  quality: number;
+}
+
+/** 非破坏编辑配方（后端 edit_recipe 表存储的同一 JSON） */
+export interface EditRecipe {
+  version: 1;
+  rotateQuarter: 0 | 1 | 2 | 3;
+  crop: EditRecipeCrop | null;
+  textLayers: EditRecipeTextLayer[];
+  brushStrokes: EditRecipeBrushStroke[];
+  output: EditRecipeOutput;
+}
+
+/** editRecipeGet / editRecipeSave 返回：recipe=null 表示尚无配方 */
+export interface EditRecipeState {
+  recipe: EditRecipe | null;
+  updatedAt: string | null;
+}
+
+/** 导出选项（folder 模式必填 folder；album 模式必填 album，文件名后端自动生成） */
+export interface ExportOptions {
+  mode: "folder" | "album";
+  folder?: { outputDir: string; fileName: string };
+  album?: { albumId: string; subgroup: string | null };
+  longEdge?: number | null;
+  quality?: number;
+  removeGps?: boolean;
+  copyright?: string;
+  author?: string;
+  keywords?: string[];
+}
+
+/** 导出产物（ExportTask.result；album 模式附带新资产 id） */
+export interface ExportResultDto {
+  outputPath: string;
+  width: number;
+  height: number;
+  bytes: number;
+  assetId: number | null;
+}
+
+/**
+ * 导出任务 DTO（export_run 返回 / export_job 行投影；后端 src-tauri/src/edit/export.rs
+ * ExportTaskDto 镜像——id 为库内任务号，exportTaskProgress/exportTaskFinished 事件按它关联）。
+ */
+export interface ExportTask {
+  id: number;
+  assetId: number;
+  mode: string;
+  status: "queued" | "running" | "done" | "error";
+  result: ExportResultDto | null;
+  error: string | null;
+}
+
+/** 脏数据容错：后端配方 JSON → EditRecipe 归一（形状异常返回 null，UI 回退默认配方） */
+function normalizeEditRecipe(value: unknown): EditRecipe | null {
+  if (value === null || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  const numOf = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : Number.NaN);
+  const quarter = numOf(r.rotateQuarter);
+  if (r.version !== 1 || ![0, 1, 2, 3].includes(quarter)) return null;
+  const cropRaw = r.crop;
+  let crop: EditRecipeCrop | null = null;
+  if (cropRaw !== null && typeof cropRaw === "object") {
+    const c = cropRaw as Record<string, unknown>;
+    const x = numOf(c.x), y = numOf(c.y), w = numOf(c.w), h = numOf(c.h);
+    if ([x, y, w, h].some((n) => Number.isNaN(n))) return null;
+    crop = { x, y, w, h };
+  }
+  const textLayers: EditRecipeTextLayer[] = Array.isArray(r.textLayers)
+    ? r.textLayers.filter(
+        (l): l is EditRecipeTextLayer =>
+          l !== null && typeof l === "object" &&
+          typeof (l as EditRecipeTextLayer).id === "string" &&
+          typeof (l as EditRecipeTextLayer).text === "string" &&
+          typeof (l as EditRecipeTextLayer).color === "string" &&
+          typeof (l as EditRecipeTextLayer).sizeRel === "number",
+      )
+    : [];
+  const brushStrokes: EditRecipeBrushStroke[] = Array.isArray(r.brushStrokes)
+    ? r.brushStrokes.filter(
+        (s): s is EditRecipeBrushStroke =>
+          s !== null && typeof s === "object" &&
+          typeof (s as EditRecipeBrushStroke).id === "string" &&
+          typeof (s as EditRecipeBrushStroke).color === "string" &&
+          typeof (s as EditRecipeBrushStroke).widthRel === "number" &&
+          Array.isArray((s as EditRecipeBrushStroke).points),
+      )
+    : [];
+  const outputRaw = r.output;
+  const output =
+    outputRaw !== null && typeof outputRaw === "object"
+      ? (outputRaw as Record<string, unknown>)
+      : {};
+  const longEdge = numOf(output.longEdge);
+  const quality = numOf(output.quality);
+  return {
+    version: 1,
+    rotateQuarter: quarter as EditRecipe["rotateQuarter"],
+    crop,
+    textLayers,
+    brushStrokes,
+    output: {
+      longEdge: Number.isNaN(longEdge) ? null : longEdge,
+      quality: Number.isNaN(quality) ? 90 : Math.min(100, Math.max(1, Math.round(quality))),
+    },
+  };
+}
+
+/** edit_recipe_get 结果归一 */
+function normalizeEditRecipeState(value: unknown): EditRecipeState {
+  if (value === null || typeof value !== "object") return { recipe: null, updatedAt: null };
+  const r = value as Record<string, unknown>;
+  return {
+    recipe: normalizeEditRecipe(r.recipe),
+    updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : null,
+  };
+}
+
+/** 读取资产的编辑配方（无配方/命令失败回退 { recipe: null }——UI 显示「无」态）。
+ *  后端契约 asset_id 为字符串（edit.rs parse_asset_id），此处统一转换。 */
+export async function editRecipeGet(assetId: number): Promise<EditRecipeState> {
+  try {
+    return normalizeEditRecipeState(await ipc<unknown>("edit_recipe_get", { assetId: String(assetId) }));
+  } catch {
+    return { recipe: null, updatedAt: null };
+  }
+}
+
+/** 保存编辑配方（非破坏，仅写本应用数据库）。不 catch：失败文案由调用方 toast */
+export async function editRecipeSave(assetId: number, recipe: EditRecipe): Promise<EditRecipeState> {
+  return normalizeEditRecipeState(
+    await ipc<unknown>("edit_recipe_save", { assetId: String(assetId), recipe }),
+  );
+}
+
+/** 删除编辑配方（编辑器「重置」）。不 catch：失败文案透传给调用方 */
+export async function editRecipeDelete(assetId: number): Promise<void> {
+  await ipc<void>("edit_recipe_delete", { assetId: String(assetId) });
+}
+
+export type ExportRunResult =
+  | { ok: true; task: ExportTask }
+  | { ok: false; error: string | null };
+
+/** 启动导出后台任务（export_run；进度/完成经 exportTaskProgress/exportTaskFinished 事件）。
+ *  业务错误（如目录不可写）透传原始 Err 文案；invoke 不可用 error=null。 */
+export async function exportRun(
+  assetId: number,
+  recipe: EditRecipe,
+  options: ExportOptions,
+): Promise<ExportRunResult> {
+  try {
+    const task = await ipc<ExportTask>("export_run", {
+      assetId: String(assetId),
+      recipe,
+      options,
+    });
+    if (
+      task === null || typeof task !== "object" ||
+      typeof task.id !== "number" || !Number.isFinite(task.id)
+    ) {
+      return { ok: false, error: null };
+    }
+    return { ok: true, task };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) {
+      return { ok: false, error: null };
+    }
+    return { ok: false, error: message };
   }
 }
 
