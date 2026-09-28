@@ -209,6 +209,7 @@ fn semantic_backfill_consumes_existing_pending_tasks() {
         std::sync::Arc::new(StubEmbedder),
         &events::EventBus::new(),
         2,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     assert_eq!(
         database.pending_index_task_count("ai").unwrap(),
@@ -255,6 +256,7 @@ fn semantic_backfill_persists_in_non_ascii_library_path() {
         std::sync::Arc::new(StubEmbedder),
         &events::EventBus::new(),
         1,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
 
     assert_eq!(done, 1);
@@ -279,6 +281,7 @@ fn semantic_backfill_persists_in_non_ascii_library_path() {
         std::sync::Arc::new(StubEmbedder),
         &events::EventBus::new(),
         1,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     assert_eq!(replayed, 1);
 }
@@ -465,6 +468,7 @@ fn backfill_batch_failure_degrades_to_per_image_and_isolates_bad_apple() {
         }),
         &events::EventBus::new(),
         1, // 单 worker：一批 4 条（AI_BATCH=16 > 4）走批失败→降级路径
+        "siglip2-visual", // 档位解析：标签只影响批决策
     );
     assert_eq!(done, 3, "3 好图经降级逐图成功，坏图只废自己");
     let failed: i64 = database
@@ -581,6 +585,7 @@ fn real_backfill_chinese_dbdir_diagnosis() {
         std::sync::Arc::new(manager),
         &events::EventBus::new(),
         1,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     eprintln!("step6 run_semantic_backfill done={done}");
     assert!(done >= 1, "回填应成功至少 1 条（中文库路径）");
@@ -696,6 +701,7 @@ fn real_semantic_backfill_one_asset() {
         std::sync::Arc::new(manager),
         &events::EventBus::new(),
         2,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     assert_eq!(done, 1, "真实单资产回填应成功");
     let indexed: i64 = database
@@ -744,14 +750,40 @@ fn hnsw_10k_insert_knn_correctness() {
 /// 阈值合成（真机修复 2026-09-20「进哪个智能相册都是全部照片」根因）：
 /// 显式参数 > 设置值；不传参数必须回落设置项——此前 None 直通检索层，
 /// 119 张库 limit=100 时任何查询都返回全库。
+/// 2026-09-28 三档画质：设置值改 Option（null = auto 随模型变体）——
+/// null 时按档位默认（int8/fp16 同为标定值 0.09，见 semantic_default_min_score）。
 #[test]
 fn semantic_min_score_priority() {
     use common::ipc;
-    assert_eq!(ipc::ai::effective_min_score(None, 0.09), Some(0.09));
-    assert_eq!(ipc::ai::effective_min_score(Some(0.2), 0.09), Some(0.2));
+    let normal = ai::QualityTier::Normal;
+    let accurate = ai::QualityTier::Accurate;
+    // 设置显式值：自定义 > 一切
+    assert_eq!(
+        ipc::ai::effective_min_score(None, Some(0.15), normal),
+        Some(0.15)
+    );
+    assert_eq!(
+        ipc::ai::effective_min_score(Some(0.2), Some(0.15), normal),
+        Some(0.2)
+    );
     // 显式 0 = 用户明确要求不过滤，不能被设置值覆盖
-    assert_eq!(ipc::ai::effective_min_score(Some(0.0), 0.09), Some(0.0));
-    assert!((settings::AiSettings::default().semantic_min_score - 0.09).abs() < 1e-6);
+    assert_eq!(
+        ipc::ai::effective_min_score(Some(0.0), Some(0.15), normal),
+        Some(0.0)
+    );
+    // null = auto：按当前档位语义模型变体取默认
+    assert_eq!(
+        ipc::ai::effective_min_score(None, None, normal),
+        Some(ai::semantic::semantic_default_min_score(normal))
+    );
+    assert_eq!(
+        ipc::ai::effective_min_score(None, None, accurate),
+        Some(ai::semantic::semantic_default_min_score(accurate))
+    );
+    // 默认档位 = normal
+    assert_eq!(ai::QualityTier::default(), normal);
+    assert_eq!(settings::AiSettings::default().semantic_min_score, None);
+    assert_eq!(settings::AiSettings::default().quality_tier, "normal");
 }
 
 /// 回归（真机 2026-09-20 事故）：vectors.usearch 已存在且池内持有搜索侧
@@ -793,6 +825,7 @@ fn backfill_survives_pooled_immutable_view() {
         std::sync::Arc::new(StubEmbedder),
         &events::EventBus::new(),
         1,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     assert_eq!(done1, 1, "第一轮应成功");
     assert!(lib.path().join("vectors.usearch").is_file());
@@ -808,6 +841,7 @@ fn backfill_survives_pooled_immutable_view() {
         std::sync::Arc::new(StubEmbedder),
         &events::EventBus::new(),
         1,
+        "siglip2-visual", // 档位解析：stub 嵌入器不感知模型，标签只影响批决策
     );
     assert_eq!(done2, 1, "池内 view 存在时回填必须照常成功（可写句柄路径）");
     let idx = ai::semantic::shared_index(lib.path()).unwrap();

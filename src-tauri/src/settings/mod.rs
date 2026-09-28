@@ -179,10 +179,21 @@ pub struct AiSettings {
     pub index_schedule: IndexSchedule,
     pub cpu_limit_percent: u32,
     pub use_gpu: bool,
-    /// 语义检索相似度阈值（cos，0..1）：低于该分的结果过滤；0 = 不过滤。
-    /// 默认 0.09——SigLIP2 cos 分数区间压缩（实测无关内容 top≈0.087，
-    /// 相关簇 ≈0.099+），过高全灭、过低「进哪个相册都是全部照片」。
-    pub semantic_min_score: f32,
+    /// AI 索引画质档位（2026-09-28 三档画质）："fast"（SCRFD 10G 小检测
+    /// 模型）|"normal"（默认，现件）|"accurate"（语义 fp16 + 检测源 2048
+    /// 优先）。切档经参数指纹自动重建受影响通道（fast↔normal 只重建
+    /// face；normal↔accurate 重建 face+semantic）。非法值加载时兜成
+    /// "normal"，settings_set 拒绝写入。
+    #[serde(default = "default_quality_tier")]
+    pub quality_tier: String,
+    /// 语义检索相似度阈值（cos，0..1）：低于该分的结果过滤；0 = 不过滤；
+    /// null = **auto**——按当前语义模型变体取默认（int8 = 0.09，
+    /// 2026-09-21 标定；fp16 见 ai::semantic_default_min_score）。
+    /// SigLIP2 cos 分数区间压缩（实测无关内容 top≈0.087，相关簇 ≈0.099+），
+    /// 过高全灭、过低「进哪个相册都是全部照片」。老配置显式 0.09（= 旧
+    /// 默认）加载时迁移为 null（auto）；非 0.09 的自定义值保留。
+    #[serde(default)]
+    pub semantic_min_score: Option<f64>,
     /// 语义嵌入输入档位（px，squash 到 embed_input_size²）：默认 256。
     /// **改了必须重建语义索引**（嵌入向量随输入尺寸变化）——启动时经
     /// dbDir/index-params.marker 指纹比对自动重建，设置页另有手动按钮。
@@ -215,7 +226,8 @@ impl Default for AiSettings {
             index_schedule: IndexSchedule::IdleOnly,
             cpu_limit_percent: 50,
             use_gpu: true,
-            semantic_min_score: 0.09,
+            quality_tier: default_quality_tier(),
+            semantic_min_score: None,
             embed_input_size: 256,
             face_detect_threshold: 0.5,
             face_cluster_threshold: 0.4,
@@ -225,6 +237,28 @@ impl Default for AiSettings {
             burst_min_size: 2,
             blur_soft_threshold: 30.0,
         }
+    }
+}
+
+/// 画质档位默认值（"normal"）。
+fn default_quality_tier() -> String {
+    "normal".to_string()
+}
+
+/// AI 设置合法性校验（settings_set 前置；返回 Err 的值拒绝落盘）。
+/// quality_tier 必须是三档之一——档位驱动模型件选择与指纹重建，脏值
+/// 会让推理层与 marker 各自兜底成不一致状态。
+pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
+    if matches!(
+        ai.quality_tier.as_str(),
+        "fast" | "normal" | "accurate"
+    ) {
+        Ok(())
+    } else {
+        Err(format!(
+            "非法画质档位: {}（可选 fast / normal / accurate）",
+            ai.quality_tier
+        ))
     }
 }
 
@@ -301,6 +335,7 @@ impl SettingsManager {
                 // 缺字段已被 serde(default) 填充，这里统一升版本号完成迁移。
                 settings.schema_version = SCHEMA_VERSION;
                 migrate_legacy_libraries(&mut settings);
+                migrate_legacy_ai_settings(&mut settings);
                 Ok(settings)
             }
             Err(_parse_error) => {
@@ -343,5 +378,24 @@ fn migrate_legacy_libraries(settings: &mut Settings) {
         for lib in &mut settings.libraries {
             lib.configured = true;
         }
+    }
+}
+
+/// AI 节一次性迁移（2026-09-28 三档画质）：
+/// - 旧 settings.json 的 `semanticMinScore: 0.09` = 旧默认值（f32 存储
+///   时代写死）→ 迁移为 `None`（auto，随语义模型变体自适应）；非 0.09
+///   的自定义值保留用户语义。缺字段本就落 None（auto）。
+/// - `qualityTier` 非法（手改坏）→ 兜成 "normal"（settings_set 写入侧
+///   有硬校验，这里只救读取侧，避免整份配置走损坏分支被备份重置）。
+fn migrate_legacy_ai_settings(settings: &mut Settings) {
+    if settings
+        .ai
+        .semantic_min_score
+        .is_some_and(|v| (v - 0.09).abs() < 1e-9)
+    {
+        settings.ai.semantic_min_score = None;
+    }
+    if validate_ai_settings(&settings.ai).is_err() {
+        settings.ai.quality_tier = default_quality_tier();
     }
 }

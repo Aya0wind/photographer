@@ -168,7 +168,11 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         }
         "ai" => {
             if !state.ai.semantic_ready() {
-                return Err("语义检索模型未下载，请先在设置中下载模型（siglip2-visual / siglip2-text / siglip2-tokenizer）".into());
+                let [visual, text] =
+                    crate::ai::semantic_model_ids(state.ai.ai_params().quality_tier);
+                return Err(format!(
+                    "语义检索模型未下载，请先在设置中下载模型（{visual} / {text} / siglip2-tokenizer）"
+                ));
             }
             if !enable_clip {
                 return Err("语义索引未开启（设置 → AI → 语义检索）".into());
@@ -180,7 +184,10 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         }
         "face" => {
             if !state.ai.face_models_ready() {
-                return Err("人脸识别模型未下载，请先在设置中下载模型（scrfd / arcface）".into());
+                let det = crate::ai::face_detect_model_id(state.ai.ai_params().quality_tier);
+                return Err(format!(
+                    "人脸识别模型未下载，请先在设置中下载模型（{det} / arcface）"
+                ));
             }
             if !enable_face {
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
@@ -300,7 +307,11 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
     match kind {
         "semantic" => {
             if !state.ai.semantic_ready() {
-                return Err("语义检索模型未下载，请先在设置中下载模型（siglip2-visual / siglip2-text / siglip2-tokenizer）".into());
+                let [visual, text] =
+                    crate::ai::semantic_model_ids(state.ai.ai_params().quality_tier);
+                return Err(format!(
+                    "语义检索模型未下载，请先在设置中下载模型（{visual} / {text} / siglip2-tokenizer）"
+                ));
             }
             if !enable_clip {
                 return Err("语义索引未开启（设置 → AI → 语义检索）".into());
@@ -308,7 +319,10 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
         }
         "face" => {
             if !state.ai.face_models_ready() {
-                return Err("人脸识别模型未下载，请先在设置中下载模型（scrfd / arcface）".into());
+                let det = crate::ai::face_detect_model_id(state.ai.ai_params().quality_tier);
+                return Err(format!(
+                    "人脸识别模型未下载，请先在设置中下载模型（{det} / arcface）"
+                ));
             }
             if !enable_face {
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
@@ -383,7 +397,10 @@ pub async fn index_status(state: State<'_, SharedState>) -> Result<IndexStatusDt
 // AI 索引参数指纹（settings.ai ↔ dbDir/index-params.marker；改参数自动重建）
 // ---------------------------------------------------------------------------
 
-/// 语义通道指纹（版本 + embed_input_size——嵌入随输入尺寸变化）。
+/// 语义通道指纹（版本 + embed_input_size——嵌入随输入尺寸变化；2026-09-28
+/// 三档画质：accurate 档追加 fp16 双塔**模型版本**折叠——切档换件即换指纹
+/// → 自动重建语义索引。fast/normal 同用 int8 件 → 不追加 → 互相切换不动
+/// 语义索引，且与升级前的旧指纹**逐位一致**（既有 marker 命中，不误重建））。
 pub fn semantic_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
@@ -393,10 +410,19 @@ pub fn semantic_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    if let Some(tag) = semantic_tier_tag(ai) {
+        hash ^= tag;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     hash
 }
 
-/// 人脸通道指纹（版本 + 检测门槛 + 聚类阈值；f32 用 to_bits 保精确比较）。
+/// 人脸通道指纹（版本 + 检测门槛 + 聚类阈值；f32 用 to_bits 保精确比较；
+/// 2026-09-28 三档画质：fast 追加**检测模型 id+版本**（scrfd-10g 换件）、
+/// accurate 追加**检测源策略**（2048 优先，同 34G 检测件但源图不同 → 坐标
+/// 精度不同）。normal 不追加 → 与旧指纹逐位一致（升级不误重建）。
+/// 联动矩阵：fast↔normal 重建 face；normal↔accurate 重建 face+semantic；
+/// fast↔accurate 重建 face+semantic）。
 pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
@@ -408,7 +434,63 @@ pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    if let Some(tag) = face_tier_tag(ai) {
+        hash ^= tag;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     hash
+}
+
+/// FNV-1a 字节串折叠（档位派生标签用）。
+fn fnv_str(hash: u64, s: &str) -> u64 {
+    let mut h = hash;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 语义档位派生标签：Some(值) 参与 fingerprint 折叠，None = 与升级前
+/// 旧指纹兼容（不追加项）。accurate 折叠 fp16 双塔的 catalog 版本串
+/// （版本 pin 变化 → 指纹变 → 重建）。
+fn semantic_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
+    let tier = crate::ai::QualityTier::from_setting(&ai.quality_tier)?;
+    if !matches!(tier, crate::ai::QualityTier::Accurate) {
+        return None; // fast/normal 同用 int8 件：与旧指纹兼容
+    }
+    let version = |id: &str| {
+        crate::ai::catalog()
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.version.as_str())
+            .unwrap_or("")
+    };
+    let [visual, text] = crate::ai::semantic_model_ids(tier);
+    let mut h = 0xcbf29ce484222325u64;
+    h = fnv_str(h, version(visual));
+    Some(fnv_str(h, version(text)))
+}
+
+/// 人脸档位派生标签（同上 None = 旧指纹兼容）：fast = scrfd-10g 模型
+/// id+版本；accurate = 检测源 2048 优先策略标记（同件不同源）。
+fn face_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
+    let tier = crate::ai::QualityTier::from_setting(&ai.quality_tier)?;
+    let mut h = 0xcbf29ce484222325u64;
+    match tier {
+        crate::ai::QualityTier::Fast => {
+            let id = crate::ai::face_detect_model_id(tier);
+            let version = crate::ai::catalog()
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.version.as_str())
+                .unwrap_or("");
+            h = fnv_str(h, id);
+            Some(fnv_str(h, version))
+        }
+        crate::ai::QualityTier::Accurate => Some(fnv_str(h, "detection-source:2048-first")),
+        crate::ai::QualityTier::Normal => None,
+    }
 }
 
 /// 选片分析指纹（0021：blur 阈值/算法版本 + eyes 模型就绪态；f32 用

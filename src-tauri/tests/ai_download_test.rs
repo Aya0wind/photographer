@@ -170,6 +170,7 @@ fn entry(id: &str, url: &str, mirror: &str, body: &[u8]) -> ModelEntry {
         bytes_total: body.len() as u64,
         version: "v1".into(),
         feature: "semantic".into(),
+        tier: None,
     }
 }
 
@@ -201,27 +202,37 @@ fn payload(n: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn catalog_has_five_models_with_full_metadata() {
+fn catalog_has_eight_models_with_full_metadata() {
     let catalog = ai::catalog();
     assert_eq!(
         catalog.len(),
-        5,
-        "siglip2-visual/text/tokenizer + scrfd/arcface"
+        8,
+        "siglip2-visual/text/tokenizer + fp16 双塔 + scrfd/scrfd-10g/arcface"
     );
     let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
     for expect in [
         "siglip2-visual",
         "siglip2-text",
         "siglip2-tokenizer",
+        "siglip2-visual-fp16",
+        "siglip2-text-fp16",
         "scrfd",
+        "scrfd-10g",
         "arcface",
     ] {
         assert!(ids.contains(&expect), "缺 {expect}: {ids:?}");
     }
-    // SigLIP2 语义模型同版本号成对（visual/text/tokenizer 必须同源同代）
+    // SigLIP2 语义模型同版本号成对（visual/text/tokenizer 必须同源同代；
+    // fp16 双塔自成一对）
     let ver = |id: &str| catalog.iter().find(|m| m.id == id).unwrap().version.clone();
     assert_eq!(ver("siglip2-visual"), ver("siglip2-text"));
     assert_eq!(ver("siglip2-text"), ver("siglip2-tokenizer"));
+    assert_eq!(ver("siglip2-visual-fp16"), ver("siglip2-text-fp16"));
+    assert_ne!(
+        ver("siglip2-visual"),
+        ver("siglip2-visual-fp16"),
+        "fp16 件版本必须与 int8 件区分（指纹依赖版本区分档位）"
+    );
     for m in catalog {
         assert!(m.url.starts_with("https://"), "{} url", m.id);
         assert!(m.mirror_url.contains("hf-mirror.com"), "{} mirror", m.id);
@@ -234,6 +245,25 @@ fn catalog_has_five_models_with_full_metadata() {
             m.id
         );
     }
+    // tier 归属真值表（2026-09-28 三档画质）：
+    // normal 独占 = int8 双塔 + scrfd；fast 独占 = scrfd-10g；accurate 独占
+    // = fp16 双塔；共用（null）= tokenizer + arcface
+    let tier_of = |id: &str| {
+        catalog
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap()
+            .tier
+            .clone()
+    };
+    assert_eq!(tier_of("siglip2-visual").as_deref(), Some("normal"));
+    assert_eq!(tier_of("siglip2-text").as_deref(), Some("normal"));
+    assert_eq!(tier_of("scrfd").as_deref(), Some("normal"));
+    assert_eq!(tier_of("scrfd-10g").as_deref(), Some("fast"));
+    assert_eq!(tier_of("siglip2-visual-fp16").as_deref(), Some("accurate"));
+    assert_eq!(tier_of("siglip2-text-fp16").as_deref(), Some("accurate"));
+    assert_eq!(tier_of("siglip2-tokenizer"), None, "tokenizer 各档共用");
+    assert_eq!(tier_of("arcface"), None, "arcface 各档共用（既定决策不换）");
 }
 
 #[test]
@@ -446,6 +476,7 @@ fn status_starts_idle_and_delete_flips_installed() {
             bytes_total: 1,
             version: "v1".into(),
             feature: "face".into(),
+            tier: None,
         })
         .is_ok()); // 派发成功但下载必然失败 → failed 事件
     let finished = wait_finished(&mgr, "ghost");
@@ -465,6 +496,7 @@ fn model_status_dto_serializes_camel_case() {
         version: "v1".into(),
         feature: "semantic".into(),
         state: "done".into(),
+        tier: Some("normal".into()),
     };
     let json = serde_json::to_value(&dto).unwrap();
     assert_eq!(json["bytesTotal"], 100);

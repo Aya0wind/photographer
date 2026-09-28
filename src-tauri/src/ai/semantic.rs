@@ -263,11 +263,14 @@ pub fn worker_count_for_ai() -> usize {
 /// ② worker 按批认领（DML 激活 = AI_BATCH 条，CPU = 1 条/批）→ 批推理
 ///   （单次 session.run）→ 逐条入库记账，逐条发布 indexTaskProgress
 ///   {kind:"ai"}（严格单调）。返回本轮成功嵌入数。
+/// `vision_model` = 当前档位的 vision 模型 id（int8/fp16 二选一，批量化
+/// 决策按它查 DML 毒化位——档位解析见调用方 kick_semantic_if_ready）。
 pub fn run_semantic_backfill(
     db_dir: &Path,
     embedder: Arc<dyn SemanticEmbedder>,
     bus: &EventBus,
     workers: usize,
+    vision_model: &str,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         eprintln!("语义回填：库打开失败（{}），本轮跳过", db_dir.display());
@@ -287,6 +290,7 @@ pub fn run_semantic_backfill(
     // 所有 worker 共用一个完成计数，并在锁内发布事件，保证事件严格单调；
     // 不能让每个 worker 各报 1..N，最后把 UI 留在 30/119。
     let progress_done = Arc::new(Mutex::new(indexed_before));
+    let vision_model = vision_model.to_string();
     let mut done = 0u64;
     let mut handles = Vec::new();
     for n in 0..workers.max(1) {
@@ -294,6 +298,7 @@ pub fn run_semantic_backfill(
         let bus = bus.clone();
         let embedder = Arc::clone(&embedder);
         let progress_done = Arc::clone(&progress_done);
+        let vision_model = vision_model.clone();
         handles.push(
             std::thread::Builder::new()
                 .name(format!("index-ai-{n}"))
@@ -305,8 +310,8 @@ pub fn run_semantic_backfill(
                     // 批大按 EP 运行态定：DML 激活 = 16（快 23%），CPU = 1
                     // （批化反而 -12%，见 prefer_batch_inference 注释）；
                     // DML 中途毒化后后续批次自动落 1（批量化是语义通道决策
-                    // → 按 siglip vision 标签查毒化位）
-                    let batch_size = if super::prefer_batch_inference("siglip2-visual") {
+                    // → 按当前档位的 siglip vision 标签查毒化位）
+                    let batch_size = if super::prefer_batch_inference(&vision_model) {
                         AI_BATCH
                     } else {
                         1
@@ -375,9 +380,11 @@ pub fn kick_semantic_if_ready(
         return;
     }
     let embedder: Arc<dyn SemanticEmbedder> = Arc::new(manager.clone());
+    let vision_model =
+        super::semantic_model_ids(manager.ai_params().quality_tier)[0].to_string();
     let bus = bus.clone();
     let _ = supervisor.spawn_unique("index", "semantic-backfill".into(), move |_| {
-        run_semantic_backfill(&db_dir, embedder, &bus, worker_count_for_ai());
+        run_semantic_backfill(&db_dir, embedder, &bus, worker_count_for_ai(), &vision_model);
     });
 }
 
@@ -389,6 +396,30 @@ pub fn kick_semantic_if_ready(
 /// 拉伸到 [0,1]，否则 top 命中 0.12 会显示成「12%」。
 pub const SEMANTIC_SCORE_FLOOR: f32 = 0.04;
 pub const SEMANTIC_SCORE_CEILING: f32 = 0.125;
+
+/// 阈值 auto 默认值（settings.ai.semantic_min_score = null 时按当前语义
+/// 模型变体取，2026-09-28 三档画质引入）：
+/// - **int8**（fast/normal）：0.09——2026-09-21 标定轮工作点（方法：162 张
+///   真库全量重嵌入后，荒谬词查询（「手术台」「无人机航拍」等 5+ 个库内
+///   无对应内容的词）top-1 分 vs 内容词查询（「猫」「海边」等）相关簇
+///   分数的分隔带取值：无关 top ≤0.096、相关簇 0.09-0.12，工作点落在
+///   带内偏保守侧 0.09）。
+/// - **fp16**（accurate）：0.03——2026-09-28 真机标定（RTX 5070 Ti DML 批
+///   16，497 张真库 `I:\SmartPhoto\主库`，方法同 int8 轮：荒谬词 5 个 ×
+///   内容词 5 个的 top-1 分布取分隔带）。实测 fp16 双塔 cos 带整体比 int8
+///   压低并居中于 0（中位 ≈-0.03；int8 中位 ≈+0.06）：
+///   荒谬 top-1 ∈ [-0.001, 0.032]（手术台 -0.0008 / 无人机航拍 0.0222 /
+///   税务审计报表 -0.0004 / 深海钻井平台 0.0081 / 考古发掘现场 0.0315），
+///   内容 top-1 ∈ [0.010, 0.046]（猫 0.0104 / 狗 0.0174 / 人像 0.0118 /
+///   海边 0.0377 / 日落 0.0463——强相关内容明确浮出带外）。0.03 滤掉
+///   荒谬词主体（4/5 低于 0.03）并放行强内容命中，与 int8 轮 0.09 的
+///   「带内偏保守」取点同位。相对排序两变体一致（日落 > 海边 > 其余）。
+pub fn semantic_default_min_score(tier: super::QualityTier) -> f32 {
+    match tier {
+        super::QualityTier::Accurate => 0.03, // fp16 标定（2026-09-28，数值见上）
+        _ => 0.09, // int8 标定工作点（2026-09-21）
+    }
+}
 
 /// 原始 cos 相似度 → 显示分数 [0,1]：floor 以下归 0，ceiling 以上饱和 1。
 pub fn calibrated_display_score(raw: f32) -> f32 {

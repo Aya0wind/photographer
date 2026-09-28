@@ -79,12 +79,15 @@ pub fn run() {
             thumbs::set_thumb_cache_cap_bytes(
                 u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
             );
-            // AI 索引参数投影到推理层（embed 输入档位 / 人脸阈值 / GPU 开关）
+            // AI 索引参数投影到推理层（embed 输入档位 / 人脸阈值 / GPU 开关 /
+            // 画质档位——三档画质 2026-09-28）
             ai.set_ai_params(crate::ai::AiIndexParams {
                 embed_input_size: settings.ai.embed_input_size,
                 face_detect_threshold: settings.ai.face_detect_threshold,
                 face_cluster_threshold: settings.ai.face_cluster_threshold,
                 use_gpu: settings.ai.use_gpu,
+                quality_tier: crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
+                    .unwrap_or_default(),
             });
             // 选片分析参数快照（blur 软阈值 worker 侧读取，0021）
             crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);

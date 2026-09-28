@@ -7,6 +7,10 @@
 //!   text_model_quantized 283MB / tokenizer.json 34MB——双塔合体文件
 //!   model_quantized.onnx 378MB 的替代，内存减半语义相同；int8 量化在
 //!   语义检索场景质量损失可接受，输出维度仍 768）。
+//! - 三档画质（2026-09-28 定案，[`QualityTier`]）：fast 换 SCRFD 10G 小
+//!   检测模型、accurate 换 fp16 语义双塔 + 检测源 2048 优先，normal 维持
+//!   既有件。档位→模型/源策略的解析集中在 [`face_detect_model_id`] /
+//!   [`semantic_model_ids`]，切档经参数指纹自动重建（ipc::indexing）。
 //! - [`ModelManager`]：`.part` 暂存 + Content-Range 断点续传（网络中断保留
 //!   `.part`，换源/重连从断点续传）；下载完成 SHA256 校验，不匹配删
 //!   `.part` 重来一次，再失败置 failed；主 URL 失败自动切镜像，两处都败
@@ -40,7 +44,22 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 /// 下载读块大小。
 const CHUNK: usize = 256 * 1024;
 
-/// 内置模型清单（JSON 常量 → 强类型；sha256/bytes 为 HF API 实测 pin 值）。
+/// 内置模型清单（JSON 常量 → 强类型；sha256/bytes 为 HF API 实测 pin 值，
+/// LFS oid 即内容 sha256；scrfd-10g 另做了全量下载校验，2026-09-28）。
+///
+/// **三档画质新件的许可记档（2026-09-28 核实）**：
+/// - `scrfd-10g`：原计划的独立仓 immich-app/scrfd_10g_bnkps 已不可达
+///   （HF API/resolve 均 401，2026-09-28 实测）——同字节权重（sha256 一致，
+///   且与 antelopev2 仓 detection/model.onnx 同 oid）由 insightface 官方
+///   buffalo_l 包仓 immich-app/buffalo_l 提供，改从该仓收录。**注意许可**：
+///   该仓 license = "other"（insightface，见仓 README license_link 指向
+///   deepinsight/insightface python-package 许可）而非定案时以为的
+///   Apache-2.0；既有 arcface（garavv/arcface-onnx）同为 insightface 系
+///   权重，风险口径一致（个人摄影工作流自托管使用场景）。
+/// - `siglip2-*-fp16`：与既有 int8 件同仓（onnx-community/
+///   siglip2-base-patch16-256-ONNX）同许可（仓未单列许可，随基模型
+///   google/siglip2-base-patch16-256 = Apache-2.0，与现件一致，无新增
+///   许可负担）。
 ///
 /// feature="selection"（闭眼检测，0021 选型 2026-09-27）：**暂无条目**。
 /// 评估结论——HuggingFace 许可证干净（Apache-2.0）的 open/closed eye
@@ -63,7 +82,8 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "f2eb8ccfa3dc0b3761d9ea9a39554fe0f2be71b247ad7f68a80720ec88895650",
     "bytesTotal": 94737653,
     "version": "siglip2-base-patch16-256-v1",
-    "feature": "semantic"
+    "feature": "semantic",
+    "tier": "normal"
   },
   {
     "id": "siglip2-text",
@@ -72,7 +92,8 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "6f59b39d880c413042314b79302b74d0dd93b273caf8fbfdb1eb2df61a7fefd4",
     "bytesTotal": 283438275,
     "version": "siglip2-base-patch16-256-v1",
-    "feature": "semantic"
+    "feature": "semantic",
+    "tier": "normal"
   },
   {
     "id": "siglip2-tokenizer",
@@ -81,7 +102,28 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
     "bytesTotal": 34363039,
     "version": "siglip2-base-patch16-256-v1",
-    "feature": "semantic"
+    "feature": "semantic",
+    "tier": null
+  },
+  {
+    "id": "siglip2-visual-fp16",
+    "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_fp16.onnx",
+    "mirrorUrl": "https://hf-mirror.com/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_fp16.onnx",
+    "sha256": "fe9ad8020a6d3d98d394c9be8f07064066135fc2f87ec11692de0b677c0ac4db",
+    "bytesTotal": 186131676,
+    "version": "siglip2-base-patch16-256-fp16-v1",
+    "feature": "semantic",
+    "tier": "accurate"
+  },
+  {
+    "id": "siglip2-text-fp16",
+    "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/text_model_fp16.onnx",
+    "mirrorUrl": "https://hf-mirror.com/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/text_model_fp16.onnx",
+    "sha256": "80954edffdc689599e5d5bc6a1738380bc9e8139a18e5c8892485f248b6b4890",
+    "bytesTotal": 564862230,
+    "version": "siglip2-base-patch16-256-fp16-v1",
+    "feature": "semantic",
+    "tier": "accurate"
   },
   {
     "id": "scrfd",
@@ -90,7 +132,18 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "aa19f0e7f4d120d4cf990086639ab74a0136adceaebd232e0dc4745e0cfd4257",
     "bytesTotal": 39424525,
     "version": "v1",
-    "feature": "face"
+    "feature": "face",
+    "tier": "normal"
+  },
+  {
+    "id": "scrfd-10g",
+    "url": "https://huggingface.co/immich-app/buffalo_l/resolve/main/detection/model.onnx",
+    "mirrorUrl": "https://hf-mirror.com/immich-app/buffalo_l/resolve/main/detection/model.onnx",
+    "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+    "bytesTotal": 16923827,
+    "version": "v1",
+    "feature": "face",
+    "tier": "fast"
   },
   {
     "id": "arcface",
@@ -99,7 +152,8 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "ffe014a45c9488506719d37fd578ece6661bb385535b36e8039975fa5d4683db",
     "bytesTotal": 136619444,
     "version": "v1",
-    "feature": "face"
+    "feature": "face",
+    "tier": null
   }
 ]"#;
 
@@ -115,6 +169,10 @@ pub struct ModelEntry {
     pub version: String,
     /// "semantic" | "face"（"selection" 预留：闭眼模型选型未过，暂无条目）
     pub feature: String,
+    /// 画质档位归属（2026-09-28 三档画质）：Some("fast"|"normal"|"accurate")
+    /// = 该档独占件；None = 各档共用件（arcface / tokenizer）。
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 /// 模型状态 DTO（ai_models_status 载荷，camelCase）。
@@ -129,12 +187,74 @@ pub struct ModelStatusDto {
     pub feature: String,
     /// "idle" | "downloading" | "verifying" | "done" | "failed"
     pub state: String,
+    /// 档位归属（镜像清单条目；None = 各档共用件）。
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 /// 内置模型清单（OnceLock 单次解析）。
 pub fn catalog() -> &'static [ModelEntry] {
     static CATALOG: std::sync::OnceLock<Vec<ModelEntry>> = std::sync::OnceLock::new();
     CATALOG.get_or_init(|| serde_json::from_str(CATALOG_JSON).expect("内置清单必须合法"))
+}
+
+// ---------------------------------------------------------------------------
+// 三档画质（快速/普通/精准，用户定案 2026-09-28）
+// ---------------------------------------------------------------------------
+
+/// AI 索引画质档位。blur 不分档、ArcFace 不换（既定决策）、eyes 无模型。
+///
+/// | 档 | 人脸检测 | 检测源策略 | 语义 |
+/// |---|---|---|---|
+/// | fast | scrfd-10g（buffalo_l 包，17MB） | 缓存优先 [512, 2048] | base int8 |
+/// | normal（默认） | scrfd（34g） | 缓存优先 [512, 2048] | base int8 |
+/// | accurate | scrfd（34g，同件） | **2048 优先**（未命中生成 2048，512 兜底） | base fp16 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QualityTier {
+    Fast,
+    #[default]
+    Normal,
+    Accurate,
+}
+
+impl QualityTier {
+    /// settings.ai.quality_tier 字符串解析（非法值 → None，settings_set 拒绝）。
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "fast" => Some(Self::Fast),
+            "normal" => Some(Self::Normal),
+            "accurate" => Some(Self::Accurate),
+            _ => None,
+        }
+    }
+
+    /// 档位字符串形态（日志/测试断言用）。
+    #[doc(hidden)]
+    #[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Normal => "normal",
+            Self::Accurate => "accurate",
+        }
+    }
+}
+
+/// 人脸检测模型 id（fast = 10G 小模型换速，normal/accurate = 34G 现件）。
+pub fn face_detect_model_id(tier: QualityTier) -> &'static str {
+    match tier {
+        QualityTier::Fast => "scrfd-10g",
+        _ => "scrfd",
+    }
+}
+
+/// 语义双塔模型 id 组 [vision, text]（fast/normal = int8 现件共享 → fast↔normal
+/// 不动语义索引；accurate = fp16 新件 → 切档经指纹自动重建）。
+pub fn semantic_model_ids(tier: QualityTier) -> [&'static str; 2] {
+    match tier {
+        QualityTier::Accurate => ["siglip2-visual-fp16", "siglip2-text-fp16"],
+        _ => ["siglip2-visual", "siglip2-text"],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,10 +278,11 @@ fn agent() -> &'static ureq::Agent {
 /// DML 运行时故障位（**按模型隔离**，2026-09-28）：DML EP **注册**成功但
 /// 运行时节点报错（真机 2026-09-21：SigLIP2 int8 的 LayerNormFusion 在
 /// RTX 5070 Ti 的 DML 上 E_INVALIDARG——ort 的逐算子回落只覆盖"不支持"，
-/// 不覆盖"执行即炸"）。某模型（"scrfd"/"arcface"/"siglip2-visual"/
-/// "siglip2-text"）运行时故障只毒化该模型——重建纯 CPU 会话时**其他模型
-/// 保住 DML**（此前全局一位，单模型炸会连坐全部通道）。推理层捕获错误后
-/// 丢弃该模型的 DML 会话重建（见 run_with_dml_fallback）。
+/// 不覆盖"执行即炸"）。某模型（"scrfd"/"scrfd-10g"/"arcface"/"siglip2-visual"
+/// /"siglip2-text"/"siglip2-visual-fp16"/"siglip2-text-fp16"）运行时故障只毒化
+/// 该模型——重建纯 CPU 会话时**其他模型保住 DML**（此前全局一位，单模型炸
+/// 会连坐全部通道）。推理层捕获错误后丢弃该模型的 DML 会话重建（见
+/// run_with_dml_fallback）。
 fn poison_flags() -> &'static Mutex<HashMap<String, bool>> {
     static POISON: std::sync::OnceLock<Mutex<HashMap<String, bool>>> = std::sync::OnceLock::new();
     POISON.get_or_init(|| Mutex::new(HashMap::new()))
@@ -348,6 +469,10 @@ pub struct AiIndexParams {
     /// 允许 GPU（settings.ai.use_gpu 投影）：true 时会话 EP 序列
     /// [DirectML, CPU]（DML 失败自动落 CPU，见 execution_providers）。
     pub use_gpu: bool,
+    /// 画质档位（settings.ai.quality_tier 投影，默认 normal）：推理层
+    /// 经 face_detect_model_id / semantic_model_ids 解析当前档位的模型件
+    /// 与检测源策略；切档后 settings_set 刷新快照 → 惰性重建会话。
+    pub quality_tier: QualityTier,
 }
 
 impl Default for AiIndexParams {
@@ -357,6 +482,7 @@ impl Default for AiIndexParams {
             face_detect_threshold: 0.5,
             face_cluster_threshold: 0.4,
             use_gpu: true,
+            quality_tier: QualityTier::Normal,
         }
     }
 }
@@ -454,6 +580,7 @@ impl ModelManager {
             version: entry.version.clone(),
             feature: entry.feature.clone(),
             state,
+            tier: entry.tier.clone(),
         })
     }
 

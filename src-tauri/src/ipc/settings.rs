@@ -107,18 +107,24 @@ pub fn settings_set(
     state: State<SharedState>,
     settings: Settings,
 ) -> Result<(), String> {
+    // 画质档位硬校验（2026-09-28 三档画质）：档位驱动模型件选择与指纹
+    // 重建，脏值拒绝落盘（读取侧另有 load 兜底，双保险）。
+    crate::settings::validate_ai_settings(&settings.ai)?;
     SettingsManager::save(&settings, &state.config_dir).map_err(|err| err.to_string())?;
     // 缩略图缓存上限即时生效（M8-③）
     crate::thumbs::set_thumb_cache_cap_bytes(
         u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
     );
     // AI 索引参数投影（推理层即时读新值；use_gpu 关掉时新会话回落纯 CPU——
-    // 存量会话重启后生效，v1 不做会话驱逐）
+    // 存量会话重启后生效，v1 不做会话驱逐；quality_tier 切档后推理层惰性
+    // 重建对应档位的会话/模型件）
     state.ai.set_ai_params(crate::ai::AiIndexParams {
         embed_input_size: settings.ai.embed_input_size,
         face_detect_threshold: settings.ai.face_detect_threshold,
         face_cluster_threshold: settings.ai.face_cluster_threshold,
         use_gpu: settings.ai.use_gpu,
+        quality_tier: crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
+            .unwrap_or_default(),
     });
     // 选片分析参数快照刷新（blur 软阈值 worker 侧即时读新值，0021）
     crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);

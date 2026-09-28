@@ -382,16 +382,17 @@ fn active_library_lookup_follows_active_id() {
     assert!(s.active_library().is_none());
 }
 
-/// 语义阈值默认值（SigLIP2 cos 区间压缩实测标定：无关 top≈0.087 / 相关簇
-/// ≈0.099+；过高全灭、过低任何查询 top-N≈全库）。
+/// 语义阈值默认值：None = auto（2026-09-28 三档画质起随语义模型变体自适应：
+/// int8 → 0.09（2026-09-21 标定），fp16 → 标定值见 ai::semantic_default_min_score）。
 #[test]
-fn ai_settings_default_semantic_min_score() {
+fn ai_settings_default_semantic_min_score_is_auto() {
     let ai = AiSettings::default();
-    assert!((ai.semantic_min_score - 0.09).abs() < 1e-6, "默认 0.09");
+    assert_eq!(ai.semantic_min_score, None, "默认 auto（null）");
 }
 
-/// 旧配置缺 semanticMinScore 字段 → serde default 补 0.09（已装用户的
-/// settings.json 升级路径）。
+/// 旧配置缺 semanticMinScore 字段 → serde default 落 None（auto）；显式
+/// 0.09（= 旧默认值）→ 加载迁移为 None（auto）；非 0.09 自定义值 → 保留。
+/// 画质档位缺字段 → "normal"；非法值 → 兜成 "normal"。
 #[test]
 fn legacy_settings_without_semantic_min_score_gets_default() {
     let dir = temp_dir();
@@ -407,8 +408,76 @@ fn legacy_settings_without_semantic_min_score_gets_default() {
     )
     .unwrap();
     let loaded = SettingsManager::load(dir.path()).expect("load legacy settings");
-    assert!(
-        (loaded.ai.semantic_min_score - 0.09).abs() < 1e-6,
-        "缺字段落默认 0.09"
-    );
+    assert_eq!(loaded.ai.semantic_min_score, None, "缺字段落 auto");
+    assert_eq!(loaded.ai.quality_tier, "normal", "缺字段落 normal 档");
+}
+
+#[test]
+fn legacy_explicit_default_threshold_migrates_to_auto_but_custom_survives() {
+    let dir = temp_dir();
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "onboardingCompleted": true,
+            "libraries": [],
+            "activeLibraryId": null,
+            "ai": { "semanticMinScore": 0.09 }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = SettingsManager::load(dir.path()).expect("load");
+    assert_eq!(loaded.ai.semantic_min_score, None, "旧默认 0.09 → auto");
+
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "onboardingCompleted": true,
+            "libraries": [],
+            "activeLibraryId": null,
+            "ai": { "semanticMinScore": 0.15, "qualityTier": "accurate" }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = SettingsManager::load(dir.path()).expect("load");
+    assert_eq!(loaded.ai.semantic_min_score, Some(0.15), "自定义值保留");
+    assert_eq!(loaded.ai.quality_tier, "accurate", "合法档位保留");
+
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "onboardingCompleted": true,
+            "libraries": [],
+            "activeLibraryId": null,
+            "ai": { "qualityTier": "turbo" }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = SettingsManager::load(dir.path()).expect("load");
+    assert_eq!(loaded.ai.quality_tier, "normal", "非法档位兜成 normal");
+}
+
+/// settings_set 的档位硬校验：三档通过，脏值拒绝。
+#[test]
+fn validate_ai_settings_rejects_bad_tier() {
+    for ok in ["fast", "normal", "accurate"] {
+        let ai = AiSettings {
+            quality_tier: ok.to_string(),
+            ..AiSettings::default()
+        };
+        assert!(
+            smart_photo_lib::settings::validate_ai_settings(&ai).is_ok(),
+            "{ok} 应合法"
+        );
+    }
+    let bad = AiSettings {
+        quality_tier: "ultra".to_string(),
+        ..AiSettings::default()
+    };
+    assert!(smart_photo_lib::settings::validate_ai_settings(&bad).is_err());
 }

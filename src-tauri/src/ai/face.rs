@@ -97,6 +97,9 @@ pub struct DetectedFace {
 #[derive(Default)]
 struct FaceSlots {
     det: Option<Session>,
+    /// det 会话对应的模型 id（档位切换后换件重建：fast=scrfd-10g，
+    /// normal/accurate=scrfd；不匹配即弃缓存会话重载）。
+    det_model: Option<String>,
     rec: Option<Session>,
 }
 
@@ -106,9 +109,11 @@ fn face_slots() -> &'static Mutex<FaceSlots> {
 }
 
 impl ModelManager {
-    /// 人脸两件套（scrfd + arcface）是否齐备。
+    /// 人脸两件套是否齐备（检测件按当前画质档位解析：fast = scrfd-10g +
+    /// arcface；normal/accurate = scrfd + arcface）。
     pub fn face_models_ready(&self) -> bool {
-        ["scrfd", "arcface"]
+        let det = super::face_detect_model_id(self.ai_params().quality_tier);
+        [det, "arcface"]
             .iter()
             .all(|id| self.model_path(id).is_file())
     }
@@ -125,17 +130,22 @@ impl ModelManager {
         !ids.is_empty() && ids.iter().all(|id| self.model_path(id).is_file())
     }
 
+    /// 惰性加载检测会话（模型按当前档位解析；切档后 det_model 不匹配即
+    /// 弃旧会话重载新件）。
     fn ensure_det(&self, slots: &mut FaceSlots) -> Result<(), String> {
-        if slots.det.is_some() {
+        let model_id = super::face_detect_model_id(self.ai_params().quality_tier);
+        if slots.det.is_some() && slots.det_model.as_deref() == Some(model_id) {
             return Ok(());
         }
-        let path = self.model_path("scrfd");
+        let path = self.model_path(model_id);
         if !path.is_file() {
-            return Err("模型 scrfd 未下载（设置页下载后再试）".into());
+            return Err(format!("模型 {model_id} 未下载（设置页下载后再试）"));
         }
-        // EP 序列与 embed 共用（use_gpu → [DML, CPU]；DML 失败自动落 CPU）
-        let session = super::build_session(&path, None, self.ai_params().use_gpu, "scrfd")?;
+        // EP 序列与 embed 共用（use_gpu → [DML, CPU]；DML 失败自动落 CPU）；
+        // 毒化位按模型 id 隔离（scrfd 与 scrfd-10g 互不连坐）
+        let session = super::build_session(&path, None, self.ai_params().use_gpu, model_id)?;
         slots.det = Some(session);
+        slots.det_model = Some(model_id.to_string());
         Ok(())
     }
 
@@ -185,12 +195,13 @@ pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<Detect
             data.push(px.0[ch] as f32 / 128.0 - 127.5 / 128.0);
         }
     }
-    // DML 运行时故障同 embed 语义：毒化（仅 scrfd，按模型隔离）+ 纯 CPU
-    // 重建重跑一次
+    // DML 运行时故障同 embed 语义：毒化（按当前档位检测模型 id 隔离）+
+    // 纯 CPU 重建重跑一次
     let use_gpu = manager.ai_params().use_gpu;
+    let det_model = super::face_detect_model_id(manager.ai_params().quality_tier);
     let heads = super::run_with_dml_fallback(
         use_gpu,
-        "scrfd",
+        det_model,
         || {
             let tensor = Tensor::from_array((
                 vec![1i64, 3, DET_SIZE as i64, DET_SIZE as i64],
@@ -696,13 +707,13 @@ fn assign_cluster(db: &Db, clusterer: &mut OnlineClusterer, emb: &[f32]) -> Resu
 /// 检测源档位优先级（缓存命中优先；1024 不是 thumbs 档位——SIZE_TIERS =
 /// 256/512/2048 → 用 [512, 2048]）。SCRFD 输入恒 640 letterbox，源 ≥512
 /// 即可（1024→640 与 2048→640 检测质量等价）；检测+对齐+ArcFace 全在
-/// 同一源图上做。
+/// 同一源图上做。fast/normal 共用本策略。
 pub const DETECTION_SOURCE_TIERS: &[u16] = &[512, 2048];
 
-/// 检测源取图：按 [`DETECTION_SOURCE_TIERS`] 顺序查**缓存命中**（只查不
-/// 生成，thumbs::cached），全未命中才 `thumb_file(512)` 按需生成最便宜档。
-/// 吃掉「无条件同步生成 2048 档（61MP ARW 首张半秒~两秒）」这一最大
-/// 固定成本。
+/// 检测源取图（fast/normal 策略）：按 [`DETECTION_SOURCE_TIERS`] 顺序查
+/// **缓存命中**（只查不生成，thumbs::cached），全未命中才 `thumb_file(512)`
+/// 按需生成最便宜档。吃掉「无条件同步生成 2048 档（61MP ARW 首张半秒~
+/// 两秒）」这一最大固定成本。blur/eyes 选片通道不分档，沿用本函数。
 pub fn detection_source(db_dir: &Path, src: &Path) -> Option<String> {
     for tier in DETECTION_SOURCE_TIERS {
         if let Some(hit) = crate::thumbs::cached(db_dir, src, *tier) {
@@ -710,6 +721,31 @@ pub fn detection_source(db_dir: &Path, src: &Path) -> Option<String> {
         }
     }
     crate::thumbs::thumb_file(db_dir, src, DETECTION_SOURCE_TIERS[0])
+}
+
+/// 检测源取图（档位感知，2026-09-28 三档画质）：
+/// - fast/normal：缓存优先 [512, 2048]，全未命中生成 512（同上）。
+/// - accurate：**2048 优先**——命中缓存即用；未命中**同步生成 2048 档**
+///   （精准档以解码质量优先，吃下首张 61MP RAW 半秒~两秒的显影成本）；
+///   2048 生成失败（RAW 预览损坏等）才兜底 512（缓存或生成）。
+pub fn detection_source_tiered(
+    db_dir: &Path,
+    src: &Path,
+    tier: super::QualityTier,
+) -> Option<String> {
+    if let super::QualityTier::Accurate = tier {
+        if let Some(hit) = crate::thumbs::cached(db_dir, src, 2048) {
+            return Some(hit);
+        }
+        if let Some(generated) = crate::thumbs::thumb_file(db_dir, src, 2048) {
+            return Some(generated);
+        }
+        if let Some(hit) = crate::thumbs::cached(db_dir, src, 512) {
+            return Some(hit);
+        }
+        return crate::thumbs::thumb_file(db_dir, src, 512);
+    }
+    detection_source(db_dir, src)
 }
 
 /// 检出人脸（源图像素坐标）→ faces 表归一化坐标 `[x, y, w, h]` ∈ 0..1
@@ -754,7 +790,7 @@ fn infer_face_payload(
     asset_id: i64,
 ) -> Option<FacePayload> {
     let (path, _) = db.thumb_info_by_id(asset_id).ok().flatten()?; // 资产已删除（级联清任务前的防御兜底）
-    let thumb = detection_source(db_dir, Path::new(&path))?;
+    let thumb = detection_source_tiered(db_dir, Path::new(&path), manager.ai_params().quality_tier)?;
     let img = image::ImageReader::open(&thumb)
         .ok()
         .and_then(|r| r.decode().ok())

@@ -51,10 +51,14 @@ pub trait SemanticEmbedder: Send + Sync {
 }
 
 /// 全局推理槽：三件套惰性加载（模型未下载时命令报明确错误，下载后自动可用）。
+/// visual/text 会话记录对应模型 id：三档画质切档（normal↔accurate 换
+/// int8↔fp16 件）后不匹配即弃缓存会话重载（tokenizer 各档共享不换）。
 #[derive(Default)]
 struct InferSlots {
     visual: Option<Session>,
+    visual_model: Option<String>,
     text: Option<Session>,
+    text_model: Option<String>,
     tokenizer: Option<tokenizers::Tokenizer>,
 }
 
@@ -69,9 +73,12 @@ impl ModelManager {
         self.root.join(format!("{id}.onnx"))
     }
 
-    /// 语义检索三件套是否齐备（visual + text + tokenizer 均已安装）。
+    /// 语义检索三件套是否齐备（**按当前画质档位**：normal/fast = int8 双塔
+    /// + tokenizer；accurate = fp16 双塔 + tokenizer。缺当前档位件时
+    /// ready=false——切回已装档位即恢复，不强制下载全量件）。
     pub fn semantic_models_ready(&self) -> bool {
-        ["siglip2-visual", "siglip2-text", "siglip2-tokenizer"]
+        let [visual, text] = super::semantic_model_ids(self.ai_params().quality_tier);
+        [visual, text, "siglip2-tokenizer"]
             .iter()
             .all(|id| self.model_path(id).is_file())
     }
@@ -95,39 +102,45 @@ impl ModelManager {
         .clamp(1, 8)
     }
 
-    /// 惰性加载 vision 会话（模型缺失 → 明确错误；EP 序列按 use_gpu/env）。
+    /// 惰性加载 vision 会话（模型按当前档位解析 int8/fp16；切档后
+    /// visual_model 不匹配即弃缓存重载。模型缺失 → 明确错误；EP 序列按
+    /// use_gpu/env，毒化位按模型 id 隔离）。
     fn ensure_visual(&self, slots: &mut InferSlots) -> Result<(), String> {
-        if slots.visual.is_some() {
+        let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[0];
+        if slots.visual.is_some() && slots.visual_model.as_deref() == Some(model_id) {
             return Ok(());
         }
-        let path = self.model_path("siglip2-visual");
+        let path = self.model_path(model_id);
         if !path.is_file() {
-            return Err("模型 siglip2-visual 未下载（设置页下载后再试）".into());
+            return Err(format!("模型 {model_id} 未下载（设置页下载后再试）"));
         }
         let session = super::build_session(
             &path,
             Some(Self::embed_intra_threads()),
             self.ai_params().use_gpu,
-            "siglip2-visual",
+            model_id,
         )?;
         slots.visual = Some(session);
+        slots.visual_model = Some(model_id.to_string());
         Ok(())
     }
 
-    /// 惰性加载 text 会话 + 分词器。
+    /// 惰性加载 text 会话 + 分词器（text 按档位解析；tokenizer 共享）。
     fn ensure_text(&self, slots: &mut InferSlots) -> Result<(), String> {
-        if slots.text.is_none() {
-            let path = self.model_path("siglip2-text");
+        let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[1];
+        if slots.text.is_none() || slots.text_model.as_deref() != Some(model_id) {
+            let path = self.model_path(model_id);
             if !path.is_file() {
-                return Err("模型 siglip2-text 未下载（设置页下载后再试）".into());
+                return Err(format!("模型 {model_id} 未下载（设置页下载后再试）"));
             }
             let session = super::build_session(
                 &path,
                 Some(Self::embed_intra_threads()),
                 self.ai_params().use_gpu,
-                "siglip2-text",
+                model_id,
             )?;
             slots.text = Some(session);
+            slots.text_model = Some(model_id.to_string());
         }
         if slots.tokenizer.is_none() {
             let path = self.model_path("siglip2-tokenizer");
@@ -216,8 +229,9 @@ impl ModelManager {
             let mut slots = slots().lock().expect("infer slots mutex poisoned");
             slots.visual = None; // 丢弃 DML 会话：重建走 execution_providers 的 CPU 分支
         };
+        let vision_model = super::semantic_model_ids(self.ai_params().quality_tier)[0];
         let (shape, flat) =
-            super::run_with_dml_fallback(use_gpu, "siglip2-visual", extract, reset)?;
+            super::run_with_dml_fallback(use_gpu, vision_model, extract, reset)?;
         let (rows, dim_out) = match shape.len() {
             // [B, 768]：整块按行切
             2 => (shape[0] as usize, shape[1] as usize),

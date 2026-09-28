@@ -18,11 +18,20 @@ pub struct SearchHitDto {
     pub score: f32,
 }
 
-/// 语义检索阈值合成：显式参数优先，未传回落设置项（ai.semantic_min_score）。
+/// 语义检索阈值合成：显式参数优先，未传回落设置项（ai.semantic_min_score；
+/// null = auto——按当前画质档位的语义模型变体取默认：int8 = 0.09、
+/// fp16 = 见 ai::semantic_default_min_score）。
 /// 不设阈值时任何查询都返回 top-N≈全库（119 张库 limit=100 →「进哪个智能
 /// 相册都是全部照片」真机实测复现）。设置 0 = 不过滤。
-pub fn effective_min_score(explicit: Option<f32>, settings_value: f32) -> Option<f32> {
-    explicit.or(Some(settings_value))
+pub fn effective_min_score(
+    explicit: Option<f32>,
+    settings_value: Option<f64>,
+    tier: crate::ai::QualityTier,
+) -> Option<f32> {
+    let from_settings = settings_value
+        .map(|v| v as f32)
+        .unwrap_or_else(|| crate::ai::semantic::semantic_default_min_score(tier));
+    explicit.or(Some(from_settings))
 }
 
 /// 语义检索核（模型未齐 → 明确错误）。
@@ -37,10 +46,11 @@ pub fn fetch_search_semantic(
         return Err("查询不能为空".into());
     }
     if !state.ai.semantic_ready() {
-        return Err(
-            "语义检索模型未下载（siglip2-visual / siglip2-text / siglip2-tokenizer，             请先在设置页下载）"
-                .into(),
-        );
+        let [visual, text] =
+            crate::ai::semantic_model_ids(state.ai.ai_params().quality_tier);
+        return Err(format!(
+            "语义检索模型未下载（{visual} / {text} / siglip2-tokenizer，             请先在设置页下载）"
+        ));
     }
     let library = state
         .settings
@@ -51,9 +61,13 @@ pub fn fetch_search_semantic(
         .ok_or("尚未创建库")?;
     let db_dir = std::path::PathBuf::from(&library.db_dir);
     let db = super::open_library_db(&db_dir)?;
-    let settings_value = {
+    let (settings_value, tier) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
-        settings.ai.semantic_min_score
+        (
+            settings.ai.semantic_min_score,
+            crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
+                .unwrap_or_default(),
+        )
     };
     let hits = crate::ai::semantic::search(
         &db_dir,
@@ -61,7 +75,7 @@ pub fn fetch_search_semantic(
         &state.ai,
         query,
         limit.clamp(1, 100),
-        effective_min_score(min_score, settings_value),
+        effective_min_score(min_score, settings_value, tier),
     )?;
     Ok(hits
         .into_iter()
@@ -88,35 +102,37 @@ pub async fn search_semantic(
 }
 
 /// 模型下载完成后的语义索引自动触发：轮询三件套就绪（后台下载完成）→
-/// enable_clip 时派语义回填。轮询上限 20 分钟。
+/// enable_clip 时派语义回填 + 补跑参数指纹比对。轮询上限 20 分钟。
+/// 指纹补跑（2026-09-28 三档画质）：切到 accurate 时若 fp16 件未装，
+/// check_params_and_rebuild 会被 ready 门槛挡下且**不写 marker**——件装好
+/// 后这里补跑一次，让「切档 → 提示下载 → 装好 → 自动重建+回填」闭环
+/// （marker 未动，补跑时指纹仍是旧值 → 正常触发重建；无变更则 no-op）。
 fn spawn_post_install_watch(state: &SharedState) {
     let shared = std::sync::Arc::clone(state);
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     supervisor.spawn("ai-postinstall", "semantic-watch".into(), move |_| {
         for _ in 0..600 {
             if shared.ai.semantic_ready() {
-                let enable_clip = shared
-                    .settings
-                    .lock()
-                    .expect("settings mutex poisoned")
-                    .ai
-                    .enable_clip;
-                if enable_clip {
-                    let library = shared
-                        .settings
-                        .lock()
-                        .expect("settings mutex poisoned")
-                        .active_library()
-                        .cloned();
-                    if let Some(library) = library {
-                        let db_dir = std::path::PathBuf::from(&library.db_dir);
+                let (enable_clip, library, ai_snapshot) = {
+                    let settings = shared.settings.lock().expect("settings mutex poisoned");
+                    (
+                        settings.ai.enable_clip,
+                        settings.active_library().cloned(),
+                        settings.ai.clone(),
+                    )
+                };
+                if let Some(library) = library {
+                    let db_dir = std::path::PathBuf::from(&library.db_dir);
+                    if enable_clip {
                         crate::ai::semantic::kick_semantic_if_ready(
-                            db_dir,
+                            db_dir.clone(),
                             &shared.ai,
                             &shared.bus,
                             &shared.supervisor,
                         );
                     }
+                    // 档位切换在模型就位前的指纹欠账在此补跑（幂等，marker 把关）
+                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
                 }
                 return;
             }
@@ -135,12 +151,13 @@ pub async fn ai_models_status(
 }
 
 /// 发起模型下载（同模型去重；断点续传 + SHA256 校验 + 镜像回退，结果经
-/// aiModelDownloadFinished 事件）。
+/// aiModelDownloadFinished 事件）。三档画质件（scrfd-10g / siglip2-*-fp16）
+/// 沿 feature 既有钩子：face 件装好触发人脸回填，语义件装好触发语义回填。
 #[tauri::command]
 pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let shared = state.inner().clone();
     let is_semantic = id.starts_with("siglip2");
-    let is_face = id == "scrfd" || id == "arcface";
+    let is_face = id.starts_with("scrfd") || id == "arcface";
     run_blocking(shared.clone(), move |state| {
         let entry = crate::ai::catalog()
             .iter()
@@ -197,36 +214,35 @@ pub async fn ai_face_data_clear(state: State<'_, SharedState>) -> Result<bool, S
     run_blocking(shared, fetch_face_data_clear).await
 }
 
-/// scrfd/arcface 下载完成后的自动触发：轮询两件套就绪 → enable_face 时派
-/// 人脸回填。轮询上限 20 分钟。
+/// scrfd/scrfd-10g/arcface 下载完成后的自动触发：轮询当前档位两件套就绪
+/// → enable_face 时派人脸回填 + 补跑参数指纹比对（语义 watch 同款欠账
+/// 闭环：切 fast 时 scrfd-10g 未装 → 指纹被 ready 门槛挡下不写 marker，
+/// 件装好这里补跑）。轮询上限 20 分钟。
 fn spawn_face_post_install_watch(state: &SharedState) {
     let shared = std::sync::Arc::clone(state);
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     supervisor.spawn("ai-postinstall", "face-watch".into(), move |_| {
         for _ in 0..600 {
-            let enable_face = shared
-                .settings
-                .lock()
-                .expect("settings mutex poisoned")
-                .ai
-                .enable_face;
+            let (enable_face, library, ai_snapshot) = {
+                let settings = shared.settings.lock().expect("settings mutex poisoned");
+                (
+                    settings.ai.enable_face,
+                    settings.active_library().cloned(),
+                    settings.ai.clone(),
+                )
+            };
             if shared.ai.face_models_ready() {
-                let library = shared
-                    .settings
-                    .lock()
-                    .expect("settings mutex poisoned")
-                    .active_library()
-                    .cloned();
-                if enable_face {
-                    if let Some(library) = library {
-                        let db_dir = std::path::PathBuf::from(&library.db_dir);
+                if let Some(library) = library {
+                    let db_dir = std::path::PathBuf::from(&library.db_dir);
+                    if enable_face {
                         crate::ai::face::kick_face_if_ready(
-                            db_dir,
+                            db_dir.clone(),
                             &shared.ai,
                             &shared.bus,
                             &shared.supervisor,
                         );
                     }
+                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
                 }
                 return;
             }
