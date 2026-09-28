@@ -13,19 +13,21 @@ export type QualityTier = AiQualityTier;
 /** 展示顺序 */
 export const QUALITY_TIERS: readonly QualityTier[] = ["fast", "normal", "accurate"] as const;
 
-/** 契约档位→所需模型 id 集合（不得偏移；null 档共用件如 tokenizer 在各档都出现） */
+/** 契约档位→所需模型 id 集合（不得偏移；与后端 CATALOG_JSON 最终 id 一致——
+ * siglip2-visual / siglip2-visual-fp16；null 档共用件如 tokenizer 各档都出现） */
 export const TIER_REQUIRED_MODELS: Record<QualityTier, readonly string[]> = {
-  fast: ["scrfd-10g", "siglip2-vision", "siglip2-text", "siglip2-tokenizer"],
-  normal: ["scrfd", "siglip2-vision", "siglip2-text", "siglip2-tokenizer"],
-  accurate: ["scrfd", "siglip2-vision-fp16", "siglip2-text-fp16", "siglip2-tokenizer"],
+  fast: ["scrfd-10g", "siglip2-visual", "siglip2-text", "siglip2-tokenizer"],
+  normal: ["scrfd", "siglip2-visual", "siglip2-text", "siglip2-tokenizer"],
+  accurate: ["scrfd", "siglip2-visual-fp16", "siglip2-text-fp16", "siglip2-tokenizer"],
 };
 
 /** 人脸识别（聚类）模型：各档共用，不在档位表内 */
 export const FACE_SHARED_MODEL = "arcface";
 
-/** 模型 id 归一（别名折叠到契约 id） */
+/** 模型 id 归一（旧契约 vision 拼法折叠到后端最终 visual 拼法） */
 const MODEL_ID_ALIASES: Record<string, string> = {
-  "siglip2-visual": "siglip2-vision",
+  "siglip2-vision": "siglip2-visual",
+  "siglip2-vision-fp16": "siglip2-visual-fp16",
 };
 
 export function normalizeModelId(id: string): string {

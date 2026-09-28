@@ -70,7 +70,7 @@ function fullCatalog(overrides: Array<Partial<AiModelStatus> & { id: string }> =
     aiModel("siglip2-visual", "done", "semantic", "normal", 90 * 1024 * 1024),
     aiModel("siglip2-text", "done", "semantic", "normal", 250 * 1024 * 1024),
     aiModel("siglip2-tokenizer", "done", "semantic", null, 34 * 1024 * 1024),
-    aiModel("siglip2-vision-fp16", "idle", "semantic", "accurate", 340 * 1024 * 1024),
+    aiModel("siglip2-visual-fp16", "idle", "semantic", "accurate", 340 * 1024 * 1024),
     aiModel("siglip2-text-fp16", "idle", "semantic", "accurate", 610 * 1024 * 1024),
     aiModel("scrfd", "idle", "face", "normal", 39 * 1024 * 1024),
     aiModel("scrfd-10g", "idle", "face", "fast", 17 * 1024 * 1024),
@@ -141,7 +141,7 @@ describe("AI 画质档位选择器", () => {
     const list = screen.getByTestId("ai-tier-models");
     expect(within(list).getByText("「普通」档所需模型")).toBeInTheDocument();
     // 语义三件（visual 别名归一到 vision）+ scrfd；状态与体积透出
-    expect(within(list).getByTestId("ai-tier-model-siglip2-vision")).toHaveAttribute("data-state", "done");
+    expect(within(list).getByTestId("ai-tier-model-siglip2-visual")).toHaveAttribute("data-state", "done");
     expect(within(list).getByTestId("ai-tier-model-scrfd")).toHaveAttribute("data-state", "idle");
     expect(within(list).getAllByTestId("ai-tier-badge-shared").length).toBeGreaterThanOrEqual(1);
   });
@@ -215,12 +215,12 @@ describe("档位切换三态", () => {
 
     const dialog = await screen.findByTestId("ai-tier-missing-dialog");
     expect(within(dialog).getByText(/还需下载 2 个模型/)).toBeInTheDocument();
-    expect(within(dialog).getByTestId("ai-tier-missing-item-siglip2-vision-fp16")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("ai-tier-missing-item-siglip2-visual-fp16")).toBeInTheDocument();
     expect(within(dialog).getByTestId("ai-tier-missing-item-siglip2-text-fp16")).toBeInTheDocument();
 
     await user.click(within(dialog).getByTestId("ai-tier-download-only"));
     await waitFor(() => expect(aiModelDownloadMock).toHaveBeenCalledTimes(2));
-    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-vision-fp16");
+    expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-visual-fp16");
     expect(aiModelDownloadMock).toHaveBeenCalledWith("siglip2-text-fp16");
 
     // 仅下载：档位不变，也无等待横幅
@@ -254,10 +254,10 @@ describe("档位切换三态", () => {
 
     // 逐件下载完成（aiModelDownloadFinished → refresh → 快照更新）
     act(() => {
-      doneIds.add("siglip2-vision-fp16");
+      doneIds.add("siglip2-visual-fp16");
       useAiStore.getState().handleAppEvent({
         type: "aiModelDownloadFinished",
-        id: "siglip2-vision-fp16",
+        id: "siglip2-visual-fp16",
         ok: true,
       });
     });
@@ -294,7 +294,7 @@ describe("档位切换三态", () => {
     expect(screen.queryByTestId("ai-tier-pending")).not.toBeInTheDocument();
 
     // 模型后续就绪也不会应用档位（等待已取消）
-    aiModelsStatusMock.mockResolvedValue(fullCatalog([{ id: "siglip2-vision-fp16", state: "done" }, { id: "siglip2-text-fp16", state: "done" }]));
+    aiModelsStatusMock.mockResolvedValue(fullCatalog([{ id: "siglip2-visual-fp16", state: "done" }, { id: "siglip2-text-fp16", state: "done" }]));
     await act(async () => {
       await useAiStore.getState().refresh();
     });
@@ -393,7 +393,7 @@ describe("模型管理（逐模型行）", () => {
     const vision = screen.getByTestId("ai-model-row-siglip2-visual");
     expect(vision).toHaveAttribute("data-tier", "normal");
     expect(within(vision).getByTestId("ai-tier-badge-normal")).toBeInTheDocument();
-    const fp16 = screen.getByTestId("ai-model-row-siglip2-vision-fp16");
+    const fp16 = screen.getByTestId("ai-model-row-siglip2-visual-fp16");
     expect(fp16).toHaveAttribute("data-tier", "accurate");
     expect(screen.getByTestId("ai-model-row-siglip2-tokenizer")).toHaveAttribute("data-tier", "shared");
     expect(screen.getByTestId("ai-model-row-scrfd-10g")).toHaveAttribute("data-tier", "fast");
@@ -464,19 +464,19 @@ describe("模型管理（逐模型行）", () => {
   it("下载中行：取消按钮 + 事件进度展示（沿用既有进度 UI）", async () => {
     aiModelsStatusMock.mockReset().mockResolvedValue(
       fullCatalog([
-        { id: "siglip2-vision-fp16", state: "downloading", downloadedBytes: 0 },
+        { id: "siglip2-visual-fp16", state: "downloading", downloadedBytes: 0 },
       ]),
     );
     const user = userEvent.setup();
     renderAiTab();
-    const row = await screen.findByTestId("ai-model-row-siglip2-vision-fp16");
+    const row = await screen.findByTestId("ai-model-row-siglip2-visual-fp16");
     expect(row).toHaveAttribute("data-state", "downloading");
 
     // 事件进度（节流 1s）：行内字节进度
     act(() => {
       useAiStore.getState().handleAppEvent({
         type: "aiModelDownloadProgress",
-        id: "siglip2-vision-fp16",
+        id: "siglip2-visual-fp16",
         doneBytes: 1024 * 1024,
         totalBytes: 2 * 1024 * 1024,
       });
@@ -484,7 +484,7 @@ describe("模型管理（逐模型行）", () => {
     expect(row).toHaveTextContent("1.0 MB / 2.0 MB");
 
     // 单模型取消
-    await user.click(screen.getByTestId("ai-model-cancel-siglip2-vision-fp16"));
-    await waitFor(() => expect(aiModelCancelMock).toHaveBeenCalledWith("siglip2-vision-fp16"));
+    await user.click(screen.getByTestId("ai-model-cancel-siglip2-visual-fp16"));
+    await waitFor(() => expect(aiModelCancelMock).toHaveBeenCalledWith("siglip2-visual-fp16"));
   });
 });

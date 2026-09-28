@@ -38,19 +38,19 @@ describe("档位→所需模型映射（契约常量）", () => {
   it("三档映射与契约一致（fast 用 scrfd-10g；accurate 用 fp16 件；tokenizer 各档共用）", () => {
     expect([...TIER_REQUIRED_MODELS.fast]).toEqual([
       "scrfd-10g",
-      "siglip2-vision",
+      "siglip2-visual",
       "siglip2-text",
       "siglip2-tokenizer",
     ]);
     expect([...TIER_REQUIRED_MODELS.normal]).toEqual([
       "scrfd",
-      "siglip2-vision",
+      "siglip2-visual",
       "siglip2-text",
       "siglip2-tokenizer",
     ]);
     expect([...TIER_REQUIRED_MODELS.accurate]).toEqual([
       "scrfd",
-      "siglip2-vision-fp16",
+      "siglip2-visual-fp16",
       "siglip2-text-fp16",
       "siglip2-tokenizer",
     ]);
@@ -59,7 +59,7 @@ describe("档位→所需模型映射（契约常量）", () => {
 
   it("语义/人脸件拆分：语义=siglip2 三件；人脸=档位 scrfd 件 + 共用 arcface", () => {
     expect([...tierSemanticIds("accurate")]).toEqual([
-      "siglip2-vision-fp16",
+      "siglip2-visual-fp16",
       "siglip2-text-fp16",
       "siglip2-tokenizer",
     ]);
@@ -70,9 +70,10 @@ describe("档位→所需模型映射（契约常量）", () => {
 });
 
 describe("模型 id 归一（别名兼容）", () => {
-  it("现行清单 siglip2-visual 折叠到契约 id siglip2-vision；其余原样", () => {
-    expect(normalizeModelId("siglip2-visual")).toBe("siglip2-vision");
-    expect(normalizeModelId("siglip2-vision-fp16")).toBe("siglip2-vision-fp16");
+  it("旧契约 vision 拼法折叠到最终 visual 拼法；其余原样", () => {
+    expect(normalizeModelId("siglip2-vision")).toBe("siglip2-visual");
+    expect(normalizeModelId("siglip2-visual-fp16")).toBe("siglip2-visual-fp16");
+    expect(normalizeModelId("siglip2-visual-fp16")).toBe("siglip2-visual-fp16");
     expect(normalizeModelId("scrfd")).toBe("scrfd");
   });
 });
@@ -113,7 +114,7 @@ describe("缺件判定", () => {
       model("siglip2-tokenizer", "done"),
     ];
     const gaps = tierModelGaps("accurate", models);
-    expect(gaps.map((g) => g.id)).toEqual(["scrfd", "siglip2-vision-fp16", "siglip2-text-fp16"]);
+    expect(gaps.map((g) => g.id)).toEqual(["scrfd", "siglip2-visual-fp16", "siglip2-text-fp16"]);
     // 清单未收录 → status=null（弹窗展示「清单未收录」，无法发起下载）
     expect(gaps.every((g) => g.status === null)).toBe(true);
   });
@@ -136,7 +137,7 @@ describe("功能门控（按当前档判定）", () => {
 
     const withFp16 = [
       ...normalOnly,
-      model("siglip2-vision-fp16", "done"),
+      model("siglip2-visual-fp16", "done"),
       model("siglip2-text-fp16", "done"),
     ];
     expect(tierSemanticReady("accurate", withFp16)).toBe(true);
