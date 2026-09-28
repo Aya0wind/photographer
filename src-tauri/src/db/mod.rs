@@ -1371,6 +1371,9 @@ impl Db {
     /// 完成，不落存储层。created_at 解析失败（理论不可能，列 NOT NULL）
     /// 兜底 dir_name 直挂 photoRoot。段间用 `/`（render_dir 渲染产物同形态，
     /// Windows Path::join 兼容）。
+    ///
+    /// 子组物理化（0022）后「相册内平铺」的唯一例外 = 子组：条目级落位
+    /// 请用 [`Db::album_item_home_rel`]（本方法保留为相册主目录基段）。
     pub fn album_home_rel(&self, id: i64) -> Result<Option<String>> {
         self.0
             .query_row(
@@ -1399,6 +1402,29 @@ impl Db {
             ))
         })?;
         rows.collect()
+    }
+
+    /// 相册内**条目**目录相对段（子组物理化 0022，存储布局唯一不平铺例外）：
+    /// `{创建YYYY}/{创建MM}/{dir_name}[/{子组}]`——subgroup=Some 时在相册
+    /// 主目录（[`Db::album_home_rel`]）之后追加净化子组段，None = 相册根
+    /// （平铺现状）。四调用点共用（导入引擎 dir_template 覆写、移组挪移
+    /// album_item_move_subgroup、album 模式导出、claim 归册），不得各自拼。
+    ///
+    /// 子组段口径：与 album dir_name 同一 [`sanitize_dir_name`]（非法字符/
+    /// 控制符折叠、尾点空格剥离、保留设备名前缀、80 字符截断、空兜底）——
+    /// DB subgroup 原值（UI datalist 输入）与物理段是**纯函数映射**，四个
+    /// 调用点对同一子组名永远解析出同一段，物理归位不漂移。子组嵌套不支持
+    /// （一层；`/` 等分隔符在 sanitize 中折叠为 `-`，天然拍平）。同名文件
+    /// 占位该目录名时物理 mkdir 失败由调用方按行报错（简化定案：sanitize
+    /// 后直接用，不做让位）。
+    pub fn album_item_home_rel(&self, id: i64, subgroup: Option<&str>) -> Result<Option<String>> {
+        match self.album_home_rel(id)? {
+            Some(home) => Ok(Some(match subgroup {
+                Some(sub) => format!("{}/{}", home, sanitize_dir_name(sub)),
+                None => home,
+            })),
+            None => Ok(None),
+        }
     }
 
     /// 批量改写资产路径前缀（0018 相册目录 rename / claim 挪移共用）：
@@ -1593,8 +1619,11 @@ impl Db {
         Ok(added)
     }
 
-    /// 相册内挪子分组（0019）：纯引用层 UPDATE（subgroup 改写，None = 挪回
-    /// 根），不动物理文件与资产行。不在该相册的 id 自然不命中（0 行）。
+    /// 相册内挪子分组的**账本半边**（0019；0022 物理化后由 IPC 层
+    /// `fetch_album_item_move_subgroup` 编排：先物理挪移（XMP 边车随行）再
+    /// 走本方法改 subgroup + `asset_update_path` 改写路径——先物理后账本，
+    /// 挪移失败的行不落账）。本方法只做引用层 UPDATE（subgroup 改写，
+    /// None = 挪回根），不动物理文件。不在该相册的 id 自然不命中（0 行）。
     /// 返回实际改写行数；相册不存在报错。
     pub fn album_item_move_subgroup(
         &self,

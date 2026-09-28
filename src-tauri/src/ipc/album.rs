@@ -136,7 +136,14 @@ pub fn fetch_album_subgroups(
         .collect())
 }
 
-/// 相册内挪子分组核（0019）：纯引用层 UPDATE（None = 挪回根）。
+/// 相册内挪子分组核（0019；0022 物理化）：**物理挪移**——源 = 当前
+/// `assets.path`，目标 = [`crate::db::Db::album_item_home_rel`] 公式段
+/// （subgroup None = 相册根），同卷 rename / 跨卷 copy+xxhash 校验+删源，
+/// XMP 边车随行（与 claim 挪移同款语义，复用其 [`super::claim`] 工具）。
+/// 先物理后账本：挪移成功的行才改 `album_item.subgroup` + `assets.path`
+/// （filename 随冲突后缀变化）；**失败的行不更新 DB**（整批不回滚）。
+/// 已在目标目录（如子组名净化后同段）只补账本；不在该相册的 id 自然
+/// 不命中（0 行，与纯 DB 时代语义一致）。返回成功改写行数。
 pub fn fetch_album_item_move_subgroup(
     state: &super::AppState,
     id: i64,
@@ -145,8 +152,117 @@ pub fn fetch_album_item_move_subgroup(
 ) -> Result<u64, String> {
     let subgroup = subgroup.map(str::trim).filter(|s| !s.is_empty());
     let db = super::active_library_db(state)?;
-    db.album_item_move_subgroup(id, asset_ids, subgroup)
-        .map_err(map_missing)
+    if !db.album_exists(id).map_err(|e| e.to_string())? {
+        return Err("相册不存在".into());
+    }
+    if asset_ids.is_empty() {
+        return Ok(0);
+    }
+    let home_rel = db
+        .album_item_home_rel(id, subgroup)
+        .map_err(|e| e.to_string())?
+        .ok_or("相册不存在")?;
+    let photo_root = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .active_library()
+        .cloned()
+        .ok_or("尚未创建库")?
+        .photo_root;
+    // home_rel 段分隔符归一为平台原生（库内两种形态前缀判定均兼容——见
+    // claim 的 norm_sep）
+    let dst_dir =
+        std::path::Path::new(&photo_root).join(home_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let dst_dir_norm = super::claim::norm_sep(&dst_dir.to_string_lossy());
+
+    let mut moved: u64 = 0;
+    let mut failures: Vec<String> = Vec::new();
+    for asset_id in asset_ids.iter().copied() {
+        let fail = |failures: &mut Vec<String>, error: String| {
+            failures.push(format!("资产 {asset_id}: {error}"));
+        };
+        // 只处理本相册在册行（旧纯 DB UPDATE 的命中语义）；顺带取当前
+        // 子组判定是否需要物理挪移
+        let row: Option<(String, String, i64, i64, u64)> =
+            db.0.query_row(
+                "SELECT a.path, a.filename, a.in_trash, a.xxhash, a.size \
+                 FROM album_item i JOIN assets a ON a.id = i.asset_id \
+                 WHERE i.album_id = ?1 AND i.asset_id = ?2",
+                rusqlite::params![id, asset_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)? as u64,
+                    ))
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| e.to_string())?;
+        let Some((path, filename, in_trash, xxhash, size)) = row else {
+            continue; // 不在册：不命中（0 行语义），静默跳过
+        };
+        let src = std::path::PathBuf::from(&path);
+        let src_dir_norm = src
+            .parent()
+            .map(|p| super::claim::norm_sep(&p.to_string_lossy()))
+            .unwrap_or_default();
+        if src_dir_norm != dst_dir_norm {
+            // 物理挪移（根↔子组A↔子组B 任意向）：先物理后账本
+            if in_trash != 0 {
+                fail(&mut failures, "资产在回收站，不能挪移".into());
+                continue;
+            }
+            if !src.is_file() {
+                fail(&mut failures, format!("源文件不在盘：{path}"));
+                continue;
+            }
+            let dst = super::claim::resolve_conflict(&dst_dir, &filename);
+            if let Err(e) =
+                super::claim::move_file_with_sidecar(&src, &dst, size, xxhash as u64)
+            {
+                fail(&mut failures, e);
+                continue; // 物理失败：该行账本不动
+            }
+            let new_name = dst
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| filename.clone());
+            if let Err(e) = db.asset_update_path(
+                asset_id,
+                &dst.to_string_lossy(),
+                &new_name,
+            ) {
+                fail(&mut failures, format!("库路径更新失败: {e}"));
+                continue;
+            }
+        }
+        // 账本半边：subgroup 改写（None = 挪回根）
+        if let Err(e) = db.album_item_move_subgroup(id, &[asset_id], subgroup) {
+            fail(&mut failures, format!("子分组改写失败: {e}"));
+            continue;
+        }
+        moved += 1;
+    }
+    if !failures.is_empty() {
+        let summary = failures.join("；");
+        let _ = db.append_log(
+            "warn",
+            None,
+            &format!("子分组挪移部分失败（成功 {moved}）：{summary}"),
+        );
+        if moved == 0 {
+            return Err(format!("子分组挪移全部失败：{summary}"));
+        }
+    }
+    Ok(moved)
 }
 
 /// 批量移除引用核（幂等；相册不存在报错）。

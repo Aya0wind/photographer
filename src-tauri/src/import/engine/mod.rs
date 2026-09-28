@@ -65,8 +65,9 @@ pub enum ImportMode {
 }
 
 /// F2 双目的地导入的第二目的地：单遍读取同时写第二份（同布局公式、
-/// 同文件名模板，仅根不同——`{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/`，
-/// 2026-09-28 定案；dir_template 随布局写死一并退役）；第二路同样走
+/// 同文件名模板，仅根不同——`{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/
+/// [{子组}/]`，2026-09-28 定案；dir_template 随布局写死一并退役；子组段
+/// 随 plan.album_subgroup 追加，0022）；第二路同样走
 /// `.part` 暂存 + 长度校验 + journal 记录（job_files.dst2）。与 move 模式
 /// 互斥（begin 时拒绝）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,9 +78,10 @@ pub struct SecondTarget {
 
 /// 导入计划（IPC 契约，camelCase）。布局固定不可配置（用户定案
 /// 2026-09-28）：目录段没有计划字段，运行时由相册统一公式
-/// [`crate::db::Db::album_home_rel`] 派生（`{创建YYYY}/{创建MM}/{dir_name}`，
-/// 相册内平铺）；历史 journal plan_json 里的 `dirTemplate` 键反序列化时
-/// 自动忽略（resume 剩余文件按当前公式重渲染落位）。
+/// [`crate::db::Db::album_item_home_rel`] 派生（`{创建YYYY}/{创建MM}/
+/// {dir_name}[/{子组}]`，相册内平铺——唯一例外 = 子组段，0022 物理化随
+/// `album_subgroup` 追加）；历史 journal plan_json 里的 `dirTemplate` 键
+/// 反序列化时自动忽略（resume 剩余文件按当前公式重渲染落位）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlan {
@@ -106,7 +108,9 @@ pub struct ImportPlan {
     #[serde(default)]
     pub album_id: Option<i64>,
     /// 相册内子分组（0019，可选）：入册 album_item 带 subgroup（NULL = 散在
-    /// 相册根）。serde default 缺省 = None（历史 journal 兼容）。
+    /// 相册根）。serde default 缺省 = None（历史 journal 兼容）。0022 物理化：
+    /// Some 时目标目录在相册主目录后追加净化子组段（存储布局唯一不平铺
+    /// 例外），落位公式 [`crate::db::Db::album_item_home_rel`]。
     #[serde(default)]
     pub album_subgroup: Option<String>,
 }
@@ -316,13 +320,15 @@ impl Engine {
         }
 
         // 相册物理目录化（0018；布局改版用户定案 2026-09-28）：带 album_id
-        // 的导入落 `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`——布局**固定
-        // 不可配置**，统一公式 [`crate::db::Db::album_home_rel`]（外层两段 =
-        // 相册 created_at 的字面量（UTC 口径），相册级常量、相册内**平铺**；
-        // 拍摄日分组在应用 UI（groupAssetsByDate）完成，不落存储层）。第二
-        // 目的地同公式、仅根不同。此处只做相册存在性校验（早失败）；
-        // 模板在 run() 派生，不落 plan_json（相册改名后 resume 自然跟新）。
-        // album_id 必填（None = 防御性报错，IPC 层已有同款校验）。
+        // 的导入落 `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/[{子组}/]`——
+        // 布局**固定不可配置**，统一公式 [`crate::db::Db::album_item_home_rel`]
+        // （外层两段 = 相册 created_at 的字面量（UTC 口径），相册级常量、
+        // 相册内**平铺**——唯一例外 = 子组段（0022 物理化），plan 带子组时
+        // 追加净化子组段；拍摄日分组在应用 UI（groupAssetsByDate）完成，
+        // 不落存储层）。第二目的地同公式、仅根不同。此处只做相册存在性
+        // 校验（早失败）；模板在 run() 派生，不落 plan_json（相册改名后
+        // resume 自然跟新）。album_id 必填（None = 防御性报错，IPC 层已有
+        // 同款校验）。
         match self.plan.album_id {
             Some(album_id) => {
                 self.db
@@ -428,13 +434,20 @@ impl Engine {
         let queue = queue.unwrap_or_default();
 
         // 布局公式派生（固定不可配置，2026-09-28 定案）：目录段 =
-        // album_home_rel（`{创建YYYY}/{创建MM}/{dir_name}`，相册内平铺）。
+        // album_item_home_rel（`{创建YYYY}/{创建MM}/{dir_name}[/{子组}]`——
+        // 相册内平铺，**唯一例外 = 子组段**（0022 物理化）：plan 带子组时
+        // 追加净化子组段，None = 平铺现状）。
         // begin 已对新任务校验相册存在；resume 历史任务在此派生——相册
         // 被删/无 album_id 的史前计划无法落位，任务判 error 收尾。
         let dir_template = match self
             .plan
             .album_id
-            .and_then(|aid| self.db.album_home_rel(aid).ok().flatten())
+            .and_then(|aid| {
+                self.db
+                    .album_item_home_rel(aid, self.plan.album_subgroup.as_deref())
+                    .ok()
+                    .flatten()
+            })
         {
             Some(template) => template,
             None => {

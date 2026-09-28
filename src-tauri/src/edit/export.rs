@@ -10,9 +10,10 @@
 //! rename；目标已存在报错（绝不覆盖）。
 //!
 //! **album 模式**：复用**导入引擎**的相册落位与登记路径，不平行造轮子——
-//! 目录段走 [`crate::db::Db::album_home_rel`] 统一公式
-//! （`{创建YYYY}/{创建MM}/{dir_name}`，外层=相册创建时间年月（UTC 口径）、
-//! 相册内平铺——2026-09-28 布局定案；拍摄日分组在应用 UI），整体过
+//! 目录段走 [`crate::db::Db::album_item_home_rel`] 统一公式
+//! （`{创建YYYY}/{创建MM}/{dir_name}[/{子组}]`，外层=相册创建时间年月
+//! （UTC 口径）、相册内平铺——唯一例外 = 子组段（0022 物理化）——
+//! 2026-09-28 布局定案；拍摄日分组在应用 UI），整体过
 //! [`crate::import::templates::render_dir`] 净化；文件名 `{源stem}_edit.jpg`，
 //! 冲突走导入引擎的
 //! [`crate::import::templates::unique_path`]（`_1`/`_2` 可追踪后缀）；登记
@@ -442,7 +443,7 @@ fn place_in_album(
     subgroup: Option<String>,
 ) -> Result<(PathBuf, i64), String> {
     let home_rel = db
-        .album_home_rel(album_id)
+        .album_item_home_rel(album_id, subgroup.as_deref())
         .map_err(|e| e.to_string())?
         .ok_or("相册不存在")?;
     let stem = source
@@ -451,10 +452,11 @@ fn place_in_album(
         .map(|(s, _)| s.to_string())
         .unwrap_or_else(|| source.filename.clone());
     let captured_at = captured_or_fallback(source);
-    // 与导入引擎同一布局公式（album_home_rel：`{创建YYYY}/{创建MM}/
-    // {dir_name}`，相册内平铺）+ 同一渲染器过 sanitize——同一相册的导出件
-    // 与导入件落进同一个相册主目录。模板为纯字面量（无逐照片令牌），
-    // captured_at 上下文仅形态沿用。
+    // 与导入引擎同一布局公式（album_item_home_rel：`{创建YYYY}/{创建MM}/
+    // {dir_name}[/{子组}]`——相册内平铺，唯一例外 = 子组段（0022 物理化），
+    // subgroup Some 时导出件落进对应子文件夹）+ 同一渲染器过 sanitize——
+    // 同一相册的导出件与导入件落进同一个相册目录（同子组同文件夹）。
+    // 模板为纯字面量（无逐照片令牌），captured_at 上下文仅形态沿用。
     let ctx = RenderCtx {
         captured_at,
         camera: None,

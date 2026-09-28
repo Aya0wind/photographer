@@ -169,7 +169,8 @@ impl PartSink {
 /// 单文件单遍复制：流式读 → 哈希/写盘/head 截存 → 长度校验。
 /// dst = target_root + 渲染结果；second=Some(根) 时同遍双写第二目的地
 /// （**同布局公式、同文件名模板**，仅根不同——2026-09-28 定案，第二份
-/// 落 `{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/` 平铺）。
+/// 落 `{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/[{子组}/]`，子组段随
+/// plan 传入的 dir_template 已含，0022）。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_one(
     source: &dyn DeviceSource,
@@ -222,8 +223,8 @@ pub(super) fn copy_one(
     let meta = exif_lite::parse(&head);
 
     // 渲染目标相对路径（{相机}/{镜头} 缺失降级默认段；主/第二目的地同
-    // 布局公式同文件名模板——dir_template 为相册固定公式（字面量），
-    // 逐照片令牌仅剩文件名段）
+    // 布局公式同文件名模板——dir_template 为相册固定公式（字面量，可含
+    // 0022 子组段），逐照片令牌仅剩文件名段）
     let (stem, ext) = split_stem_ext(&entry.rel_path);
     let ctx = RenderCtx {
         captured_at: resolve_captured(meta.captured_at, entry.mtime),

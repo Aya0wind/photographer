@@ -1,7 +1,8 @@
 //! 阶段 D 基础编辑与导出（0022）：配方存取/校验夹取、folder 导出（长边
 //! 只缩不放 + JPEG 可解码 + GPS 剥离 + EXIF 拍摄时间保留 + 目标存在报错）、
 //! 旋转后裁剪坐标、album 导出落位（{root}/{创建YYYY}/{创建MM}/{dir_name}/
-//! 平铺——与导入/claim 同公式 album_home_rel + subgroup + 重名后缀）、
+//! [{子组}/]——与导入/claim/移组同公式 album_item_home_rel；0022 子组物理化
+//! + subgroup + 重名后缀）、
 //! 文字/笔迹渲染冒烟、IPC 后台任务链路。
 
 mod common;
@@ -493,16 +494,18 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
     let options = album_options(album.id, Some("成片"));
     let row = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
 
-    // 落位：{root}/{创建YYYY}/{创建MM}/{dir_name}/{stem}_edit.jpg（相册内
-    // 平铺——与导入/claim 同公式 album_home_rel；外层=相册创建年月 UTC）
+    // 落位：{root}/{创建YYYY}/{创建MM}/{dir_name}/{子组}/{stem}_edit.jpg
+    // （0022 子组物理化：相册内平铺的唯一例外 = 子组段——与导入/claim/移组
+    // 同公式 album_item_home_rel；外层=相册创建年月 UTC）
     let dst = PathBuf::from(row.output_path.clone().unwrap());
     let expected = fixture
         .photo_root
         .join("2026")
         .join("04")
         .join(album.dir_name.clone())
+        .join("成片")
         .join("DSC_0004_edit.jpg");
-    assert_eq!(dst, expected, "album 落位路径");
+    assert_eq!(dst, expected, "album 落位路径（含子组段）");
     assert!(dst.is_file());
 
     // 登记：新资产 + album_item 子分组 + 拍摄时间/相机沿用
@@ -565,9 +568,18 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
         dst2.display()
     );
     assert!(dst2.is_file());
-    // 相册根（subgroup=None）
+    // 相册根（subgroup=None）→ 平铺主目录（无子组段；根目录首件无后缀）
     let options = album_options(album.id, None);
     let row3 = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
+    let dst3 = PathBuf::from(row3.output_path.clone().unwrap());
+    let expected3 = fixture
+        .photo_root
+        .join("2026")
+        .join("04")
+        .join(&album.dir_name)
+        .join("DSC_0004_edit.jpg");
+    assert_eq!(dst3, expected3, "subgroup 可空 = 相册根平铺");
+    assert!(dst3.is_file());
     let subgroup3: Option<String> = fixture
         .db
         .0

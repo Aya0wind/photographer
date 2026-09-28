@@ -2,14 +2,16 @@
 //!
 //! `album_claim_assets`：归入 = 物理挪移并改主相册。支持从日期根（历史
 //! 遗留）、从未分组、从任意相册主目录挪到目标相册目录
-//! （`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`，布局公式统一走
-//! [`crate::db::Db::album_home_rel`]——外层两段 = 相册创建时间年月
-//! （UTC 口径），相册内平铺，与导入/album 导出同公式；拍摄日分组在应用
-//! UI 完成）。同卷 rename 毫秒级；跨卷 copy（.part 原子落位）+ xxhash
-//! 校验 + 删源。XMP 边车随行；DB 路径同步更新。挪移成功后：从原主相册
-//! 移除引用（原主相册为「未分组」时保留——它是系统兜底袋，引用不清）+
-//! 目标相册引用建立。已在目标相册目录 → 幂等跳过（仅补引用）；外部库
-//! （origin=external，文件不在库内）拒绝挪移；回收站资产拒绝。
+//! （`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/[{子组}/]`，布局公式统一走
+//! [`crate::db::Db::album_item_home_rel`]——外层两段 = 相册创建时间年月
+//! （UTC 口径），相册内平铺，唯一例外 = 子组段（0022 物理化）：带
+//! subgroup 时落对应子文件夹，与导入/album 导出/移组同公式；拍摄日分组
+//! 在应用 UI 完成）。同卷 rename 毫秒级；跨卷 copy（.part 原子落位）+
+//! xxhash 校验 + 删源。XMP 边车随行；DB 路径同步更新。挪移成功后：从原
+//! 主相册移除引用（原主相册为「未分组」时保留——它是系统兜底袋，引用
+//! 不清）+ 目标相册引用建立。已在目标目录（含子组段）→ 幂等跳过（仅补
+//! 引用）；外部库（origin=external，文件不在库内）拒绝挪移；回收站资产
+//! 拒绝。
 //!
 //! 主相册判定（实现选型）：资产路径落在某相册主目录
 //! （`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`）前缀之下即归属该相册
@@ -80,8 +82,8 @@ fn volume_root_of(path: &Path) -> String {
 
 /// 路径分隔符归一（`\` → `/`）：库内 path 存在反斜杠（claim 挪移 join
 /// 产物）与正斜杠（引擎/导出 render_dir 渲染段）两种形态，前缀判定统一
-/// 按 `/` 比较。
-fn norm_sep(p: &str) -> String {
+/// 按 `/` 比较。0022 起移组挪移（ipc::album）与 claim 共用。
+pub(crate) fn norm_sep(p: &str) -> String {
     p.replace('\\', "/")
 }
 
@@ -95,7 +97,8 @@ fn album_prefix(photo_root: &str, home_rel: &str) -> String {
 }
 
 /// 冲突后缀：原名保留，重名追加 ` (2)`、` (3)`…（与导入引擎约定一致）。
-fn resolve_conflict(dir: &Path, filename: &str) -> PathBuf {
+/// 0022 起移组挪移（ipc::album）与 claim 共用。
+pub(crate) fn resolve_conflict(dir: &Path, filename: &str) -> PathBuf {
     let mut candidate = dir.join(filename);
     let (stem, ext) = match filename.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), Some(e.to_string())),
@@ -115,7 +118,8 @@ fn resolve_conflict(dir: &Path, filename: &str) -> PathBuf {
 
 /// 挪移单个文件（含 XMP 边车随行）：同卷 rename / 跨卷 copy+校验+删源。
 /// expected_xxhash 为库内权威指纹（0 哨兵 = 只校验 size）。
-fn move_file_with_sidecar(
+/// 0022 起移组挪移（ipc::album）与 claim 共用。
+pub(crate) fn move_file_with_sidecar(
     src: &Path,
     dst: &Path,
     size: u64,
@@ -191,9 +195,11 @@ pub fn fetch_album_claim_assets(
     if !db.album_exists(album_id).map_err(|e| e.to_string())? {
         return Err("相册不存在".into());
     }
-    // 挪移目标 = 相册主目录（布局公式统一 album_home_rel，与导入/导出一致）
+    // 挪移目标 = 相册内条目目录（布局公式统一 album_item_home_rel，与导入/
+    // 导出/移组一致；0022：带 subgroup 时含子组段——散在根的照片带子组
+    // 归册会物理挪进子文件夹）
     let home_rel = db
-        .album_home_rel(album_id)
+        .album_item_home_rel(album_id, subgroup)
         .map_err(|e| e.to_string())?
         .ok_or("相册不存在")?;
     let photo_root = state

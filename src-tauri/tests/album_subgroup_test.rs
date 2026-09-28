@@ -1,8 +1,10 @@
 //! 相册子分组（0019）：album_item.subgroup 命名层（NULL = 相册根）。
 //! 子分组清单（DISTINCT+计数升序）、根/子分组视图分页（subgroup /
 //! subgroup_is_null 过滤，默认整个相册）、加引用带子分组（重复加引用
-//! None 保持 / Some 改写）、挪子分组（根↔组↔组）、导入带子分组（resume
-//! 幂等）、claim 带子分组、lr_export_import 成片入子分组。
+//! None 保持 / Some 改写）、挪子分组账本基元（根↔组↔组；0022 物理化后
+//! IPC 层先物理挪移，db 层基元仍是纯引用 UPDATE——物理一致性见
+//! album_subgroup_physical_test）、导入带子分组（物理落子文件夹 + resume
+//! 幂等）、claim 带子分组（物理落子文件夹）、lr_export_import 成片入子分组。
 
 mod common;
 
@@ -295,6 +297,26 @@ fn import_with_album_subgroup_and_resume_idempotent() {
     assert_eq!(job_status(&db, job_id), "done");
     assert_eq!(stats.done_files, 3);
 
+    // 0022 物理化：文件真实落 {target}/{创建YYYY}/{创建MM}/{dir_name}/{子组}/
+    let home = db.album_home_rel(album.id).unwrap().unwrap();
+    let sub_dir = target.path().join(format!("{home}/机内直出"));
+    let paths: Vec<String> = db
+        .0
+        .prepare("SELECT path FROM assets ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(paths.len(), 3);
+    for path in &paths {
+        let p = std::path::PathBuf::from(path);
+        assert!(
+            p.starts_with(&sub_dir),
+            "导入件应落子组文件夹 {sub_dir:?}，实得 {path}"
+        );
+        assert!(p.is_file());
+    }
     let subgroups: Vec<String> = db
         .0
         .prepare("SELECT subgroup FROM album_item WHERE album_id = ?1 AND subgroup IS NOT NULL")
@@ -371,12 +393,18 @@ fn claim_with_subgroup_lands_named_layer() {
 
     let result = fetch_album_claim_assets(&state, album.id, &[id], Some("成片")).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
-    // 物理挪进相册目录 + 引用带子分组
+    // 物理挪进相册子组文件夹（0022：唯一不平铺例外）+ 引用带子分组
     assert!(!photo.exists());
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
             .unwrap();
-    assert!(moved_path.contains("交付册"));
+    let home = db.album_home_rel(album.id).unwrap().unwrap();
+    let expected = photo_root
+        .join(home.replace('/', std::path::MAIN_SEPARATOR_STR))
+        .join("成片")
+        .join("DSC_0001.jpg");
+    assert_eq!(moved_path.replace('/', std::path::MAIN_SEPARATOR_STR), expected.to_string_lossy());
+    assert!(expected.is_file());
     assert_eq!(subgroup_of(&db, album.id, id).as_deref(), Some("成片"));
 
     // 幂等重试：skipped 且子分组保持
