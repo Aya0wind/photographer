@@ -85,21 +85,21 @@ describe("OnboardingPage 向导", () => {
     sessionStorage.removeItem(NEW_LIBRARY_DRAFT_KEY);
   });
 
-  it("步骤1 预填本机默认值（主库 / I:\\SmartPhoto\\主库 / Y:\\照片 / SmartPhoto）", () => {
+  it("步骤1 只预填库名；目录留空待用户自选（2026-09-28 用户定规：无默认路径）", () => {
     renderWizard();
     expect((screen.getByLabelText("库名称") as HTMLInputElement).value).toBe("主库");
-    expect((screen.getByLabelText("数据库目录") as HTMLInputElement).value).toBe(
-      "I:\\SmartPhoto\\主库",
-    );
-    expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("Y:\\照片");
-    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+    expect((screen.getByLabelText("数据库目录") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
   });
 
-  it("照片存储目录为空时禁止下一步", () => {
+  it("两个目录都填后才允许下一步（dbDir 为空同样拦截）", () => {
     renderWizard();
-    fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "" } });
-    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\\照片" } });
+    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("数据库目录"), {
+      target: { value: "D:\\SmartPhoto\\db" },
+    });
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
 
@@ -118,7 +118,11 @@ describe("OnboardingPage 向导", () => {
   it("完整流程：走完四步并以正确负载提交设置", async () => {
     renderWizard();
 
-    // 步骤1 → 步骤2（AnimatePresence mode="wait"：切换有 180ms 退场动画，异步等待）
+    // 目录不再预填（2026-09-28）：手填两目录后才能进下一步
+    fireEvent.change(screen.getByLabelText("数据库目录"), {
+      target: { value: "D:\\SmartPhoto\\db" },
+    });
+    fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\\照片" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     // 目录布局已固定（dirTemplate 配置退役）：只读展示公式，无模板输入
     expect(await screen.findByText("目录布局（固定）")).toBeDefined();
@@ -147,8 +151,8 @@ describe("OnboardingPage 向导", () => {
     const libraries = settings["libraries"] as Array<Record<string, string | boolean>>;
     expect(libraries).toHaveLength(1);
     expect(libraries[0]["name"]).toBe("主库");
-    expect(libraries[0]["dbDir"]).toBe("I:\\SmartPhoto\\主库");
-    expect(libraries[0]["photoRoot"]).toBe("Y:\\照片");
+    expect(libraries[0]["dbDir"]).toBe("D:\\SmartPhoto\\db");
+    expect(libraries[0]["photoRoot"]).toBe("D:\\照片");
     // 目录布局固定（dirTemplate/importSubdir 均已退役不再落库）
     expect(libraries[0]["dirTemplate"]).toBeUndefined();
     expect(libraries[0]["importSubdir"]).toBeUndefined();
@@ -242,6 +246,8 @@ describe("退出与回退（取消 / 上一步 / 步骤指示器）", () => {
   it("上一步回退保留已填草稿（步骤1↔2 往返）", async () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText("库名称"), { target: { value: "旅行库" } });
+    fireEvent.change(screen.getByLabelText("数据库目录"), { target: { value: "D:\SmartPhoto\db" } });
+    fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\照片" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     await screen.findByText("目录布局（固定）");
     fireEvent.click(screen.getByRole("radio", { name: "重命名导入（追加 _1 后缀）" }));
@@ -259,6 +265,8 @@ describe("退出与回退（取消 / 上一步 / 步骤指示器）", () => {
   it("步骤指示器：已完成步可点击跳回，当前/未来步不可点；跳回草稿保留", async () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText("库名称"), { target: { value: "旅行库" } });
+    fireEvent.change(screen.getByLabelText("数据库目录"), { target: { value: "D:\SmartPhoto\db" } });
+    fireEvent.change(screen.getByLabelText("照片存储目录"), { target: { value: "D:\照片" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     await screen.findByText("目录布局（固定）");
 

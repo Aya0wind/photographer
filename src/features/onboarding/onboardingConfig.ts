@@ -1,11 +1,8 @@
 /**
- * 首次引导的本机默认值（达芬奇式库模型，spec §5.11）：
- * 引导创建首个库——名称"主库"、数据库目录 I:\SmartPhoto\主库（自包含可迁移）、
- * 照片存储目录 Y:\照片。三者均可在向导中修改。
+ * 首次引导默认值（达芬奇式库模型，spec §5.11）。只默认库名；目录一律
+ * 留空由用户自选（用户定规 2026-09-28：开发机路径不适合做默认路径）。
  */
 export const SUGGESTED_LIBRARY_NAME = "主库";
-export const SUGGESTED_DB_DIR = "I:\\SmartPhoto\\主库";
-export const SUGGESTED_PHOTO_ROOT = "Y:\\照片";
 
 /**
  * 固定目录布局公式（dirTemplate/importSubdir 配置退役，2026-09-28 定案）：

@@ -242,6 +242,7 @@ pub fn run() {
             ipc::settings::settings_get,
             ipc::settings::settings_set,
             ipc::settings::library_delete,
+            ipc::settings::library_relocate,
             ipc::device::device_list,
             ipc::device::device_scan,
             ipc::device::device_files,

@@ -1242,6 +1242,26 @@ export async function libraryDelete(
   });
 }
 
+/** 库照片存储目录整体重定位（library_relocate）：改配置 + 重写库内路径
+ *  前缀（前提：用户已在文件管理器把整树搬到新根）。apply=false 只预检。
+ *  不 catch：失败文案（相对路径拒绝/库不存在）透传给调用方。 */
+export interface LibraryRelocateResult {
+  affected: number;
+  unaffected: number;
+  rootExists: boolean;
+}
+export async function libraryRelocate(
+  libraryId: string,
+  newPhotoRoot: string,
+  apply: boolean,
+): Promise<LibraryRelocateResult> {
+  return ipc<LibraryRelocateResult>("library_relocate", {
+    libraryId,
+    newPhotoRoot,
+    apply,
+  });
+}
+
 /** 侧栏导航计数（sidebar_counts：一次性纯 COUNT；后端在途契约——
  *  命令未注册/失败/形状异常静默 null，侧栏不显示徽标） */
 export interface SidebarCounts {

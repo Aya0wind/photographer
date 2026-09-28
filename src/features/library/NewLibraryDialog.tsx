@@ -3,11 +3,7 @@ import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
-import {
-  SUGGESTED_DB_DIR,
-  SUGGESTED_LIBRARY_NAME,
-  SUGGESTED_PHOTO_ROOT,
-} from "@/features/onboarding/onboardingConfig";
+import { SUGGESTED_LIBRARY_NAME } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
 
 /**
@@ -58,8 +54,8 @@ interface Draft {
 function defaultDraft(): Draft {
   return {
     name: SUGGESTED_LIBRARY_NAME,
-    dbDir: SUGGESTED_DB_DIR,
-    photoRoot: SUGGESTED_PHOTO_ROOT,
+    dbDir: "",
+    photoRoot: "",
     streams: 4,
   };
 }

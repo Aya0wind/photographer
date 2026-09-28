@@ -90,6 +90,87 @@ pub async fn library_delete(
     .await
 }
 
+/// 库重定位结果（camelCase）：affected=旧根前缀重写数；unaffected=不在
+/// 旧根下（外部根/历史遗留）保持原样的数量；rootExists=新根当前是否在盘。
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRelocateDto {
+    pub affected: u64,
+    pub unaffected: u64,
+    pub root_exists: bool,
+}
+
+/// 库照片存储目录整体重定位（用户定案 2026-09-28「整体重定位」语义）：
+/// 前提是用户已在文件管理器把整个照片树搬到新根，应用负责改配置 + 重写
+/// 库内路径前缀（大小写/斜杠不敏感）+ 重排缩略图任务。apply=false 只预检
+/// 返回计数。新根不必当前在盘（可先改后挂载；缺失走 missing 终态提示）。
+pub fn fetch_library_relocate(
+    state: &super::AppState,
+    library_id: &str,
+    new_photo_root: &str,
+    apply: bool,
+) -> Result<LibraryRelocateDto, String> {
+    let normalized = crate::settings::normalize_library_path(new_photo_root)?;
+    let root_exists = std::path::Path::new(&normalized).is_dir();
+    let (db_dir, old_root) = {
+        let settings = state.settings.lock().expect("settings mutex poisoned");
+        let lib = settings
+            .libraries
+            .iter()
+            .find(|l| l.id == library_id)
+            .ok_or_else(|| format!("库不存在：{library_id}"))?;
+        (lib.db_dir.clone(), lib.photo_root.clone())
+    };
+    let same_root = normalized.eq_ignore_ascii_case(&old_root);
+    let db = super::open_library_db(std::path::Path::new(&db_dir))?;
+    let (affected, unaffected) = if apply && !same_root {
+        db.rewrite_asset_roots(&old_root, &normalized)?
+    } else {
+        db.inspect_asset_roots(&old_root)?
+    };
+    if apply && !same_root {
+        // DB 已提交在先；配置写失败时用户对同一目标重试即自愈
+        // （路径已重写 → affected=0 → 只补配置落盘）。
+        let snapshot = {
+            let mut settings = state.settings.lock().expect("settings mutex poisoned");
+            if let Some(lib) = settings.libraries.iter_mut().find(|l| l.id == library_id) {
+                lib.photo_root = normalized.clone();
+            }
+            settings.clone()
+        };
+        SettingsManager::save(&snapshot, &state.config_dir).map_err(|e| e.to_string())?;
+        crate::index::kick(std::path::PathBuf::from(&db_dir), &state.supervisor);
+    }
+    Ok(LibraryRelocateDto {
+        affected,
+        unaffected,
+        root_exists,
+    })
+}
+
+/// 重定位库照片存储目录（library_relocate）：DB 批量重写 + settings 落盘
+/// + 事件 → 后台线程执行（铁律：批量 UPDATE 不上主线程）。
+#[tauri::command]
+pub async fn library_relocate(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    library_id: String,
+    new_photo_root: String,
+    apply: bool,
+) -> Result<LibraryRelocateDto, String> {
+    let shared = state.inner().clone();
+    let dto = run_blocking(shared, move |state| {
+        fetch_library_relocate(&state, &library_id, &new_photo_root, apply)
+    })
+    .await?;
+    if apply {
+        // settings 已在后台落盘并更新内存快照；事件通知前端刷新
+        let snapshot = state.settings.lock().expect("settings mutex poisoned").clone();
+        let _ = app.emit("settings://changed", &snapshot);
+    }
+    Ok(dto)
+}
+
 /// 读取当前设置（内存快照）。
 #[tauri::command]
 pub fn settings_get(state: State<SharedState>) -> Settings {

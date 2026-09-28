@@ -528,7 +528,7 @@
   "wizard.duplicatePolicy": "重复文件处理",
   "wizard.skipImported": "跳过已导入文件（按内容指纹）",
   "wizard.album.label": "存入相册（必选，照片归入相册目录）",
-    "wizard.album.existing": "存入已有相册",
+  "wizard.album.existing": "存入已有相册",
   "wizard.album.new": "新建相册（同时创建相册目录）",
   "wizard.album.selectPlaceholder": "选择相册…",
   "wizard.album.pathPreview": "导入位置预览",
@@ -693,7 +693,6 @@
   "viewer.ai.eyes.maybe": "可能闭眼",
   "viewer.ai.eyes.noFace": "未检出人脸（无法判定闭眼）",
   "viewer.ai.eyes.notAnalyzed": "未分析",
-  
   "viewer.dupItems": "{{count}} 张",
   "viewer.index": "{{index}} / {{total}}",
   "viewer.close": "关闭",
@@ -968,7 +967,7 @@
   "editor.error.folderNameMissing": "请输入导出文件名",
   "editor.error.folderNameInvalid": "文件名包含非法字符（\\ / : * ? \" < > |）",
   "editor.error.albumMissing": "请选择要加入的相册",
-    "editor.error.longEdgeInvalid": "长边必须为正整数（留空 = 原尺寸）",
+  "editor.error.longEdgeInvalid": "长边必须为正整数（留空 = 原尺寸）",
   "culling.title": "选片会话",
   "culling.desc": "全屏快速过片，进度随时保存、下次原位续选",
   "culling.activeSection": "进行中",
@@ -1056,5 +1055,16 @@
   "albums.cull": "选片",
   "albums.cullBusy": "创建中…",
   "albums.cullHint": "对整个相册发起选片会话",
-  "albums.cullHintSubgroup": "对子分组「{{subgroup}}」发起选片会话"
+  "albums.cullHintSubgroup": "对子分组「{{subgroup}}」发起选片会话",
+  "settings.relocate.title": "重定位照片存储目录：{{name}}",
+  "settings.relocate.hint": "适用于已在文件管理器把整棵照片目录树搬到新位置的场景。应用将修改库配置并把库内路径前缀重写指向新根；缩略图会自动重建。",
+  "settings.relocate.newRoot": "新照片根目录（绝对路径）",
+  "settings.relocate.browse": "选择…",
+  "settings.relocate.affected": "将重写 {{count}} 张照片的库内路径。",
+  "settings.relocate.unaffected": "另有 {{count}} 张不在旧根下，保持原样。",
+  "settings.relocate.rootMissing": "新目录当前不存在（可先改后挂载；缺失照片会显示「源文件缺失」标记）。",
+  "settings.relocate.confirm": "确认重定位",
+  "settings.relocate.applying": "重定位中…",
+  "settings.relocate.done": "完成：重写 {{affected}} 张路径（{{unaffected}} 张不动）。库照片根已更新为 {{root}}。",
+  "settings.relocate.open": "重定位…"
 }

@@ -262,9 +262,10 @@ pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
 /// dev watcher 风暴。规则：
 /// ① 必须是绝对路径（`Path::is_absolute()`——Windows 上 `I:xxx` 无根
 ///    分量因此为 false），否则拒绝；
-/// ② 存在于盘 → `fs::canonicalize`（剥掉 `\\?\` verbatim 前缀）；
-/// ③ 尚未创建（建库时目录还没落）→ 按组件逻辑归一：正斜杠折成反斜杠、
-///    折叠 `.`/`..`，保持绝对形态与用户大小写。
+/// ② 组件级逻辑归一（始终）：正斜杠折成反斜杠、折叠 `.`/`..`，保持绝对
+///    形态与用户大小写。**不走 fs::canonicalize**（2026-09-28 修正：会把
+///    映射盘 Y:\ 翻成 UNC 形态，导致库内盘符路径前缀匹配失效、且与用户
+///    配置形态漂移；绝对性校验已由 ① 保证，canonical 不再必要）。
 pub fn normalize_library_path(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -274,11 +275,7 @@ pub fn normalize_library_path(input: &str) -> Result<String, String> {
     if !path.is_absolute() {
         return Err(format!("路径必须是绝对路径：{trimmed}"));
     }
-    let normalized = match std::fs::canonicalize(path) {
-        Ok(canonical) => strip_verbatim_prefix(canonical),
-        Err(_) => logical_normalize(path),
-    };
-    Ok(normalized.to_string_lossy().into_owned())
+    Ok(logical_normalize(path).to_string_lossy().into_owned())
 }
 
 /// 全部库的 db_dir / photo_root 逐一规范化（settings_set 前置；任一非法
@@ -289,19 +286,6 @@ pub fn normalize_library_paths(settings: &mut Settings) -> Result<(), String> {
         lib.photo_root = normalize_library_path(&lib.photo_root)?;
     }
     Ok(())
-}
-
-/// 剥掉 Windows canonicalize 的 `\\?\` verbatim 前缀（`\\?\UNC\server\…`
-/// 还原为 `\\server\…`），让落盘/回传前端的路径保持常规形态。
-fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        std::path::PathBuf::from(format!(r"\\{rest}"))
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        std::path::PathBuf::from(rest.to_owned())
-    } else {
-        path
-    }
 }
 
 /// 组件级逻辑归一（目标路径尚不存在时的兜底）：`/` 分隔符经 components

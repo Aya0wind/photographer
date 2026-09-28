@@ -12,11 +12,7 @@ import AiStep from "../steps/AiStep";
 import DoneStep from "../steps/DoneStep";
 import ImportSchemeStep from "../steps/ImportSchemeStep";
 import LibraryStep from "../steps/LibraryStep";
-import {
-  SUGGESTED_DB_DIR,
-  SUGGESTED_LIBRARY_NAME,
-  SUGGESTED_PHOTO_ROOT,
-} from "../onboardingConfig";
+import { SUGGESTED_LIBRARY_NAME } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
 import { resetLibrarySession } from "@/lib/librarySession";
@@ -34,12 +30,12 @@ function makeLibraryId(): string {
     : `lib-${Date.now().toString(36)}`;
 }
 
-/** 新建库草稿：本机默认值（名称/目录预填，可改）；目录布局固定不再收集 */
+/** 新建库草稿：只默认库名；目录留空由用户自选（2026-09-28 用户定规） */
 function newLibraryDraft(): OnboardingDraft {
   return {
     libraryName: SUGGESTED_LIBRARY_NAME,
-    dbDir: SUGGESTED_DB_DIR,
-    photoRoot: SUGGESTED_PHOTO_ROOT,
+    dbDir: "",
+    photoRoot: "",
     duplicatePolicy: "skip",
     notifyMilestones: true,
     aiChoice: "all",

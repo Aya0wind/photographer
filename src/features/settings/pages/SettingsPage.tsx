@@ -3,9 +3,10 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
+import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags } from "@/features/albums/lib/smartTags";
-import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
+import { useSettingsStore, type DeepPartial, type Library, type Settings } from "@/stores/settingsStore";
 
 /**
  * 设置页（经典工业风选项卡）：常规 / 导入 / 库 / AI 四个水平 tab
@@ -218,6 +219,7 @@ export default function SettingsPage() {
   const settings = useSettingsStore((s) => s.settings);
   // 深链 ?tab=ai（语义门禁/未就绪引导卡的「去设置」直达；非法值回常规）
   const [searchParams] = useSearchParams();
+  const [relocating, setRelocating] = useState<Library | null>(null);
   const urlTab = searchParams.get("tab");
   const [tab, setTab] = useState<SettingsTab>(
     TABS.some((item) => item.key === urlTab) ? (urlTab as SettingsTab) : "general",
@@ -431,7 +433,21 @@ export default function SettingsPage() {
                   value={library?.name ?? null}
                   mono={false}
                 />
-                <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
+                <div className="flex items-center justify-between gap-8">
+                  <div className="min-w-0 flex-1">
+                    <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
+                  </div>
+                  {library !== null && (
+                    <button
+                      type="button"
+                      onClick={() => setRelocating(library)}
+                      className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                      data-testid="settings-library-relocate"
+                    >
+                      {t("settings.relocate.open")}
+                    </button>
+                  )}
+                </div>
                 <InfoRow label={t("pages.settings.dbDir")} value={library?.dbDir ?? null} />
               </div>
 
@@ -539,6 +555,9 @@ export default function SettingsPage() {
       </div>
 
       <NewLibraryDialog open={newLibOpen} onClose={() => setNewLibOpen(false)} />
+      {relocating !== null && (
+        <RelocateLibraryDialog library={relocating} onClose={() => setRelocating(null)} />
+      )}
     </div>
   );
 }
