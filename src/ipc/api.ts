@@ -2124,7 +2124,7 @@ export async function cullSessionList(): Promise<CullSessionDto[]> {
 /** 打开会话续选（cull_session_open：会话 + 决定表）；失败/形状异常返回 null */
 export async function cullSessionOpen(id: number): Promise<CullSessionOpenResult | null> {
   try {
-    const raw = await ipc<unknown>("cull_session_open", { id });
+    const raw = await ipc<unknown>("cull_session_open", { sessionId: id });
     if (raw === null || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
     const session = normalizeCullSession(r.session);
@@ -2164,7 +2164,7 @@ export async function cullDecisionApply(
 /** 会话改名（cull_session_rename）；命令失败 false */
 export async function cullSessionRename(id: number, name: string): Promise<boolean> {
   try {
-    await ipc<void>("cull_session_rename", { id, name });
+    await ipc<void>("cull_session_rename", { sessionId: id, name });
     return true;
   } catch {
     return false;
@@ -2174,7 +2174,7 @@ export async function cullSessionRename(id: number, name: string): Promise<boole
 /** 丢弃会话（cull_session_discard：仅删会话+决定表，不动库内照片/标记） */
 export async function cullSessionDiscard(id: number): Promise<boolean> {
   try {
-    await ipc<void>("cull_session_discard", { id });
+    await ipc<void>("cull_session_discard", { sessionId: id });
     return true;
   } catch {
     return false;
@@ -2187,7 +2187,7 @@ export async function cullSessionFinish(
   apply: CullFinishApply,
 ): Promise<CullFinishResult | null> {
   try {
-    const raw = await ipc<unknown>("cull_session_finish", { id, apply });
+    const raw = await ipc<unknown>("cull_session_finish", { sessionId: id, apply });
     if (raw === null || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
     const numOf = (v: unknown): number =>

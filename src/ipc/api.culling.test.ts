@@ -94,7 +94,7 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     });
     const opened = await cullSessionOpen(7);
 
-    expect(invokeMock).toHaveBeenCalledWith("cull_session_open", { id: 7 });
+    expect(invokeMock).toHaveBeenCalledWith("cull_session_open", { sessionId: 7 });
     expect(opened).not.toBeNull();
     expect(opened?.items).toEqual([
       { assetId: 1, decision: "accepted", origin: "manual" },
@@ -127,10 +127,10 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
   it("cullSessionRename / cullSessionDiscard：命令名与参数；失败 false", async () => {
     invokeMock.mockResolvedValue(undefined);
     await expect(cullSessionRename(7, "复选")).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith("cull_session_rename", { id: 7, name: "复选" });
+    expect(invokeMock).toHaveBeenCalledWith("cull_session_rename", { sessionId: 7, name: "复选" });
 
     await expect(cullSessionDiscard(7)).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith("cull_session_discard", { id: 7 });
+    expect(invokeMock).toHaveBeenCalledWith("cull_session_discard", { sessionId: 7 });
 
     invokeMock.mockRejectedValue("boom");
     await expect(cullSessionRename(7, "x")).resolves.toBe(false);
@@ -146,7 +146,7 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     });
 
     expect(invokeMock).toHaveBeenCalledWith("cull_session_finish", {
-      id: 7,
+      sessionId: 7,
       apply: { acceptedFlag: true, acceptedRating: null, rejectRejected: true },
     });
     expect(result).toEqual({ appliedFlag: 40, appliedRating: 0, rejected: 30 });
