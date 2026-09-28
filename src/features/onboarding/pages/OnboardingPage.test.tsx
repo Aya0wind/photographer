@@ -60,7 +60,6 @@ const CONFIGURED_LIB: Library = {
   name: "主库",
   dbDir: "D:\\db",
   photoRoot: "D:\\照片",
-  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
 streams: 4,
@@ -72,7 +71,6 @@ const FRESH_LIB: Library = {
   name: "新库",
   dbDir: "D:\\db2",
   photoRoot: "D:\\新照片",
-  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: false,
 streams: 4,
@@ -125,16 +123,10 @@ describe("OnboardingPage 向导", () => {
 
     // 步骤1 → 步骤2（AnimatePresence mode="wait"：切换有 180ms 退场动画，异步等待）
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    const templateInput = await screen.findByLabelText("目录命名模板");
-
-    // 未知令牌：警告 + 禁止下一步（易错路径覆盖）
-    fireEvent.change(templateInput, { target: { value: "{BAD}" } });
-    expect(screen.getByRole("alert").textContent).toContain("{BAD}");
-    expect(screen.getByRole("button", { name: "下一步" })).toBeDisabled();
-    fireEvent.change(templateInput, {
-      target: { value: "{YYYY}/{MM-DD}/{原文件名}" },
-    });
-    expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
+    // 目录布局已固定（dirTemplate 配置退役）：只读展示公式，无模板输入
+    expect(await screen.findByText("目录布局（固定）")).toBeDefined();
+    expect(screen.getByText("{相册创建年}\\{相册创建月}\\{相册目录}")).toBeInTheDocument();
+    expect(screen.queryByLabelText("目录命名模板")).not.toBeInTheDocument();
 
     // 步骤2 → 步骤3：选"仅语义搜索"
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
@@ -160,8 +152,8 @@ describe("OnboardingPage 向导", () => {
     expect(libraries[0]["name"]).toBe("主库");
     expect(libraries[0]["dbDir"]).toBe("I:\\SmartPhoto\\主库");
     expect(libraries[0]["photoRoot"]).toBe("Y:\\照片");
-    // 库级导入整理规则（新架构：随库走）
-    expect(libraries[0]["dirTemplate"]).toBe("{YYYY}/{MM-DD}/{原文件名}");
+    // 库级导入整理规则（新架构：随库走）；dirTemplate 已退役不再落库
+    expect(libraries[0]["dirTemplate"]).toBeUndefined();
     expect(libraries[0]["importSubdir"]).toBe("SmartPhoto");
     expect(libraries[0]["configured"]).toBe(true);
     const ai = settings["ai"] as Record<string, unknown>;
@@ -187,8 +179,7 @@ describe("OnboardingPage 向导", () => {
             name: "旧库",
             dbDir: "I:\\SmartPhoto\\旧库",
             photoRoot: "Z:\\旧照片",
-            dirTemplate: "{YYYY}/{MM}",
-            importSubdir: "Import",
+                      importSubdir: "Import",
             configured: false,
             streams: 3,
           },
@@ -208,9 +199,8 @@ describe("OnboardingPage 向导", () => {
     expect((screen.getByLabelText("导入子目录") as HTMLInputElement).value).toBe("Import");
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect((await screen.findByLabelText("目录命名模板") as HTMLInputElement).value).toBe(
-      "{YYYY}/{MM}",
-    );
+    // 步骤2 只读展示固定目录布局（模板输入已退役）
+    expect(await screen.findByText("目录布局（固定）")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     fireEvent.click(await screen.findByRole("button", { name: "下一步" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始使用 Photo Hub" }));
@@ -258,24 +248,24 @@ describe("退出与回退（取消 / 上一步 / 步骤指示器）", () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText("库名称"), { target: { value: "旅行库" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    const templateInput = await screen.findByLabelText("目录命名模板");
-    fireEvent.change(templateInput, { target: { value: "{YYYY}/{MM}" } });
+    await screen.findByText("目录布局（固定）");
+    fireEvent.click(screen.getByRole("radio", { name: "重命名导入（追加 _1 后缀）" }));
 
     fireEvent.click(screen.getByRole("button", { name: "上一步" }));
 
-    // 回到步骤1：名称草稿保留；再前进：模板草稿保留（draft 常驻内存不重置）
+    // 回到步骤1：名称草稿保留；再前进：查重策略草稿保留（draft 常驻内存不重置）
     expect((await screen.findByLabelText("库名称") as HTMLInputElement).value).toBe("旅行库");
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    expect((await screen.findByLabelText("目录命名模板") as HTMLInputElement).value).toBe(
-      "{YYYY}/{MM}",
-    );
+    expect(
+      await screen.findByRole("radio", { name: "重命名导入（追加 _1 后缀）" }),
+    ).toBeChecked();
   });
 
   it("步骤指示器：已完成步可点击跳回，当前/未来步不可点；跳回草稿保留", async () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText("库名称"), { target: { value: "旅行库" } });
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-    await screen.findByLabelText("目录命名模板");
+    await screen.findByText("目录布局（固定）");
 
     // 步骤2（index 1）：步骤0 已完成可点；当前步与未来步禁用
     expect(screen.getByTestId("onboarding-step-0")).toBeEnabled();

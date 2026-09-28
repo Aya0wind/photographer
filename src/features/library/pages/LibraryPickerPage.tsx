@@ -175,12 +175,6 @@ export default function LibraryPickerPage() {
                       <span className="truncate font-mono text-[11px] text-text-muted" title={lib.dbDir}>
                         {lib.dbDir}
                       </span>
-                      <span
-                        className="truncate font-mono text-[11px] text-text-muted"
-                        title={lib.dirTemplate}
-                      >
-                        {lib.dirTemplate}
-                      </span>
                     </div>
                   </div>
                   {unconfigured && (

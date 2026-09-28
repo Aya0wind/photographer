@@ -99,7 +99,6 @@ const LIB_A: Library = {
   name: "主库",
   dbDir: "D:\\SmartPhoto\\db",
   photoRoot: "D:\\Photos",
-  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
 streams: 4,
@@ -109,7 +108,6 @@ const LIB_B: Library = {
   name: "工作库",
   dbDir: "E:\\db2",
   photoRoot: "E:\\照片",
-  dirTemplate: "{YYYY}/{MM}",
   importSubdir: "",
   configured: true,
 streams: 4,
@@ -255,7 +253,7 @@ describe("「库」选项卡（保留库管理能力）", () => {
     expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
   });
 
-  it("当前库信息只读：名称/照片目录/数据库目录/导入收纳区/模板", async () => {
+  it("当前库信息只读：名称/照片目录/数据库目录/导入收纳区（模板行已退役）", async () => {
     useSettingsStore.setState((s) => ({
       settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
     }));
@@ -268,7 +266,8 @@ describe("「库」选项卡（保留库管理能力）", () => {
     expect(within(current).getByText("D:\\Photos")).toBeInTheDocument();
     expect(within(current).getByText("D:\\SmartPhoto\\db")).toBeInTheDocument();
     expect(within(current).getByText("D:\\Photos\\SmartPhoto")).toBeInTheDocument();
-    expect(within(current).getByText("{YYYY}/{MM-DD}/{原文件名}")).toBeInTheDocument();
+    // dirTemplate 配置退役：不再展示库模板
+    expect(within(current).queryByText("目录模板")).not.toBeInTheDocument();
   });
 
   it("并发流数（库属性）：分段展示当前值，改即存并落盘", async () => {

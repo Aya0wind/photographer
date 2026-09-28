@@ -10,6 +10,7 @@ import {
   albumList,
   albumSubgroups,
   deviceFiles,
+  FIXED_PLAN_DIR_TEMPLATE,
   folderScan,
   fsListDirs,
   importStart,
@@ -24,7 +25,7 @@ import {
   type ImportPlan,
 } from "@/ipc/api";
 import { formatBytes } from "@/lib/format";
-import { previewTemplate, importRootOf } from "@/features/onboarding/onboardingConfig";
+import { FIXED_ALBUM_LAYOUT, importRootOf } from "@/features/onboarding/onboardingConfig";
 import {
   isUngroupedAlbum,
   subgroupSuggestions,
@@ -39,8 +40,8 @@ import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind
  * 顶部=复制/移动分段模式条；左=设备卡列表 + 文件系统懒加载目录树
  * （点击文件夹名=选中该文件夹为源，folderScan 成 FOLDER: 源）+ 最近使用源
  * + 源文件树；中=文件区双视图（列表默认 / 缩略图网格，右栏切换并持久化，
- * 两视图均虚拟化、共享勾选语义与统计条）；右=方案面板（查看方式/目标根目录/
- * 目录模板三预设+自定义实时预览/查重策略/并发流数，MTP 强制 1）。
+ * 两视图均虚拟化、共享勾选语义与统计条）；右=方案面板（查看方式/目标根与固定
+ * 目录布局展示/查重策略/存入相册与实时路径预览，MTP 强制 1）。
  *
  * 缩略图：photo 走 asset 协议（convertFileSrc，folder=去前缀路径/volume=设备id
  * + relPath，MTP 无文件系统路径恒占位），信号量限 6 张在途解码，onLoad 150ms
@@ -1342,16 +1343,14 @@ export default function ImportWizard() {
     seenFiles.current = { id: selectedId, paths: next };
   }, [selectedId, files]);
 
-  // 方案状态：目标根/模板从激活库合成（只读；旧库缺字段时以全局设置兜底）
-  const libraryDirTemplateFull = activeLibrary?.dirTemplate ?? importSettings.dirTemplate;
+  // 方案状态：目标根从激活库合成（只读；旧库缺字段时以全局设置兜底）。
+  // 目录布局已固定（时间/相册+平铺，dirTemplate 配置退役 2026-09-28）：
+  // 具体落位见相册区实时预览，此处不再展示库级模板。
   const libraryImportSubdir = activeLibrary?.importSubdir ?? importSettings.importSubdir;
   const libraryPhotoRoot = activeLibrary?.photoRoot ?? "";
   const targetRoot = libraryPhotoRoot
     ? importRootOf(libraryPhotoRoot, libraryImportSubdir)
     : "";
-  // plan 的目录段 = 库模板去掉尾部 {原文件名}；nameTemplate 恒为 {原文件名}
-  const dirTemplate = libraryDirTemplateFull.replace(/\/?\{原文件名\}\s*$/, "");
-  const locationPreview = previewTemplate(dirTemplate, targetRoot);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
   // 存入相册（规格修订后必选）：无「不添加」分支；默认预选系统保底相册「未分组」，
@@ -1664,14 +1663,18 @@ export default function ImportWizard() {
     const plan: ImportPlan = {
       sourceId: device.id,
       targetRoot,
-      dirTemplate,
+      // 过渡期兼容占位（后端 ImportPlan.dir_template 必填）：相册导入下后端
+      // begin 阶段整体覆写为 {相册创建YYYY}/{MM}/{dir_name}，此值不影响落位
+      dirTemplate: FIXED_PLAN_DIR_TEMPLATE,
       nameTemplate: "{原文件名}",
       duplicatePolicy,
       skipImported,
       streams: effectiveStreams,
       mode,
       secondTarget:
-        secondEnabled && secondRoot.trim() ? { targetRoot: secondRoot.trim(), dirTemplate } : undefined,
+        secondEnabled && secondRoot.trim()
+          ? { targetRoot: secondRoot.trim(), dirTemplate: FIXED_PLAN_DIR_TEMPLATE }
+          : undefined,
       // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
       include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
       // 添加到相册（可选）：导入完成后新入库照片加入该相册
@@ -2099,22 +2102,16 @@ export default function ImportWizard() {
                   </div>
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="shrink-0 text-[11px] text-text-muted">
-                      {t("wizard.location.template")}
+                      {t("wizard.location.layout")}
                     </span>
                     <span
                       className="truncate font-mono text-[11px] text-text-secondary"
-                      title={libraryDirTemplateFull}
+                      title={FIXED_ALBUM_LAYOUT}
+                      data-testid="wizard-preview"
                     >
-                      {libraryDirTemplateFull}
+                      {FIXED_ALBUM_LAYOUT}
                     </span>
                   </div>
-                  <p
-                    className="mt-1 truncate rounded border border-edge bg-surface px-2 py-1 font-mono text-[11px] text-text-muted"
-                    title={locationPreview}
-                    data-testid="wizard-preview"
-                  >
-                    {locationPreview}
-                  </p>
                 </>
               ) : (
                 <p className="text-[11px] leading-relaxed text-text-muted">

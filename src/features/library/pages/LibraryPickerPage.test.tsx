@@ -18,7 +18,6 @@ const LIB_A: Library = {
   name: "主库",
   dbDir: "I:\\SmartPhoto\\主库",
   photoRoot: "Y:\\照片",
-  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
 streams: 4,
@@ -28,7 +27,6 @@ const LIB_B: Library = {
   name: "工作库",
   dbDir: "E:\\db2",
   photoRoot: "E:\\照片",
-  dirTemplate: "{YYYY}/{MM}",
   importSubdir: "",
   configured: true,
 streams: 4,
@@ -72,7 +70,7 @@ beforeEach(() => {
 });
 
 describe("LibraryPickerPage（达芬奇式启动首屏）", () => {
-  it("渲染库卡片：名称/目录/模板摘要 + 上次使用标记 + 激活库预选", async () => {
+  it("渲染库卡片：名称/目录摘要 + 上次使用标记 + 激活库预选（模板行已退役）", async () => {
     setLibraries([LIB_A, LIB_B], "lib-1");
     renderPicker();
 
@@ -82,7 +80,8 @@ describe("LibraryPickerPage（达芬奇式启动首屏）", () => {
     const cardB = cards.find((el) => el.getAttribute("data-library-id") === "lib-2");
     expect(cardA).toHaveTextContent("主库");
     expect(cardA).toHaveTextContent("Y:\\照片");
-    expect(cardA).toHaveTextContent("{YYYY}/{MM-DD}/{原文件名}");
+    // dirTemplate 配置退役：卡片不再展示模板摘要
+    expect(cardA).not.toHaveTextContent("{YYYY}");
     expect(cardA).toHaveTextContent("上次使用");
     expect(cardA).toHaveAttribute("data-selected", "true");
     expect(cardB).toHaveAttribute("data-selected", "false");

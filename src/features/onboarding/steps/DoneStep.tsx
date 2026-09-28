@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { importRootOf, previewTemplate } from "../onboardingConfig";
+import { FIXED_ALBUM_LAYOUT } from "../onboardingConfig";
 import type { OnboardingDraft } from "../types";
 
 interface Props {
@@ -26,8 +26,7 @@ export default function DoneStep({ draft }: Props) {
     <div className="flex flex-col gap-3">
       <Row label={t("onboarding.done.library")} value={`${draft.libraryName}（${draft.photoRoot}）`} />
       <Row label={t("onboarding.done.dbDir")} value={draft.dbDir} />
-      <Row label={t("onboarding.done.template")} value={draft.dirTemplate} />
-      <Row label={t("onboarding.done.preview")} value={previewTemplate(draft.dirTemplate, importRootOf(draft.photoRoot))} />
+      <Row label={t("onboarding.done.layout")} value={FIXED_ALBUM_LAYOUT} />
       <Row label={t("onboarding.done.duplicate")} value={t(`onboarding.scheme.dup.${draft.duplicatePolicy}`)} />
       <Row label={t("onboarding.done.ai")} value={t(`onboarding.ai.choice.${draft.aiChoice}`)} />
       <p className="mt-2 text-xs text-text-muted">{t("onboarding.done.note")}</p>

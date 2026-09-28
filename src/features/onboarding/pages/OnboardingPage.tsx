@@ -17,7 +17,6 @@ import {
   SUGGESTED_DB_DIR,
   SUGGESTED_LIBRARY_NAME,
   SUGGESTED_PHOTO_ROOT,
-  unknownTokens,
 } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
@@ -36,14 +35,13 @@ function makeLibraryId(): string {
     : `lib-${Date.now().toString(36)}`;
 }
 
-/** 新建库草稿：本机默认值（名称/目录预填，可改） */
+/** 新建库草稿：本机默认值（名称/目录预填，可改）；目录布局固定不再收集 */
 function newLibraryDraft(): OnboardingDraft {
   return {
     libraryName: SUGGESTED_LIBRARY_NAME,
     dbDir: SUGGESTED_DB_DIR,
     photoRoot: SUGGESTED_PHOTO_ROOT,
     importSubdir: DEFAULT_IMPORT_SUBDIR,
-    dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
     duplicatePolicy: "skip",
     notifyMilestones: true,
     aiChoice: "all",
@@ -57,7 +55,6 @@ function draftFromLibrary(library: Library): OnboardingDraft {
     dbDir: library.dbDir,
     photoRoot: library.photoRoot,
     importSubdir: library.importSubdir || DEFAULT_IMPORT_SUBDIR,
-    dirTemplate: library.dirTemplate || "{YYYY}/{MM-DD}/{原文件名}",
     duplicatePolicy: "skip",
     notifyMilestones: true,
     aiChoice: "all",
@@ -72,10 +69,7 @@ function canProceed(step: number, draft: OnboardingDraft): boolean {
         draft.dbDir.trim().length > 0 &&
         draft.photoRoot.trim().length > 0
       );
-    case 1:
-      return draft.dirTemplate.trim().length > 0 && unknownTokens(draft.dirTemplate).length === 0;
-    case 2:
-      return true;
+    // 步骤 2 只收集查重策略/通知偏好，无必填校验（目录布局已固定）
     default:
       return true;
   }
@@ -119,7 +113,6 @@ export default function OnboardingPage() {
       name: draft.libraryName.trim(),
       dbDir: draft.dbDir.trim(),
       photoRoot: draft.photoRoot.trim(),
-      dirTemplate: draft.dirTemplate.trim(),
       importSubdir: draft.importSubdir.trim(),
       streams: existing?.streams ?? 4,
       configured: true,
@@ -133,10 +126,9 @@ export default function OnboardingPage() {
       onboardingCompleted: true,
       libraries,
       activeLibraryId: library.id,
-      // 全局 ImportSettings 仅作后续新建库的默认值
+      // 全局 ImportSettings 仅作后续新建库的默认值（目录布局固定，不再写模板）
       import: {
         ...current.import,
-        dirTemplate: draft.dirTemplate.trim(),
         duplicatePolicy: draft.duplicatePolicy,
         notifyMilestones: draft.notifyMilestones,
       },

@@ -443,7 +443,6 @@ export default function SettingsPage() {
                       : null
                   }
                 />
-                <InfoRow label={t("settings.libraries.template")} value={library?.dirTemplate ?? null} />
               </div>
 
               {/* 并发流数（库属性）：1-4 分段，改即存；无激活库时占位 */}

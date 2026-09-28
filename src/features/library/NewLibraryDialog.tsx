@@ -111,7 +111,6 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
       name: draft.name.trim(),
       dbDir: draft.dbDir.trim(),
       photoRoot: draft.photoRoot.trim(),
-      dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
       importSubdir: draft.importSubdir.trim(),
       streams: draft.streams,
       configured: false,

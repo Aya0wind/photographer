@@ -5,7 +5,9 @@ import { ipc } from "@/ipc";
 import type { AiQualityTier } from "@/ipc/api";
 
 /** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储。
- *  导入整理规则随库走：dirTemplate（含 {原文件名} 的完整模板）与 importSubdir（应用写入区名）；
+ *  导入整理规则随库走：importSubdir（应用写入区名）；目录布局已固定为时间/相册+平铺
+ *  （dirTemplate 配置退役，2026-09-28 定案——旧 settings.json 里的 dirTemplate 字段
+ *  容错保留：后端 serde 有默认值，前端类型已删不再写入）；
  *  并发流数同为库属性（streams，Rust 侧 serde 缺省 4；MTP 源受协议限制恒 1，由向导在组 plan 时钳制）；
  *  configured=配置链（位置/整理规则/AI）是否走完——旧库由后端迁移自动置 true，前端读取兜底 ?? true。
  *  旧配置由后端自动补默认值，前端读取时再以全局 ImportSettings 兜底。 */
@@ -14,8 +16,6 @@ export interface Library {
   name: string;
   dbDir: string;
   photoRoot: string;
-  /** 库级目录模板（如 "{YYYY}/{MM-DD}/{原文件名}"） */
-  dirTemplate: string;
   /** 库级导入子目录（应用写入区名；空串=直接写 photoRoot） */
   importSubdir: string;
   /** 库级导入并发流数（后端 serde 缺省 4；旧数据无字段时读取方 ?? 4 兜底） */
@@ -32,7 +32,6 @@ export interface Settings {
   import: {
     promptOnDevice: boolean;
     skipImported: boolean;
-    dirTemplate: string;
     duplicatePolicy: "skip" | "rename" | "ask";
     notifyMilestones: boolean;
     /** 卡/相机导入专用子目录名（相对 photoRoot 的应用写入区，spec §5.11） */
@@ -92,7 +91,6 @@ export const DEFAULT_SETTINGS: Settings = {
   import: {
     promptOnDevice: true,
     skipImported: true,
-    dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
     duplicatePolicy: "skip",
     notifyMilestones: true,
     importSubdir: "SmartPhoto",

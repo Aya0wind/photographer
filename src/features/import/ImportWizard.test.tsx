@@ -23,6 +23,7 @@ import {
   deviceList,
   folderScan,
   fsListDirs,
+  FIXED_PLAN_DIR_TEMPLATE,
   importStart,
   thumbGet,
   type ImportPlan,
@@ -129,8 +130,7 @@ function seedSession(): void {
           name: "主库",
           dbDir: "I:\\SmartPhoto\\主库",
           photoRoot: "Y:\\照片",
-          dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
-          importSubdir: "SmartPhoto",
+                  importSubdir: "SmartPhoto",
           configured: true,
         streams: 4,
         },
@@ -365,18 +365,18 @@ describe("源文件树与文件列表", () => {
 });
 
 describe("方案面板", () => {
-  it("导入位置为只读库属性：信息卡展示目标根/模板/预览，无输入框", async () => {
+  it("导入位置为只读库属性：信息卡展示目标根/固定目录布局，无输入框", async () => {
     seedSession();
     renderWizard("?device=E:");
 
     const card = await screen.findByTestId("wizard-location-card");
     expect(card).toHaveTextContent("Y:\\照片\\SmartPhoto");
-    expect(card).toHaveTextContent("{YYYY}/{MM-DD}/{原文件名}");
-    // 示例预览沿用 onboarding 的示例值（库模板去掉文件名令牌后渲染）
+    // 目录布局固定（dirTemplate 配置退役）：展示时间/相册公式，非库模板
     expect(screen.getByTestId("wizard-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_0001.CR3",
+      "{相册创建年}\\{相册创建月}\\{相册目录}",
     );
-    // 目标根/模板均不可编辑（原输入与下拉已移除）
+    expect(card).not.toHaveTextContent("{YYYY}/{MM-DD}");
+    // 目标根/布局均不可编辑（原输入与下拉已移除）
     expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("目录模板")).not.toBeInTheDocument();
     expect(screen.getByTestId("wizard-location-edit")).toBeInTheDocument();
@@ -438,8 +438,7 @@ describe("方案面板", () => {
             name: "主库",
             dbDir: "I:\\SmartPhoto\\主库",
             photoRoot: "Y:\\照片",
-            dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
-            importSubdir: "SmartPhoto",
+                      importSubdir: "SmartPhoto",
             streams: 3,
             configured: true,
           },
@@ -477,10 +476,11 @@ describe("方案面板", () => {
     expect(plan).toEqual({
       sourceId: "E:",
       targetRoot: "Y:\\照片\\SmartPhoto",
+      // dirTemplate 配置退役：固定占位（后端相册导入整体覆写，值不影响落位）
+      dirTemplate: FIXED_PLAN_DIR_TEMPLATE,
       // 相册必选（规格修订）：默认预选系统保底相册「未分组」
       albumId: 1,
-      dirTemplate: "{YYYY}/{MM-DD}",
-      nameTemplate: "{原文件名}",
+          nameTemplate: "{原文件名}",
       duplicatePolicy: "skip",
       skipImported: true,
       streams: 4,
@@ -492,10 +492,9 @@ describe("方案面板", () => {
         "E:/DCIM/101CANON/IMG_0004.JPG",
       ],
     });
-    // 库属性不回写全局设置（模板仍是全局默认值）
-    expect(useSettingsStore.getState().settings.import.dirTemplate).toBe(
-      "{YYYY}/{MM-DD}/{原文件名}",
-    );
+    // 库属性不回写全局设置（dirTemplate 已退役，import 配置保持默认）
+    expect(useSettingsStore.getState().settings.import.importSubdir).toBe("SmartPhoto");
+    expect("dirTemplate" in useSettingsStore.getState().settings.import).toBe(false);
   });
 
   it("启动失败：透出后端 Err 原文；invoke 不可用时用通用文案", async () => {
@@ -1117,7 +1116,7 @@ describe("双目的地（M2）", () => {
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].secondTarget).toEqual({
       targetRoot: "D:\\照片备份",
-      dirTemplate: "{YYYY}/{MM-DD}", // 与主目的地相同
+      dirTemplate: FIXED_PLAN_DIR_TEMPLATE, // 固定占位：与主目的地相同（后端覆写后两路一致）
     });
   });
 

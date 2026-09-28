@@ -32,9 +32,18 @@ export type DuplicatePolicy = "skip" | "rename" | "ask";
 /** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
 export type ImportMode = "copy" | "move";
 
+/**
+ * plan.dirTemplate 的固定占位值（dirTemplate 配置退役，2026-09-28 定案）：
+ * 目录布局写死为时间/相册+平铺，不再可配置。Rust ImportPlan.dir_template 过渡期
+ * 仍为必填（无 serde default），前端固定发送此占位；相册导入下后端 begin 阶段会把
+ * dir_template 整体覆写为 `{相册创建YYYY}/{MM}/{dir_name}`，secondTarget 随之同公式。
+ */
+export const FIXED_PLAN_DIR_TEMPLATE = "{YYYY}/{MM-DD}";
+
 export interface ImportPlan {
   sourceId: string;
   targetRoot: string;
+  /** 过渡期兼容占位：恒为 FIXED_PLAN_DIR_TEMPLATE（相册导入下后端整体覆写，值不影响落位） */
   dirTemplate: string;
   nameTemplate: string;
   duplicatePolicy: DuplicatePolicy;
@@ -43,7 +52,8 @@ export interface ImportPlan {
   /** 缺省 copy（Rust 侧默认）；move 时入库后删除源文件 */
   mode: ImportMode;
   /** 双目的地（可选）：一次读取同时复制到第二位置；落位与主目的地相同
-   *  （相册导入下后端 engine 整体覆写 dir_template，第二份随之走时间/相册布局）。
+   *  （第二根目录 + 同一时间/相册公式；dirTemplate 过渡期必填，恒为
+   *  FIXED_PLAN_DIR_TEMPLATE，后端 engine 覆写后两路一致）。
    *  后端约束：move + secondTarget 会被拒绝（前端互斥保证不发出）。 */
   secondTarget?: { targetRoot: string; dirTemplate: string };
   /** 本次导入的文件清单（rel_path 列表）——向导勾选结果，引擎只导入集合内的文件；

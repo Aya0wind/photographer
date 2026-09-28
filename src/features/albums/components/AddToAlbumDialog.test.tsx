@@ -42,7 +42,6 @@ const LIB: Library = {
   name: "主库",
   dbDir: "I:\\SmartPhoto\\主库",
   photoRoot: "Y:\\照片",
-  dirTemplate: "{YYYY}/{MM-DD}/{原文件名}",
   importSubdir: "SmartPhoto",
   configured: true,
   streams: 4,

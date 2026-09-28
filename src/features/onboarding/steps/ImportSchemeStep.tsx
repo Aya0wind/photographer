@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { importRootOf, previewTemplate, unknownTokens } from "../onboardingConfig";
+import { FIXED_ALBUM_LAYOUT } from "../onboardingConfig";
 import type { OnboardingDraft } from "../types";
 
 interface Props {
@@ -10,36 +10,20 @@ interface Props {
 
 const DUPLICATE_OPTIONS: OnboardingDraft["duplicatePolicy"][] = ["skip", "rename", "ask"];
 
-/** 步骤 2：导入方案——目录模板 + 实时预览 + 查重策略 + 里程碑通知 */
+/** 步骤 2：整理规则——目录布局固定（时间/相册+平铺，2026-09-28 定案不再可配置），
+ *  仅收集查重策略与里程碑通知偏好 */
 export default function ImportSchemeStep({ draft, onChange }: Props) {
   const { t } = useTranslation();
-  const badTokens = unknownTokens(draft.dirTemplate);
-  const preview = previewTemplate(draft.dirTemplate, importRootOf(draft.photoRoot));
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1.5">
-        <label htmlFor="onboarding.scheme.template" className="text-sm font-medium text-text-primary">
-          {t("onboarding.scheme.template")}
-        </label>
-        <input
-          id="onboarding.scheme.template"
-          type="text"
-          value={draft.dirTemplate}
-          onChange={(e) => onChange({ dirTemplate: e.target.value })}
-          className="w-full rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent"
-        />
-        <p className="text-xs text-text-muted">{t("onboarding.scheme.templateDesc")}</p>
-        <p className="text-xs text-text-muted">{t("onboarding.scheme.storageNote")}</p>
+        <p className="text-sm font-medium text-text-primary">{t("onboarding.scheme.layout")}</p>
         <div className="rounded-md border border-edge bg-bg px-3 py-2 font-mono text-xs text-text-secondary">
-          <span className="mr-2 text-text-muted">{t("onboarding.scheme.preview")}</span>
-          {preview}
+          {FIXED_ALBUM_LAYOUT}
         </div>
-        {badTokens.length > 0 && (
-          <p className="text-xs text-red-400" role="alert">
-            {t("onboarding.scheme.unknownToken", { tokens: badTokens.map((t2) => `{${t2}}`).join(" ") })}
-          </p>
-        )}
+        <p className="text-xs text-text-muted">{t("onboarding.scheme.layoutNote")}</p>
+        <p className="text-xs text-text-muted">{t("onboarding.scheme.storageNote")}</p>
       </div>
 
       <fieldset className="flex flex-col gap-1.5">
