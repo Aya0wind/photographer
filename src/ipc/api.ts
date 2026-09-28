@@ -2257,17 +2257,33 @@ export async function cullAiPrescan(
     const raw = await ipc<unknown>("cull_ai_prescan", { sessionId, rules, apply });
     if (raw === null || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
-    const numOf = (v: unknown): number =>
-      typeof v === "number" && Number.isFinite(v) ? v : 0;
-    const assetIds = Array.isArray(r.assetIds)
-      ? r.assetIds.filter((v): v is number => typeof v === "number" && Number.isFinite(v))
-      : undefined;
+    // 后端每桶为 { count, assetIds } 对象（或历史扁平数字）——两种形状都归一
+    const bucketOf = (v: unknown): { count: number; assetIds?: number[] } => {
+      if (typeof v === "number" && Number.isFinite(v)) return { count: v };
+      if (v !== null && typeof v === "object") {
+        const b = v as Record<string, unknown>;
+        const count =
+          typeof b.count === "number" && Number.isFinite(b.count) ? b.count : 0;
+        const ids = Array.isArray(b.assetIds)
+          ? b.assetIds.filter(
+              (x): x is number => typeof x === "number" && Number.isFinite(x),
+            )
+          : undefined;
+        return { count, ...(ids !== undefined ? { assetIds: ids } : {}) };
+      }
+      return { count: 0 };
+    };
+    const accepted = bucketOf(r.suggestedAccepted);
+    const rejected = bucketOf(r.suggestedRejected);
+    const manual = bucketOf(r.skippedManual);
+    const exempt = bucketOf(r.exemptedGroup);
+    const assetIds = [...(accepted.assetIds ?? []), ...(rejected.assetIds ?? [])];
     return {
-      suggestedAccepted: numOf(r.suggestedAccepted),
-      suggestedRejected: numOf(r.suggestedRejected),
-      skippedManual: numOf(r.skippedManual),
-      exemptedGroup: numOf(r.exemptedGroup),
-      ...(assetIds !== undefined ? { assetIds } : {}),
+      suggestedAccepted: accepted.count,
+      suggestedRejected: rejected.count,
+      skippedManual: manual.count,
+      exemptedGroup: exempt.count,
+      ...(assetIds.length > 0 ? { assetIds } : {}),
     };
   } catch {
     return null;

@@ -163,13 +163,12 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     ).resolves.toBeNull();
   });
 
-  it("cullAiPrescan 预览/应用同载荷形状（apply 位区分）；assetIds 可选归一", async () => {
+  it("cullAiPrescan 预览/应用同载荷形状（apply 位区分）；桶对象/扁平两种形状归一", async () => {
     invokeMock.mockResolvedValue({
-      suggestedAccepted: 30,
-      suggestedRejected: 120,
-      skippedManual: 12,
-      exemptedGroup: 8,
-      assetIds: [5, 6, "x", null],
+      suggestedAccepted: { count: 30, assetIds: [5, "x", null] },
+      suggestedRejected: { count: 120, assetIds: [6] },
+      skippedManual: { count: 12, assetIds: [] },
+      exemptedGroup: { count: 8 },
     });
     const rules: CullAiRules = {
       eyes: { enabled: true, sensitivity: "strong" },
@@ -181,6 +180,7 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     const preview = await cullAiPrescan(7, rules, false);
 
     expect(invokeMock).toHaveBeenCalledWith("cull_ai_prescan", { sessionId: 7, rules, apply: false });
+    // 桶对象的 count 提升到顶层；assetIds = accepted+rejected 桶明细并集（脏值剔除）
     expect(preview).toEqual({
       suggestedAccepted: 30,
       suggestedRejected: 120,
@@ -189,6 +189,7 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
       assetIds: [5, 6],
     });
 
+    // 历史扁平数字形状兼容
     invokeMock.mockResolvedValue({
       suggestedAccepted: 30,
       suggestedRejected: 120,
