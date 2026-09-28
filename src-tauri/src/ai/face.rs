@@ -762,13 +762,16 @@ fn assign_cluster(db: &Db, clusterer: &mut OnlineClusterer, emb: &[f32]) -> Resu
 /// 检测源档位优先级（缓存命中优先；1024 不是 thumbs 档位——SIZE_TIERS =
 /// 256/512/2048 → 用 [512, 2048]）。SCRFD 输入恒 640 letterbox，源 ≥512
 /// 即可（1024→640 与 2048→640 检测质量等价）；检测+对齐+ArcFace 全在
-/// 同一源图上做。fast/normal 共用本策略。
+/// 同一源图上做。**三档统一本策略**（2026-09-28 用户定规：精准档不再
+/// 2048 优先——检测恒 640、2048 源只贵在 ArcFace 裁片边际质量，整库
+/// 同步生成 2048 是精准档索引慢且 GPU 占用低的主因，得不偿失）。
 pub const DETECTION_SOURCE_TIERS: &[u16] = &[512, 2048];
 
-/// 检测源取图（fast/normal 策略）：按 [`DETECTION_SOURCE_TIERS`] 顺序查
+/// 检测源取图（三档统一策略）：按 [`DETECTION_SOURCE_TIERS`] 顺序查
 /// **缓存命中**（只查不生成，thumbs::cached），全未命中才 `thumb_file(512)`
 /// 按需生成最便宜档。吃掉「无条件同步生成 2048 档（61MP ARW 首张半秒~
 /// 两秒）」这一最大固定成本。blur/eyes 选片通道不分档，沿用本函数。
+/// 精准档的差异只在语义 fp16 双塔（见 [`super::semantic_model_ids`]）。
 pub fn detection_source(db_dir: &Path, src: &Path) -> Option<String> {
     for tier in DETECTION_SOURCE_TIERS {
         if let Some(hit) = crate::thumbs::cached(db_dir, src, *tier) {
@@ -776,31 +779,6 @@ pub fn detection_source(db_dir: &Path, src: &Path) -> Option<String> {
         }
     }
     crate::thumbs::thumb_file(db_dir, src, DETECTION_SOURCE_TIERS[0])
-}
-
-/// 检测源取图（档位感知，2026-09-28 三档画质）：
-/// - fast/normal：缓存优先 [512, 2048]，全未命中生成 512（同上）。
-/// - accurate：**2048 优先**——命中缓存即用；未命中**同步生成 2048 档**
-///   （精准档以解码质量优先，吃下首张 61MP RAW 半秒~两秒的显影成本）；
-///   2048 生成失败（RAW 预览损坏等）才兜底 512（缓存或生成）。
-pub fn detection_source_tiered(
-    db_dir: &Path,
-    src: &Path,
-    tier: super::QualityTier,
-) -> Option<String> {
-    if let super::QualityTier::Accurate = tier {
-        if let Some(hit) = crate::thumbs::cached(db_dir, src, 2048) {
-            return Some(hit);
-        }
-        if let Some(generated) = crate::thumbs::thumb_file(db_dir, src, 2048) {
-            return Some(generated);
-        }
-        if let Some(hit) = crate::thumbs::cached(db_dir, src, 512) {
-            return Some(hit);
-        }
-        return crate::thumbs::thumb_file(db_dir, src, 512);
-    }
-    detection_source(db_dir, src)
 }
 
 /// 检出人脸（源图像素坐标）→ faces 表归一化坐标 `[x, y, w, h]` ∈ 0..1
@@ -845,8 +823,7 @@ fn infer_face_payload(
     asset_id: i64,
 ) -> Option<FacePayload> {
     let (path, _) = db.thumb_info_by_id(asset_id).ok().flatten()?; // 资产已删除（级联清任务前的防御兜底）
-    let thumb =
-        detection_source_tiered(db_dir, Path::new(&path), manager.ai_params().quality_tier)?;
+    let thumb = detection_source(db_dir, Path::new(&path))?;
     let img = image::ImageReader::open(&thumb)
         .ok()
         .and_then(|r| r.decode().ok())

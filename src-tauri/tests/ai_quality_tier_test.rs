@@ -151,27 +151,33 @@ fn fingerprint_linkage_matrix() {
         face_params_fingerprint(&normal),
         "fast↔normal 换检测件 → face 指纹必变 → 重建 face"
     );
-    // normal→accurate：face（源策略 2048 优先）+ semantic（fp16）
-    assert_ne!(
+    // normal→accurate：只 semantic（fp16 双塔）；人脸同件同源零重算
+    //（2026-09-28 用户定规：检测源三档统一，2048 优先策略退役）
+    assert_eq!(
         face_params_fingerprint(&accurate),
         face_params_fingerprint(&normal),
-        "normal→accurate 源策略变 → face 指纹必变 → 重建 face"
+        "normal↔accurate 人脸同件同源 → 指纹不变 → 不重建 face"
     );
-    // fast→accurate：face（检测件 + 源策略都变）+ semantic（fp16）
+    // fast→accurate：face（换回 34G 检测件）+ semantic（fp16）
     assert_ne!(
         face_params_fingerprint(&accurate),
         face_params_fingerprint(&fast),
-        "fast→accurate face 指纹必变"
+        "fast→accurate 检测件变 → face 指纹必变"
     );
-    // 三档人脸指纹两两互异（档位间任何切换都重建 face）
+    // 人脸指纹分两簇：fast 独立（换检测件）；normal=accurate 同簇
+    //（2026-09-28 检测源统一后同件同源，切档零重算人脸）
     let mut faces = vec![
         face_params_fingerprint(&fast),
         face_params_fingerprint(&normal),
-        face_params_fingerprint(&accurate),
     ];
     faces.sort_unstable();
     faces.dedup();
-    assert_eq!(faces.len(), 3, "三档人脸指纹两两互异");
+    assert_eq!(faces.len(), 2, "fast 与 normal/accurate 互异");
+    assert_eq!(
+        face_params_fingerprint(&accurate),
+        face_params_fingerprint(&normal),
+        "normal=accurate 人脸同簇"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -281,46 +287,38 @@ fn tier_file_count(db_dir: &Path, tier: &str) -> usize {
 }
 
 #[test]
-fn detection_source_accurate_prefers_2048_with_512_fallback() {
+fn detection_source_unified_across_tiers_no_2048_generation() {
+    // 2026-09-28 用户定规：检测源三档统一（缓存优先 [512,2048]，全未命中
+    // 生成最便宜 512）；2048 优先策略退役——detection_source_tiered 已删。
     let src_dir = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let tiered =
-        |p: &Path| ai::face::detection_source_tiered(db_dir.path(), p, QualityTier::Accurate);
 
-    // ① 全未命中 → 同步生成 2048（精准档吃显影成本，不再落 512）
+    // ① 全未命中 → 生成 512（不再为任何档位同步生成 2048）
     let a = write_jpeg(src_dir.path(), "a.jpg", 800, 600);
-    let got = tiered(&a).expect("全未命中应生成 2048");
-    assert_eq!(tier_dir_of(&got), "2048", "accurate 应落 2048 档: {got}");
+    let got = ai::face::detection_source(db_dir.path(), &a).expect("全未命中应生成 512");
+    assert_eq!(tier_dir_of(&got), "512", "三档统一落 512 档: {got}");
 
-    // ② 仅 512 缓存 → 仍生成 2048（2048 优先；不将就低档缓存）
+    // ② 仅 512 缓存 → 命中直返零生成
     let b = write_jpeg(src_dir.path(), "b.jpg", 800, 600);
     assert!(thumbs::thumb_file(db_dir.path(), &b, 512).is_some());
-    let got = tiered(&b).expect("应生成 2048");
-    assert_eq!(tier_dir_of(&got), "2048", "512 命中不得短路: {got}");
+    let before = tier_file_count(db_dir.path(), "512");
+    let got = ai::face::detection_source(db_dir.path(), &b).expect("512 命中");
+    assert_eq!(tier_dir_of(&got), "512");
+    assert_eq!(tier_file_count(db_dir.path(), "512"), before);
 
-    // ③ 2048 命中缓存 → 零生成直接用
+    // ③ 2048 命中缓存 → 直接用（零生成）
     let c = write_jpeg(src_dir.path(), "c.jpg", 800, 600);
     assert!(thumbs::thumb_file(db_dir.path(), &c, 2048).is_some());
     let before512 = tier_file_count(db_dir.path(), "512");
     let before2048 = tier_file_count(db_dir.path(), "2048");
-    let got = tiered(&c).expect("2048 命中");
+    let got = ai::face::detection_source(db_dir.path(), &c).expect("2048 命中");
     assert_eq!(tier_dir_of(&got), "2048");
-    assert_eq!(
-        tier_file_count(db_dir.path(), "512"),
-        before512,
-        "不得顺手生成 512"
-    );
+    assert_eq!(tier_file_count(db_dir.path(), "512"), before512);
     assert_eq!(tier_file_count(db_dir.path(), "2048"), before2048);
 
-    // ④ fast/normal 维持既有策略（全未命中生成最便宜 512 档）
-    let d = write_jpeg(src_dir.path(), "d.jpg", 800, 600);
-    let got = ai::face::detection_source_tiered(db_dir.path(), &d, QualityTier::Fast)
-        .expect("fast 全未命中应生成 512");
-    assert_eq!(tier_dir_of(&got), "512", "fast 维持 512 生成: {got}");
-
-    // ⑤ 源不存在 → None
+    // ④ 源不存在 → None
     let ghost = src_dir.path().join("ghost.jpg");
-    assert!(tiered(&ghost).is_none());
+    assert!(ai::face::detection_source(db_dir.path(), &ghost).is_none());
 }
 
 // ---------------------------------------------------------------------------

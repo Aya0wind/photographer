@@ -427,11 +427,11 @@ pub fn semantic_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
 }
 
 /// 人脸通道指纹（版本 + 检测门槛 + 聚类阈值；f32 用 to_bits 保精确比较；
-/// 2026-09-28 三档画质：fast 追加**检测模型 id+版本**（scrfd-10g 换件）、
-/// accurate 追加**检测源策略**（2048 优先，同 34G 检测件但源图不同 → 坐标
-/// 精度不同）。normal 不追加 → 与旧指纹逐位一致（升级不误重建）。
-/// 联动矩阵：fast↔normal 重建 face；normal↔accurate 重建 face+semantic；
-/// fast↔accurate 重建 face+semantic）。
+/// 三档画质：fast 追加**检测模型 id+版本**（scrfd-10g 换件）；normal 与
+/// accurate 人脸同件同源（2026-09-28 用户定规：检测源三档统一缓存优先
+/// [512,2048]，不再 2048 优先）→ 均不追加，与旧指纹逐位一致。
+/// 联动矩阵：fast↔normal/fast↔accurate 重建 face；normal↔accurate
+/// **只重建 semantic**（fp16 双塔），人脸零重算。
 pub fn face_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
@@ -482,11 +482,11 @@ fn semantic_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
     Some(fnv_str(h, version(text)))
 }
 
-/// 人脸档位派生标签（同上 None = 旧指纹兼容）：fast = scrfd-10g 模型
-/// id+版本；accurate = 检测源 2048 优先策略标记（同件不同源）。
+/// 人脸档位派生标签（None = 与旧指纹兼容不触发重建）：仅 fast 追加
+/// scrfd-10g 模型 id+版本（换检测件必须重算）；normal/accurate 人脸
+/// 同件同源（2026-09-28 检测源统一，2048 优先策略退役）→ None。
 fn face_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
     let tier = crate::ai::QualityTier::from_setting(&ai.quality_tier)?;
-    let mut h = 0xcbf29ce484222325u64;
     match tier {
         crate::ai::QualityTier::Fast => {
             let id = crate::ai::face_detect_model_id(tier);
@@ -495,11 +495,11 @@ fn face_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
                 .find(|e| e.id == id)
                 .map(|e| e.version.as_str())
                 .unwrap_or("");
+            let mut h = 0xcbf29ce484222325u64;
             h = fnv_str(h, id);
             Some(fnv_str(h, version))
         }
-        crate::ai::QualityTier::Accurate => Some(fnv_str(h, "detection-source:2048-first")),
-        crate::ai::QualityTier::Normal => None,
+        crate::ai::QualityTier::Normal | crate::ai::QualityTier::Accurate => None,
     }
 }
 

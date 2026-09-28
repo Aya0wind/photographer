@@ -8,7 +8,7 @@
 //!   model_quantized.onnx 378MB 的替代，内存减半语义相同；int8 量化在
 //!   语义检索场景质量损失可接受，输出维度仍 768）。
 //! - 三档画质（2026-09-28 定案，[`QualityTier`]）：fast 换 SCRFD 10G 小
-//!   检测模型、accurate 换 fp16 语义双塔 + 检测源 2048 优先，normal 维持
+//!   检测模型、accurate 换 fp16 语义双塔（检测源三档统一缓存优先，normal 维持
 //!   既有件。档位→模型/源策略的解析集中在 [`face_detect_model_id`] /
 //!   [`semantic_model_ids`]，切档经参数指纹自动重建（ipc::indexing）。
 //! - [`ModelManager`]：`.part` 暂存 + Content-Range 断点续传（网络中断保留
@@ -257,7 +257,7 @@ pub fn catalog() -> &'static [ModelEntry] {
 /// |---|---|---|---|
 /// | fast | scrfd-10g（buffalo_l 包，17MB） | 缓存优先 [512, 2048] | base int8 |
 /// | normal（默认） | scrfd（34g） | 缓存优先 [512, 2048] | base int8 |
-/// | accurate | scrfd（34g，同件） | **2048 优先**（未命中生成 2048，512 兜底） | base fp16 |
+/// | accurate | scrfd（34g，同件） | 缓存优先 [512, 2048]（三档统一；2048 优先已退役） | base fp16 |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QualityTier {
     Fast,
