@@ -5,7 +5,7 @@ mod common;
 
 pub use common::{
     ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, plan_with_album,
-    settings, tasks, thumbs, videos,
+    settings, tasks, thumbs,
 };
 
 use std::fs;

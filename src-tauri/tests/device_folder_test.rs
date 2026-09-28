@@ -4,8 +4,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -40,11 +39,7 @@ fn folder_source_lists_media_with_stable_id() {
     // 点前缀目录 / 系统目录 / 非媒体扩展名全部跳过（与卷源同规则）
     assert_eq!(
         rels,
-        [
-            "DCIM/100CANON/IMG_0001.CR3",
-            "DCIM/100CANON/IMG_0002.jpg",
-            "DCIM/100CANON/MVI_0003.MP4",
-        ]
+        ["DCIM/100CANON/IMG_0001.CR3", "DCIM/100CANON/IMG_0002.jpg",]
     );
 
     // open_head / stream 与卷源同等可用
@@ -90,5 +85,5 @@ fn folder_source_excludes_subtree() {
     // 排除不存在的路径 → 忽略（全量枚举）
     let nope = dir.path().join("nope");
     let src = LocalFolderSource::with_exclude(dir.path(), Some(&nope)).unwrap();
-    assert_eq!(src.list().unwrap().len(), 4);
+    assert_eq!(src.list().unwrap().len(), 3);
 }

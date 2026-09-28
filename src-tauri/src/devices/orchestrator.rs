@@ -24,7 +24,7 @@ pub struct DeviceSnapshot {
     pub id: String,
     pub name: String,
     pub kind: SourceKind,
-    /// 按类型统计的文件数（photo/raw/video/other）。
+    /// 按类型统计的文件数（photo/raw/other）。
     pub files_by_kind: BTreeMap<AssetKind, u64>,
     /// 全部媒体文件总字节。
     pub bytes_total: u64,

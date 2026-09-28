@@ -71,7 +71,7 @@ import { motionInitial, useMotionOn } from "@/lib/motion";
  * - 日期组头折叠（AssetGrid）
  * - 多选（M4.5）：选择按钮 / Ctrl+点击 / 长按进入；浮动操作条（收藏/旗标/分享/取消），
  *   Esc 退出；单选=多选下的 N=1
- * - URL 协议：?mode=semantic&q=…（语义直达）、?kind=photo|raw|video（预置类型）
+ * - URL 协议：?mode=semantic&q=…（语义直达）、?kind=photo|raw（预置类型）
  * - 快照缓存：仅默认态落盘（筛选/语义态不落）；? 键快捷键速查见 AppShell
  */
 
@@ -166,7 +166,7 @@ export default function GalleryPage() {
       semantic.reset();
     }
     const urlKind = searchParams.get("kind");
-    if (urlKind === "photo" || urlKind === "raw" || urlKind === "video") {
+    if (urlKind === "photo" || urlKind === "raw") {
       if (appliedUrlKindRef.current !== urlKind) {
         appliedUrlKindRef.current = urlKind;
         setInputs((prev) => (prev.kind === urlKind ? prev : { ...prev, kind: urlKind }));

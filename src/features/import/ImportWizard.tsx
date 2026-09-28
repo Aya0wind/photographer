@@ -44,7 +44,7 @@ import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind
  *
  * 缩略图：photo 走 asset 协议（convertFileSrc，folder=去前缀路径/volume=设备id
  * + relPath，MTP 无文件系统路径恒占位），信号量限 6 张在途解码，onLoad 150ms
- * 淡入，失败/超时静默保持占位；RAW/视频恒占位（M3 缩略图管线前不做内嵌提取）。
+ * 淡入，失败/超时静默保持占位；RAW 无内嵌预览时保持占位。
  */
 
 interface DirGroup {
@@ -70,7 +70,6 @@ function groupByDir(files: SourceFile[], scanning = false): DirGroup[] {
 const KIND_LABEL_COLOR: Record<FileKind, string> = {
   photo: "text-accent",
   raw: "text-sky-400",
-  video: "text-violet-400",
   other: "text-text-muted",
 };
 
@@ -333,7 +332,7 @@ function releaseImageSlot(): void {
   if (next) next();
 }
 
-/** 会话内缩略图缓存：absPath → asset URL（null=该文件无缩略图，RAW/视频/失败同态） */
+/** 会话内缩略图缓存：absPath → asset URL（null=该文件无缩略图或提取失败） */
 const thumbUrlCache = new Map<string, string | null>();
 /** in-flight 去重：同 absPath 的并发请求共享同一 Promise（滚动复用不重复 IPC） */
 const thumbInflight = new Map<string, Promise<string | null>>();
@@ -387,7 +386,7 @@ function extOf(name: string): string {
   return dot >= 0 ? name.slice(dot + 1).toUpperCase() : "";
 }
 
-/** 缩略占位块：surface 底 + kind 色点缀（RAW=扩展名大字+徽标；视频=胶片；photo=图片框） */
+/** 缩略占位块：surface 底 + kind 色点缀（RAW=扩展名大字+徽标；photo=图片框） */
 function ThumbPlaceholder({ kind, name }: { kind: FileKind; name: string }) {
   const ext = extOf(name);
   if (kind === "raw") {
@@ -395,29 +394,6 @@ function ThumbPlaceholder({ kind, name }: { kind: FileKind; name: string }) {
       <div className="flex h-full w-full flex-col items-center justify-center gap-1" data-testid="tile-raw">
         <span className="font-mono text-lg font-bold tracking-wide text-sky-400">{ext || "RAW"}</span>
         <span className="rounded bg-bg px-1.5 py-0.5 text-[10px] font-medium text-text-secondary">RAW</span>
-      </div>
-    );
-  }
-  if (kind === "video") {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-1.5" data-testid="tile-video">
-        <svg
-          viewBox="0 0 24 24"
-          width="26"
-          height="26"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="text-violet-400"
-          aria-hidden="true"
-        >
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <path d="M3 9h2M3 15h2M19 9h2M19 15h2" />
-          <path d="M10 9.5l5 2.5-5 2.5v-5z" />
-        </svg>
-        {ext && <span className="font-mono text-[10px] text-text-muted">{ext}</span>}
       </div>
     );
   }
@@ -470,7 +446,7 @@ function FileTile({
     if (absPath === null) return;
     setPending(true);
     void fetchThumbUrl(absPath).then((url) => {
-      // null=无缩略图（RAW/视频/失败）：保持占位
+      // null=无缩略图或提取失败：保持占位
       if (cancelled) return;
       setPending(false);
       if (url === null) return;
@@ -1332,7 +1308,7 @@ export default function ImportWizard() {
   }, [selectedId, device?.scanStatus, sourceFilesMap[selectedId ?? ""]]);
 
   const files = useMemo(
-    () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []),
+    () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []).filter((file) => file.kind === "photo" || file.kind === "raw"),
     [selectedId, sourceFilesMap],
   );
   // 扫描中按到达顺序追加，结束后再排序，避免每批重排所有文件。
@@ -1847,7 +1823,7 @@ export default function ImportWizard() {
                             {t(deviceKindLabelKey(device))}
                           </dd>
                         </div>
-                        {(Object.keys(device.filesByKind) as FileKind[]).map((kind) => (
+                        {(["photo", "raw"] as const).map((kind) => (
                           <div key={kind} className="flex justify-between">
                             <dt className="text-text-muted">{t(`wizard.fileKind.${kind}`)}</dt>
                             <dd className={`font-mono tabular-nums ${KIND_LABEL_COLOR[kind]}`}>

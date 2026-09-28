@@ -34,8 +34,6 @@ pub mod settings;
 pub mod tasks;
 #[path = "../../src/thumbs/mod.rs"]
 pub mod thumbs;
-#[path = "../../src/videos/mod.rs"]
-pub mod videos;
 
 use std::collections::HashMap;
 use std::fs;
@@ -57,17 +55,18 @@ use sha2::{Digest, Sha256};
 // 通用源树构造
 // ---------------------------------------------------------------------------
 
-/// 引擎/清卡用的 3 文件源树（jpg/raw/mp4，魔数与扩展名一致，内容 padded）。
-/// 返回 (rel_path, content) 列表。
+/// 引擎/清卡用的 3 张图片源树。
+/// 返回可导入的 (rel_path, content) 列表。
 pub fn build_source(dir: &Path) -> Vec<(String, Vec<u8>)> {
     fs::create_dir_all(dir.join("DCIM/100CANON")).unwrap();
     let jpg = shrink(vec![0xFF, 0xD8, 0xFF, 0xE0], 4096);
     let raw = shrink(b"II*\0\x00\x00\x00\x08\x00\x00".to_vec(), 8192);
-    let mp4 = shrink(b"\0\0\0\x18ftypisom\x00\x00".to_vec(), 2048);
+    let mut jpg2 = shrink(vec![0xFF, 0xD8, 0xFF, 0xE0], 4096);
+    jpg2[10] = 3;
     let files = vec![
         ("DCIM/100CANON/IMG_0001.jpg".to_string(), jpg),
         ("DCIM/100CANON/IMG_0002.CR3".to_string(), raw),
-        ("DCIM/100CANON/MVI_0003.MP4".to_string(), mp4),
+        ("DCIM/100CANON/IMG_0003.jpg".to_string(), jpg2),
     ];
     for (rel, content) in &files {
         fs::write(dir.join(rel.replace('/', "\\")), content).unwrap();

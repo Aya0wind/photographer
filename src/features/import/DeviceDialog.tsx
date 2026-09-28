@@ -9,14 +9,13 @@ import { deviceKindLabelKey, devicePresentationKind, type DevicePresentationKind
 
 /**
  * 设备就绪弹窗（B 简洁风格）：deviceScanned 事件把设备推入 promptQueue，
- * 本组件逐个弹出居中卡片——设备名 + 类型徽标、按类型统计（照片/RAW/视频
+ * 本组件逐个弹出居中卡片——设备名 + 类型徽标、按类型统计（照片/RAW
  * 分色数字）、总量与新增数、「开始导入」「忽略」。多设备同屏时排队逐个弹。
  */
 
 const KIND_BADGE: Record<FileKind, string> = {
   photo: "text-accent",
   raw: "text-sky-400",
-  video: "text-violet-400",
   other: "text-text-muted",
 };
 
@@ -57,7 +56,7 @@ export default function DeviceDialog() {
   const waitingCount = Math.max(0, queue.length - (device ? 1 : 0));
 
   const stats: { kind: FileKind; count: number }[] = device
-    ? (["photo", "raw", "video"] as FileKind[]).map((kind) => ({
+    ? (["photo", "raw"] as FileKind[]).map((kind) => ({
         kind,
         count: device.filesByKind?.[kind] ?? 0,
       }))

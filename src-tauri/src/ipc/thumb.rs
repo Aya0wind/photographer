@@ -197,7 +197,7 @@ pub enum ThumbOutcome {
 }
 
 /// 按需缩略图（画廊主通道）：命中返回缓存绝对路径；未命中入队后台生成
-/// （完成后 `ThumbnailReady` 事件回执）；RAW/视频/资产不存在返回 Unavailable
+/// （完成后 `ThumbnailReady` 事件回执）；无法解码的 RAW/资产不存在返回 Unavailable
 /// （不入队）。
 pub fn fetch_asset_thumb(
     state: &super::AppState,
@@ -214,7 +214,7 @@ pub fn fetch_asset_thumb(
     let db_dir = PathBuf::from(&library.db_dir);
     let db = super::open_library_db(&db_dir)?;
     // 状态分流（thumb_state 列 O(1) 判断）：1=缓存命中直返（文件被清则
-    // 落入兜底入队重生成）；2=永久占位（视频/不可解码/三次失败）不排队；
+    // 落入兜底入队重生成）；2=永久占位（不可解码/三次失败）不排队；
     // 0=pending 按需兜底（插队生成，索引 worker 之外的快速通道）。
     let Some((path, thumb_state)) = db.thumb_info_by_id(asset_id).map_err(|e| e.to_string())?
     else {

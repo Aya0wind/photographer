@@ -3,8 +3,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -38,14 +37,14 @@ fn snapshot_counts_by_kind_and_bytes() {
     assert_eq!(snapshot.kind, SourceKind::Volume);
     assert_eq!(snapshot.files_by_kind.get(&AssetKind::Photo), Some(&1));
     assert_eq!(snapshot.files_by_kind.get(&AssetKind::Raw), Some(&1));
-    assert_eq!(snapshot.files_by_kind.get(&AssetKind::Video), Some(&1));
-    assert_eq!(snapshot.bytes_total, 350);
-    assert_eq!(snapshot.new_files, 3, "空库应全部视为新文件");
+    assert_eq!(snapshot.files_by_kind.get(&AssetKind::Video), None);
+    assert_eq!(snapshot.bytes_total, 300);
+    assert_eq!(snapshot.new_files, 2, "空库应全部视为新图片");
     // serde：filesByKind 为字符串 key map
     let json = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(json["filesByKind"]["photo"], 1);
-    assert_eq!(json["bytesTotal"], 350);
-    assert_eq!(json["newFiles"], 3);
+    assert_eq!(json["bytesTotal"], 300);
+    assert_eq!(json["newFiles"], 2);
 }
 
 #[test]
@@ -100,7 +99,10 @@ fn skip_imported_deducts_loose_matched_assets() {
 
     let source = VolumeSource::new(src.path());
     let snapshot = scan_device(&source, &db, true).unwrap();
-    assert_eq!(snapshot.new_files, 2, "宽松命中的 A.jpg 不计入新文件");
+    assert_eq!(
+        snapshot.new_files, 1,
+        "宽松命中的 A.jpg 与视频都不计入新文件"
+    );
     assert_eq!(
         snapshot.files_by_kind.get(&AssetKind::Photo),
         Some(&1),
@@ -109,7 +111,7 @@ fn skip_imported_deducts_loose_matched_assets() {
 
     // 关闭 skip_imported：全部视为新文件
     let all_new = scan_device(&source, &db, false).unwrap();
-    assert_eq!(all_new.new_files, 3);
+    assert_eq!(all_new.new_files, 2);
 }
 
 /// 惰性头读：无扩展名/未知扩展名的条目靠魔数判类。

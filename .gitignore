@@ -29,6 +29,6 @@ dist-ssr
 target-test/
 hh.json
 
-# ffmpeg 侧车（下载物不入库，构建脚本自动下载）
+# 本地二进制文件不入库
 src-tauri/binaries/
 installer-output/

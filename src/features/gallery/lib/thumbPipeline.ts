@@ -193,7 +193,7 @@ export interface AssetThumbState {
 export const PENDING_RETRY_MS = 2500;
 
 /**
- * 单资产缩略图（enabled=false 时不请求不订阅——video 短路占位用）。
+ * 单资产缩略图（enabled=false 时不请求不订阅）。
  * pending → 保持 loading 等 thumbnailReady 事件重试 + 周期兜底重拉
  * （PENDING_RETRY_MS，事件丢失时自愈）；unavailable → failed。
  */

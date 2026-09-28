@@ -7,13 +7,11 @@ import { useAssetThumbUrl } from "../lib/thumbPipeline";
  * 库内资产缩略图单元（网格块/查看器胶片条共用）：
  * - photo/raw：进缩略图管线（assetThumbGet→convertFileSrc；未命中占位，
  *   thumbnailReady 重试；RAW 走后端内嵌预览提取，可能较慢——占位期间有水印角标）
- * - video（M8）：进管线取 ffmpeg 海报；提取失败回退 kind 占位（胶片图形）
  * - RAW 恒叠右上角 RAW 水印角标（半透明深底白字；有真实缩略图后仍可一眼区分）
- * - video 有海报时叠播放角标（半透明圆底三角），一眼区分可播内容
  * - img onLoad 150ms 淡入；解码失败（缓存文件丢失等）回退占位
  */
 
-/** kind 占位图形：photo=图片框(accent) / raw=扩展名徽标(sky) / video=胶片(violet)。
+/** kind 占位图形：photo=图片框(accent) / raw=扩展名徽标(sky)。
  *  视觉降噪：图形缩小沉到左下角 1/3 区域（大字降一档），其余留白给骨架动画。
  *  容器底色由外层提供（加载中=sp-skeleton 骨架 / 永久无图=静态 panel），此层保持透明。 */
 function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
@@ -31,31 +29,6 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
         <span className="rounded bg-bg px-1 py-0.5 text-[9px] font-medium leading-none text-text-secondary">
           RAW
         </span>
-      </div>
-    );
-  }
-  if (kind === "video") {
-    return (
-      <div
-        className="flex h-full w-full flex-col items-start justify-end gap-0.5 p-1.5"
-        data-testid="thumb-video"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          width="18"
-          height="18"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="text-violet-400"
-          aria-hidden="true"
-        >
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <path d="M10 9.5l5 2.5-5 2.5v-5z" />
-        </svg>
-        {ext && <span className="font-mono text-[9px] text-text-muted">{ext}</span>}
       </div>
     );
   }
@@ -111,7 +84,7 @@ export default function AssetThumb({
   priority = "low",
   testId,
 }: AssetThumbProps) {
-  // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线；video 走 ffmpeg 海报（M8）
+  // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线。
   const { url, status } = useAssetThumbUrl(asset.id, size, true, priority);
   const imageKey = url === null ? null : `${asset.id}:${url}`;
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
@@ -168,20 +141,6 @@ export default function AssetThumb({
           data-testid="thumb-raw-badge"
         >
           RAW
-        </span>
-      )}
-      {/* video 播放角标：有海报时居中半透明圆底三角（与 RAW 角标同层语义） */}
-      {asset.kind === "video" && showImg && (
-        <span
-          className="absolute inset-0 flex items-center justify-center"
-          data-testid="thumb-video-play"
-          aria-hidden="true"
-        >
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/55">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="white">
-              <path d="M9 7.5l8 4.5-8 4.5v-9z" />
-            </svg>
-          </span>
         </span>
       )}
     </div>

@@ -5,8 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::path::{Path, PathBuf};
@@ -228,16 +227,15 @@ fn undecodable_and_missing_assets_return_none_without_enqueue() {
     );
     assert_eq!(state.thumb_queue.pending_len(), 0);
 
-    // 视频（M8 起）：不再永久占位——垃圾字节也入队试海报（worker 侧由
-    // ffmpeg 失败 + 队列失败计数 ≥3 兜底）
+    // 视频扩展名不进入缩略图队列。
     let mp4 = src_dir.path().join("VID_0001.MP4");
     std::fs::write(&mp4, b"video-bytes").unwrap();
     let db_dir2 = tempfile::tempdir().unwrap();
     let (state2, id2) = state_with_asset(db_dir2.path(), &mp4);
     assert_eq!(
         ipc::thumb::fetch_asset_thumb(&state2, id2, 256).unwrap(),
-        ipc::thumb::ThumbOutcome::Pending,
-        "视频（M8）：入队出 ffmpeg 海报"
+        ipc::thumb::ThumbOutcome::Unavailable,
+        "视频不生成缩略图"
     );
 }
 

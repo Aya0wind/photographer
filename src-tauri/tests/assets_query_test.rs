@@ -6,8 +6,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -248,7 +247,7 @@ fn page_filters_kind_camera_and_time_range() {
             ..Default::default()
         },
     );
-    assert_eq!(sony.len(), 2);
+    assert_eq!(sony.len(), 1);
 
     // 时间范围（RFC3339 带偏移的输入也要正确归一比较）
     let range = AssetFilters {
@@ -258,7 +257,7 @@ fn page_filters_kind_camera_and_time_range() {
     };
     let in_range = page(&state, 0, 100, range);
     let names: Vec<&str> = in_range.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, vec!["r1.cr3", "v1.mp4"], "区间内按 captured 降序");
+    assert_eq!(names, vec!["r1.cr3"], "旧视频记录不进入日期筛选结果");
 
     // 组合过滤
     let combo = page(
@@ -670,12 +669,7 @@ fn kinds_filter_merges_photo_and_raw() {
             ..Default::default()
         },
     );
-    assert_eq!(videos.len(), 1);
-    assert_eq!(
-        videos[0].kind,
-        AssetKind::Video,
-        "DTO kind 仍为真实格式分类"
-    );
+    assert!(videos.is_empty(), "旧视频记录不应出现在图库");
 }
 
 #[test]

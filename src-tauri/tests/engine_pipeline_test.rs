@@ -6,8 +6,7 @@ mod common;
 use xxhash_rust::xxh64::xxh64;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -26,6 +25,7 @@ fn copies_files_with_byte_and_hash_integrity() {
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let files = build_source(src.path());
+    fs::write(src.path().join("DCIM/100CANON/MVI_0003.MP4"), b"video").unwrap();
 
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
 
@@ -61,6 +61,7 @@ fn copies_files_with_byte_and_hash_integrity() {
         );
     }
     assert_eq!(count_assets(&db), 3);
+    assert!(db.asset_id_by_path("MVI_0003.MP4").unwrap().is_none());
     assert_eq!(
         db.0.query_row("SELECT status FROM jobs WHERE id = ?1", [job_id], |r| {
             r.get::<_, String>(0)
@@ -76,9 +77,10 @@ fn milestones_fire_in_order() {
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     build_source(src.path());
-    // 追加第 4 个等大文件 → 每文件 25%
-    let extra = shrink(b"\0\0\0\x18ftypisom\x00\x00".to_vec(), 4096);
-    fs::write(src.path().join("DCIM/100CANON/MVI_0004.MOV"), &extra).unwrap();
+    // 追加一个等大 JPEG，视频不参与；共四张图片，每文件 25%。
+    let mut extra = shrink(vec![0xff, 0xd8, 0xff, 0xe0], 4096);
+    extra[10] = 1;
+    fs::write(src.path().join("DCIM/100CANON/IMG_0004.JPG"), &extra).unwrap();
 
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
@@ -218,9 +220,10 @@ fn include_filters_queue_to_selected_files() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    let files = build_source(src.path()); // 3 个媒体文件
+    let files = build_source(src.path()); // 三张图片 + 一个应忽略的视频
+    fs::write(src.path().join("DCIM/100CANON/MVI_0003.MP4"), b"video").unwrap();
 
-    // 只勾选 2 个（jpg + mp4，跳过 CR3）
+    // 即使旧计划勾选了视频，也只导入照片。
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
         plan.include = Some(vec![
             "DCIM/100CANON/IMG_0001.jpg".into(),
@@ -228,25 +231,25 @@ fn include_filters_queue_to_selected_files() {
         ]);
     });
 
-    assert_eq!(stats.total_files, 2, "只统计勾选文件: {stats:?}");
-    assert_eq!(stats.done_files, 2);
+    assert_eq!(stats.total_files, 1, "只统计可导入图片: {stats:?}");
+    assert_eq!(stats.done_files, 1);
     assert_eq!(stats.failed_files, 0);
 
     let db = open_db(db_dir.path());
-    // journal 只有 2 行且全 verified
+    // journal 只有照片一行且 verified。
     let rows = db.all_job_files(job_id).unwrap();
-    assert_eq!(rows.len(), 2, "未勾选文件不得进 journal: {rows:?}");
+    assert_eq!(rows.len(), 1, "视频和未勾选文件不得进 journal: {rows:?}");
     assert!(rows.iter().all(|r| r.state == FileState::Verified));
     assert!(rows.iter().any(|r| r.src.ends_with("IMG_0001.jpg")));
-    assert!(rows.iter().any(|r| r.src.ends_with("MVI_0003.MP4")));
-    // assets 恰好 2；勾选的落位、未勾选的不落位
-    assert_eq!(count_assets(&db), 2);
+    assert!(!rows.iter().any(|r| r.src.ends_with("MVI_0003.MP4")));
+    // assets 只有照片；视频与未勾选的 RAW 不落位。
+    assert_eq!(count_assets(&db), 1);
     for (rel, content) in &files {
         let dst = target
             .path()
             .join(expected_subdir(src.path(), rel))
             .join(rel.rsplit('/').next().unwrap());
-        if rel.ends_with("IMG_0002.CR3") {
+        if !rel.ends_with("IMG_0001.jpg") {
             assert!(!dst.exists(), "未勾选文件不得导入: {rel}");
         } else {
             assert_eq!(fs::read(&dst).unwrap(), *content, "勾选文件正常导入: {rel}");
@@ -292,7 +295,7 @@ fn include_none_and_serde_round_trip() {
         assert_eq!(plan.include, None);
         plan.include = None; // 显式 None 与缺省同义
     });
-    assert_eq!(stats.done_files, 3, "None 必须全量导入: {stats:?}");
+    assert_eq!(stats.done_files, 3, "None 导入全部图片: {stats:?}");
 
     // 旧 journal plan JSON（无 include 字段）→ None；Some 列表 round-trip
     let legacy = r#"{

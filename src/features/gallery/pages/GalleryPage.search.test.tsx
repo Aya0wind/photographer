@@ -440,9 +440,9 @@ describe("画廊合并：三态切换", () => {
 
     // 展开筛选面板改条件 → 退出语义态（分数角标消失、走 assetsPage filters）
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
-    fireEvent.click(screen.getByTestId("search-kind-video"));
+    fireEvent.click(screen.getByTestId("search-kind-raw"));
     await waitFor(() =>
-      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["video"] }),
+      expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { kinds: ["raw"] }),
     );
     await waitFor(() =>
       expect(screen.queryByTestId("search-score-badge")).not.toBeInTheDocument(),
@@ -456,7 +456,7 @@ describe("画廊合并：三态切换", () => {
     expect(screen.getByTestId("gallery-empty-import")).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
-    fireEvent.click(screen.getByTestId("search-kind-video"));
+    fireEvent.click(screen.getByTestId("search-kind-raw"));
     await waitFor(() => expect(screen.getByTestId("search-empty")).toBeInTheDocument());
     expect(screen.queryByTestId("gallery-empty-import")).not.toBeInTheDocument();
   });

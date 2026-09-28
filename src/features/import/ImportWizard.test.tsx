@@ -71,7 +71,7 @@ function volumeDevice() {
     id: "E:",
     name: "SanDisk 64G",
     kind: "volume" as const,
-    filesByKind: { photo: 2, raw: 2, video: 0, other: 0 },
+    filesByKind: { photo: 2, raw: 2, other: 0 },
     bytesTotal: 1024 * 1024 * 100,
     newFiles: 4,
   };
@@ -82,7 +82,7 @@ function mtpDevice() {
     id: "MTP:CAM",
     name: "EOS R5",
     kind: "mtp" as const,
-    filesByKind: { photo: 1, raw: 0, video: 1, other: 0 },
+    filesByKind: { photo: 2, raw: 0, other: 0 },
     bytesTotal: 1024 * 1024 * 10,
     newFiles: 2,
   };
@@ -93,7 +93,7 @@ function folderSnapshot(id = "FOLDER:D:\\老照片", name = "老照片") {
     id,
     name,
     kind: "folder" as const,
-    filesByKind: { photo: 3, raw: 1, video: 0, other: 0 },
+    filesByKind: { photo: 3, raw: 1, other: 0 },
     bytesTotal: 1024 * 1024 * 10,
     newFiles: 4,
   };
@@ -111,7 +111,7 @@ function files(): SourceFile[] {
     mk("DCIM/100CANON", "IMG_0001.CR3", 45 * 1024 * 1024, "raw"),
     mk("DCIM/100CANON", "IMG_0002.CR3", 44 * 1024 * 1024, "raw"),
     mk("DCIM/101CANON", "IMG_0003.JPG", 5 * 1024 * 1024, "photo"),
-    mk("DCIM/101CANON", "VID_0004.MP4", 6 * 1024 * 1024, "video"),
+    mk("DCIM/101CANON", "IMG_0004.JPG", 6 * 1024 * 1024, "photo"),
   ];
 }
 
@@ -305,7 +305,7 @@ describe("源文件树与文件列表", () => {
     expect(screen.getByTestId("wizard-list-scroll")).toBeInTheDocument();
     expect(within(list).getAllByTestId("wizard-list-group")).toHaveLength(2);
     expect(within(list).getByText("IMG_0001.CR3")).toBeInTheDocument();
-    expect(within(list).getByText("VID_0004.MP4")).toBeInTheDocument();
+    expect(within(list).getByText("IMG_0004.JPG")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
@@ -488,7 +488,7 @@ describe("方案面板", () => {
         "E:/DCIM/100CANON/IMG_0001.CR3",
         "E:/DCIM/100CANON/IMG_0002.CR3",
         "E:/DCIM/101CANON/IMG_0003.JPG",
-        "E:/DCIM/101CANON/VID_0004.MP4",
+        "E:/DCIM/101CANON/IMG_0004.JPG",
       ],
     });
     // 库属性不回写全局设置（模板仍是全局默认值）
@@ -771,8 +771,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     const grid = await screen.findByTestId("wizard-file-grid");
     // 预览模式（convertFileSrc 不可用）→ 全部占位
     expect(within(grid).getAllByTestId("tile-raw")).toHaveLength(2);
-    expect(within(grid).getByTestId("tile-video")).toBeInTheDocument();
-    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(within(grid).getAllByTestId("tile-photo")).toHaveLength(2);
     expect(document.querySelector("img")).toBeNull();
     expect(within(grid).getAllByTestId("wizard-grid-group")).toHaveLength(2);
 
@@ -814,7 +813,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 3 / 4");
   });
 
-  it("M2 缩略图：photo 走 thumb_get(256)→convertFileSrc(小图路径)；RAW/视频不调 thumb_get", async () => {
+  it("M2 缩略图：photo 走 thumb_get(256)→convertFileSrc(小图路径)；RAW 不调 thumb_get", async () => {
     seedSession();
     const user = userEvent.setup();
     convertMock.mockImplementation((p: string) => `asset://${p}`);
@@ -829,7 +828,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(img).toHaveAttribute("src", "asset://C:\\thumbCache\\0003_256.jpg");
     expect(thumbMock).toHaveBeenCalledWith("E:/DCIM/101CANON/IMG_0003.JPG", 256);
     expect(convertMock).toHaveBeenCalledWith("C:\\thumbCache\\0003_256.jpg");
-    // RAW/视频不请求缩略图（后端返回 null 的语义在前端直接短路）
+    // RAW 不请求缩略图（后端返回 null 的语义在前端直接短路）
     expect(thumbMock).not.toHaveBeenCalledWith(expect.stringContaining("IMG_0001.CR3"), 256);
     expect(screen.queryByRole("img", { name: "IMG_0001.CR3" })).not.toBeInTheDocument();
   });
@@ -869,7 +868,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     await user.click(await screen.findByTestId("wizard-view-grid"));
     expect(thumbMock).not.toHaveBeenCalled();
     const grid = await screen.findByTestId("wizard-file-grid");
-    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(within(grid).getAllByTestId("tile-photo")[0]).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
@@ -883,7 +882,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     await screen.findByTestId("wizard-file-grid");
     await waitFor(() => expect(thumbMock).toHaveBeenCalled());
     const grid = screen.getByTestId("wizard-file-grid");
-    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(within(grid).getAllByTestId("tile-photo")[0]).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
@@ -917,7 +916,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
 
     await user.click(await screen.findByTestId("wizard-view-grid"));
     const grid = await screen.findByTestId("wizard-file-grid");
-    expect(within(grid).getByTestId("tile-photo")).toBeInTheDocument();
+    expect(within(grid).getAllByTestId("tile-photo")[0]).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
@@ -940,7 +939,7 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     resolveThumb(null);
     await waitFor(() => expect(area?.className).not.toContain("sp-skeleton"));
     expect(
-      within(screen.getByTestId("wizard-file-grid")).getByTestId("tile-photo"),
+      within(screen.getByTestId("wizard-file-grid")).getAllByTestId("tile-photo")[0],
     ).toBeInTheDocument();
   });
 });

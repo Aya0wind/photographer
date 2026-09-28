@@ -5,8 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::io::Read;
@@ -25,14 +24,10 @@ fn volume_list_filters_sorts_and_normalizes() {
 
     let files = src.list().unwrap();
     let rels: Vec<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
-    // 大小写混合扩展名（.CR3/.jpg/.MP4）全部命中；系统/回收站/隐藏目录/非媒体全部排除
+    // 仅照片/RAW 命中；视频与系统/回收站/隐藏目录/非媒体全部排除。
     assert_eq!(
         rels,
-        [
-            "DCIM/100CANON/IMG_0001.CR3",
-            "DCIM/100CANON/IMG_0002.jpg",
-            "DCIM/100CANON/MVI_0003.MP4",
-        ]
+        ["DCIM/100CANON/IMG_0001.CR3", "DCIM/100CANON/IMG_0002.jpg",]
     );
 
     for f in &files {

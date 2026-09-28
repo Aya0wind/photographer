@@ -6,10 +6,6 @@
 #[allow(dead_code)]
 mod thumbs;
 
-#[path = "../src/videos/mod.rs"]
-#[allow(dead_code)]
-mod videos;
-
 #[path = "../src/metadata/mod.rs"]
 #[allow(dead_code)]
 mod metadata;

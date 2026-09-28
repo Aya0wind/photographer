@@ -12,7 +12,6 @@ pub mod settings;
 mod tasks;
 mod thumbs;
 mod tray;
-mod videos;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -85,6 +84,8 @@ pub fn run() {
                 face_cluster_threshold: settings.ai.face_cluster_threshold,
                 use_gpu: settings.ai.use_gpu,
             });
+            // 选片分析参数快照（blur 软阈值 worker 侧读取，0021）
+            crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);
             let ai_for_kick = ai.clone();
             let ai_settings_snapshot = settings.ai.clone();
             app.manage(std::sync::Arc::new(AppState {
@@ -133,19 +134,18 @@ pub fn run() {
                 index::refresh_exif_for_generation(db_dir.clone(), &bus, &supervisor_handle);
                 // 哈希补算代际自愈（gen-1 / migration 0014）：xxh=0 哨兵补齐
                 index::refresh_hash_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // 选片分析代际自愈（gen-1 / migration 0021）：eyes/blur 任务
+                // 账建档（闭眼模型未收录→eyes 通道跳过并计数；blur 始终可用）
+                index::refresh_selection_for_generation(db_dir.clone(), &bus, &supervisor_handle);
+                // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）
+                ai::selection::kick_eyes_if_ready(
+                    db_dir.clone(),
+                    &ai_for_kick,
+                    &bus,
+                    &supervisor_handle,
+                );
                 // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）
                 thumbs::kick_startup_evict(db_dir.clone());
-                // M8 视频海报解锁：历史库 video 永久占位（thumb_state=2）
-                // 复位为 0——海报管线就位后按需队列即可补生成（幂等，兼作
-                // 侧车补装后的自愈通道）
-                {
-                    let db_dir = db_dir.clone();
-                    supervisor_handle.spawn("thumbs", "video-poster-unlock".into(), move |_| {
-                        if let Ok(db) = ipc::open_library_db(&db_dir) {
-                            let _ = db.reset_video_thumb_placeholders();
-                        }
-                    });
-                }
                 // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算
                 // pHash + 完成后连拍重组
                 index::refresh_phash_for_generation(

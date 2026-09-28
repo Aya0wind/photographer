@@ -96,12 +96,6 @@ jobs:
           restore-keys: |
             tauri-bundlers-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Cache FFmpeg sidecar
-        uses: actions/cache@v4
-        with:
-          path: src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
-          key: ffmpeg-windows-release-essentials-v1
-
       - name: Install frontend dependencies
         run: npm ci
 

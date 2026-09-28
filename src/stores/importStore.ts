@@ -335,7 +335,7 @@ export const useImportStore = create<ImportState>((set, get) => ({
           devices: upsertDevice(s.devices, {
             ...(s.devices.find((d) => d.id === event.id) ?? {
               id: event.id, name: event.name, kind: event.kind,
-              filesByKind: { photo: 0, raw: 0, video: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
+              filesByKind: { photo: 0, raw: 0, other: 0 }, bytesTotal: 0, newFiles: 0,
             }),
             scanStatus: "scanning", scanError: null,
           }),

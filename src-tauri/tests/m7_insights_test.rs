@@ -4,8 +4,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
-    thumbs, videos,
+    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -170,7 +169,7 @@ fn sidebar_counts_semantics_and_tz_boundary() {
     db.mark_asset_viewed(2).unwrap();
 
     let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
-    assert_eq!(counts.assets, 6, "全 kind 计入资产总数");
+    assert_eq!(counts.assets, 5, "旧视频不计入资产总数");
     assert_eq!(counts.recent_viewed, 2);
     // 仅往年两张；今年今天与 video、他日均不计
     assert_eq!(

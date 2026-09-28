@@ -73,7 +73,7 @@ body {
 
 /* 缩略图骨架屏（加载中占位统一挂 .sp-skeleton）：panel 底 + 对角 shimmer 扫光。
    只动 background-position（不触发 layout/paint 面积变化）；视口外虚拟行卸载天然省开销。
-   注意：仅「加载中」挂此 类；结算为永久无图（video/提取失败）的占位保持静态 panel 底。 */
+   注意：仅「加载中」挂此 类；结算为永久无图（提取失败）的占位保持静态 panel 底。 */
 .sp-skeleton {
   background-color: var(--color-panel);
   background-image: linear-gradient(

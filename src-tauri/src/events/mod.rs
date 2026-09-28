@@ -36,6 +36,7 @@ pub enum SourceKind {
 pub enum AssetKind {
     Photo,
     Raw,
+    /// 仅用于读取旧版本留下的资产行；扫描和导入不再产生此类型。
     Video,
     Other,
 }

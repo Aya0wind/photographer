@@ -15,7 +15,7 @@ function snapshot(id: string, name: string, kind: "volume" | "mtp", newFiles: nu
     id,
     name,
     kind,
-    filesByKind: { photo: 100, raw: 40, video: 3, other: 1 },
+    filesByKind: { photo: 100, raw: 40, other: 1 },
     bytesTotal: 8_000_000_000,
     newFiles,
   };
@@ -61,10 +61,9 @@ describe("DeviceDialog", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(screen.getByText("SanDisk 64G")).toBeInTheDocument();
     expect(screen.getByText("读卡器")).toBeInTheDocument();
-    // 分色统计：照片 100 / RAW 40 / 视频 3
+    // 分色统计：照片 100 / RAW 40
     expect(screen.getByTestId("device-dialog-stats")).toHaveTextContent("100");
     expect(screen.getByTestId("device-dialog-stats")).toHaveTextContent("40");
-    expect(screen.getByTestId("device-dialog-stats")).toHaveTextContent("3");
     // 总量 8 GB + 新增
     expect(screen.getByText("7.5 GB")).toBeInTheDocument();
     expect(screen.getByTestId("device-dialog-new")).toHaveTextContent("12 个新文件");

@@ -43,7 +43,7 @@ function snapshot(id: string, name = "SD 卡", newFiles = 12): DeviceSnapshot {
     id,
     name,
     kind: "volume",
-    filesByKind: { photo: 100, raw: 40, video: 3, other: 1 },
+    filesByKind: { photo: 100, raw: 40, other: 1 },
     bytesTotal: 8_000_000_000,
     newFiles,
   };

@@ -200,6 +200,10 @@ pub struct AiSettings {
     pub burst_hamming_max: u8,
     /// 连拍分组：成组最小成员数（默认 2；单张不成组）。
     pub burst_min_size: u32,
+    /// 疑似失焦阈值（0-100 归一清晰度分，默认 30）：低于判 soft（「疑似
+    /// 失焦」建议标签，绝不自动定罪——运动模糊/浅景深天然误报）。改了经
+    /// selection 指纹比对重排 blur 任务。
+    pub blur_soft_threshold: f32,
 }
 
 impl Default for AiSettings {
@@ -219,6 +223,7 @@ impl Default for AiSettings {
             burst_gap_ms: 2000,
             burst_hamming_max: 10,
             burst_min_size: 2,
+            blur_soft_threshold: 30.0,
         }
     }
 }

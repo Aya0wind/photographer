@@ -96,17 +96,14 @@ pub const RAW_EXTS: &[&str] = &[
     "cr2", "cr3", "nef", "arw", "raf", "dng", "orf", "rw2", "r3d", "iiq", "pef", "srw", "x3f",
     "nev",
 ];
-/// 视频扩展名（小写）。
-pub const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mov", "avi", "mkv", "mts", "m2ts", "wmv", "3gp", "avchd",
+/// 已知非图片扩展名：即便内容伪装成 JPEG，也不能进入导入任务。
+const NON_IMAGE_EXTS: &[&str] = &[
+    "mp4", "mov", "avi", "mkv", "mts", "m2ts", "wmv", "3gp", "avchd", "webm",
 ];
-
-/// 全部媒体扩展名。
+/// 可导入的图片扩展名。
 pub fn is_media_ext(ext: &str) -> bool {
     let ext = ext.to_ascii_lowercase();
-    PHOTO_EXTS.contains(&ext.as_str())
-        || RAW_EXTS.contains(&ext.as_str())
-        || VIDEO_EXTS.contains(&ext.as_str())
+    PHOTO_EXTS.contains(&ext.as_str()) || RAW_EXTS.contains(&ext.as_str())
 }
 
 fn ext_kind(ext: &str) -> Option<AssetKind> {
@@ -115,8 +112,6 @@ fn ext_kind(ext: &str) -> Option<AssetKind> {
         Some(AssetKind::Photo)
     } else if RAW_EXTS.contains(&ext.as_str()) {
         Some(AssetKind::Raw)
-    } else if VIDEO_EXTS.contains(&ext.as_str()) {
-        Some(AssetKind::Video)
     } else {
         None
     }
@@ -142,31 +137,30 @@ fn magic_kind(head: &[u8]) -> Option<AssetKind> {
         return match brand {
             b"crx " | b"CRX " => Some(AssetKind::Raw), // CR3
             b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some(AssetKind::Photo),
-            _ => Some(AssetKind::Video), // mp4/mov/qt 等 ISOBMFF
+            _ => Some(AssetKind::Other), // 非图片 ISOBMFF 容器
         };
     }
     if head.starts_with(b"RIFF") {
-        if head.len() >= 12 && &head[8..12] == b"AVI " {
-            return Some(AssetKind::Video);
-        }
         if head.len() >= 12 && &head[8..12] == b"WEBP" {
             return Some(AssetKind::Photo);
         }
-        return Some(AssetKind::Video);
+        return Some(AssetKind::Other);
     }
     if head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        return Some(AssetKind::Video); // Matroska/MKV/WebM
+        return Some(AssetKind::Other);
     }
     None
 }
 
 /// 扩展名 + 魔数双保险分类。
 ///
-/// 规则：扩展名优先；若魔数可判且与扩展名结论冲突（如 .jpg 实为 mp4），
-/// 判 `Other`（伪装文件，不导入）。无头数据（空 head）时信任扩展名。
+/// 规则：仅允许图片扩展名；魔数与扩展名冲突时判 `Other`。
 pub fn classify(file_name: &str, head: &[u8]) -> AssetKind {
     let ext = file_name.rsplit('.').next().unwrap_or("");
     let by_ext = ext_kind(ext);
+    if NON_IMAGE_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+        return AssetKind::Other;
+    }
     if head.is_empty() {
         return by_ext.unwrap_or(AssetKind::Other);
     }
@@ -182,7 +176,8 @@ pub fn classify(file_name: &str, head: &[u8]) -> AssetKind {
                 AssetKind::Other
             }
         }
-        (Some(kind), _) | (None, Some(kind)) => kind,
+        (Some(kind), _) => kind,
+        (None, Some(kind)) => kind,
         (None, None) => AssetKind::Other,
     }
 }
@@ -246,7 +241,7 @@ mod tests {
     fn classify_by_extension_without_head() {
         assert_eq!(classify("IMG_0001.JPG", &[]), AssetKind::Photo);
         assert_eq!(classify("DSC00001.ARW", &[]), AssetKind::Raw);
-        assert_eq!(classify("MVI_0001.MP4", &[]), AssetKind::Video);
+        assert_eq!(classify("MVI_0001.MP4", &[]), AssetKind::Other);
     }
 
     #[test]
@@ -266,15 +261,15 @@ mod tests {
         );
         assert_eq!(
             classify("a.mp4", &head(b"\0\0\0\x20ftypisom\0\0")),
-            AssetKind::Video
+            AssetKind::Other
         );
         assert_eq!(
             classify("a.avi", &head(b"RIFF\x00\x00\x00\x00AVI ")),
-            AssetKind::Video
+            AssetKind::Other
         );
         assert_eq!(
             classify("a.mkv", &head(&[0x1A, 0x45, 0xDF, 0xA3])),
-            AssetKind::Video
+            AssetKind::Other
         );
         assert_eq!(
             classify("a.raf", &head(b"FUJIFILMCCD-RAW ")),
@@ -287,6 +282,10 @@ mod tests {
         // 伪装：.jpg 实为 mp4
         assert_eq!(
             classify("fake.jpg", &head(b"\0\0\0\x20ftypisom\0\0")),
+            AssetKind::Other
+        );
+        assert_eq!(
+            classify("fake.mp4", &head(&[0xFF, 0xD8, 0xFF, 0xE0])),
             AssetKind::Other
         );
         // 图片家族内部互认：.tif 是 TIFF 头 → Photo（按扩展名）
