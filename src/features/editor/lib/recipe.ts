@@ -247,9 +247,24 @@ export function recipeReducer(
   }
 }
 
-/** 配方等值比较（JSON 稳定序列化；用于脏检查） */
+/** 键序无关规范化：后端 serde_json 无 preserve_order，回传配方为字母键序；
+ * 本地对象为 TS 声明序，JSON.stringify 直比会误判不等（保存后恒脏）。 */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const src = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(src)
+        .sort()
+        .map((key) => [key, canonicalize(src[key])]),
+    );
+  }
+  return value;
+}
+
+/** 配方等值比较（键序无关；用于脏检查） */
 export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
 }
 
 /** 持久化/导出前清洗：剔除空文字层与零点笔迹（放置后未输入的占位层不入库） */

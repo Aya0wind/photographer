@@ -259,6 +259,19 @@ describe("recipeForPersist / equals / id", () => {
     expect(recipeEquals(defaultRecipe(), { ...defaultRecipe(), rotateQuarter: 1 })).toBe(false);
   });
 
+  it("recipeEquals：键序无关（后端 serde_json 回传为字母键序）", () => {
+    // 模拟后端 EditRecipeStateDto.recipe：字母序键（brushStrokes 在前）
+    const backendShape = {
+      brushStrokes: [],
+      crop: null,
+      output: { longEdge: null, quality: 90 },
+      rotateQuarter: 0,
+      textLayers: [],
+      version: 1,
+    } as unknown as Parameters<typeof recipeEquals>[0];
+    expect(recipeEquals(defaultRecipe(), backendShape)).toBe(true);
+  });
+
   it("newLayerId 唯一", () => {
     const ids = new Set(Array.from({ length: 50 }, () => newLayerId()));
     expect(ids.size).toBe(50);

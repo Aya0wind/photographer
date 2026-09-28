@@ -134,6 +134,20 @@ export default function EditorCanvas({
   const readyRef = useRef(onImageReady);
   readyRef.current = onImageReady;
 
+  // --- 全部钩子必须在 image===null 早退之前：图未加载与加载完成两个渲染分支
+  //     的钩子数不一致会触发 React「Rendered more hooks」崩溃 ----------------------
+  // 画笔在途一笔（Free Drawing）
+  const [drawingPoints, setDrawingPoints] = useState<number[] | null>(null);
+  const drawingRef = useRef<number[] | null>(null);
+  // 文字双击编辑状态（textarea 覆盖）
+  const [editing, setEditing] = useState<{ id: string; x: number; y: number; fontSize: number; color: string; text: string } | null>(null);
+  // Transformer/节点引用与选中文字节点
+  const textTrRef = useRef<Konva.Transformer | null>(null);
+  const cropTrRef = useRef<Konva.Transformer | null>(null);
+  const cropRectRef = useRef<Konva.Rect | null>(null);
+  const textNodesRef = useRef(new Map<string, Konva.Text>());
+  const [selectedTextNode, setSelectedTextNode] = useState<Konva.Text | null>(null);
+
   // 容器尺寸（ResizeObserver；jsdom stub 下保持缺省值）
   useEffect(() => {
     const el = containerRef.current;
@@ -155,6 +169,23 @@ export default function EditorCanvas({
     const h = image.naturalHeight || fallbackSize?.height || 0;
     if (w > 0 && h > 0) readyRef.current({ width: w, height: h });
   }, [image, fallbackSize]);
+
+  // Transformer 绑定（同样必须早退之前）
+  useEffect(() => {
+    setSelectedTextNode(
+      selectedTextId !== null ? textNodesRef.current.get(selectedTextId) ?? null : null,
+    );
+  }, [selectedTextId, recipe.textLayers]);
+  useEffect(() => {
+    if (textTrRef.current === null) return;
+    textTrRef.current.nodes(selectedTextNode !== null ? [selectedTextNode] : []);
+    textTrRef.current.getLayer()?.batchDraw();
+  }, [selectedTextNode, tool, recipe]);
+  useEffect(() => {
+    if (cropTrRef.current === null || cropRectRef.current === null) return;
+    cropTrRef.current.nodes([cropRectRef.current]);
+    cropTrRef.current.getLayer()?.batchDraw();
+  }, [tool, cropDraft]);
 
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
@@ -189,8 +220,6 @@ export default function EditorCanvas({
   const frameH = rot.h * scale;
 
   // --- 画笔（Free Drawing）---------------------------------------------------------
-  const [drawingPoints, setDrawingPoints] = useState<number[] | null>(null);
-  const drawingRef = useRef<number[] | null>(null);
   const brushWidthPx = strokeWidthPx(brushOptions.widthRel, canvas);
 
   function pointerPos(stage: Konva.Stage): { x: number; y: number } | null {
@@ -239,7 +268,6 @@ export default function EditorCanvas({
   }
 
   // --- 文字编辑（双击 textarea 覆盖，官方 demo 模式） --------------------------------
-  const [editing, setEditing] = useState<{ id: string; x: number; y: number; fontSize: number; color: string; text: string } | null>(null);
 
   function finishTextEditing(commit: boolean): void {
     if (editing === null) return;
@@ -249,26 +277,6 @@ export default function EditorCanvas({
   }
 
   // --- Transformer 绑定 --------------------------------------------------------------
-  const textTrRef = useRef<Konva.Transformer | null>(null);
-  const cropTrRef = useRef<Konva.Transformer | null>(null);
-  const cropRectRef = useRef<Konva.Rect | null>(null);
-  const textNodesRef = useRef(new Map<string, Konva.Text>());
-  const [selectedTextNode, setSelectedTextNode] = useState<Konva.Text | null>(null);
-  useEffect(() => {
-    setSelectedTextNode(
-      selectedTextId !== null ? textNodesRef.current.get(selectedTextId) ?? null : null,
-    );
-  }, [selectedTextId, recipe.textLayers]);
-  useEffect(() => {
-    if (textTrRef.current === null) return;
-    textTrRef.current.nodes(selectedTextNode !== null ? [selectedTextNode] : []);
-    textTrRef.current.getLayer()?.batchDraw();
-  }, [selectedTextNode, tool, recipe]);
-  useEffect(() => {
-    if (cropTrRef.current === null || cropRectRef.current === null) return;
-    cropTrRef.current.nodes([cropRectRef.current]);
-    cropTrRef.current.getLayer()?.batchDraw();
-  }, [tool, cropDraft]);
 
   const cropMode = tool === "crop" && cropDraft !== null;
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;

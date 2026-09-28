@@ -3,10 +3,18 @@
 //! 字体策略（用户定案：**不得捆绑字体文件**，避免再分发许可问题）：运行时
 //! 从系统字体目录加载——Windows 依次尝试 `C:\Windows\Fonts` 的
 //! msyh.ttc（微软雅黑，中英全覆盖）→ simhei.ttf（黑体）→ simsun.ttc；
-//! 非 Windows 尝试 Noto CJK / DejaVu 常见路径。TTC 集合取第一张字脸
-//! （手工解析 ttcf 头，ab_glyph 不认集合容器）。全部失败 → **静态回退**：
-//! 每行画一个等尺寸的空心矩形占位（导出不因缺字体失败，标注位置仍可见）。
+//! 非 Windows 尝试 Noto CJK / DejaVu 常见路径。TTC 集合用 ab_glyph 原生
+//! `try_from_vec_and_index(…, 0)` 解析（**不能手工切字节**：TTC 内表偏移是
+//! 文件绝对偏移，切片后全部错位——msyh.ttc 实测 InvalidFont 回退 simhei，
+//! 宽度/基线与前端预览完全对不上）。全部失败 → **静态回退**：每行画一个
+//! 等尺寸的空心矩形占位（导出不因缺字体失败，标注位置仍可见）。
 //! 字体进程级缓存（OnceLock），首次渲染后零 IO。
+//!
+//! **基线公式与前端 Konva Text 逐像素对齐**（konva/lib/shapes/Text.js 非
+//! legacy 分支）：首行字母基线 = `y + (ascent - descent)/2 + lineHeightPx/2`，
+//! 行进 = `lineHeight × em`；其中 lineHeight=1.25（前端 Konva.Text lineHeight
+//! 同值），ascent/descent 取 hhea（浏览器 canvas fontBoundingBox 同源，
+//! msyh 100px 实测 fba/fbd=106/26 ≈ hhea 2167/541）。见 konvaMapping/EditorCanvas。
 //!
 //! 笔迹 = 折线 + 圆头端点/连接 + 等宽：沿路径按半径步长密集盖印实心圆
 //! （单点 = 圆点），天然满足圆头/圆连接语义。
@@ -14,9 +22,12 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont};
 
 use super::recipe::{BrushStroke, TextLayer};
+
+/// 与前端 Konva.Text lineHeight={1.25} 对齐的行高倍数。
+const LINE_HEIGHT: f32 = 1.25;
 
 /// Windows 候选（契约顺序：msyh → simhei；simsun/arial 追加兜底）。
 #[cfg(windows)]
@@ -41,19 +52,6 @@ fn font_candidates() -> Vec<PathBuf> {
     .collect()
 }
 
-/// TTC 集合取第一张字脸：`ttcf` + 版本 u32 + 字脸数 u32 + 偏移表（u32 BE）。
-/// 返回切片起点之后的单字脸字节；非 TTC 原样返回。
-fn first_ttc_face(bytes: Vec<u8>) -> Vec<u8> {
-    if bytes.len() < 16 || &bytes[..4] != b"ttcf" {
-        return bytes;
-    }
-    let offset = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-    if offset == 0 || offset >= bytes.len() {
-        return bytes; // 结构异常：交给字体解析器报错
-    }
-    bytes[offset..].to_vec()
-}
-
 /// 进程级字体缓存（None = 已尝试且全部失败，走静态回退）。
 fn font() -> Option<&'static FontArc> {
     static FONT: OnceLock<Option<FontArc>> = OnceLock::new();
@@ -62,8 +60,8 @@ fn font() -> Option<&'static FontArc> {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
-            if let Ok(font) = FontArc::try_from_vec(first_ttc_face(bytes)) {
-                return Some(font);
+            if let Ok(font) = FontVec::try_from_vec_and_index(bytes, 0) {
+                return Some(FontArc::new(font));
             }
         }
         None
@@ -89,12 +87,31 @@ pub fn draw_text_layer(canvas: &mut image::RgbImage, layer: &TextLayer) {
         draw_text_fallback(canvas, &layer.text, x_px, y_px, em, color);
         return;
     };
-    let scale = PxScale { x: em, y: em };
+    // ab_glyph 的 PxScale.y 语义 = hhea (ascent+descent) 盒的像素高，**不是** CSS
+    // fontSize 的 em（msyh 实测：scale=100 时 ascent+descent 恰为 100、CJK 字宽
+    // 75.77px 而浏览器同字号为 100px）。FontArc 不暴露原始 hhea 单位，用全角
+    // 字符（advance=upem，如 U+3000）在 scale=em 下的实测字宽反推修正系数
+    // factor = span/upem（msyh = 2708/2048 ≈ 1.322），使 h_advance 与浏览器
+    // fontSize=em 逐像素对齐。夹取防御异常字体度量。
+    let probe_scale = PxScale { x: em, y: em };
+    let probe = font.clone().into_scaled(probe_scale);
+    let mut factor = 1.0f32;
+    for ch in ['\u{3000}', '\u{9a8c}'] {
+        let adv = probe.h_advance(probe.glyph_id(ch));
+        if adv > 1.0 {
+            factor = em / adv;
+            break;
+        }
+    }
+    factor = factor.clamp(0.5, 2.5);
+    let scale = PxScale { x: em * factor, y: em * factor };
     let scaled = font.into_scaled(scale);
     let ascent = scaled.ascent();
-    // ab_glyph 的 descent 为负（height = ascent - descent）
-    let line_height = ascent - scaled.descent() + scaled.line_gap();
-    let mut baseline = y_px + ascent;
+    // ab_glyph 的 descent 为负（height = ascent - descent）；Konva 公式里的
+    // descent 是正的 fontBoundingBoxDescent，故此处用 (asc + desc)/2 等价之
+    let descent = -scaled.descent();
+    // 首行基线与 Konva Text 对齐：(asc - desc)/2 + lineHeight·em/2；行进 = 1.25·em
+    let mut baseline = y_px + (ascent - descent) / 2.0 + LINE_HEIGHT * em / 2.0;
     for line in layer.text.split('\n') {
         let mut cursor_x = x_px;
         let mut previous: Option<ab_glyph::GlyphId> = None;
@@ -125,7 +142,7 @@ pub fn draw_text_layer(canvas: &mut image::RgbImage, layer: &TextLayer) {
             }
             cursor_x += scaled.h_advance(glyph_id);
         }
-        baseline += line_height;
+        baseline += LINE_HEIGHT * em;
     }
 }
 
@@ -235,3 +252,4 @@ fn blend_pixel(canvas: &mut image::RgbImage, x: u32, y: u32, color: [u8; 3], cov
             (*channel as f32 * (1.0 - coverage) + f32::from(value) * coverage).round() as u8;
     }
 }
+
