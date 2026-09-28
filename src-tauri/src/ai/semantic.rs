@@ -304,8 +304,9 @@ pub fn run_semantic_backfill(
                     let mut count = 0u64;
                     // 批大按 EP 运行态定：DML 激活 = 16（快 23%），CPU = 1
                     // （批化反而 -12%，见 prefer_batch_inference 注释）；
-                    // DML 中途毒化后后续批次自动落 1
-                    let batch_size = if super::prefer_batch_inference() {
+                    // DML 中途毒化后后续批次自动落 1（批量化是语义通道决策
+                    // → 按 siglip vision 标签查毒化位）
+                    let batch_size = if super::prefer_batch_inference("siglip2-visual") {
                         AI_BATCH
                     } else {
                         1

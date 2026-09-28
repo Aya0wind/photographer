@@ -278,3 +278,100 @@ fn embed_throughput_cpu_vs_dml() {
 
     eprintln!("== 基准结束（ep={ep}）==");
 }
+
+// ---------------------------------------------------------------------------
+// face 全管线吞吐（2026-09-28 性能三件套真机验收）：检测源降档 + 两阶段
+// 并行 + 归一化坐标落库，与 index_rebuild(face) IPC 同核的清理+重排后计时。
+// ---------------------------------------------------------------------------
+
+/// face 全管线基准（写真库）：
+/// ① rebuild_channel_core("face")——faces/people 全清 + face_indexed_at
+///   复位 + 任务重排（旧 v1 像素坐标数据由此重建为 v2 归一化，幂等）
+/// ② run_face_backfill 全管线计时（认领→取图[缓存档优先]→SCRFD→对齐
+///   →ArcFace→在线聚类→归一化落库→记账）。
+/// env：SMARTPHOTO_BENCH_LIB（默认 I:\SmartPhoto\主库）、
+/// SMARTPHOTO_BENCH_MODELS、SMARTPHOTO_BENCH_N（默认 0=全部 pending；
+/// 大于 0 时只保留按 id 升序的前 N 个资产的任务，其余删行——下次 kick
+/// 自动补种，无损）、SMARTPHOTO_AI_EP（cpu|dml 覆盖）。
+/// 手动：cargo test --test dml_bench_test face_pipeline -- --ignored --nocapture
+#[test]
+#[ignore = "真机验收基准：重建并计时真库人脸索引，手动 --ignored 运行"]
+fn face_pipeline_throughput_real_library() {
+    let lib = PathBuf::from(env_or("SMARTPHOTO_BENCH_LIB", r"I:\SmartPhoto\主库"));
+    let models = PathBuf::from(env_or(
+        "SMARTPHOTO_BENCH_MODELS",
+        r"C:\Users\12003\AppData\Roaming\com.smartphoto.app\models",
+    ));
+    if !lib.is_dir() {
+        eprintln!("skip: 真库不存在 {}", lib.display());
+        return;
+    }
+    let manager = ModelManager::new(
+        models.clone(),
+        EventBus::new(),
+        tasks::TaskSupervisor::new(EventBus::new()),
+    );
+    if !manager.face_models_ready() {
+        eprintln!("skip: scrfd/arcface 未齐备（{}）", models.display());
+        return;
+    }
+    manager.set_ai_params(ai::AiIndexParams {
+        use_gpu: true, // 实际 EP 由 SMARTPHOTO_AI_EP 覆盖决定
+        ..ai::AiIndexParams::default()
+    });
+    let n_cap: usize = env_or("SMARTPHOTO_BENCH_N", "0").parse().unwrap_or(0);
+
+    // ① 重建（幂等；与 index_rebuild(face) 同核：清产物+重排，不 kick UI 侧）
+    let db = ipc::open_library_db(&lib).expect("打开真库");
+    let _ = ipc::indexing::rebuild_channel_core(&db, &lib, "face").expect("face 重建");
+    if n_cap > 0 {
+        db.0.execute(
+            "DELETE FROM index_tasks WHERE kind = 'face' AND asset_id NOT IN \
+             (SELECT id FROM assets WHERE kind IN ('photo','raw') ORDER BY id LIMIT ?1)",
+            rusqlite::params![n_cap as i64],
+        )
+        .expect("截断基准任务集");
+    }
+    let total = db.pending_index_task_count("face").unwrap_or(0);
+    let ep = env_or("SMARTPHOTO_AI_EP", "auto");
+    eprintln!(
+        "== face 全管线基准：lib={} ep={} pending={total}（重建后，v2 归一化坐标）==",
+        lib.display(),
+        ep
+    );
+
+    // ② 全管线计时（两阶段：3 worker 推理 + 单线程聚类落库）
+    let t0 = Instant::now();
+    let done = ai::face::run_face_backfill(&lib, std::sync::Arc::new(manager), &EventBus::new());
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    report(&format!("face-pipeline[{ep}]"), done as usize, ms);
+
+    // 对账：落库脸数 / 簇数 / 坐标空间抽查（v2 归一化 ∈ 0..1）
+    let faces: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM faces", [], |r| r.get(0))
+            .unwrap_or(0);
+    let people: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))
+            .unwrap_or(0);
+    let bad_boxes: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM faces WHERE box_x < 0 OR box_y < 0 OR \
+             box_w <= 0 OR box_h <= 0 OR box_x + box_w > 1.01 OR box_y + box_h > 1.01",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    let leftovers: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'face' AND state != 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    eprintln!(
+        "BENCH | face-pipeline faces={faces} people={people} bad_boxes={bad_boxes} leftovers={leftovers}（done={done}/{total}）"
+    );
+    assert_eq!(leftovers, 0, "任务应收口（failed/pending 残留=异常）");
+    assert_eq!(bad_boxes, 0, "v2 归一化坐标应在 0..1");
+    eprintln!("== face 全管线基准结束（ep={ep}）==");
+}

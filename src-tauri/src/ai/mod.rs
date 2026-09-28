@@ -155,40 +155,53 @@ fn agent() -> &'static ureq::Agent {
 // EP 选择与会话构建（embed/face 共用，2026-09-21 DML 接入）
 // ---------------------------------------------------------------------------
 
-/// DML 运行时故障位（进程级一次）：DML EP **注册**成功但运行时节点报错
-/// （真机 2026-09-21：SigLIP2 int8 的 LayerNormFusion 在 RTX 5070 Ti 的
-/// DML 上 E_INVALIDARG——ort 的逐算子回落只覆盖"不支持"，不覆盖"执行即
-/// 炸"）。置位后本进程所有新会话回落纯 CPU；推理层捕获错误后丢弃 DML
-/// 会话重建（见 run_with_dml_fallback）。
-fn poison_flag() -> &'static std::sync::atomic::AtomicBool {
-    static POISON: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
-    POISON.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+/// DML 运行时故障位（**按模型隔离**，2026-09-28）：DML EP **注册**成功但
+/// 运行时节点报错（真机 2026-09-21：SigLIP2 int8 的 LayerNormFusion 在
+/// RTX 5070 Ti 的 DML 上 E_INVALIDARG——ort 的逐算子回落只覆盖"不支持"，
+/// 不覆盖"执行即炸"）。某模型（"scrfd"/"arcface"/"siglip2-visual"/
+/// "siglip2-text"）运行时故障只毒化该模型——重建纯 CPU 会话时**其他模型
+/// 保住 DML**（此前全局一位，单模型炸会连坐全部通道）。推理层捕获错误后
+/// 丢弃该模型的 DML 会话重建（见 run_with_dml_fallback）。
+fn poison_flags() -> &'static Mutex<HashMap<String, bool>> {
+    static POISON: std::sync::OnceLock<Mutex<HashMap<String, bool>>> = std::sync::OnceLock::new();
+    POISON.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn dml_poisoned() -> bool {
-    poison_flag().load(std::sync::atomic::Ordering::Relaxed)
+fn dml_poisoned(model: &str) -> bool {
+    poison_flags()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(model)
+        .copied()
+        .unwrap_or(false)
 }
 
-fn poison_dml() {
-    poison_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+fn poison_dml(model: &str) {
+    poison_flags()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(model.to_string(), true);
 }
 
-/// 当前意图是否 DML 优先（env 覆盖 > use_gpu；已毒化则否）。
-fn dml_intended(use_gpu: bool) -> bool {
+/// 当前意图是否 DML 优先（env 覆盖 > use_gpu；该模型已毒化则否）。
+fn dml_intended(use_gpu: bool, model: &str) -> bool {
     match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
-        Ok("dml") => !dml_poisoned(),
+        Ok("dml") => !dml_poisoned(model),
         Ok("cpu") => false,
-        _ => use_gpu && !dml_poisoned(),
+        _ => use_gpu && !dml_poisoned(model),
     }
 }
 
 /// EP 序列：`use_gpu=true` → `[DirectML, CPU]`——DML **注册**失败时 ort 记
 /// 警告并回落（CPU EP 恒在队尾兜底，逐算子不支持的也自动回落 CPU）；
-/// `use_gpu=false` 或 DML 已毒化（运行时故障）→ 纯 CPU。env
+/// `use_gpu=false` 或该模型 DML 已毒化（运行时故障）→ 纯 CPU。env
 /// `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖（"dml" 越过 use_gpu 开关，"cpu"
 /// 压制之）——基准 A/B 与现场诊断用，优先级最高。
-pub(crate) fn execution_providers(use_gpu: bool) -> Vec<ort::ep::ExecutionProviderDispatch> {
-    if dml_intended(use_gpu) {
+pub(crate) fn execution_providers(
+    use_gpu: bool,
+    model: &str,
+) -> Vec<ort::ep::ExecutionProviderDispatch> {
+    if dml_intended(use_gpu, model) {
         vec![
             ort::ep::DirectML::default().build(),
             ort::ep::CPU::default().build(),
@@ -198,20 +211,24 @@ pub(crate) fn execution_providers(use_gpu: bool) -> Vec<ort::ep::ExecutionProvid
     }
 }
 
-/// DML 运行时故障的统一处置：`run` 失败且当前会话确为 DML 优先时——置
-/// 毒化位 + `reset` 丢弃该 DML 会话 + 重跑一次（重建会话经
-/// execution_providers 自动回落纯 CPU）。非 DML 会话 / 二次失败原样上抛。
+/// DML 运行时故障的统一处置：`run` 失败且该模型会话确为 DML 优先时——置
+/// **该模型**的毒化位 + `reset` 丢弃其 DML 会话 + 重跑一次（重建会话经
+/// execution_providers 自动回落纯 CPU，其他模型不受连坐）。非 DML 会话 /
+/// 二次失败原样上抛。
 pub(crate) fn run_with_dml_fallback<T>(
     use_gpu: bool,
+    model: &str,
     mut run: impl FnMut() -> Result<T, String>,
     reset: impl FnOnce(),
 ) -> Result<T, String> {
     match run() {
         Ok(v) => Ok(v),
         Err(err) => {
-            if dml_intended(use_gpu) {
-                poison_dml();
-                eprintln!("DML 推理运行时故障，本进程回落纯 CPU 并重建会话: {err}");
+            if dml_intended(use_gpu, model) {
+                poison_dml(model);
+                eprintln!(
+                    "DML 推理运行时故障（{model}），该模型本进程回落纯 CPU 并重建会话: {err}"
+                );
                 reset();
                 run()
             } else {
@@ -225,8 +242,50 @@ pub(crate) fn run_with_dml_fallback<T>(
 /// RTX 5070 Ti，SigLIP2 vision int8——DML 批16 = 24.6 img/s vs 单图 20.0
 /// （+23%）；CPU 批16 = 12.5 vs 单图 14.1（**-12%**，单图 Run 的 intra-op
 /// 线程已吃满核，批化反而劣化）。CPU/毒化/显式 cpu 一律批 1。
-pub(crate) fn prefer_batch_inference() -> bool {
-    dml_intended(true)
+/// 这是**语义通道**的批量化决策 → 按批推理实际用的 siglip vision 标签查。
+pub(crate) fn prefer_batch_inference(model: &str) -> bool {
+    dml_intended(true, model)
+}
+
+// ---------------------------------------------------------------------------
+// 毒化隔离测试缝（集成测试用；生产代码勿调）
+// ---------------------------------------------------------------------------
+
+/// 置某模型的 DML 毒化位（tests 毒化隔离真值表用）。
+#[doc(hidden)]
+#[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
+pub fn poison_dml_for_test(model: &str) {
+    poison_dml(model);
+}
+
+/// 清空全部毒化位（测试隔离：每个用例从干净态起步）。
+#[doc(hidden)]
+#[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
+pub fn reset_dml_poison_for_test() {
+    poison_flags()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// 某模型当前 DML 意图（tests 断言「A 毒化后 A=CPU、B 仍 DML」）。
+#[doc(hidden)]
+#[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
+pub fn dml_intended_for_test(use_gpu: bool, model: &str) -> bool {
+    dml_intended(use_gpu, model)
+}
+
+/// 直通 run_with_dml_fallback（tests 验证「失败一次 → 毒化该模型 + reset +
+/// 重跑成功；其他模型不受连坐」——用假 run/reset 闭包当 EP/会话 seam）。
+#[doc(hidden)]
+#[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
+pub fn run_with_dml_fallback_for_test<T>(
+    use_gpu: bool,
+    model: &str,
+    run: impl FnMut() -> Result<T, String>,
+    reset: impl FnOnce(),
+) -> Result<T, String> {
+    run_with_dml_fallback(use_gpu, model, run, reset)
 }
 
 /// ort 会话构建（embed/face 共用）：图优化 + 可选 intra 线程 + EP 序列。
@@ -247,7 +306,7 @@ pub(crate) fn build_session(
     let opt_level = match std::env::var("SMARTPHOTO_AI_OPT").as_deref() {
         Ok("level1") => GraphOptimizationLevel::Level1,
         Ok("disable") => GraphOptimizationLevel::Disable,
-        _ if dml_intended(use_gpu) => GraphOptimizationLevel::Level1,
+        _ if dml_intended(use_gpu, model_label) => GraphOptimizationLevel::Level1,
         _ => GraphOptimizationLevel::Level3,
     };
     let mut builder = ort::session::Session::builder().map_err(|e| e.to_string())?;
@@ -257,7 +316,7 @@ pub(crate) fn build_session(
     builder
         .with_optimization_level(opt_level)
         .map_err(|e| e.to_string())?
-        .with_execution_providers(execution_providers(use_gpu))
+        .with_execution_providers(execution_providers(use_gpu, model_label))
         .map_err(|e| e.to_string())?
         .commit_from_file(path)
         .map_err(|e| format!("加载 {model_label} 失败: {e}"))

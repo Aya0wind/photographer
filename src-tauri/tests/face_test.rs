@@ -585,6 +585,291 @@ fn ipc_people_commands_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
+// 性能三件套（2026-09-28）：检测源降档真值表 / 归一化坐标 / 两阶段顺序性
+// ---------------------------------------------------------------------------
+
+/// 生成一枚真实 JPEG 源文件（检测源真值表用）。
+fn write_jpeg(dir: &Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([((x * 7) % 256) as u8, ((y * 13) % 256) as u8, 128])
+    });
+    let path = dir.join(name);
+    img.save_with_format(&path, image::ImageFormat::Jpeg)
+        .unwrap();
+    path
+}
+
+/// 缓存文件落点档位目录名（thumbs/<tier>/…）。
+fn tier_of(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// 档位目录下的缓存文件数。
+fn tier_file_count(db_dir: &Path, tier: &str) -> usize {
+    std::fs::read_dir(db_dir.join("thumbs").join(tier))
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
+}
+
+/// 检测源策略真值表：缓存档优先 [512, 2048]；全未命中才生成最便宜档 512
+/// （不再无条件同步生成 2048 档）。
+#[test]
+fn detection_source_prefers_cached_tier_then_generates_512() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+
+    // ① 全未命中 → 按需生成 512（最便宜档）
+    let a = write_jpeg(src_dir.path(), "a.jpg", 800, 600);
+    let got = face::detection_source(db_dir.path(), &a).expect("全未命中应生成 512");
+    assert_eq!(tier_of(&got), "512", "应落 512 档: {got}");
+
+    // ② 仅 2048 缓存 → 直接命中 2048（零生成；512 档文件数不变）
+    let b = write_jpeg(src_dir.path(), "b.jpg", 800, 600);
+    assert!(thumbs::thumb_file(db_dir.path(), &b, 2048).is_some());
+    let before = tier_file_count(db_dir.path(), "512");
+    let got = face::detection_source(db_dir.path(), &b).expect("2048 命中");
+    assert_eq!(tier_of(&got), "2048", "应命中已缓存 2048: {got}");
+    assert_eq!(
+        tier_file_count(db_dir.path(), "512"),
+        before,
+        "缓存命中时不得顺手生成 512"
+    );
+
+    // ③ 512 与 2048 都缓存 → 取优先序首位 512
+    let c = write_jpeg(src_dir.path(), "c.jpg", 800, 600);
+    assert!(thumbs::thumb_file(db_dir.path(), &c, 512).is_some());
+    assert!(thumbs::thumb_file(db_dir.path(), &c, 2048).is_some());
+    let got = face::detection_source(db_dir.path(), &c).expect("两档均命中");
+    assert_eq!(tier_of(&got), "512", "优先序 [512, 2048] 首位: {got}");
+
+    // ④ 源文件不存在 → None
+    let ghost = src_dir.path().join("ghost.jpg");
+    assert!(face::detection_source(db_dir.path(), &ghost).is_none());
+}
+
+/// faces 坐标空间 v2：源图像素框 → 归一化 0..1（两轴各除以源图宽高），
+/// 且两阶段写库路径落的就是归一化值。
+#[test]
+fn faces_written_with_normalized_coordinates() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    db.insert_asset(&asset_row("X:/p/n1.jpg", AssetKind::Photo, None))
+        .unwrap();
+    let a = db.asset_id_by_path("X:/p/n1.jpg").unwrap().unwrap();
+    db.create_face_tasks_for_unindexed().unwrap();
+
+    // 纯函数真值：1000×800 源图上 (100,200,300,160) → (0.1, 0.25, 0.3, 0.2)
+    let det = face::DetectedFace {
+        box_x: 100.0,
+        box_y: 200.0,
+        box_w: 300.0,
+        box_h: 160.0,
+        score: 0.9,
+        kps: [[0.0; 2]; 5],
+    };
+    let [x, y, w, h] = face::normalized_box(&det, 1000, 800);
+    assert!((x - 0.1).abs() < 1e-9 && (y - 0.25).abs() < 1e-9);
+    assert!((w - 0.3).abs() < 1e-9 && (h - 0.2).abs() < 1e-9);
+
+    // 图缘越界钳制（SCRFD anchor 贴边半脸可少量越界）：坐标夹回 0..1，
+    // x+w / y+h 不超 1
+    let edge = face::DetectedFace {
+        box_x: -10.0,
+        box_y: 790.0,
+        box_w: 300.0,
+        box_h: 60.0,
+        score: 0.9,
+        kps: [[0.0; 2]; 5],
+    };
+    let [x, y, w, h] = face::normalized_box(&edge, 1000, 800);
+    assert!((x - 0.0).abs() < 1e-9, "负起点夹 0");
+    assert!((y - 0.9875).abs() < 1e-9);
+    assert!(
+        x + w <= 1.0 + 1e-9 && y + h <= 1.0 + 1e-9,
+        "端点不越 1: {x}+{w} {y}+{h}"
+    );
+    let over = face::DetectedFace {
+        box_x: 990.0,
+        box_y: 0.0,
+        box_w: 30.0,
+        box_h: 100.0,
+        score: 0.9,
+        kps: [[0.0; 2]; 5],
+    };
+    let [x, _, w, _] = face::normalized_box(&over, 1000, 800);
+    assert!(
+        (x - 0.99).abs() < 1e-9 && (w - 0.01).abs() < 1e-9,
+        "右缘越界宽度夹到剩余空间: x={x} w={w}"
+    );
+
+    // 写入路径：两阶段回填（假嵌入桩）落库坐标 = 归一化
+    let manager = ai::ModelManager::new(
+        dir.path().join("models-empty"),
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    let infer: face::FaceInfer = std::sync::Arc::new(move |_db, _asset_id| {
+        Some(face::FacePayload {
+            src_w: 1000,
+            src_h: 800,
+            faces: vec![(det.clone(), rand_unit(51))],
+        })
+    });
+    let done = face::run_face_backfill_with(
+        dir.path(),
+        std::sync::Arc::new(manager),
+        &events::EventBus::new(),
+        infer,
+    );
+    assert_eq!(done, 1);
+    let row: (f64, f64, f64, f64) =
+        db.0.query_row(
+            "SELECT box_x, box_y, box_w, box_h FROM faces WHERE asset_id = ?1",
+            [a],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert!(
+        (row.0 - 0.1).abs() < 1e-6
+            && (row.1 - 0.25).abs() < 1e-6
+            && (row.2 - 0.3).abs() < 1e-6
+            && (row.3 - 0.2).abs() < 1e-6,
+        "faces 应存归一化坐标: {row:?}"
+    );
+    // 记账 + 任务 done + 封面晋升（首脸无条件）
+    let ledger: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE face_indexed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ledger, 1);
+    let state: String =
+        db.0.query_row(
+            "SELECT state FROM index_tasks WHERE kind = 'face' AND asset_id = ?1",
+            [a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "done");
+    assert_eq!(db.people_list().unwrap().len(), 1);
+}
+
+/// 两阶段回填：假嵌入按序落库（聚类单点）、worker panic 任务回收
+/// （attempts 封顶 → failed，不遗留 running）、进度事件严格非降。
+#[test]
+fn two_stage_backfill_fake_embeddings_order_and_panic_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let name = if i == 2 {
+            "boom.jpg"
+        } else {
+            &format!("ok{i}.jpg")
+        };
+        db.insert_asset(&asset_row(&format!("X:/p/{name}"), AssetKind::Photo, None))
+            .unwrap();
+        ids.push(
+            db.asset_id_by_path(&format!("X:/p/{name}"))
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let bad = ids[2];
+    db.create_face_tasks_for_unindexed().unwrap();
+
+    let manager = ai::ModelManager::new(
+        dir.path().join("models-empty"),
+        events::EventBus::new(),
+        tasks::TaskSupervisor::new(events::EventBus::new()),
+    );
+    let infer: face::FaceInfer = std::sync::Arc::new(move |_db, asset_id| {
+        if asset_id == bad {
+            panic!("worker 崩溃桩");
+        }
+        let seed = u64::try_from(asset_id).unwrap_or(1);
+        Some(face::FacePayload {
+            src_w: 512,
+            src_h: 512,
+            faces: vec![(
+                face::DetectedFace {
+                    box_x: 10.0,
+                    box_y: 20.0,
+                    box_w: 100.0,
+                    box_h: 120.0,
+                    score: 0.9,
+                    kps: [[0.0; 2]; 5],
+                },
+                member(0, 7000 + seed), // 同基向量 → 4 张脸全归同簇
+            )],
+        })
+    });
+    let bus = events::EventBus::new();
+    let mut events_rx = bus.subscribe();
+    // 压制桩 panic 的默认输出噪音（catch_unwind 语义不受影响）
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let done = face::run_face_backfill_with(dir.path(), std::sync::Arc::new(manager), &bus, infer);
+    std::panic::set_hook(prev_hook);
+    assert_eq!(done, 4, "5 条任务中 panic 桩那条失败，其余 4 条成功");
+
+    // panic 任务回收：attempts 封顶 → failed，不遗留 running/pending
+    let (pending, running, failed): (i64, i64, i64) =
+        db.0.query_row(
+            "SELECT COUNT(CASE WHEN state='pending' THEN 1 END), \
+                    COUNT(CASE WHEN state='running' THEN 1 END), \
+                    COUNT(CASE WHEN state='failed' THEN 1 END) \
+             FROM index_tasks WHERE kind='face'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (pending, running, failed),
+        (0, 0, 1),
+        "panic 桩回收到 failed"
+    );
+    let ledger: i64 =
+        db.0.query_row(
+            "SELECT COUNT(*) FROM assets WHERE face_indexed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ledger, 4);
+
+    // 聚类单点：同基向量的 4 张脸全归一个簇（消费线程单点顺序吸收）
+    let people = db.people_list().unwrap();
+    assert_eq!(people.len(), 1, "同基向量应聚为一簇");
+    assert_eq!(people[0].face_count, 4);
+
+    // 进度事件：done 严格非降、total 恒 5、终值 = 成功数
+    let mut progress: Vec<(u64, u64)> = Vec::new();
+    while let Ok(ev) = events_rx.try_recv() {
+        if let events::AppEvent::IndexTaskProgress { kind, done, total } = ev {
+            if kind == "face" {
+                progress.push((done, total));
+            }
+        }
+    }
+    assert!(!progress.is_empty(), "应发布进度事件");
+    assert!(
+        progress.iter().all(|&(_, t)| t == 5),
+        "total 恒为本轮任务数"
+    );
+    for pair in progress.windows(2) {
+        assert!(pair[0].0 <= pair[1].0, "done 严格非降: {progress:?}");
+    }
+    assert_eq!(progress.last().map(|&(d, _)| d), Some(4));
+}
+
+// ---------------------------------------------------------------------------
 // 真 smoke（#[ignore]）：需先在设置页/ai_model_download 下载 scrfd + arcface
 // 到 %APPDATA%\com.smartphoto.app\models\。手动跑：
 // cargo test --test face_test real -- --ignored --nocapture

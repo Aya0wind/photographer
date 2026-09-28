@@ -1,6 +1,21 @@
 //! 人脸全链路（M4）：SCRFD 343G 检测 + 5 关键点对齐 + ArcFace 512 维特征 +
 //! 在线聚类（index_tasks kind="face" 通道）。
 //!
+//! ## 性能结构（2026-09-28 三件套：检测源降档 + 两阶段并行 + 毒化隔离）
+//! - **检测源降档**：检测/对齐/特征全在缓存档缩略图上做（SCRFD 输入恒
+//!   640 letterbox，源 ≥512 即可，1024→640 与 2048→640 检测质量等价），
+//!   优先命中 [`DETECTION_SOURCE_TIERS`] 的已缓存档，全未命中才生成最便宜
+//!   档 512——此前无条件 `thumb_file(2048)` 同步显影 61MP RAW（首张半秒~
+//!   两秒）是流水线最大固定成本。
+//! - **faces 表坐标空间 v2 = 归一化 0..1**（box 两轴各自除以源图宽高；
+//!   v1 是 2048 档像素坐标）。全库消费方已同步（selection.rs blur 人脸
+//!   局部裁剪按归一化映射；db 封面面积的 w*h 比较在同一空间内自洽）。
+//!   **旧像素坐标数据不兼容**——重建入口 `index_rebuild(face)`（开发期
+//!   无兼容包袱，497 张重建很快）。
+//! - **两阶段并行**：[`run_face_backfill`] 阶段 1 多 worker（FACE_WORKERS）
+//!   认领→取图→推理（SCRFD/ArcFace 会话互斥天然串行化 GPU），阶段 2
+//!   单线程消费 mpsc 结果做在线聚类（顺序敏感单点）+ 落库。
+//!
 //! ## 预处理 / 解码约定（immich-app 官方 ONNX 用法，2026-09 核对
 //! immich_ml/models/facial_recognition/{detection,_ops}.py）
 //! - 检测输入：letterbox 640×640（保比缩放贴左上角，余下补黑）→
@@ -19,12 +34,12 @@
 //! 新脸与现有簇心（成员归一化向量的均值）最大 cos ≥ [`CLUSTER_COS_THRESHOLD`]
 //! → 归簇（簇心滑动平均更新）；否则新建簇。簇人数 > 500 的近簇合并 v1 **不做**
 //! （误合并不可逆，等 M8 真库观察误聚率再定，见 [`OnlineClusterer`] 注释）。
-//! 聚类为顺序敏感的单遍状态 → face 通道单 worker 串行；簇心缓存在进程内
-//! （重启后从 faces 表重建）。
+//! 聚类为顺序敏感的单遍状态 → 回填阶段 2 单线程消费（见 run_face_backfill）；
+//! 簇心缓存在进程内（重启后从 faces 表重建）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use image::RgbImage;
 use ort::session::Session;
@@ -170,10 +185,12 @@ pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<Detect
             data.push(px.0[ch] as f32 / 128.0 - 127.5 / 128.0);
         }
     }
-    // DML 运行时故障同 embed 语义：毒化 + 纯 CPU 重建重跑一次
+    // DML 运行时故障同 embed 语义：毒化（仅 scrfd，按模型隔离）+ 纯 CPU
+    // 重建重跑一次
     let use_gpu = manager.ai_params().use_gpu;
     let heads = super::run_with_dml_fallback(
         use_gpu,
+        "scrfd",
         || {
             let tensor = Tensor::from_array((
                 vec![1i64, 3, DET_SIZE as i64, DET_SIZE as i64],
@@ -468,10 +485,12 @@ impl ModelManager {
                 data.push(px.0[ch] as f32 / 128.0 - 127.5 / 128.0);
             }
         }
-        // DML 运行时故障同 embed/det 语义：毒化 + 纯 CPU 重建重跑一次
+        // DML 运行时故障同 embed/det 语义：毒化（仅 arcface，按模型隔离）
+        // + 纯 CPU 重建重跑一次
         let use_gpu = self.ai_params().use_gpu;
         let vec = super::run_with_dml_fallback(
             use_gpu,
+            "arcface",
             || {
                 let tensor = Tensor::from_array((
                     vec![1i64, ALIGNED_SIZE as i64, ALIGNED_SIZE as i64, 3],
@@ -671,71 +690,266 @@ fn assign_cluster(db: &Db, clusterer: &mut OnlineClusterer, emb: &[f32]) -> Resu
 }
 
 // ---------------------------------------------------------------------------
-// index_tasks kind="face" 通道（CPU 串行；接线见 ipc 钩子 + 启动恢复）
+// index_tasks kind="face" 通道（两阶段：多 worker 推理 + 单线程聚类落库）
 // ---------------------------------------------------------------------------
 
-/// 单条 face 任务处理：2048 档缩略图（256 档人脸像素不足）→ 检测 → 对齐 →
-/// 特征 → 在线归簇 → faces 落行 → 记账。返回成功与否（失败走 attempts 封顶）。
-fn process_face_task(db: &Db, db_dir: &Path, manager: &ModelManager, asset_id: i64) -> bool {
-    let Some((path, _)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
-        return false; // 资产已删除（级联清任务前的防御兜底）
-    };
-    let Some(thumb) = crate::thumbs::thumb_file(db_dir, Path::new(&path), 2048) else {
-        return false;
-    };
+/// 检测源档位优先级（缓存命中优先；1024 不是 thumbs 档位——SIZE_TIERS =
+/// 256/512/2048 → 用 [512, 2048]）。SCRFD 输入恒 640 letterbox，源 ≥512
+/// 即可（1024→640 与 2048→640 检测质量等价）；检测+对齐+ArcFace 全在
+/// 同一源图上做。
+pub const DETECTION_SOURCE_TIERS: &[u16] = &[512, 2048];
+
+/// 检测源取图：按 [`DETECTION_SOURCE_TIERS`] 顺序查**缓存命中**（只查不
+/// 生成，thumbs::cached），全未命中才 `thumb_file(512)` 按需生成最便宜档。
+/// 吃掉「无条件同步生成 2048 档（61MP ARW 首张半秒~两秒）」这一最大
+/// 固定成本。
+pub fn detection_source(db_dir: &Path, src: &Path) -> Option<String> {
+    for tier in DETECTION_SOURCE_TIERS {
+        if let Some(hit) = crate::thumbs::cached(db_dir, src, *tier) {
+            return Some(hit);
+        }
+    }
+    crate::thumbs::thumb_file(db_dir, src, DETECTION_SOURCE_TIERS[0])
+}
+
+/// 检出人脸（源图像素坐标）→ faces 表归一化坐标 `[x, y, w, h]` ∈ 0..1
+/// （两轴各自除以源图宽高；坐标空间 v2，见模块注释）。
+/// SCRFD anchor 解码在图缘可少量越界（贴边半脸真机实测 x+w 至 1.014），
+/// 按 0..1 契约写入时钳制回图内——检测语义不变（v1 像素空间同款越界，
+/// 只是当时无契约约束）。
+pub fn normalized_box(face: &DetectedFace, src_w: u32, src_h: u32) -> [f64; 4] {
+    let (w, h) = (f64::from(src_w.max(1)), f64::from(src_h.max(1)));
+    let x = (f64::from(face.box_x) / w).clamp(0.0, 1.0);
+    let y = (f64::from(face.box_y) / h).clamp(0.0, 1.0);
+    let bw = (f64::from(face.box_w) / w).clamp(0.0, 1.0 - x);
+    let bh = (f64::from(face.box_h) / h).clamp(0.0, 1.0 - y);
+    [x, y, bw, bh]
+}
+
+/// 阶段 1 产物：源图尺寸 + 检出人脸（源图像素坐标）+ ArcFace 归一化特征。
+pub struct FacePayload {
+    pub src_w: u32,
+    pub src_h: u32,
+    pub faces: Vec<(DetectedFace, Vec<f32>)>,
+}
+
+/// worker → 消费者消息：payload=None 表示该任务失败（资产缺失/取图失败/
+/// 推理失败/panic——统一交阶段 2 finish_index_task(false) 回收）。
+pub struct FaceTaskOutcome {
+    pub task_id: i64,
+    pub asset_id: i64,
+    pub payload: Option<FacePayload>,
+}
+
+/// 阶段 1 推理核（可注入：生产 = [`infer_face_payload`]；集成测试 = 假嵌入
+/// 桩 / panic 桩，验证两阶段顺序性与 panic 回收）。
+pub type FaceInfer = Arc<dyn Fn(&Db, i64) -> Option<FacePayload> + Send + Sync>;
+
+/// 阶段 1 单任务核：新档位策略取图 → 解码 → 检测+对齐+特征。任一步失败
+/// 返回 None（任务按失败结算走 attempts 封顶）。
+fn infer_face_payload(
+    db: &Db,
+    db_dir: &Path,
+    manager: &ModelManager,
+    asset_id: i64,
+) -> Option<FacePayload> {
+    let (path, _) = db.thumb_info_by_id(asset_id).ok().flatten()?; // 资产已删除（级联清任务前的防御兜底）
+    let thumb = detection_source(db_dir, Path::new(&path))?;
     let img = image::ImageReader::open(&thumb)
         .ok()
         .and_then(|r| r.decode().ok())
-        .map(|d| d.to_rgb8());
-    let Some(img) = img else { return false };
-    let faces = match manager.detect_and_embed(&img) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
+        .map(|d| d.to_rgb8())?;
+    let faces = manager.detect_and_embed(&img).ok()?;
+    Some(FacePayload {
+        src_w: img.width(),
+        src_h: img.height(),
+        faces,
+    })
+}
+
+/// 阶段 2 单任务核（**仅消费线程调用**，聚类顺序敏感）：在线归簇 →
+/// faces 落行（**归一化坐标**）→ 封面晋升 → face_indexed_at 记账。
+/// 写库失败返回 false（任务重试；半途已插的脸行随 index_rebuild(face)
+/// 幂等清理，与旧单 worker 语义一致）。
+fn commit_face_payload(
+    db: &Db,
+    db_dir: &Path,
+    manager: &ModelManager,
+    asset_id: i64,
+    payload: &FacePayload,
+) -> bool {
     // 聚类阈值（settings.ai.face_cluster_threshold，默认 CLUSTER_COS_THRESHOLD）
-    let cache = match cluster_cache(db, db_dir, manager.ai_params().face_cluster_threshold) {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Ok(cache) = cluster_cache(db, db_dir, manager.ai_params().face_cluster_threshold) else {
+        return false;
     };
     let mut clusterer = cache.lock().expect("clusterer mutex poisoned");
-    for (face, emb) in faces {
-        let cluster_id = match assign_cluster(db, &mut clusterer, &emb) {
-            Ok(id) => id,
-            Err(_) => return false,
+    for (face, emb) in &payload.faces {
+        let Ok(cluster_id) = assign_cluster(db, &mut clusterer, emb) else {
+            return false;
         };
-        clusterer.absorb(cluster_id, &emb);
-        let face_id = match db.insert_face(
-            asset_id,
-            face.box_x as f64,
-            face.box_y as f64,
-            face.box_w as f64,
-            face.box_h as f64,
-            &emb,
-            Some(cluster_id),
-        ) {
-            Ok(id) => id,
-            Err(_) => return false,
+        clusterer.absorb(cluster_id, emb);
+        let [x, y, w, h] = normalized_box(face, payload.src_w, payload.src_h);
+        let Ok(face_id) = db.insert_face(asset_id, x, y, w, h, emb, Some(cluster_id)) else {
+            return false;
         };
-        // 封面 = 簇内最大框人脸（首张无条件担任）
-        let _ = db.maybe_promote_cover(face_id, cluster_id, (face.box_w * face.box_h) as f64);
+        // 封面 = 簇内最大框人脸（归一化面积，同一空间内自洽；首张无条件担任）
+        let _ = db.maybe_promote_cover(face_id, cluster_id, w * h);
     }
     db.set_face_indexed(asset_id).is_ok()
 }
 
-/// 人脸回填 + 串行执行（模型齐备 && enable_face 时由调用方触发）：
-/// ① 为 `face_indexed_at IS NULL` 的照片建任务 ② 单 worker 跑 face 通道，
-/// 逐条发布 indexTaskProgress{kind:"face"}。返回本轮成功数。
-pub fn run_face_backfill(
+/// 在途门闩（认领中 + 已认领未结算的计数）：失败任务由消费者
+/// finish_index_task(false) 回 pending 后**必须有人再认领**——worker 认领
+/// 空时若仍有在途（别人的认领/未结算结果），等结算后重试认领再退出，
+/// 否则失败任务会滞留 pending 到下一轮 kick（两阶段竞态，测试踩出）。
+#[derive(Default)]
+struct InFlightGate {
+    state: Mutex<u64>,
+    cv: std::sync::Condvar,
+}
+
+impl InFlightGate {
+    /// 登记「一次认领尝试开始」。
+    fn begin(&self) {
+        *self.state.lock().expect("face inflight mutex poisoned") += 1;
+    }
+
+    /// 认领落空后的结算。返回 true = 可退出：撤销自己登记的瞬间计数已
+    /// 归零——此刻无在途认领/未结算结果 ⇒ 不可能再有 finish 把任务回
+    /// pending ⇒ 落空的认领是终局。返回 false = 等待过（期间有在途
+    /// 结算，失败任务可能已回 pending）⇒ 调用方必须**重新认领**。
+    /// （归零必 notify：等待者靠它醒来重认领/退出。）
+    fn settle_or_wait_exit(&self) -> bool {
+        let mut left = self.state.lock().expect("face inflight mutex poisoned");
+        *left = left.saturating_sub(1);
+        if *left == 0 {
+            drop(left);
+            self.cv.notify_all();
+            return true;
+        }
+        while *left > 0 {
+            left = self.cv.wait(left).expect("face inflight mutex poisoned");
+        }
+        false
+    }
+
+    /// 消费者结算一条结果：计数 -1 + 唤醒等待的 worker。
+    fn settle_one(&self) {
+        let mut left = self.state.lock().expect("face inflight mutex poisoned");
+        *left = left.saturating_sub(1);
+        drop(left);
+        self.cv.notify_all();
+    }
+}
+
+/// 阶段 1 worker 主循环：认领 → 推理（catch_unwind：panic 归一为该任务
+/// 失败，不裸 unwrap、不弃任务——由阶段 2 finish_index_task(false) 沿用
+/// attempts 封顶回收；worker 线程绝不因单任务崩溃退出）→ 送消费者。
+fn face_stage1_loop(
+    db: &Db,
+    infer: &FaceInfer,
+    tx: std::sync::mpsc::Sender<FaceTaskOutcome>,
+    gate: &InFlightGate,
+) {
+    loop {
+        gate.begin();
+        let task = match db.claim_index_task("face") {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                // 无可认领：无在途 ⇒ 退出安全；等过 ⇒ 失败任务可能已回
+                // pending，必须重新认领（防两阶段竞态下任务滞留）。
+                if gate.settle_or_wait_exit() {
+                    break;
+                }
+                continue;
+            }
+            Err(e) => {
+                eprintln!("人脸回填：认领任务失败，worker 退出: {e}");
+                gate.settle_one();
+                break;
+            }
+        };
+        let payload = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            infer(db, task.asset_id)
+        })) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!(
+                    "人脸回填：任务 asset_id={} 处理 panic，按失败回收",
+                    task.asset_id
+                );
+                None
+            }
+        };
+        if tx
+            .send(FaceTaskOutcome {
+                task_id: task.id,
+                asset_id: task.asset_id,
+                payload,
+            })
+            .is_err()
+        {
+            // 消费者已退出：结算自己的在途登记，别让等待的 worker 挂死
+            gate.settle_one();
+            break;
+        }
+    }
+}
+
+/// 阶段 2 消费循环（**单线程**，mpsc 顺序消费）：聚类落库 → 任务收尾 →
+/// 进度事件（done 严格非降）→ 释放该结果在途登记。返回本轮成功数。
+fn face_stage2_consume(
+    db: &Db,
     db_dir: &Path,
-    manager: std::sync::Arc<ModelManager>,
+    manager: &ModelManager,
     bus: &EventBus,
+    total: u64,
+    rx: std::sync::mpsc::Receiver<FaceTaskOutcome>,
+    gate: &InFlightGate,
+) -> u64 {
+    let mut done = 0u64;
+    for outcome in rx {
+        let ok = match &outcome.payload {
+            Some(payload) => commit_face_payload(db, db_dir, manager, outcome.asset_id, payload),
+            None => false,
+        };
+        let _ = db.finish_index_task(outcome.task_id, ok);
+        done += u64::from(ok);
+        bus.publish(AppEvent::IndexTaskProgress {
+            kind: "face".into(),
+            done,
+            total,
+        });
+        gate.settle_one();
+    }
+    done
+}
+
+/// face 回填阶段 1 worker 数（2026-09-28 定值，RTX 5070 Ti / 24 核实测）：
+/// SCRFD DML 107ms/张 + 每脸 ArcFace，推理经会话互斥天然串行 ≈ 9 张/秒
+/// 上限——3 个 worker 的取图/解码/对齐预处理（锁外）与 GPU Run 流水线
+/// 重叠即可喂饱推理；更多 worker 只会排队等会话锁。
+const FACE_WORKERS: usize = 3;
+
+/// 人脸回填两阶段执行核（推理核可注入，见 [`FaceInfer`]；生产入口 =
+/// [`run_face_backfill`]）。① 为 `face_indexed_at IS NULL` 的照片建任务
+/// （派 worker 看存量 pending，不看本轮新建数——任务已存在时新建数为 0，
+/// 直接空转会假成功）。② 阶段 1 FACE_WORKERS 个 worker 认领→取图（新
+/// 档位策略）→解码→letterbox→SCRFD→对齐→ArcFace（会话互斥天然把 GPU
+/// 推理串行化，会话槽结构不动）；阶段 2 单线程消费 mpsc → 在线聚类
+/// （顺序敏感单点）→ assign/absorb → insert_face（归一化坐标）→
+/// maybe_promote_cover → set_face_indexed → finish_index_task →
+/// indexTaskProgress{kind:"face"}。返回本轮成功数。
+pub fn run_face_backfill_with(
+    db_dir: &Path,
+    manager: Arc<ModelManager>,
+    bus: &EventBus,
+    infer: FaceInfer,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         eprintln!("人脸回填：库打开失败（{}），本轮跳过", db_dir.display());
         return 0;
     };
-    // 与语义回填同款修复：派 worker 看存量 pending，不看本轮新建数
-    // （任务已存在时新建数为 0，此前直接空转返回——点击立即索引假成功）。
     if let Err(e) = db.create_face_tasks_for_unindexed() {
         eprintln!("人脸回填：补种任务失败: {e}");
     }
@@ -743,27 +957,44 @@ pub fn run_face_backfill(
     if total == 0 {
         return 0;
     }
-    let mut done = 0u64;
-    // 单 worker：在线聚类是顺序敏感状态，且 ONNX 会话本就互斥串行。
-    loop {
-        let task = match db.claim_index_task("face") {
-            Ok(Some(t)) => t,
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("人脸回填：认领任务失败，worker 退出: {e}");
-                break;
-            }
-        };
-        let ok = process_face_task(&db, db_dir, &manager, task.asset_id);
-        let _ = db.finish_index_task(task.id, ok);
-        done += u64::from(ok);
-        bus.publish(AppEvent::IndexTaskProgress {
-            kind: "face".into(),
-            done,
-            total,
-        });
+    let (tx, rx) = std::sync::mpsc::channel::<FaceTaskOutcome>();
+    let gate = Arc::new(InFlightGate::default());
+    let mut handles = Vec::new();
+    for n in 0..FACE_WORKERS {
+        let db_dir = db_dir.to_path_buf();
+        let infer = Arc::clone(&infer);
+        let tx = tx.clone();
+        let gate = Arc::clone(&gate);
+        match std::thread::Builder::new()
+            .name(format!("index-face-{n}"))
+            .spawn(move || {
+                // 每 worker 独立连接（WAL + busy_timeout 5s，与语义回填同款）
+                let Ok(worker_db) = crate::ipc::open_library_db(&db_dir) else {
+                    return;
+                };
+                face_stage1_loop(&worker_db, &infer, tx, &gate);
+            }) {
+            Ok(h) => handles.push(h),
+            Err(e) => eprintln!("人脸回填：worker{n} 派生失败: {e}"),
+        }
+    }
+    drop(tx); // 全部 worker 退出（sender 清空）后消费循环自然收敛
+    let done = face_stage2_consume(&db, db_dir, &manager, bus, total, rx, &gate);
+    for h in handles {
+        let _ = h.join(); // 阶段 1 循环已由「认领空且在途归零」收敛
     }
     done
+}
+
+/// 人脸回填（生产入口，真推理核）。空聚类重建/进度/启停语义与两阶段
+/// 重构前一致（kick_face_if_ready 签名不动）。
+pub fn run_face_backfill(db_dir: &Path, manager: Arc<ModelManager>, bus: &EventBus) -> u64 {
+    let infer_db_dir = db_dir.to_path_buf();
+    let infer_manager = Arc::clone(&manager);
+    let infer: FaceInfer = Arc::new(move |db, asset_id| {
+        infer_face_payload(db, &infer_db_dir, &infer_manager, asset_id)
+    });
+    run_face_backfill_with(db_dir, manager, bus, infer)
 }
 
 /// 便利入口：导入钩子 / 启动恢复 / 模型装好后的统一触发。门槛：scrfd +

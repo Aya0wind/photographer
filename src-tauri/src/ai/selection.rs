@@ -5,18 +5,20 @@
 //!
 //! ## 失焦（blur 通道，无模型依赖，始终可用）
 //! 512 档已缓存缩略图上计算拉普拉斯方差 → 饱和归一 0-100 清晰度分；
-//! 有人脸框（faces 表，原图坐标按比例映射）时取「全图与人脸局部最小」
-//! 双分保守判定。value：`soft`（低于保守阈值，疑似）/ `sharp` / `unknown`
-//! （缩略图缺失或解码失败）。运动模糊/浅景深天然误报——分数给 UI 展示，
-//! 不硬判。
+//! 有人脸框（faces 表，**归一化 0..1 坐标**——2026-09-28 v2 空间，随
+//! face.rs process 管线切换；映射见 [`face_crop_window_px`]）时取「全图与
+//! 人脸局部最小」双分保守判定。value：`soft`（低于保守阈值，疑似）/
+//! `sharp` / `unknown`（缩略图缺失或解码失败）。运动模糊/浅景深天然误报
+//! ——分数给 UI 展示，不硬判。
 //!
 //! ## 闭眼（eyes 通道）
 //! 独立 index_tasks 通道：任务处理时以 SCRFD 现场检测（5 关键点含双眼
 //! 位置），裁双眼区域送眼部状态分类器（trait 注入，ONNX 实现随模型收录
 //! 落地；模型选型未过——见 ai::mod CATALOG 注释——今天恒为「未就绪」，
-//! 通道跳过并计数，任务保持 pending）。无人脸 → done 且不产生记录
-//! （≠ 没有闭眼，UI 语义注意）；分类不确定/遮挡/单眼 → `unknown` 保守
-//! 三态。
+//! 通道跳过并计数，任务保持 pending）。检测源与 face 通道同款降档
+//! （face::detection_source，缓存档优先，不再无条件生成 2048 档）。
+//! 无人脸 → done 且不产生记录（≠ 没有闭眼，UI 语义注意）；分类不确定/
+//! 遮挡/单眼 → `unknown` 保守三态。
 
 use std::path::{Path, PathBuf};
 
@@ -93,42 +95,30 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
             .to_luma8();
         let full = laplacian_variance(&img)?;
         let mut worst = normalize_blur_score(full);
-        // 人脸局部双分：faces 表框为原图坐标 → 按缩略图/原图宽度比映射
-        let orig_w: Option<i64> =
-            db.0.query_row("SELECT width FROM assets WHERE id = ?1", [asset_id], |r| {
-                r.get(0)
-            })
-            .ok();
-        if let Some(orig_w) = orig_w.filter(|w| *w > 0) {
-            let scale = f64::from(img.width()) / f64::from(orig_w as u32);
-            let faces: Vec<(f64, f64, f64)> = {
-                let mut stmt =
-                    db.0.prepare("SELECT box_x, box_y, box_w FROM faces WHERE asset_id = ?1")
-                        .ok()?;
-                let rows = stmt
-                    .query_map([asset_id], |r| {
-                        Ok((
-                            r.get::<_, f64>(0)?,
-                            r.get::<_, f64>(1)?,
-                            r.get::<_, f64>(2)?,
-                        ))
-                    })
+        // 人脸局部双分：faces 表框为归一化 0..1（v2 坐标空间）→ 按缩略图
+        // 实际宽高映射回像素
+        let faces: Vec<(f64, f64, f64)> = {
+            let mut stmt =
+                db.0.prepare("SELECT box_x, box_y, box_w FROM faces WHERE asset_id = ?1")
                     .ok()?;
-                rows.collect::<Result<Vec<_>, _>>().ok()?
-            };
-            for (bx, by, bw) in faces {
-                // 人脸框映射到缩略图坐标并外扩 20%，转整数裁剪窗
-                let (bx, by, bw) = (bx * scale, by * scale, bw * scale * 1.2);
-                let x = (bx.max(0.0) as u32).min(img.width().saturating_sub(1));
-                let y = (by.max(0.0) as u32).min(img.height().saturating_sub(1));
-                let w = (bw as u32).clamp(8, img.width() - x);
-                let h = w.clamp(8, img.height() - y);
-                let crop = image::imageops::crop_imm(&img, x, y, w, h).to_image();
-                if let Some(v) = laplacian_variance(&crop) {
-                    let local = normalize_blur_score(v);
-                    if local < worst {
-                        worst = local;
-                    }
+            let rows = stmt
+                .query_map([asset_id], |r| {
+                    Ok((
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
+                })
+                .ok()?;
+            rows.collect::<Result<Vec<_>, _>>().ok()?
+        };
+        for (bx, by, bw) in faces {
+            let (x, y, w, h) = face_crop_window_px(bx, by, bw, img.width(), img.height());
+            let crop = image::imageops::crop_imm(&img, x, y, w, h).to_image();
+            if let Some(v) = laplacian_variance(&crop) {
+                let local = normalize_blur_score(v);
+                if local < worst {
+                    worst = local;
                 }
             }
         }
@@ -160,6 +150,28 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
                 .is_ok()
         }
     }
+}
+
+/// faces 归一化框 `(x, y, w)` ∈ 0..1 → 缩略图像素裁剪窗 `(x, y, w, h)`
+/// （外扩 20%、h=w 方窗；起点夹图内、宽不越右/下边界，最小 8px 但绝不清过
+/// 可用边界——极小图/贴边框退化为可用窗，不 panic）。纯函数可测。
+pub fn face_crop_window_px(
+    bx: f64,
+    by: f64,
+    bw: f64,
+    img_w: u32,
+    img_h: u32,
+) -> (u32, u32, u32, u32) {
+    let (bx, by, bw) = (
+        bx * f64::from(img_w),
+        by * f64::from(img_h),
+        bw * f64::from(img_w) * 1.2,
+    );
+    let x = (bx.max(0.0) as u32).min(img_w.saturating_sub(1));
+    let y = (by.max(0.0) as u32).min(img_h.saturating_sub(1));
+    let w = (bw.max(0.0) as u32).max(8).min(img_w - x);
+    let h = w.min(img_h - y);
+    (x, y, w, h)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,9 +248,10 @@ fn crop_eyes(img: &image::RgbImage, face: &super::face::DetectedFace) -> Option<
     Some(out)
 }
 
-/// eyes 任务核：2048 档缩略图现场检测 → 双眼裁剪分类 → 三态聚合 →
-/// ai_analysis('eyes')。无人脸 → done 且无记录；检测/分类失败 → false
-/// （走 attempts 封顶重试）。
+/// eyes 任务核：检测源取图（face 通道同款降档：缓存档优先 [512, 2048]，
+/// 全未命中才生成 512——不再无条件同步生成 2048 档）→ SCRFD 现场检测 →
+/// 双眼裁剪分类 → 三态聚合 → ai_analysis('eyes')。无人脸 → done 且无
+/// 记录；检测/分类失败 → false（走 attempts 封顶重试）。
 /// （模型收录前 lib 侧无调用方——由 run_eyes_backfill 就绪分支与测试使用。）
 #[allow(dead_code)]
 pub fn process_eyes_task(
@@ -251,7 +264,7 @@ pub fn process_eyes_task(
     let Some((path, _)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
         return false; // 资产已删除（级联清任务前的防御兜底）
     };
-    let thumb = match crate::thumbs::thumb_file(db_dir, Path::new(&path), 2048) {
+    let thumb = match super::face::detection_source(db_dir, Path::new(&path)) {
         Some(t) => t,
         None => return false,
     };

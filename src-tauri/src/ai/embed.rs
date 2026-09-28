@@ -216,7 +216,8 @@ impl ModelManager {
             let mut slots = slots().lock().expect("infer slots mutex poisoned");
             slots.visual = None; // 丢弃 DML 会话：重建走 execution_providers 的 CPU 分支
         };
-        let (shape, flat) = super::run_with_dml_fallback(use_gpu, extract, reset)?;
+        let (shape, flat) =
+            super::run_with_dml_fallback(use_gpu, "siglip2-visual", extract, reset)?;
         let (rows, dim_out) = match shape.len() {
             // [B, 768]：整块按行切
             2 => (shape[0] as usize, shape[1] as usize),

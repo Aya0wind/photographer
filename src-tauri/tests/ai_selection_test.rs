@@ -176,6 +176,67 @@ fn blur_missing_thumb_records_unknown() {
 }
 
 // ---------------------------------------------------------------------------
+// faces 坐标空间 v2（归一化 0..1）：blur 通道人脸局部裁剪映射
+// ---------------------------------------------------------------------------
+
+/// 归一化框 → 缩略图像素裁剪窗真值表（外扩 20%、h=w 方窗、边界钳制不 panic）。
+#[test]
+fn blur_face_crop_window_maps_normalized_box() {
+    use ai::selection::face_crop_window_px as win;
+    // 常规：512×256 缩略图上 (0.25, 0.5, 0.1) → (128, 128, 61, 61)
+    assert_eq!(win(0.25, 0.5, 0.1, 512, 256), (128, 128, 61, 61));
+    // 贴右缘：宽夹到剩余边界（512-486=26）
+    assert_eq!(win(0.95, 0.5, 0.1, 512, 256), (486, 128, 26, 26));
+    // 极小框：下限 8px
+    assert_eq!(win(0.0, 0.0, 0.001, 512, 256), (0, 0, 8, 8));
+    // 贴底缘：h 夹到剩余边界（256-253=3），不 panic
+    assert_eq!(win(0.5, 0.99, 0.1, 512, 256), (256, 253, 61, 3));
+    // 溢出坐标防御：负值起点夹 0，超 1 的比例夹边界
+    assert_eq!(win(0.0, 0.0, 1.0, 100, 100), (0, 0, 100, 100));
+}
+
+/// 端到端：faces 表归一化框参与 blur 局部双分——无人脸框全图判 sharp，
+/// 归一化框盖住柔和区后局部最小分拉回 soft。
+#[test]
+fn blur_task_uses_normalized_face_boxes_for_local_score() {
+    let (dir, db, _state) = setup();
+    let db_dir = dir.path().join("db");
+    let photos = dir.path().join("photos");
+    // 左半垂直渐变（soft）、右半棋盘（sharp）：全图分被右半拉高
+    let mut img = image::RgbImage::new(256, 256);
+    for y in 0..256u32 {
+        for x in 0..256u32 {
+            let v = if x < 128 {
+                y as u8
+            } else if (x / 4 + y / 4) % 2 == 0 {
+                240
+            } else {
+                16
+            };
+            img.put_pixel(x, y, image::Rgb([v, v, v]));
+        }
+    }
+    let id = ins(&db, &photos, "half.jpg", &img);
+
+    // 无人脸框：全图分（棋盘主导）→ sharp
+    assert!(ai::selection::process_blur_task(&db, &db_dir, id, 30.0));
+    assert_eq!(
+        analysis(&db, id, "blur").unwrap().0.as_deref(),
+        Some("sharp")
+    );
+
+    // 归一化人脸框 (0,0,0.4,0.4)（外扩 20% 后仍在左半渐变内）→ 局部最小 → soft
+    db.insert_face(id, 0.0, 0.0, 0.4, 0.4, &[0.5f32; 512], None)
+        .unwrap();
+    assert!(ai::selection::process_blur_task(&db, &db_dir, id, 30.0));
+    assert_eq!(
+        analysis(&db, id, "blur").unwrap().0.as_deref(),
+        Some("soft"),
+        "归一化框应映射回缩略图像素并参与局部双分"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // eyes 通道：三态聚合（stub 分类器）+ 无人脸/模型缺失跳过
 // ---------------------------------------------------------------------------
 

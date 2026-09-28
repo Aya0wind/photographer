@@ -834,3 +834,116 @@ fn semantic_display_calibration_anchors() {
     // 单调性：拉伸后排序不变（前端徽标与排序一致性依赖此性质）
     assert!(f(0.10) > f(0.09) && f(0.09) > f(0.08));
 }
+
+// ---------------------------------------------------------------------------
+// DML 毒化位按模型隔离（2026-09-28）：某模型 DML 运行时故障只毒化该模型，
+// 其他模型（scrfd/arcface/siglip vision/text）保住 DML
+// ---------------------------------------------------------------------------
+
+/// env 覆盖（基准/诊断）会改写 dml_intended 真值——被覆盖的进程跳过真值表。
+fn ep_overridden() -> bool {
+    std::env::var("SMARTPHOTO_AI_EP").is_ok()
+}
+
+#[test]
+fn dml_poison_isolated_per_model() {
+    if ep_overridden() {
+        eprintln!("skip: SMARTPHOTO_AI_EP 已设置，真值表仅在无覆盖时成立");
+        return;
+    }
+    // 毒化位是进程级全局——与 fallback 用例并发会互相改写彼此的断言
+    // 前置（真值表必须独占运行），用锁把两个用例串行化。
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    ai::reset_dml_poison_for_test();
+    // 基线：use_gpu=true → 各模型 DML 优先；false → 全 CPU
+    for m in ["scrfd", "arcface", "siglip2-visual", "siglip2-text"] {
+        assert!(ai::dml_intended_for_test(true, m), "{m} 基线应 DML 优先");
+        assert!(!ai::dml_intended_for_test(false, m), "{m} 关 GPU 应纯 CPU");
+    }
+    // scrfd 毒化 → 只 scrfd 落 CPU，其余保住 DML
+    ai::poison_dml_for_test("scrfd");
+    assert!(!ai::dml_intended_for_test(true, "scrfd"), "scrfd 已毒化");
+    for m in ["arcface", "siglip2-visual", "siglip2-text"] {
+        assert!(ai::dml_intended_for_test(true, m), "{m} 不应被 scrfd 连坐");
+    }
+    // 再毒化 siglip vision → 文本塔仍 DML
+    ai::poison_dml_for_test("siglip2-visual");
+    assert!(!ai::dml_intended_for_test(true, "siglip2-visual"));
+    assert!(
+        ai::dml_intended_for_test(true, "siglip2-text"),
+        "双塔各自独立"
+    );
+    // 复位 → 全部恢复 DML
+    ai::reset_dml_poison_for_test();
+    for m in ["scrfd", "arcface", "siglip2-visual", "siglip2-text"] {
+        assert!(ai::dml_intended_for_test(true, m), "{m} 复位后应恢复");
+    }
+}
+
+#[test]
+fn dml_fallback_poisons_only_failing_model_and_recovers_once() {
+    if ep_overridden() {
+        eprintln!("skip: SMARTPHOTO_AI_EP 已设置");
+        return;
+    }
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    ai::reset_dml_poison_for_test();
+
+    // 模型 A（arcface）首跑失败 → 毒化 A + reset（丢 DML 会话）+ 重跑一次成功
+    let mut calls = 0;
+    let mut resets = 0;
+    let out = ai::run_with_dml_fallback_for_test(
+        true,
+        "arcface",
+        || {
+            calls += 1;
+            if calls == 1 {
+                Err("E_INVALIDARG".into())
+            } else {
+                Ok(7u32)
+            }
+        },
+        || resets += 1,
+    );
+    assert_eq!(out, Ok(7));
+    assert_eq!(
+        (calls, resets),
+        (2, 1),
+        "失败一次 → 重跑一次 + 会话重建一次"
+    );
+    assert!(
+        !ai::dml_intended_for_test(true, "arcface"),
+        "arcface 已毒化落 CPU"
+    );
+
+    // 其他模型不受连坐：scrfd 单跑成功（run 恰一次、零 reset）
+    let mut scrfd_calls = 0;
+    let ok = ai::run_with_dml_fallback_for_test(
+        true,
+        "scrfd",
+        || {
+            scrfd_calls += 1;
+            Ok(1u32)
+        },
+        || panic!("scrfd 不应重建会话"),
+    );
+    assert_eq!(ok, Ok(1));
+    assert_eq!(scrfd_calls, 1, "scrfd 保住 DML，单跑即成功");
+
+    // 已毒化模型再失败：不再二次重建（run 恰一次），错误原样上抛
+    let mut again = 0;
+    let err = ai::run_with_dml_fallback_for_test(
+        true,
+        "arcface",
+        || {
+            again += 1;
+            Err::<u32, _>("boom".into())
+        },
+        || panic!("已落 CPU 不应再 reset"),
+    );
+    assert!(err.is_err(), "二次失败原样上抛");
+    assert_eq!(again, 1, "非 DML 会话不重跑");
+    ai::reset_dml_poison_for_test();
+}
