@@ -68,7 +68,7 @@ pub struct CullDecisionRow {
     pub origin: &'static str,
 }
 
-/// 快照条目（open 数据源：seq 序 + 决定 LEFT JOIN）。
+/// 快照条目（open 数据源：seq 序 + 决定 LEFT JOIN + burst 归属）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CullItemRow {
     pub asset_id: i64,
@@ -76,7 +76,21 @@ pub struct CullItemRow {
     pub decision: Option<String>,
     /// 无决定时 None。
     pub origin: Option<String>,
+    /// assets.burst_id（无连拍组 None；V2 对比视图默认取同组）。
+    pub burst_id: Option<i64>,
+    /// 该 burst 在**会话快照内**的成员数（无组 = 1；与 bursts.asset_count
+    /// 不同——快照可能只含组的一部分，UI「组 N 张」徽标按快照口径）。
+    pub burst_size: u32,
 }
+
+/// 会话快照内 burst 成员数聚合子查询（?1 = session_id；open items 与 AI
+/// 预扫共用——单条 SQL 内联聚合，绝无逐条 N+1 查询）。
+const SNAPSHOT_BURST_SIZE_JOIN: &str = "LEFT JOIN ( \
+     SELECT a2.burst_id AS bid, COUNT(*) AS cnt \
+     FROM cull_session_asset s2 JOIN assets a2 ON a2.id = s2.asset_id \
+     WHERE s2.session_id = ?1 AND a2.burst_id IS NOT NULL \
+     GROUP BY a2.burst_id \
+ ) bz ON bz.bid = a.burst_id";
 
 fn map_session(row: &rusqlite::Row<'_>) -> Result<CullSessionRow> {
     Ok(CullSessionRow {
@@ -239,22 +253,27 @@ impl Db {
         }))
     }
 
-    /// 快照条目（seq 升序 + 决定 LEFT JOIN；open 数据源）。
-    /// **V1 全量返回**（万张内可接受）；V2 keyset 分页按 (session_id, seq)
-    /// 游标即可——表结构已就绪。
+    /// 快照条目（seq 升序 + 决定 LEFT JOIN + burstId/burstSize 聚合；open
+    /// 数据源）。**V1 全量返回**（万张内可接受）；V2 keyset 分页按
+    /// (session_id, seq) 游标即可——表结构已就绪。
     pub fn cull_session_items(&self, session_id: i64) -> Result<Vec<CullItemRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT s.asset_id, d.decision, d.origin \
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT s.asset_id, d.decision, d.origin, a.burst_id, \
+                    CASE WHEN a.burst_id IS NULL THEN 1 ELSE COALESCE(bz.cnt, 1) END \
              FROM cull_session_asset s \
+             JOIN assets a ON a.id = s.asset_id \
              LEFT JOIN cull_decision d ON d.session_id = s.session_id AND d.asset_id = s.asset_id \
+             {SNAPSHOT_BURST_SIZE_JOIN} \
              WHERE s.session_id = ?1 \
-             ORDER BY s.seq",
-        )?;
+             ORDER BY s.seq"
+        ))?;
         let rows = stmt.query_map(params![session_id], |r| {
             Ok(CullItemRow {
                 asset_id: r.get(0)?,
                 decision: r.get(1)?,
                 origin: r.get(2)?,
+                burst_id: r.get(3)?,
+                burst_size: r.get::<_, i64>(4)? as u32,
             })
         })?;
         rows.collect()
@@ -368,4 +387,221 @@ impl Db {
             )?;
         Ok(n > 0)
     }
+
+    // -----------------------------------------------------------------------
+    // AI 挑图预扫（V3，proposal §3.3）：纯 DB 规则引擎——零推理，只读既有
+    // ai_analysis / faces / bursts 数据给「预标记建议」，绝不自动定案。
+    // -----------------------------------------------------------------------
+
+    /// AI 预扫（会话不存在 None）。规则求值全程单条 JOIN 查询取数 + 内存
+    /// 求值；**只读**——落库由调用方经 [`Db::cull_decision_apply`]
+    /// （origin='ai'）完成。桶语义（四桶非互斥分区：豁免桶是 eyes 通道的
+    /// 旁路记录，被豁免项仍可能被 blur/burst 规则建议剔除）：
+    /// - suggested_accepted / suggested_rejected：最终建议（含 maxAccepted
+    ///   封顶后转不动的 accepted **不**入桶）；
+    /// - skipped_manual：已有决定（manual 或既有 ai）的项——规则整组跳过；
+    /// - exempted_group：因合影豁免跳过 eyes 规则的未定项。
+    pub fn cull_ai_prescan(
+        &self,
+        session_id: i64,
+        rules: &CullPrescanRules,
+    ) -> Result<Option<CullPrescanOutcome>> {
+        let exists: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cull_session WHERE id = ?1)",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        // 单条查询取全量求值输入（快照序）：决定存在性 + eyes/blur 分析行
+        // + faces 计数 + burst 归属与快照内组员数
+        let mut stmt = self.0.prepare(&format!(
+            "SELECT s.asset_id, d.decision IS NOT NULL, \
+                    ee.value, ee.score, bb.value, bb.score, \
+                    a.burst_id, \
+                    CASE WHEN a.burst_id IS NULL THEN 1 ELSE COALESCE(bz.cnt, 1) END, \
+                    COALESCE(fc.cnt, 0) \
+             FROM cull_session_asset s \
+             JOIN assets a ON a.id = s.asset_id \
+             LEFT JOIN cull_decision d ON d.session_id = s.session_id AND d.asset_id = s.asset_id \
+             LEFT JOIN ai_analysis ee ON ee.asset_id = s.asset_id AND ee.kind = 'eyes' \
+             LEFT JOIN ai_analysis bb ON bb.asset_id = s.asset_id AND bb.kind = 'blur' \
+             LEFT JOIN (SELECT asset_id AS aid, COUNT(*) AS cnt FROM faces GROUP BY asset_id) fc \
+               ON fc.aid = s.asset_id \
+             {SNAPSHOT_BURST_SIZE_JOIN} \
+             WHERE s.session_id = ?1 \
+             ORDER BY s.seq"
+        ))?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok(PrescanRow {
+                asset_id: r.get(0)?,
+                decided: r.get(1)?,
+                eyes_value: r.get(2)?,
+                eyes_score: r.get(3)?,
+                blur_value: r.get(4)?,
+                blur_score: r.get(5)?,
+                burst_id: r.get(6)?,
+                burst_size: r.get::<_, i64>(7)? as u32,
+                faces: r.get::<_, i64>(8)? as u32,
+            })
+        })?;
+        let rows: Vec<PrescanRow> = rows.collect::<Result<_>>()?;
+
+        // 组级预聚合：每组（burstSize≥2）blur score 最高的成员（最锐）。
+        // **全组成员参与比拼**（已决定的也计入基准——用户已剔除最锐帧时，
+        // 其余组员按「其余组员」整体建议剔除，不偷偷晋升次锐为 accepted）；
+        // 同分取快照序先者；组内全无 blur 分 → 不入表（整组不动）。
+        let mut sharpest: std::collections::HashMap<i64, usize> =
+            std::collections::HashMap::new();
+        for (idx, r) in rows.iter().enumerate() {
+            if r.burst_size < 2 {
+                continue;
+            }
+            if let (Some(bid), Some(score)) = (r.burst_id, r.blur_score) {
+                match sharpest.get(&bid) {
+                    Some(&best) if rows[best].blur_score.is_some_and(|s| s >= score) => {}
+                    _ => {
+                        sharpest.insert(bid, idx);
+                    }
+                }
+            }
+        }
+
+        let mut outcome = CullPrescanOutcome::default();
+        let mut accepted_count: u64 = 0;
+        for (idx, r) in rows.iter().enumerate() {
+            if r.decided {
+                outcome.skipped_manual.push(r.asset_id);
+                continue;
+            }
+            // suggestion：Some(true)=accepted / Some(false)=rejected / None=不动
+            let mut suggestion: Option<bool> = None;
+
+            // ① eyes：敏感度值集命中 → 剔除建议；合影豁免（>N 人不判闭眼；
+            //    N=0 关）只旁路本规则，不拦后面规则
+            if rules.eyes_enabled {
+                let exempt = rules.group_exempt_faces > 0 && r.faces > rules.group_exempt_faces;
+                if exempt {
+                    outcome.exempted_group.push(r.asset_id);
+                } else if eyes_hits(
+                    rules.eyes_sensitivity,
+                    r.eyes_value.as_deref(),
+                    r.eyes_score,
+                ) {
+                    suggestion = Some(false);
+                }
+            }
+            // ② blur：值集命中 → 剔除建议（weak 值集为空 = 不启用）
+            if rules.blur_enabled
+                && blur_hits(rules.blur_sensitivity, r.blur_value.as_deref())
+            {
+                suggestion = Some(false);
+            }
+            // ③ burstKeepSharpest：最锐组员 → accepted（仅在未被 ①② 建议
+            //    剔除时——冲突保守取剔除）；其余组员 → rejected
+            if rules.burst_keep_sharpest && r.burst_size >= 2 {
+                if let Some(bid) = r.burst_id {
+                    match sharpest.get(&bid) {
+                        Some(&best) if best == idx => {
+                            if suggestion.is_none() {
+                                suggestion = Some(true);
+                            }
+                        }
+                        Some(_) => suggestion = Some(false),
+                        // 组内全无 blur 分：整组不动
+                        None => {}
+                    }
+                }
+            }
+
+            // ④ maxAccepted：accepted 建议按快照序先到先得，封顶后转不动；
+            //    rejected 建议不受限
+            match suggestion {
+                Some(true) => {
+                    if rules
+                        .max_accepted
+                        .is_some_and(|cap| accepted_count >= cap)
+                    {
+                        continue;
+                    }
+                    accepted_count += 1;
+                    outcome.suggested_accepted.push(r.asset_id);
+                }
+                Some(false) => outcome.suggested_rejected.push(r.asset_id),
+                None => {}
+            }
+        }
+        Ok(Some(outcome))
+    }
+}
+
+/// 预扫求值输入行（[`Db::cull_ai_prescan`] 内部用）。
+struct PrescanRow {
+    asset_id: i64,
+    /// 已有决定（manual 或既有 ai）——规则整组跳过。
+    decided: bool,
+    eyes_value: Option<String>,
+    eyes_score: Option<f64>,
+    blur_value: Option<String>,
+    blur_score: Option<f64>,
+    burst_id: Option<i64>,
+    burst_size: u32,
+    /// faces 行数（0 = 无人脸）。
+    faces: u32,
+}
+
+/// eyes 敏感度 → ai_analysis('eyes').value 剔除值集：
+/// - weak = {closed} **且额外要求 score ≥ 0.5**（score = 闭眼置信 0..1，
+///   分析通道已恒写入——见 ai::selection；weak 档用它压误报）
+/// - normal = {closed}（不看 score）
+/// - strong = {closed, maybe}
+///
+/// unknown / 无记录永不命中。
+fn eyes_hits(sensitivity: CullSensitivity, value: Option<&str>, score: Option<f64>) -> bool {
+    match sensitivity {
+        CullSensitivity::Weak => value == Some("closed") && score.is_some_and(|s| s >= 0.5),
+        CullSensitivity::Normal => value == Some("closed"),
+        CullSensitivity::Strong => matches!(value, Some("closed") | Some("maybe")),
+    }
+}
+
+/// blur 敏感度 → ai_analysis('blur').value 剔除值集（现值域 sharp/soft/
+/// unknown）：weak = {}（关）；normal = strong = {soft}。
+fn blur_hits(sensitivity: CullSensitivity, value: Option<&str>) -> bool {
+    match sensitivity {
+        CullSensitivity::Weak => false,
+        CullSensitivity::Normal | CullSensitivity::Strong => value == Some("soft"),
+    }
+}
+
+/// 敏感度档（eyes/blur 规则共用；IPC 层字符串校验后转入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CullSensitivity {
+    Weak,
+    Normal,
+    Strong,
+}
+
+/// AI 预扫规则（V3，**已校验**形态——字符串敏感度在 IPC 层解析为本枚举）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CullPrescanRules {
+    pub eyes_enabled: bool,
+    pub eyes_sensitivity: CullSensitivity,
+    pub blur_enabled: bool,
+    pub blur_sensitivity: CullSensitivity,
+    pub burst_keep_sharpest: bool,
+    /// faces 行数 > N 的资产跳过 eyes 规则（合影豁免）；0 = 关。
+    pub group_exempt_faces: u32,
+    /// accepted 建议数封顶（快照序先到先得；None = 不限）。
+    pub max_accepted: Option<u64>,
+}
+
+/// 预扫结果（四桶快照序 asset id 列表；计数由 DTO 层取 len）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CullPrescanOutcome {
+    pub suggested_accepted: Vec<i64>,
+    pub suggested_rejected: Vec<i64>,
+    pub skipped_manual: Vec<i64>,
+    pub exempted_group: Vec<i64>,
 }

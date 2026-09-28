@@ -2,6 +2,9 @@
 //! 批量 upsert / 回未定 / 快照外忽略计数、进度纯派生、默认名轮次（初选/
 //! 复选）与同名后缀、列表序（进行中在前）、收尾三开关映射 + 幂等 + XMP
 //! 即时投影（星级/拒绝断言边车）、改名/弃置、资产删除级联收敛。
+//! V2/V3：open items 连拍组字段（burstId/burstSize 快照口径聚合）+
+//! AI 挑图预扫规则引擎（三档敏感度值集 / 合影豁免边界 / 连拍留最锐 /
+//! maxAccepted 封顶 / manual 不动 / apply 落 origin='ai' / 非法规则）。
 
 mod common;
 
@@ -16,9 +19,10 @@ use db::culling::CullScope;
 use db::AssetRow;
 use events::AssetKind;
 use ipc::culling::{
-    fetch_cull_decision_apply, fetch_cull_session_create, fetch_cull_session_discard,
-    fetch_cull_session_finish, fetch_cull_session_list, fetch_cull_session_open,
-    fetch_cull_session_rename, CullDecisionInput, CullFinishApply,
+    fetch_cull_ai_prescan, fetch_cull_decision_apply, fetch_cull_session_create,
+    fetch_cull_session_discard, fetch_cull_session_finish, fetch_cull_session_list,
+    fetch_cull_session_open, fetch_cull_session_rename, CullDecisionInput, CullFinishApply,
+    CullPrescanRulesInput, CullRuleSwitch,
 };
 use metadata::xmp;
 
@@ -559,4 +563,545 @@ fn scope_json_roundtrips_through_dto() {
     assert_eq!(json["scope"]["assetIds"], serde_json::json!([a]));
     assert_eq!(json["undecided"], 1);
     assert!(json.get("ignored").is_none(), "非 apply 路径不占 ignored 载荷");
+}
+
+// ---------------------------------------------------------------------------
+// V2：open items 连拍组字段
+// ---------------------------------------------------------------------------
+
+/// 建一个连拍组（直接落 bursts + 回填 assets.burst_id），返回组 id。
+fn burst_of(db: &db::Db, ids: &[i64]) -> i64 {
+    db.0.execute(
+        "INSERT INTO bursts (asset_count, started_at, ended_at) VALUES (?1, NULL, NULL)",
+        [ids.len() as i64],
+    )
+    .unwrap();
+    let bid = db.0.last_insert_rowid();
+    for id in ids {
+        db.0.execute("UPDATE assets SET burst_id = ?1 WHERE id = ?2", [bid, *id]).unwrap();
+    }
+    bid
+}
+
+#[test]
+fn open_items_carry_burst_id_and_snapshot_burst_size() {
+    let (_dir, state, db) = setup();
+    // 组 G：3 张成组；快照 A 只含 x1/x3（组员部分在册）；快照 B 全含
+    let x1 = ins(&db, "X:/p/x1.jpg", None, AssetKind::Photo);
+    let x2 = ins(&db, "X:/p/x2.jpg", None, AssetKind::Photo);
+    let x3 = ins(&db, "X:/p/x3.jpg", None, AssetKind::Photo);
+    let solo = ins(&db, "X:/p/solo.jpg", None, AssetKind::Photo);
+    let g = burst_of(&db, &[x1, x2, x3]);
+
+    // 快照 A：x1, x3, solo（x2 不在册 → 组快照内成员数 = 2）
+    let sa = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![x1, x3, solo] },
+    )
+    .unwrap();
+    let items: Vec<(i64, Option<i64>, u32)> = fetch_cull_session_open(&state, sa.id)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|i| (i.asset_id, i.burst_id, i.burst_size))
+        .collect();
+    assert_eq!(
+        items,
+        vec![(x1, Some(g), 2), (x3, Some(g), 2), (solo, None, 1)],
+        "burstSize 按会话快照口径聚合（部分在册 = 在册数），无组 = 1"
+    );
+
+    // 快照 B：全组在册 → 3
+    let sb = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![x1, x2, x3] },
+    )
+    .unwrap();
+    let sizes: Vec<u32> = fetch_cull_session_open(&state, sb.id)
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.burst_size)
+        .collect();
+    assert_eq!(sizes, vec![3, 3, 3]);
+
+    // camelCase 契约
+    let detail = fetch_cull_session_open(&state, sa.id).unwrap();
+    let json = serde_json::to_value(&detail).unwrap();
+    assert_eq!(json["items"][0]["burstId"], g);
+    assert_eq!(json["items"][0]["burstSize"], 2);
+    assert_eq!(json["items"][2]["burstId"], serde_json::Value::Null);
+    assert_eq!(json["items"][2]["burstSize"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// V3：AI 挑图预扫规则引擎
+// ---------------------------------------------------------------------------
+
+/// 落一条 eyes 分析行。
+fn eyes(db: &db::Db, id: i64, value: &str, score: f64) {
+    db.set_ai_analysis(id, "eyes", Some(value), Some(score), "t").unwrap();
+}
+
+/// 落一条 blur 分析行。
+fn blur(db: &db::Db, id: i64, value: &str, score: f64) {
+    db.set_ai_analysis(id, "blur", Some(value), Some(score), "t").unwrap();
+}
+
+/// 给资产插 n 行 faces（合影豁免的面数口径 = faces 行数）。
+fn faces_n(db: &db::Db, id: i64, n: u32) {
+    for _ in 0..n {
+        db.insert_face(id, 0.1, 0.1, 0.2, 0.2, &[0.0f32; 4], None).unwrap();
+    }
+}
+
+/// 规则构造：eyes/blur = Some(敏感度) 即 enabled。
+fn rules(
+    eyes_sens: Option<&str>,
+    blur_sens: Option<&str>,
+    burst_keep_sharpest: bool,
+    group_exempt_faces: u32,
+    max_accepted: Option<i64>,
+) -> CullPrescanRulesInput {
+    CullPrescanRulesInput {
+        eyes: CullRuleSwitch {
+            enabled: eyes_sens.is_some(),
+            sensitivity: eyes_sens.unwrap_or("normal").to_string(),
+        },
+        blur: CullRuleSwitch {
+            enabled: blur_sens.is_some(),
+            sensitivity: blur_sens.unwrap_or("normal").to_string(),
+        },
+        burst_keep_sharpest,
+        group_exempt_faces,
+        max_accepted,
+    }
+}
+
+fn decision_rows(db: &db::Db) -> Vec<(i64, String, String)> {
+    let mut stmt = db
+        .0
+        .prepare("SELECT asset_id, decision, origin FROM cull_decision ORDER BY asset_id")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap();
+    rows.collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+/// 表驱动：eyes 三档敏感度值集（weak={closed}+score≥0.5 / normal={closed}
+/// / strong={closed,maybe}；unknown 与无记录永不命中）。
+#[test]
+fn prescan_eyes_sensitivity_value_sets() {
+    let (_dir, state, db) = setup();
+    // (value, score, weak 命中, normal 命中, strong 命中)
+    struct EyeCase(&'static str, f64, bool, bool, bool);
+    let cases = [
+        EyeCase("closed", 0.93, true, true, true),
+        EyeCase("closed", 0.30, false, true, true), // weak 额外要求 score ≥ 0.5
+        EyeCase("closed", 0.50, true, true, true),  // 边界：= 0.5 命中
+        EyeCase("maybe", 0.70, false, false, true), // maybe 只进 strong 值集
+        EyeCase("unknown", 0.0, false, false, false),
+    ];
+    let ids: Vec<i64> = cases
+        .iter()
+        .map(|c| {
+            let id = ins(&db, &format!("X:/p/e{}{}.jpg", c.0, c.1), None, AssetKind::Photo);
+            eyes(&db, id, c.0, c.1);
+            id
+        })
+        .collect();
+    let s = fetch_cull_session_create(&state, CullScope::Query { asset_ids: ids.clone() })
+        .unwrap();
+
+    for (sens, pick) in [("weak", 2usize), ("normal", 3usize), ("strong", 4usize)] {
+        let expected: Vec<i64> = ids
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| match pick { 2 => cases[i].2, 3 => cases[i].3, _ => cases[i].4 })
+            .map(|(_, &id)| id)
+            .collect();
+        let dto = fetch_cull_ai_prescan(&state, s.id, rules(Some(sens), None, false, 0, None), false)
+            .unwrap();
+        assert_eq!(
+            dto.suggested_rejected.asset_ids, expected,
+            "eyes {sens} 档值集（快照序）"
+        );
+        assert_eq!(dto.suggested_accepted.asset_ids, Vec::<i64>::new());
+        assert_eq!(dto.suggested_accepted.count, 0);
+        assert_eq!(dto.applied, None, "apply=false 不携带 applied");
+        assert_eq!(dto.rules_echo.eyes.sensitivity, sens, "规则回显");
+    }
+    // 纯预览不落任何决定行
+    assert!(decision_rows(&db).is_empty(), "apply=false 零写入");
+}
+
+/// 表驱动：blur 三档值集（weak={} 关 / normal=strong={soft}；sharp/
+/// unknown/无记录永不命中）。
+#[test]
+fn prescan_blur_sensitivity_value_sets() {
+    let (_dir, state, db) = setup();
+    let soft = ins(&db, "X:/p/soft.jpg", None, AssetKind::Photo);
+    let sharp = ins(&db, "X:/p/sharp.jpg", None, AssetKind::Photo);
+    let unk = ins(&db, "X:/p/unk.jpg", None, AssetKind::Photo);
+    let bare = ins(&db, "X:/p/bb.jpg", None, AssetKind::Photo);
+    blur(&db, soft, "soft", 12.0);
+    blur(&db, sharp, "sharp", 80.0);
+    blur(&db, unk, "unknown", 0.0);
+    let s = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![soft, sharp, unk, bare] },
+    )
+    .unwrap();
+
+    for (sens, expected) in [
+        ("weak", Vec::<i64>::new()), // weak 值集为空 = 不启用
+        ("normal", vec![soft]),
+        ("strong", vec![soft]),
+    ] {
+        let dto = fetch_cull_ai_prescan(&state, s.id, rules(None, Some(sens), false, 0, None), false)
+            .unwrap();
+        assert_eq!(dto.suggested_rejected.asset_ids, expected, "blur {sens} 档值集");
+        assert_eq!(dto.suggested_rejected.count, expected.len() as u64);
+        assert_eq!(dto.suggested_accepted.asset_ids, Vec::<i64>::new());
+    }
+}
+
+/// 合影豁免边界：faces = N 不豁免、> N 豁免（N=0 整体关）。
+#[test]
+fn prescan_group_exempt_boundary() {
+    let (_dir, state, db) = setup();
+    let e2 = ins(&db, "X:/p/e2.jpg", None, AssetKind::Photo); // faces = 2
+    let e3 = ins(&db, "X:/p/e3.jpg", None, AssetKind::Photo); // faces = 3
+    let e5 = ins(&db, "X:/p/e5.jpg", None, AssetKind::Photo); // faces = 5
+    for (id, n) in [(e2, 2u32), (e3, 3), (e5, 5)] {
+        eyes(&db, id, "closed", 0.9);
+        faces_n(&db, id, n);
+    }
+    let s = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![e2, e3, e5] },
+    )
+    .unwrap();
+
+    // N=2：=2 不豁免（照判闭眼）、>2 豁免（跳过 eyes）
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), None, false, 2, None),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_rejected.asset_ids, vec![e2], "= N 边界不豁免");
+    assert_eq!(dto.exempted_group.asset_ids, vec![e3, e5], "> N 豁免（只跳 eyes）");
+    assert_eq!(dto.exempted_group.count, 2);
+
+    // N=0：豁免整体关（哪怕 5 张脸也照判）
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), None, false, 0, None),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_rejected.asset_ids, vec![e2, e3, e5], "0 = 豁免关");
+    assert_eq!(dto.exempted_group.asset_ids, Vec::<i64>::new());
+
+    // 豁免只旁路 eyes：blur 规则照判豁免项（四桶非互斥）
+    blur(&db, e3, "soft", 10.0);
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), Some("normal"), false, 2, None),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_rejected.asset_ids, vec![e2, e3], "blur 不受合影豁免");
+    assert_eq!(dto.exempted_group.asset_ids, vec![e3, e5]);
+}
+
+/// 连拍留最锐：组内 blur score 最高 → accepted、其余组员 → rejected；
+/// 无 blur 分的组不动；冲突保守取剔除；已决定的最锐不晋升次锐。
+#[test]
+fn prescan_burst_keep_sharpest() {
+    let (_dir, state, db) = setup();
+    // G1：三分组（50/90/70）→ 90 留、其余剔
+    let g1a = ins(&db, "X:/p/g1a.jpg", None, AssetKind::Photo);
+    let g1b = ins(&db, "X:/p/g1b.jpg", None, AssetKind::Photo);
+    let g1c = ins(&db, "X:/p/g1c.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[g1a, g1b, g1c]);
+    blur(&db, g1a, "sharp", 50.0);
+    blur(&db, g1b, "sharp", 90.0);
+    blur(&db, g1c, "sharp", 70.0);
+    // G2：全组无 blur 分 → 不动
+    let g2a = ins(&db, "X:/p/g2a.jpg", None, AssetKind::Photo);
+    let g2b = ins(&db, "X:/p/g2b.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[g2a, g2b]);
+    // 孤儿组员（组另一成员不在快照 → burstSize=1 → 不算组）
+    let l1 = ins(&db, "X:/p/l1.jpg", None, AssetKind::Photo);
+    let l2 = ins(&db, "X:/p/l2_out.jpg", None, AssetKind::Photo); // 不入快照
+    burst_of(&db, &[l1, l2]);
+    blur(&db, l1, "sharp", 60.0);
+    // G3：最锐那张闭眼（normal）→ 冲突保守取剔除（不 accepted）
+    let g3a = ins(&db, "X:/p/g3a.jpg", None, AssetKind::Photo);
+    let g3b = ins(&db, "X:/p/g3b.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[g3a, g3b]);
+    blur(&db, g3a, "sharp", 95.0);
+    blur(&db, g3b, "sharp", 60.0);
+    eyes(&db, g3a, "closed", 0.9);
+    // G4：最锐已被 manual 剔除 → 不给次锐 accepted、其余组员照剔
+    let g4a = ins(&db, "X:/p/g4a.jpg", None, AssetKind::Photo);
+    let g4b = ins(&db, "X:/p/g4b.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[g4a, g4b]);
+    blur(&db, g4a, "sharp", 90.0);
+    blur(&db, g4b, "sharp", 70.0);
+    // G5：部分有分（有分者留、无分组员照剔）
+    let g5a = ins(&db, "X:/p/g5a.jpg", None, AssetKind::Photo);
+    let g5b = ins(&db, "X:/p/g5b.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[g5a, g5b]);
+    blur(&db, g5a, "sharp", 80.0);
+
+    let s = fetch_cull_session_create(
+        &state,
+        CullScope::Query {
+            asset_ids: vec![g1a, g1b, g1c, g2a, g2b, l1, g3a, g3b, g4a, g4b, g5a, g5b],
+        },
+    )
+    .unwrap();
+    fetch_cull_decision_apply(&state, s.id, &[dec(g4a, Some("rejected"))]).unwrap();
+
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), None, true, 0, None),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_accepted.asset_ids, vec![g1b, g5a], "组内最锐（含部分有分组）");
+    assert_eq!(
+        dto.suggested_rejected.asset_ids,
+        vec![g1a, g1c, g3a, g3b, g4b, g5b],
+        "其余组员剔（含无分者）；孤儿/无分组/已决定不动"
+    );
+    assert_eq!(dto.skipped_manual.asset_ids, vec![g4a], "manual 决定跳过");
+    assert_eq!(dto.exempted_group.asset_ids, Vec::<i64>::new());
+    // G3 冲突：最锐 g3a 剔除建议覆盖 accepted（保守）→ 不在 accepted 桶
+    assert!(!dto.suggested_accepted.asset_ids.contains(&g3a));
+}
+
+/// maxAccepted 封顶：accepted 建议按快照序先到先得，封顶后转不动；
+/// rejected 不受限。
+#[test]
+fn prescan_max_accepted_caps_in_snapshot_order() {
+    let (_dir, state, db) = setup();
+    let a1 = ins(&db, "X:/p/a1.jpg", None, AssetKind::Photo);
+    let a2 = ins(&db, "X:/p/a2.jpg", None, AssetKind::Photo);
+    let b1 = ins(&db, "X:/p/b1.jpg", None, AssetKind::Photo);
+    let b2 = ins(&db, "X:/p/b2.jpg", None, AssetKind::Photo);
+    burst_of(&db, &[a1, a2]);
+    burst_of(&db, &[b1, b2]);
+    blur(&db, a1, "sharp", 80.0);
+    blur(&db, a2, "sharp", 60.0);
+    blur(&db, b1, "sharp", 90.0);
+    blur(&db, b2, "sharp", 70.0);
+    let s = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![a1, a2, b1, b2] },
+    )
+    .unwrap();
+
+    // 封顶 1：a1（快照序先）留；b1 的 accepted 转不动（不在任何桶）
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(None, None, true, 0, Some(1)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_accepted.asset_ids, vec![a1], "先到先得");
+    assert_eq!(dto.suggested_accepted.count, 1);
+    assert_eq!(dto.suggested_rejected.asset_ids, vec![a2, b2], "rejected 不受限");
+    for bucket in [&dto.skipped_manual, &dto.exempted_group] {
+        assert_eq!(bucket.asset_ids, Vec::<i64>::new());
+    }
+    // b1 转不动 = 不出现在任何桶
+    let all: Vec<i64> = dto
+        .suggested_accepted
+        .asset_ids
+        .iter()
+        .chain(dto.suggested_rejected.asset_ids.iter())
+        .chain(dto.skipped_manual.asset_ids.iter())
+        .chain(dto.exempted_group.asset_ids.iter())
+        .copied()
+        .collect();
+    assert!(!all.contains(&b1), "封顶后的 accepted 转不动（不入桶）");
+
+    // 封顶 0：全部 accepted 转不动
+    let dto = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(None, None, true, 0, Some(0)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(dto.suggested_accepted.asset_ids, Vec::<i64>::new());
+    assert_eq!(dto.suggested_rejected.asset_ids, vec![a2, b2]);
+
+    // 不封顶：两个 accepted 都在
+    let dto = fetch_cull_ai_prescan(&state, s.id, rules(None, None, true, 0, None), false).unwrap();
+    assert_eq!(dto.suggested_accepted.asset_ids, vec![a1, b1]);
+}
+
+/// apply 语义：预览零写入；apply 只写未定项、origin='ai'、既有决定
+/// （manual 与 ai 皆）与未建议项不动。
+#[test]
+fn prescan_apply_writes_ai_origin_and_leaves_decided_untouched() {
+    let (_dir, state, db) = setup();
+    let m1 = ins(&db, "X:/p/m1.jpg", None, AssetKind::Photo);
+    let m2 = ins(&db, "X:/p/m2.jpg", None, AssetKind::Photo);
+    let m3 = ins(&db, "X:/p/m3.jpg", None, AssetKind::Photo);
+    let u1 = ins(&db, "X:/p/u1.jpg", None, AssetKind::Photo); // 闭眼 → 剔
+    let u3 = ins(&db, "X:/p/u3.jpg", None, AssetKind::Photo); // 最锐 → 选
+    let u4 = ins(&db, "X:/p/u4.jpg", None, AssetKind::Photo); // 次锐 → 剔
+    let u5 = ins(&db, "X:/p/u5.jpg", None, AssetKind::Photo); // 干净未定 → 不动
+    eyes(&db, m1, "closed", 0.9); // 已决定 → 也不该被建议
+    eyes(&db, u1, "closed", 0.9);
+    burst_of(&db, &[u3, u4]);
+    blur(&db, u3, "sharp", 90.0);
+    blur(&db, u4, "sharp", 60.0);
+    let s = fetch_cull_session_create(
+        &state,
+        CullScope::Query { asset_ids: vec![m1, m2, m3, u1, u3, u4, u5] },
+    )
+    .unwrap();
+    fetch_cull_decision_apply(&state, s.id, &[dec(m1, Some("accepted"))]).unwrap();
+    fetch_cull_decision_apply(&state, s.id, &[dec(m2, Some("rejected"))]).unwrap();
+    fetch_cull_decision_apply(
+        &state,
+        s.id,
+        &[CullDecisionInput {
+            asset_id: m3,
+            decision: Some("accepted".into()),
+            origin: Some("ai".into()), // 既有 ai 决定同样不动
+        }],
+    )
+    .unwrap();
+
+    // 预览：零写入
+    let preview = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), None, true, 0, None),
+        false,
+    )
+    .unwrap();
+    assert_eq!(preview.suggested_accepted.asset_ids, vec![u3]);
+    assert_eq!(preview.suggested_rejected.asset_ids, vec![u1, u4]);
+    assert_eq!(preview.skipped_manual.asset_ids, vec![m1, m2, m3], "manual 与既有 ai 都跳过");
+    assert_eq!(preview.applied, None);
+    assert_eq!(decision_rows(&db).len(), 3, "apply=false 零写入");
+
+    // 落地：origin='ai'；未建议的 u5 不动
+    let applied = fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), None, true, 0, None),
+        true,
+    )
+    .unwrap();
+    assert_eq!(applied.applied, Some(3), "写入决定行数 = 建议数");
+    assert_eq!(applied.suggested_accepted.asset_ids, vec![u3], "同形返回");
+    assert_eq!(applied.suggested_rejected.asset_ids, vec![u1, u4]);
+
+    let detail = fetch_cull_session_open(&state, s.id).unwrap();
+    let by_id = |id: i64| {
+        detail
+            .items
+            .iter()
+            .find(|i| i.asset_id == id)
+            .map(|i| (i.decision.as_deref(), i.origin.as_deref()))
+            .unwrap()
+    };
+    assert_eq!(by_id(m1), (Some("accepted"), Some("manual")), "manual 不被覆盖");
+    assert_eq!(by_id(m2), (Some("rejected"), Some("manual")));
+    assert_eq!(by_id(m3), (Some("accepted"), Some("ai")), "既有 ai 不被覆盖");
+    assert_eq!(by_id(u1), (Some("rejected"), Some("ai")), "AI 建议落 origin=ai");
+    assert_eq!(by_id(u3), (Some("accepted"), Some("ai")));
+    assert_eq!(by_id(u4), (Some("rejected"), Some("ai")));
+    assert_eq!(by_id(u5), (None, None), "未建议项保持未定");
+    assert_eq!(
+        (detail.session.accepted, detail.session.rejected, detail.session.undecided),
+        (3, 3, 1)
+    );
+}
+
+/// 非法规则与终态会话：敏感度/负数上限报错；不存在/已收尾拒绝。
+#[test]
+fn prescan_invalid_rules_and_session_state() {
+    let (_dir, state, db) = setup();
+    let a = ins(&db, "X:/p/a.jpg", None, AssetKind::Photo);
+    let s = fetch_cull_session_create(&state, CullScope::Query { asset_ids: vec![a] }).unwrap();
+
+    assert!(fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("ultra"), None, false, 0, None),
+        false
+    )
+    .is_err(), "eyes 敏感度非法");
+    assert!(fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(None, Some(""), false, 0, None),
+        false
+    )
+    .is_err(), "blur 敏感度非法");
+    assert!(
+        fetch_cull_ai_prescan(&state, s.id, rules(None, None, false, 0, Some(-1)), false).is_err(),
+        "maxAccepted 负数非法"
+    );
+    assert!(fetch_cull_ai_prescan(&state, 9999, rules(None, None, false, 0, None), false).is_err());
+
+    // 已收尾拒绝（预览与 apply 同拒）
+    fetch_cull_session_finish(
+        &state,
+        s.id,
+        CullFinishApply { accepted_flag: false, accepted_rating: None, reject_rejected: false },
+    )
+    .unwrap();
+    assert!(fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), Some("normal"), false, 0, None),
+        false
+    )
+    .is_err());
+    assert!(fetch_cull_ai_prescan(
+        &state,
+        s.id,
+        rules(Some("normal"), Some("normal"), false, 0, None),
+        true
+    )
+    .is_err());
+}
+
+/// DTO 契约：camelCase 键名 + 桶 {count, assetIds} + rulesEcho + applied
+/// 仅 apply 携带。
+#[test]
+fn prescan_dto_serialization_shape() {
+    let (_dir, state, db) = setup();
+    let a = ins(&db, "X:/p/a.jpg", None, AssetKind::Photo);
+    eyes(&db, a, "closed", 0.9);
+    let s = fetch_cull_session_create(&state, CullScope::Query { asset_ids: vec![a] }).unwrap();
+    let input = rules(Some("normal"), Some("weak"), false, 0, None);
+    let dto = fetch_cull_ai_prescan(&state, s.id, input.clone(), false).unwrap();
+    let json = serde_json::to_value(&dto).unwrap();
+    assert_eq!(json["suggestedRejected"]["count"], 1);
+    assert_eq!(json["suggestedRejected"]["assetIds"], serde_json::json!([a]));
+    assert_eq!(json["rulesEcho"]["eyes"]["sensitivity"], "normal");
+    assert_eq!(json["rulesEcho"]["blur"]["sensitivity"], "weak");
+    assert_eq!(json["rulesEcho"]["burstKeepSharpest"], false);
+    assert_eq!(json["rulesEcho"]["groupExemptFaces"], 0);
+    assert_eq!(json["rulesEcho"]["maxAccepted"], serde_json::Value::Null);
+    assert!(json.get("applied").is_none(), "apply=false 不占 applied 载荷");
 }

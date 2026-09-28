@@ -926,7 +926,9 @@ impl Engine {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let _ = self.db.insert_asset_with_album(
+        // 入库失败不回滚文件（已落盘的物理事实优先——下次导入靠同路径
+        // 覆盖 upsert 收编），但 stderr 留痕可查：文件在、库没有 = 线索。
+        if let Err(err) = self.db.insert_asset_with_album(
             // album_subgroup（0019）：入册引用带子分组命名层
             &AssetRow {
                 path: final_dst.to_string_lossy().into_owned(),
@@ -965,7 +967,12 @@ impl Engine {
             },
             self.plan.album_id,
             self.plan.album_subgroup.as_deref(),
-        );
+        ) {
+            eprintln!(
+                "入库失败（文件已落盘不回滚）: {}: {err}",
+                final_dst.display()
+            );
+        }
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2
             .map(|p| p.to_string_lossy().into_owned())

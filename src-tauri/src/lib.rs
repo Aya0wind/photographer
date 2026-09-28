@@ -341,6 +341,8 @@ pub fn run() {
             ipc::culling::cull_session_rename,
             ipc::culling::cull_session_discard,
             ipc::culling::cull_session_finish,
+            // AI 挑图预扫（V3）：规则引擎预标记建议（只建议不自动决定）
+            ipc::culling::cull_ai_prescan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

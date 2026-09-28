@@ -1,6 +1,9 @@
 //! 选片（Culling）会话命令（0024，V1）：会话持久化 + 决定读写 + 进度派生
 //! + 收尾映射（旗标/星级/拒绝——v1 不做子组动作）。
 //!
+//! V2/V3 增量：open items 连拍组字段（对比视图数据源）+ `cull_ai_prescan`
+//! AI 挑图预扫规则引擎（纯 DB 零推理，只建议不自动决定）。
+//!
 //! - 全部 async + run_blocking（UI 零阻塞铁律）。
 //! - 决定/进度语义见 [`crate::db::culling`]：未定 = 无行，计数纯 SQL 派生。
 //! - 收尾映射走既有命令内核（[`super::rating::fetch_asset_flag_set`] /
@@ -47,7 +50,9 @@ pub struct CullDecisionInput {
 }
 
 /// 快照条目（open 返回；快照序）。**不含资产元数据**——前端经既有
-/// asset_detail / 缩略图管线按 assetId 自取。
+/// asset_detail / 缩略图管线按 assetId 自取。V2 追加连拍组字段：
+/// burstId（assets.burst_id，无组 null）+ burstSize（该组**会话快照内**
+/// 成员数，无组 = 1）——V2 对比视图默认取同连拍组的数据源。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CullItemDto {
@@ -56,6 +61,8 @@ pub struct CullItemDto {
     pub decision: Option<String>,
     /// "manual" | "ai"；未定时 null。
     pub origin: Option<String>,
+    pub burst_id: Option<i64>,
+    pub burst_size: u32,
 }
 
 /// open 返回体：会话（含派生计数）+ 全量快照条目（V1 全量返回，万张内
@@ -258,6 +265,8 @@ pub fn fetch_cull_session_open(
             asset_id: item.asset_id,
             decision: item.decision,
             origin: item.origin,
+            burst_id: item.burst_id,
+            burst_size: item.burst_size,
         })
         .collect();
     Ok(CullSessionDetailDto {
@@ -501,6 +510,168 @@ pub async fn cull_session_finish(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_cull_session_finish(state, session_id, apply)
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// AI 挑图预扫（V3，proposal §3.3）：纯 DB 规则引擎（零推理）——读既有
+// ai_analysis / faces / bursts 给「预标记建议」。AI 只建议纪律不变：
+// apply=true 也只写会话内 origin='ai' 决定（用户过片可翻转），绝不直接
+// 动主库旗标/星级/拒绝（那是收尾映射的事）。
+// ---------------------------------------------------------------------------
+
+/// 检测开关（eyes/blur 共用形状）：enabled + 三档敏感度字符串。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CullRuleSwitch {
+    pub enabled: bool,
+    /// "weak" | "normal" | "strong"（[`parse_sensitivity`] 校验）。
+    pub sensitivity: String,
+}
+
+/// 预扫规则输入（camelCase 契约；rulesEcho 回显同形——缺省字段按生效值
+/// 回显，前端弹窗「按这些规则跑了 N 张」的直接数据源）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CullPrescanRulesInput {
+    pub eyes: CullRuleSwitch,
+    pub blur: CullRuleSwitch,
+    /// 连拍组留最锐（组内 blur score 最高成员 accepted、其余 rejected；
+    /// 无 blur 分的组不动）。
+    #[serde(default)]
+    pub burst_keep_sharpest: bool,
+    /// faces 行数 > N 的资产跳过 eyes 规则（合影豁免）；0 = 关。
+    #[serde(default)]
+    pub group_exempt_faces: u32,
+    /// accepted 建议数封顶（快照序先到先得；null = 不限；负数非法）。
+    #[serde(default)]
+    pub max_accepted: Option<i64>,
+}
+
+/// 结果桶：计数 + 明细 asset_id 列表（快照序）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CullPrescanBucketDto {
+    pub count: u64,
+    pub asset_ids: Vec<i64>,
+}
+
+/// 预扫返回体：apply=false 纯只读预览；apply=true 落 origin='ai' 决定并
+/// 额外携带 applied 计数（= 实际写入决定行数——与两建议桶计数之和一致，
+/// 前端拿去出 toast）。四桶非互斥分区（豁免桶是 eyes 通道旁路记录）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CullPrescanDto {
+    pub suggested_accepted: CullPrescanBucketDto,
+    pub suggested_rejected: CullPrescanBucketDto,
+    /// 已有决定（manual 或既有 ai）被跳过的项。
+    pub skipped_manual: CullPrescanBucketDto,
+    /// 因合影豁免跳过 eyes 规则的未定项。
+    pub exempted_group: CullPrescanBucketDto,
+    /// 生效规则回显（已校验/已补默认值形态）。
+    pub rules_echo: CullPrescanRulesInput,
+    /// 仅 apply=true 携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<u64>,
+}
+
+fn bucket(ids: Vec<i64>) -> CullPrescanBucketDto {
+    CullPrescanBucketDto { count: ids.len() as u64, asset_ids: ids }
+}
+
+/// 敏感度校验：weak/normal/strong 之外拒绝。
+fn parse_sensitivity(raw: &str) -> Result<crate::db::culling::CullSensitivity, String> {
+    match raw {
+        "weak" => Ok(crate::db::culling::CullSensitivity::Weak),
+        "normal" => Ok(crate::db::culling::CullSensitivity::Normal),
+        "strong" => Ok(crate::db::culling::CullSensitivity::Strong),
+        other => Err(format!("非法敏感度: {other}（weak/normal/strong）")),
+    }
+}
+
+/// AI 预扫核：规则校验 → 引擎求值（只读）→ apply 时落 origin='ai' 决定。
+/// 值集映射（详见 db::culling）：eyes weak={closed}+score≥0.5 /
+/// normal={closed} / strong={closed,maybe}；blur weak={}（关）/
+/// normal=strong={soft}；eyes 与 burst 建议冲突保守取剔除。
+pub fn fetch_cull_ai_prescan(
+    state: &super::AppState,
+    session_id: i64,
+    rules: CullPrescanRulesInput,
+    apply: bool,
+) -> Result<CullPrescanDto, String> {
+    // 先全量校验（非法规则不碰库）
+    let eyes_sensitivity = parse_sensitivity(&rules.eyes.sensitivity)?;
+    let blur_sensitivity = parse_sensitivity(&rules.blur.sensitivity)?;
+    if let Some(max) = rules.max_accepted {
+        if max < 0 {
+            return Err(format!("maxAccepted 不能为负：{max}"));
+        }
+    }
+    let parsed = crate::db::culling::CullPrescanRules {
+        eyes_enabled: rules.eyes.enabled,
+        eyes_sensitivity,
+        blur_enabled: rules.blur.enabled,
+        blur_sensitivity,
+        burst_keep_sharpest: rules.burst_keep_sharpest,
+        group_exempt_faces: rules.group_exempt_faces,
+        max_accepted: rules.max_accepted.map(|v| v as u64),
+    };
+    let db = super::active_library_db(state)?;
+    let row = db
+        .cull_session_get(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("选片会话不存在")?;
+    if row.finished_at.is_some() {
+        return Err(format!("选片会话「{}」已收尾，不能再预扫", row.name));
+    }
+    let outcome = db
+        .cull_ai_prescan(session_id, &parsed)
+        .map_err(|e| e.to_string())?
+        .ok_or("选片会话不存在")?;
+    let mut applied = None;
+    if apply {
+        let decisions: Vec<crate::db::culling::CullDecisionRow> = outcome
+            .suggested_accepted
+            .iter()
+            .map(|&asset_id| crate::db::culling::CullDecisionRow {
+                asset_id,
+                decision: Some("accepted"),
+                origin: "ai",
+            })
+            .chain(outcome.suggested_rejected.iter().map(|&asset_id| {
+                crate::db::culling::CullDecisionRow {
+                    asset_id,
+                    decision: Some("rejected"),
+                    origin: "ai",
+                }
+            }))
+            .collect();
+        applied = Some(decisions.len() as u64);
+        db.cull_decision_apply(session_id, &decisions)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(CullPrescanDto {
+        suggested_accepted: bucket(outcome.suggested_accepted),
+        suggested_rejected: bucket(outcome.suggested_rejected),
+        skipped_manual: bucket(outcome.skipped_manual),
+        exempted_group: bucket(outcome.exempted_group),
+        rules_echo: rules,
+        applied,
+    })
+}
+
+/// AI 挑图预扫（apply=false 只读预览 / true 落 origin='ai' 预标记）。
+#[tauri::command]
+pub async fn cull_ai_prescan(
+    state: State<'_, SharedState>,
+    session_id: i64,
+    rules: CullPrescanRulesInput,
+    apply: bool,
+) -> Result<CullPrescanDto, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        fetch_cull_ai_prescan(state, session_id, rules, apply)
     })
     .await
 }
