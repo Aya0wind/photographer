@@ -388,14 +388,21 @@ pub fn kick_semantic_if_ready(
     });
 }
 
-/// 语义分数显示标定（经验锚点，2026-09-21 于 162 张真库实测）：
-/// SigLIP2 统一重嵌入后 cos 相似度整体压缩在窄带——无关内容查询 top
-/// ≤0.096（「手术台/无人机航拍」实测）、相关簇 0.09-0.12、长尾地板
-/// ≈0.04。阈值过滤仍用原始分数（0.09 为实测工作点，[0.088,0.096] 区间
-/// 真假重叠属 ANN 固有的精度/召回权衡），但返回前端的 score 做线性
-/// 拉伸到 [0,1]，否则 top 命中 0.12 会显示成「12%」。
+/// 语义分数显示标定（经验锚点；阈值过滤仍用原始分数，见
+/// [`semantic_default_min_score`] 注释的各轮实测分布）：
+/// - **int8**（fast/normal，2026-09-21 于 162 张真库）：无关 top ≤0.096、
+///   相关簇 0.09-0.12、长尾地板 ≈0.04 → floor 0.04 / ceiling 0.125
+///   （工作点 0.09 显示为 ~52%）。
+/// - **fp16**（accurate，2026-09-28 于 497 张真库）：cos 带整体压低居中于
+///   0（中位 ≈-0.03）、荒谬 top ∈[-0.001,0.032]、内容 top ∈[0.010,0.046]
+///   （日落 0.0463 浮出带外）→ floor 0.0 / ceiling 0.06（负分归 0；工作点
+///   0.03 显示为 50%，日落 0.0463 显示为 ~77%——与 int8 档同位观感）。
+/// 返回前端前做线性拉伸到 [0,1]，否则窄带原始分会显示成「3%」。
 pub const SEMANTIC_SCORE_FLOOR: f32 = 0.04;
 pub const SEMANTIC_SCORE_CEILING: f32 = 0.125;
+/// fp16 变体（accurate 档）的显示拉伸带（标定依据见上）。
+pub const SEMANTIC_SCORE_FLOOR_FP16: f32 = 0.0;
+pub const SEMANTIC_SCORE_CEILING_FP16: f32 = 0.06;
 
 /// 阈值 auto 默认值（settings.ai.semantic_min_score = null 时按当前语义
 /// 模型变体取，2026-09-28 三档画质引入）：
@@ -421,9 +428,14 @@ pub fn semantic_default_min_score(tier: super::QualityTier) -> f32 {
     }
 }
 
-/// 原始 cos 相似度 → 显示分数 [0,1]：floor 以下归 0，ceiling 以上饱和 1。
-pub fn calibrated_display_score(raw: f32) -> f32 {
-    ((raw - SEMANTIC_SCORE_FLOOR) / (SEMANTIC_SCORE_CEILING - SEMANTIC_SCORE_FLOOR)).clamp(0.0, 1.0)
+/// 原始 cos 相似度 → 显示分数 [0,1]（按当前语义模型变体取拉伸带）：
+/// floor 以下归 0，ceiling 以上饱和 1。
+pub fn calibrated_display_score(raw: f32, tier: super::QualityTier) -> f32 {
+    let (floor, ceiling) = match tier {
+        super::QualityTier::Accurate => (SEMANTIC_SCORE_FLOOR_FP16, SEMANTIC_SCORE_CEILING_FP16),
+        _ => (SEMANTIC_SCORE_FLOOR, SEMANTIC_SCORE_CEILING),
+    };
+    ((raw - floor) / (ceiling - floor)).clamp(0.0, 1.0)
 }
 
 /// 语义检索：embed 查询 → HNSW KNN → 资产账 join（过滤失效 id 与

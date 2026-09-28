@@ -81,7 +81,7 @@ pub fn fetch_search_semantic(
         .into_iter()
         .map(|(asset_id, score)| SearchHitDto {
             asset_id,
-            score: crate::ai::semantic::calibrated_display_score(score),
+            score: crate::ai::semantic::calibrated_display_score(score, tier),
         })
         .collect())
 }
