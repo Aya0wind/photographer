@@ -8,6 +8,7 @@ import {
   assetsCount,
   assetsPage,
   assetTrashMove,
+  cullSessionCreate,
   isIpcAvailable,
   smartViewDelete,
   smartViewList,
@@ -15,6 +16,8 @@ import {
   type AssetFilters,
   type SmartViewDto,
 } from "@/ipc/api";
+import { collectAssetIdsByFilters } from "@/features/culling/lib/cullingCore";
+import { useCullingStore } from "@/features/culling/cullingStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import {
   groupAssetsByDate,
@@ -541,6 +544,35 @@ export default function GalleryPage() {
   const refreshSmartViews = useCallback(() => {
     void smartViewList().then(setSmartViews);
   }, []);
+
+  // --- 「从此筛选选片」（Culling V1）：当前结果资产 id 快照开会话 ---------------------
+  // 语义态直接取内存结果；默认/筛选态现有 API 只 keyset 分页——按查询参数循环
+  // 直取全量（collectAssetIdsByFilters），快照后防新导入扰动。
+  const [cullBusy, setCullBusy] = useState(false);
+  const [cullError, setCullError] = useState(false);
+  async function startCullingFromFilter(): Promise<void> {
+    if (cullBusy) return;
+    setCullBusy(true);
+    setCullError(false);
+    try {
+      const ids = semanticMode
+        ? semantic.assets.map((a) => a.id)
+        : await collectAssetIdsByFilters(filtersActive ? appliedFilters : undefined);
+      if (ids.length === 0) {
+        setCullError(true);
+        return;
+      }
+      const result = await cullSessionCreate({ kind: "query", assetIds: ids });
+      if (!result.ok) {
+        setCullError(true);
+        return;
+      }
+      void useCullingStore.getState().refreshActiveCount();
+      navigate("/culling", { state: { open: result.session.id } });
+    } finally {
+      setCullBusy(false);
+    }
+  }
   useEffect(() => {
     refreshSmartViews();
   }, [refreshSmartViews]);
@@ -671,6 +703,25 @@ export default function GalleryPage() {
 
           {/* 已存视图（B1）：点击应用（filters 反解套用）+ 逐项 × 删除确认 */}
           <SmartViewsMenu views={smartViews} onApply={applySmartView} onDelete={(v) => void deleteSmartView(v)} />
+
+          {/* 从此筛选选片（Culling V1）：当前结果 id 快照开会话（语义态取内存结果） */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void startCullingFromFilter()}
+              disabled={cullBusy || (semanticMode ? semantic.assets.length === 0 : (totalCount ?? assets.length) === 0)}
+              className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+              data-testid="gallery-cull-start"
+              data-busy={cullBusy}
+            >
+              {cullBusy ? t("gallery.cullBusy") : t("gallery.cullFromFilter")}
+            </button>
+            {cullError && (
+              <span className="text-[11px] text-red-400" role="alert" data-testid="gallery-cull-error">
+                {t("culling.createFailed")}
+              </span>
+            )}
+          </div>
 
           {/* 计数徽标 */}
           <span

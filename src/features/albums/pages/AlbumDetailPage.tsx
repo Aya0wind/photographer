@@ -8,11 +8,13 @@ import {
   albumList,
   albumRename,
   albumSubgroups,
+  cullSessionCreate,
   type AlbumDto,
   type AlbumSubgroupDto,
   type AssetDto,
   type AssetFilters,
 } from "@/ipc/api";
+import { useCullingStore } from "@/features/culling/cullingStore";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
@@ -300,6 +302,22 @@ export default function AlbumDetailPage() {
   // --- 「添加照片」入口（v1：提示到图库多选加入） ---------------------------------------
   const [addHintOpen, setAddHintOpen] = useState(false);
 
+  // --- 「选片」入口（Culling V1）：当前作用域（根/子组）一键开会话 → /culling 续选 ---
+  const [cullBusy, setCullBusy] = useState(false);
+  async function startCulling(): Promise<void> {
+    if (cullBusy || itemCount === 0) return;
+    setCullBusy(true);
+    const result = await cullSessionCreate({
+      kind: "album",
+      albumId,
+      subgroup,
+    });
+    setCullBusy(false);
+    if (!result.ok) return; // 后端未就绪：静默降级（按钮可重试）
+    void useCullingStore.getState().refreshActiveCount();
+    navigate("/culling", { state: { open: result.session.id } });
+  }
+
   return (
     <div className="h-full" data-testid="album-detail-page" data-album-id={albumId}>
       <div className="flex h-full w-full flex-col px-4">
@@ -381,6 +399,19 @@ export default function AlbumDetailPage() {
                 {chips.length}
               </span>
             )}
+          </button>
+
+          {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
+          <button
+            type="button"
+            onClick={() => void startCulling()}
+            disabled={cullBusy || itemCount === 0}
+            title={subgroup === null ? t("albums.cullHint") : t("albums.cullHintSubgroup", { subgroup })}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="album-cull-start"
+            data-busy={cullBusy}
+          >
+            {cullBusy ? t("albums.cullBusy") : t("albums.cull")}
           </button>
 
           <div className="relative shrink-0">

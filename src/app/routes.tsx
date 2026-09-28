@@ -16,6 +16,7 @@ import SimilarPage from "@/features/similar/pages/SimilarPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import PeoplePage from "@/features/people/pages/PeoplePage";
+import CullingPage from "@/features/culling/pages/CullingPage";
 import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsPages";
 import SettingsPage from "@/features/settings/pages/SettingsPage";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -64,6 +65,8 @@ export const router = createBrowserRouter([
       { path: "gear", element: <GearPage /> },
       { path: "search", element: <SearchRedirect /> },
       { path: "similar", element: <SimilarPage /> },
+      // 选片会话（Culling V1）：会话列表 + 全屏过片层（浮层内挂载）
+      { path: "culling", element: <CullingPage /> },
       { path: "people", element: <PeoplePage /> },
       { path: "albums", element: <AlbumsIndexPage /> },
       // 手工相册详情（/albums/:id，纯数字参数）/ 智能标签语义结果共用一个槽位

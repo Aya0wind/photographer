@@ -1985,6 +1985,223 @@ export async function cameraCapture(pnpId: string, timeoutMs?: number): Promise<
   }
 }
 
+// --- 选片会话（Culling V1）契约 ------------------------------------------------------
+// 方案：docs/plans/2026-09-28-culling-proposal.md §1/§6。会话是一等持久化实体，
+// 进度（已选/已剔除/未定/总数）全部由后端真值派生；决定即时落库（决定即保存）。
+// 后端 lane 并行实装中：命令未注册时按既有惯例静默降级（列表 []、写操作
+// false/null），前端乐观 UI 不被传输失败阻塞。
+
+/** 决定值（未定 = null，无 cull_decision 行） */
+export type CullDecisionValue = "accepted" | "rejected";
+
+/** 会话来源快照：相册（含子组）/ 查询结果（asset id 快照，防新导入扰动） */
+export type CullScope =
+  | { kind: "album"; albumId: number; subgroup: string | null }
+  | { kind: "query"; assetIds: number[] };
+
+/** 选片会话（cull_session_* 返回；计数为后端派生真值） */
+export interface CullSessionDto {
+  id: number;
+  name: string;
+  scope: CullScope;
+  total: number;
+  accepted: number;
+  rejected: number;
+  undecided: number;
+  createdAt: string;
+  updatedAt: string;
+  /** null = 进行中（会话归档不删，历史可查） */
+  finishedAt: string | null;
+}
+
+/** 会话内单资产决定状态（cullSessionOpen 返回；decision=null 即未定） */
+export interface CullItemState {
+  assetId: number;
+  decision: CullDecisionValue | null;
+  /** manual=用户手标 / ai=AI 预标记（V3；用户可翻转） */
+  origin: "manual" | "ai";
+}
+
+/** cullSessionOpen 结果：会话 + 决定表（按会话快照序） */
+export interface CullSessionOpenResult {
+  session: CullSessionDto;
+  items: CullItemState[];
+}
+
+/** 单条决定写入（decision=null 清除决定回未定） */
+export interface CullDecisionPatch {
+  assetId: number;
+  decision: CullDecisionValue | null;
+}
+
+/** 收尾映射开关（已选→旗标/星级；已剔除→拒绝） */
+export interface CullFinishApply {
+  acceptedFlag: boolean;
+  acceptedRating: number | null;
+  rejectRejected: boolean;
+}
+
+/** cullSessionFinish 结果：各出口实际作用张数 */
+export interface CullFinishResult {
+  appliedFlag: number;
+  appliedRating: number;
+  rejected: number;
+}
+
+export type CullSessionCreateResult =
+  | { ok: true; session: CullSessionDto }
+  | { ok: false; error: string | null };
+
+/** 脏数据容错：后端载荷 → CullSessionDto 归一（形状异常剔除/回退） */
+function normalizeCullSession(value: unknown): CullSessionDto | null {
+  if (value === null || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  const numOf = (v: unknown): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : 0;
+  if (typeof r.id !== "number" || !Number.isFinite(r.id) || typeof r.name !== "string") {
+    return null;
+  }
+  // scope 归一：album 必须有 albumId；query 必须有 assetIds 数组；其余按 query 空集兜底
+  const rawScope = r.scope !== null && typeof r.scope === "object"
+    ? (r.scope as Record<string, unknown>)
+    : {};
+  let scope: CullScope;
+  if (rawScope.kind === "album" && typeof rawScope.albumId === "number") {
+    scope = {
+      kind: "album",
+      albumId: rawScope.albumId,
+      subgroup: typeof rawScope.subgroup === "string" && rawScope.subgroup !== "" ? rawScope.subgroup : null,
+    };
+  } else {
+    scope = {
+      kind: "query",
+      assetIds: Array.isArray(rawScope.assetIds)
+        ? rawScope.assetIds.filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+        : [],
+    };
+  }
+  return {
+    id: r.id,
+    name: r.name,
+    scope,
+    total: numOf(r.total),
+    accepted: numOf(r.accepted),
+    rejected: numOf(r.rejected),
+    undecided: numOf(r.undecided),
+    createdAt: typeof r.createdAt === "string" ? r.createdAt : "",
+    updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : "",
+    finishedAt: typeof r.finishedAt === "string" ? r.finishedAt : null,
+  };
+}
+
+/** 新建选片会话（cull_session_create；空 scope/后端业务错误透传原始 Err 文案） */
+export async function cullSessionCreate(scope: CullScope): Promise<CullSessionCreateResult> {
+  try {
+    const raw = await ipc<unknown>("cull_session_create", { scope });
+    const session = normalizeCullSession(raw);
+    if (session === null) return { ok: false, error: null };
+    return { ok: true, session };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
+    return { ok: false, error: message };
+  }
+}
+
+/** 会话清单（cull_session_list；失败/非数组/形状异常回退 []） */
+export async function cullSessionList(): Promise<CullSessionDto[]> {
+  try {
+    const list = await ipc<unknown>("cull_session_list");
+    if (!Array.isArray(list)) return [];
+    return list
+      .map(normalizeCullSession)
+      .filter((s): s is CullSessionDto => s !== null);
+  } catch {
+    return [];
+  }
+}
+
+/** 打开会话续选（cull_session_open：会话 + 决定表）；失败/形状异常返回 null */
+export async function cullSessionOpen(id: number): Promise<CullSessionOpenResult | null> {
+  try {
+    const raw = await ipc<unknown>("cull_session_open", { id });
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const session = normalizeCullSession(r.session);
+    if (session === null) return null;
+    const items: CullItemState[] = Array.isArray(r.items)
+      ? r.items
+          .filter(
+            (i): i is Record<string, unknown> =>
+              i !== null && typeof i === "object" && typeof (i as Record<string, unknown>).assetId === "number",
+          )
+          .map((i) => ({
+            assetId: i.assetId as number,
+            decision:
+              i.decision === "accepted" || i.decision === "rejected" ? (i.decision as CullDecisionValue) : null,
+            origin: i.origin === "ai" ? "ai" : "manual",
+          }))
+      : [];
+    return { session, items };
+  } catch {
+    return null;
+  }
+}
+
+/** 批量写入决定（cull_decision_apply；单条过片也走此接口）。成功返回最新会话
+ *  计数（进度真值），失败/形状异常返回 null（调用方回滚乐观更新） */
+export async function cullDecisionApply(
+  sessionId: number,
+  decisions: CullDecisionPatch[],
+): Promise<CullSessionDto | null> {
+  try {
+    return normalizeCullSession(await ipc<unknown>("cull_decision_apply", { sessionId, decisions }));
+  } catch {
+    return null;
+  }
+}
+
+/** 会话改名（cull_session_rename）；命令失败 false */
+export async function cullSessionRename(id: number, name: string): Promise<boolean> {
+  try {
+    await ipc<void>("cull_session_rename", { id, name });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 丢弃会话（cull_session_discard：仅删会话+决定表，不动库内照片/标记） */
+export async function cullSessionDiscard(id: number): Promise<boolean> {
+  try {
+    await ipc<void>("cull_session_discard", { id });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 完成会话并应用收尾映射（cull_session_finish）；失败/形状异常返回 null */
+export async function cullSessionFinish(
+  id: number,
+  apply: CullFinishApply,
+): Promise<CullFinishResult | null> {
+  try {
+    const raw = await ipc<unknown>("cull_session_finish", { id, apply });
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const numOf = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? v : 0;
+    return {
+      appliedFlag: numOf(r.appliedFlag),
+      appliedRating: numOf(r.appliedRating),
+      rejected: numOf(r.rejected),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // --- 事件订阅 ----------------------------------------------------------------
 
 /**

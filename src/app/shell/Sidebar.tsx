@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { ReactElement } from "react";
 
 import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
+import { useCullingStore } from "@/features/culling/cullingStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
@@ -28,8 +29,8 @@ interface NavItem {
   to: string;
   labelKey: string;
   icon: ReactElement;
-  /** 徽标：people=聚类人脸总数；其余=sidebar_counts 对应键 */
-  badge?: "people" | CountBadge;
+  /** 徽标：people=聚类人脸总数；culling=进行中选片会话数；其余=sidebar_counts 对应键 */
+  badge?: "people" | "culling" | CountBadge;
 }
 
 interface NavSection {
@@ -110,6 +111,15 @@ const ICONS = {
     </>,
     "similar",
   ),
+  culling: icon(
+    <>
+      <path d="M2 4.5h4l1.5 2H14" />
+      <path d="M3.2 2.5h9.6l-1 4.2a3 3 0 0 1-2.9 2.3H7.1a3 3 0 0 1-2.9-2.3z" />
+      <path d="M8 9v2.5" />
+      <path d="M5.8 14l2.2-2.5L10.2 14" />
+    </>,
+    "culling",
+  ),
   import: icon(
     <>
       <path d="M8 1.5v8M4.8 6.6L8 9.8l3.2-3.2" />
@@ -158,6 +168,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/import", labelKey: "nav.import", icon: ICONS.import },
       { to: "/similar", labelKey: "nav.similar", icon: ICONS.similar },
+      { to: "/culling", labelKey: "nav.culling", icon: ICONS.culling, badge: "culling" },
       { to: "/trash", labelKey: "nav.trash", icon: ICONS.trash },
     ],
   },
@@ -171,6 +182,12 @@ export default function Sidebar() {
   const { t } = useTranslation();
   // 计数/人脸徽标按库私有：切库时以 activeLibraryId 为依赖重拉
   const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
+  // 选片徽标：进行中会话数（cullingStore 集中维护，各入口建会话/收尾后刷新）
+  const cullingActive = useCullingStore((s) => s.activeCount);
+  const refreshCullingCount = useCullingStore((s) => s.refreshActiveCount);
+  useEffect(() => {
+    void refreshCullingCount();
+  }, [refreshCullingCount, activeLibraryId]);
   // 人物入口徽标：聚类人脸总数（进 app 拉一次；失败静默 0——后端未就绪不显示）
   const [peopleFaces, setPeopleFaces] = useState(0);
   useEffect(() => {
@@ -213,9 +230,11 @@ export default function Sidebar() {
     };
   }, [activeLibraryId]);
 
-  /** 行徽标值（people 走聚类总数；其余走 sidebar_counts；0/缺数据=不显示） */
+  /** 行徽标值（people 走聚类总数；culling 走进行中会话数；其余走 sidebar_counts；
+   *  0/缺数据=不显示） */
   function badgeValueOf(badge: NonNullable<NavItem["badge"]>): number {
     if (badge === "people") return peopleFaces;
+    if (badge === "culling") return cullingActive;
     return counts ? counts[badge] : 0;
   }
 
@@ -255,7 +274,11 @@ export default function Sidebar() {
                         <span
                           className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
                           data-testid={
-                            item.badge === "people" ? "sidebar-people-badge" : "sidebar-count-badge"
+                            item.badge === "people"
+                              ? "sidebar-people-badge"
+                              : item.badge === "culling"
+                                ? "sidebar-culling-badge"
+                                : "sidebar-count-badge"
                           }
                           data-kind={item.badge}
                         >
