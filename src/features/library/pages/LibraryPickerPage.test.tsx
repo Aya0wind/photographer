@@ -18,7 +18,6 @@ const LIB_A: Library = {
   name: "主库",
   dbDir: "I:\\SmartPhoto\\主库",
   photoRoot: "Y:\\照片",
-  importSubdir: "SmartPhoto",
   configured: true,
 streams: 4,
 };
@@ -27,7 +26,6 @@ const LIB_B: Library = {
   name: "工作库",
   dbDir: "E:\\db2",
   photoRoot: "E:\\照片",
-  importSubdir: "",
   configured: true,
 streams: 4,
 };

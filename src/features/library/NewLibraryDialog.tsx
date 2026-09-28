@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 
 import {
-  DEFAULT_IMPORT_SUBDIR,
   SUGGESTED_DB_DIR,
   SUGGESTED_LIBRARY_NAME,
   SUGGESTED_PHOTO_ROOT,
@@ -53,7 +52,6 @@ interface Draft {
   name: string;
   dbDir: string;
   photoRoot: string;
-  importSubdir: string;
   streams: number;
 }
 
@@ -62,7 +60,6 @@ function defaultDraft(): Draft {
     name: SUGGESTED_LIBRARY_NAME,
     dbDir: SUGGESTED_DB_DIR,
     photoRoot: SUGGESTED_PHOTO_ROOT,
-    importSubdir: DEFAULT_IMPORT_SUBDIR,
     streams: 4,
   };
 }
@@ -111,7 +108,6 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
       name: draft.name.trim(),
       dbDir: draft.dbDir.trim(),
       photoRoot: draft.photoRoot.trim(),
-      importSubdir: draft.importSubdir.trim(),
       streams: draft.streams,
       configured: false,
     };
@@ -177,15 +173,6 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
                   type="text"
                   value={draft.photoRoot}
                   onChange={(e) => patch({ photoRoot: e.target.value })}
-                  className={FIELD_CLASS}
-                />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-text-secondary">
-                {t("onboarding.library.importSubdir")}
-                <input
-                  type="text"
-                  value={draft.importSubdir}
-                  onChange={(e) => patch({ importSubdir: e.target.value })}
                   className={FIELD_CLASS}
                 />
               </label>

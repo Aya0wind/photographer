@@ -42,7 +42,6 @@ const LIB: Library = {
   name: "主库",
   dbDir: "I:\\SmartPhoto\\主库",
   photoRoot: "Y:\\照片",
-  importSubdir: "SmartPhoto",
   configured: true,
   streams: 4,
 };
@@ -190,12 +189,12 @@ describe("加入相册弹窗", () => {
 // --- 归入语义（规格修订：通用「归入=物理挪移改主相册」） ---------------------------------
 
 describe("加入相册弹窗：归入（claim）语义", () => {
-  /** 位于目标相册（青海湖 2026）目录内的资产 */
+  /** 位于目标相册（青海湖 2026，createdAt 2026-09-01）主目录内的资产（固定布局公式） */
   const inTarget = (id: number): AssetDto => ({
     ...makeAsset(id),
-    path: "Y:\\照片\\SmartPhoto\\青海湖 2026\\2026\\09-18\\IMG_" + id + ".JPG",
+    path: "Y:\\照片\\2026\\09\\青海湖 2026\\IMG_" + id + ".JPG",
   });
-  /** 位于日期根（未在任何相册目录）的资产 */
+  /** 位于别处（未在目标相册目录）的资产 */
   const atDateRoot = (id: number): AssetDto => ({
     ...makeAsset(id),
     path: "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_" + id + ".JPG",

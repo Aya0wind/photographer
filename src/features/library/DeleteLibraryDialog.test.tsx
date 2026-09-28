@@ -23,7 +23,6 @@ const LIB: Library = {
   name: "测试库",
   dbDir: "I:\\SmartPhoto\\测试库",
   photoRoot: "Y:\\照片",
-  importSubdir: "SmartPhoto",
   streams: 4,
   configured: true,
 };

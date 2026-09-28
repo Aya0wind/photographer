@@ -60,7 +60,6 @@ const CONFIGURED_LIB: Library = {
   name: "主库",
   dbDir: "D:\\db",
   photoRoot: "D:\\照片",
-  importSubdir: "SmartPhoto",
   configured: true,
 streams: 4,
 };
@@ -71,7 +70,6 @@ const FRESH_LIB: Library = {
   name: "新库",
   dbDir: "D:\\db2",
   photoRoot: "D:\\新照片",
-  importSubdir: "SmartPhoto",
   configured: false,
 streams: 4,
 };
@@ -94,7 +92,6 @@ describe("OnboardingPage 向导", () => {
       "I:\\SmartPhoto\\主库",
     );
     expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("Y:\\照片");
-    expect((screen.getByLabelText("导入子目录") as HTMLInputElement).value).toBe("SmartPhoto");
     expect(screen.getByRole("button", { name: "下一步" })).toBeEnabled();
   });
 
@@ -152,9 +149,9 @@ describe("OnboardingPage 向导", () => {
     expect(libraries[0]["name"]).toBe("主库");
     expect(libraries[0]["dbDir"]).toBe("I:\\SmartPhoto\\主库");
     expect(libraries[0]["photoRoot"]).toBe("Y:\\照片");
-    // 库级导入整理规则（新架构：随库走）；dirTemplate 已退役不再落库
+    // 目录布局固定（dirTemplate/importSubdir 均已退役不再落库）
     expect(libraries[0]["dirTemplate"]).toBeUndefined();
-    expect(libraries[0]["importSubdir"]).toBe("SmartPhoto");
+    expect(libraries[0]["importSubdir"]).toBeUndefined();
     expect(libraries[0]["configured"]).toBe(true);
     const ai = settings["ai"] as Record<string, unknown>;
     expect(ai["enableClip"]).toBe(true);
@@ -179,7 +176,6 @@ describe("OnboardingPage 向导", () => {
             name: "旧库",
             dbDir: "I:\\SmartPhoto\\旧库",
             photoRoot: "Z:\\旧照片",
-                      importSubdir: "Import",
             configured: false,
             streams: 3,
           },
@@ -196,7 +192,6 @@ describe("OnboardingPage 向导", () => {
 
     expect((screen.getByLabelText("库名称") as HTMLInputElement).value).toBe("旧库");
     expect((screen.getByLabelText("照片存储目录") as HTMLInputElement).value).toBe("Z:\\旧照片");
-    expect((screen.getByLabelText("导入子目录") as HTMLInputElement).value).toBe("Import");
 
     fireEvent.click(screen.getByRole("button", { name: "下一步" }));
     // 步骤2 只读展示固定目录布局（模板输入已退役）

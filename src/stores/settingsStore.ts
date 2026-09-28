@@ -5,7 +5,7 @@ import { ipc } from "@/ipc";
 import type { AiQualityTier } from "@/ipc/api";
 
 /** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储。
- *  导入整理规则随库走：importSubdir（应用写入区名）；目录布局已固定为时间/相册+平铺
+ *  目录布局已固定为时间/相册+平铺（importSubdir/dirTemplate 退役 2026-09-28）
  *  （dirTemplate 配置退役，2026-09-28 定案——旧 settings.json 里的 dirTemplate 字段
  *  容错保留：后端 serde 有默认值，前端类型已删不再写入）；
  *  并发流数同为库属性（streams，Rust 侧 serde 缺省 4；MTP 源受协议限制恒 1，由向导在组 plan 时钳制）；
@@ -16,8 +16,6 @@ export interface Library {
   name: string;
   dbDir: string;
   photoRoot: string;
-  /** 库级导入子目录（应用写入区名；空串=直接写 photoRoot） */
-  importSubdir: string;
   /** 库级导入并发流数（后端 serde 缺省 4；旧数据无字段时读取方 ?? 4 兜底） */
   streams: number;
   /** 配置链是否已完成（未完成的库打开时引导回向导补完） */
@@ -34,8 +32,6 @@ export interface Settings {
     skipImported: boolean;
     duplicatePolicy: "skip" | "rename" | "ask";
     notifyMilestones: boolean;
-    /** 卡/相机导入专用子目录名（相对 photoRoot 的应用写入区，spec §5.11） */
-    importSubdir: string;
   };
   /** 画廊展示（M3+）：RAW+JPG 同 pairId 合并为一张卡（优先 JPG 缩略图 + RAW+JPG 角标） */
   gallery: {
@@ -93,7 +89,6 @@ export const DEFAULT_SETTINGS: Settings = {
     skipImported: true,
     duplicatePolicy: "skip",
     notifyMilestones: true,
-    importSubdir: "SmartPhoto",
   },
   gallery: {
     mergeRawJpg: true,

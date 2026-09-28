@@ -13,7 +13,6 @@ import DoneStep from "../steps/DoneStep";
 import ImportSchemeStep from "../steps/ImportSchemeStep";
 import LibraryStep from "../steps/LibraryStep";
 import {
-  DEFAULT_IMPORT_SUBDIR,
   SUGGESTED_DB_DIR,
   SUGGESTED_LIBRARY_NAME,
   SUGGESTED_PHOTO_ROOT,
@@ -41,7 +40,6 @@ function newLibraryDraft(): OnboardingDraft {
     libraryName: SUGGESTED_LIBRARY_NAME,
     dbDir: SUGGESTED_DB_DIR,
     photoRoot: SUGGESTED_PHOTO_ROOT,
-    importSubdir: DEFAULT_IMPORT_SUBDIR,
     duplicatePolicy: "skip",
     notifyMilestones: true,
     aiChoice: "all",
@@ -54,7 +52,6 @@ function draftFromLibrary(library: Library): OnboardingDraft {
     libraryName: library.name,
     dbDir: library.dbDir,
     photoRoot: library.photoRoot,
-    importSubdir: library.importSubdir || DEFAULT_IMPORT_SUBDIR,
     duplicatePolicy: "skip",
     notifyMilestones: true,
     aiChoice: "all",
@@ -113,7 +110,6 @@ export default function OnboardingPage() {
       name: draft.libraryName.trim(),
       dbDir: draft.dbDir.trim(),
       photoRoot: draft.photoRoot.trim(),
-      importSubdir: draft.importSubdir.trim(),
       streams: existing?.streams ?? 4,
       configured: true,
     };

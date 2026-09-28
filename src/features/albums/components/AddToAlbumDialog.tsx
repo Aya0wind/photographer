@@ -29,13 +29,14 @@ function normalizePath(p: string): string {
   return p.replace(/\//g, "\\").toLowerCase();
 }
 
-/** 资产是否位于 `importRoot/albumDir/` 之下（即主相册 = 该相册） */
-function isUnderAlbumDir(path: string, importRoot: string, albumDir: string): boolean {
-  if (importRoot === "" || albumDir === "") return false;
+/** 资产是否位于相册主目录 `photoRoot/{相册创建YYYY}/{MM}/{相册目录}/` 之下
+ * （即主相册 = 该相册；固定布局公式，与后端 album_home_rel 同口径） */
+function isUnderAlbumDir(path: string, importRoot: string, albumHome: string): boolean {
+  if (importRoot === "" || albumHome === "") return false;
   const p = normalizePath(path);
   const root = normalizePath(importRoot);
   if (!p.startsWith(`${root}\\`)) return false;
-  return p.slice(root.length + 1).startsWith(`${normalizePath(albumDir)}\\`);
+  return p.slice(root.length + 1).startsWith(`${normalizePath(albumHome)}\\`);
 }
 
 /** 操作结果（toast 文案区分归入/引用；显示后自动关闭弹窗） */
@@ -66,7 +67,7 @@ export default function AddToAlbumDialog({
   // 活动库导入收纳区（claim 启发式基准：日期根 = importRoot/日期模板）
   const importRoot = useSettingsStore((s) => {
     const lib = s.settings.libraries.find((l) => l.id === s.settings.activeLibraryId);
-    return lib ? importRootOf(lib.photoRoot, lib.importSubdir) : "";
+    return lib ? importRootOf(lib.photoRoot) : "";
   });
 
   // 挂载拉相册清单（后端不可用 → 空列表 + 只能新建）
@@ -81,15 +82,19 @@ export default function AddToAlbumDialog({
   }, []);
 
   // 归入语义（规格修订）：以选中目标相册为基准——
-  // 「已在该相册」= 路径位于 `收纳区/目标相册目录/` 之下（dir_name 缺省回退显示名）。
+  // 「已在该相册」= 路径位于 `photoRoot/{创建YYYY}/{创建MM}/{相册目录}/` 之下
+  // （固定布局公式；dir_name 缺省回退显示名）。
   const targetAlbum = albums.find((a) => a.id === selectedId) ?? null;
-  const targetDir = targetAlbum !== null ? (targetAlbum.dirName ?? targetAlbum.name).trim() : "";
+  const targetHome =
+    targetAlbum !== null
+      ? `${targetAlbum.createdAt.slice(0, 4)}\\${targetAlbum.createdAt.slice(5, 7)}\\${(targetAlbum.dirName ?? targetAlbum.name).trim()}`
+      : "";
   const inTargetIds = useMemo(() => {
-    if (targetDir === "") return [];
+    if (targetHome === "") return [];
     return assets
-      .filter((a) => isUnderAlbumDir(a.path, importRoot, targetDir))
+      .filter((a) => isUnderAlbumDir(a.path, importRoot, targetHome))
       .map((a) => a.id);
-  }, [assets, importRoot, targetDir]);
+  }, [assets, importRoot, targetHome]);
   const inTargetCount = inTargetIds.length;
   const claimableIds = useMemo(
     () => assets.map((a) => a.id).filter((id) => !inTargetIds.includes(id)),

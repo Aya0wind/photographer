@@ -3,17 +3,10 @@ import { describe, expect, it } from "vitest";
 import { FIXED_ALBUM_LAYOUT, importRootOf } from "./onboardingConfig";
 
 describe("importRootOf", () => {
-  it("joins photoRoot with default import subdir", () => {
-    expect(importRootOf("Y:\\照片")).toBe("Y:\\照片\\SmartPhoto");
-  });
-
-  it("accepts custom subdir and trims separators on both sides", () => {
-    expect(importRootOf("Y:\\照片\\", "/从卡导入/")).toBe("Y:\\照片\\从卡导入");
-  });
-
-  it("falls back to photoRoot when subdir is empty or separator-only", () => {
-    expect(importRootOf("Y:\\照片", "")).toBe("Y:\\照片");
-    expect(importRootOf("Y:\\照片", "\\")).toBe("Y:\\照片");
+  it("导入目标根 = photoRoot 本身（importSubdir 退役后无子目录前缀）", () => {
+    expect(importRootOf("Y:\\照片")).toBe("Y:\\照片");
+    expect(importRootOf("Y:\\照片\\")).toBe("Y:\\照片");
+    expect(importRootOf("Y:\\照片/")).toBe("Y:\\照片");
   });
 });
 

@@ -94,18 +94,6 @@ export default function LibraryStep({ draft, onChange }: Props) {
         <Desc descKey="onboarding.library.photoRootDesc" />
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="onboarding.library.importSubdir" labelKey="onboarding.library.importSubdir" />
-        <input
-          id="onboarding.library.importSubdir"
-          type="text"
-          value={draft.importSubdir}
-          onChange={(e) => onChange({ importSubdir: e.target.value })}
-          placeholder="SmartPhoto"
-          className={inputClass}
-        />
-        <Desc descKey="onboarding.library.importSubdirDesc" />
-      </div>
     </div>
   );
 }

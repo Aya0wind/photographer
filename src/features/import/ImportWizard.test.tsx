@@ -130,7 +130,6 @@ function seedSession(): void {
           name: "主库",
           dbDir: "I:\\SmartPhoto\\主库",
           photoRoot: "Y:\\照片",
-                  importSubdir: "SmartPhoto",
           configured: true,
         streams: 4,
         },
@@ -370,7 +369,7 @@ describe("方案面板", () => {
     renderWizard("?device=E:");
 
     const card = await screen.findByTestId("wizard-location-card");
-    expect(card).toHaveTextContent("Y:\\照片\\SmartPhoto");
+    expect(card).toHaveTextContent("Y:\\照片");
     // 目录布局固定（dirTemplate 配置退役）：展示时间/相册公式，非库模板
     expect(screen.getByTestId("wizard-preview")).toHaveTextContent(
       "{相册创建年}\\{相册创建月}\\{相册目录}",
@@ -438,7 +437,6 @@ describe("方案面板", () => {
             name: "主库",
             dbDir: "I:\\SmartPhoto\\主库",
             photoRoot: "Y:\\照片",
-                      importSubdir: "SmartPhoto",
             streams: 3,
             configured: true,
           },
@@ -475,7 +473,7 @@ describe("方案面板", () => {
     const plan: ImportPlan = startMock.mock.calls[0][0];
     expect(plan).toEqual({
       sourceId: "E:",
-      targetRoot: "Y:\\照片\\SmartPhoto",
+      targetRoot: "Y:\\照片",
       // dirTemplate 配置退役：固定占位（后端相册导入整体覆写，值不影响落位）
       dirTemplate: FIXED_PLAN_DIR_TEMPLATE,
       // 相册必选（规格修订）：默认预选系统保底相册「未分组」
@@ -492,9 +490,9 @@ describe("方案面板", () => {
         "E:/DCIM/101CANON/IMG_0004.JPG",
       ],
     });
-    // 库属性不回写全局设置（dirTemplate 已退役，import 配置保持默认）
-    expect(useSettingsStore.getState().settings.import.importSubdir).toBe("SmartPhoto");
+    // 库属性不回写全局设置（dirTemplate/importSubdir 均已退役，import 配置保持默认）
     expect("dirTemplate" in useSettingsStore.getState().settings.import).toBe(false);
+    expect("importSubdir" in useSettingsStore.getState().settings.import).toBe(false);
   });
 
   it("启动失败：透出后端 Err 原文；invoke 不可用时用通用文案", async () => {
@@ -1228,7 +1226,7 @@ it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾�
 // 目标 = 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/，相册内平铺不按日期分层。
 
 describe("ImportWizard：导入位置实时预览（时间/相册布局）", () => {
-  it("默认预选「未分组」：预览 = 照片根/相册创建年月/未分组（Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\）", async () => {
+  it("默认预选「未分组」：预览 = 照片根/相册创建年月/未分组（Y:\\照片\\2026\\09\\未分组\\）", async () => {
     seedSession();
     renderWizard("?device=E:");
     await screen.findByTestId("wizard-table-stats");
@@ -1236,7 +1234,7 @@ describe("ImportWizard：导入位置实时预览（时间/相册布局）", () 
 
     const preview = screen.getByTestId("wizard-album-path-preview");
     expect(preview).toHaveTextContent("导入位置预览");
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\");
+    expect(preview).toHaveTextContent("Y:\\照片\\2026\\09\\未分组\\");
     // 平铺说明：相册内不按日期分层，应用内按拍摄日分组
     expect(screen.getByTestId("wizard-album-flat-note")).toHaveTextContent(
       "相册内不按日期分层，应用内按拍摄日分组。",
@@ -1253,7 +1251,7 @@ describe("ImportWizard：导入位置实时预览（时间/相册布局）", () 
     // 默认已选未分组；改选青海湖 2026（createdAt 2025-12-15）→ 外层年月随相册创建时间切换
     await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
     const preview = screen.getByTestId("wizard-album-path-preview");
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2025\\12\\青海湖 2026\\");
+    expect(preview).toHaveTextContent("Y:\\照片\\2025\\12\\青海湖 2026\\");
     expect(preview).not.toHaveTextContent("09-18");
   });
 
@@ -1270,13 +1268,13 @@ describe("ImportWizard：导入位置实时预览（时间/相册布局）", () 
     const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
     await user.type(input, "婚礼0927");
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      `Y:\\照片\\SmartPhoto\\${currentYm}\\婚礼0927\\`,
+      `Y:\\照片\\${currentYm}\\婚礼0927\\`,
     );
 
     // 空名兜底「未分组」：列表已有同名保底相册 → 用其真实 createdAt（2026-09-01 → 2026\09）
     await user.clear(input);
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\",
+      "Y:\\照片\\2026\\09\\未分组\\",
     );
   });
 
@@ -1293,7 +1291,7 @@ describe("ImportWizard：导入位置实时预览（时间/相册布局）", () 
     const now = new Date();
     const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      `Y:\\照片\\SmartPhoto\\${currentYm}\\未分组\\`,
+      `Y:\\照片\\${currentYm}\\未分组\\`,
     );
   });
 });

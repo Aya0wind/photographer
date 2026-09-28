@@ -1346,11 +1346,8 @@ export default function ImportWizard() {
   // 方案状态：目标根从激活库合成（只读；旧库缺字段时以全局设置兜底）。
   // 目录布局已固定（时间/相册+平铺，dirTemplate 配置退役 2026-09-28）：
   // 具体落位见相册区实时预览，此处不再展示库级模板。
-  const libraryImportSubdir = activeLibrary?.importSubdir ?? importSettings.importSubdir;
   const libraryPhotoRoot = activeLibrary?.photoRoot ?? "";
-  const targetRoot = libraryPhotoRoot
-    ? importRootOf(libraryPhotoRoot, libraryImportSubdir)
-    : "";
+  const targetRoot = libraryPhotoRoot ? importRootOf(libraryPhotoRoot) : "";
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
   // 存入相册（规格修订后必选）：无「不添加」分支；默认预选系统保底相册「未分组」，

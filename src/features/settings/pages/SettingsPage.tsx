@@ -2,7 +2,6 @@ import { useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
-import { importRootOf } from "@/features/onboarding/onboardingConfig";
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags } from "@/features/albums/lib/smartTags";
@@ -434,15 +433,6 @@ export default function SettingsPage() {
                 />
                 <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
                 <InfoRow label={t("pages.settings.dbDir")} value={library?.dbDir ?? null} />
-                <InfoRow
-                  label={t("settings.libraries.importRoot")}
-                  value={
-                    library
-                      ? importRootOf(library.photoRoot, library.importSubdir || "") ||
-                        library.photoRoot
-                      : null
-                  }
-                />
               </div>
 
               {/* 并发流数（库属性）：1-4 分段，改即存；无激活库时占位 */}

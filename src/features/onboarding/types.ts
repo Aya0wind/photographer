@@ -6,8 +6,6 @@ export interface OnboardingDraft {
   libraryName: string;
   dbDir: string;
   photoRoot: string;
-  /** 库级导入子目录（应用写入区名，默认 SmartPhoto；空=直接写 photoRoot） */
-  importSubdir: string;
   // 步骤 2：库的整理规则（查重策略/通知；目录布局已固定，不再可配置）
   duplicatePolicy: Settings["import"]["duplicatePolicy"];
   notifyMilestones: boolean;
