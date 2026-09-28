@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  cullAiPrescan,
   cullDecisionApply,
   cullSessionCreate,
   cullSessionDiscard,
@@ -12,6 +13,7 @@ import {
   cullSessionRename,
   isIpcAvailable,
   resetIpcAvailable,
+  type CullAiRules,
   type CullSessionDto,
 } from "./api";
 
@@ -81,13 +83,13 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     expect(isIpcAvailable()).toBe(false);
   });
 
-  it("cullSessionOpen 归一 items（decision 脏值回 null，origin 只认 ai）", async () => {
+  it("cullSessionOpen 归一 items（decision 脏值回 null，origin 只认 ai，burst 脏值回 null/1）", async () => {
     invokeMock.mockResolvedValue({
       session: sessionDto(),
       items: [
-        { assetId: 1, decision: "accepted", origin: "manual" },
-        { assetId: 2, decision: null, origin: "ai" },
-        { assetId: 3, decision: "maybe", origin: "weird" },
+        { assetId: 1, decision: "accepted", origin: "manual", burstId: 11, burstSize: 3 },
+        { assetId: 2, decision: null, origin: "ai", burstId: null, burstSize: 1 },
+        { assetId: 3, decision: "maybe", origin: "weird", burstId: "bad", burstSize: 0 },
         { assetId: "bad" },
         "junk",
       ],
@@ -97,9 +99,9 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     expect(invokeMock).toHaveBeenCalledWith("cull_session_open", { sessionId: 7 });
     expect(opened).not.toBeNull();
     expect(opened?.items).toEqual([
-      { assetId: 1, decision: "accepted", origin: "manual" },
-      { assetId: 2, decision: null, origin: "ai" },
-      { assetId: 3, decision: null, origin: "manual" },
+      { assetId: 1, decision: "accepted", origin: "manual", burstId: 11, burstSize: 3 },
+      { assetId: 2, decision: null, origin: "ai", burstId: null, burstSize: 1 },
+      { assetId: 3, decision: null, origin: "manual", burstId: null, burstSize: 1 },
     ]);
   });
 
@@ -159,5 +161,63 @@ describe("选片 IPC 契约封装（Culling V1）", () => {
     await expect(
       cullSessionFinish(7, { acceptedFlag: false, acceptedRating: null, rejectRejected: false }),
     ).resolves.toBeNull();
+  });
+
+  it("cullAiPrescan 预览/应用同载荷形状（apply 位区分）；assetIds 可选归一", async () => {
+    invokeMock.mockResolvedValue({
+      suggestedAccepted: 30,
+      suggestedRejected: 120,
+      skippedManual: 12,
+      exemptedGroup: 8,
+      assetIds: [5, 6, "x", null],
+    });
+    const rules: CullAiRules = {
+      eyes: { enabled: true, sensitivity: "strong" },
+      blur: { enabled: false, sensitivity: "normal" },
+      burstKeepSharpest: true,
+      groupExemptFaces: 5,
+      maxAccepted: 30,
+    };
+    const preview = await cullAiPrescan(7, rules, false);
+
+    expect(invokeMock).toHaveBeenCalledWith("cull_ai_prescan", { sessionId: 7, rules, apply: false });
+    expect(preview).toEqual({
+      suggestedAccepted: 30,
+      suggestedRejected: 120,
+      skippedManual: 12,
+      exemptedGroup: 8,
+      assetIds: [5, 6],
+    });
+
+    invokeMock.mockResolvedValue({
+      suggestedAccepted: 30,
+      suggestedRejected: 120,
+      skippedManual: 12,
+      exemptedGroup: 8,
+    });
+    const applied = await cullAiPrescan(7, rules, true);
+    expect(invokeMock).toHaveBeenCalledWith("cull_ai_prescan", { sessionId: 7, rules, apply: true });
+    expect(applied).toEqual({
+      suggestedAccepted: 30,
+      suggestedRejected: 120,
+      skippedManual: 12,
+      exemptedGroup: 8,
+    });
+    expect(applied?.assetIds).toBeUndefined();
+  });
+
+  it("cullAiPrescan 失败/形状异常返回 null（后端未就绪不改会话状态）", async () => {
+    invokeMock.mockRejectedValue(new Error("command cull_ai_prescan not found"));
+    const rules: CullAiRules = {
+      eyes: { enabled: false, sensitivity: "normal" },
+      blur: { enabled: false, sensitivity: "normal" },
+      burstKeepSharpest: false,
+      groupExemptFaces: 0,
+      maxAccepted: null,
+    };
+    await expect(cullAiPrescan(7, rules, false)).resolves.toBeNull();
+
+    invokeMock.mockResolvedValue("junk");
+    await expect(cullAiPrescan(7, rules, true)).resolves.toBeNull();
   });
 });

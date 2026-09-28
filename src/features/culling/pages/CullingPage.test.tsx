@@ -129,7 +129,7 @@ describe("选片会话页（CullingPage /culling）", () => {
     listMock.mockResolvedValue([session(1)]);
     openMock.mockResolvedValue({
       session: session(1),
-      items: [{ assetId: 11, decision: null, origin: "manual" }],
+      items: [{ assetId: 11, decision: null, origin: "manual", burstId: null, burstSize: 1 }],
     });
     renderPage();
 
@@ -208,7 +208,7 @@ describe("选片会话页（CullingPage /culling）", () => {
     listMock.mockResolvedValue([session(1)]);
     openMock.mockResolvedValue({
       session: session(1),
-      items: [{ assetId: 11, decision: null, origin: "manual" }],
+      items: [{ assetId: 11, decision: null, origin: "manual", burstId: null, burstSize: 1 }],
     });
     renderPage([{ pathname: "/culling", state: { open: 1 } }]);
 
@@ -220,7 +220,7 @@ describe("选片会话页（CullingPage /culling）", () => {
     listMock.mockResolvedValue([session(1)]);
     openMock.mockResolvedValue({
       session: session(1),
-      items: [{ assetId: 11, decision: null, origin: "manual" }],
+      items: [{ assetId: 11, decision: null, origin: "manual", burstId: null, burstSize: 1 }],
     });
     renderPage();
 

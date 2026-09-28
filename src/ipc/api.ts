@@ -2020,6 +2020,10 @@ export interface CullItemState {
   decision: CullDecisionValue | null;
   /** manual=用户手标 / ai=AI 预标记（V3；用户可翻转） */
   origin: "manual" | "ai";
+  /** 连拍组 id（null=无组；V2 对比视图组员选取/一键留张用） */
+  burstId: number | null;
+  /** 连拍组大小（快照内同组张数；>=2 即组徽标/对比可用；缺省 1） */
+  burstSize: number;
 }
 
 /** cullSessionOpen 结果：会话 + 决定表（按会话快照序） */
@@ -2140,6 +2144,13 @@ export async function cullSessionOpen(id: number): Promise<CullSessionOpenResult
             decision:
               i.decision === "accepted" || i.decision === "rejected" ? (i.decision as CullDecisionValue) : null,
             origin: i.origin === "ai" ? "ai" : "manual",
+            // burst 脏值容错：burstId 非有限数回 null；burstSize 回退 1（无组）
+            burstId:
+              typeof i.burstId === "number" && Number.isFinite(i.burstId) ? i.burstId : null,
+            burstSize:
+              typeof i.burstSize === "number" && Number.isFinite(i.burstSize) && i.burstSize >= 1
+                ? Math.floor(i.burstSize)
+                : 1,
           }))
       : [];
     return { session, items };
@@ -2196,6 +2207,67 @@ export async function cullSessionFinish(
       appliedFlag: numOf(r.appliedFlag),
       appliedRating: numOf(r.appliedRating),
       rejected: numOf(r.rejected),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// --- AI 挑图（Culling V3，方案 §3.3）契约 --------------------------------------------
+// AI 只建议不自动决定：预览（apply=false）出摘要，应用（apply=true）写入会话为
+// origin='ai' 预标记（仅未定项），用户过片随时翻转。规则映射 ai_analysis 阈值。
+
+/** 检测敏感度三档（weak=少报误报 / normal=默认 / strong=宁可错杀） */
+export type CullAiSensitivity = "weak" | "normal" | "strong";
+
+/** AI 挑图规则（cull_ai_prescan 载荷；表单态 → 规整由 cullingCore.buildAiRules） */
+export interface CullAiRules {
+  eyes: { enabled: boolean; sensitivity: CullAiSensitivity };
+  blur: { enabled: boolean; sensitivity: CullAiSensitivity };
+  /** 连拍组自动留最锐（组内其余标剔除建议；AfterShoot 式） */
+  burstKeepSharpest: boolean;
+  /** 豁免：合影人数 > N 不判闭眼等（0=关） */
+  groupExemptFaces: number;
+  /** 精选张数上限（null=不限；「帮我精选 30 张」） */
+  maxAccepted: number | null;
+}
+
+/** cull_ai_prescan 结果（预览/应用同形；明细 assetIds 后端可能仅预览返回——可选） */
+export interface CullPrescanDto {
+  /** 建议保留张数 */
+  suggestedAccepted: number;
+  /** 建议剔除张数 */
+  suggestedRejected: number;
+  /** 已手动决定跳过张数 */
+  skippedManual: number;
+  /** 命中豁免（合影> N 人）张数 */
+  exemptedGroup: number;
+  /** 建议（剔除）明细资产 id（可选；仅预览可能返回） */
+  assetIds?: number[];
+}
+
+/** AI 挑图规则跑批（cull_ai_prescan）。apply=false 预览摘要 / true 写入预标记；
+ *  失败/形状异常返回 null（调用方提示后端未连接，不改会话状态） */
+export async function cullAiPrescan(
+  sessionId: number,
+  rules: CullAiRules,
+  apply: boolean,
+): Promise<CullPrescanDto | null> {
+  try {
+    const raw = await ipc<unknown>("cull_ai_prescan", { sessionId, rules, apply });
+    if (raw === null || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const numOf = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? v : 0;
+    const assetIds = Array.isArray(r.assetIds)
+      ? r.assetIds.filter((v): v is number => typeof v === "number" && Number.isFinite(v))
+      : undefined;
+    return {
+      suggestedAccepted: numOf(r.suggestedAccepted),
+      suggestedRejected: numOf(r.suggestedRejected),
+      skippedManual: numOf(r.skippedManual),
+      exemptedGroup: numOf(r.exemptedGroup),
+      ...(assetIds !== undefined ? { assetIds } : {}),
     };
   } catch {
     return null;

@@ -10,6 +10,7 @@ import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline
 import {
   assetDetail,
   assetsByIds,
+  cullAiPrescan,
   cullDecisionApply,
   cullSessionFinish,
   cullSessionOpen,
@@ -24,6 +25,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     assetDetail: vi.fn(),
     assetsByIds: vi.fn(),
+    cullAiPrescan: vi.fn(),
     cullDecisionApply: vi.fn(),
     cullSessionFinish: vi.fn(),
     cullSessionOpen: vi.fn(),
@@ -39,6 +41,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const openMock = vi.mocked(cullSessionOpen);
 const applyMock = vi.mocked(cullDecisionApply);
 const finishMock = vi.mocked(cullSessionFinish);
+const prescanMock = vi.mocked(cullAiPrescan);
 const assetsByIdsMock = vi.mocked(assetsByIds);
 const detailMock = vi.mocked(assetDetail);
 
@@ -72,15 +75,16 @@ function makeSession(overrides: Partial<CullSessionDto> = {}): CullSessionDto {
   };
 }
 
-/** 会话打开载荷：4 张，1 已选（id=1）、1 已剔除（id=2）、2 未定（id=3/4） */
+/** 会话打开载荷：4 张，1 已选（id=1，手动）、1 已剔除（id=2，AI 预标记）、
+ *  2 未定（id=3/4 为同连拍组 burst=11） */
 function openPayload() {
   return {
     session: makeSession(),
     items: [
-      { assetId: 1, decision: "accepted" as const, origin: "manual" as const },
-      { assetId: 2, decision: "rejected" as const, origin: "manual" as const },
-      { assetId: 3, decision: null, origin: "manual" as const },
-      { assetId: 4, decision: null, origin: "ai" as const },
+      { assetId: 1, decision: "accepted" as const, origin: "manual" as const, burstId: null, burstSize: 1 },
+      { assetId: 2, decision: "rejected" as const, origin: "ai" as const, burstId: null, burstSize: 1 },
+      { assetId: 3, decision: null, origin: "manual" as const, burstId: 11, burstSize: 2 },
+      { assetId: 4, decision: null, origin: "manual" as const, burstId: 11, burstSize: 2 },
     ],
   };
 }
@@ -129,6 +133,7 @@ beforeEach(() => {
     );
   });
   finishMock.mockReset().mockResolvedValue({ appliedFlag: 2, appliedRating: 0, rejected: 2 });
+  prescanMock.mockReset().mockResolvedValue(null);
   assetsByIdsMock.mockReset().mockImplementation(async (ids) => ids.map((id) => makeAsset(id)));
   detailMock.mockReset().mockResolvedValue(null);
 });
@@ -149,10 +154,10 @@ describe("全屏选片层（CullingOverlay V1）", () => {
     expect(progress).toHaveAttribute("data-undecided", "2");
     // 顶栏拖拽层（全屏浮层铁律）
     expect(screen.getByTestId("culling-overlay").querySelector("[data-tauri-drag-region]")).not.toBeNull();
-    // 胶片条角标（AI 小徽仅在「AI 预标记 + 已有决定」时显示——id=4 origin=ai 但未定）
+    // 胶片条角标（AI 小徽仅在「AI 预标记 + 已有决定」时显示——id=2 origin=ai 已剔除）
     expect(screen.getAllByTestId("cull-film-accepted").length).toBe(1);
     expect(screen.getAllByTestId("cull-film-rejected").length).toBe(1);
-    expect(screen.queryAllByTestId("cull-film-ai").length).toBe(0);
+    expect(screen.getAllByTestId("cull-film-ai").length).toBe(1);
   });
 
   it("键盘流：空格选入（乐观+落库+翻页）· X 剔除 · U 回未定（不翻页）", async () => {
@@ -248,6 +253,36 @@ describe("全屏选片层（CullingOverlay V1）", () => {
 
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("V2 放大跨图保持：翻片同位置同倍率；松开恢复常态；再按 Z 回上次位置（会话内记忆）", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    const stage = screen.getByTestId("culling-stage");
+    // 首次按 Z：无记忆 → 居中锚点
+    fireEvent.keyDown(document.body, { key: "z" });
+    expect(stage).toHaveAttribute("data-zoomed", "true");
+    expect(stage).toHaveAttribute("data-zoom-at", "0.500,0.500");
+    // 移动锚点（jsdom rect 全 0 → 收夹到 1,1）
+    fireEvent.mouseMove(stage, { clientX: 100, clientY: 60 });
+    expect(stage).toHaveAttribute("data-zoom-at", "1.000,1.000");
+    // 按住 Z 翻片：放大态与锚点跨图保持（同构图直查谁更锐）
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(screen.getByTestId("culling-index")).toHaveTextContent("4 / 4");
+    expect(stage).toHaveAttribute("data-zoomed", "true");
+    expect(stage).toHaveAttribute("data-zoom-at", "1.000,1.000");
+    // 松开 Z：恢复常态
+    fireEvent.keyUp(document.body, { key: "z" });
+    expect(stage).toHaveAttribute("data-zoomed", "false");
+    expect(screen.getByTestId("culling-index")).toHaveTextContent("4 / 4");
+    // 再按 Z：回到上次锚点（会话内记忆），新图同位复放
+    fireEvent.keyDown(document.body, { key: "z" });
+    expect(stage).toHaveAttribute("data-zoomed", "true");
+    expect(stage).toHaveAttribute("data-zoom-at", "1.000,1.000");
+    fireEvent.keyUp(document.body, { key: "z" });
   });
 
   it("键盘接管：选片键 stopPropagation 压过全局快捷键（Ctrl 组合不接管）", async () => {
@@ -379,6 +414,285 @@ describe("收尾弹窗（CullingOverlay + CullFinishDialog）", () => {
     expect(onClose).not.toHaveBeenCalled();
     await waitFor(() => {
       expect(screen.queryByTestId("cull-finish-dialog")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("culling-overlay")).toBeInTheDocument();
+  });
+});
+
+describe("对比视图（V2）", () => {
+  it("C 进对比：默认同连拍组同屏（当前片+组内兄弟），焦点在当前片", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    fireEvent.keyDown(document.body, { key: "c" });
+    const grid = await screen.findByTestId("culling-compare-grid");
+    expect(grid).toHaveAttribute("data-count", "2");
+    expect(screen.getByTestId("culling-overlay")).toHaveAttribute("data-mode", "compare");
+    const panes = screen.getAllByTestId("culling-compare-pane");
+    // 组员 = 当前片（id=3）+ 同连拍组兄弟（id=4，burst=11）
+    expect(panes.map((p) => p.getAttribute("data-asset-id"))).toEqual(["3", "4"]);
+    expect(panes[0]).toHaveAttribute("data-focused", "true");
+    // 对比模式无单图操作条（决定入口在张上）
+    expect(screen.queryByTestId("culling-actions")).not.toBeInTheDocument();
+  });
+
+  it("键盘流：2 选焦 → 空格选入焦点张（不翻页）；U 回未定", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+    fireEvent.keyDown(document.body, { key: "c" });
+    await screen.findByTestId("culling-compare-grid");
+
+    fireEvent.keyDown(document.body, { key: "2" });
+    const panes = screen.getAllByTestId("culling-compare-pane");
+    expect(panes[1]).toHaveAttribute("data-focused", "true");
+
+    fireEvent.keyDown(document.body, { key: " " });
+    await waitFor(() => {
+      expect(applyMock).toHaveBeenCalledWith(7, [{ assetId: 4, decision: "accepted" }]);
+    });
+    await waitFor(() => {
+      expect(panes[1]).toHaveAttribute("data-decision", "accepted");
+    });
+
+    // U = 焦点张回未定
+    fireEvent.keyDown(document.body, { key: "u" });
+    await waitFor(() => {
+      expect(applyMock).toHaveBeenCalledWith(7, [{ assetId: 4, decision: null }]);
+    });
+
+    // C 回单图：进出对比保持单图位置（仍在第 3 张）
+    fireEvent.keyDown(document.body, { key: "c" });
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+    expect(screen.queryByTestId("culling-compare-grid")).not.toBeInTheDocument();
+  });
+
+  it("张上按钮独立标记（点击 ✓/✗ = 鼠标等价物）；←/→ 切焦", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+    fireEvent.keyDown(document.body, { key: "c" });
+    await screen.findByTestId("culling-compare-grid");
+
+    // ←/→ 切焦
+    fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    expect(screen.getAllByTestId("culling-compare-pane")[1]).toHaveAttribute("data-focused", "true");
+    fireEvent.keyDown(document.body, { key: "ArrowLeft" });
+    expect(screen.getAllByTestId("culling-compare-pane")[0]).toHaveAttribute("data-focused", "true");
+
+    // 点 pane 1 的 ✗ 剔除（独立于焦点张）
+    await userEvent.click(screen.getAllByTestId("culling-compare-reject")[1]);
+    await waitFor(() => {
+      expect(applyMock).toHaveBeenCalledWith(7, [{ assetId: 4, decision: "rejected" }]);
+    });
+    await userEvent.click(screen.getAllByTestId("culling-compare-accept")[0]);
+    await waitFor(() => {
+      expect(applyMock).toHaveBeenCalledWith(7, [{ assetId: 3, decision: "accepted" }]);
+    });
+  });
+
+  it("同屏张数 2/3/4 可切：组员不足补相邻（按距离序）", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+    fireEvent.keyDown(document.body, { key: "c" });
+    await screen.findByTestId("culling-compare-grid");
+
+    // 4 张：当前(idx2) + 同组兄弟(idx3) + 相邻 idx1、idx0
+    const count4 = screen
+      .getAllByTestId("culling-compare-count")
+      .find((b) => b.getAttribute("data-count") === "4")!;
+    await userEvent.click(count4);
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-compare-grid")).toHaveAttribute("data-count", "4");
+    });
+    expect(
+      screen.getAllByTestId("culling-compare-pane").map((p) => p.getAttribute("data-asset-id")),
+    ).toEqual(["3", "4", "2", "1"]);
+
+    // 3 张：截前三个
+    const count3 = screen
+      .getAllByTestId("culling-compare-count")
+      .find((b) => b.getAttribute("data-count") === "3")!;
+    await userEvent.click(count3);
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-compare-grid")).toHaveAttribute("data-count", "3");
+    });
+    expect(
+      screen.getAllByTestId("culling-compare-pane").map((p) => p.getAttribute("data-asset-id")),
+    ).toEqual(["3", "4", "2"]);
+  });
+});
+
+describe("连拍组集成（V2）", () => {
+  it("组徽标 + 本组只留这张：当前 accepted + 组内未定 rejected（一次批量 decision_apply）", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    // 当前片 id=3（burst=11，组 2 张）
+    const burst = screen.getByTestId("culling-burst");
+    expect(burst).toHaveAttribute("data-size", "2");
+    expect(screen.getByTestId("culling-burst-badge")).toHaveTextContent("组 2 张");
+
+    await userEvent.click(screen.getByTestId("culling-burst-keep"));
+    await waitFor(() => {
+      expect(applyMock).toHaveBeenCalledWith(7, [
+        { assetId: 3, decision: "accepted" },
+        { assetId: 4, decision: "rejected" },
+      ]);
+    });
+    // 不翻页（留在保留张上复查）
+    expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    // 当前决定角标转已选
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-decision-badge")).toHaveAttribute("data-decision", "accepted");
+    });
+  });
+
+  it("非连拍组片不显示组徽标", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+    fireEvent.keyDown(document.body, { key: "ArrowLeft" });
+    fireEvent.keyDown(document.body, { key: "ArrowLeft" });
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("1 / 4");
+    });
+    expect(screen.queryByTestId("culling-burst")).not.toBeInTheDocument();
+  });
+});
+
+describe("AI 预标记区分 + AI 挑图（V3）", () => {
+  it("origin=ai 决定角标带 AI 小标；手动翻转后转 manual 样式", async () => {
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    // 上一张 = id=2（AI 预标记剔除）
+    fireEvent.keyDown(document.body, { key: "ArrowLeft" });
+    await waitFor(() => {
+      const badge = screen.getByTestId("culling-decision-badge");
+      expect(badge).toHaveAttribute("data-decision", "rejected");
+      expect(badge).toHaveAttribute("data-origin", "ai");
+    });
+    expect(screen.getByTestId("culling-decision-ai")).toBeInTheDocument();
+    expect(screen.getAllByTestId("cull-film-ai").length).toBe(1);
+
+    // 空格手动翻转（选入）→ origin 转 manual（胶片条 AI 小徽随之消失）
+    fireEvent.keyDown(document.body, { key: " " });
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("cull-film-ai").length).toBe(0);
+    });
+  });
+
+  it("AI 挑图：规则默认 → 预览摘要 → 调规则重预览 → 应用（apply=true 同规则）→ toast + 决定表刷新", async () => {
+    prescanMock.mockResolvedValue({
+      suggestedAccepted: 2,
+      suggestedRejected: 3,
+      skippedManual: 2,
+      exemptedGroup: 1,
+    });
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    await userEvent.click(screen.getByTestId("culling-ai-open"));
+    const dialog = await screen.findByTestId("cull-ai-dialog");
+
+    // 默认规则：闭眼/失焦开（标准档）、留最锐关、豁免 0、上限不限
+    await userEvent.click(within(dialog).getByTestId("cull-ai-preview"));
+    const defaultRules = {
+      eyes: { enabled: true, sensitivity: "normal" },
+      blur: { enabled: true, sensitivity: "normal" },
+      burstKeepSharpest: false,
+      groupExemptFaces: 0,
+      maxAccepted: null,
+    };
+    await waitFor(() => {
+      expect(prescanMock).toHaveBeenCalledWith(7, defaultRules, false);
+    });
+    const summary = await within(dialog).findByTestId("cull-ai-summary");
+    expect(summary).toHaveAttribute("data-accepted", "2");
+    expect(summary).toHaveAttribute("data-rejected", "3");
+    expect(summary).toHaveAttribute("data-skipped", "2");
+    expect(summary).toHaveAttribute("data-exempted", "1");
+
+    // 调整规则：闭眼强档 + 精选上限 30 → 旧摘要作废，重新预览
+    await userEvent.click(
+      within(dialog)
+        .getAllByTestId("cull-ai-eyes-sens-opt")
+        .find((b) => b.getAttribute("data-value") === "strong")!,
+    );
+    await userEvent.type(within(dialog).getByTestId("cull-ai-max-input"), "30");
+    expect(within(dialog).queryByTestId("cull-ai-summary")).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByTestId("cull-ai-preview"));
+    const tunedRules = {
+      eyes: { enabled: true, sensitivity: "strong" },
+      blur: { enabled: true, sensitivity: "normal" },
+      burstKeepSharpest: false,
+      groupExemptFaces: 0,
+      maxAccepted: 30,
+    };
+    await waitFor(() => {
+      expect(prescanMock).toHaveBeenCalledWith(7, tunedRules, false);
+    });
+
+    // 应用建议（apply=true，同规则）
+    await userEvent.click(within(dialog).getByTestId("cull-ai-apply"));
+    await waitFor(() => {
+      expect(prescanMock).toHaveBeenCalledWith(7, tunedRules, true);
+    });
+    // 应用后：弹窗关 + toast + 重开决定表刷新（保持当前位）
+    await waitFor(() => {
+      expect(screen.queryByTestId("cull-ai-dialog")).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId("culling-ai-toast")).toHaveAttribute("data-rejected", "3");
+    await waitFor(() => {
+      expect(openMock).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+  });
+
+  it("预览失败提示后端未连接；无摘要时应用禁用", async () => {
+    prescanMock.mockResolvedValue(null);
+    renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    await userEvent.click(screen.getByTestId("culling-ai-open"));
+    const dialog = await screen.findByTestId("cull-ai-dialog");
+    await userEvent.click(within(dialog).getByTestId("cull-ai-preview"));
+
+    expect(await within(dialog).findByTestId("cull-ai-failed")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("cull-ai-apply")).toBeDisabled();
+  });
+
+  it("AI 弹窗打开时浮层键盘让位（Esc 关弹窗不退浮层）", async () => {
+    const { onClose } = renderOverlay();
+    await waitFor(() => {
+      expect(screen.getByTestId("culling-index")).toHaveTextContent("3 / 4");
+    });
+
+    await userEvent.click(screen.getByTestId("culling-ai-open"));
+    await screen.findByTestId("cull-ai-dialog");
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.queryByTestId("cull-ai-dialog")).not.toBeInTheDocument();
     });
     expect(screen.getByTestId("culling-overlay")).toBeInTheDocument();
   });

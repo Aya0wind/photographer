@@ -1,15 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { assetsPage, type AssetDto, type AssetFilters, type CullDecisionValue } from "@/ipc/api";
+import {
+  assetsPage,
+  type AssetDto,
+  type AssetFilters,
+  type CullDecisionValue,
+} from "@/ipc/api";
 
 import {
+  buildAiRules,
   buildFinishApply,
-  cullKeyAction,
+  buildKeepOnlyDecisions,
+  clampZoomPoint,
   collectAssetIdsByFilters,
+  comparisonMembers,
+  cullKeyAction,
   deriveProgress,
   indexAfterDecision,
   scopeDescKey,
   withDecision,
+  zoomEnterPoint,
 } from "./cullingCore";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -92,7 +102,7 @@ describe("进度计数派生（deriveProgress）", () => {
 });
 
 describe("键盘映射（cullKeyAction）", () => {
-  it("←/→ 翻片 · 空格/↑ 选入 · X/↓ 剔除 · U 回未定", () => {
+  it("←/→ 翻片 · 空格/↑ 选入 · X/↓ 剔除 · U 回未定 · C 对比切换（V2）", () => {
     expect(cullKeyAction({ key: "ArrowLeft" })).toBe("prev");
     expect(cullKeyAction({ key: "ArrowRight" })).toBe("next");
     expect(cullKeyAction({ key: " " })).toBe("accept");
@@ -103,6 +113,8 @@ describe("键盘映射（cullKeyAction）", () => {
     expect(cullKeyAction({ key: "ArrowDown" })).toBe("reject");
     expect(cullKeyAction({ key: "u" })).toBe("undecided");
     expect(cullKeyAction({ key: "U" })).toBe("undecided");
+    expect(cullKeyAction({ key: "c" })).toBe("compare");
+    expect(cullKeyAction({ key: "C" })).toBe("compare");
   });
 
   it("其余键与修饰键组合不接管（让位应用快捷键）", () => {
@@ -171,5 +183,150 @@ describe("来源描述键（scopeDescKey）", () => {
     expect(scopeDescKey({ kind: "album", albumId: 1, subgroup: null })).toBe("album");
     expect(scopeDescKey({ kind: "album", albumId: 1, subgroup: "成片" })).toBe("albumSubgroup");
     expect(scopeDescKey({ kind: "query", assetIds: [1] })).toBe("query");
+  });
+});
+
+// --- V2：放大跨图保持 ---------------------------------------------------------------
+
+describe("放大锚点（clampZoomPoint / zoomEnterPoint）", () => {
+  it("越界收夹到 0-1；NaN 回中心分量", () => {
+    expect(clampZoomPoint(0.3, 0.7)).toEqual({ x: 0.3, y: 0.7 });
+    expect(clampZoomPoint(-1, 2)).toEqual({ x: 0, y: 1 });
+    expect(clampZoomPoint(NaN, Number.POSITIVE_INFINITY)).toEqual({ x: 0.5, y: 0.5 });
+  });
+
+  it("按下 Z 起始锚点：无记忆居中，有记忆回上次位置（会话内记忆）", () => {
+    expect(zoomEnterPoint(null)).toEqual({ x: 0.5, y: 0.5 });
+    expect(zoomEnterPoint({ x: 0.25, y: 0.8 })).toEqual({ x: 0.25, y: 0.8 });
+  });
+});
+
+// --- V2：对比视图组员选取 -----------------------------------------------------------
+
+describe("comparisonMembers（同连拍组优先，不足补相邻）", () => {
+  const items = [
+    { assetId: 1, burstId: null }, // 0
+    { assetId: 2, burstId: 11 }, // 1
+    { assetId: 3, burstId: 11 }, // 2 ← 当前（组 11 兄弟：1、4）
+    { assetId: 4, burstId: 11 }, // 3
+    { assetId: 5, burstId: null }, // 4
+  ];
+
+  it("首位恒为当前片；同组兄弟按距离序补位", () => {
+    expect(comparisonMembers(items, 2, 2)).toEqual([2, 1]);
+    expect(comparisonMembers(items, 2, 3)).toEqual([2, 1, 3]);
+    expect(comparisonMembers(items, 3, 2)).toEqual([3, 2]);
+  });
+
+  it("无组：相邻补位（等距左侧优先）；组员不足补相邻", () => {
+    expect(comparisonMembers(items, 0, 3)).toEqual([0, 1, 2]);
+    expect(comparisonMembers(items, 4, 2)).toEqual([4, 3]);
+    // 当前在组内但组员只有 3 个，count=4 → 补最近相邻（左侧 0 距离 2，右侧 4 距离 2？等距左侧优先）
+    expect(comparisonMembers(items, 2, 4)).toEqual([2, 1, 3, 0]);
+  });
+
+  it("会话总张数不足 count 全量铺开；边界输入回空", () => {
+    expect(comparisonMembers(items.slice(0, 2), 0, 4)).toEqual([0, 1]);
+    expect(comparisonMembers([], 0, 2)).toEqual([]);
+    expect(comparisonMembers(items, -1, 2)).toEqual([]);
+    expect(comparisonMembers(items, 5, 2)).toEqual([]);
+  });
+});
+
+// --- V2：连拍组一键留张 --------------------------------------------------------------
+
+describe("buildKeepOnlyDecisions（本组只留这张）", () => {
+  const items = [
+    { assetId: 1, burstId: 11 },
+    { assetId: 2, burstId: 11 },
+    { assetId: 3, burstId: 11 },
+    { assetId: 4, burstId: null },
+  ];
+
+  it("当前 accepted + 组内未定项批量 rejected（一次 decision_apply）", () => {
+    const decisions = new Map<number, CullDecisionValue | null>([[1, "accepted"]]);
+    expect(buildKeepOnlyDecisions(items, 2, decisions)).toEqual([
+      { assetId: 2, decision: "accepted" },
+      { assetId: 3, decision: "rejected" },
+    ]);
+  });
+
+  it("已手动决定的兄弟不动（尊重手动）；当前已 accepted 免重写", () => {
+    const decisions = new Map<number, CullDecisionValue | null>([
+      [1, "accepted"],
+      [2, "accepted"],
+      [3, "rejected"],
+    ]);
+    expect(buildKeepOnlyDecisions(items, 2, decisions)).toEqual([]);
+  });
+
+  it("无组 / 当前片不在会话内返回空", () => {
+    expect(buildKeepOnlyDecisions(items, 4, new Map())).toEqual([]);
+    expect(buildKeepOnlyDecisions(items, 99, new Map())).toEqual([]);
+  });
+});
+
+// --- V3：AI 挑图规则组装 -------------------------------------------------------------
+
+describe("buildAiRules（表单态 → cull_ai_prescan 规则）", () => {
+  it("合法表单原样组装（预览/应用共用同形 DTO）", () => {
+    expect(
+      buildAiRules({
+        eyesEnabled: true,
+        eyesSensitivity: "strong",
+        blurEnabled: true,
+        blurSensitivity: "weak",
+        burstKeepSharpest: true,
+        groupExemptFaces: "5",
+        maxAccepted: "30",
+      }),
+    ).toEqual({
+      eyes: { enabled: true, sensitivity: "strong" },
+      blur: { enabled: true, sensitivity: "weak" },
+      burstKeepSharpest: true,
+      groupExemptFaces: 5,
+      maxAccepted: 30,
+    });
+  });
+
+  it("敏感度脏值回 normal；豁免人数非法/负数回 0（=关）", () => {
+    const rules = buildAiRules({
+      eyesEnabled: false,
+      eyesSensitivity: "ultra",
+      blurEnabled: false,
+      blurSensitivity: "",
+      burstKeepSharpest: false,
+      groupExemptFaces: "abc",
+      maxAccepted: "",
+    });
+    expect(rules.eyes.sensitivity).toBe("normal");
+    expect(rules.blur.sensitivity).toBe("normal");
+    expect(rules.groupExemptFaces).toBe(0);
+    expect(rules.maxAccepted).toBeNull();
+    expect(buildAiRules({
+      eyesEnabled: false,
+      eyesSensitivity: "normal",
+      blurEnabled: false,
+      blurSensitivity: "normal",
+      burstKeepSharpest: false,
+      groupExemptFaces: "-3",
+      maxAccepted: "",
+    }).groupExemptFaces).toBe(0);
+  });
+
+  it("精选上限：空/0/非法/负数回 null（=不限）", () => {
+    const base = {
+      eyesEnabled: true,
+      eyesSensitivity: "normal",
+      blurEnabled: true,
+      blurSensitivity: "normal",
+      burstKeepSharpest: false,
+      groupExemptFaces: "0",
+    };
+    expect(buildAiRules({ ...base, maxAccepted: "" }).maxAccepted).toBeNull();
+    expect(buildAiRules({ ...base, maxAccepted: "0" }).maxAccepted).toBeNull();
+    expect(buildAiRules({ ...base, maxAccepted: "-5" }).maxAccepted).toBeNull();
+    expect(buildAiRules({ ...base, maxAccepted: "abc" }).maxAccepted).toBeNull();
+    expect(buildAiRules({ ...base, maxAccepted: "1" }).maxAccepted).toBe(1);
   });
 });

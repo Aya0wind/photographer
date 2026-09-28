@@ -9,9 +9,12 @@ import {
   cullSessionOpen,
   type AssetDetailDto,
   type AssetDto,
+  type CullDecisionPatch,
   type CullFinishResult,
   type CullItemState,
+  type CullPrescanDto,
   type CullSessionDto,
+  type CullSessionOpenResult,
 } from "@/ipc/api";
 import {
   fetchAssetThumb,
@@ -19,34 +22,43 @@ import {
   warmImageDecode,
 } from "@/features/gallery/lib/thumbPipeline";
 import {
+  buildKeepOnlyDecisions,
+  clampZoomPoint,
+  comparisonMembers,
   cullKeyAction,
   deriveProgress,
   indexAfterDecision,
   withDecision,
+  zoomEnterPoint,
   type CullDecision,
   type CullDecisionMap,
+  type CullZoomPoint,
 } from "../lib/cullingCore";
+import CullAiDialog from "./CullAiDialog";
+import CullCompareGrid from "./CullCompareGrid";
 import CullFilmstrip from "./CullFilmstrip";
 import CullFinishDialog from "./CullFinishDialog";
 
 /**
- * 全屏选片层（V1 单图过片，方案 §3.1）：
- * - 键盘流：←/→ 翻片 · 空格/↑ 选入 · X/↓ 剔除 · U 回未定 · Z 按住放大（位置跟随
- *   鼠标）· Esc 退出回列表。决定即落库（乐观更新+失败回滚）——退出=保存，
- *   无确认弹窗（进度天然持久，方案定案）。
- * - 接管键盘：window 捕获阶段监听 + stopPropagation，压过全局快捷键/
- *   查看器键位（编辑器浮层同款让位思想；收尾弹窗打开时本层让位）。
- * - 大图走既有预览分级管线（photo：原图→2048→512；RAW：内嵌全幅→2048 显影
- *   →512），相邻预取；底部胶片条虚拟滚动（点击跳转，绿✓/红✗ 角标）。
- * - AI 行内提示 chips：闭眼/失焦（asset_detail.aiAnalysis；AI 只建议）。
- * - 顶栏带 data-tauri-drag-region 拖拽层（全屏浮层铁律——按钮区域
- *   pointer-events 正常，空白处落到拖拽层）。
+ * 全屏选片层（V1 单图过片 §3.1 + V2 对比视图 §3.2 + V3 AI 挑图 §3.3）：
+ * - 键盘流：←/→ 翻片 · 空格/↑ 选入 · X/↓ 剔除 · U 回未定 · Z 按住放大 ·
+ *   C 单图/对比切换（V2）· Esc 退出。决定即落库（乐观更新+失败回滚）。
+ * - V2 放大跨图保持：放大位置+倍率翻片不变（同构图直查谁更锐）；松开 Z
+ *   恢复常态，会话内记忆上次锚点——再按 Z 原位复放。
+ * - V2 对比视图：同屏 2/3/4 张，组员=同连拍组优先+相邻补位；1-4 选焦后
+ *   空格/X/U 作用于焦点张（张上按钮为鼠标等价物）；进出对比保持单图位置。
+ * - V2 连拍组集成：当前片 burstSize≥2 显示「组 N 张」徽标 +「本组只留这张」
+ *   （当前 accepted + 组内未定项批量 rejected，一次 decision_apply）。
+ * - V3 AI 挑图：顶栏「AI 挑图」弹窗（规则 → 预览摘要 → 应用为 origin='ai'
+ *   预标记）；AI 决定角标蓝描边+AI 小标（单图/对比/胶片条一致），手动改过
+ *   即转 manual 样式。
+ * - 接管键盘：window 捕获阶段监听 + stopPropagation；收尾/AI 弹窗打开时让位。
  */
 
 const VIEWER_MID_SIZE = 2048;
 const VIEWER_RAW_EMBED_SIZE = 6000;
 const VIEWER_THUMB_SIZE = 1280;
-/** Z 按住放大倍率（位置=transform-origin 跟随鼠标；跨图保持为 V2） */
+/** Z 按住放大倍率（位置=transform-origin 跟随鼠标；跨图保持，V2） */
 const ZOOM_SCALE = 2.5;
 
 /** 资产元数据窗口加载（胶片条/主图用；万张会话不整表取回） */
@@ -93,6 +105,31 @@ export default function CullingOverlay({
   const [decisions, setDecisions] = useState<CullDecisionMap>(new Map());
   const [origins, setOrigins] = useState<Map<number, "manual" | "ai">>(new Map());
   const [index, setIndex] = useState(0);
+  // --- V2 对比视图状态（单图/对比模式 + 同屏张数 + 焦点屏位） ---------------------------
+  const [mode, setMode] = useState<"single" | "compare">("single");
+  const [compareCount, setCompareCount] = useState<2 | 3 | 4>(2);
+  const [focusedPane, setFocusedPane] = useState(0);
+
+  /** open 结果落地（resume=true 断点续选位；false 保持当前位——AI 应用后刷新） */
+  const applyOpened = useCallback((opened: CullSessionOpenResult, resume: boolean) => {
+    setSession(opened.session);
+    setItems(opened.items);
+    setDecisions(
+      new Map(
+        opened.items
+          .filter((item) => item.decision !== null)
+          .map((item) => [item.assetId, item.decision] as const),
+      ),
+    );
+    setOrigins(new Map(opened.items.map((item) => [item.assetId, item.origin] as const)));
+    setIndex((cur) =>
+      resume
+        ? resumeIndexOf(opened.items)
+        : opened.items.length === 0
+          ? 0
+          : Math.min(cur, opened.items.length - 1),
+    );
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,25 +139,16 @@ export default function CullingOverlay({
         setOpenFailed(true);
         return;
       }
-      setSession(opened.session);
-      setItems(opened.items);
-      setDecisions(
-        new Map(
-          opened.items
-            .filter((item) => item.decision !== null)
-            .map((item) => [item.assetId, item.decision] as const),
-        ),
-      );
-      setOrigins(new Map(opened.items.map((item) => [item.assetId, item.origin] as const)));
-      setIndex(resumeIndexOf(opened.items));
+      applyOpened(opened, true);
     });
     return () => {
       cancelled = true;
     };
-  }, [sessionProp.id]);
+  }, [sessionProp.id, applyOpened]);
 
   const ids = useMemo(() => items?.map((item) => item.assetId) ?? [], [items]);
   const currentId = items !== null && index < items.length ? items[index].assetId : null;
+  const currentBurst = items !== null && index < items.length ? items[index] : null;
   const progress = useMemo(
     () => deriveProgress(session.total, decisions),
     [session.total, decisions],
@@ -156,7 +184,7 @@ export default function CullingOverlay({
   }, [items, index]);
 
   const asset = currentId !== null ? assetById.get(currentId) ?? null : null;
-  /** 胶片条元数据投影（kind/name；未加载格回退序号占位） */
+  /** 胶片条/对比格元数据投影（kind/name；未加载格回退序号占位） */
   const assetMeta = useMemo(() => {
     const map = new Map<number, { kind: AssetDto["kind"]; name: string }>();
     for (const a of assetById.values()) map.set(a.id, { kind: a.kind, name: a.name });
@@ -240,20 +268,45 @@ export default function CullingOverlay({
     if (mainFailed) setImageLayers([]);
   }, [mainFailed]);
 
-  // --- Z 按住放大（transform scale + transform-origin 跟随鼠标） ------------------------
+  // --- V2 Z 按住放大：位置+倍率跨图保持，会话内记忆锚点 ---------------------------------
+  // 状态三份：zoomed/zoomAt 驱动渲染；ref 镜像供按键监听（免重注册）与松开记忆。
   const [zoomed, setZoomed] = useState(false);
-  const [zoomAt, setZoomAt] = useState({ x: 0.5, y: 0.5 });
+  const [zoomAt, setZoomAt] = useState<CullZoomPoint>({ x: 0.5, y: 0.5 });
+  const zoomedRef = useRef(false);
+  const zoomAtRef = useRef<CullZoomPoint>({ x: 0.5, y: 0.5 });
+  /** 会话内锚点记忆（null=未用过放大，首次居中） */
+  const zoomMemoryRef = useRef<CullZoomPoint | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+
+  function setZoomPoint(point: CullZoomPoint): void {
+    zoomAtRef.current = point;
+    setZoomAt(point);
+  }
+  function enterZoom(): void {
+    if (zoomedRef.current) return; // 按住期间 keydown 重复（自动重复键）不重置锚点
+    zoomedRef.current = true;
+    setZoomPoint(zoomEnterPoint(zoomMemoryRef.current));
+    setZoomed(true);
+  }
+  /** saveMemory=true 记住当前锚点（松开 Z）；双击/Esc 视为取消，不记 */
+  function exitZoom(saveMemory: boolean): void {
+    if (!zoomedRef.current) return;
+    zoomedRef.current = false;
+    if (saveMemory) zoomMemoryRef.current = zoomAtRef.current;
+    setZoomed(false);
+  }
   function handleStageMouseMove(e: React.MouseEvent<HTMLDivElement>): void {
-    if (!zoomed) return;
+    if (!zoomedRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    setZoomAt({
-      x: Math.min(1, Math.max(0, (e.clientX - rect.left) / Math.max(1, rect.width))),
-      y: Math.min(1, Math.max(0, (e.clientY - rect.top) / Math.max(1, rect.height))),
-    });
+    setZoomPoint(
+      clampZoomPoint(
+        (e.clientX - rect.left) / Math.max(1, rect.width),
+        (e.clientY - rect.top) / Math.max(1, rect.height),
+      ),
+    );
   }
 
-  // --- 决定：乐观更新 + 失败回滚（决定即落库） -----------------------------------------
+  // --- 决定：乐观更新 + 失败回滚（决定即落库；单条/批量同接口） -------------------------
   const [rollbackAt, setRollbackAt] = useState<{ assetId: number; decision: CullDecision } | null>(null);
   // 回滚提示自动消退（2.5s；不阻塞继续过片）
   useEffect(() => {
@@ -261,29 +314,72 @@ export default function CullingOverlay({
     const timer = window.setTimeout(() => setRollbackAt(null), 2500);
     return () => clearTimeout(timer);
   }, [rollbackAt]);
-  const applyDecision = useCallback(
-    (decision: CullDecision, options?: { advance?: boolean }) => {
-      if (currentId === null) return;
-      const prev = decisions.get(currentId) ?? null;
-      setDecisions(withDecision(decisions, currentId, decision));
-      void cullDecisionApply(session.id, [{ assetId: currentId, decision }]).then((dto) => {
+
+  /** 批量写决定（单条过片 / 对比格 / 连拍组一键留张共用）；用户手写 → origin manual */
+  const applyDecisions = useCallback(
+    (patches: CullDecisionPatch[], options?: { advance?: boolean }) => {
+      if (patches.length === 0) return;
+      const prevEntries = patches.map(
+        (p) => [p.assetId, decisions.get(p.assetId) ?? null] as const,
+      );
+      const prevOrigins = patches.map(
+        (p) => [p.assetId, origins.get(p.assetId) ?? "manual"] as const,
+      );
+      setDecisions((cur) => {
+        let next = cur;
+        for (const p of patches) next = withDecision(next, p.assetId, p.decision);
+        return next;
+      });
+      // 人工决定覆盖 AI 预标记 → origin 转手动（角标样式随之收敛）
+      if (patches.some((p) => p.decision !== null)) {
+        setOrigins((cur) => {
+          const next = new Map(cur);
+          for (const p of patches) if (p.decision !== null) next.set(p.assetId, "manual");
+          return next;
+        });
+      }
+      void cullDecisionApply(session.id, patches).then((dto) => {
         if (dto === null || dto.id !== session.id) {
-          // 传输失败/脏数据：回滚本条决定（进度以本地态继续派生）
-          setDecisions((cur) => withDecision(cur, currentId, prev));
-          setRollbackAt({ assetId: currentId, decision: prev });
+          // 传输失败/脏数据：回滚本批决定（进度以本地态继续派生）
+          setDecisions((cur) => {
+            let next = cur;
+            for (const [id, decision] of prevEntries) next = withDecision(next, id, decision);
+            return next;
+          });
+          setOrigins((cur) => {
+            const next = new Map(cur);
+            for (const [id, origin] of prevOrigins) next.set(id, origin);
+            return next;
+          });
+          setRollbackAt({ assetId: prevEntries[0][0], decision: prevEntries[0][1] });
           return;
         }
         setSession(dto); // 计数对齐后端真值
       });
       if (options?.advance) setIndex((cur) => indexAfterDecision(cur, ids.length));
     },
-    [currentId, decisions, ids.length, session.id],
+    [decisions, ids.length, origins, session.id],
   );
+
+  const applyDecision = useCallback(
+    (decision: CullDecision, options?: { advance?: boolean }) => {
+      if (currentId === null) return;
+      applyDecisions([{ assetId: currentId, decision }], options);
+    },
+    [currentId, applyDecisions],
+  );
+
+  /** V2 连拍组「本组只留这张」：当前 accepted + 组内未定项 rejected（一次批量写） */
+  const keepOnlyThis = useCallback(() => {
+    if (items === null || currentId === null) return;
+    applyDecisions(buildKeepOnlyDecisions(items, currentId, decisions));
+  }, [items, currentId, decisions, applyDecisions]);
 
   const navigate = useCallback(
     (next: number) => {
       if (items === null || items.length === 0) return;
       setIndex(Math.min(Math.max(0, next), items.length - 1));
+      setFocusedPane(0); // 对比模式下胶片条跳转 = 重新锚定组员，焦点回首位
     },
     [items],
   );
@@ -301,6 +397,40 @@ export default function CullingOverlay({
       });
     }
   }, [ids, index, assetById]);
+
+  // --- V2 对比视图：组员选取（同连拍组优先、不足补相邻） --------------------------------
+  /** 进出对比不动 index——单图位置保持 */
+  const comparePaneIndices = useMemo(() => {
+    if (items === null) return [];
+    return comparisonMembers(items, index, compareCount);
+  }, [items, index, compareCount]);
+  const comparePanes = useMemo(() => {
+    if (items === null) return [];
+    return comparePaneIndices.map((i) => {
+      const item = items[i];
+      return {
+        assetId: item.assetId,
+        name: assetMeta.get(item.assetId)?.name ?? `#${i + 1}`,
+      };
+    });
+  }, [items, comparePaneIndices, assetMeta]);
+  const effectiveFocusedPane = Math.min(focusedPane, Math.max(0, comparePanes.length - 1));
+
+  function enterCompare(): void {
+    exitZoom(true); // 对比无放大；锚点入记忆（回单图再按 Z 原位复放）
+    setMode("compare");
+    setFocusedPane(0);
+  }
+  function exitCompare(): void {
+    setMode("single");
+  }
+  function toggleCompare(): void {
+    if (mode === "single") enterCompare();
+    else exitCompare();
+  }
+  function handleCompareDecide(assetId: number, decision: CullDecision): void {
+    applyDecisions([{ assetId, decision }]);
+  }
 
   // --- AI 行内提示（闭眼/失焦 chips；asset_detail 已有字段） ---------------------------
   const [aiDetail, setAiDetail] = useState<AssetDetailDto | null>(null);
@@ -325,14 +455,33 @@ export default function CullingOverlay({
     return chips;
   }, [aiDetail]);
 
+  // --- V3 AI 挑图弹窗 + 应用后刷新 -----------------------------------------------------
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiToast, setAiToast] = useState<CullPrescanDto | null>(null);
+  useEffect(() => {
+    if (aiToast === null) return undefined;
+    const timer = window.setTimeout(() => setAiToast(null), 4000);
+    return () => clearTimeout(timer);
+  }, [aiToast]);
+
+  /** 应用成功：关弹窗 + toast + 决定表/origin/计数按后端真值刷新（保持当前位） */
+  function handleAiApplied(result: CullPrescanDto): void {
+    setAiOpen(false);
+    setAiToast(result);
+    void cullSessionOpen(session.id).then((opened) => {
+      if (opened !== null) applyOpened(opened, false);
+    });
+  }
+
   // --- 收尾弹窗 ------------------------------------------------------------------------
   const [finishOpen, setFinishOpen] = useState(false);
   const currentDecision = currentId !== null ? decisions.get(currentId) ?? null : null;
+  const currentOrigin = currentId !== null ? origins.get(currentId) ?? "manual" : "manual";
 
-  // --- 键盘接管（window 捕获 + stopPropagation；收尾弹窗打开时让位） -------------------
+  // --- 键盘接管（window 捕获 + stopPropagation；收尾/AI 弹窗打开时让位） ----------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (finishOpen) return; // 弹窗自处理 Esc（其自身捕获监听）
+      if (finishOpen || aiOpen) return; // 弹窗自处理 Esc（其自身捕获监听）
       const target = e.target;
       if (
         target instanceof HTMLElement &&
@@ -343,7 +492,7 @@ export default function CullingOverlay({
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        setZoomed(false);
+        exitZoom(false);
         onClose();
         return;
       }
@@ -351,7 +500,15 @@ export default function CullingOverlay({
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         e.preventDefault();
         e.stopPropagation();
-        setZoomed(true);
+        if (mode === "single") enterZoom(); // 对比模式无放大
+        return;
+      }
+      // 对比模式：数字键 1-4 选焦（屏位；越界收夹）
+      if (mode === "compare" && ["1", "2", "3", "4"].includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pane = Number(e.key) - 1;
+        if (comparePanes.length > 0) setFocusedPane(Math.min(pane, comparePanes.length - 1));
         return;
       }
       const action = cullKeyAction(e);
@@ -359,26 +516,51 @@ export default function CullingOverlay({
       e.preventDefault();
       e.stopPropagation();
       if (items === null || items.length === 0) return;
+      // 对比模式：空格/X/U 作用于焦点张（不翻页）；←/→ 切焦
+      const focusedAssetId =
+        mode === "compare" && comparePanes.length > 0
+          ? comparePanes[effectiveFocusedPane]?.assetId ?? null
+          : null;
       switch (action) {
+        case "compare":
+          toggleCompare();
+          break;
         case "prev":
-          navigate(index - 1);
+          if (mode === "compare") setFocusedPane((cur) => Math.max(0, cur - 1));
+          else navigate(index - 1);
           break;
         case "next":
-          navigate(index + 1);
+          if (mode === "compare") {
+            setFocusedPane((cur) => Math.min(comparePanes.length - 1, cur + 1));
+          } else {
+            navigate(index + 1);
+          }
           break;
         case "accept":
-          applyDecision("accepted", { advance: true });
+          if (mode === "compare") {
+            if (focusedAssetId !== null) handleCompareDecide(focusedAssetId, "accepted");
+          } else {
+            applyDecision("accepted", { advance: true });
+          }
           break;
         case "reject":
-          applyDecision("rejected", { advance: true });
+          if (mode === "compare") {
+            if (focusedAssetId !== null) handleCompareDecide(focusedAssetId, "rejected");
+          } else {
+            applyDecision("rejected", { advance: true });
+          }
           break;
         case "undecided":
-          applyDecision(null);
+          if (mode === "compare") {
+            if (focusedAssetId !== null) handleCompareDecide(focusedAssetId, null);
+          } else {
+            applyDecision(null);
+          }
           break;
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "z" || e.key === "Z") setZoomed(false);
+      if (e.key === "z" || e.key === "Z") exitZoom(true); // 松开恢复常态 + 记住锚点
     };
     window.addEventListener("keydown", onKey, { capture: true });
     window.addEventListener("keyup", onKeyUp, { capture: true });
@@ -386,7 +568,20 @@ export default function CullingOverlay({
       window.removeEventListener("keydown", onKey, { capture: true });
       window.removeEventListener("keyup", onKeyUp, { capture: true });
     };
-  }, [applyDecision, finishOpen, index, items, navigate, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    aiOpen,
+    applyDecision,
+    applyDecisions,
+    comparePanes,
+    effectiveFocusedPane,
+    finishOpen,
+    index,
+    items,
+    mode,
+    navigate,
+    onClose,
+  ]);
 
   const progressPct = progress.total > 0 ? ((progress.accepted + progress.rejected) / progress.total) * 100 : 0;
 
@@ -397,8 +592,9 @@ export default function CullingOverlay({
       aria-modal="true"
       aria-label={session.name}
       data-testid="culling-overlay"
+      data-mode={mode}
     >
-      {/* 顶栏：拖拽层 + 会话名 + 进度计数 + 完成选片 + 退出 */}
+      {/* 顶栏：拖拽层 + 会话名 + 进度计数 + 模式切换 + AI 挑图 + 完成选片 + 退出 */}
       <div className="relative flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
         <div className="absolute inset-0" data-tauri-drag-region />
         <div className="pointer-events-none relative flex min-w-0 items-baseline gap-3">
@@ -431,6 +627,79 @@ export default function CullingOverlay({
           </span>
         )}
         <div className="pointer-events-none relative ml-auto flex items-center gap-2">
+          {/* 单图/对比切换（C 键等价物） */}
+          <div
+            className="pointer-events-auto flex overflow-hidden rounded-md border border-edge"
+            role="group"
+            aria-label={t("culling.overlay.modeLabel")}
+            data-testid="culling-mode-toggle"
+          >
+            <button
+              type="button"
+              aria-pressed={mode === "single"}
+              onClick={exitCompare}
+              className={`px-2.5 py-1 text-xs transition-colors ${
+                mode === "single"
+                  ? "bg-accent font-medium text-black"
+                  : "text-text-secondary hover:bg-panel hover:text-text-primary"
+              }`}
+              data-testid="culling-mode-single"
+              data-active={mode === "single"}
+            >
+              {t("culling.overlay.modeSingle")}
+            </button>
+            <button
+              type="button"
+              aria-pressed={mode === "compare"}
+              onClick={enterCompare}
+              className={`px-2.5 py-1 text-xs transition-colors ${
+                mode === "compare"
+                  ? "bg-accent font-medium text-black"
+                  : "text-text-secondary hover:bg-panel hover:text-text-primary"
+              }`}
+              data-testid="culling-mode-compare"
+              data-active={mode === "compare"}
+            >
+              {t("culling.overlay.modeCompare")}
+              <span className="ml-1 font-mono text-[10px] opacity-60">C</span>
+            </button>
+          </div>
+          {/* 同屏张数（仅对比模式） */}
+          {mode === "compare" && (
+            <div
+              className="pointer-events-auto flex overflow-hidden rounded-md border border-edge"
+              role="group"
+              aria-label={t("culling.overlay.compareCountLabel")}
+              data-testid="culling-compare-counts"
+            >
+              {[2, 3, 4].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  aria-pressed={compareCount === n}
+                  onClick={() => setCompareCount(n as 2 | 3 | 4)}
+                  className={`w-7 py-1 font-mono text-xs transition-colors ${
+                    compareCount === n
+                      ? "bg-accent font-medium text-black"
+                      : "text-text-secondary hover:bg-panel hover:text-text-primary"
+                  }`}
+                  data-testid="culling-compare-count"
+                  data-count={n}
+                  data-active={compareCount === n}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setAiOpen(true)}
+            className="pointer-events-auto rounded-md border border-sky-400/60 px-2.5 py-1 text-xs text-sky-300 transition-colors hover:border-sky-300 hover:text-sky-200"
+            data-testid="culling-ai-open"
+          >
+            {t("culling.ai.entry")}
+          </button>
           <button
             type="button"
             onClick={() => setFinishOpen(true)}
@@ -466,40 +735,52 @@ export default function CullingOverlay({
         <span className="sr-only">{Math.round(progressPct)}%</span>
       </div>
 
-      {/* 主区：单图大图 */}
+      {/* 主区：单图大图 / 对比网格 */}
       <div className="relative min-h-0 flex-1" data-testid="culling-stage-pane">
-        <div
-          ref={stageRef}
-          className="absolute inset-0 flex touch-none items-center justify-center overflow-hidden"
-          onMouseMove={handleStageMouseMove}
-          onDoubleClick={() => setZoomed(false)}
-          style={{ cursor: zoomed ? "zoom-in" : "default" }}
-          data-testid="culling-stage"
-          data-zoomed={zoomed}
-        >
-          {openFailed ? (
-            <div className="flex flex-col items-center gap-3 text-text-muted" data-testid="culling-open-failed">
-              <p className="text-sm text-text-secondary">{t("culling.overlay.openFailed")}</p>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-              >
-                {t("culling.overlay.exit")}
-              </button>
-            </div>
-          ) : items !== null && items.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 text-text-muted" data-testid="culling-empty">
-              <p className="text-sm text-text-secondary">{t("culling.overlay.empty")}</p>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-              >
-                {t("culling.overlay.exit")}
-              </button>
-            </div>
-          ) : (
+        {openFailed ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-text-muted" data-testid="culling-open-failed">
+            <p className="text-sm text-text-secondary">{t("culling.overlay.openFailed")}</p>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            >
+              {t("culling.overlay.exit")}
+            </button>
+          </div>
+        ) : items !== null && items.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-text-muted" data-testid="culling-empty">
+            <p className="text-sm text-text-secondary">{t("culling.overlay.empty")}</p>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            >
+              {t("culling.overlay.exit")}
+            </button>
+          </div>
+        ) : mode === "compare" ? (
+          <CullCompareGrid
+            panes={comparePanes}
+            count={compareCount}
+            decisions={decisions}
+            origins={origins}
+            assetMeta={assetMeta}
+            focusedPane={effectiveFocusedPane}
+            onFocusPane={setFocusedPane}
+            onDecide={handleCompareDecide}
+          />
+        ) : (
+          <div
+            ref={stageRef}
+            className="absolute inset-0 flex touch-none items-center justify-center overflow-hidden"
+            onMouseMove={handleStageMouseMove}
+            onDoubleClick={() => exitZoom(false)}
+            style={{ cursor: zoomed ? "zoom-in" : "default" }}
+            data-testid="culling-stage"
+            data-zoomed={zoomed}
+            data-zoom-at={`${zoomAt.x.toFixed(3)},${zoomAt.y.toFixed(3)}`}
+          >
             <>
               {imageLayers.map((layer) => (
                 <img
@@ -564,6 +845,31 @@ export default function CullingOverlay({
                 </div>
               )}
 
+              {/* 连拍组徽标 + 一键留张（burstSize≥2；方案 §3.1/§3.2 组集成） */}
+              {currentBurst !== null && currentBurst.burstSize >= 2 && (
+                <div
+                  className="absolute left-3 top-3 flex items-center gap-1.5"
+                  data-testid="culling-burst"
+                  data-size={currentBurst.burstSize}
+                  data-burst-id={currentBurst.burstId ?? ""}
+                >
+                  <span
+                    className="rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-text-primary"
+                    data-testid="culling-burst-badge"
+                  >
+                    {t("culling.overlay.burstBadge", { count: currentBurst.burstSize })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={keepOnlyThis}
+                    className="rounded-full border border-edge bg-black/60 px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    data-testid="culling-burst-keep"
+                  >
+                    {t("culling.overlay.burstKeep")}
+                  </button>
+                </div>
+              )}
+
               {/* AI 行内提示 chips（闭眼/失焦；AI 只建议） */}
               {aiChips.length > 0 && (
                 <div
@@ -588,20 +894,29 @@ export default function CullingOverlay({
                 </div>
               )}
 
-              {/* 当前决定态角标 */}
+              {/* 当前决定态角标（AI 预标记 = 蓝描边 + AI 小标；手动改过转 manual） */}
               {currentDecision !== null && (
                 <div
-                  className={`pointer-events-none absolute right-3 top-3 rounded-full px-2.5 py-1 text-xs font-semibold shadow ${
+                  className={`pointer-events-none absolute right-3 top-3 flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold shadow ${
                     currentDecision === "accepted"
                       ? "bg-emerald-500 text-black"
                       : "bg-red-500 text-white"
-                  }`}
+                  } ${currentOrigin === "ai" ? "ring-2 ring-sky-400" : ""}`}
                   data-testid="culling-decision-badge"
                   data-decision={currentDecision}
+                  data-origin={currentOrigin}
                 >
                   {currentDecision === "accepted"
                     ? t("culling.overlay.decisionAccepted")
                     : t("culling.overlay.decisionRejected")}
+                  {currentOrigin === "ai" && (
+                    <span
+                      className="rounded bg-black/25 px-1 text-[8px] font-semibold leading-3"
+                      data-testid="culling-decision-ai"
+                    >
+                      {t("culling.overlay.ai.badge")}
+                    </span>
+                  )}
                 </div>
               )}
 
@@ -639,47 +954,49 @@ export default function CullingOverlay({
                 {t("culling.overlay.keysHint")}
               </p>
             </>
-          )}
+          </div>
+        )}
+      </div>
+
+      {/* 底部：决定操作条（键盘等价物；对比模式的张上按钮在格内） */}
+      {mode === "single" && (
+        <div
+          className="flex h-12 shrink-0 items-center justify-center gap-2 border-t border-edge bg-surface/80 px-4"
+          data-testid="culling-actions"
+        >
+          <span className="mr-2 font-mono text-[11px] tabular-nums text-text-muted" data-testid="culling-index">
+            {items !== null && items.length > 0
+              ? t("culling.overlay.index", { index: index + 1, total: items.length })
+              : "—"}
+          </span>
+          <button
+            type="button"
+            onClick={() => applyDecision("accepted", { advance: true })}
+            className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
+            data-testid="culling-accept"
+          >
+            {t("culling.overlay.accept")} <span className="font-mono opacity-60">空格</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => applyDecision(null)}
+            className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="culling-undecided"
+          >
+            {t("culling.overlay.undecided")} <span className="font-mono opacity-60">U</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => applyDecision("rejected", { advance: true })}
+            className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
+            data-testid="culling-reject"
+          >
+            {t("culling.overlay.reject")} <span className="font-mono opacity-60">X</span>
+          </button>
         </div>
-      </div>
+      )}
 
-      {/* 底部：决定操作条（键盘等价物） */}
-      <div
-        className="flex h-12 shrink-0 items-center justify-center gap-2 border-t border-edge bg-surface/80 px-4"
-        data-testid="culling-actions"
-      >
-        <span className="mr-2 font-mono text-[11px] tabular-nums text-text-muted" data-testid="culling-index">
-          {items !== null && items.length > 0
-            ? t("culling.overlay.index", { index: index + 1, total: items.length })
-            : "—"}
-        </span>
-        <button
-          type="button"
-          onClick={() => applyDecision("accepted", { advance: true })}
-          className="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
-          data-testid="culling-accept"
-        >
-          {t("culling.overlay.accept")} <span className="font-mono opacity-60">空格</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => applyDecision(null)}
-          className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-          data-testid="culling-undecided"
-        >
-          {t("culling.overlay.undecided")} <span className="font-mono opacity-60">U</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => applyDecision("rejected", { advance: true })}
-          className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
-          data-testid="culling-reject"
-        >
-          {t("culling.overlay.reject")} <span className="font-mono opacity-60">X</span>
-        </button>
-      </div>
-
-      {/* 底部胶片条（虚拟滚动 + 决定角标 + 点击跳转） */}
+      {/* 底部胶片条（虚拟滚动 + 决定角标 + 点击跳转；对比模式同样实时同步） */}
       {items !== null && items.length > 0 && (
         <CullFilmstrip
           ids={ids}
@@ -688,6 +1005,31 @@ export default function CullingOverlay({
           assetMeta={assetMeta}
           index={index}
           onJump={navigate}
+        />
+      )}
+
+      {/* AI 应用摘要 toast（进度刷新真值来自重开） */}
+      {aiToast !== null && (
+        <div
+          className="fixed bottom-24 left-1/2 z-[70] -translate-x-1/2 rounded-lg border border-sky-400/50 bg-surface px-4 py-2.5 text-xs shadow-2xl"
+          role="status"
+          data-testid="culling-ai-toast"
+          data-accepted={aiToast.suggestedAccepted}
+          data-rejected={aiToast.suggestedRejected}
+        >
+          {t("culling.ai.appliedToast", {
+            accepted: aiToast.suggestedAccepted,
+            rejected: aiToast.suggestedRejected,
+          })}
+        </div>
+      )}
+
+      {/* AI 挑图弹窗（打开时本层键盘让位） */}
+      {aiOpen && (
+        <CullAiDialog
+          session={session}
+          onClose={() => setAiOpen(false)}
+          onApplied={handleAiApplied}
         />
       )}
 
