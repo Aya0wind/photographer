@@ -193,7 +193,8 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue(null);
   albumListMock.mockReset().mockResolvedValue([
     { id: 1, name: "未分组", coverAssetId: null, itemCount: 0, createdAt: "2026-09-01" },
-    { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2026-09-01" },
+    // createdAt 与「未分组」不同年月：预览断言可验证外层年月取所选相册的创建时间
+    { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2025-12-15" },
   ]);
   albumSubgroupsMock.mockReset().mockResolvedValue([]);
   albumCreateMock.mockReset().mockResolvedValue({
@@ -1063,7 +1064,7 @@ describe("缩略图档位", () => {
 });
 
 describe("双目的地（M2）", () => {
-  it("默认关；开启后显示第二目录输入+浏览+必填校验拦住开始", async () => {
+  it("默认关；开启后显示第二目录输入+浏览+必填校验拦住开始；预览 = 第二根目录+同公式", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1074,14 +1075,20 @@ describe("双目的地（M2）", () => {
     await user.click(screen.getByTestId("wizard-second-toggle"));
     const panel = await screen.findByTestId("wizard-second-panel");
     expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
-    expect(panel).toHaveTextContent("目录模板与主目的地相同。");
-    // 必填校验：第二目录为空 → 开始导入禁用 + 提示
+    expect(panel).toHaveTextContent("第二目的地按相同的时间/相册布局写入。");
+    // 必填校验：第二目录为空 → 开始导入禁用 + 提示（此时无路径预览）
     expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
     expect(panel).toHaveTextContent("请填写第二目标根目录");
+    expect(screen.queryByTestId("wizard-second-path-preview")).not.toBeInTheDocument();
 
     await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
     expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
     expect(panel).not.toHaveTextContent("请填写第二目标根目录");
+    // 第二目的地预览对齐后端：第二根目录 + 相册创建年月/相册目录名（默认预选「未分组」2026-09）
+    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
+    expect(screen.getByTestId("wizard-second-path-preview")).toHaveTextContent(
+      "D:\\照片备份\\2026\\09\\未分组\\",
+    );
   });
 
   it("浏览…选择第二目标根目录（openDialog 回填）", async () => {
@@ -1218,47 +1225,76 @@ it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾�
   expect(deviceFilesMock).not.toHaveBeenCalled();
 });
 
-// --- 相册目录化（规格修订）：导入位置实时预览——恒为相册目录路径 -------------------------
+// --- 时间/相册布局（2026-09-28 定案）：导入位置实时预览 -------------------------------
+// 目标 = 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/，相册内平铺不按日期分层。
 
-describe("ImportWizard：导入位置实时预览（相册主组织）", () => {
-  it("默认预选「未分组」：预览 = 收纳区/未分组/日期模板（Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\）", async () => {
+describe("ImportWizard：导入位置实时预览（时间/相册布局）", () => {
+  it("默认预选「未分组」：预览 = 照片根/相册创建年月/未分组（Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\）", async () => {
     seedSession();
     renderWizard("?device=E:");
     await screen.findByTestId("wizard-table-stats");
+    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
 
     const preview = screen.getByTestId("wizard-album-path-preview");
     expect(preview).toHaveTextContent("导入位置预览");
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\");
+    // 平铺说明：相册内不按日期分层，应用内按拍摄日分组
+    expect(screen.getByTestId("wizard-album-flat-note")).toHaveTextContent(
+      "相册内不按日期分层，应用内按拍摄日分组。",
+    );
   });
 
-  it("存入已有相册：预览随相册目录更新（相册目录/日期模板）", async () => {
+  it("存入已有相册：预览随相册目录与其创建年月更新（相册内平铺，不再拼库级日期模板）", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
     await screen.findByTestId("wizard-table-stats");
+    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
 
-    // 默认已选未分组；改选青海湖 2026 → 预览切换
-    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
+    // 默认已选未分组；改选青海湖 2026（createdAt 2025-12-15）→ 外层年月随相册创建时间切换
+    await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
     const preview = screen.getByTestId("wizard-album-path-preview");
-    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\青海湖 2026\\2026\\09-18\\");
+    expect(preview).toHaveTextContent("Y:\\照片\\SmartPhoto\\2025\\12\\青海湖 2026\\");
+    expect(preview).not.toHaveTextContent("09-18");
   });
 
-  it("新建相册：预览随输入名实时更新；输入为空时按「未分组」兜底", async () => {
+  it("新建相册：预览随输入名实时更新，外层年月 = 导入当刻；空名兜底「未分组」复用其真实创建年月", async () => {
     seedSession();
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+    await screen.findByTestId("wizard-table-stats");
+    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
+
+    await user.click(screen.getByTestId("wizard-album-new"));
+    const input = screen.getByTestId("wizard-album-new-name");
+    const now = new Date();
+    const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
+    await user.type(input, "婚礼0927");
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      `Y:\\照片\\SmartPhoto\\${currentYm}\\婚礼0927\\`,
+    );
+
+    // 空名兜底「未分组」：列表已有同名保底相册 → 用其真实 createdAt（2026-09-01 → 2026\09）
+    await user.clear(input);
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\SmartPhoto\\2026\\09\\未分组\\",
+    );
+  });
+
+  it("新建相册空名兜底：列表无「未分组」时外层年月用导入当刻", async () => {
+    seedSession();
+    albumListMock.mockReset().mockResolvedValue([
+      { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2025-12-15" },
+    ]);
     renderWizard("?device=E:");
     const user = userEvent.setup();
     await screen.findByTestId("wizard-table-stats");
 
     await user.click(screen.getByTestId("wizard-album-new"));
-    const input = screen.getByTestId("wizard-album-new-name");
-    await user.type(input, "婚礼0927");
+    const now = new Date();
+    const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\婚礼0927\\2026\\09-18\\",
-    );
-
-    await user.clear(input);
-    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\SmartPhoto\\未分组\\2026\\09-18\\",
+      `Y:\\照片\\SmartPhoto\\${currentYm}\\未分组\\`,
     );
   });
 });

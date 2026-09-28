@@ -1391,20 +1391,38 @@ export default function ImportWizard() {
       cancelled = true;
     };
   }, [albumChoice, albumId]);
-  // 相册主组织（必选）：导入落 `相册目录/日期模板/`。
+  // 相册主组织（必选，时间/相册布局 2026-09-28 定案）：导入落
+  // `照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/`，相册内平铺不按日期分层
+  //（应用内按拍摄日分组；相册导入下后端整体覆写 dir_template，预览不再拼库级模板）。
   // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；未选出时按「未分组」兜底；
   // 新建分支用输入名）。
   const selectedAlbum = albumChoice === "existing" ? albums.find((a) => a.id === albumId) : undefined;
+  const ungroupedAlbum = albums.find((a) => isUngroupedAlbum(a));
   const albumDirForPreview =
     albumChoice === "existing"
       ? (selectedAlbum?.dirName ?? selectedAlbum?.name ?? UNGROUPED_ALBUM_NAME)
       : newAlbumName.trim() === ""
         ? UNGROUPED_ALBUM_NAME
         : newAlbumName.trim();
-  const importTargetPreview = previewTemplate(dirTemplate, `${targetRoot}\\${albumDirForPreview}`);
+  // 外层年月 = 相册创建时间（只到月）：existing 分支取所选相册 createdAt（未选出回退
+  // 「未分组」）；新建分支 = 导入当刻 YYYY/MM，空名回退「未分组」时若列表中已存在
+  // 同名保底相册则用其真实 createdAt（后端按名幂等复用），没有再用当前日期。
+  const nowForPreview = new Date();
+  const currentDateForPreview = `${nowForPreview.getFullYear()}-${String(nowForPreview.getMonth() + 1).padStart(2, "0")}-01`;
+  const albumCreatedAtForPreview =
+    albumChoice === "existing"
+      ? (selectedAlbum?.createdAt ?? ungroupedAlbum?.createdAt ?? currentDateForPreview)
+      : newAlbumName.trim() === ""
+        ? (ungroupedAlbum?.createdAt ?? currentDateForPreview)
+        : currentDateForPreview;
+  const albumYearForPreview = albumCreatedAtForPreview.slice(0, 4);
+  const albumMonthForPreview = albumCreatedAtForPreview.slice(5, 7);
+  const importTargetPreview = `${targetRoot}\\${albumYearForPreview}\\${albumMonthForPreview}\\${albumDirForPreview}`;
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
+  // 双目的地第二份预览：第二根目录 + 同公式（后端 engine 覆写 dir_template 后随之对齐）
+  const secondImportTargetPreview = `${secondRoot.trim().replace(/[\\/]+$/, "")}\\${albumYearForPreview}\\${albumMonthForPreview}\\${albumDirForPreview}`;
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
@@ -2225,12 +2243,16 @@ export default function ImportWizard() {
                 {albumError}
               </p>
             )}
-            {/* 导入位置实时预览（B1 追加包）：随相册（=存放目录）/日期选择即时更新 */}
+            {/* 导入位置实时预览（时间/相册布局定案）：目标 = 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}，
+                相册内平铺不按日期分层（应用内按拍摄日分组），随相册选择/输入即时更新 */}
             <p className="ml-5 mt-1 text-[11px] text-text-muted" data-testid="wizard-album-path-preview">
               {t("wizard.album.pathPreview")}：
               <span className="break-all font-mono text-text-secondary">
                 {importTargetPreview}\
               </span>
+            </p>
+            <p className="ml-5 text-[11px] leading-relaxed text-text-muted" data-testid="wizard-album-flat-note">
+              {t("wizard.album.flatNote")}
             </p>
           </fieldset>
 
@@ -2284,6 +2306,15 @@ export default function ImportWizard() {
                 <p className="text-[11px] leading-relaxed text-text-muted">
                   {t("wizard.second.sameTemplate")}
                 </p>
+                {secondRoot.trim() !== "" && (
+                  <p
+                    className="break-all font-mono text-[11px] text-text-secondary"
+                    data-testid="wizard-second-path-preview"
+                    title={secondImportTargetPreview}
+                  >
+                    {secondImportTargetPreview}\
+                  </p>
+                )}
               </div>
             )}
           </div>

@@ -42,7 +42,8 @@ export interface ImportPlan {
   streams: number;
   /** 缺省 copy（Rust 侧默认）；move 时入库后删除源文件 */
   mode: ImportMode;
-  /** 双目的地（可选）：一次读取同时复制到第二位置；目录模板与主目的地相同。
+  /** 双目的地（可选）：一次读取同时复制到第二位置；落位与主目的地相同
+   *  （相册导入下后端 engine 整体覆写 dir_template，第二份随之走时间/相册布局）。
    *  后端约束：move + secondTarget 会被拒绝（前端互斥保证不发出）。 */
   secondTarget?: { targetRoot: string; dirTemplate: string };
   /** 本次导入的文件清单（rel_path 列表）——向导勾选结果，引擎只导入集合内的文件；
