@@ -59,6 +59,12 @@ kamadak-exif = "0.6"
 # M5 XMP 边车（LR 互通）：quick-xml 只做读取侧的结构化解析；改写侧用
 # 字符串外科手术（未触字段逐字节保留，绝不整档重序列化——防丢 LR 数据）
 quick-xml = "0.42"
+# 阶段 D 基础编辑：文字栅格化（运行时加载系统字体，不捆绑字体文件；
+# MIT OR Apache-2.0，许可宽松）
+ab_glyph = "0.2"
+# 阶段 D 导出元数据：JPEG 段级改写（只替换 APP1 段，图像数据零重编码；
+# MIT，许可宽松）
+img-parts = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

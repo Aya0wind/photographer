@@ -273,6 +273,24 @@ pub enum AppEvent {
         files: u64,
     },
 
+    // 导出任务（阶段 D 基础编辑与导出；任务真值在 export_job 表，事件只做
+    // 进度/收尾通知——UI 重启后从库里读历史/终态）
+    /// 单文件导出阶段推进：phase = "render"|"encode"|"write"|"register"。
+    ExportTaskProgress {
+        job_id: i64,
+        asset_id: i64,
+        phase: String,
+    },
+    /// 导出收尾：ok + 输出路径（album 模式附带新资产 id）+ 失败原因。
+    ExportTaskFinished {
+        job_id: i64,
+        asset_id: i64,
+        ok: bool,
+        output_path: Option<String>,
+        new_asset_id: Option<i64>,
+        error: Option<String>,
+    },
+
     // 错误
     AppError {
         level: String,

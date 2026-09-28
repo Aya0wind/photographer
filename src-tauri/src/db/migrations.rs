@@ -26,6 +26,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0019_ALBUM_SUBGROUPS,
     MIGRATION_0020_DROP_DERIVED_RELATIONS,
     MIGRATION_0021_AI_SELECTION,
+    MIGRATION_0022_EDIT_EXPORT,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -504,4 +505,39 @@ DROP TABLE index_tasks;
 ALTER TABLE index_tasks_new RENAME TO index_tasks;
 CREATE UNIQUE INDEX idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
 CREATE INDEX idx_index_tasks_state ON index_tasks (state, id);
+"#;
+
+/// 0022（阶段 D 基础编辑与导出，roadmap §8）：
+/// - `edit_recipe`：非破坏编辑配方（每资产至多一份，PK=asset_id）。配方为
+///   version 化 JSON 文本（校验/夹取在 IPC 层做，库只存归一化后的文本）；
+///   updated_at 为 Unix epoch 毫秒（DTO 层渲染 RFC3339）。资产删除级联清配方。
+/// - `export_job`：导出任务账（持久化任务铁律——进程重启后 UI 仍可查
+///   历史/终态）。status：queued→running→done|error（无暂停态：单文件导出
+///   不支持断点续传，进程中断的遗留行由下一次 export_run 收尸为 error）。
+///   结果四元组（output_path/width/height/bytes）+ album 模式的新资产 id。
+///   行风格对齐 jobs（TEXT RFC3339 时间戳 + status CHECK）。
+const MIGRATION_0022_EDIT_EXPORT: &str = r#"
+CREATE TABLE edit_recipe (
+    asset_id   INTEGER PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+    recipe     TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE export_job (
+    id           INTEGER PRIMARY KEY,
+    asset_id     INTEGER NOT NULL REFERENCES assets (id) ON DELETE CASCADE,
+    mode         TEXT    NOT NULL CHECK (mode IN ('folder', 'album')),
+    status       TEXT    NOT NULL CHECK (status IN ('queued', 'running', 'done', 'error')),
+    output_path  TEXT,
+    width        INTEGER,
+    height       INTEGER,
+    bytes        INTEGER,
+    new_asset_id INTEGER,
+    error        TEXT,
+    created_at   TEXT    NOT NULL,
+    finished_at  TEXT
+);
+
+CREATE INDEX idx_export_job_asset  ON export_job (asset_id, id);
+CREATE INDEX idx_export_job_status ON export_job (status, id);
 "#;

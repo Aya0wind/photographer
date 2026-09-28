@@ -2,6 +2,7 @@ mod ai;
 mod bursts;
 mod db;
 mod devices;
+mod edit;
 mod events;
 mod import;
 mod index;
@@ -311,6 +312,10 @@ pub fn run() {
             ipc::selection::smart_view_create,
             ipc::selection::smart_view_delete,
             ipc::versions::asset_versions,
+            edit::ipc::edit_recipe_get,
+            edit::ipc::edit_recipe_save,
+            edit::ipc::edit_recipe_delete,
+            edit::ipc::export_run,
             ipc::watch::watch_folders_list,
             ipc::watch::watch_folder_add,
             ipc::watch::watch_folder_remove,

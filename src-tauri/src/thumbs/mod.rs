@@ -492,7 +492,9 @@ fn orientation_from_file(src: &Path) -> Option<u32> {
 }
 
 /// 按 EXIF Orientation 1-8 转正像素（5/7 为转置组合，6/8 宽高互换）。
-fn apply_orientation(img: image::RgbImage, orientation: u32) -> image::RgbImage {
+/// 编辑导出管线（crate::edit）复用同一函数——缩略图/预览/导出的方向
+/// 归一化必须同一实现，不允许平行副本。
+pub fn apply_orientation(img: image::RgbImage, orientation: u32) -> image::RgbImage {
     use image::imageops;
     match orientation {
         2 => imageops::flip_horizontal(&img),
