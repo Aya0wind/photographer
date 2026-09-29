@@ -77,6 +77,16 @@ pub(crate) fn norm_sep(p: &str) -> String {
     p.replace('\\', "/")
 }
 
+/// 照片根所在卷根（如 `Y:\`）——LR 暂存夹落卷根用。纯路径形态计算，
+/// 与挪移判定用的 platform::filesystem_identity（卷序列号身份）无关；
+/// 注意 verbatim 前缀（`\\?\C:\`）与普通盘根判为不同形态。
+fn volume_root_of(path: &Path) -> String {
+    path.ancestors()
+        .last()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// 相册主目录前缀（含尾分隔符；相册相对段 album_home_rel 以 `/` 拼接，
 /// 归一后与库内两种分隔符形态均能命中）。
 fn album_prefix(photo_root: &str, home_rel: &str) -> String {
