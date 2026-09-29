@@ -60,9 +60,14 @@ const SETTING_ORDER = [
   "imagesize", "pcsaveimgsize", "liveviewsettingeffect", "manualfocus", "focusmagnifier",
 ] as const;
 
-/** 悬浮工具栏参数（曝光三要素 + 对焦 + 白平衡）：常驻取景画面底部，
- *  随手可调不用翻面板。choice 形态才进工具栏（range/action 仍走右栏）。 */
-const QUICK_IDS = ["shutterspeed", "f-number", "iso", "whitebalance", "focusmode", "focusarea"] as const;
+/** 悬浮工具栏参数（拍摄模式 + 曝光三要素 + 对焦 + 白平衡）：常驻取景画面
+ *  底部，随手可调不用翻面板。choice 形态才进工具栏（range/action 走右栏）。 */
+const QUICK_IDS = ["expprogram", "shutterspeed", "f-number", "iso", "whitebalance", "focusmode", "focusarea"] as const;
+
+/** 工具栏常驻例外：只读也保留展示——
+ *  - expprogram（拍摄模式）：唯一能切回 M/A/S 的入口，藏了就被锁死在档位里；
+ *  - f-number（光圈）：镜头环控制的机身常见，只读也要能看到当前值。 */
+const QUICK_ALWAYS_SHOW = new Set<string>(["expprogram", "f-number"]);
 
 /** 机身模式切换（A/S 档 ↔ M 档）会改变参数可写性——settings 轮询间隔：
  *  只读的快门在 A 档隐藏、切回 M 档要能自动回来，靠这轮询刷新快照。 */
@@ -83,13 +88,12 @@ function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   });
 }
 
-/** 工具栏参数：曝光三要素/对焦/白平衡；不可调的隐藏——光圈例外
- * （镜头环控制光圈的机身常见，只读也要能看到当前值）。 */
+/** 工具栏参数：拍摄模式/曝光三要素/对焦/白平衡；只读隐藏——模式与光圈例外。 */
 function quickSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   return QUICK_IDS.map((id) => settings.find((s) => s.id === id))
     .filter((s): s is TetherCameraSetting => {
       if (s === undefined || s.kind !== "choice") return false;
-      return s.writable || s.id === "f-number";
+      return s.writable || QUICK_ALWAYS_SHOW.has(s.id);
     });
 }
 
@@ -272,7 +276,11 @@ export default function TetheringWindowPage() {
   }
 
   async function applySetting(setting: TetherCameraSetting, value: string): Promise<void> {
-    if (sessionId === "" || !setting.writable || value === setting.current) return;
+    // 拍摄模式是档位逃生舱：相机上报只读也照常尝试（readonly 标志随机身
+    // 状态翻转——休眠/档位切换后常翻只读；真拒绝会走错误提示，不锁死入口）
+    if (sessionId === "" || (!setting.writable && setting.id !== "expprogram") || value === setting.current) {
+      return;
+    }
     setSettingErrors((prev) => {
       const next = { ...prev };
       delete next[setting.id];
@@ -536,7 +544,8 @@ export default function TetheringWindowPage() {
           {/* 悬浮工具栏（SelectionBar 同款浮条视觉）：曝光三要素 / 对焦 / 白平衡
               常驻画面底部，随手可调不必翻右栏；AF 触发 + 快门随时可拍；
               grip 拖动可挪位（位置持久化）。
-              不可调参数不进工具栏——光圈例外（镜头环控制的机身，只读也要看到值）。 */}
+              不可调参数不进工具栏——拍摄模式与光圈例外（模式是切回
+              M/A/S 的唯一入口，光圈常有镜头环控制的机身）。 */}
           <div
             ref={quickBarRef}
             className={`absolute z-20 ${barPos === null ? "bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2" : ""}`}
@@ -566,8 +575,15 @@ export default function TetheringWindowPage() {
                   <button
                     type="button"
                     onClick={() => setQuickOpen((v) => (v === setting.id ? null : setting.id))}
-                    disabled={!setting.writable || !connected}
+                    disabled={(setting.id !== "expprogram" && !setting.writable) || !connected}
                     aria-expanded={quickOpen === setting.id}
+                    title={
+                      setting.id === "expprogram" && !setting.writable
+                        ? t("tether.modeDialHint")
+                        : !setting.writable
+                          ? t("tether.settingReadonly")
+                          : undefined
+                    }
                     className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                     data-testid={`tether-setting-${setting.id}`}
                   >

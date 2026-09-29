@@ -1265,7 +1265,7 @@
   "tether.refreshSettings": "重新整理參數",
   "tether.noAdjustable": "當前相機沒有可調參數",  "albums.tether": "聯機拍攝",
   "tether.quickbarDrag": "拖動工具欄",  "albums.tetherHint": "連接相機，在本相簿內進行聯機拍攝",
-  "albums.tetherDialogTitle": "聯機拍攝到「{{name}}」",
+  "tether.modeDialHint": "此機型的拍攝模式由機身轉盤控制，不能遠端切換",  "albums.tetherDialogTitle": "聯機拍攝到「{{name}}」",
   "albums.tetherNoCamera": "未發現可聯拍的相機（請用傳輸線連接相機並確認機身處於可遙控模式）",
   "albums.tetherRefresh": "重新掃描",
   "albums.tetherScanning": "掃描相機中…",

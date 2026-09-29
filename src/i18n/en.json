@@ -1279,7 +1279,7 @@
   "tether.refreshSettings": "Refresh settings",
   "tether.noAdjustable": "No adjustable parameters on this camera",  "albums.tether": "Tethered capture",
   "tether.quickbarDrag": "Drag toolbar",  "albums.tetherHint": "Connect a camera and shoot tethered into this album",
-  "albums.tetherDialogTitle": "Tethered capture to “{{name}}”",
+  "tether.modeDialHint": "Exposure mode is controlled by the camera dial on this model",  "albums.tetherDialogTitle": "Tethered capture to “{{name}}”",
   "albums.tetherNoCamera": "No tetherable camera found (connect via USB and make sure the camera is in remote mode)",
   "albums.tetherRefresh": "Rescan",
   "albums.tetherScanning": "Scanning cameras…",

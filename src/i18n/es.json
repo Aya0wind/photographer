@@ -1279,7 +1279,7 @@
   "tether.refreshSettings": "Actualizar ajustes",
   "tether.noAdjustable": "No hay parámetros ajustables en esta cámara",  "albums.tether": "Captura conectada",
   "tether.quickbarDrag": "Arrastrar la barra",  "albums.tetherHint": "Conecta una cámara y dispara en directo a este álbum",
-  "albums.tetherDialogTitle": "Captura conectada a «{{name}}»",
+  "tether.modeDialHint": "El modo de exposición se controla con el dial de la cámara en este modelo",  "albums.tetherDialogTitle": "Captura conectada a «{{name}}»",
   "albums.tetherNoCamera": "No se encontró una cámara compatible (conéctala por USB y actívala en modo remoto)",
   "albums.tetherRefresh": "Volver a escanear",
   "albums.tetherScanning": "Escaneando cámaras…",

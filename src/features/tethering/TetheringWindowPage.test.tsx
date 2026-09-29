@@ -156,6 +156,37 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(screen.getByTestId("tether-shutter")).toBeInTheDocument();
   });
 
+  it("拍摄模式固定工具栏首位：只读标志下也不锁死（照常尝试切换）", async () => {
+    // P 档后机身把 expprogram 上报为只读——控件仍显示、仍可点，尝试下发
+    sessionMock.mockResolvedValue(
+      dto({ settings: [choice("expprogram", "P", false, ["P", "A", "S", "M"]), choice("iso", "400", false)] }),
+    );
+    settingSetMock.mockResolvedValue([choice("expprogram", "M", true, ["P", "A", "S", "M"])]);
+    renderPage();
+    const mode = await screen.findByTestId("tether-setting-expprogram");
+    expect(mode).toHaveTextContent("拍摄模式");
+    expect(mode).toHaveTextContent("P");
+    expect(mode).not.toBeDisabled();
+    expect(mode).toHaveAttribute("title", i18n.t("tether.modeDialHint"));
+    // 只读标志不拦截模式切换：点开弹层选 M，照常下发
+    fireEvent.click(mode);
+    fireEvent.click(screen.getByTestId("tether-quick-expprogram-menu").querySelector('[data-value="M"]')!);
+    await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "expprogram", "M"));
+    // 其他只读参数（ISO）依旧隐藏
+    expect(screen.queryByTestId("tether-setting-iso")).toBeNull();
+  });
+
+  it("拍摄模式可写（支持远程切换的机型）：弹层直接切档", async () => {
+    sessionMock.mockResolvedValue(
+      dto({ settings: [choice("expprogram", "P", true, ["P", "A", "S", "M"])] }),
+    );
+    settingSetMock.mockResolvedValue([choice("expprogram", "M", true, ["P", "A", "S", "M"])]);
+    renderPage();
+    fireEvent.click(await screen.findByTestId("tether-setting-expprogram"));
+    fireEvent.click(screen.getByTestId("tether-quick-expprogram-menu").querySelector('[data-value="M"]')!);
+    await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "expprogram", "M"));
+  });
+
   it("实时取景：帧轮询填充画面（data URL）", async () => {
     sessionMock.mockResolvedValue(dto());
     frameMock.mockResolvedValue("data:image/jpeg;base64,FRAME");
