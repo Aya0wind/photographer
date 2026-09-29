@@ -176,10 +176,59 @@ fn skip_policy_existing_dst_skips_without_full_download() {
     let states = journal_states(&open_db(db_dir.path()), job_id);
     assert_eq!(states.iter().filter(|s| **s == FileState::Skipped).count(), 1);
 
-    // 预跳只读头段（1MB 出头），绝不拉全量 5MB——修复前此处是 ~5MB
+    // 零设备 IO 预判（默认模板 {原文件名} + 相册级目录公式）：不碰源
+    let read = read_bytes.load(Ordering::Relaxed);
+    assert_eq!(
+        read, 0,
+        "默认模板下目标已存在应零 IO 预跳，实际读了 {read} 字节"
+    );
+}
+
+#[test]
+fn exif_dependent_template_falls_back_to_head_preflight() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+
+    // 命名含 {YYYY}（拍摄日期令牌）：预测不可用，回退头段预跳（≤1MB 头）
+    let mut content = vec![0u8; 5 * 1024 * 1024];
+    content[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+    fs::write(src.path().join("IMG_0002.jpg"), &content).unwrap();
+
+    // 无 EXIF → captured 回退清单 mtime；占用目录按该年份动态构造
+    let year: String = {
+        let mtime: chrono::DateTime<chrono::Utc> =
+            fs::metadata(src.path().join("IMG_0002.jpg")).unwrap().modified().unwrap().into();
+        mtime.format("%Y").to_string()
+    };
+    let occupied = expected_ungrouped_dir(db_dir.path(), target.path())
+        .join(&year)
+        .join("IMG_0002.jpg");
+    fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+    fs::write(&occupied, b"occupied").unwrap();
+
+    let read_bytes = std::sync::Arc::new(AtomicU64::new(0));
+    let db = open_db(db_dir.path());
+    let bus = events::EventBus::new();
+    let source = CountingSource {
+        inner: devices::volume::VolumeSource::new(src.path()),
+        read_bytes: std::sync::Arc::clone(&read_bytes),
+    };
+    let mut plan = common::plan_for(target.path());
+    plan.duplicate_policy = DuplicatePolicy::Skip;
+    plan.skip_imported = false;
+    plan.name_template = "{YYYY}/{原文件名}".into();
+    plan.album_id = Some(db.ensure_default_album().unwrap());
+    let mut engine = import::engine::Engine::new(db, bus, Box::new(source), plan);
+    engine.begin().unwrap();
+    let stats = engine.run();
+
+    assert_eq!(stats.skipped_duplicates, 1);
     let read = read_bytes.load(Ordering::Relaxed);
     assert!(
-        read <= 2 * 1024 * 1024,
-        "目标已存在应免下载预跳，实际读了 {read} 字节"
+        read > 0 && read <= 2 * 1024 * 1024,
+        "EXIF 模板应走头段预跳（>0 且 ≤2MB），实际 {read} 字节"
     );
 }

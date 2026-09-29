@@ -203,6 +203,21 @@ pub(super) fn copy_one(
         }
     };
 
+    // 零设备 IO 预跳（2026-09-29 二轮提速，用户实测头段预跳后仍 ~500ms/
+    // 张——MTP 小传输的会话建立固定开销就是大头）：目录公式是相册级
+    // 字面量、默认命名 {原文件名} 只用清单文件名，目标路径无需 EXIF
+    // 即可预测。预测路径已存在（Skip/Ask）→ 连流都不开。模板依赖
+    // EXIF（含 {拍摄日期}/{相机} 等）时预测返回 None，回退头段预跳。
+    if matches!(duplicate_policy, DuplicatePolicy::Skip | DuplicatePolicy::Ask) {
+        if let Some(dst) = predict_dst(target_root, dir_template, name_template, entry) {
+            if dst.exists() {
+                return FileOutcome::Skipped {
+                    entry: entry.clone(),
+                };
+            }
+        }
+    }
+
     let mut reader = match source.stream(&entry.id) {
         Ok(reader) => reader,
         Err(DeviceError::Disconnected) => return disconnect("设备连接中断".into()),
@@ -354,6 +369,44 @@ fn render_dst(ctx: &RenderCtx, dir_template: &str, name_template: &str) -> Resul
             Err(format!("命名模板含未知令牌「{token}」，请检查导入设置"))
         }
     }
+}
+
+/// 无设备 IO 的目标路径预测：用两组差异化的哨兵上下文各渲染一次，结果
+/// 相同 ⇔ 模板不含任何 EXIF 相关令牌（目录公式本就是相册级字面量，默认
+/// 命名 {原文件名} 只用清单文件名）——路径与文件内容无关，可放心按清单
+/// 预测。依赖 EXIF 的模板（两次结果不同或渲染报错）返回 None。
+fn predict_dst(
+    target_root: &Path,
+    dir_template: &str,
+    name_template: &str,
+    entry: &FileEntry,
+) -> Option<PathBuf> {
+    let sentinel_time = |year: i32| {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, year, 1, 2, 3, 4, 5)
+            .single()
+            .expect("哨兵日期恒合法")
+    };
+    let render = |year: i32, mark: &str| -> Option<String> {
+        let (stem, ext) = split_stem_ext(&entry.rel_path);
+        let ctx = RenderCtx {
+            captured_at: sentinel_time(year),
+            camera: Some(format!("相机{mark}")),
+            lens: Some(format!("镜头{mark}")),
+            original_stem: stem,
+            ext,
+        };
+        Some(format!(
+            "{}/{}",
+            render_dir(dir_template, &ctx).ok()?,
+            render_name(name_template, &ctx).ok()?
+        ))
+    };
+    let a = render(1970, "A")?;
+    let b = render(2099, "乙")?;
+    if a != b {
+        return None;
+    }
+    Some(target_root.join(a))
 }
 
 fn split_stem_ext(rel_path: &str) -> (String, String) {
