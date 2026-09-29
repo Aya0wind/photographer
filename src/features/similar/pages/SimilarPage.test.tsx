@@ -11,7 +11,7 @@ import SimilarPage from "./SimilarPage";
 import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
 import {
   assetThumbGet,
-  duplicateDelete,
+  assetTrashMoveChecked,
   duplicatesList,
   type AssetDto,
   type DuplicateGroupDto,
@@ -22,7 +22,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     duplicatesList: vi.fn(),
-    duplicateDelete: vi.fn(),
+    assetTrashMoveChecked: vi.fn(),
     assetThumbGet: vi.fn(),
   };
 });
@@ -33,7 +33,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const listMock = vi.mocked(duplicatesList);
-const deleteMock = vi.mocked(duplicateDelete);
+const trashMoveMock = vi.mocked(assetTrashMoveChecked);
 const thumbMock = vi.mocked(assetThumbGet);
 
 // --- 工具 ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ function renderSimilar() {
 
 beforeEach(() => {
   listMock.mockReset().mockResolvedValue([]);
-  deleteMock.mockReset().mockResolvedValue(0);
+  trashMoveMock.mockReset().mockResolvedValue(undefined);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   resetThumbPipelineForTests();
 });
@@ -93,11 +93,11 @@ describe("相似照片：Tab 与组渲染", () => {
 // --- 勾选 + 删除确认流 ----------------------------------------------------------------
 
 describe("相似照片：勾选删除", () => {
-  it("点选组内照片 → 删除所选（按钮带计数）→ 二次确认 → duplicateDelete → 组内剔除 + 已删除反馈", async () => {
+  it("点选组内照片 → 删除所选（按钮带计数）→ 二次确认 → asset_trash_move → 组内剔除 + 已移入回收站反馈", async () => {
     listMock.mockResolvedValue([
       { kind: "similar", assets: [makeAsset(1), makeAsset(2), makeAsset(3)] },
     ]);
-    deleteMock.mockResolvedValue(2);
+    trashMoveMock.mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderSimilar();
 
@@ -111,26 +111,26 @@ describe("相似照片：勾选删除", () => {
     await user.click(within(tiles[2]).getByTestId("similar-asset-check"));
     expect(tiles[1]).toHaveAttribute("data-selected", "true");
     expect(tiles[0]).not.toHaveAttribute("data-selected");
-    expect(deleteButton).toHaveTextContent("删除所选（2）");
+    expect(deleteButton).toHaveTextContent("移入回收站（2）");
 
     // 确认弹窗（红色二次确认）→ 取消不发
     await user.click(deleteButton);
     const dialog = screen.getByTestId("similar-confirm");
-    expect(dialog).toHaveTextContent("将永久删除所选 2 张");
+    expect(dialog).toHaveTextContent("将把所选 2 张移入回收站");
     await user.click(screen.getByTestId("similar-confirm-cancel"));
-    expect(deleteMock).not.toHaveBeenCalled();
+    expect(trashMoveMock).not.toHaveBeenCalled();
 
     // 确认路径：ids 传选中两张；组内剔除后剩 1 张（组卡移除）；行内反馈
     await user.click(within(card).getByTestId("similar-group-delete"));
     await user.click(screen.getByTestId("similar-confirm-yes"));
-    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith([2, 3]));
-    expect(await screen.findByTestId("similar-feedback")).toHaveTextContent("已删除 2 张");
+    await waitFor(() => expect(trashMoveMock).toHaveBeenCalledWith([2, 3]));
+    expect(await screen.findByTestId("similar-feedback")).toHaveTextContent("已移入回收站 2 张");
     await waitFor(() => expect(screen.queryByTestId("similar-group")).not.toBeInTheDocument());
   });
 
   it("删除失败（后端 Err 文案透传），组不变", async () => {
     listMock.mockResolvedValue([{ kind: "similar", assets: [makeAsset(1), makeAsset(2)] }]);
-    deleteMock.mockRejectedValue("未选择活动库");
+    trashMoveMock.mockRejectedValue("未选择活动库");
     const user = userEvent.setup();
     renderSimilar();
 
@@ -167,7 +167,7 @@ describe("相似照片：分页游标", () => {
   it("删除使整组消失后游标同步收缩：加载更多 after=19（不跳组）", async () => {
     const page1 = Array.from({ length: 20 }, (_, i) => groupOf([100 + i * 2, 101 + i * 2]));
     listMock.mockResolvedValueOnce(page1).mockResolvedValueOnce([groupOf([300, 301])]);
-    deleteMock.mockResolvedValue(2);
+    trashMoveMock.mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderSimilar();
 

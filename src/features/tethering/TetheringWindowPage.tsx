@@ -122,6 +122,7 @@ export default function TetheringWindowPage() {
   const captureRef = useRef(false);
   const focusingRef = useRef(false);
   const refreshingRef = useRef(false);
+  const settingsDirty = useRef(false);
   const settingsVersion = useRef(0);
   const alive = useRef(true);
   const refreshTimer = useRef<number | null>(null);
@@ -180,9 +181,10 @@ export default function TetheringWindowPage() {
   // 参数快照轮询：机身档位切换（A/S/M…）改变参数可写性，快门/光圈等
   // 的显示隐藏依赖最新 writable；断连不轮询。
   /** 全量参数快照刷新（轮询 / 改参联动 / 手动刷新按钮共用）；失败静默。 */
-  const refreshSettings = useCallback(async () => {
+  const refreshSettings = useCallback(async function refresh() {
     if (sessionId === "" || !alive.current || refreshingRef.current || writingRef.current || captureRef.current || focusingRef.current) return;
     const version = settingsVersion.current;
+    settingsDirty.current = false;
     refreshingRef.current = true;
     try {
       const next = await tetheringSettings(sessionId);
@@ -193,10 +195,16 @@ export default function TetheringWindowPage() {
       /* 变化通知与低频快照均会重试，单次失败不打断操作。 */
     } finally {
       refreshingRef.current = false;
+      // 读取期间又有变化通知：结束后补一次，不丢变化，也不并发读取。
+      if (settingsDirty.current && alive.current && !writingRef.current && !captureRef.current && !focusingRef.current) {
+        if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+        refreshTimer.current = window.setTimeout(() => { refreshTimer.current = null; void refresh(); }, 200);
+      }
     }
   }, [sessionId]);
 
   const scheduleSettingsRefresh = useCallback(() => {
+    settingsDirty.current = true;
     if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
@@ -261,6 +269,7 @@ export default function TetheringWindowPage() {
           prev === null ? prev : { ...prev, connected: event.connected, error: event.error },
         );
       } else if (event.type === "tetheringSettingsChanged" && event.sessionId === sessionId) {
+        settingsVersion.current += 1;
         scheduleSettingsRefresh();
       }
     })
@@ -280,11 +289,19 @@ export default function TetheringWindowPage() {
     if (sessionId === "" || !liveViewSupported || !connected || capturing || settingsBusy) return;
     let stopped = false;
     let timer: number | null = null;
+    let emptyFrames = 0;
     const tick = () => {
       void tetheringFrame(sessionId).then((url) => {
         if (stopped || !alive.current) return;
-        if (url !== null) setFrame(url);
-        timer = window.setTimeout(tick, framePollMs(fps));
+        if (url !== null) {
+          setFrame(url);
+          emptyFrames = 0;
+        } else {
+          emptyFrames += 1;
+        }
+        // 相机忙或暂时拿不到画面时退让，避免高帧率重复失败请求。
+        const delay = url === null ? Math.min(500, framePollMs(fps) * Math.min(emptyFrames, 15)) : framePollMs(fps);
+        timer = window.setTimeout(tick, delay);
       });
     };
     tick();
@@ -387,6 +404,7 @@ export default function TetheringWindowPage() {
       /* 相机不支持/模式不符：标记自然消失即可，不打断取景 */
     } finally {
       focusingRef.current = false;
+      if (alive.current && settingsDirty.current) scheduleSettingsRefresh();
     }
   }
 
@@ -445,6 +463,7 @@ export default function TetheringWindowPage() {
       /* 相机不支持：绿闪照常消失 */
     } finally {
       focusingRef.current = false;
+      if (alive.current && settingsDirty.current) scheduleSettingsRefresh();
     }
   }
 

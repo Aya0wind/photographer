@@ -159,12 +159,6 @@ export async function duplicatesList(
   }
 }
 
-/** 批量删除资产（duplicate_delete：文件 + 库行级联，幂等容忍文件缺失）。
- *  返回实际删除数；业务错误（如未选库）原样抛给调用方展示。 */
-export async function duplicateDelete(assetIds: number[]): Promise<number> {
-  const deleted = await ipc<number>("duplicate_delete", { assetIds });
-  return typeof deleted === "number" ? deleted : 0;
-}
 
 /** 标记资产被浏览（asset_view_mark；查看器打开/切图时调用，fire-and-forget）。
  *  命令失败静默——浏览打点不阻塞查看。 */

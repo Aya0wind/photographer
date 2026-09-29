@@ -21,7 +21,7 @@ import {
   burstStats,
   gearStats,
   onThisDay,
-  duplicateDelete,
+
   duplicatesList,
   assetFlagSet,
   assetRatingSet,
@@ -778,13 +778,5 @@ describe("M4 AI 命令", () => {
     await expect(duplicatesList("exact")).resolves.toEqual([groups[0]]);
   });
 
-  it("duplicateDelete 传 assetIds 返回实际删除数；业务错误原样抛出", async () => {
-    invokeMock.mockResolvedValueOnce(2);
-    await expect(duplicateDelete([4, 5])).resolves.toBe(2);
-    expect(invokeMock).toHaveBeenCalledWith("duplicate_delete", { assetIds: [4, 5] });
 
-    // 后端 Err（如未选库）透传给调用方展示
-    invokeMock.mockRejectedValueOnce("未选择活动库");
-    await expect(duplicateDelete([4])).rejects.toBe("未选择活动库");
-  });
 });

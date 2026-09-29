@@ -15,6 +15,7 @@ import {
   tetheringSession,
   tetheringSettingSet,
   tetheringSettings,
+  type TetherCaptureResult,
   type TetherSessionDto,
 } from "@/ipc/api";
 import type { CameraInfo, TetherCameraSetting } from "@/ipc/api";
@@ -194,7 +195,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
 
   it("连续点击快门只触发一次，失败后可以再次拍摄", async () => {
     sessionMock.mockResolvedValue(dto());
-    const capture = deferred<{ ok: boolean; error?: string }>();
+    const capture = deferred<TetherCaptureResult>();
     captureMock.mockReturnValueOnce(capture.promise).mockResolvedValueOnce({ ok: true });
     renderPage();
     const shutter = await screen.findByTestId("tether-shutter");

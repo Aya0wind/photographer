@@ -29,6 +29,11 @@ export async function assetTrashMove(assetIds: number[]): Promise<void> {
   }
 }
 
+/** 移入回收站（可抛错版：相似照片页等需要错误透传给用户的调用方）。 */
+export async function assetTrashMoveChecked(assetIds: number[]): Promise<void> {
+  await ipc<void>("asset_trash_move", { assetIds });
+}
+
 /** 回收站清单（trash_list；trashedAt DESC keyset：afterId=上一页末条 id，首页传 0）。
  *  失败/非数组回退 []——UI 自然降级空态。 */
 export async function trashList(afterId: number, limit: number): Promise<AssetDto[]> {

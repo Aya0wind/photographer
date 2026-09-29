@@ -71,6 +71,11 @@ mod gpt {
     // 函数指针类型：字段名即 libgphoto2 符号名，供 libloading 按名解析。
     pub type gp_context_new = unsafe extern "C" fn() -> *mut std::ffi::c_void;
     pub type gp_context_unref = unsafe extern "C" fn(*mut std::ffi::c_void);
+    pub type gp_context_set_error_func = unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void),
+        *mut std::ffi::c_void,
+    );
     pub type gp_list_new = unsafe extern "C" fn(*mut *mut CameraList) -> c_int;
     pub type gp_list_free = unsafe extern "C" fn(*mut CameraList) -> c_int;
     pub type gp_list_count = unsafe extern "C" fn(*const CameraList) -> c_int;
@@ -161,6 +166,7 @@ mod gpt {
 struct Symbols {
     gp_context_new: gpt::gp_context_new,
     gp_context_unref: gpt::gp_context_unref,
+    gp_context_set_error_func: gpt::gp_context_set_error_func,
     gp_list_new: gpt::gp_list_new,
     gp_list_free: gpt::gp_list_free,
     gp_list_count: gpt::gp_list_count,
@@ -222,6 +228,7 @@ impl Symbols {
         Ok(Symbols {
             gp_context_new: sym!(gp_context_new),
             gp_context_unref: sym!(gp_context_unref),
+            gp_context_set_error_func: sym!(gp_context_set_error_func),
             gp_list_new: sym!(gp_list_new),
             gp_list_free: sym!(gp_list_free),
             gp_list_count: sym!(gp_list_count),
@@ -477,6 +484,20 @@ unsafe fn cstr(raw: *const c_char) -> String {
     } else {
         CStr::from_ptr(raw).to_string_lossy().into_owned()
     }
+}
+
+unsafe extern "C" fn context_error(
+    _context: *mut std::ffi::c_void,
+    text: *const c_char,
+    _data: *mut std::ffi::c_void,
+) {
+    crate::devices::diagnostics::record(format!("tethering gphoto2 error: {}", cstr(text)));
+}
+
+unsafe fn context_new(s: &Symbols) -> *mut std::ffi::c_void {
+    let context = (s.gp_context_new)();
+    (s.gp_context_set_error_func)(context, context_error, std::ptr::null_mut());
+    context
 }
 
 fn check(code: c_int) -> Result<c_int, TetherError> {
@@ -930,7 +951,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let mut list: *mut gpt::CameraList = std::ptr::null_mut();
             let result = (|| {
                 check((s.gp_list_new)(&mut list))?;
@@ -966,7 +987,7 @@ impl CameraBackend for GphotoBackend {
         let port = pnp_id.strip_prefix("gphoto:").unwrap_or(pnp_id).to_string();
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = (|| -> Result<CameraInfo, TetherError> {
                 let mut ports: *mut gpt::GPPortInfoList = std::ptr::null_mut();
                 check((s.gp_port_info_list_new)(&mut ports))?;
@@ -1037,7 +1058,7 @@ impl CameraBackend for GphotoBackend {
             if let Ok(lib) = lib() {
                 let _guard = self.camera_mutex.lock().unwrap();
                 unsafe {
-                    let ctx = (lib.symbols.gp_context_new)();
+                    let ctx = context_new(&lib.symbols);
                     let _ = (lib.symbols.gp_camera_exit)(conn.camera, ctx);
                     (lib.symbols.gp_camera_free)(conn.camera);
                     (lib.symbols.gp_context_unref)(ctx);
@@ -1056,7 +1077,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = (|| {
                 let mut root: *mut gpt::CameraWidget = std::ptr::null_mut();
                 check((s.gp_camera_get_config)(conn.camera, &mut root, ctx))?;
@@ -1082,7 +1103,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = Self::apply_setting_by_name(s, ctx, conn.camera, id, value);
             (s.gp_context_unref)(ctx);
             result
@@ -1098,7 +1119,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = (|| {
                 let px = (x.clamp(0.0, 1.0) * 639.0).round() as i32;
                 let py = (y.clamp(0.0, 1.0) * 479.0).round() as i32;
@@ -1123,7 +1144,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let mut file: *mut gpt::CameraFile = std::ptr::null_mut();
             let result = (|| {
                 check((s.gp_file_new)(&mut file))?;
@@ -1151,7 +1172,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = (|| {
                 let mut path = std::mem::zeroed::<gpt::CameraFilePath>();
                 check((s.gp_camera_capture)(
@@ -1179,7 +1200,7 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let _guard = self.camera_mutex.lock().unwrap();
         unsafe {
-            let ctx = (s.gp_context_new)();
+            let ctx = context_new(s);
             let result = (|| -> Result<Vec<CapturedObject>, TetherError> {
                 let mut eventtype: c_int = 0;
                 let mut eventdata: *mut std::ffi::c_void = std::ptr::null_mut();

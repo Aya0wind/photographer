@@ -152,7 +152,9 @@ pub fn fetch_duplicates_list(
     }
 }
 
-/// 删除资产核（duplicate_delete）：删库行（FK 级联清 index_tasks/faces/
+/// 永久删除资产核（trash_purge 同路径；原 duplicate_delete 命令已删——
+/// 2026-09-29 定案：除回收站外一律软删，此核仅供测试/维护直接调用）：
+/// 删库行（FK 级联清 index_tasks/faces/
 /// view_history/similar_bucket；同款 DB 删除路径 assets_delete_rows 为
 /// 回收站 purge 共用，顺带清 pair 双向引用）+ 磁盘文件（缺失不报错）
 /// + 日志。缩略图缓存按 (path, mtime) 键成为孤儿——开发期容忍，整库重建可清。
@@ -205,18 +207,6 @@ pub async fn duplicates_list(
     .await
 }
 
-/// 批量删除资产（文件 + 库行级联；重复清理页的确认动作）。
-#[tauri::command]
-pub async fn duplicate_delete(
-    state: State<'_, SharedState>,
-    asset_ids: Vec<i64>,
-) -> Result<u64, String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, move |state| {
-        fetch_duplicate_delete(state, &asset_ids)
-    })
-    .await
-}
 
 /// 并查集（近重复候选聚合；路径压缩 + 按秩合并）。
 struct UnionFind {

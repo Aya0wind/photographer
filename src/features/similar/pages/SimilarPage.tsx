@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  duplicateDelete,
+  assetTrashMoveChecked,
   duplicatesList,
   type DuplicateGroupDto,
   type AssetDto,
@@ -19,7 +19,8 @@ import { useGalleryTileSize, type GalleryTileSize } from "@/features/gallery/lib
  *   （RAW+JPG 孪生后端已排除；连拍组内不排除——正是挑片场景）
  * - 组卡片列表：组头「N 张 · 近似」，组内缩略图走 thumbPipeline
  *   240 档（AssetThumb 与画廊同款）；点击照片预览；独立勾选要删的照片 → 「删除所选」二次确认
- *   → duplicateDelete（返回实际删除数）
+ *   → assetTrashMoveChecked（移入回收站——2026-09-29 定案：除回收站外
+ *     一律软删，真删只发生在回收站页）
  * - 删除后乐观更新：组内剔除已删项，<2 张的组整卡移除（后端同样不再返回）；
  *   游标 seen 同步减去消失的组数——after 是 0 基组偏移（skip 计数），
  *   服务端列表收缩后偏移对齐，加载更多不会跳组
@@ -250,7 +251,8 @@ export default function SimilarPage() {
     setDeleting(true);
     setError(null);
     try {
-      const deleted = await duplicateDelete(pending.ids);
+      await assetTrashMoveChecked(pending.ids);
+      const deleted = pending.ids.length;
       // 乐观更新：组内剔除已删项；<2 张的组整卡移除，游标同步收缩
       //（after 是 0 基组偏移——服务端列表少了几组，偏移也要减同数）
       const remaining = groups

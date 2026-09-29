@@ -308,7 +308,6 @@ pub fn run() {
             ipc::insights::gear_stats,
             ipc::insights::sidebar_counts,
             ipc::duplicates::duplicates_list,
-            ipc::duplicates::duplicate_delete,
             ipc::assets::lens_list,
             ipc::assets::format_list,
             ipc::assets::assets_by_ids,
