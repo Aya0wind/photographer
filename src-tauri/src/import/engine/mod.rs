@@ -48,6 +48,10 @@ use pipeline::{copy_one, CopiedFile, FileOutcome};
 
 /// 进度事件最小间隔（spec：≥100ms）。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// 实时速率窗口（用户定案 2026-09-29）：按最近 1 秒的 done_bytes 增量计算，
+/// 不拿总时间除总字节——跳过/失败阶段的无流量时间一进分母，后续速度就被
+/// 稀释（实测：全量重导已存在照片后，真实拷贝段速度显示偏低）。
+const RATE_WINDOW: Duration = Duration::from_secs(1);
 /// 暂停时工作线程的轮询间隔。
 const PAUSE_POLL: Duration = Duration::from_millis(10);
 /// `.part` 集中暂存目录名（各目标根下，点前缀）。
@@ -181,8 +185,11 @@ impl Counters {
         self.done_bytes + self.skipped_bytes + self.failed_bytes
     }
 
-    fn into_stats(self, elapsed: Duration) -> JobStats {
-        let secs = elapsed.as_secs_f64();
+    /// `active`：done_bytes 实际有增长的时间累计（跳过/失败/等待不计入）。
+    /// elapsed 仍是总耗时（时长展示）；速度只按活跃时间折算，同
+    /// [`RATE_WINDOW`] 的动机——无流量阶段不得稀释速度。
+    fn into_stats(self, elapsed: Duration, active: Duration) -> JobStats {
+        let active_secs = active.as_secs_f64();
         JobStats {
             total_files: self.total_files,
             done_files: self.done_files,
@@ -191,13 +198,52 @@ impl Counters {
             total_bytes: self.total_bytes,
             done_bytes: self.done_bytes,
             elapsed_ms: elapsed.as_millis() as u64,
-            bytes_per_sec: if secs > 0.0 {
-                self.done_bytes as f64 / secs
+            bytes_per_sec: if active_secs > 0.0 {
+                self.done_bytes as f64 / active_secs
             } else {
                 0.0
             },
             moved: self.moved,
             source_delete_failed: self.source_delete_failed,
+        }
+    }
+}
+
+/// 滑动窗口传输速率（进度事件用）：保留窗口内的 (时刻, done_bytes) 样本，
+/// 速率=首尾字节增量/首尾时间增量。字节平坦（跳过/等待/卡死）自然归零，
+/// 久远的高吞吐样本随窗口滑出衰减——总耗时除法做不到这两点。
+#[derive(Debug)]
+struct TransferRate {
+    window: Duration,
+    samples: std::collections::VecDeque<(std::time::Instant, u64)>,
+}
+
+impl TransferRate {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            samples: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 记录一个样本（每个文件结果到达时调用一次），返回当前窗口速率。
+    fn update(&mut self, now: std::time::Instant, done_bytes: u64) -> f64 {
+        let cutoff = now.checked_sub(self.window);
+        while let Some(&(t, _)) = self.samples.front() {
+            match cutoff {
+                Some(c) if t < c => {
+                    self.samples.pop_front();
+                }
+                // 平台不支持 checked_sub（理论上仅极老系统）：退化为不清窗。
+                _ => break,
+            }
+        }
+        self.samples.push_back((now, done_bytes));
+        match (self.samples.front(), self.samples.back()) {
+            (Some(&(t0, b0)), Some(&(t1, b1))) if t1 > t0 && b1 > b0 => {
+                (b1 - b0) as f64 / (t1 - t0).as_secs_f64()
+            }
+            _ => 0.0,
         }
     }
 }
@@ -407,7 +453,7 @@ impl Engine {
                     recoverable: true,
                 });
                 self.controls.done.store(true, Ordering::SeqCst);
-                return Counters::default().into_stats(Duration::ZERO);
+                return Counters::default().into_stats(Duration::ZERO, Duration::ZERO);
             }
         }
         let prepared = self.prepared.take().expect("begin ensured prepared");
@@ -425,7 +471,8 @@ impl Engine {
             self.bus.publish(AppEvent::DeviceUnavailable {
                 id: self.source.id(),
             });
-            let stats = counters.into_stats(started.elapsed());
+            // 循环未起步，无活跃时间可言
+            let stats = counters.into_stats(started.elapsed(), Duration::ZERO);
             let _ = self.db.finish_job(
                 job_id,
                 "paused",
@@ -466,11 +513,11 @@ impl Engine {
                 let _ = self.db.finish_job(
                     job_id,
                     "error",
-                    &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO))
+                    &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO, Duration::ZERO))
                         .unwrap_or_default(),
                 );
                 self.controls.done.store(true, Ordering::SeqCst);
-                return Counters::default().into_stats(Duration::ZERO);
+                return Counters::default().into_stats(Duration::ZERO, Duration::ZERO);
             }
         };
 
@@ -562,8 +609,21 @@ impl Engine {
 
         let mut progress = Throttle::new(PROGRESS_INTERVAL);
         let mut last_completed_src = String::new();
+        // 速率/活跃时间统计见 RATE_WINDOW 与 Counters::into_stats 注释：
+        // 每个文件结果到达即记一个样本；done_bytes 有增长才算活跃时间。
+        let mut rate = TransferRate::new(RATE_WINDOW);
+        let mut last_tick = Instant::now();
+        let mut last_done_bytes = counters.done_bytes;
+        let mut active = Duration::ZERO;
 
         for outcome in result_rx {
+            let tick_now = Instant::now();
+            if counters.done_bytes > last_done_bytes {
+                active += tick_now.saturating_duration_since(last_tick);
+            }
+            last_tick = tick_now;
+            last_done_bytes = counters.done_bytes;
+            let window_rate = rate.update(tick_now, counters.done_bytes);
             match outcome {
                 FileOutcome::Copied(copied) => {
                     let entry = &copied.entry;
@@ -683,18 +743,14 @@ impl Engine {
 
             // 节流进度（按已结算字节占比：done+skipped+failed）
             if progress.should_fire() {
-                let secs = started.elapsed().as_secs_f64();
                 self.bus.publish(AppEvent::ImportFileProgress {
                     job_id,
                     done_files: counters.done_files,
                     done_bytes: counters.done_bytes,
                     settled_bytes: counters.settled_bytes(),
                     current_file: last_completed_src.clone(),
-                    bytes_per_sec: if secs > 0.0 {
-                        counters.done_bytes as f64 / secs
-                    } else {
-                        0.0
-                    },
+                    // 实时速度=最近 1 秒窗口增量（见 RATE_WINDOW）
+                    bytes_per_sec: window_rate,
                 });
             }
         }
@@ -729,7 +785,7 @@ impl Engine {
         } else {
             "done"
         };
-        let stats = counters.into_stats(started.elapsed());
+        let stats = counters.into_stats(started.elapsed(), active);
         let _ = self.db.finish_job(
             job_id,
             status,
@@ -1051,4 +1107,49 @@ fn resume_has_pending(prepared: &Prepared) -> bool {
         .resume_srcs
         .as_ref()
         .is_some_and(|srcs| !srcs.is_empty())
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::TransferRate;
+    use std::time::{Duration, Instant};
+
+    /// 跳过阶段（字节平坦）不计入速率分母：60s 无流量后 1s 内拷 100MB，
+    /// 速率应是 ~100MB/s 而不是 100MB/61s（总耗时法的稀释 bug）。
+    #[test]
+    fn skip_phase_does_not_dilute_later_speed() {
+        let mut rate = TransferRate::new(Duration::from_secs(1));
+        let t0 = Instant::now();
+        // 60 秒跳过阶段：样本时间推进、字节不动
+        let r = rate.update(t0 + Duration::from_secs(60), 0);
+        assert_eq!(r, 0.0);
+        // 随后 1 秒拷完 100MB（两个样本划出增量）
+        rate.update(t0 + Duration::from_secs(60) + Duration::from_millis(900), 90_000_000);
+        let r = rate.update(t0 + Duration::from_secs(61), 100_000_000);
+        // 窗口内增量 100MB-0? 不——90MB 样本已把基线抬高，窗口≈100ms/10MB
+        // 断言量级即可（≥10MB/s；总耗时法此时只有 ~1.6MB/s）
+        assert!(r > 10_000_000.0, "diluted rate: {r}");
+    }
+
+    /// 字节平坦 → 0；单样本 → 0。
+    #[test]
+    fn flat_or_single_sample_yields_zero() {
+        let mut rate = TransferRate::new(Duration::from_secs(1));
+        let t0 = Instant::now();
+        assert_eq!(rate.update(t0, 0), 0.0);
+        assert_eq!(rate.update(t0 + Duration::from_millis(500), 0), 0.0);
+        let mut solo = TransferRate::new(Duration::from_secs(1));
+        assert_eq!(solo.update(t0, 1_000), 0.0);
+    }
+
+    /// 窗口外的旧样本滑出：10s 前的高吞吐不参与当前速率。
+    #[test]
+    fn stale_samples_fall_out_of_window() {
+        let mut rate = TransferRate::new(Duration::from_secs(1));
+        let t0 = Instant::now();
+        rate.update(t0, 0);
+        rate.update(t0 + Duration::from_millis(500), 1_000_000_000);
+        // 10s 后再记样本：窗口里只剩新样本 → 0（旧吞吐已滑出）
+        assert_eq!(rate.update(t0 + Duration::from_secs(10), 1_000_000_000), 0.0);
+    }
 }

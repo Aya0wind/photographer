@@ -69,7 +69,9 @@ fn start_pause_resume_cancel_state_machine() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    build_many(src.path(), 8);
+    // 文件数决定 Busy 窗口宽度：太少时满载并跑下首任务会在二次 start
+    // 前就跑完（2026-09-29 全量并跑实测 flaky），60 个足够撑住断言链。
+    build_many(src.path(), 60);
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(25));
 
     let job_id = start_import(&state, ipc_plan(&state, target.path())).unwrap();
