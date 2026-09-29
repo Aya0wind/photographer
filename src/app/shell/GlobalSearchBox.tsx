@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { useAiStore } from "@/stores/aiStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useSemanticGate } from "@/features/ai/useSemanticSearch";
 import { SemanticGateNotice } from "@/features/ai/SemanticResultsView";
 
@@ -15,8 +16,11 @@ import { SemanticGateNotice } from "@/features/ai/SemanticResultsView";
  * - 右侧过滤图标 → /gallery（条件筛选在画廊工具条）
  * - 语义搜索前置门禁（模型未齐/索引从未建立）：回车不导航不发查询，输入文字
  *   保留，输入框下拉行内提示（带一键跳设置 AI tab）
- * - 语义索引未就绪（aiStore indexStatus ai.done<total）：输入框下细提示条
- *   （不阻塞输入；数据源与任务抽屉的常驻轮询同源）
+ * - 语义功能未开启（settings.ai.enableClip=false）：输入框禁用（占位文案
+ *   引导去设置开启），不显示任何索引提示（2026-09-29 用户报告：未开功能
+ *   也常驻显示「语义索引建立中」）
+ * - 索引提示只在语义任务真的在跑（pending+running>0）时显示——done<total
+ *   的历史欠账不再触发（任务没在跑时提示是误导）
  */
 export default function GlobalSearchBox() {
   const { t } = useTranslation();
@@ -30,11 +34,12 @@ export default function GlobalSearchBox() {
     setValue(urlQuery);
   }, [urlQuery]);
   const indexStatus = useAiStore((s) => s.indexStatus);
+  const semanticEnabled = useSettingsStore((s) => s.settings.ai?.enableClip === true);
   const gate = useSemanticGate();
   const [gateBlocked, setGateBlocked] = useState(false);
 
-  const aiIncomplete =
-    indexStatus !== null && indexStatus.ai.total > 0 && indexStatus.ai.done < indexStatus.ai.total;
+  const aiBuilding =
+    indexStatus !== null && (indexStatus.ai.pending > 0 || indexStatus.ai.running > 0);
 
   function submit(): void {
     const q = value.trim();
@@ -52,6 +57,7 @@ export default function GlobalSearchBox() {
       <input
         type="text"
         value={value}
+        disabled={!semanticEnabled}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -59,7 +65,8 @@ export default function GlobalSearchBox() {
             submit();
           }
         }}
-        placeholder={t("globalsearch.placeholder")}
+        placeholder={semanticEnabled ? t("globalsearch.placeholder") : t("globalsearch.disabled")}
+        title={semanticEnabled ? undefined : t("globalsearch.disabled")}
         aria-label={t("globalsearch.placeholder")}
         data-testid="globalsearch-input"
         className="h-7 w-56 rounded-md border border-edge bg-bg pl-7 pr-8 text-[11px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:w-64 focus:border-accent"
@@ -110,8 +117,8 @@ export default function GlobalSearchBox() {
         </div>
       )}
 
-      {/* 语义索引未就绪：细提示条（绝对定位于输入框下，不挤占标题栏） */}
-      {aiIncomplete && (
+      {/* 语义索引任务在跑：细提示条（绝对定位于输入框下，不挤占标题栏） */}
+      {semanticEnabled && aiBuilding && (
         <div
           className="absolute left-0 top-full z-20 mt-1 rounded border border-edge bg-surface px-2 py-1 text-[10px] leading-tight text-text-muted shadow-lg"
           data-testid="globalsearch-hint"

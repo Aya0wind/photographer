@@ -158,6 +158,8 @@
   "globalsearch.placeholder": "輸入一段描述搜索照片…",
   "globalsearch.filter": "條件篩選",
   "globalsearch.indexHint": "語義索引建立中，搜索結果可能不全",
+  "globalsearch.disabled": "未開啟語義搜尋（設定 → AI 中開啟）",
+  "splash.loading": "正在啟動…",
   "gallery.yearRail": "按年份跳轉",
   "pages.gallery.title": "照片畫廊（M4 交付）",
   "pages.gallery.desc": "縮圖虛擬網格、看圖與評分瀏覽將在里程碑 M4 於此交付。",

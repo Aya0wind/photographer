@@ -53,6 +53,21 @@ pub fn run() {
                 .expect("failed to resolve app config dir");
             std::fs::create_dir_all(&config_dir)?;
             devices::diagnostics::init(&config_dir);
+            // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
+            // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    if let (Some(main), Some(splash)) = (
+                        handle.get_webview_window("main"),
+                        handle.get_webview_window("splash"),
+                    ) {
+                        let _ = main.show();
+                        let _ = splash.close();
+                    }
+                });
+            }
             // 联拍 libgphoto2 随包目录注入：Tauri 资源根（Windows 与 exe 同
             // 目录，macOS 为 Contents/Resources）——覆盖所有平台的安装布局。
             if std::env::var_os("PHOTO_HUB_GPHOTO_DLL").is_none() {

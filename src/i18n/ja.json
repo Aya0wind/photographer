@@ -158,6 +158,8 @@
   "globalsearch.placeholder": "写真を検索するには説明を入力してください…",
   "globalsearch.filter": "フィルター",
   "globalsearch.indexHint": "セマンティック インデックスが確立されているため、検索結果が不完全になる可能性があります。",
+  "globalsearch.disabled": "セマンティック検索は無効です（設定 → AI で有効化）",
+  "splash.loading": "起動中…",
   "gallery.yearRail": "年で移動",
   "pages.gallery.title": "写真ライブラリ",
   "pages.gallery.desc": "サムネイルの仮想グリッド、画像の表示、および評価の閲覧は、ここ Milestone M4 で提供されます。",

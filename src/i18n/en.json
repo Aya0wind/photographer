@@ -158,6 +158,8 @@
   "globalsearch.placeholder": "Enter a description to search for photos…",
   "globalsearch.filter": "Conditional filtering",
   "globalsearch.indexHint": "The semantic index is being established, and the search results may be incomplete.",
+  "globalsearch.disabled": "Semantic search is off (enable in Settings → AI)",
+  "splash.loading": "Starting…",
   "gallery.yearRail": "Jump by year",
   "pages.gallery.title": "Photo Gallery (delivered in M4)",
   "pages.gallery.desc": "Thumbnail virtual grid, image viewing and rating browsing will be delivered here at Milestone M4.",

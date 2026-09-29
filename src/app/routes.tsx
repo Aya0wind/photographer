@@ -14,6 +14,8 @@ import GearPage from "@/features/gear/pages/GearPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import SimilarPage from "@/features/similar/pages/SimilarPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
+import SplashPage from "@/app/SplashPage";
+import { useWindowReveal } from "@/lib/windowReveal";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import CullingPage from "@/features/culling/pages/CullingPage";
@@ -30,6 +32,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
  */
 export function GatedShell() {
   const loaded = useSettingsStore((s) => s.loaded);
+  useWindowReveal(loaded);
   const libraryChosen = useSettingsStore((s) => s.libraryChosen);
   const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
   const libraries = useSettingsStore((s) => s.settings.libraries);
@@ -50,6 +53,8 @@ export function SearchRedirect() {
 
 export const router = createBrowserRouter([
   // 启动首屏：库选择器（达芬奇式，每次启动先选库）
+  // 启动画面（splash 窗口加载；主窗口就绪后被关闭——见 lib/windowReveal）
+  { path: "/splash", element: <SplashPage /> },
   { path: "/library-picker", element: <LibraryPickerPage /> },
   // 新建库配置链 / 未配置库补完（?library=<id>）：独立于主壳全屏展示
   { path: "/onboarding", element: <OnboardingPage /> },

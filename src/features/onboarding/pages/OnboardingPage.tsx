@@ -15,6 +15,7 @@ import LibraryStep from "../steps/LibraryStep";
 import { suggestedLibraryName } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { useWindowReveal } from "@/lib/windowReveal";
 import { resetLibrarySession } from "@/lib/librarySession";
 import { useAiStore } from "@/stores/aiStore";
 import { gapsForIds } from "@/features/settings/lib/qualityTier";
@@ -81,6 +82,7 @@ export default function OnboardingPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const loaded = useSettingsStore((s) => s.loaded);
+  useWindowReveal(loaded);
   const models = useAiStore((s) => s.models);
   const [preparingAi, setPreparingAi] = useState(false);
   const [saving, setSaving] = useState(false);

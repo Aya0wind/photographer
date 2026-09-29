@@ -8,6 +8,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import i18n from "@/i18n";
 import GlobalSearchBox from "./GlobalSearchBox";
 import { useAiStore } from "@/stores/aiStore";
+import { DEFAULT_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
 import { aiModelsStatus, indexStatus, type AiModelStatus, type IndexStatus } from "@/ipc/api";
 
 // 门禁真值 mock：useSemanticGate 挂载即拉 ai_models_status / index_status
@@ -105,6 +106,12 @@ function gatedModels(): AiModelStatus[] {
 }
 
 beforeEach(() => {
+  // 语义搜索测试默认开启功能（关闭态另有专测）
+  useSettingsStore.setState({
+    settings: { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, enableClip: true } },
+    loaded: true,
+  });
+
   useAiStore.getState().resetForTests();
   // 默认就绪：模型全装 + 语义索引已建（库内有资产）
   aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
@@ -147,6 +154,18 @@ describe("顶部全局搜索框（M4.5 A1）", () => {
 
     await user.click(screen.getByTestId("globalsearch-filter"));
     expect(await screen.findByTestId("search-probe")).toBeInTheDocument();
+  });
+
+  it("语义功能未开启：输入框禁用（占位引导去设置），不显示索引提示", () => {
+    useSettingsStore.setState({
+      settings: { ...DEFAULT_SETTINGS, ai: { ...DEFAULT_SETTINGS.ai, enableClip: false } },
+    });
+    useAiStore.setState({ indexStatus: aiStatus(30, 100) });
+    renderBox();
+    const input = screen.getByTestId("globalsearch-input");
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("placeholder", "未开启语义搜索（设置 → AI 中开启）");
+    expect(screen.queryByTestId("globalsearch-hint")).not.toBeInTheDocument();
   });
 
   it("语义索引未建完 → 输入框下细提示条；建完/未知不提示", () => {

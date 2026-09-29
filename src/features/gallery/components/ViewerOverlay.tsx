@@ -755,7 +755,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 data-fallback={sourceKind(layer.src)}
                 className={`${
                   layer.phase === "loading" ? "invisible " : "absolute "
-                }max-h-full max-w-full select-none object-contain`}
+                }max-h-full max-w-full select-none object-contain will-change-transform [backface-visibility:hidden]`}
                 style={{
                   // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
                   // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）

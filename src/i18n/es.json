@@ -158,6 +158,8 @@
   "globalsearch.placeholder": "Ingresa una descripción para buscar fotos…",
   "globalsearch.filter": "Filtrado condicional",
   "globalsearch.indexHint": "El índice semántico se está estableciendo y los resultados de la búsqueda pueden estar incompletos.",
+  "globalsearch.disabled": "Búsqueda semántica desactivada (activar en Ajustes → IA)",
+  "splash.loading": "Iniciando…",
   "gallery.yearRail": "Saltar por año",
   "pages.gallery.title": "Galería de fotos (entregada en M4)",
   "pages.gallery.desc": "La cuadrícula virtual en miniatura, la visualización de imágenes y la exploración de calificaciones se entregarán aquí en Milestone M4.",
