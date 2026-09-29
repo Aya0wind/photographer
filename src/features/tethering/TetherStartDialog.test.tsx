@@ -86,10 +86,6 @@ describe("TetherStartDialog 联拍启动弹窗", () => {
 
   it("选择相机 → tetheringStart(albumId, pnpId)；成功即关闭弹窗", async () => {
     listMock.mockResolvedValue([camera("CAM_A", "Nikon D750")]);
-    const { onClose } = renderDialog(7, "棚拍");
-
-    fireEvent.click(await screen.findByTestId("tether-start-camera-CAM_A"));
-    await waitFor(() => expect(startMock).toHaveBeenCalledWith(7, "CAM_A"));
     startMock.mockResolvedValue({
       ok: true,
       session: {
@@ -105,8 +101,12 @@ describe("TetherStartDialog 联拍启动弹窗", () => {
         error: null,
       },
     });
-    // 上一轮 start 调用发生在 mock 配置前，补一轮成功路径
-    fireEvent.click(screen.getByTestId("tether-start-camera-CAM_A"));
+    const { onClose } = renderDialog(7, "棚拍");
+
+    fireEvent.click(await screen.findByTestId("tether-start-camera-CAM_A"));
+    await waitFor(() => expect(startMock).toHaveBeenCalledWith(7, "CAM_A"));
+    // mock 返回值必须在首次点击前配置（组件点击即 await，迟配会让
+    // undefined 的 result.ok 抛未捕获 TypeError → vitest 挂 unhandled error）
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
