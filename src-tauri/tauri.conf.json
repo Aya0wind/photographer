@@ -33,7 +33,8 @@
   "bundle": {
     "active": true,
     "resources": {
-      "resources/gphoto/": "gphoto/"
+      "resources/gphoto/": "gphoto/",
+      "resources/installer/purge-user-data.ps1": "purge-user-data.ps1"
     },
     "targets": [
       "nsis"
@@ -51,10 +52,14 @@
         "languages": [
           "SimpChinese"
         ],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "nsis/hooks.nsh"
       },
       "wix": {
         "language": "zh-CN"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
       }
     }
   }

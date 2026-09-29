@@ -1,37 +1,46 @@
 @echo off
 REM ============================================================
 REM  Smart Photo Windows installer build script
-REM  Output: NSIS exe (currentUser, no admin) + WiX msi
+REM  Output: two NSIS exe variants (both currentUser, no admin):
+REM   <product>_<ver>_x64-setup.exe                  - online: webviewInstallMode=downloadBootstrapper,
+REM                                                   auto-downloads WebView2 during install if missing
+REM   <product>_<ver>_x64-webview2-offline-setup.exe - offline: bundles the full WebView2 runtime
+REM                                                   (~+127MB, installs fully offline)
 REM  Artifacts: installer-output\
 REM  Usage: scripts\build-installer.cmd [--nopause]
-REM  Notes: first run downloads NSIS/WiX toolchain to %LOCALAPPDATA%\tauri
+REM  Notes: first run downloads NSIS toolchain to %LOCALAPPDATA%\tauri
 REM ============================================================
 setlocal enabledelayedexpansion
 set PATH=%USERPROFILE%\.local\nodejs;%USERPROFILE%\.cargo\bin;%PATH%
 cd /d "%~dp0.."
 
-echo [1/4] toolchain check...
+echo [1/5] toolchain check...
 where node >nul 2>nul || (echo [FAIL] node not found, expected %USERPROFILE%\.local\nodejs & goto :fail)
 where cargo >nul 2>nul || (echo [FAIL] cargo not found, expected %USERPROFILE%\.cargo\bin & goto :fail)
 
-echo [2/4] frontend deps...
+echo [2/5] frontend deps...
 if not exist node_modules call npm install --no-audit --no-fund || goto :fail
 
-echo [3/4] Tauri build (release + NSIS exe + WiX msi^)...
-call npm run tauri build || goto :fail
-
-echo [4/4] collect artifacts...
 set OUTDIR=installer-output
+if exist %OUTDIR% rmdir /s /q %OUTDIR%
 if not exist %OUTDIR% mkdir %OUTDIR%
+
+echo [3/5] Tauri build - online bootstrapper (default config)...
+call npm run tauri build || goto :fail
 set FOUND=0
 for %%F in ("src-tauri\target\release\bundle\nsis\*-setup.exe") do (
   copy /y "%%~fF" "%OUTDIR%\" >nul && set FOUND=1
-  echo        exe: %%~nxF
+  echo        exe online: %%~nxF
 )
-for %%F in ("src-tauri\target\release\bundle\msi\*.msi") do (
-  copy /y "%%~fF" "%OUTDIR%\" >nul && set FOUND=1
-  echo        msi: %%~nxF
+
+echo [4/5] Tauri build - offline WebView2 (config overlay, incremental)...
+call npm run tauri build -- --config src-tauri\tauri.webview-offline.conf.json || goto :fail
+for %%F in ("src-tauri\target\release\bundle\nsis\*-setup.exe") do (
+  copy /y "%%~fF" "%OUTDIR%\%%~nF-webview2-offline%%~xF" >nul && set FOUND=1
+  echo        exe offline: %%~nF-webview2-offline%%~xF
 )
+
+echo [5/5] verify artifacts...
 if %FOUND%==0 (
   echo [FAIL] no installer artifacts found
   goto :fail
