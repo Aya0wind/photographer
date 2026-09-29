@@ -794,7 +794,7 @@ export interface TetherPhoto {
   kind: string;
 }
 
-/** 联拍会话（tethering_session/start 返回；后端全局单会话）。 */
+/** 联拍会话（tethering_session/start 返回；多相机可并行多会话，同相机互斥）。 */
 export interface TetherSessionDto {
   id: string;
   libraryId: string;

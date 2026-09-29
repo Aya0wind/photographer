@@ -218,9 +218,10 @@ pub async fn tethering_start(
     .await
     .map_err(|e| e.to_string())??;
     let id = dto.id.clone();
+    // 窗口 label 按会话 id 隔离：多相机可同时各开一个联拍窗口
     let window = tauri::WebviewWindowBuilder::new(
         &app,
-        "tethering",
+        format!("tethering-{id}"),
         tauri::WebviewUrl::App(format!("tethering?session={id}").into()),
     )
     .title("Photo Hub · Tethered Capture")

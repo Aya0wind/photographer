@@ -1,6 +1,6 @@
 //! A tethered session pins its destination library and album for its full lifetime.
 //! Each completed download is copied and registered without creating an import job.
-use super::backend::{backend_registry, CameraBackend, CameraSetting, CapturedObject};
+use super::backend::{backend_registry, CameraBackend, CameraSetting, CapturedObject, TetherError};
 use crate::db::{AssetRow, Db};
 use crate::events::AppEvent;
 use crate::ipc::tethering::CameraDto;
@@ -52,21 +52,41 @@ pub struct Session {
     seen: Mutex<HashSet<String>>,
     error: Mutex<Option<String>>,
 }
-fn current() -> &'static Mutex<Option<Arc<Session>>> {
-    static CURRENT: OnceLock<Mutex<Option<Arc<Session>>>> = OnceLock::new();
-    CURRENT.get_or_init(|| Mutex::new(None))
+/// 多会话存储：key = 会话 id。同一台相机（pnp_id）同一时刻只允许一个
+/// 会话（USB 控制权互斥，物理事实）；不同相机可各自开会话，入册相册
+/// 不限相同或不同。
+#[derive(Default)]
+pub struct SessionStore {
+    sessions: std::collections::HashMap<String, Arc<Session>>,
 }
+
+impl SessionStore {
+    pub fn insert(&mut self, session: Arc<Session>) {
+        self.sessions.insert(session.id.clone(), session);
+    }
+    pub fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions.get(id).cloned()
+    }
+    pub fn remove(&mut self, id: &str) -> Option<Arc<Session>> {
+        self.sessions.remove(id)
+    }
+    /// 该相机是否已被某个在册会话占用。
+    pub fn camera_in_use(&self, pnp_id: &str) -> bool {
+        self.sessions.values().any(|s| s.camera.pnp_id == pnp_id)
+    }
+}
+
+fn current() -> &'static Mutex<SessionStore> {
+    static CURRENT: OnceLock<Mutex<SessionStore>> = OnceLock::new();
+    CURRENT.get_or_init(|| Mutex::new(SessionStore::default()))
+}
+
 pub fn get(id: &str) -> Result<Arc<Session>, String> {
     current()
         .lock()
         .unwrap()
-        .as_ref()
-        .filter(|s| s.id == id)
-        .cloned()
+        .get(id)
         .ok_or_else(|| "拍摄会话已结束".into())
-}
-pub fn active() -> Option<SessionDto> {
-    current().lock().unwrap().as_ref().map(|s| s.dto())
 }
 impl Session {
     pub fn dto(&self) -> SessionDto {
@@ -103,8 +123,8 @@ impl Session {
 }
 pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<SessionDto, String> {
     let mut guard = current().lock().unwrap();
-    if guard.is_some() {
-        return Err("已有联机拍摄窗口，请先结束当前拍摄".into());
+    if guard.camera_in_use(camera_id) {
+        return Err("该相机已在联机拍摄会话中，请先结束其窗口".into());
     }
     crate::ipc::ensure_library_not_migrating(&state)?;
     let library = state
@@ -161,12 +181,15 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
         error: Mutex::new(None),
     });
     let dto = session.dto();
-    *guard = Some(session.clone());
+    guard.insert(session.clone());
     drop(guard);
     std::thread::spawn(move || {
         while !session.cancelled.load(Ordering::Acquire) {
             match session.backend.poll_objects(&session.camera.pnp_id) {
                 Ok(objects) => {
+                    // 收片与用户操作（拍摄/参数）互斥：断开清理 incoming
+                    // 目录时不会删到在途文件
+                    let _operation = session.operation.lock().unwrap();
                     for object in objects {
                         if let Err(error) = receive(&state, &session, &object) {
                             session.record_error(&state, error);
@@ -181,16 +204,15 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+        // 与在途操作互斥后再断开（gp_camera_exit + 删收片暂存目录）
+        let _operation = session.operation.lock().unwrap();
         session.backend.disconnect(&session.camera.pnp_id);
     });
     Ok(dto)
 }
 pub fn stop(id: &str) {
-    let mut guard = current().lock().unwrap();
-    if guard.as_ref().is_some_and(|s| s.id == id) {
-        if let Some(session) = guard.take() {
-            session.cancelled.store(true, Ordering::Release);
-        }
+    if let Some(session) = current().lock().unwrap().remove(id) {
+        session.cancelled.store(true, Ordering::Release);
     }
 }
 pub fn capture(state: &SharedState, id: &str) -> Result<(), String> {
@@ -200,10 +222,17 @@ pub fn capture(state: &SharedState, id: &str) -> Result<(), String> {
         return Err("相机已断开".into());
     }
     *session.error.lock().unwrap() = None;
-    let objects = session
-        .backend
-        .trigger_capture(&session.camera.pnp_id)
-        .map_err(|e| e.to_string())?;
+    let objects = match session.backend.trigger_capture(&session.camera.pnp_id) {
+        Ok(objects) => objects,
+        Err(error) => {
+            // 拔线等硬断连：置断开态并发事件（UI 横幅），错误文案照常透传
+            if matches!(error, TetherError::Disconnected) {
+                session.connected.store(false, Ordering::Release);
+                session.record_error(state, error.to_string());
+            }
+            return Err(error.to_string());
+        }
+    };
     for object in objects {
         receive(state, &session, &object)?;
     }
@@ -403,4 +432,108 @@ pub fn ingest(
         let _ = std::fs::remove_file(&part);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoopBackend;
+    impl CameraBackend for NoopBackend {
+        fn id(&self) -> &'static str {
+            "noop"
+        }
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn capabilities(&self) -> super::super::backend::Capabilities {
+            super::super::backend::Capabilities::FILE_TRANSFER
+        }
+        fn enumerate(&self) -> Result<Vec<super::super::backend::CameraInfo>, TetherError> {
+            Ok(Vec::new())
+        }
+        fn connect(
+            &self,
+            _pnp_id: &str,
+        ) -> Result<super::super::backend::CameraInfo, TetherError> {
+            Err(TetherError::Other("noop".into()))
+        }
+        fn disconnect(&self, _pnp_id: &str) {}
+        fn capture_still(
+            &self,
+            _pnp_id: &str,
+            _timeout: Duration,
+        ) -> Result<CapturedObject, TetherError> {
+            Err(TetherError::CaptureNotSupported)
+        }
+    }
+
+    fn make_session(id: &str, camera_pnp: &str, album_id: i64) -> Arc<Session> {
+        Arc::new(Session {
+            id: id.to_string(),
+            library: crate::settings::Library {
+                id: "lib".into(),
+                name: "测试库".into(),
+                db_dir: "unused".into(),
+                photo_root: "unused".into(),
+                configured: true,
+                streams: 0,
+                ai_quality_tier: None,
+            },
+            album_id,
+            album_name: format!("相册{album_id}"),
+            camera: crate::ipc::tethering::CameraDto {
+                pnp_id: camera_pnp.to_string(),
+                name: "假相机".into(),
+                capabilities: crate::ipc::tethering::CameraCapabilitiesDto {
+                    file_transfer: true,
+                    standard_capture: false,
+                    vendor_capture_nikon: false,
+                    object_added_events: false,
+                    live_view: false,
+                },
+            },
+            backend: Arc::new(NoopBackend),
+            operation: Mutex::new(()),
+            cancelled: AtomicBool::new(false),
+            connected: AtomicBool::new(true),
+            receiving: AtomicBool::new(false),
+            settings: Mutex::new(Vec::new()),
+            photos: Mutex::new(Vec::new()),
+            seen: Mutex::new(HashSet::new()),
+            error: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn store_supports_multiple_sessions_same_or_different_albums() {
+        let mut store = SessionStore::default();
+        let a = make_session("s1", "gphoto:usb:001,010", 1);
+        let b = make_session("s2", "gphoto:usb:001,011", 1); // 同相册不同相机
+        let c = make_session("s3", "wpd:X", 2);
+        store.insert(a.clone());
+        store.insert(b.clone());
+        store.insert(c.clone());
+        assert!(store.get("s1").is_some() && store.get("s2").is_some() && store.get("s3").is_some());
+        assert_eq!(store.sessions.len(), 3);
+        // 停止一个不影响其他会话
+        let removed = store.remove("s2");
+        assert!(removed.is_some());
+        assert!(!removed.unwrap().cancelled.load(Ordering::Acquire)); // 置位由 stop() 全局入口做
+        assert!(store.get("s1").is_some());
+        assert!(store.get("s3").is_some());
+        assert!(store.get("s2").is_none());
+    }
+
+    #[test]
+    fn store_rejects_second_session_on_same_camera() {
+        let mut store = SessionStore::default();
+        store.insert(make_session("s1", "gphoto:usb:001,010", 1));
+        // 同相机不同相册也不行（USB 控制权互斥）
+        assert!(store.camera_in_use("gphoto:usb:001,010"));
+        assert!(!store.camera_in_use("gphoto:usb:001,011"));
+        // 停止后可重开
+        store.remove("s1");
+        assert!(!store.camera_in_use("gphoto:usb:001,010"));
+    }
 }
