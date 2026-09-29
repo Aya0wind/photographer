@@ -7,6 +7,10 @@ export function useViewerTransform(assetId: number) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
   const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
+  // 拖拽中用 state（渲染期可靠读取）：拖拽路径 transform 过渡必须关闭（跟手），
+  // 滚轮/双击/旋转等目标值变化走 CSS 过渡（缩放流畅）。ref 在渲染期读值会拿到
+  // 上一次的值（pointerup 后残留「拖拽中」→ 下一次缩放瞬跳）。
+  const [dragging, setDragging] = useState(false);
   useEffect(() => {
     setView({ scale: 1, x: 0, y: 0, rotation: 0 });
   }, [assetId]);
@@ -46,6 +50,7 @@ export function useViewerTransform(assetId: number) {
     // 箭头/工具按钮是操作控件，缩放状态下不能被舞台的 pointer capture 抢走点击。
     if (e.target instanceof Element && e.target.closest("button")) return;
     dragRef.current = { x: e.clientX, y: e.clientY };
+    setDragging(true);
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -60,6 +65,7 @@ export function useViewerTransform(assetId: number) {
   }
   function handlePointerUp(e: React.PointerEvent<HTMLDivElement>): void {
     dragRef.current = null;
+    setDragging(false);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {
@@ -73,6 +79,6 @@ export function useViewerTransform(assetId: number) {
       ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
       : { ...v, scale: 2, x: 0, y: 0 });
   }
-  return { stageRef, dragRef, view, rotate, resetView, toggleZoom,
+  return { stageRef, dragRef, view, rotate, resetView, toggleZoom, dragging,
     handlePointerDown, handlePointerMove, handlePointerUp };
 }

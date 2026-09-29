@@ -63,9 +63,9 @@ describe("AppShell", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("link", { name: "设置" }));
 
-    // 页面直接替换，不等待退场动画。
+    // 页面交叉淡入（popLayout）：过渡期新旧两页并存，退场页 150ms 后卸载
     expect(screen.getByText("OUTLET_SETTINGS")).toBeInTheDocument();
-    expect(screen.queryByText("OUTLET_GALLERY")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("OUTLET_GALLERY")).not.toBeInTheDocument());
   });
 
   it("任务抽屉随壳常驻：TitleBar 开关徽标，打开后任意页面可见导入行（M4.5 A2）", async () => {

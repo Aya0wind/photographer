@@ -235,7 +235,7 @@ function ManualAlbumCard({
         e.preventDefault();
         onMenu({ x: e.clientX, y: e.clientY }, album);
       }}
-      className="group relative cursor-pointer select-none overflow-hidden rounded-lg border border-edge bg-surface text-center transition-colors hover:border-accent"
+      className="group relative cursor-pointer select-none overflow-hidden rounded-lg border border-edge bg-surface text-center transition-all duration-150 hover:-translate-y-0.5 hover:border-accent hover:shadow-md"
       data-testid="albums-manual-card"
       data-album-id={album.id}
     >

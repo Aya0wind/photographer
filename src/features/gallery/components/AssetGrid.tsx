@@ -608,7 +608,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             }}
                             onPointerDown={(e) => e.stopPropagation()}
                             onContextMenu={(e) => e.stopPropagation()}
-                            className={`absolute left-1.5 top-1.5 z-20 flex h-5 w-5 items-center justify-center rounded-full border transition-opacity ${
+                            className={`absolute left-1.5 top-1.5 z-20 flex h-5 w-5 items-center justify-center rounded-full border transition-all duration-150 active:scale-90 ${
                               isSelected
                                 ? "border-accent bg-accent text-black opacity-100"
                                 : "border-white/70 bg-black/45 text-white"

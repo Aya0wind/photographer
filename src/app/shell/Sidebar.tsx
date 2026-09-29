@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
+import { motion } from "motion/react";
+
+import { useMotionOn } from "@/lib/motion";
 import { useTranslation } from "react-i18next";
 
 import type { ReactElement } from "react";
@@ -179,6 +182,7 @@ const SECTIONS: NavSection[] = [
 ];
 
 export default function Sidebar() {
+  const motionOn = useMotionOn();
   const { t } = useTranslation();
   // 计数/人脸徽标按库私有：切库时以 activeLibraryId 为依赖重拉
   const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
@@ -263,12 +267,20 @@ export default function Sidebar() {
                 >
                   {({ isActive }: { isActive: boolean }) => (
                     <>
-                      {isActive && (
-                        <span
-                          className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent"
-                          aria-hidden="true"
-                        />
-                      )}
+                      {isActive &&
+                        (motionOn ? (
+                          <motion.span
+                            layoutId="sidebar-active-bar"
+                            className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent"
+                            aria-hidden="true"
+                            transition={{ duration: 0.18, ease: "easeOut" }}
+                          />
+                        ) : (
+                          <span
+                            className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent"
+                            aria-hidden="true"
+                          />
+                        ))}
                       {item.icon}
                       <span>{t(item.labelKey)}</span>
                       {item.badge && badgeValueOf(item.badge) > 0 && (

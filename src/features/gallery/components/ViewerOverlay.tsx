@@ -1,4 +1,7 @@
+import { AnimatePresence, motion } from "motion/react";
+
 import { useViewerTransform } from "../lib/useViewerTransform";
+import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
 import { useViewerImage } from "../lib/useViewerImage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -159,7 +162,8 @@ interface ViewerOverlayProps {
 
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
-  const { stageRef, dragRef, view, rotate, resetView, toggleZoom,
+  const motionOn = useMotionOn();
+  const { stageRef, view, rotate, resetView, toggleZoom, dragging,
     handlePointerDown, handlePointerMove, handlePointerUp } = useViewerTransform(asset.id);
   const [fullscreen, setFullscreen] = useState(false);
   const [exifOpen, setExifOpen] = useState(true);
@@ -178,13 +182,29 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       setExifOpen(false);
     }
   }, []);
+  // 自含退场动画（2026-09-29 动画批次）：closing 态 150ms 淡出后再调 onClose 卸载，
+  // 7 个挂载页保持纯条件渲染即可；动画关（或已在退场中）立即关闭。
+  const [closing, setClosing] = useState(false);
   const closeViewer = useCallback(() => {
     if (fullscreen) {
       if (isTauri()) void getCurrentWindow().setFullscreen(false);
       else if (document.fullscreenElement) void document.exitFullscreen();
     }
-    onClose();
-  }, [fullscreen, onClose]);
+    if (!motionOn || closing) {
+      onClose();
+      return;
+    }
+    setClosing(true);
+    window.setTimeout(() => onClose(), 150);
+  }, [fullscreen, onClose, motionOn, closing]);
+
+  // 切图方向（渲染期从 props 推导，不用 effect——新 key 挂载时 initial 要立即拿到）
+  const lastIndexRef = useRef(index);
+  const navDirRef = useRef(0);
+  if (index !== lastIndexRef.current) {
+    navDirRef.current = index > lastIndexRef.current ? 1 : -1;
+    lastIndexRef.current = index;
+  }
   useEffect(() => {
     const sync = () => setFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", sync);
@@ -532,12 +552,15 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 固定 17 个槽位，当前照片始终居中。边界处留空，不让缩略图条逐张伸缩。
 
   return (
-    <div
+    <motion.div
       className="fixed inset-0 z-50 flex flex-col bg-black/95"
       role="dialog"
       aria-modal="true"
       aria-label={asset.name}
       data-testid="viewer"
+      initial={motionInitial(motionOn, { opacity: 0 })}
+      animate={closing ? { opacity: 0 } : { opacity: 1 }}
+      transition={TRANS.quick}
     >
       {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
           查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
@@ -670,6 +693,13 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 {t("viewer.missingSource")}
               </div>
             )}
+            <motion.div
+              key={asset.id}
+              className="absolute inset-0 flex items-center justify-center"
+              initial={motionInitial(motionOn, { opacity: 0, x: navDirRef.current * 36 })}
+              animate={{ opacity: 1, x: 0 }}
+              transition={TRANS.quick}
+            >
             {imageLayers.map((layer) => (
               <img
                 key={layer.src}
@@ -730,10 +760,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                   // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
                   // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）
                   transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
-                  transition: dragRef.current ? "none" : "transform 150ms ease-out",
+                  // 拖拽跟手直通；滚轮/双击/旋转目标值变化走过渡（缩放流畅）
+                  transition: dragging ? "none" : "transform 150ms cubic-bezier(0.2, 0, 0, 1)",
                 }}
               />
             ))}
+            </motion.div>
             {imageLayers.length === 0 && mainFailed && (
               <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-placeholder">
                 <svg
@@ -842,10 +874,16 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         </div>
 
         {/* 详情关闭时完全收回，预览获得全部可用宽度。 */}
-            {exifOpen && <aside
+            <AnimatePresence initial={false}>
+            {exifOpen && (
+            <motion.aside
               className="h-full w-72 shrink-0 overflow-hidden border-l border-edge bg-surface"
               data-testid="viewer-exif"
               data-open="true"
+              initial={motionInitial(motionOn, { x: 32, opacity: 0 })}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 32, opacity: 0 }}
+              transition={TRANS.slide}
             >
               <div className="h-full overflow-y-auto p-3" data-testid="viewer-exif-scroll">
                 <div className="mb-1 flex items-center gap-2">
@@ -867,7 +905,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                       aria-checked={currentRating === value}
                       aria-label={`${t("viewer.rating")} ${value}`}
                       onClick={() => void applyRating(value)}
-                      className={`rounded p-0.5 transition-colors ${
+                      className={`rounded p-0.5 transition-all duration-150 active:scale-125 ${
                         value <= currentRating ? "text-accent" : "text-text-muted hover:text-text-secondary"
                       }`}
                       data-testid="viewer-rating-star"
@@ -887,7 +925,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                       aria-expanded={colorOpen}
                       aria-label={t("viewer.colorLabel")}
                       title={currentColor === null ? t("viewer.colorLabel") : t(`gallery.color.${currentColor}`)}
-                      className="rounded-full p-1 transition-colors hover:bg-panel"
+                      className="rounded-full p-1 transition-all duration-150 hover:bg-panel active:scale-125"
                       data-testid="viewer-color"
                       data-label={currentColor ?? "none"}
                     >
@@ -937,7 +975,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                     onClick={() => void applyFlagged(!currentFlagged)}
                     aria-pressed={currentFlagged}
                     title={currentFlagged ? t("viewer.flagClear") : t("viewer.flagSet")}
-                    className={`ml-auto rounded px-1.5 py-0.5 text-[11px] ${
+                    className={`ml-auto rounded px-1.5 py-0.5 text-[11px] transition-transform duration-150 active:scale-125 ${
                       currentFlagged ? "bg-accent text-black" : "text-text-muted hover:text-text-primary"
                     }`}
                     data-testid="viewer-flag"
@@ -1042,7 +1080,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 </div>
                 </>
               </div>
-            </aside>}
+            </motion.aside>
+            )}
+            </AnimatePresence>
       </div>
 
       {/* 大图右键菜单（作用于当前资产；Esc/点击外部关闭，期间查看器 Esc 让位） */}
@@ -1069,6 +1109,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           }}
         />
       )}
-    </div>
+    </motion.div>
   );
 }

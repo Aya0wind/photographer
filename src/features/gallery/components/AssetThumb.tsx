@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AssetKind } from "@/ipc/api";
@@ -93,20 +93,35 @@ export default function AssetThumb({
   const imageKey = url === null ? null : `${asset.id}:${url}`;
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [failedKey, setFailedKey] = useState<string | null>(null);
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
   const loaded = imageKey !== null && loadedKey === imageKey;
   const failed = imageKey !== null && failedKey === imageKey;
+  const settled = imageKey !== null && settledKey === imageKey;
+  // 换图（imageKey 变）时重置 settled 计时，卸载时清理
+  useEffect(() => {
+    return () => {
+      if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    };
+  }, []);
 
   // WebView2 对内存缓存中的 asset:// 图片偶尔不会再次派发 load；同时原生
   // lazy-loading 与 transform 虚拟列表组合后可能不启动解码。网格本身只
   // 挂载视口+overscan 项，因此直接 eager，并补查缓存图片的 complete 状态。
   const handleImageRef = useCallback((img: HTMLImageElement | null) => {
     if (!img || !img.complete) return;
-    if (img.naturalWidth > 0) setLoadedKey(imageKey);
+    if (img.naturalWidth > 0) {
+      setLoadedKey(imageKey);
+      if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = window.setTimeout(() => setSettledKey(imageKey), 160);
+    }
   }, [imageKey]);
 
   const showImg = url !== null && !failed;
   // 加载中（请求在途/排队生成/缩略图在解码）= 骨架动画；永久无图或已展示 = 静态底。
-  const loading = skeleton && (status === "loading" || (showImg && !loaded));
+  // settled：图片淡入完成（onLoad 后 160ms）才允许撤骨架底色——否则骨架→panel
+  // 底色跳变与图片从 0 淡入叠加，滚动加载时可见闪烁（2026-09-29 用户报告）。
+  const loading = skeleton && (status === "loading" || (showImg && !settled));
   return (
     <div
       className={`relative overflow-hidden ${loading ? "sp-skeleton" : "bg-panel/40"} ${className}`}
@@ -122,7 +137,11 @@ export default function AssetThumb({
           alt={alt ?? asset.name}
           loading="eager"
           decoding="async"
-          onLoad={() => setLoadedKey(imageKey)}
+          onLoad={() => {
+            setLoadedKey(imageKey);
+            if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+            settleTimerRef.current = window.setTimeout(() => setSettledKey(imageKey), 160);
+          }}
           onError={() => setFailedKey(imageKey)}
           data-testid={testId ? `${testId}-img` : undefined}
           draggable={false}

@@ -1,6 +1,9 @@
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { motion } from "motion/react";
+
+import { motionInitial, useMotionOn } from "@/lib/motion";
 
 import {
   peopleAssets,
@@ -292,6 +295,7 @@ function PersonAssetsView({
 // --- 页面 ---------------------------------------------------------------------------
 
 export default function PeoplePage() {
+  const motionOn = useMotionOn();
   const { t } = useTranslation();
   // null = 首拉进行中；[] = 后端未就绪/无聚类（空态兜底）
   const [people, setPeople] = useState<PersonCluster[] | null>(null);
@@ -374,14 +378,20 @@ export default function PeoplePage() {
             className="mt-4 grid flex-1 content-start grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 pb-6"
             data-testid="people-grid"
           >
-            {people.map((person) => (
-              <PersonCard
+            {people.map((person, i) => (
+              <motion.div
                 key={person.clusterId}
-                person={person}
-                openLabel={t("people.open")}
-                onOpen={() => setSelected(person)}
-                onChanged={() => void refresh()}
-              />
+                initial={motionInitial(motionOn, { opacity: 0, y: 8 })}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.18, ease: "easeOut", delay: Math.min(i * 0.02, 0.25) }}
+              >
+                <PersonCard
+                  person={person}
+                  openLabel={t("people.open")}
+                  onOpen={() => setSelected(person)}
+                  onChanged={() => void refresh()}
+                />
+              </motion.div>
             ))}
           </div>
         )}

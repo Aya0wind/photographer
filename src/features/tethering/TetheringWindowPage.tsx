@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { motion } from "motion/react";
+
+import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
 
 import {
   subscribeAppEvents,
@@ -87,6 +90,7 @@ export default function TetheringWindowPage() {
   const [rangeDrafts, setRangeDrafts] = useState<Record<string, string>>({});
   /** 点击对焦标记（归一化坐标 + 2s 自动消失）。 */
   const [focusMark, setFocusMark] = useState<{ x: number; y: number } | null>(null);
+  const motionOn = useMotionOn();
 
   const liveViewSupported = session?.camera.capabilities.liveView === true;
   const connected = session?.connected === true;
@@ -371,29 +375,38 @@ export default function TetheringWindowPage() {
             <img src={mainImage} alt="live view" className="max-h-full max-w-full object-contain" data-testid="tether-view-img" />
           ) : (
             <div className="flex flex-col items-center gap-2 text-xs text-white/40">
-              <span>{liveViewSupported ? t("tether.liveViewWaiting") : t("tether.liveViewUnsupported")}</span>
+              <span className={liveViewSupported ? "animate-pulse" : undefined}>{liveViewSupported ? t("tether.liveViewWaiting") : t("tether.liveViewUnsupported")}</span>
               {!liveViewSupported && lastPhoto === null && <span className="text-[11px]">{t("tether.noPhotos")}</span>}
             </div>
           )}
           {focusMark !== null && (
-            <div
+            <motion.div
               className="pointer-events-none absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent/90 shadow-[0_0_0_2px_rgba(0,0,0,0.35)]"
               style={{ left: `${focusMark.x * 100}%`, top: `${focusMark.y * 100}%` }}
+              initial={motionInitial(motionOn, { scale: 0.4, opacity: 0 })}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
               data-testid="tether-focus-marker"
             >
               <span className="absolute left-1/2 top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
               <span className="absolute left-1/2 top-1/2 h-0.5 w-3 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
-            </div>
+            </motion.div>
           )}
           {capturing && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/40" data-testid="tether-capturing">
-              <span className="rounded-full bg-black/70 px-4 py-2 text-xs text-white">{t("tether.capturing")}</span>
+              <span className="animate-pulse rounded-full bg-black/70 px-4 py-2 text-xs text-white">{t("tether.capturing")}</span>
             </div>
           )}
           {captureError !== null && (
-            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-md bg-red-500/90 px-3 py-1.5 text-[11px] text-white" data-testid="tether-capture-error">
+            <motion.div
+              className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-md bg-red-500/90 px-3 py-1.5 text-[11px] text-white"
+              initial={motionInitial(motionOn, { y: 12, opacity: 0 })}
+              animate={{ y: 0, opacity: 1 }}
+              transition={TRANS.slide}
+              data-testid="tether-capture-error"
+            >
               {captureError}
-            </div>
+            </motion.div>
           )}
         </div>
 

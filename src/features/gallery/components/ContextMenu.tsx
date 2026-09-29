@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { motion } from "motion/react";
+
+import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
 import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
@@ -77,14 +80,18 @@ export default function ContextMenu({
     };
   }, [onClose]);
 
+  const motionOn = useMotionOn();
   return createPortal(
-    <div
+    <motion.div
       ref={ref}
       role="menu"
-      style={{ left: pos.left, top: pos.top }}
+      style={{ left: pos.left, top: pos.top, transformOrigin: "top left" }}
       className="fixed z-[80] min-w-[190px] overflow-hidden rounded-md border border-edge bg-surface py-1 shadow-xl"
       data-testid={testId}
       onContextMenu={(e) => e.preventDefault()}
+      initial={motionInitial(motionOn, { opacity: 0, scale: 0.96 })}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={TRANS.quick}
     >
       {entries.map((entry) => (
         <div key={entry.key}>
@@ -152,7 +159,7 @@ export default function ContextMenu({
           )}
         </div>
       ))}
-    </div>,
+    </motion.div>,
     document.body,
   );
 }

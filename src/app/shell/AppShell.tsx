@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
-import { Outlet, useNavigate } from "react-router";
+import { Outlet, useLocation, useNavigate } from "react-router";
+import { motion } from "motion/react";
+
+import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
 
 import Sidebar from "./Sidebar";
 import TitleBar from "./TitleBar";
@@ -9,7 +12,6 @@ import DeviceDialog from "@/features/import/DeviceDialog";
 import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
 import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
-import { useMotionOn } from "@/lib/motion";
 
 /**
  * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 全局搜索框 +
@@ -91,7 +93,9 @@ export default function AppShell() {
         <Sidebar />
         <main className="relative min-w-0 flex-1 overflow-y-auto">
           <div className="h-full">
-            <Outlet />
+            <PageTransition>
+              <Outlet />
+            </PageTransition>
           </div>
         </main>
       </div>
@@ -101,5 +105,27 @@ export default function AppShell() {
       {/* 导入完成总结弹窗（全局：任何页面弹出；此前在任务页） */}
       <SummaryModalHost />
     </div>
+  );
+}
+
+/** 子页切换过渡（动画批次 #4）：AnimatePresence mode="wait" + 短淡入。
+ *  退场 150ms 内完成（无感延迟）；动画关（useMotionOn=false）直通渲染。 */
+function PageTransition({ children }: { children: React.ReactNode }) {
+  const motionOn = useMotionOn();
+  const location = useLocation();
+  if (!motionOn) return <>{children}</>;
+  // 仅入场动画、无退场：Outlet 是活组件，退场层会渲染新路由内容（双层同
+  // 内容），且 wait/popLayout 都有空窗或克隆问题——入场 y 位移不透明度不
+  // 归零，首帧即有内容（无闪烁），切页仍有轻量动效。
+  return (
+    <motion.div
+      key={location.pathname}
+      className="h-full"
+      initial={motionInitial(motionOn, { y: 8 })}
+      animate={{ y: 0 }}
+      transition={TRANS.slide}
+    >
+      {children}
+    </motion.div>
   );
 }

@@ -540,9 +540,9 @@ describe("查看器：左右切换与关闭", () => {
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "90");
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
     fireEvent.click(screen.getByTestId("viewer-close"));
-    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("左右方向键逐张翻页；Esc 关闭返回画廊", async () => {
@@ -556,7 +556,7 @@ describe("查看器：左右切换与关闭", () => {
     expect(onNavigate).toHaveBeenCalledTimes(1);
 
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("提供明确退出按钮；详情抽屉与预览画布并列且可从抽屉内收起", async () => {
@@ -576,14 +576,13 @@ describe("查看器：左右切换与关闭", () => {
     expect(close.className).toContain("rounded-full");
 
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
     fireEvent.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.getByTestId("viewer-exif")).toHaveAttribute("data-open", "true");
+    expect(await screen.findByTestId("viewer-exif")).toHaveAttribute("data-open", "true");
     expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
 
     fireEvent.click(close);
-    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("F11 切换窗口全屏，进入时自动收起详细信息", async () => {
@@ -931,8 +930,7 @@ describe("查看器：EXIF 面板", () => {
 
     // 收起后保留仅容纳折叠图标的窄轨
     await user.click(screen.getByTestId("viewer-exif-toggle"));
-    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("viewer-exif-rows")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
 
     await user.click(screen.getByTestId("viewer-exif-toggle"));
     expect(await screen.findByTestId("viewer-exif-rows")).toBeInTheDocument();
@@ -1088,7 +1086,7 @@ describe("查看器：星标条", () => {
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
 
     fireEvent.keyDown(window, { key: "I" });
-    expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
   });
 
   it("详情 rating 驱动星级；点星调 assetRatingSet(id, n)，再点同星=清除（0）", async () => {
