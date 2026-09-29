@@ -8,15 +8,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router";
 
 import { subscribeAppEvents } from "@/ipc/api/events";
 import type { AppEvent } from "@/ipc/api/types";
-import {
-  mapGeoDownloadStart,
-  mapGeoStatus,
-  type GeoStatus,
-  type MapCluster,
-} from "@/ipc/api/map";
+import { mapGeoStatus, type GeoStatus, type MapCluster } from "@/ipc/api/map";
 import { useMotionOn } from "@/lib/motion";
 
 import MapCanvas, { type FlyTarget } from "../components/MapCanvas";
@@ -32,9 +28,9 @@ interface Crumb {
 
 export default function MapPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const motionOn = useMotionOn();
   const [status, setStatus] = useState<GeoStatus | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [level, setLevel] = useState<MapLevel>(0);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]); // 下钻链（空 = 全球）
   const [fly, setFly] = useState<FlyTarget | null>(null);
@@ -81,12 +77,9 @@ export default function MapPage() {
     };
   }, [pullStatus, invalidateAll]);
 
-  const startDownload = useCallback(() => {
-    setDownloadError(null);
-    mapGeoDownloadStart()
-      .then(() => pullStatus()) // 命令成功即进入后台管线：主动拉一次状态切进度页
-      .catch((err) => setDownloadError(String(err)));
-  }, [pullStatus]);
+  // 下载/重试入口全部收进设置页「地图数据」（2026-09-29 用户定案）：
+  // 本页只读展示管线状态 + 跳转。
+  const gotoSettings = useCallback(() => navigate("/settings?tab=map"), [navigate]);
 
   // zoom 驱动切层：回到全局聚合（drill 链清空）
   const onLevelChange = useCallback((next: MapLevel) => {
@@ -144,14 +137,13 @@ export default function MapPage() {
           <p className="max-w-md text-center text-xs leading-relaxed text-text-muted" data-testid="map-download-hint">
             {t("map.downloadHint")}
           </p>
-          {downloadError && <div className="text-xs text-red-400">{downloadError}</div>}
           <button
             type="button"
-            onClick={startDownload}
+            onClick={gotoSettings}
             className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
             data-testid="map-download-start"
           >
-            {t("map.download")}
+            {t("map.gotoSettings")}
           </button>
         </div>
       </div>
@@ -185,11 +177,11 @@ export default function MapPage() {
           {status.message && <div className="max-w-md text-center text-[11px] text-text-muted">{status.message}</div>}
           <button
             type="button"
-            onClick={startDownload}
+            onClick={gotoSettings}
             className="rounded-md border border-edge px-4 py-1.5 text-xs text-text-muted transition-colors hover:border-accent hover:text-accent"
             data-testid="map-retry"
           >
-            {t("map.retry")}
+            {t("map.gotoSettings")}
           </button>
         </div>
       </div>
@@ -227,7 +219,7 @@ export default function MapPage() {
           {status.datavFiles < 250 && (
             <button
               type="button"
-              onClick={startDownload}
+              onClick={gotoSettings}
               className="rounded-md border border-accent/40 px-2 py-1 text-[11px] text-accent transition-colors hover:border-accent"
               data-testid="map-complete-download"
             >

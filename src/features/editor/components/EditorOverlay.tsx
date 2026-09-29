@@ -8,7 +8,6 @@ import {
   assetMetadataGet,
   assetMetadataSave,
   type EditableMetadata,
-  albumSubgroups,
   editRecipeDelete,
   editRecipeSave,
   exportRun,
@@ -33,16 +32,19 @@ import { clampCrop, fitCropRect, isFullCrop, type Size } from "../lib/coords";
 import {
   defaultExportDraft,
   parseLongEdge,
+  validateExportDraft,
   type ExportOptionsDraft,
 } from "../lib/exportOptions";
 import EditorCanvas, { type EditorTool } from "./EditorCanvas";
-import ExportDialog from "./ExportDialog";
+import ExportAlbumPicker from "./ExportAlbumPicker";
 import MetadataFields from "./MetadataFields";
 
 /**
  * 全屏编辑浮层（阶段 D 前端）：
- * - 非破坏：所有编辑只改配方状态；「保存配方」写 DB（editRecipeSave），「导出」
- *   经 exportRun 后台任务生成新 JPEG（album 模式入册并生成派生资产）。
+ * - 非破坏：所有编辑只改配方状态；「保存配方」写 DB（editRecipeSave）；
+ *   右上「导出」= 系统目录选择器确定即导出（folder 模式）、「加入相册」=
+ *   程序内相册选择对话框（album 模式入册生成派生资产）。导出参数（文件名/
+ *   长边/质量）取「输出」面板当前值——没有导出设置弹窗步骤。
  * - 撤销/重做栈本地维护（recipeReducer）；输出设置不随几何撤销。
  * - 交互层是 EditorCanvas（react-konva）；本组件持有工具态/面板/弹窗/toast。
  * - 未保存改动关闭需确认；重置需确认后 editRecipeDelete。
@@ -276,9 +278,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     ...defaultExportDraft(asset),
     longEdge: initial.recipe?.output.longEdge != null ? String(initial.recipe.output.longEdge) : "",
   }));
-  const [exportOpen, setExportOpen] = useState(false);
+  const [albumPickerOpen, setAlbumPickerOpen] = useState(false);
   const [albums, setAlbums] = useState<AlbumDto[]>([]);
-  const [subgroups, setSubgroups] = useState<string[]>([]);
   useEffect(() => {
     let cancelled = false;
     void albumList().then((list) => {
@@ -288,36 +289,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       cancelled = true;
     };
   }, []);
-  useEffect(() => {
-    const albumId = Number(exportDraft.albumId);
-    if (exportDraft.mode !== "album" || !Number.isInteger(albumId) || albumId <= 0) {
-      setSubgroups([]);
-      return;
-    }
-    let cancelled = false;
-    void albumSubgroups(albumId).then((list) => {
-      if (!cancelled) setSubgroups(list.map((g) => g.name));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [exportDraft.mode, exportDraft.albumId]);
 
   useEffect(() => {
     if (!savedMetadata) return;
     setExportDraft((draft) => ({ ...draft, author: savedMetadata.author, copyright: savedMetadata.copyright, keywords: savedMetadata.keywords.join(", ") }));
   }, [savedMetadata]);
-
-  async function pickOutputDir(): Promise<void> {
-    try {
-      const dir = await openDialog({ directory: true });
-      if (typeof dir === "string" && dir !== "") {
-        setExportDraft((d) => ({ ...d, outputDir: dir }));
-      }
-    } catch {
-      // 用户取消/对话框不可用：静默
-    }
-  }
 
   // --- toast / 后台导出事件（exportTaskProgress/Finished，按 jobId 关联） ----------------
   const [toast, setToast] = useState<EditorToast | null>(null);
@@ -407,7 +383,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   }
 
   async function runExport(options: ExportOptions): Promise<void> {
-    setExportOpen(false);
     const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft)) ? null : clampCrop(cropDraft) }, ctxRef.current).present : present;
     const result = await exportRun(asset.id, recipeForPersist(recipe), options);
     if (!result.ok) {
@@ -419,6 +394,42 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     }
     activeJobRef.current = result.task.id;
     setToast({ kind: "export-running", phase: "render" });
+  }
+
+  /** 导出（右上按钮）：系统目录选择器 → 确定即导出；取消静默。
+   *  文件名/长边/质量取「输出」面板当前值（2026-09-29 导出重做定案）。 */
+  async function exportToFolder(): Promise<void> {
+    if (missing) return;
+    let dir: string | null = null;
+    try {
+      dir = await openDialog({ directory: true });
+    } catch {
+      return;
+    }
+    if (typeof dir !== "string" || dir === "") return;
+    const validation = validateExportDraft(
+      { ...exportDraft, mode: "folder", outputDir: dir },
+      present.output.quality,
+    );
+    if (!validation.ok) {
+      setToast({ kind: "export-error", message: validation.errors.map((code) => t(`editor.error.${code}`)).join("；") });
+      return;
+    }
+    await runExport(validation.options);
+  }
+
+  /** 加入相册（右上按钮 → 程序内相册选择对话框）：成片以派生资产入册。
+   *  文件名后端自动生成 {stem}_edit.jpg；子组取对话框输入。 */
+  function exportToAlbum(albumId: number, subgroup: string | null): void {
+    const validation = validateExportDraft(
+      { ...exportDraft, mode: "album", albumId: String(albumId), subgroup: subgroup ?? "" },
+      present.output.quality,
+    );
+    if (!validation.ok) {
+      setToast({ kind: "export-error", message: validation.errors.map((code) => t(`editor.error.${code}`)).join("；") });
+      return;
+    }
+    void runExport(validation.options);
   }
 
   // --- 关闭确认 / 快捷键 ------------------------------------------------------------------
@@ -443,7 +454,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       if (e.key === "Escape") {
         if (inInput) return; // 输入框内的 Esc 交给输入框（textarea 取消编辑等）
         e.preventDefault();
-        if (exportOpen) setExportOpen(false);
+        if (albumPickerOpen) setAlbumPickerOpen(false);
         else if (confirm !== null) setConfirm(null);
         else requestClose();
         return;
@@ -560,7 +571,17 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
             {t("editor.saveChanges")}</button>
           <button
             type="button"
-            onClick={() => setExportOpen(true)}
+            onClick={() => setAlbumPickerOpen(true)}
+            disabled={missing}
+            title={missing ? t("editor.missingSource") : undefined}
+            className="h-9 rounded-md border border-edge bg-panel/40 px-4 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="editor-export-album"
+          >
+            {t("editor.exportAlbum")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void exportToFolder()}
             disabled={missing}
             title={missing ? t("editor.missingSource") : undefined}
             className="h-9 rounded-md border border-edge bg-panel/40 px-4 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
@@ -875,107 +896,22 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
             </section>
           )}
 
-          {/* 输出设置 */}
+          {/* 输出参数：文件名/长边/质量——“导出”“加入相册”按钮在顶栏；
+              目录经系统选择器、相册经程序内对话框，均无导出设置弹窗步骤 */}
           {tool === "output" && <section className="space-y-2" data-testid="editor-output-panel">
             <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
               {t("editor.output.title")}
             </h3>
-            <div className="mb-2 flex gap-2" role="radiogroup" aria-label={t("editor.output.mode")}>
-              <label className="flex flex-1 cursor-pointer items-center gap-1.5 rounded-md border border-edge px-2 py-1.5 text-[11px] transition-colors has-[:checked]:border-accent has-[:checked]:text-accent">
-                <input
-                  type="radio"
-                  name="export-mode"
-                  checked={exportDraft.mode === "folder"}
-                  onChange={() => setExportDraft((d) => ({ ...d, mode: "folder" }))}
-                  className="h-3 w-3 accent-[#F0A83C]"
-                  data-testid="editor-output-mode-folder"
-                />
-                {t("editor.output.mode.folder")}
-              </label>
-              <label className="flex flex-1 cursor-pointer items-center gap-1.5 rounded-md border border-edge px-2 py-1.5 text-[11px] transition-colors has-[:checked]:border-accent has-[:checked]:text-accent">
-                <input
-                  type="radio"
-                  name="export-mode"
-                  checked={exportDraft.mode === "album"}
-                  onChange={() => setExportDraft((d) => ({ ...d, mode: "album" }))}
-                  className="h-3 w-3 accent-[#F0A83C]"
-                  data-testid="editor-output-mode-album"
-                />
-                {t("editor.output.mode.album")}
-              </label>
-            </div>
-
-            {exportDraft.mode === "folder" ? (
-              <div className="space-y-2">
-                <div>
-                  <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.dir")}</span>
-                  <div className="flex gap-1.5">
-                    <input
-                      type="text"
-                      readOnly
-                      value={exportDraft.outputDir}
-                      placeholder={t("editor.output.dirPlaceholder")}
-                      className="min-w-0 flex-1 truncate rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none placeholder:text-text-muted/60"
-                      data-testid="editor-output-dir"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void pickOutputDir()}
-                      className="shrink-0 rounded-md border border-edge px-2 py-1.5 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                      data-testid="editor-dir-pick"
-                    >
-                      {t("editor.output.dirPick")}
-                    </button>
-                  </div>
-                </div>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.fileName")}</span>
-                  <input
-                    type="text"
-                    value={exportDraft.fileName}
-                    onChange={(e) => setExportDraft((d) => ({ ...d, fileName: e.target.value }))}
-                    className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none transition-colors focus:border-accent"
-                    data-testid="editor-output-filename"
-                  />
-                </label>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <label className="block">
-                  <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.album")}</span>
-                  <select
-                    value={exportDraft.albumId}
-                    onChange={(e) => setExportDraft((d) => ({ ...d, albumId: e.target.value }))}
-                    className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none focus:border-accent"
-                    data-testid="editor-output-album"
-                  >
-                    <option value="">{t("editor.output.albumPlaceholder")}</option>
-                    {albums.map((album) => (
-                      <option key={album.id} value={String(album.id)}>
-                        {album.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.subgroup")}</span>
-                  <input
-                    type="text"
-                    list="editor-subgroup-options"
-                    value={exportDraft.subgroup}
-                    onChange={(e) => setExportDraft((d) => ({ ...d, subgroup: e.target.value }))}
-                    placeholder={t("editor.output.subgroupPlaceholder")}
-                    className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none placeholder:text-text-muted/60 focus:border-accent"
-                    data-testid="editor-output-subgroup"
-                  />
-                  <datalist id="editor-subgroup-options">
-                    {subgroups.map((name) => (
-                      <option key={name} value={name} />
-                    ))}
-                  </datalist>
-                </label>
-              </div>
-            )}
+            <label className="block">
+              <span className="mb-1 block text-[11px] text-text-muted">{t("editor.output.fileName")}</span>
+              <input
+                type="text"
+                value={exportDraft.fileName}
+                onChange={(e) => setExportDraft((d) => ({ ...d, fileName: e.target.value }))}
+                className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-[11px] text-text-primary outline-none transition-colors focus:border-accent"
+                data-testid="editor-output-filename"
+              />
+            </label>
 
             <div className="mt-2 flex gap-2">
               <label className="flex-1">
@@ -1017,16 +953,15 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         </aside>}
       </div>
 
-      {/* 导出确认弹窗 */}
-      {exportOpen && (
-        <ExportDialog
-          asset={asset}
-          recipe={present}
-          draft={exportDraft}
+      {/* 加入相册导出目标（程序内对话框）：确认即 album 模式导出 */}
+      {albumPickerOpen && (
+        <ExportAlbumPicker
           albums={albums}
-          running={toast !== null && toast.kind === "export-running"}
-          onCancel={() => setExportOpen(false)}
-          onConfirm={(options) => void runExport(options)}
+          onCancel={() => setAlbumPickerOpen(false)}
+          onConfirm={(albumId, subgroup) => {
+            setAlbumPickerOpen(false);
+            exportToAlbum(albumId, subgroup);
+          }}
         />
       )}
 

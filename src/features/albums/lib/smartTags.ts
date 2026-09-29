@@ -75,17 +75,37 @@ export function unindexedTags(tags: readonly string[]): string[] {
   return tags.filter((tag) => !Array.isArray(index[tag]?.hits));
 }
 
+/** 单标签查询并落缓存（cover 取首个命中）。 */
+async function indexTag(tag: string): Promise<void> {
+  const hits = await searchSemantic(tag, 100);
+  const scope = libraryKey();
+  const index = loadIndex();
+  index[scope] = { ...index[scope], [tag]: { cover: hits[0]?.assetId ?? null, hits } };
+  localStorage.setItem(INDEX_KEY, JSON.stringify(index));
+}
+
 /** Only new tags run a semantic query. The photo embedding index is shared by all tags. */
 export async function indexNewTags(tags: readonly string[], onProgress?: (done: number, total: number) => void): Promise<void> {
   const pending = unindexedTags(tags);
   let done = 0;
   for (const tag of pending) {
-    const hits = await searchSemantic(tag, 100);
-    const scope = libraryKey();
-    const index = loadIndex();
-    index[scope] = { ...index[scope], [tag]: { cover: hits[0]?.assetId ?? null, hits } };
-    localStorage.setItem(INDEX_KEY, JSON.stringify(index));
+    await indexTag(tag);
     onProgress?.(++done, pending.length);
+  }
+  window.dispatchEvent(new Event("smartphoto:tags-indexed"));
+}
+
+/** 全量重建（force）：所有标签重跑语义查询并覆盖缓存。
+ * 语义索引一轮新照片回填完成后调用——已索引标签也可能新增命中；也修复
+ * 早于语义完成建索引时缓存住的 0 命中（否则智能相册永不浮现）。 */
+export async function reindexAllTags(
+  tags: readonly string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  let done = 0;
+  for (const tag of tags) {
+    await indexTag(tag);
+    onProgress?.(++done, tags.length);
   }
   window.dispatchEvent(new Event("smartphoto:tags-indexed"));
 }

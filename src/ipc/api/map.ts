@@ -54,6 +54,16 @@ export async function mapGeoDownloadStart(): Promise<void> {
   await ipc<void>("map_geo_download_start");
 }
 
+/** 取消进行中的下载/回填管线（软取消；文件保留，重试断点续传） */
+export async function mapGeoCancel(): Promise<void> {
+  await ipc<void>("map_geo_cancel");
+}
+
+/** 删除地理数据（geo 目录 + 库内 regions 表；状态复位未安装） */
+export async function mapGeoDelete(): Promise<void> {
+  await ipc<void>("map_geo_delete");
+}
+
 /**
  * 树缓存直读（convertFileSrc → fetch 本地文件）。未就绪/读失败回 null，
  * 调用方降级（层级名走 clusters 自带 name）。

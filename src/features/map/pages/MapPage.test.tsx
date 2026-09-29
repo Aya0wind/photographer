@@ -9,7 +9,6 @@ import { subscribeAppEvents } from "@/ipc/api/events";
 import type { AppEvent } from "@/ipc/api/types";
 import {
   mapClusters,
-  mapGeoDownloadStart,
   mapGeoStatus,
   type GeoStatus,
   type MapCluster,
@@ -62,7 +61,6 @@ vi.mock("@/ipc/api/map", async (importOriginal) => {
   return {
     ...actual,
     mapGeoStatus: vi.fn(),
-    mapGeoDownloadStart: vi.fn(),
     mapRegionTree: vi.fn(),
     mapClusters: vi.fn(),
   };
@@ -77,7 +75,6 @@ vi.mock("@/ipc/api/events", async (importOriginal) => {
 });
 
 const statusMock = vi.mocked(mapGeoStatus);
-const downloadMock = vi.mocked(mapGeoDownloadStart);
 const clustersMock = vi.mocked(mapClusters);
 const subscribeMock = vi.mocked(subscribeAppEvents);
 
@@ -118,6 +115,7 @@ function renderPage() {
       <MemoryRouter initialEntries={["/map"]}>
         <Routes>
           <Route path="/map" element={<MapPage />} />
+          <Route path="/settings" element={<div data-testid="settings-page-stub" />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -132,7 +130,6 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  downloadMock.mockResolvedValue(undefined);
   subscribeMock.mockResolvedValue(() => {});
   // hooks 无条件跑（不渲染地图的分支也会拉聚合）：统一兜底，各测试再覆盖
   clustersMock.mockResolvedValue([]);
@@ -142,12 +139,12 @@ beforeEach(() => {
 // --- 场景 --------------------------------------------------------------------
 
 describe("MapPage 数据管线状态机", () => {
-  it("未安装 → 下载引导；点击触发下载", async () => {
+  it("未安装 → 下载引导；点击跳转设置地图数据 tab（下载入口都在设置）", async () => {
     statusMock.mockResolvedValue(status({ installed: false, phase: "notInstalled" }));
     renderPage();
     expect(await screen.findByTestId("map-download-hint")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("map-download-start"));
-    await waitFor(() => expect(downloadMock).toHaveBeenCalled());
+    expect(await screen.findByTestId("settings-page-stub")).toBeInTheDocument();
   });
 
   it("下载中 → 进度页", async () => {
@@ -158,14 +155,14 @@ describe("MapPage 数据管线状态机", () => {
     expect(await screen.findByTestId("map-preparing")).toBeInTheDocument();
   });
 
-  it("失败 → 错误 + 重试按钮", async () => {
+  it("失败 → 错误 + 跳转设置重试（不在本页下载）", async () => {
     statusMock.mockResolvedValue(
       status({ phase: "failed", message: "network" }),
     );
     renderPage();
     expect(await screen.findByTestId("map-failed")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("map-retry"));
-    await waitFor(() => expect(downloadMock).toHaveBeenCalled());
+    expect(await screen.findByTestId("settings-page-stub")).toBeInTheDocument();
   });
 
   it("就绪 + 无 GPS 照片 → 空态提示", async () => {

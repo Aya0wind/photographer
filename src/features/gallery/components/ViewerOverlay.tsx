@@ -198,13 +198,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     window.setTimeout(() => onClose(), 150);
   }, [fullscreen, onClose, motionOn, closing]);
 
-  // 切图方向（渲染期从 props 推导，不用 effect——新 key 挂载时 initial 要立即拿到）
-  const lastIndexRef = useRef(index);
-  const navDirRef = useRef(0);
-  if (index !== lastIndexRef.current) {
-    navDirRef.current = index > lastIndexRef.current ? 1 : -1;
-    lastIndexRef.current = index;
-  }
   useEffect(() => {
     const sync = () => setFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", sync);
@@ -693,13 +686,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 {t("viewer.missingSource")}
               </div>
             )}
-            <motion.div
-              key={asset.id}
-              className="absolute inset-0 flex items-center justify-center"
-              initial={motionInitial(motionOn, { opacity: 0, x: navDirRef.current * 36 })}
-              animate={{ opacity: 1, x: 0 }}
-              transition={TRANS.quick}
-            >
+            {/* 切图不做过渡动画（2026-09-29 用户定案）：图片层自身在不可见解码
+                完成后原子替换，任何入场动画都会先露出黑底再淡入（一闪黑）。 */}
+            <div className="absolute inset-0 flex items-center justify-center">
             {imageLayers.map((layer) => (
               <img
                 key={layer.src}
@@ -765,7 +754,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 }}
               />
             ))}
-            </motion.div>
+            </div>
             {imageLayers.length === 0 && mainFailed && (
               <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-placeholder">
                 <svg

@@ -377,6 +377,10 @@ pub fn run_semantic_backfill(
     // 收尾逐出双池：搜索 view 从最新落盘重映射（否则检索读旧 mmap）；
     // 可写池释放全量驻留内存（下次回填按需再 load）
     invalidate_index(db_dir);
+    // 一轮收尾通知（done>0 才发）：前端据此自动重建智能相册标签索引
+    if done > 0 {
+        bus.publish(AppEvent::AiIndexFinished { done });
+    }
     done
 }
 

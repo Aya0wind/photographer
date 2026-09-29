@@ -143,6 +143,8 @@ export type AppEvent =
   | { type: "indexTaskResumed"; pending: number }
   /** 索引任务进度（kind="ai" 语义索引 / 其余为缩略图等）；节流由后端负责 */
   | { type: "indexTaskProgress"; kind: string; done: number; total: number }
+  /** 语义索引一轮回填收尾（done=本轮新嵌入数；>0 时自动重建智能相册标签索引） */
+  | { type: "aiIndexFinished"; done: number }
   /** AI 模型下载进度（单模型，节流 1s） */
   | { type: "aiModelDownloadProgress"; id: string; doneBytes: number; totalBytes: number }
   /** AI 模型下载结束（ok=false 时 error 为原因文案） */

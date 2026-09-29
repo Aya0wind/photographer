@@ -52,22 +52,52 @@ struct DatavFull {
     features: Vec<serde_json::Value>,
 }
 
+/// DataV 下载源（默认公网；测试/离线环境可用 SMARTPHOTO_GEO_DATAV_BASE 覆盖）。
+fn datav_base() -> String {
+    std::env::var("SMARTPHOTO_GEO_DATAV_BASE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DATAV_BASE.to_string())
+}
+
+/// 拉取单个 DataV 包（已存在即跳过）：优先 `{adcode}_full.json`（含子级
+/// 区划），404/源缺时回退 `{adcode}.json` 轮廓文件——台湾 710000 无 _full
+/// （DataV 不提供其区划数据，只有省界轮廓；2026-09-29 用户真机 404 让整个
+/// 下载管线失败）。两试都失败按 _full 的错误上报。
+pub fn download_datav_file(dir: &Path, adcode: &str, base: &str) -> Result<(), String> {
+    let path = dir.join(format!("datav-{adcode}.json"));
+    if path.is_file() {
+        return Ok(());
+    }
+    let full_url = format!("{base}/{adcode}_full.json");
+    match download_to(&path, &full_url) {
+        Ok(()) => Ok(()),
+        Err(full_err) => {
+            let plain_url = format!("{base}/{adcode}.json");
+            match download_to(&path, &plain_url) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(full_err),
+            }
+        }
+    }
+}
+
 /// 递归拉取 DataV 文件族，返回本次拉取的文件数（进度计数用）。
 /// 全量约 375 个小文件（34 省 + ~340 市）；每文件落 `datav-<adcode>.json`。
-fn download_datav_recursive(
+pub fn download_datav_recursive(
     dir: &Path,
     adcode: &str,
     level: u8,
     cancel: &dyn Fn() -> bool,
     on_file: &dyn Fn(),
+    base: &str,
 ) -> Result<usize, String> {
     if cancel() {
         return Err("已取消".into());
     }
     let path = dir.join(format!("datav-{adcode}.json"));
     if !path.is_file() {
-        let url = format!("{DATAV_BASE}/{adcode}_full.json");
-        download_to(&path, &url)?;
+        download_datav_file(dir, adcode, base)?;
         on_file(); // 每文件推进度（市县在递归深处，不回调进度会长时间不动）
     }
     let raw = std::fs::read(&path).map_err(|e| format!("读回失败: {e}"))?;
@@ -93,7 +123,7 @@ fn download_datav_recursive(
             continue;
         }
         // 市县文件容错：重试一次仍失败则跳过该地区（上级数据仍可用）
-        match download_datav_recursive(dir, &code, level + 1, cancel, on_file) {
+        match download_datav_recursive(dir, &code, level + 1, cancel, on_file, base) {
             Ok(n) => count += n,
             Err(err) => eprintln!("DataV 子包跳过（{code}）: {err}"),
         }
@@ -176,13 +206,9 @@ fn run_download(db_dir: &Path, bus: &EventBus, cancel: &dyn Fn() -> bool) -> Res
     }
 
     // 中国包递归（省级根 → 市 → 县文件全拉齐；进度按文件数推进）
+    let base = datav_base();
+    download_datav_file(&dir, DATAV_CHINA_CODE, &base)?;
     let prov_path = dir.join(format!("datav-{DATAV_CHINA_CODE}.json"));
-    if !prov_path.is_file() {
-        download_to(
-            &prov_path,
-            &format!("{DATAV_BASE}/{DATAV_CHINA_CODE}_full.json"),
-        )?;
-    }
     let raw = std::fs::read(&prov_path).map_err(|e| format!("读省级文件失败: {e}"))?;
     let full: DatavFull =
         serde_json::from_slice(&raw).map_err(|e| format!("DataV 省级 JSON 无效: {e}"))?;
@@ -212,10 +238,10 @@ fn run_download(db_dir: &Path, bus: &EventBus, cancel: &dyn Fn() -> bool) -> Res
                 });
             };
             // 逐省递归（省市县三层）；单省失败重试一次
-            let result = download_datav_recursive(&dir, &code, 1, cancel, &on_file);
+            let result = download_datav_recursive(&dir, &code, 1, cancel, &on_file, &base);
             if result.is_err() {
                 std::thread::sleep(Duration::from_millis(500));
-                download_datav_recursive(&dir, &code, 1, cancel, &on_file)?;
+                download_datav_recursive(&dir, &code, 1, cancel, &on_file, &base)?;
             }
         }
         done += 1;

@@ -6,7 +6,7 @@ vi.mock("@/ipc/api", async (importOriginal) => ({
 }));
 
 import { searchSemantic } from "@/ipc/api";
-import { DEFAULT_SMART_TAGS, indexNewTags, indexedTagCover, loadSmartTags, saveSmartTags, unindexedTags } from "./smartTags";
+import { DEFAULT_SMART_TAGS, indexNewTags, indexedTagCover, indexedTagHitCount, loadSmartTags, reindexAllTags, saveSmartTags, unindexedTags } from "./smartTags";
 
 const searchMock = vi.mocked(searchSemantic);
 
@@ -30,5 +30,17 @@ describe("smart album tags", () => {
     await indexNewTags(["人像", "夜景", "星轨"]);
     expect(searchMock).toHaveBeenCalledTimes(3);
     expect(searchMock).toHaveBeenLastCalledWith("星轨", 100);
+  });
+
+  it("reindexAllTags forces re-query of every tag (stale zero-hit cache repaired)", async () => {
+    // 早于语义完成建索引：0 命中被缓存（智能相册隐藏的根因）
+    searchMock.mockResolvedValueOnce([]);
+    await indexNewTags(["人像"]);
+    expect(indexedTagHitCount("人像")).toBe(0);
+    // 语义收尾后全量重建：已索引标签也重跑查询并覆盖缓存
+    await reindexAllTags(["人像", "夜景"]);
+    expect(searchMock).toHaveBeenCalledTimes(3);
+    expect(indexedTagHitCount("人像")).toBe(1);
+    expect(indexedTagHitCount("夜景")).toBe(1);
   });
 });

@@ -276,6 +276,8 @@ pub fn run() {
             ipc::settings::settings_get,
             ipc::map::map_geo_status,
             ipc::map::map_geo_download_start,
+            ipc::map::map_geo_cancel,
+            ipc::map::map_geo_delete,
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
             ipc::settings::settings_set,

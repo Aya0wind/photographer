@@ -95,6 +95,49 @@ pub fn map_geo_download_start(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 取消进行中的下载/回填管线（软取消：任务体步进轮询）。状态落 Failed
+/// （「已取消」），数据包文件保留——重试断点续传。
+#[tauri::command]
+pub fn map_geo_cancel(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<SharedState>();
+    state.supervisor.cancel_kind("geo");
+    Ok(())
+}
+
+/// 删除地理数据（设置页管理）：取消管线 → 删 geo 目录与库内 regions/
+/// asset_regions 表 → 状态复位 NotInstalled。重下后回填管线全量重建。
+#[tauri::command]
+pub fn map_geo_delete(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<SharedState>();
+    state.supervisor.cancel_kind("geo");
+    let db_dir = {
+        let settings = state
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        settings
+            .active_library()
+            .map(|l| std::path::PathBuf::from(&l.db_dir))
+    };
+    let Some(db_dir) = db_dir else {
+        return Err("尚未创建库".into());
+    };
+    let dir = geo::geo_dir(&db_dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除地理数据目录失败: {e}"))?;
+    }
+    {
+        let db = active_library_db(state.inner())?;
+        db.0.execute_batch("DELETE FROM asset_regions; DELETE FROM regions;")
+            .map_err(|e| format!("清理地区表失败: {e}"))?;
+    }
+    let mut geo_state = geo::geo_state().lock().unwrap_or_else(|e| e.into_inner());
+    geo_state.phase = GeoPhase::NotInstalled;
+    geo_state.index = None;
+    Ok(())
+}
+
 /// 树缓存文件绝对路径（前端 convertFileSrc 直读；未就绪返回 None）。
 #[tauri::command]
 pub fn map_geo_cache_url(state: State<'_, SharedState>) -> Option<String> {

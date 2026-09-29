@@ -306,6 +306,21 @@ fn manual_index_kick_rejected_while_importing() {
     assert!(err.contains("导入"), "重建入口同样让路: {err}");
 
     assert!(wait_done(&state, Duration::from_secs(20)));
-    // 收尾放行后手动触发恢复可用
-    ipc::indexing::fetch_index_kick_now(&state, "thumb").unwrap();
+    // 收尾放行后手动触发恢复可用。wait_done 以 active_import 清空为准，让路
+    // 闸（import_running）在任务闭包末尾才 Drop——全量并行下两时点间有窗口，
+    // 此处轮询等待闸真正放下（而非立即断言）。
+    let started = std::time::Instant::now();
+    loop {
+        match ipc::indexing::fetch_index_kick_now(&state, "thumb") {
+            Ok(_) => break,
+            Err(err) => {
+                assert!(err.contains("导入"), "意外错误: {err}");
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "导入收尾后让路闸迟迟未放下"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
 }

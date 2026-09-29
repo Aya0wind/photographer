@@ -6,6 +6,7 @@ import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
 import AiTab from "@/features/settings/AiTab";
+import GeoTab from "@/features/settings/GeoTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags, smartTagLabel } from "@/features/albums/lib/smartTags";
 import { useSettingsStore, type DeepPartial, type Library, type Settings } from "@/stores/settingsStore";
 
@@ -18,7 +19,7 @@ import { useSettingsStore, type DeepPartial, type Library, type Settings } from 
  * 新建库走可复用 NewLibraryDialog（顶部菜单共用）。
  */
 
-type SettingsTab = "general" | "appearance" | "gallery" | "import" | "libraries" | "ai";
+type SettingsTab = "general" | "appearance" | "gallery" | "import" | "libraries" | "ai" | "map";
 
 const TABS: { key: SettingsTab; labelKey: string }[] = [
   { key: "general", labelKey: "settings.tab.general" },
@@ -27,6 +28,7 @@ const TABS: { key: SettingsTab; labelKey: string }[] = [
   { key: "import", labelKey: "settings.tab.import" },
   { key: "libraries", labelKey: "settings.tab.libraries" },
   { key: "ai", labelKey: "settings.tab.ai" },
+  { key: "map", labelKey: "settings.tab.map" },
 ];
 
 /** 修改即存：本地合并 + 持久化（失败静默，本地已更新） */
@@ -501,6 +503,7 @@ export default function SettingsPage() {
           )}
 
           {tab === "ai" && <AiTab />}
+          {tab === "map" && <GeoTab />}
         </div>
       </div>
 

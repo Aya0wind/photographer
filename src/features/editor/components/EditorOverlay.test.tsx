@@ -76,6 +76,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 vi.mock("@/features/gallery/lib/thumbPipeline", () => ({
   useAssetThumbUrl: vi.fn(() => ({ url: null, status: "loading" })),
 }));
@@ -96,6 +97,7 @@ const saveMock = vi.mocked(editRecipeSave);
 const deleteMock = vi.mocked(editRecipeDelete);
 const exportMock = vi.mocked(exportRun);
 const albumListMock = vi.mocked(albumList);
+const dialogOpenMock = vi.mocked(openDialog);
 const albumSubgroupsMock = vi.mocked(albumSubgroups);
 const thumbHookMock = vi.mocked(useAssetThumbUrl);
 
@@ -129,6 +131,7 @@ beforeEach(() => {
   deleteMock.mockReset();
   exportMock.mockReset();
   albumListMock.mockReset();
+  dialogOpenMock.mockReset().mockResolvedValue(null);
   thumbHookMock.mockReset().mockReturnValue({ url: null, status: "loading" });
   saveMock.mockImplementation(async (_id: number, recipe: EditRecipe) => ({
     recipe,
@@ -266,35 +269,18 @@ describe("EditorOverlay 保存/重置", () => {
   });
 });
 
-describe("EditorOverlay 导出对话框", () => {
-  it("folder 缺目录 → 确认禁用并提示；album 缺相册同理；选相册后可导出", async () => {
+describe("EditorOverlay 导出（顶栏按钮直导，无设置弹窗）", () => {
+  it("导出 → 系统目录选择器确定即导出（folder 模式）", async () => {
+    dialogOpenMock.mockResolvedValue("X:\\导出成品");
     const user = userEvent.setup();
     renderEditor();
-    await user.click(screen.getByTestId("editor-tool-output"));
     await user.click(screen.getByTestId("editor-export"));
-
-    const dialog = screen.getByTestId("export-dialog");
-    expect(dialog).toBeInTheDocument();
-    // 默认 folder 模式：目录为空 → 错误 + 确认禁用
-    const confirm = screen.getByTestId("export-dialog-confirm");
-    expect(confirm).toBeDisabled();
-    expect(screen.getByTestId("export-dialog-errors")).toHaveTextContent("请选择输出目录");
-
-    // 切 album 模式：未选相册
-    await user.click(screen.getByTestId("editor-output-mode-album"));
-    expect(confirm).toBeDisabled();
-    expect(screen.getByTestId("export-dialog-errors")).toHaveTextContent("请选择要加入的相册");
-
-    // 选相册 → 确认可点
-    await user.selectOptions(screen.getByTestId("editor-output-album"), "3");
-    expect(confirm).toBeEnabled();
-    await user.click(confirm);
 
     await waitFor(() => expect(exportMock).toHaveBeenCalledTimes(1));
     const [assetId, , options] = exportMock.mock.calls[0];
     expect(assetId).toBe(1);
-    expect(options.mode).toBe("album");
-    expect(options.album).toEqual({ albumId: "3", subgroup: null });
+    expect(options.mode).toBe("folder");
+    expect(options.folder).toEqual({ outputDir: "X:\\导出成品", fileName: "DSC_1234_edit.jpg" });
     expect(options.quality).toBe(90);
     expect(options.removeGps).toBe(false);
     expect("copyright" in options).toBe(false);
@@ -303,17 +289,59 @@ describe("EditorOverlay 导出对话框", () => {
     );
   });
 
-  it("folder 模式目录必填（只读输入经系统选择器选取）；文件名默认 {stem}_edit.jpg", async () => {
+  it("目录选择器取消 → 静默不导出", async () => {
+    dialogOpenMock.mockResolvedValue(null);
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByTestId("editor-export"));
+    await waitFor(() => expect(dialogOpenMock).toHaveBeenCalled());
+    expect(exportMock).not.toHaveBeenCalled();
+  });
+
+  it("文件名在输出面板可改；导出用面板当前值", async () => {
+    dialogOpenMock.mockResolvedValue("X:\\out");
     const user = userEvent.setup();
     renderEditor();
     await user.click(screen.getByTestId("editor-tool-output"));
-    await user.click(screen.getByTestId("editor-export"));
-    expect(screen.getByTestId("editor-output-dir")).toHaveAttribute("readonly");
     expect(screen.getByTestId("editor-output-filename")).toHaveValue("DSC_1234_edit.jpg");
-    expect(screen.getByTestId("export-dialog-confirm")).toBeDisabled();
-    expect(screen.getByTestId("export-dialog-errors")).toHaveTextContent("请选择输出目录");
-    // 摘要含元数据写入目标说明（§8：区分写入目标）
-    expect(screen.getByTestId("export-dialog-summary")).toHaveTextContent("不会修改原片");
+    await user.clear(screen.getByTestId("editor-output-filename"));
+    await user.type(screen.getByTestId("editor-output-filename"), "成品.jpg");
+    await user.click(screen.getByTestId("editor-export"));
+    await waitFor(() => expect(exportMock).toHaveBeenCalledTimes(1));
+    expect(exportMock.mock.calls[0][2].folder).toEqual({ outputDir: "X:\\out", fileName: "成品.jpg" });
+  });
+
+  it("加入相册 → 程序内对话框选相册 → album 模式导出（子组可选）", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByTestId("editor-export-album"));
+
+    const picker = screen.getByTestId("export-album-picker");
+    expect(picker).toBeInTheDocument();
+    // 未选相册（无相册数据时确认禁用；本例有默认选中第一个相册）
+    await user.type(screen.getByTestId("export-album-subgroup"), "精修");
+    await user.click(screen.getByTestId("export-album-confirm"));
+
+    await waitFor(() => expect(exportMock).toHaveBeenCalledTimes(1));
+    const [, , options] = exportMock.mock.calls[0];
+    expect(options.mode).toBe("album");
+    expect(options.album).toEqual({ albumId: "3", subgroup: "精修" });
+    expect(options.folder).toBeUndefined();
+  });
+
+  it("加入相册：子组留空 → subgroup null；取消不导出", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    await user.click(screen.getByTestId("editor-export-album"));
+    await user.click(screen.getByTestId("export-album-confirm"));
+    await waitFor(() => expect(exportMock).toHaveBeenCalledTimes(1));
+    expect(exportMock.mock.calls[0][2].album).toEqual({ albumId: "3", subgroup: null });
+
+    exportMock.mockClear();
+    await user.click(screen.getByTestId("editor-export-album"));
+    await user.click(screen.getByTestId("export-album-cancel"));
+    expect(screen.queryByTestId("export-album-picker")).not.toBeInTheDocument();
+    expect(exportMock).not.toHaveBeenCalled();
   });
 });
 
