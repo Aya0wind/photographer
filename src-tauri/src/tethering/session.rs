@@ -189,11 +189,20 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                 Ok(objects) => {
                     // 收片与用户操作（拍摄/参数）互斥：断开清理 incoming
                     // 目录时不会删到在途文件
-                    let _operation = session.operation.lock().unwrap();
-                    for object in objects {
-                        if let Err(error) = receive(&state, &session, &object) {
-                            session.record_error(&state, error);
+                    {
+                        let _operation = session.operation.lock().unwrap();
+                        for object in &objects {
+                            if let Err(error) = receive(&state, &session, object) {
+                                session.record_error(&state, error);
+                            }
                         }
+                    }
+                    // 排空模式（高速连拍）：拿到事件立即回轮（驱动侧事件
+                    // 还在排队）；空轮才歇——固定 200ms 会把相机自拍收片
+                    // 上限压到 ~5 张/秒
+                    let pace = poll_pace_ms(objects.len());
+                    if pace > 0 {
+                        std::thread::sleep(Duration::from_millis(pace));
                     }
                 }
                 Err(error) => {
@@ -202,7 +211,6 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                     break;
                 }
             }
-            std::thread::sleep(Duration::from_millis(200));
         }
         // 与在途操作互斥后再断开（gp_camera_exit + 删收片暂存目录）
         let _operation = session.operation.lock().unwrap();
@@ -210,6 +218,16 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     });
     Ok(dto)
 }
+/// poller 节奏：空轮歇 200ms；拿到事件立即回轮（排空模式——高速连拍
+/// 时驱动侧事件还在排队，固定间隔会把收片上限压到 ~5 张/秒）。
+fn poll_pace_ms(received: usize) -> u64 {
+    if received == 0 {
+        200
+    } else {
+        0
+    }
+}
+
 pub fn stop(id: &str) {
     if let Some(session) = current().lock().unwrap().remove(id) {
         session.cancelled.store(true, Ordering::Release);
@@ -523,6 +541,14 @@ mod tests {
         assert!(store.get("s1").is_some());
         assert!(store.get("s3").is_some());
         assert!(store.get("s2").is_none());
+    }
+
+    #[test]
+    fn poll_pace_drains_burst_without_fixed_interval() {
+        // 空轮限频、有事件立即回轮（高速连拍排空）
+        assert_eq!(poll_pace_ms(0), 200);
+        assert_eq!(poll_pace_ms(1), 0);
+        assert_eq!(poll_pace_ms(10), 0);
     }
 
     #[test]
