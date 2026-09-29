@@ -7,7 +7,6 @@ import {
   type AlbumSubgroupDto,
   type AssetDto,
   type AssetFilters,
-  type LrStagingResult,
 } from "./types";
 import { INVOKE_UNAVAILABLE_PATTERN } from "./errors";
 
@@ -133,23 +132,6 @@ export async function albumClaimAssets(
     if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return null;
     // 业务错误（如「已在其他相册主目录」）以 Err 原文抛出，调用方行内/浮层提示
     throw new Error(message);
-  }
-}
-
-/** 生成 LR 暂存夹（lr_staging_create；name 省略由后端按时间戳命名）。
- *  命令失败/负载异常返回 null（调用方提示失败）。 */
-export async function lrStagingCreate(assetIds: number[], name?: string): Promise<LrStagingResult | null> {
-  try {
-    const payload: Record<string, unknown> = { assetIds };
-    if (name !== undefined && name.trim() !== "") payload.name = name.trim();
-    const raw = await ipc<unknown>("lr_staging_create", payload);
-    if (raw === null || typeof raw !== "object") return null;
-    const r = raw as Partial<LrStagingResult>;
-    if (typeof r.dir !== "string" || r.dir === "") return null;
-    const numOf = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-    return { dir: r.dir, created: numOf(r.created), hardlinked: numOf(r.hardlinked), copied: numOf(r.copied) };
-  } catch {
-    return null;
   }
 }
 

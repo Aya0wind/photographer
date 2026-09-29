@@ -16,6 +16,8 @@ import {
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
+import SelectionToolbarHost from "@/features/gallery/components/SelectionToolbarHost";
+import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 
@@ -239,6 +241,9 @@ function PersonAssetsView({
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets ?? []);
 
+  // --- 多选（与图库同语义） ---
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+
   return (
     <div className="flex h-full flex-col" data-testid="people-assets-view">
       <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge px-4">
@@ -274,9 +279,35 @@ function PersonAssetsView({
             <p className="text-sm text-text-secondary">{t("people.assetsEmpty")}</p>
           </div>
         ) : (
-          <AssetGrid badges={badges} groups={groups} onOpenAsset={(asset) => openAsset(asset)} scrollTestId="people-grid-scroll" />
+          <AssetGrid
+            badges={badges}
+            groups={groups}
+            onOpenAsset={(asset) => openAsset(asset)}
+            scrollTestId="people-grid-scroll"
+            selection={selecting ? { active: true, selected, onToggle: toggleSelected } : undefined}
+            onCtrlClick={ctrlSelect}
+            onLongPress={ctrlSelect}
+            onCheckClick={ctrlSelect}
+          />
         )}
       </div>
+
+      {selecting && assets !== null && (
+        <SelectionToolbarHost
+          assets={assets}
+          selectedIds={selected}
+          onSelectIds={setSelected}
+          onDone={exitSelection}
+          onPatched={(ids, patch) => {
+            const idSet = new Set(ids);
+            setAssets((prev) => prev?.map((a) => (idSet.has(a.id) ? { ...a, ...patch } : a)) ?? prev);
+          }}
+          onRemoved={(ids) => {
+            const idSet = new Set(ids);
+            setAssets((prev) => prev?.filter((a) => !idSet.has(a.id)) ?? prev);
+          }}
+        />
+      )}
 
       {viewer && (
         <ViewerOverlay

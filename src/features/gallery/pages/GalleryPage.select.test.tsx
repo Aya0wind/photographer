@@ -415,3 +415,47 @@ describe("画廊：快捷键一次性提示条", () => {
     );
   });
 });
+
+describe("画廊：多选切换语义（再点即取消）", () => {
+  it("收藏：未收藏→5；乐观回写后全部已收藏→再点=0（取消收藏）", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(1));
+    await user.click(screen.getByTestId("selection-favorite"));
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 5));
+
+    // 乐观回写 rating=5 后再点：全部已收藏 → 取消
+    await user.click(screen.getByTestId("selection-favorite"));
+    await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 0));
+  });
+
+  it("全选：数据窗口全选；再点=取消全选（空集）", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(1));
+    await user.click(screen.getByTestId("selection-all"));
+    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 3 张"));
+    expect(screen.getByTestId("selection-all")).toHaveTextContent("取消全选");
+
+    await user.click(screen.getByTestId("selection-all"));
+    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 0 张"));
+    expect(screen.getByTestId("selection-all")).toHaveTextContent("全选");
+  });
+
+  it("旗标：全部已旗标再点=取消", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(2));
+    await user.click(screen.getByTestId("selection-flag"));
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, true));
+    // 旗标无乐观回写（assets.flagged 不变）→ 仍视为未旗标，语义不变：
+    // 这里只验证切换语义依赖选中集自身的 flagged 态
+    expect(flagMock).not.toHaveBeenCalledWith(2, false);
+  });
+});

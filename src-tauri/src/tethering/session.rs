@@ -11,10 +11,23 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex, MutexGuard, OnceLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+struct PendingCommand<'a>(&'a AtomicUsize);
+impl Drop for PendingCommand<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+pub struct CapturePermit<'a>(&'a AtomicBool);
+impl Drop for CapturePermit<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TetherPhoto {
@@ -44,6 +57,8 @@ pub struct Session {
     pub camera: CameraDto,
     pub backend: Arc<dyn CameraBackend>,
     pub operation: Mutex<()>,
+    pending_commands: AtomicUsize,
+    capture_in_flight: AtomicBool,
     cancelled: AtomicBool,
     disconnected: AtomicBool,
     connected: AtomicBool,
@@ -96,6 +111,50 @@ pub fn all() -> Vec<Arc<Session>> {
     current().lock().unwrap().all()
 }
 impl Session {
+    pub fn claim_capture(&self) -> Result<CapturePermit<'_>, String> {
+        self.ensure_open()?;
+        if self.receiving.load(Ordering::Acquire) {
+            return Err("相机正在接收照片，请稍候".into());
+        }
+        self.capture_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "相机正在拍摄或接收照片，请稍候".to_string())?;
+        Ok(CapturePermit(&self.capture_in_flight))
+    }
+    pub fn command<T>(
+        &self,
+        name: &str,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.pending_commands.fetch_add(1, Ordering::AcqRel);
+        let _pending = PendingCommand(&self.pending_commands);
+        let started = Instant::now();
+        let _operation = self.operation.lock().unwrap();
+        self.ensure_open()?;
+        let result = action();
+        if started.elapsed() >= Duration::from_millis(500) {
+            crate::devices::diagnostics::record(format!(
+                "tethering command={name} camera={} elapsed={:?} error={:?}",
+                self.camera.pnp_id,
+                started.elapsed(),
+                result.as_ref().err()
+            ));
+        }
+        result
+    }
+    pub fn try_background(&self) -> Option<MutexGuard<'_, ()>> {
+        if self.is_stopping()
+            || self.pending_commands.load(Ordering::Acquire) > 0
+            || self.capture_in_flight.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        let guard = self.operation.try_lock().ok()?;
+        if self.pending_commands.load(Ordering::Acquire) > 0 || self.is_stopping() {
+            return None;
+        }
+        Some(guard)
+    }
     pub fn is_stopping(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -136,14 +195,52 @@ impl Session {
         });
     }
     pub fn refresh_settings(&self) -> Result<Vec<CameraSetting>, String> {
-        let _operation = self.operation.lock().unwrap();
         self.ensure_open()?;
+        let Some(_operation) = self.try_background() else {
+            return Ok(self.settings.lock().unwrap().clone());
+        };
         let settings = self
             .backend
             .settings(&self.camera.pnp_id)
             .map_err(|e| e.to_string())?;
         *self.settings.lock().unwrap() = settings.clone();
         Ok(settings)
+    }
+    pub fn set_setting(&self, id: &str, value: &str) -> Result<Vec<CameraSetting>, String> {
+        self.command("set-parameter", || {
+            self.backend
+                .set_setting(&self.camera.pnp_id, id, value)
+                .map_err(|e| e.to_string())?;
+            // 写入和回读在同一次操作内，Sony 的异步属性需要以回读确认。
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            loop {
+                let settings = self
+                    .backend
+                    .settings(&self.camera.pnp_id)
+                    .map_err(|e| e.to_string())?;
+                let confirmed = settings.iter().any(|setting| {
+                    setting.id == id
+                        && (setting.current == value
+                            || setting.kind == super::backend::SettingKind::Action
+                            || (setting.kind == super::backend::SettingKind::Range
+                                && setting
+                                    .current
+                                    .parse::<f64>()
+                                    .ok()
+                                    .zip(value.parse::<f64>().ok())
+                                    .is_some_and(|(a, b)| (a - b).abs() < 0.0001)))
+                });
+                *self.settings.lock().unwrap() = settings.clone();
+                if confirmed {
+                    return Ok(settings);
+                }
+                self.ensure_open()?;
+                if Instant::now() >= deadline {
+                    return Err("相机未确认参数修改，请检查拍摄模式或机身控制".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
     }
 }
 pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<SessionDto, String> {
@@ -197,6 +294,8 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
         camera,
         backend,
         operation: Mutex::new(()),
+        pending_commands: AtomicUsize::new(0),
+        capture_in_flight: AtomicBool::new(false),
         cancelled: AtomicBool::new(false),
         disconnected: AtomicBool::new(false),
         connected: AtomicBool::new(true),
@@ -210,14 +309,21 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     guard.insert(session.clone());
     drop(guard);
     std::thread::spawn(move || {
+        let mut notified_revision = session.backend.settings_revision(&session.camera.pnp_id);
+        let mut last_notification = Instant::now();
+        let mut consecutive_errors = 0;
         while !session.cancelled.load(Ordering::Acquire) {
             // 轮询也纳入操作锁：旧会话清理后绝不能再操作相机，影响新会话。
-            let operation = session.operation.lock().unwrap();
+            let Some(operation) = session.try_background() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
             if session.cancelled.load(Ordering::Acquire) {
                 break;
             }
             match session.backend.poll_objects(&session.camera.pnp_id) {
                 Ok(objects) => {
+                    consecutive_errors = 0;
                     // 收片与用户操作（拍摄/参数）互斥：断开清理 incoming
                     // 目录时不会删到在途文件
                     for object in &objects {
@@ -226,6 +332,17 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                         }
                     }
                     drop(operation);
+                    let revision = session.backend.settings_revision(&session.camera.pnp_id);
+                    // 一秒内的参数事件合并为一个失效通知，由窗口按需读取快照。
+                    if revision != notified_revision
+                        && last_notification.elapsed() >= Duration::from_secs(1)
+                    {
+                        state.bus.publish(AppEvent::TetheringSettingsChanged {
+                            session_id: session.id.clone(),
+                        });
+                        notified_revision = revision;
+                        last_notification = Instant::now();
+                    }
                     // 排空模式（高速连拍）：拿到事件立即回轮（驱动侧事件
                     // 还在排队）；空轮才歇——固定 200ms 会把相机自拍收片
                     // 上限压到 ~5 张/秒
@@ -235,9 +352,17 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                     }
                 }
                 Err(error) => {
-                    session.connected.store(false, Ordering::Release);
+                    consecutive_errors += 1;
+                    if matches!(error, TetherError::Disconnected | TetherError::AccessDenied)
+                        || consecutive_errors >= 3
+                    {
+                        session.connected.store(false, Ordering::Release);
+                        session.record_error(&state, error.to_string());
+                        break;
+                    }
                     session.record_error(&state, error.to_string());
-                    break;
+                    drop(operation);
+                    std::thread::sleep(Duration::from_millis(200));
                 }
             }
         }
@@ -275,24 +400,25 @@ pub fn request_stop(id: &str) {
 }
 pub fn capture(state: &SharedState, id: &str) -> Result<(), String> {
     let session = get(id)?;
-    let _operation = session.operation.lock().unwrap();
-    session.ensure_open()?;
-    *session.error.lock().unwrap() = None;
-    let objects = match session.backend.trigger_capture(&session.camera.pnp_id) {
-        Ok(objects) => objects,
-        Err(error) => {
-            // 拔线等硬断连：置断开态并发事件（UI 横幅），错误文案照常透传
-            if matches!(error, TetherError::Disconnected) {
-                session.connected.store(false, Ordering::Release);
-                session.record_error(state, error.to_string());
+    let _capture = session.claim_capture()?;
+    session.command("capture", || {
+        *session.error.lock().unwrap() = None;
+        let objects = match session.backend.trigger_capture(&session.camera.pnp_id) {
+            Ok(objects) => objects,
+            Err(error) => {
+                // 拔线等硬断连：置断开态并发事件（UI 横幅），错误文案照常透传
+                if matches!(error, TetherError::Disconnected) {
+                    session.connected.store(false, Ordering::Release);
+                    session.record_error(state, error.to_string());
+                }
+                return Err(error.to_string());
             }
-            return Err(error.to_string());
+        };
+        for object in objects {
+            receive(state, &session, &object)?;
         }
-    };
-    for object in objects {
-        receive(state, &session, &object)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> Result<(), String> {
     if session.seen.lock().unwrap().contains(&object.object_id) {
@@ -497,6 +623,8 @@ mod tests {
     #[derive(Default)]
     struct NoopBackend {
         disconnects: std::sync::atomic::AtomicUsize,
+        settings_reads: AtomicUsize,
+        parameter: Mutex<Option<(String, String)>>,
         disconnect_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         disconnect_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     }
@@ -524,6 +652,34 @@ mod tests {
             if let Some(release) = self.disconnect_release.lock().unwrap().take() {
                 release.recv_timeout(Duration::from_secs(5)).unwrap();
             }
+        }
+        fn set_setting(&self, _pnp_id: &str, id: &str, value: &str) -> Result<(), TetherError> {
+            *self.parameter.lock().unwrap() = Some((id.into(), value.into()));
+            self.settings_reads.store(0, Ordering::Release);
+            Ok(())
+        }
+        fn settings(&self, _pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
+            let reads = self.settings_reads.fetch_add(1, Ordering::AcqRel);
+            let parameter = self.parameter.lock().unwrap();
+            Ok(parameter
+                .as_ref()
+                .map(|(id, value)| CameraSetting {
+                    id: id.clone(),
+                    label: id.clone(),
+                    kind: super::super::backend::SettingKind::Choice,
+                    current: if reads == 0 {
+                        "100".into()
+                    } else {
+                        value.clone()
+                    },
+                    writable: true,
+                    options: Vec::new(),
+                    min: None,
+                    max: None,
+                    step: None,
+                })
+                .into_iter()
+                .collect())
         }
         fn capture_still(
             &self,
@@ -561,6 +717,8 @@ mod tests {
             },
             backend: Arc::new(NoopBackend::default()),
             operation: Mutex::new(()),
+            pending_commands: AtomicUsize::new(0),
+            capture_in_flight: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(true),
@@ -612,6 +770,57 @@ mod tests {
         // 停止后可重开
         store.remove("s1");
         assert!(!store.camera_in_use("gphoto:usb:001,010"));
+    }
+
+    #[test]
+    fn parameter_write_is_confirmed_by_readback_before_cache_update_completes() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("confirm", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        let settings = session.set_setting("iso", "400").unwrap();
+        assert_eq!(settings[0].current, "400");
+        assert_eq!(session.dto().settings[0].current, "400");
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+        assert_eq!(session.pending_commands.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn background_refresh_uses_cache_without_queuing_behind_user_command() {
+        let session = make_session("priority", "test-camera", 1);
+        let operation = session.operation.lock().unwrap();
+        let command_session = session.clone();
+        let command = std::thread::spawn(move || command_session.command("test", || Ok(())));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.pending_commands.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(session.pending_commands.load(Ordering::Acquire) > 0);
+        assert!(session.try_background().is_none());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let background_session = session.clone();
+        let background =
+            std::thread::spawn(move || tx.send(background_session.refresh_settings()).unwrap());
+        let cached = rx.recv_timeout(Duration::from_secs(1));
+        drop(operation);
+        command.join().unwrap().unwrap();
+        background.join().unwrap();
+        assert!(cached.unwrap().unwrap().is_empty());
+        assert_eq!(session.pending_commands.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn duplicate_capture_is_rejected_and_failure_releases_busy_state() {
+        let session = make_session("capture", "test-camera", 1);
+        let capture = session.claim_capture().unwrap();
+        assert!(session.claim_capture().is_err());
+        assert!(session.try_background().is_none());
+        drop(capture);
+        let failed: Result<(), String> = (|| {
+            let _capture = session.claim_capture()?;
+            session.command("capture", || Err("camera error".into()))
+        })();
+        assert!(failed.is_err());
+        assert!(session.claim_capture().is_ok());
     }
 
     #[test]

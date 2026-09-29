@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -40,18 +40,35 @@ interface GroupCardProps {
   onOpen: (asset: AssetDto) => void;
 }
 
-/** 单个重复组卡：组头 + 勾选区 + 删除所选（勾选态由本卡自持） */
+/** 单个重复组卡：组头 + 勾选区 + 删除所选（勾选态由本卡自持）。
+ *  拖拽划选（2026-09-29）：按住勾选钮（或已选中瓦片）拖过其他瓦片 = 连续
+ *  选中——AssetGrid 同款「按下定意图、划过即应用」语义。 */
 function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  /** 划选意图：按下时目标态（勾选未选=true / 取消已选=false）；null=未在划选 */
+  const sweepRef = useRef<boolean | null>(null);
 
-  const toggle = (id: number) => {
+  /** 划选应用：意图方向幂等（已符合意图的瓦片不重复处理） */
+  const sweep = (id: number, target: boolean) => {
     setSelected((current) => {
+      if (current.has(id) === target) return current;
       const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (target) next.add(id);
+      else next.delete(id);
       return next;
     });
+  };
+
+  const beginSweep = (assetId: number, checked: boolean) => {
+    const target = !checked;
+    sweepRef.current = target;
+    sweep(assetId, target);
+    const onUp = () => {
+      sweepRef.current = null;
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointerup", onUp);
   };
 
   const ids = [...selected];
@@ -85,7 +102,7 @@ function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps)
           {t("similar.deleteSelected", { count: ids.length })}
         </button>
       </div>
-      <div className={`grid gap-2 ${tileSize === "small" ? "grid-cols-[repeat(auto-fill,minmax(120px,1fr))]" : "grid-cols-[repeat(auto-fill,minmax(200px,1fr))]"}`}>
+      <div className={`grid touch-none select-none gap-2 ${tileSize === "small" ? "grid-cols-[repeat(auto-fill,minmax(120px,1fr))]" : "grid-cols-[repeat(auto-fill,minmax(200px,1fr))]"}`}>
         {group.assets.map((asset) => {
           const checked = selected.has(asset.id);
           return (
@@ -98,12 +115,29 @@ function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps)
               data-asset-id={asset.id}
               data-selected={checked ? "true" : undefined}
               title={asset.name}
+              onPointerEnter={() => {
+                if (sweepRef.current !== null) sweep(asset.id, sweepRef.current);
+              }}
+              onPointerDown={(e) => {
+                // 已选中瓦片上按下 = 开始取消划选（未选瓦片走勾选钮开启选中划选）
+                if (e.button === 0 && checked) beginSweep(asset.id, true);
+              }}
             >
               <button type="button" onClick={() => onOpen(asset)} className="h-full w-full" aria-label={asset.name} data-testid="similar-asset-preview">
                 <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
               </button>
-              <button type="button" onClick={() => toggle(asset.id)} aria-pressed={checked} aria-label={t("similar.selectPhoto")}
-                className={`absolute left-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  if (e.button === 0) {
+                    e.stopPropagation();
+                    beginSweep(asset.id, checked);
+                  }
+                }}
+                onClick={(e) => e.stopPropagation()}
+                aria-pressed={checked}
+                aria-label={t("similar.selectPhoto")}
+                className={`absolute left-1.5 top-1.5 flex h-4 w-4 touch-none items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${
                   checked
                     ? "border-red-400 bg-red-400 text-white"
                     : "border-white/50 bg-black/40 text-transparent"

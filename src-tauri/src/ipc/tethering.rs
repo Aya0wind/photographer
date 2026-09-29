@@ -325,15 +325,7 @@ pub async fn tethering_setting_set(
 ) -> Result<Vec<super::super::tethering::backend::CameraSetting>, String> {
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
-        {
-            let _guard = session.operation.lock().unwrap();
-            session.ensure_open()?;
-            session
-                .backend
-                .set_setting(&session.camera.pnp_id, &id, &value)
-                .map_err(|e| e.to_string())?;
-        }
-        session.refresh_settings()
+        session.set_setting(&id, &value)
     })
     .await
 }
@@ -346,12 +338,12 @@ pub async fn tethering_focus_at(
 ) -> Result<(), String> {
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
-        let _guard = session.operation.lock().unwrap();
-        session.ensure_open()?;
-        session
-            .backend
-            .focus_at(&session.camera.pnp_id, x, y)
-            .map_err(|e| e.to_string())
+        session.command("focus", || {
+            session
+                .backend
+                .focus_at(&session.camera.pnp_id, x, y)
+                .map_err(|e| e.to_string())
+        })
     })
     .await
 }
@@ -374,7 +366,7 @@ pub async fn tethering_frame(
 ) -> Result<Option<String>, String> {
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
-        let Ok(_guard) = session.operation.try_lock() else {
+        let Some(_guard) = session.try_background() else {
             return Ok(None);
         };
         if session.ensure_open().is_err() {

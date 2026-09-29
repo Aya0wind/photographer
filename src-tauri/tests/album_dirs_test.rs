@@ -21,7 +21,7 @@ use common::{open_db, run_engine};
 use db::AssetRow;
 use events::AssetKind;
 use ipc::album::fetch_album_dir_rename;
-use ipc::claim::{fetch_album_claim_assets, fetch_lr_staging_create};
+use ipc::claim::fetch_album_claim_assets;
 
 fn ins(db: &db::Db, path: &str, kind: AssetKind, captured: Option<&str>) -> i64 {
     db.insert_asset(&AssetRow {
@@ -535,74 +535,6 @@ fn import_and_claim_share_the_same_album_home_formula() {
 // LR 暂存夹
 // ---------------------------------------------------------------------------
 
-#[test]
-fn lr_staging_create_hardlinks_same_volume_and_path_aliases() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_dir = dir.path().join("db");
-    let photo_root = dir.path().join("photos");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&photo_root).unwrap();
-    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
-    let db = open_db(&db_dir);
-
-    let p1 = photo_root.join("DSC_0001.jpg");
-    std::fs::write(&p1, b"one").unwrap();
-    let p2 = photo_root.join("DSC_0002.jpg");
-    std::fs::write(&p2, b"two").unwrap();
-    let id1 = ins(&db, &p1.to_string_lossy(), AssetKind::Photo, None);
-    let id2 = ins(&db, &p2.to_string_lossy(), AssetKind::Photo, None);
-
-    // 唯一暂存夹名（暂存夹落在卷根，避免跨测试运行污染 + 便于清理）
-    let uniq = format!(
-        "lr-test-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    // 命名暂存夹：同卷 → 硬链接
-    let r = fetch_lr_staging_create(&state, &[id1, id2], Some(&uniq)).unwrap();
-    assert!(r.dir.contains(".lr-staging"));
-    assert!(r.created);
-    assert_eq!(r.hardlinked, 2, "{r:?}");
-    assert_eq!(r.copied, 0);
-    let staged1 = std::path::Path::new(&r.dir).join("DSC_0001.jpg");
-    assert!(staged1.is_file());
-    // 内容一致性（硬链接与源同字节）
-    assert_eq!(std::fs::read(&staged1).unwrap(), b"one");
-
-    // 重名复用（不新建目录）
-    let r2 = fetch_lr_staging_create(&state, &[id1], Some(&uniq)).unwrap();
-    assert!(!r2.created, "已存在的暂存夹应复用");
-
-    // 无名 → 时间戳目录
-    let r3 = fetch_lr_staging_create(&state, &[id1], None).unwrap();
-    assert!(r3.dir.contains(".lr-staging"));
-    assert!(r3.created);
-    assert_eq!(r3.hardlinked, 1);
-
-    // verbatim 路径别名仍可硬链接，不额外复制
-    let photos_verbatim = std::fs::canonicalize(&photo_root).unwrap();
-    let verbatim_file = photos_verbatim.join("DSC_0001.jpg");
-    let id_v = ins(
-        &db,
-        &verbatim_file.to_string_lossy(),
-        AssetKind::Photo,
-        None,
-    );
-    let r4 = fetch_lr_staging_create(&state, &[id_v], Some(&format!("{uniq}-alias"))).unwrap();
-    assert_eq!(r4.copied, 0, "{r4:?}");
-    assert_eq!(r4.hardlinked, 1);
-
-    // 失效 id 跳过不计数
-    let r5 = fetch_lr_staging_create(&state, &[99999], Some(&uniq)).unwrap();
-    assert_eq!(r5.hardlinked + r5.copied, 0);
-
-    // 清理卷根暂存产物（暂存夹一次性可弃）
-    for staging in [&r.dir, &r3.dir, &r4.dir] {
-        let _ = std::fs::remove_dir_all(staging);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 默认相册「未分组」（0018 修订：导入必落相册的系统级保底）

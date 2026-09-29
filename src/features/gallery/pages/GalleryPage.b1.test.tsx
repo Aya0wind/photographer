@@ -15,7 +15,6 @@ import { SHORTCUTS_HINT_KEY } from "../components/ShortcutsHint";
 import {
   assetGroupDates,
   assetLabelSet,
-  lrStagingCreate,
   assetRejectSet,
   assetThumbGet,
   assetTrashMove,
@@ -39,7 +38,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetLabelSet: vi.fn(),
     assetRejectSet: vi.fn(),
     assetTrashMove: vi.fn(),
-    lrStagingCreate: vi.fn(),
     revealInExplorer: vi.fn(),
   };
 });
@@ -54,7 +52,6 @@ const thumbMock = vi.mocked(assetThumbGet);
 const labelMock = vi.mocked(assetLabelSet);
 const rejectMock = vi.mocked(assetRejectSet);
 const trashMoveMock = vi.mocked(assetTrashMove);
-const stagingMock = vi.mocked(lrStagingCreate);
 
 function makeAsset(id: number, extra?: Partial<AssetDto>): AssetDto {
   return assetFixture(id, {
@@ -103,12 +100,6 @@ beforeEach(() => {
   labelMock.mockReset().mockResolvedValue(undefined);
   rejectMock.mockReset().mockResolvedValue(undefined);
   trashMoveMock.mockReset().mockResolvedValue(undefined);
-  stagingMock.mockReset().mockResolvedValue({
-    dir: "I:\\SmartPhoto\\主库\\LR\\0927-2",
-    created: 2,
-    hardlinked: 2,
-    copied: 0,
-  });
   resetThumbPipelineForTests();
   clearGallerySnapshotForTests();
   resetViewMarkForTests();
@@ -266,44 +257,4 @@ describe("画廊：反选（B1）", () => {
   });
 });
 
-// --- LR 暂存夹入口（追加包） -------------------------------------------------------------
-
-describe("画廊：生成 LR 暂存夹（追加包）", () => {
-  it("操作条入口：选中集 → 命名弹窗（默认 MMDD-选中数）→ 确认调 lr_staging_create → 结果含路径与计数", async () => {
-    const user = userEvent.setup();
-    renderGallery();
-    await screen.findAllByTestId("gallery-tile");
-
-    await user.click(checkOf(1));
-    await user.click(tileOf(3));
-    await user.click(screen.getByTestId("selection-lr"));
-
-    const dialog = await screen.findByTestId("lr-staging-dialog");
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const prefix = pad(now.getMonth() + 1) + pad(now.getDate());
-    expect(within(dialog).getByTestId("lr-staging-name")).toHaveValue(prefix + "-2");
-    await user.click(within(dialog).getByTestId("lr-staging-confirm"));
-
-    await waitFor(() => expect(stagingMock).toHaveBeenCalledWith([1, 3], prefix + "-2"));
-    const result = await screen.findByTestId("lr-staging-result");
-    expect(within(result).getByTestId("lr-staging-counts")).toHaveTextContent("硬链接 2 张 / 复制 0 张");
-
-    await user.click(within(result).getByTestId("lr-staging-done"));
-    await waitFor(() => expect(screen.queryByTestId("lr-staging-dialog")).not.toBeInTheDocument());
-  });
-
-  it("右键菜单入口（单张）：弹窗打开；Esc 关闭", async () => {
-    const user = userEvent.setup();
-    renderGallery();
-    await screen.findAllByTestId("gallery-tile");
-
-    fireEvent.contextMenu(tileOf(2), { clientX: 100, clientY: 100 });
-    const menu = await screen.findByTestId("asset-context-menu");
-    await user.click(within(menu).getByTestId("asset-context-menu-item-lr-staging"));
-
-    expect(await screen.findByTestId("lr-staging-dialog")).toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByTestId("lr-staging-dialog")).not.toBeInTheDocument());
-  });
-});
+// --- LR 暂存夹入口（追加包） -------------------------------------------------------------);

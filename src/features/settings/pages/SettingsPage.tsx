@@ -36,41 +36,6 @@ function commit(partial: DeepPartial<Settings>): void {
   void save(useSettingsStore.getState().settings);
 }
 
-/** LR 交接指引行（B2 静态文案）：小图标 + 标题 + 说明 */
-function LrGuideRow({
-  icon,
-  titleKey,
-  textKey,
-}: {
-  icon: string;
-  titleKey: string;
-  textKey: string;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-start gap-2.5" data-testid="lr-guide-row" data-guide={titleKey}>
-      <svg
-        viewBox="0 0 16 16"
-        width="14"
-        height="14"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className="mt-0.5 shrink-0 text-accent"
-        aria-hidden="true"
-      >
-        <path d={icon} />
-      </svg>
-      <p className="min-w-0 text-[11px] leading-relaxed text-text-secondary">
-        <span className="font-medium text-text-primary">{t(titleKey)}</span>
-        <span className="mx-1.5 text-text-muted">·</span>
-        {t(textKey)}
-      </p>
-    </div>
-  );
-}
 
 export function SectionTitle({ children }: { children: ReactNode }) {
   return (
@@ -323,15 +288,6 @@ export default function SettingsPage() {
                 </select>
               </SettingRow>
 
-              {/* LR 交接（B2）：静态指引——导出建议 / XMP 冲突 / 星级互通边界 */}
-              <SectionTitle>{t("settings.section.lr")}</SectionTitle>
-              <div
-                className="flex flex-col gap-2 rounded-lg border border-edge/70 bg-surface/60 p-3"
-                data-testid="settings-lr-guide"
-              >
-                <LrGuideRow icon="M8 2v8M5 4.5L8 2l3 2.5M3 8v3.5h10V8" titleKey="lr.guide.exportTitle" textKey="lr.guide.export" />
-                <LrGuideRow icon="M3 4h10v8H3zM5.5 8l2 2 3.5-4" titleKey="lr.guide.xmpTitle" textKey="lr.guide.xmp" />
-              </div>
             </>
           )}
 

@@ -242,6 +242,10 @@ pub trait CameraBackend: Send + Sync {
     fn poll_objects(&self, _pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         Ok(Vec::new())
     }
+    /// 参数变化通知的序号；不支持通知的后端使用低频快照兜底。
+    fn settings_revision(&self, _pnp_id: &str) -> u64 {
+        0
+    }
     fn open_captured(
         &self,
         pnp_id: &str,

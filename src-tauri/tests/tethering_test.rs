@@ -39,11 +39,13 @@ fn gphoto_connected_camera_smoke() {
     println!("Detected: {} ({})", camera.name, camera.pnp_id);
     backend.connect(&camera.pnp_id).expect("connect camera");
     // 无论验证成功还是失败，都先释放 USB 会话供应用使用。
+    let started = Instant::now();
     let settings = backend.settings(&camera.pnp_id);
+    let settings_elapsed = started.elapsed();
     let frame = backend.live_view_frame(&camera.pnp_id);
     backend.disconnect(&camera.pnp_id);
     let settings = settings.expect("read camera settings");
-    println!("Settings: {}", settings.len());
+    println!("Settings: {}, elapsed: {:?}", settings.len(), settings_elapsed);
     assert!(!settings.is_empty());
     for setting in &settings {
         if ["iso", "shutterspeed", "f-number", "aperture"].contains(&setting.id.as_str()) {

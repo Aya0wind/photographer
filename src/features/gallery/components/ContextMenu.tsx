@@ -185,7 +185,6 @@ export function AssetContextMenu({
   onColorLabeled,
   onRejected,
   onTrashRequest,
-  onLrStaging,
 }: {
   at: { x: number; y: number };
   assets: AssetDto[];
@@ -201,8 +200,6 @@ export function AssetContextMenu({
   onRejected?: (assets: AssetDto[], rejected: boolean) => void;
   /** 「移入回收站」请求回调（确认弹窗由上层挂载） */
   onTrashRequest?: (assets: AssetDto[]) => void;
-  /** 「生成 LR 暂存夹」请求回调（命名弹窗由上层挂载） */
-  onLrStaging?: (assets: AssetDto[]) => void;
 }) {
   const { t } = useTranslation();
 
@@ -312,13 +309,6 @@ export function AssetContextMenu({
       label: count > 1 ? t("albums.removeManyFrom", { count }) : t("albums.removeFromAlbum"),
       onSelect: () => void removeFromAlbum(),
       danger: true,
-    });
-  }
-  if (onLrStaging) {
-    entries.push({
-      key: "lr-staging",
-      label: count > 1 ? t("context.lrStagingMany", { count }) : t("context.lrStaging"),
-      onSelect: () => onLrStaging(assets),
     });
   }
   if (onTrashRequest) {

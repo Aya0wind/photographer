@@ -20,7 +20,7 @@ use std::ffi::{c_char, c_int, c_ulong, CStr, CString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::Duration;
@@ -42,6 +42,7 @@ mod gpt {
     pub const GP_CAPTURE_IMAGE: c_int = 0;
     // CameraEventType：UNKNOWN=0, TIMEOUT=1, FILE_ADDED=2, …（gphoto2-camera.h）
     pub const GP_EVENT_FILE_ADDED: c_int = 2;
+    pub const GP_EVENT_UNKNOWN: c_int = 0;
 
     /// 不透明句柄（C 侧为指向内部结构的指针）。
     macro_rules! opaque {
@@ -91,16 +92,6 @@ mod gpt {
         unsafe extern "C" fn(*mut Camera, *mut *mut CameraWidget, *mut std::ffi::c_void) -> c_int;
     pub type gp_camera_set_config =
         unsafe extern "C" fn(*mut Camera, *mut CameraWidget, *mut std::ffi::c_void) -> c_int;
-    /// 单配置枚举/读取（list_config 名 = 稳定 id；set 走全树路径，见
-    /// set_setting 注释）。
-    pub type gp_camera_list_config =
-        unsafe extern "C" fn(*mut Camera, *mut CameraList, *mut std::ffi::c_void) -> c_int;
-    pub type gp_camera_get_single_config = unsafe extern "C" fn(
-        *mut Camera,
-        *const c_char,
-        *mut *mut CameraWidget,
-        *mut std::ffi::c_void,
-    ) -> c_int;
     pub type gp_camera_capture_preview =
         unsafe extern "C" fn(*mut Camera, *mut CameraFile, *mut std::ffi::c_void) -> c_int;
     pub type gp_camera_capture = unsafe extern "C" fn(
@@ -151,6 +142,8 @@ mod gpt {
     pub type gp_widget_get_type = unsafe extern "C" fn(*mut CameraWidget, *mut c_int) -> c_int;
     pub type gp_widget_get_label =
         unsafe extern "C" fn(*mut CameraWidget, *mut *const c_char) -> c_int;
+    pub type gp_widget_get_name =
+        unsafe extern "C" fn(*mut CameraWidget, *mut *const c_char) -> c_int;
     pub type gp_widget_get_value =
         unsafe extern "C" fn(*mut CameraWidget, *mut std::ffi::c_void) -> c_int;
     pub type gp_widget_set_value =
@@ -181,8 +174,6 @@ struct Symbols {
     gp_camera_get_abilities: gpt::gp_camera_get_abilities,
     gp_camera_get_config: gpt::gp_camera_get_config,
     gp_camera_set_config: gpt::gp_camera_set_config,
-    gp_camera_list_config: gpt::gp_camera_list_config,
-    gp_camera_get_single_config: gpt::gp_camera_get_single_config,
     gp_camera_capture_preview: gpt::gp_camera_capture_preview,
     gp_camera_capture: gpt::gp_camera_capture,
     gp_camera_file_get: gpt::gp_camera_file_get,
@@ -203,6 +194,7 @@ struct Symbols {
     gp_widget_count_children: gpt::gp_widget_count_children,
     gp_widget_get_type: gpt::gp_widget_get_type,
     gp_widget_get_label: gpt::gp_widget_get_label,
+    gp_widget_get_name: gpt::gp_widget_get_name,
     gp_widget_get_value: gpt::gp_widget_get_value,
     gp_widget_set_value: gpt::gp_widget_set_value,
     gp_widget_get_readonly: gpt::gp_widget_get_readonly,
@@ -243,8 +235,6 @@ impl Symbols {
             gp_camera_get_abilities: sym!(gp_camera_get_abilities),
             gp_camera_get_config: sym!(gp_camera_get_config),
             gp_camera_set_config: sym!(gp_camera_set_config),
-            gp_camera_list_config: sym!(gp_camera_list_config),
-            gp_camera_get_single_config: sym!(gp_camera_get_single_config),
             gp_camera_capture_preview: sym!(gp_camera_capture_preview),
             gp_camera_capture: sym!(gp_camera_capture),
             gp_camera_file_get: sym!(gp_camera_file_get),
@@ -265,6 +255,7 @@ impl Symbols {
             gp_widget_count_children: sym!(gp_widget_count_children),
             gp_widget_get_type: sym!(gp_widget_get_type),
             gp_widget_get_label: sym!(gp_widget_get_label),
+            gp_widget_get_name: sym!(gp_widget_get_name),
             gp_widget_get_value: sym!(gp_widget_get_value),
             gp_widget_set_value: sym!(gp_widget_set_value),
             gp_widget_get_readonly: sym!(gp_widget_get_readonly),
@@ -500,11 +491,26 @@ struct GphotoConnection {
     camera: *mut gpt::Camera,
     /// 收片暂存目录（下载落盘 + open_captured 白名单根）。
     incoming: PathBuf,
-    /// wait_for_event 失败后置否，后续 poll 直接 Disconnected（不再碰死相机）。
+    /// 确认设备消失后置否；短暂 busy/timeout 不等于断开。
     connected: AtomicBool,
+    settings_revision: AtomicU64,
 }
 unsafe impl Send for GphotoConnection {}
 unsafe impl Sync for GphotoConnection {}
+
+struct GphotoEventData(*mut std::ffi::c_void);
+impl Drop for GphotoEventData {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                extern "C" {
+                    fn free(data: *mut std::ffi::c_void);
+                }
+                free(self.0); // libgphoto2 与 MSVC 使用同一 UCRT 堆。
+            }
+        }
+    }
+}
 
 /// 联拍窗口契约三参数 → 前端置顶排序键（其余按 label 排序）。
 const CORE_SETTING_IDS: &[&str] = &["shutterspeed", "f-number", "iso"];
@@ -771,6 +777,36 @@ impl GphotoBackend {
         }
     }
 
+    /// 本地遍历已经取回的配置树，不为每个参数再次发送 USB 请求。
+    unsafe fn collect_settings(
+        s: &Symbols,
+        widget: *mut gpt::CameraWidget,
+        out: &mut Vec<CameraSetting>,
+    ) {
+        let mut name_ptr: *const c_char = std::ptr::null();
+        (s.gp_widget_get_name)(widget, &mut name_ptr);
+        let name = cstr(name_ptr);
+        if EXCLUDED_SECTIONS.contains(&name.as_str()) {
+            return;
+        }
+        let count = (s.gp_widget_count_children)(widget);
+        if count > 0 {
+            for index in 0..count {
+                let mut child = std::ptr::null_mut();
+                if (s.gp_widget_get_child)(widget, index, &mut child) >= 0 && !child.is_null() {
+                    Self::collect_settings(s, child, out);
+                }
+            }
+        } else if !name.is_empty()
+            && !is_vendor_code_name(&name)
+            && !EXCLUDED_NAMES.contains(&name.as_str())
+        {
+            if let Some(setting) = Self::widget_to_setting(s, &name, widget) {
+                out.push(setting);
+            }
+        }
+    }
+
     /// 值按 widget 类型写入（Choice/Text 传 char* 本体——RADIO 的 set_value
     /// 约定与 get 不对称，传 &ptr 写入的是指针字节，相机会静默忽略；真机
     /// probe6 实测，2026-09-29）。
@@ -972,6 +1008,7 @@ impl CameraBackend for GphotoBackend {
                             camera,
                             incoming,
                             connected: AtomicBool::new(true),
+                            settings_revision: AtomicU64::new(0),
                         });
                         self.connections
                             .lock()
@@ -1010,7 +1047,7 @@ impl CameraBackend for GphotoBackend {
         }
     }
 
-    /// 全参数面板：gp_camera_list_config 名单 → 逐名 get_single_config。
+    /// 全参数面板：一次 get_config，再在内存中遍历全部参数。
     /// 过滤：厂商裸码（/main/other 十六进制名）、EXCLUDED_NAMES 危险项、
     /// status 只读杂音（TEXT 类型天然跳过）。核心三参置顶。
     fn settings(&self, pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
@@ -1021,42 +1058,11 @@ impl CameraBackend for GphotoBackend {
         unsafe {
             let ctx = (s.gp_context_new)();
             let result = (|| {
-                let mut names: *mut gpt::CameraList = std::ptr::null_mut();
-                check((s.gp_list_new)(&mut names))?;
-                let code = (s.gp_camera_list_config)(conn.camera, names, ctx);
-                if code < 0 {
-                    (s.gp_list_free)(names);
-                    return Err(TetherError::Other(format!("gphoto2 错误 {code}")));
-                }
-                let count = (s.gp_list_count)(names);
+                let mut root: *mut gpt::CameraWidget = std::ptr::null_mut();
+                check((s.gp_camera_get_config)(conn.camera, &mut root, ctx))?;
                 let mut out: Vec<CameraSetting> = Vec::new();
-                for i in 0..count {
-                    let mut name_ptr: *const c_char = std::ptr::null();
-                    (s.gp_list_get_name)(names, i, &mut name_ptr);
-                    let name = cstr(name_ptr);
-                    if is_vendor_code_name(&name)
-                        || EXCLUDED_NAMES.contains(&name.as_str())
-                        || EXCLUDED_SECTIONS.iter().any(|sec| name == *sec)
-                    {
-                        continue;
-                    }
-                    let name_c = CString::new(&*name).unwrap();
-                    let mut widget: *mut gpt::CameraWidget = std::ptr::null_mut();
-                    if (s.gp_camera_get_single_config)(
-                        conn.camera,
-                        name_c.as_ptr(),
-                        &mut widget,
-                        ctx,
-                    ) < 0
-                    {
-                        continue;
-                    }
-                    if let Some(setting) = Self::widget_to_setting(s, &name, widget) {
-                        out.push(setting);
-                    }
-                    (s.gp_widget_free)(widget);
-                }
-                (s.gp_list_free)(names);
+                Self::collect_settings(s, root, &mut out);
+                (s.gp_widget_free)(root);
                 out.sort_by_key(|setting| {
                     CORE_SETTING_IDS
                         .iter()
@@ -1184,23 +1190,33 @@ impl CameraBackend for GphotoBackend {
                     &mut eventdata,
                     ctx,
                 );
-                if code < 0 {
+                let _event_data = GphotoEventData(eventdata);
+                if matches!(code, -10 | -110) {
+                    // 空轮超时或相机暂忙，继续会话，不误报拔线。
+                    return Ok(Vec::new());
+                }
+                if code == -52 {
                     conn.connected.store(false, Ordering::Release);
                     return Err(TetherError::Disconnected);
                 }
+                if code < 0 {
+                    return Err(TetherError::Other(format!("gphoto2 错误 {code}")));
+                }
                 let mut out = Vec::new();
+                if eventtype == gpt::GP_EVENT_UNKNOWN && !eventdata.is_null() {
+                    let description = cstr(eventdata as *const c_char);
+                    if description.starts_with("PTP Property ")
+                        || description.starts_with("PTP Deviceinfo changed")
+                    {
+                        conn.settings_revision.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
                 if eventtype == gpt::GP_EVENT_FILE_ADDED && !eventdata.is_null() {
                     let path = &*(eventdata as *const gpt::CameraFilePath);
                     let folder = CStr::from_ptr(path.folder.as_ptr()).to_owned();
                     let name = CStr::from_ptr(path.name.as_ptr()).to_owned();
                     // 相机端自拍：保留卡上原件（用户自己按的快门）
                     out.push(Self::download(s, ctx, &conn, &folder, &name, false)?);
-                }
-                if !eventdata.is_null() {
-                    extern "C" {
-                        fn free(p: *mut std::ffi::c_void);
-                    }
-                    free(eventdata); // 事件数据由 libgphoto2 malloc（同 ucrt 堆）
                 }
                 Ok(out)
             })();
@@ -1222,6 +1238,12 @@ impl CameraBackend for GphotoBackend {
         std::fs::File::open(path)
             .map(|f| Box::new(f) as Box<dyn std::io::Read + Send>)
             .map_err(|e| TetherError::Other(e.to_string()))
+    }
+
+    fn settings_revision(&self, pnp_id: &str) -> u64 {
+        self.connection(pnp_id)
+            .map(|connection| connection.settings_revision.load(Ordering::Acquire))
+            .unwrap_or(0)
     }
 
     fn capture_still(

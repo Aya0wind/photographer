@@ -114,3 +114,26 @@ describe("最近浏览：查看器打点闭环", () => {
     await waitFor(() => expect(markMock).toHaveBeenCalledWith(2));
   });
 });
+
+describe("最近浏览：多选", () => {
+  it("Ctrl+点击进多选 → 操作条（收藏/加册/全选/回收站）；全选计数与取消全选", async () => {
+    recentViewedMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
+    renderRecent();
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(3);
+
+    fireEvent.click(tiles[0], { ctrlKey: true });
+    expect(await screen.findByTestId("selection-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+
+    // 全选 → 3 张；再点 → 取消全选（切换语义）
+    fireEvent.click(screen.getByTestId("selection-all"));
+    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 3 张"));
+    expect(screen.getByTestId("selection-all")).toHaveTextContent("取消全选");
+    fireEvent.click(screen.getByTestId("selection-all"));
+    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 0 张"));
+
+    fireEvent.click(screen.getByTestId("selection-cancel"));
+    await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
+  });
+});

@@ -163,6 +163,7 @@ export type AppEvent =
   | { type: "tetheringObjectAdded"; pnpId: string; objectName: string; objectSize: number | null }
   | { type: "tetheringPhotoAdded"; sessionId: string; libraryId: string; albumId: number; assetId: number; name: string }
   | { type: "tetheringStatus"; sessionId: string; connected: boolean; error: string | null }
+  | { type: "tetheringSettingsChanged"; sessionId: string }
   | { type: "mapGeoProgress"; stage: string; done: number; total: number; message: string | null }
   | { type: "mapRegionsUpdated" }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
@@ -587,17 +588,6 @@ export interface AlbumDto {
 export type AlbumOpResult = { ok: true } | { ok: false; error: string | null };
 export type AlbumCreateResult = { ok: true; album: AlbumDto } | { ok: false; error: string | null };
 
-// --- LR 暂存夹（B1 追加包契约） --------------------------------------------------------
-
-/** lr_staging_create 结果：dir=生成的暂存目录绝对路径 */
-export interface LrStagingResult {
-  dir: string;
-  created: number;
-  /** 硬链接条目数（同盘走硬链接） */
-  hardlinked: number;
-  /** 复制条目数（跨盘回退复制） */
-  copied: number;
-}
 
 /** 相册子分组（album_subgroups 返回；B4 子分组模型：相册内任意命名文件夹层） */
 export interface AlbumSubgroupDto {

@@ -308,6 +308,9 @@ pub enum AppEvent {
         connected: bool,
         error: Option<String>,
     },
+    TetheringSettingsChanged {
+        session_id: String,
+    },
 
     // 拍摄地图（geo 模块）：下载/回填进度与索引刷新
     /// 地理数据管线进度（stage = download/load/backfill；done/total 按阶段语义：

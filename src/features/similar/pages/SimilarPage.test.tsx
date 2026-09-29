@@ -1,7 +1,7 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -201,4 +201,30 @@ it("图片点击打开预览，勾选删除按钮独立操作", async () => {
   await user.click(within(cards[0]).getByTestId("similar-asset-check"));
   expect(cards[0]).toHaveAttribute("data-selected", "true");
   expect(screen.queryByTestId("viewer")).not.toBeInTheDocument();
+});
+
+describe("相似照片：拖拽划选", () => {
+  it("勾选钮按下划过其他瓦片 = 连续选中；已选瓦片按下划过 = 连续取消", async () => {
+    listMock.mockResolvedValue([{ kind: "similar", assets: [makeAsset(1), makeAsset(2), makeAsset(3)] }]);
+    renderSimilar();
+    const cards = await screen.findAllByTestId("similar-group");
+    const tiles = within(cards[0]).getAllByTestId("similar-asset");
+
+    // 从第一格勾选钮按下 → 划过第二、三格 → 三格全选
+    fireEvent.pointerDown(within(tiles[0]).getByTestId("similar-asset-check"), { button: 0 });
+    fireEvent.pointerEnter(tiles[1]);
+    fireEvent.pointerEnter(tiles[2]);
+    fireEvent.pointerUp(window);
+    for (const tile of tiles.slice(0, 3)) {
+      expect(tile).toHaveAttribute("data-selected", "true");
+    }
+
+    // 已选瓦片上按下（取消意图）→ 划过另一格 → 两格取消
+    fireEvent.pointerDown(tiles[0], { button: 0 });
+    fireEvent.pointerEnter(tiles[1]);
+    fireEvent.pointerUp(window);
+    expect(tiles[0]).not.toHaveAttribute("data-selected");
+    expect(tiles[1]).not.toHaveAttribute("data-selected");
+    expect(tiles[2]).toHaveAttribute("data-selected", "true");
+  });
 });

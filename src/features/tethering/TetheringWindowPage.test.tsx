@@ -1,7 +1,7 @@
 /** 联拍独立窗口：会话快照渲染 / 参数设置 / 拍摄 / 事件驱动胶片条 / 断连与结束态 */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router";
 
@@ -108,6 +108,12 @@ function renderPage(sessionId = "s1") {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   handler = null;
@@ -127,6 +133,88 @@ afterEach(() => {
 });
 
 describe("TetheringWindowPage 联拍独立窗口", () => {
+  it("旧刷新回包不能覆盖正在修改的值；改参期间暂停取景和拍摄", async () => {
+    sessionMock.mockResolvedValue(dto());
+    const oldRefresh = deferred<TetherCameraSetting[] | null>();
+    const write = deferred<TetherCameraSetting[]>();
+    settingsRefreshMock.mockReturnValueOnce(oldRefresh.promise);
+    settingSetMock.mockReturnValueOnce(write.promise);
+    renderPage();
+    await screen.findByTestId("tether-window");
+    handler!({ type: "tetheringSettingsChanged", sessionId: "s1" });
+    await waitFor(() => expect(settingsRefreshMock).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("tether-setting-shutterspeed"));
+    fireEvent.click(screen.getByTestId("tether-quick-shutterspeed-menu").querySelector('[data-value="250"]')!);
+    const frameCalls = frameMock.mock.calls.length;
+    expect(screen.getByTestId("tether-shutter")).toBeDisabled();
+    expect(screen.getByTestId("tether-setting-shutterspeed")).toHaveAttribute("aria-busy", "true");
+    await act(async () => {
+      oldRefresh.resolve(dto().settings);
+      await new Promise((done) => window.setTimeout(done, 100));
+    });
+    expect(screen.getByTestId("tether-setting-shutterspeed")).toHaveTextContent("250");
+    expect(frameMock).toHaveBeenCalledTimes(frameCalls);
+    await act(async () => write.resolve([choice("shutterspeed", "250", true, ["125", "250"])]));
+    expect(screen.getByTestId("tether-shutter")).toBeEnabled();
+  });
+
+  it("快速改同一参数只发送当前在途值和最后一个待发送值", async () => {
+    const iso = (value: string) => choice("iso", value, true, ["100", "200", "400", "800"]);
+    sessionMock.mockResolvedValue(dto({ settings: [iso("100")] }));
+    const first = deferred<TetherCameraSetting[]>();
+    settingSetMock.mockReturnValueOnce(first.promise).mockResolvedValueOnce([iso("800")]);
+    renderPage();
+    await screen.findByTestId("tether-setting-iso");
+    for (const value of ["200", "400", "800"]) {
+      fireEvent.click(screen.getByTestId("tether-setting-iso"));
+      fireEvent.click(screen.getByTestId("tether-quick-iso-menu").querySelector(`[data-value="${value}"]`)!);
+    }
+    expect(settingSetMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("tether-setting-iso")).toHaveTextContent("800");
+    await act(async () => first.resolve([iso("200")]));
+    await waitFor(() => expect(settingSetMock).toHaveBeenCalledTimes(2));
+    expect(settingSetMock.mock.calls.map((call) => call[2])).toEqual(["200", "800"]);
+    await waitFor(() => expect(screen.getByTestId("tether-setting-iso")).toHaveAttribute("aria-busy", "false"));
+    expect(screen.getByTestId("tether-setting-iso")).toHaveTextContent("800");
+  });
+
+  it("变化通知合并且刷新在途时不叠加新读取", async () => {
+    sessionMock.mockResolvedValue(dto());
+    const read = deferred<TetherCameraSetting[] | null>();
+    settingsRefreshMock.mockReturnValue(read.promise);
+    renderPage();
+    await screen.findByTestId("tether-window");
+    for (let i = 0; i < 10; i++) handler!({ type: "tetheringSettingsChanged", sessionId: "s1" });
+    await waitFor(() => expect(settingsRefreshMock).toHaveBeenCalledTimes(1));
+    handler!({ type: "tetheringSettingsChanged", sessionId: "s1" });
+    await act(async () => { await new Promise((done) => window.setTimeout(done, 300)); });
+    expect(settingsRefreshMock).toHaveBeenCalledTimes(1);
+    await act(async () => read.resolve(dto().settings));
+  });
+
+  it("连续点击快门只触发一次，失败后可以再次拍摄", async () => {
+    sessionMock.mockResolvedValue(dto());
+    const capture = deferred<{ ok: boolean; error?: string }>();
+    captureMock.mockReturnValueOnce(capture.promise).mockResolvedValueOnce({ ok: true });
+    renderPage();
+    const shutter = await screen.findByTestId("tether-shutter");
+    act(() => { fireEvent.click(shutter); fireEvent.click(shutter); fireEvent.click(shutter); });
+    expect(captureMock).toHaveBeenCalledTimes(1);
+    await act(async () => capture.resolve({ ok: false, error: "相机正忙" }));
+    expect(screen.getByTestId("tether-shutter")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("tether-shutter"));
+    await waitFor(() => expect(captureMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("拍摄请求异常也会恢复按钮，不会永久停在拍摄中", async () => {
+    sessionMock.mockResolvedValue(dto());
+    captureMock.mockRejectedValueOnce(new Error("USB unavailable"));
+    renderPage();
+    fireEvent.click(await screen.findByTestId("tether-shutter"));
+    await waitFor(() => expect(screen.getByTestId("tether-capture-error")).toHaveTextContent("USB unavailable"));
+    expect(screen.getByTestId("tether-shutter")).toBeEnabled();
+    expect(screen.queryByTestId("tether-capturing")).toBeNull();
+  });
   it("会话快照渲染：标题栏相册名/相机名 + 悬浮工具栏（快门本地化）", async () => {
     sessionMock.mockResolvedValue(dto());
     renderPage();

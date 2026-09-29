@@ -39,7 +39,6 @@ import {
 } from "@/features/ai/SemanticResultsView";
 import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
-import LrStagingDialog from "../components/LrStagingDialog";
 import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ShortcutsHint from "../components/ShortcutsHint";
@@ -375,7 +374,6 @@ export default function GalleryPage() {
   // --- 「加入相册」弹窗（多选操作条 / 右键菜单共用入口，③ 全局） -----------------------
   const [addToAlbumTargets, setAddToAlbumTargets] = useState<AssetDto[] | null>(null);
   // --- 「生成 LR 暂存夹」弹窗（B1 追加包：操作条 / 右键菜单共用入口） -------------------
-  const [lrTargets, setLrTargets] = useState<AssetDto[] | null>(null);
   const assetsById = useMemo(() => {
     const map = new Map<number, AssetDto>();
     for (const group of viewerGroups) for (const a of group.assets) map.set(a.id, a);
@@ -817,13 +815,12 @@ export default function GalleryPage() {
         <SelectionBar
           count={selectedAssets.length}
           assets={selectedAssets}
-          onFavoritesChanged={(items) => items.forEach((asset) => handleFavoriteChange(asset, true))}
+          onFavoritesChanged={(items, favorite) => items.forEach((asset) => handleFavoriteChange(asset, favorite))}
           onDone={exitSelection}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
           onColorLabeled={handleColorLabeled}
           onRejected={handleRejected}
           onTrashRequest={requestTrashMove}
-          onLrStaging={(targets) => setLrTargets(targets)}
           windowIds={windowIds}
           onSelectAll={selectAllInWindow}
           onInvert={invertSelection}
@@ -840,7 +837,6 @@ export default function GalleryPage() {
           onColorLabeled={handleColorLabeled}
           onRejected={handleRejected}
           onTrashRequest={requestTrashMove}
-          onLrStaging={(targets) => setLrTargets(targets)}
         />
       )}
 
@@ -852,10 +848,6 @@ export default function GalleryPage() {
         />
       )}
 
-      {/* 「生成 LR 暂存夹」弹窗（操作条/右键菜单共用；结果含路径+硬链接/复制数） */}
-      {lrTargets !== null && (
-        <LrStagingDialog assets={lrTargets} onClose={() => setLrTargets(null)} />
-      )}
 
       {/* 「移入回收站」确认一步（多选操作条/右键菜单共用；删除默认先入回收站） */}
       {trashConfirm !== null && (

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
@@ -54,7 +54,7 @@ vi.mock("maplibre-gl", () => {
       this.handlers[event]?.forEach((cb) => cb());
     }
   }
-  return { Map, Marker, NavigationControl: class {} };
+  return { Map, Marker, NavigationControl: class {}, setWorkerUrl: vi.fn() };
 });
 
 vi.mock("@/ipc/api/map", async (importOriginal) => {
@@ -123,6 +123,12 @@ function renderPage() {
     </I18nextProvider>,
   );
 }
+
+// mock Marker 直接挂 document.body 且 map.remove 是 noop：每测后手动清气泡 DOM，
+// 防上一测的陈旧气泡截胡本测的 findAllByRole
+afterEach(() => {
+  document.querySelectorAll(".map-bubble").forEach((el) => el.remove());
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -204,7 +210,8 @@ describe("MapPage 地图交互", () => {
     await screen.findByTestId("map-canvas");
     // 气泡 DOM 挂在 body（mock Marker），面包屑在页内：按「不在面包屑里」挑气泡
     const bubbleNamed = async (name: string) => {
-      const btn = await screen.findAllByRole("button", { name });
+      // 可访问名含计数（"中国, 12 photos"）：子串正则匹配
+      const btn = await screen.findAllByRole("button", { name: new RegExp(`^${name}`) });
       const bubble = btn.find((b) => !b.closest('[data-testid="map-breadcrumb"]'));
       expect(bubble).toBeDefined();
       return bubble!;
@@ -213,15 +220,21 @@ describe("MapPage 地图交互", () => {
     await waitFor(() => expect(clustersMock).toHaveBeenCalledWith(1, 10));
     fireEvent.click(await bubbleNamed("浙江省"));
     await waitFor(() => expect(clustersMock).toHaveBeenCalledWith(2, 11));
-    // 面包屑「中国」是 level 0 节点：回它 = 显示子层（省级 level 1，不是市级 2）
-    clustersMock.mockClear();
+    // 面包屑「中国」是 level 0 节点：回它 = 显示子层（省级 level 1，不是市级 2）。
+    // useMapClusters 有会话缓存（(1,10) 已拉过）→ 断言 UI 而非 IPC 次数：
+    // 面包屑只剩「全球 / 中国」，气泡回到省级（浙江省）且无杭州市。
     const crumb = screen
       .getAllByRole("button")
       .find((b) => b.textContent === "中国" && b.closest('[data-testid="map-breadcrumb"]'));
     expect(crumb).toBeDefined();
     fireEvent.click(crumb!);
-    await waitFor(() => expect(clustersMock).toHaveBeenCalledWith(1, 10));
-    expect(clustersMock.mock.calls.some(([level]) => level === 2)).toBe(false);
+    await waitFor(() => {
+      expect(screen.getByTestId("map-breadcrumb").textContent).not.toContain("浙江省");
+    });
+    await waitFor(() => expect(screen.getByTestId("map-breadcrumb").textContent).toContain("中国"));
+    const bubbleAgain = await screen.findAllByRole("button", { name: /^浙江省/ });
+    expect(bubbleAgain.length).toBeGreaterThan(0);
+    expect(screen.queryAllByRole("button", { name: /^杭州市/ })).toHaveLength(0);
   });
 
   it("mapRegionsUpdated 事件 → 缓存失效重拉", async () => {

@@ -1,5 +1,5 @@
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +7,8 @@ import { indexKickNow, type AssetDto } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
+import SelectionToolbarHost from "@/features/gallery/components/SelectionToolbarHost";
+import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useAiIndexingProgress } from "./useSemanticSearch";
 
 /**
@@ -14,6 +16,8 @@ import { useAiIndexingProgress } from "./useSemanticSearch";
  * 状态化呈现——索引进度（首次需索引）/ loading / 模型未就绪引导卡（去设置）/
  * 后端未连接 / 空结果（附「语义索引建立中」提示 + 立即索引）/ AssetGrid 结果
  * （相似度百分比角标右下，分档样式见 scoreBadge）。
+ * 多选（2026-09-29 补齐）：与图库一致的操作条（收藏/旗标/色标/拒绝/分享/
+ * 加册/全选/反选/回收站）；选中资产的乐观补丁回写 props.onPatched（有则）。
  */
 
 export interface SemanticResultsViewProps {
@@ -26,6 +30,10 @@ export interface SemanticResultsViewProps {
   onOpenAsset?: (asset: AssetDto, group: { key: string; date: string | null; assets: AssetDto[] }) => void;
   /** 触发重试（未就绪引导的「重试」入口；可选） */
   onRetry?: () => void;
+  /** 选中资产本地乐观补丁（上层同步自己的列表态；不传则仅写后端） */
+  onPatched?: (ids: number[], patch: Partial<AssetDto>) => void;
+  /** 移入回收站后的本地剔除（上层过滤列表） */
+  onRemoved?: (ids: number[]) => void;
 }
 
 /** 空结果附加提示：库内语义索引未建完（ai.done<total）→「建立中（N/M）」+ 立即索引 */
@@ -89,12 +97,23 @@ export default function SemanticResultsView({
   scrollTestId = "semantic-grid-scroll",
   onOpenAsset,
   onRetry,
+  onPatched,
+  onRemoved,
 }: SemanticResultsViewProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const indexing = useAiIndexingProgress();
   const { cards, badges } = usePhotoCards(assets);
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
+
+  // --- 多选（与图库同语义；结果集为 props，乐观补丁经回调上抛） ---
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+  const patchAssets = useCallback(
+    (ids: number[], patch: Partial<AssetDto>) => {
+      onPatched?.(ids, patch);
+    },
+    [onPatched],
+  );
 
   if (status === "loading") {
     return (
@@ -167,7 +186,28 @@ export default function SemanticResultsView({
   return (
     <div className="relative h-full min-h-0">
       <SemanticIndexingBanner progress={indexing} />
-      <AssetGrid groups={groups} badges={badges} tile={200} scores={scores} onOpenAsset={onOpenAsset} scrollTestId={scrollTestId} />
+      <AssetGrid
+        groups={groups}
+        badges={badges}
+        tile={200}
+        scores={scores}
+        onOpenAsset={onOpenAsset}
+        scrollTestId={scrollTestId}
+        selection={selecting ? { active: true, selected, onToggle: toggleSelected } : undefined}
+        onCtrlClick={ctrlSelect}
+        onLongPress={ctrlSelect}
+        onCheckClick={ctrlSelect}
+      />
+      {selecting && (
+        <SelectionToolbarHost
+          assets={assets}
+          selectedIds={selected}
+          onSelectIds={setSelected}
+          onDone={exitSelection}
+          onPatched={patchAssets}
+          onRemoved={onRemoved}
+        />
+      )}
     </div>
   );
 }

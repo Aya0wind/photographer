@@ -343,7 +343,6 @@ pub fn run() {
             ipc::album::asset_albums,
             ipc::album::album_dir_rename,
             ipc::claim::album_claim_assets,
-            ipc::claim::lr_staging_create,
             ipc::indexing::index_kick_now,
             ipc::indexing::index_status,
             ipc::indexing::index_rebuild,

@@ -1,4 +1,4 @@
-//! 归册挪移 + LR 暂存夹命令（阶段 B3，用户定案 2026-09-27 及其修订）。
+//! 归册挪移命令（阶段 B3，用户定案 2026-09-27 及其修订）。
 //!
 //! `album_claim_assets`：归入 = 物理挪移并改主相册。支持从日期根（历史
 //! 遗留）、从未分组、从任意相册主目录挪到目标相册目录
@@ -21,10 +21,6 @@
 //! 归一（[`norm_sep`]）；「未分组」的照片在 UI 判定为未真正归类（前端读
 //! 未分组引用或路径前缀均可）。
 //!
-//! `lr_staging_create`：把所选资产放入「LR 暂存夹」供 Lightroom 导入/
-//! 修改后回传——目标 `photoRoot 所在卷/.lr-staging/{name 或 时间戳}/`。
-//! 逐文件优先硬链接（零额外占用，NAS SMB 支持则同样零拷贝），失败或
-//! 跨卷回退复制。暂存夹一次性可弃，应用不管理其生命周期（v1 无清理命令）。
 //!
 //! 全部走 active_library_db + run_blocking（铁律：磁盘 IO 不上主线程）。
 
@@ -56,19 +52,6 @@ pub struct ClaimResultDto {
     pub failed: Vec<ClaimFailureDto>,
 }
 
-/// LR 暂存夹创建结果。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LrStagingResultDto {
-    /// 暂存夹绝对路径。
-    pub dir: String,
-    /// 本次是否新建了暂存夹目录（已存在则复用）。
-    pub created: bool,
-    /// 硬链接条目数（零额外占用）。
-    pub hardlinked: u64,
-    /// 回退复制条目数。
-    pub copied: u64,
-}
 
 /// 路径分隔符归一（`\` → `/`）：库内 path 存在反斜杠（claim 挪移 join
 /// 产物）与正斜杠（引擎/导出 render_dir 渲染段）两种形态，前缀判定统一
@@ -77,15 +60,6 @@ pub(crate) fn norm_sep(p: &str) -> String {
     p.replace('\\', "/")
 }
 
-/// 照片根所在卷根（如 `Y:\`）——LR 暂存夹落卷根用。纯路径形态计算，
-/// 与挪移判定用的 platform::filesystem_identity（卷序列号身份）无关；
-/// 注意 verbatim 前缀（`\\?\C:\`）与普通盘根判为不同形态。
-fn volume_root_of(path: &Path) -> String {
-    path.ancestors()
-        .last()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
 
 /// 相册主目录前缀（含尾分隔符；相册相对段 album_home_rel 以 `/` 拼接，
 /// 归一后与库内两种分隔符形态均能命中）。
@@ -414,79 +388,6 @@ pub fn fetch_album_claim_assets(
     Ok(result)
 }
 
-/// LR 暂存夹核。
-pub fn fetch_lr_staging_create(
-    state: &super::AppState,
-    asset_ids: &[i64],
-    name: Option<&str>,
-) -> Result<LrStagingResultDto, String> {
-    let db = super::active_library_db(state)?;
-    let photo_root = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .cloned()
-        .ok_or("尚未创建库")?
-        .photo_root;
-    let volume_root = volume_root_of(Path::new(&photo_root));
-    if volume_root.is_empty() {
-        return Err("无法解析照片根所在卷".into());
-    }
-    let base = Path::new(&volume_root).join(".lr-staging");
-    let dir_name = match name.map(str::trim).filter(|n| !n.is_empty()) {
-        Some(n) => crate::db::sanitize_dir_name(n),
-        None => chrono::Local::now().format("lr-%Y%m%d-%H%M%S").to_string(),
-    };
-    let dir = base.join(&dir_name);
-    let created = !dir.is_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建暂存夹失败: {e}"))?;
-
-    let mut result = LrStagingResultDto {
-        dir: dir.to_string_lossy().into_owned(),
-        created,
-        hardlinked: 0,
-        copied: 0,
-    };
-    for asset_id in asset_ids.iter().copied() {
-        let path: Option<String> =
-            db.0.query_row("SELECT path FROM assets WHERE id = ?1", [asset_id], |r| {
-                r.get(0)
-            })
-            .ok();
-        let Some(path) = path else {
-            continue; // 失效 id 跳过
-        };
-        let src = PathBuf::from(&path);
-        if !src.is_file() {
-            continue; // 不在盘：跳过（暂存夹对缺席文件无意义）
-        }
-        let filename = src
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let dst = resolve_conflict(&dir, &filename);
-        // 直接尝试硬链接（Windows = CreateHardLinkW）；跨卷/不支持时回退复制
-        let staged = std::fs::hard_link(&src, &dst).is_ok();
-        if staged {
-            result.hardlinked += 1;
-        } else if std::fs::copy(&src, &dst).is_ok() {
-            result.copied += 1;
-        }
-    }
-    let _ = db.append_log(
-        "info",
-        None,
-        &format!(
-            "LR 暂存夹：{}（硬链 {}，复制 {}，共 {} 项）",
-            result.dir,
-            result.hardlinked,
-            result.copied,
-            result.hardlinked + result.copied
-        ),
-    );
-    Ok(result)
-}
 
 // ---------------------------------------------------------------------------
 // Tauri 命令壳（async + spawn_blocking）
@@ -507,16 +408,3 @@ pub async fn album_claim_assets(
     .await
 }
 
-/// 创建 LR 暂存夹并放入所选资产（硬链接优先、失败回退复制）。
-#[tauri::command]
-pub async fn lr_staging_create(
-    state: State<'_, SharedState>,
-    asset_ids: Vec<i64>,
-    name: Option<String>,
-) -> Result<LrStagingResultDto, String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, move |state| {
-        fetch_lr_staging_create(state, &asset_ids, name.as_deref())
-    })
-    .await
-}

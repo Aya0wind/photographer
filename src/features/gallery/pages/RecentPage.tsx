@@ -1,12 +1,14 @@
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { recentViewed, type AssetDto } from "@/ipc/api";
 import { groupAssetsByDate } from "../lib/assetGroups";
 import AssetGrid from "../components/AssetGrid";
+import SelectionToolbarHost from "../components/SelectionToolbarHost";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ViewerOverlay from "../components/ViewerOverlay";
+import { useAssetSelection } from "../lib/useAssetSelection";
 import { useAssetViewer } from "../lib/useAssetViewer";
 import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
 
@@ -15,6 +17,8 @@ import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
  * - 数据源 recentViewed(200)：按最后浏览时间 DESC、同资产取最新一次（查看器
  *   打开/切图经 markAssetViewed 打点，见 lib/viewMark）
  * - 复用 AssetGrid square 布局 + 查看器（打点闭环：在此页浏览也会进入历史）
+ * - 多选（2026-09-29 补齐）：与图库一致的操作条（收藏/旗标/色标/拒绝/
+ *   分享/加册/全选/反选/回收站），Ctrl+点击/长按/勾选进入
  * - 后端命令未就绪 / 无浏览记录：空态「打开过的照片会出现在这里」
  */
 
@@ -44,6 +48,13 @@ export default function RecentPage() {
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets);
   const [tileSize, setTileSize] = useGalleryTileSize();
+
+  // --- 多选（与图库同语义；操作条/弹窗由 SelectionToolbarHost 一站接齐） ---
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+  const patchAssets = useCallback((ids: number[], patch: Partial<AssetDto>) => {
+    const idSet = new Set(ids);
+    setAssets((prev) => prev.map((a) => (idSet.has(a.id) ? { ...a, ...patch } : a)));
+  }, []);
 
   return (
     <div className="h-full" data-testid="recent-page">
@@ -84,10 +95,29 @@ export default function RecentPage() {
               onOpenAsset={openAsset}
               tile={GALLERY_TILE_PX[tileSize]}
               scrollTestId="recent-grid-scroll"
+              selection={selecting ? { active: true, selected, onToggle: toggleSelected } : undefined}
+              onCtrlClick={ctrlSelect}
+              onLongPress={ctrlSelect}
+              onCheckClick={ctrlSelect}
             />
           )}
         </div>
       </div>
+
+      {/* 多选操作条（收藏/旗标/色标/拒绝/分享/加册/全选/反选/回收站） */}
+      {selecting && (
+        <SelectionToolbarHost
+          assets={assets}
+          selectedIds={selected}
+          onSelectIds={setSelected}
+          onDone={exitSelection}
+          onPatched={patchAssets}
+          onRemoved={(ids) => {
+            const idSet = new Set(ids);
+            setAssets((prev) => prev.filter((a) => !idSet.has(a.id)));
+          }}
+        />
+      )}
 
       {viewer && (
         <ViewerOverlay

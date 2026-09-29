@@ -15,11 +15,16 @@ import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "
 import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
 
 /**
- * 多选浮动操作条（M4.5，画廊选择模式）：顶部居中浮条——已选 N 张 |
+ * 多选浮动操作条（M4.5，画廊选择模式）：底部居中浮条——已选 N 张 |
  * 收藏（星标=rating 5）/ 旗标 / 颜色标签（LR 五色）/ 拒绝旗标 / 分享
  * （在资源管理器中显示 = opener reveal、复制文件路径）/ 加入相册（③ 全局
- * 入口；弹窗由上层挂载）/ 反选（当前数据窗口取补集）/ 移入回收站（红色，
- * 上层确认一步）/ 取消。动作对全部选中资产批量调用；失败静默（乐观 UI）。
+ * 入口；弹窗由上层挂载）/ 全选（再点=取消全选）/ 反选（当前数据窗口取补集）/
+ * 移入回收站（红色，上层确认一步）/ 取消。
+ * 动作对全部选中资产批量调用；失败静默（乐观 UI）。
+ * 全部动作均为「切换」语义：再点一次 = 撤销（收藏↔取消、旗标↔取消、
+ * 全选↔取消全选、同色色标↔清除；拒绝原本就是智能切换）。
+ * 浮条默认画面底部居中，grip 可拖动（位置持久化 localStorage），
+ * 弹层一律向上展开。
  * 相册上下文（相册详情页）：额外多一项「从相册移除」——只删引用，照片保留图库。
  */
 
@@ -29,6 +34,24 @@ export interface SelectionAlbumContext {
   albumName: string;
   /** 移除完成回调（详情页刷新列表与计数） */
   onRemoved: () => void;
+}
+
+/** 浮条拖动位置持久化键（视口左上像素坐标）。 */
+const BAR_POS_KEY = "selectionbar.pos";
+
+function loadBarPos(): { x: number; y: number } | null {
+  try {
+    const raw = window.localStorage.getItem(BAR_POS_KEY);
+    if (raw === null) return null;
+    const p = JSON.parse(raw) as { x?: unknown; y?: unknown };
+    if (typeof p.x !== "number" || typeof p.y !== "number") return null;
+    // 视口可能变小：夹回范围内，避免拖到再也找不到的角落
+    const x = Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - 80));
+    const y = Math.min(Math.max(0, p.y), Math.max(0, window.innerHeight - 40));
+    return { x, y };
+  } catch {
+    return null;
+  }
 }
 
 function GlyphStar({ filled }: { filled: boolean }) {
@@ -122,24 +145,6 @@ function GlyphTrash() {
   );
 }
 
-function GlyphLr() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      width="12"
-      height="12"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-      <path d="M4.5 5.5v5h3M9 10.5h3.5M9 10.5v-5" />
-    </svg>
-  );
-}
 
 function GlyphInvert() {
   return (
@@ -181,7 +186,6 @@ export default function SelectionBar({
   onColorLabeled,
   onRejected,
   onTrashRequest,
-  onLrStaging,
   windowIds,
   onSelectAll,
   onInvert,
@@ -191,7 +195,8 @@ export default function SelectionBar({
   onDone: () => void;
   /** 「加入相册」入口回调（弹窗由上层挂载）；不传则不显示该按钮 */
   onAddToAlbum?: (assets: AssetDto[]) => void;
-  onFavoritesChanged?: (assets: AssetDto[]) => void;
+  /** 收藏切换完成（IPC 后同步本地列表态）；favorite = 本轮切换到的目标态 */
+  onFavoritesChanged?: (assets: AssetDto[], favorite: boolean) => void;
   /** 相册上下文（相册详情页）：额外显示「从相册移除」 */
   album?: SelectionAlbumContext;
   /** 子分组上下文（B4，相册详情页传入）：多选操作条「移到子分组…/移到相册根」 */
@@ -209,9 +214,7 @@ export default function SelectionBar({
   onRejected?: (assets: AssetDto[], rejected: boolean) => void;
   /** 「移入回收站」请求（确认弹窗由上层挂载）；不传则不显示该按钮 */
   onTrashRequest?: (assets: AssetDto[]) => void;
-  /** 「生成 LR 暂存夹」请求（命名弹窗由上层挂载）；不传则不显示该按钮 */
-  onLrStaging?: (assets: AssetDto[]) => void;
-  /** 全选完成（上层以窗口全量替换选中集）；与 windowIds 同给才显示按钮 */
+  /** 全选完成（上层以窗口全量或空集替换选中集）；与 windowIds 同给才显示按钮 */
   onSelectAll?: (ids: number[]) => void;
   /** 反选的数据窗口（当前已加载资产 id 全集）；与 onInvert 同给才显示按钮 */
   windowIds?: number[];
@@ -224,9 +227,11 @@ export default function SelectionBar({
   const [subgroupOpen, setSubgroupOpen] = useState(false);
   const [subgroupName, setSubgroupName] = useState("");
   const [toast, setToast] = useState<string | null>(null);
+  const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(loadBarPos);
   const shareRef = useRef<HTMLDivElement | null>(null);
   const colorRef = useRef<HTMLDivElement | null>(null);
   const subgroupRef = useRef<HTMLDivElement | null>(null);
+  const barRef = useRef<HTMLDivElement | null>(null);
 
   // 点击浮层菜单外关闭
   useEffect(() => {
@@ -247,24 +252,64 @@ export default function SelectionBar({
     window.setTimeout(() => setToast(null), 1500);
   }
 
+  /** 浮条拖动：grip 按下 → pointer 跟随（限视口内）→ 抬起持久化。 */
+  function beginBarDrag(e: React.PointerEvent<HTMLButtonElement>): void {
+    if (e.button !== 0) return;
+    const bar = barRef.current;
+    if (bar === null) return;
+    setShareOpen(false);
+    setColorOpen(false);
+    setSubgroupOpen(false);
+    const offX = e.clientX - bar.getBoundingClientRect().left;
+    const offY = e.clientY - bar.getBoundingClientRect().top;
+    let last: { x: number; y: number } | null = null;
+    const onMove = (ev: PointerEvent) => {
+      const el = barRef.current;
+      if (el === null) return;
+      const x = Math.min(Math.max(0, ev.clientX - offX), Math.max(0, window.innerWidth - el.offsetWidth));
+      const y = Math.min(Math.max(0, ev.clientY - offY), Math.max(0, window.innerHeight - el.offsetHeight));
+      last = { x, y };
+      setBarPos(last);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (last !== null) {
+        try {
+          window.localStorage.setItem(BAR_POS_KEY, JSON.stringify(last));
+        } catch {
+          /* 持久化失败：本次会话内仍有效 */
+        }
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  /** 收藏切换：全部已收藏（rating 5）→ 取消；否则批量收藏。 */
   async function favorite(): Promise<void> {
-    for (const asset of assets) await assetRatingSet(asset.id, 5);
-    onFavoritesChanged?.(assets);
+    const target = !(assets.length > 0 && assets.every((a) => a.rating === 5));
+    for (const asset of assets) await assetRatingSet(asset.id, target ? 5 : 0);
+    onFavoritesChanged?.(assets, target);
     flash(t("selection.done"));
   }
 
+  /** 旗标切换：全部已旗标 → 取消；否则批量旗标。 */
   async function flag(): Promise<void> {
-    for (const asset of assets) await assetFlagSet(asset.id, true);
+    const target = !(assets.length > 0 && assets.every((a) => a.flagged));
+    for (const asset of assets) await assetFlagSet(asset.id, target);
     flash(t("selection.done"));
   }
 
-  /** 颜色标签批量设置（label=null 清除）；再点同色 = 取消该色 */
+  /** 颜色标签切换（label=null 清除；全部同色再点 = 清除该色） */
   async function colorLabel(label: string | null): Promise<void> {
     setColorOpen(false);
+    const target =
+      label !== null && !(assets.length > 0 && assets.every((a) => a.colorLabel === label)) ? label : null;
     const ids = assets.map((a) => a.id);
-    await assetLabelSet(ids, label);
-    onColorLabeled?.(assets, label);
-    flash(label === null ? t("selection.colorCleared") : t("selection.done"));
+    await assetLabelSet(ids, target);
+    onColorLabeled?.(assets, target);
+    flash(target === null ? t("selection.colorCleared") : t("selection.done"));
   }
 
   // 拒绝旗标智能切换：全部已拒绝 → 取消拒绝；否则批量拒绝
@@ -333,11 +378,28 @@ export default function SelectionBar({
 
   return (
     <div
-      className="fixed left-1/2 top-12 z-30 -translate-x-1/2"
+      ref={barRef}
+      className={`fixed z-30 ${barPos === null ? "bottom-5 left-1/2 w-max max-w-[calc(100vw-2rem)] -translate-x-1/2" : ""}`}
+      style={barPos === null ? undefined : { left: barPos.x, top: barPos.y }}
       data-testid="selection-bar"
       data-count={count}
     >
       <div className="flex items-center gap-1.5 rounded-full border border-edge bg-surface px-3 py-1.5 shadow-xl">
+        {/* 拖动把手（挪位置；默认底部居中不遮上方 UI） */}
+        <button
+          type="button"
+          onPointerDown={beginBarDrag}
+          className="flex h-7 w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-full text-text-muted/70 transition-colors hover:bg-panel hover:text-text-secondary active:cursor-grabbing"
+          title={t("selection.dragHint")}
+          aria-label={t("selection.dragHint")}
+          data-testid="selection-bar-grip"
+        >
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+            <circle cx="5.5" cy="3.5" r="1.2" /><circle cx="10.5" cy="3.5" r="1.2" />
+            <circle cx="5.5" cy="8" r="1.2" /><circle cx="10.5" cy="8" r="1.2" />
+            <circle cx="5.5" cy="12.5" r="1.2" /><circle cx="10.5" cy="12.5" r="1.2" />
+          </svg>
+        </button>
         <span className="shrink-0 font-mono text-[11px] tabular-nums text-accent" data-testid="selection-count">
           {t("selection.count", { count })}
         </span>
@@ -377,7 +439,7 @@ export default function SelectionBar({
           </button>
           {colorOpen && (
             <div
-              className="absolute left-0 top-8 z-40 flex w-max items-center gap-1.5 rounded-lg border border-edge bg-surface p-2 shadow-xl"
+              className="absolute bottom-9 left-0 z-40 flex w-max items-center gap-1.5 rounded-lg border border-edge bg-surface p-2 shadow-xl"
               data-testid="selection-color-menu"
             >
               {COLOR_LABELS.map((label) => (
@@ -443,7 +505,7 @@ export default function SelectionBar({
           </button>
           {shareOpen && (
             <div
-              className="absolute left-0 top-8 z-40 w-44 overflow-hidden rounded-lg border border-edge bg-surface p-1 shadow-xl"
+              className="absolute bottom-9 left-0 z-40 w-44 overflow-hidden rounded-lg border border-edge bg-surface p-1 shadow-xl"
               data-testid="selection-share-menu"
             >
               <button
@@ -508,7 +570,7 @@ export default function SelectionBar({
             </button>
             {subgroupOpen && (
               <div
-                className="absolute left-0 top-8 z-40 w-52 rounded-lg border border-edge bg-surface p-2 shadow-xl"
+                className="absolute bottom-9 left-0 z-40 w-52 rounded-lg border border-edge bg-surface p-2 shadow-xl"
                 data-testid="selection-subgroup-menu"
               >
                 {subgroup.current !== null && (
@@ -561,12 +623,13 @@ export default function SelectionBar({
             )}
           </div>
         )}
-        {/* 全选：当前数据窗口全量（与反选同一窗口口径） */}
+        {/* 全选/取消全选：当前数据窗口全量（再点一次 = 全部取消） */}
         {windowIds !== undefined && onSelectAll && (
           <button
             type="button"
             onClick={() => {
-              onSelectAll(windowIds);
+              const allSelected = count > 0 && count === windowIds.length;
+              onSelectAll(allSelected ? [] : windowIds);
               flash(t("selection.done"));
             }}
             disabled={count === 0 && windowIds.length === 0}
@@ -574,7 +637,7 @@ export default function SelectionBar({
             data-testid="selection-all"
           >
             <GlyphInvert />
-            {t("selection.all")}
+            {count > 0 && count === windowIds.length ? t("selection.deselectAll") : t("selection.all")}
           </button>
         )}
         {/* 反选：当前数据窗口内取补集（窗口 id 全集由上层传入） */}
@@ -605,19 +668,6 @@ export default function SelectionBar({
           >
             <GlyphTrash />
             {t("selection.trash")}
-          </button>
-        )}
-        {onLrStaging && (
-          <button
-            type="button"
-            onClick={() => onLrStaging(assets)}
-            disabled={count === 0}
-            title={t("lr.hint")}
-            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
-            data-testid="selection-lr"
-          >
-            <GlyphLr />
-            {t("selection.lr")}
           </button>
         )}
         <span className="h-4 w-px bg-edge" aria-hidden="true" />

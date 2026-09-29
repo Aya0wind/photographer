@@ -71,7 +71,7 @@ const QUICK_ALWAYS_SHOW = new Set<string>(["expprogram", "f-number"]);
 
 /** 机身模式切换（A/S 档 ↔ M 档）会改变参数可写性——settings 轮询间隔：
  *  只读的快门在 A 档隐藏、切回 M 档要能自动回来，靠这轮询刷新快照。 */
-const SETTINGS_POLL_MS = 3000;
+const SETTINGS_POLL_MS = 5000;
 
 /** 工具栏拖动位置持久化键（相对取景容器左上的像素）。 */
 const QUICKBAR_POS_KEY = "tethering.quickbar.pos";
@@ -115,6 +115,16 @@ export default function TetheringWindowPage() {
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [settingErrors, setSettingErrors] = useState<Record<string, string>>({});
+  const [pendingSettings, setPendingSettings] = useState<Record<string, string>>({});
+  const pendingValues = useRef<Record<string, string>>({});
+  const settingQueue = useRef(new Map<string, { setting: TetherCameraSetting; value: string }>());
+  const writingRef = useRef(false);
+  const captureRef = useRef(false);
+  const focusingRef = useRef(false);
+  const refreshingRef = useRef(false);
+  const settingsVersion = useRef(0);
+  const alive = useRef(true);
+  const refreshTimer = useRef<number | null>(null);
   const [previews, setPreviews] = useState<Record<number, string>>({});
   const photosRef = useRef<number[]>([]);
   /** Range 滑条本地草稿（id → 未提交值；松手才下发，避免拖动连发）。 */
@@ -143,6 +153,17 @@ export default function TetheringWindowPage() {
   const connected = session?.connected === true;
   const receiving = session?.receiving === true;
   const photos = session?.photos ?? [];
+  const settingsBusy = Object.keys(pendingSettings).length > 0;
+
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      settingsVersion.current += 1;
+      settingQueue.current.clear();
+      if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    };
+  }, [sessionId]);
 
   // 工具栏弹层点外部收起（SelectionBar 同款契约）
   useEffect(() => {
@@ -159,21 +180,40 @@ export default function TetheringWindowPage() {
   // 参数快照轮询：机身档位切换（A/S/M…）改变参数可写性，快门/光圈等
   // 的显示隐藏依赖最新 writable；断连不轮询。
   /** 全量参数快照刷新（轮询 / 改参联动 / 手动刷新按钮共用）；失败静默。 */
-  const refreshSettings = useCallback(() => {
-    if (sessionId === "") return;
-    void tetheringSettings(sessionId)
-      .then((next) => {
-        if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
-      })
-      .catch(() => {
-        /* 单次刷新失败静默：调用方自带重试节奏 */
-      });
+  const refreshSettings = useCallback(async () => {
+    if (sessionId === "" || !alive.current || refreshingRef.current || writingRef.current || captureRef.current || focusingRef.current) return;
+    const version = settingsVersion.current;
+    refreshingRef.current = true;
+    try {
+      const next = await tetheringSettings(sessionId);
+      if (next !== null && alive.current && version === settingsVersion.current && !writingRef.current && !captureRef.current) {
+        setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+      }
+    } catch {
+      /* 变化通知与低频快照均会重试，单次失败不打断操作。 */
+    } finally {
+      refreshingRef.current = false;
+    }
   }, [sessionId]);
+
+  const scheduleSettingsRefresh = useCallback(() => {
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      refreshTimer.current = null;
+      void refreshSettings();
+    }, 200);
+  }, [refreshSettings]);
 
   useEffect(() => {
     if (sessionId === "" || !connected) return;
-    const timer = window.setInterval(refreshSettings, SETTINGS_POLL_MS);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    let timer: number;
+    const tick = async () => {
+      await refreshSettings();
+      if (!stopped) timer = window.setTimeout(() => void tick(), SETTINGS_POLL_MS);
+    };
+    timer = window.setTimeout(() => void tick(), SETTINGS_POLL_MS);
+    return () => { stopped = true; window.clearTimeout(timer); };
   }, [sessionId, connected, refreshSettings]);
 
   // 会话快照：挂载拉一次；photoAdded/status 事件增量合并（轻路径，不整页重拉）
@@ -220,6 +260,8 @@ export default function TetheringWindowPage() {
         setSession((prev) =>
           prev === null ? prev : { ...prev, connected: event.connected, error: event.error },
         );
+      } else if (event.type === "tetheringSettingsChanged" && event.sessionId === sessionId) {
+        scheduleSettingsRefresh();
       }
     })
       .then((fn) => {
@@ -231,16 +273,16 @@ export default function TetheringWindowPage() {
       cancelled = true;
       off?.();
     };
-  }, [sessionId]);
+  }, [sessionId, scheduleSettingsRefresh]);
 
   // 实时取景轮询：拿不到帧保持上一帧（不闪烁）；拍摄/收片期间后端返回 null
   useEffect(() => {
-    if (sessionId === "" || !liveViewSupported || !connected) return;
+    if (sessionId === "" || !liveViewSupported || !connected || capturing || settingsBusy) return;
     let stopped = false;
     let timer: number | null = null;
     const tick = () => {
       void tetheringFrame(sessionId).then((url) => {
-        if (stopped) return;
+        if (stopped || !alive.current) return;
         if (url !== null) setFrame(url);
         timer = window.setTimeout(tick, framePollMs(fps));
       });
@@ -250,7 +292,7 @@ export default function TetheringWindowPage() {
       stopped = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [sessionId, liveViewSupported, connected, fps]);
+  }, [sessionId, liveViewSupported, connected, fps, capturing, settingsBusy]);
 
   // 胶片条预览：为还没有预览的照片拉缩略图（新片到达后缩略图生成有延迟，重试 3 次）
   useEffect(() => {
@@ -275,14 +317,20 @@ export default function TetheringWindowPage() {
   }, [sessionId, photos, previews]);
 
   async function closeWindow(): Promise<void> {
-    if (sessionId !== "") await tetheringStop(sessionId);
-    void getCurrentWindow().close();
+    alive.current = false;
+    settingQueue.current.clear();
+    try {
+      if (sessionId !== "") await tetheringStop(sessionId);
+    } finally {
+      void getCurrentWindow().close();
+    }
   }
 
   async function applySetting(setting: TetherCameraSetting, value: string): Promise<void> {
     // 拍摄模式是档位逃生舱：相机上报只读也照常尝试（readonly 标志随机身
     // 状态翻转——休眠/档位切换后常翻只读；真拒绝会走错误提示，不锁死入口）
-    if (sessionId === "" || (!setting.writable && setting.id !== "expprogram") || value === setting.current) {
+    if (sessionId === "" || !connected || captureRef.current || !alive.current || (!setting.writable && setting.id !== "expprogram")
+      || value === (pendingValues.current[setting.id] ?? setting.current)) {
       return;
     }
     setSettingErrors((prev) => {
@@ -290,21 +338,39 @@ export default function TetheringWindowPage() {
       delete next[setting.id];
       return next;
     });
+    settingsVersion.current += 1;
+    pendingValues.current[setting.id] = value;
+    setPendingSettings({ ...pendingValues.current });
+    // 同一参数只保留最新的未发送值；所有参数写入串行，避免旧回包覆盖新值。
+    settingQueue.current.set(setting.id, { setting, value });
+    if (writingRef.current) return;
+    writingRef.current = true;
     try {
-      const next = await tetheringSettingSet(sessionId, setting.id, value);
-      setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
-      // 参数联动：改一个参数会翻转其他参数的可写性/当前值（切档最典型），
-      // set 的即时返回拿不到翻转后的状态——稍等机身稳定再拉一次全量快照
-      window.setTimeout(refreshSettings, 400);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setSettingErrors((prev) => ({ ...prev, [setting.id]: message }));
+      while (settingQueue.current.size > 0 && alive.current) {
+        const [id, request] = settingQueue.current.entries().next().value!;
+        settingQueue.current.delete(id);
+        try {
+          const next = await tetheringSettingSet(sessionId, id, request.value);
+          if (alive.current) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+        } catch (err) {
+          if (alive.current && pendingValues.current[id] === request.value) {
+            const message = err instanceof Error ? err.message : String(err);
+            setSettingErrors((prev) => ({ ...prev, [id]: message }));
+          }
+        } finally {
+          if (pendingValues.current[id] === request.value && !settingQueue.current.has(id)) delete pendingValues.current[id];
+          if (alive.current) setPendingSettings({ ...pendingValues.current });
+        }
+      }
+    } finally {
+      writingRef.current = false;
+      if (alive.current) scheduleSettingsRefresh();
     }
   }
 
   /** 点击取景画面对焦：坐标归一化下发 + 十字标记（2s 消失）。 */
   async function focusAtView(e: React.MouseEvent<HTMLDivElement>): Promise<void> {
-    if (sessionId === "" || !liveViewSupported || !connected) return;
+    if (sessionId === "" || !liveViewSupported || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
     const img = e.currentTarget.querySelector("img");
     if (img === null) return;
     const rect = img.getBoundingClientRect();
@@ -315,9 +381,12 @@ export default function TetheringWindowPage() {
     setFocusMark({ x, y });
     window.setTimeout(() => setFocusMark(null), 2000);
     try {
+      focusingRef.current = true;
       await tetheringFocusAt(sessionId, x, y);
     } catch {
       /* 相机不支持/模式不符：标记自然消失即可，不打断取景 */
+    } finally {
+      focusingRef.current = false;
     }
   }
 
@@ -343,26 +412,39 @@ export default function TetheringWindowPage() {
   }
 
   async function shoot(): Promise<void> {
-    if (sessionId === "" || capturing) return;
+    if (sessionId === "" || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
+    captureRef.current = true;
+    settingsVersion.current += 1;
     setCapturing(true);
     setCaptureError(null);
-    const result = await tetheringCapture(sessionId);
-    if (!result.ok) setCaptureError(result.error ?? t("tether.captureFailed"));
-    // 收片完成后用后端快照校准：事件延迟或错过订阅时也能立即显示新片。
-    const next = await tetheringSession(sessionId);
-    if (next !== null) mergeSession(next);
-    setCapturing(false);
+    try {
+      const result = await tetheringCapture(sessionId);
+      if (!result.ok && alive.current) setCaptureError(result.error ?? t("tether.captureFailed"));
+      const next = await tetheringSession(sessionId);
+      if (next !== null && alive.current) mergeSession(next);
+    } catch (err) {
+      if (alive.current) setCaptureError(err instanceof Error ? err.message : t("tether.captureFailed"));
+    } finally {
+      captureRef.current = false;
+      if (alive.current) {
+        setCapturing(false);
+        scheduleSettingsRefresh();
+      }
+    }
   }
 
   /** 工具栏 AF 触发：画面中心对焦（不支持/模式不符静默）+ 绿闪反馈。 */
   async function triggerAf(): Promise<void> {
-    if (sessionId === "" || !connected) return;
+    if (sessionId === "" || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
+    focusingRef.current = true;
     setAfFlash(true);
     window.setTimeout(() => setAfFlash(false), 600);
     try {
       await tetheringFocusAt(sessionId, 0.5, 0.5);
     } catch {
       /* 相机不支持：绿闪照常消失 */
+    } finally {
+      focusingRef.current = false;
     }
   }
 
@@ -582,7 +664,8 @@ export default function TetheringWindowPage() {
                   <button
                     type="button"
                     onClick={() => setQuickOpen((v) => (v === setting.id ? null : setting.id))}
-                    disabled={(setting.id !== "expprogram" && !setting.writable) || !connected}
+                    disabled={(setting.id !== "expprogram" && !setting.writable) || !connected || capturing}
+                    aria-busy={pendingSettings[setting.id] !== undefined}
                     aria-expanded={quickOpen === setting.id}
                     title={
                       setting.id === "expprogram" && !setting.writable
@@ -595,7 +678,8 @@ export default function TetheringWindowPage() {
                     data-testid={`tether-setting-${setting.id}`}
                   >
                     {settingLabel(setting.id, setting.label, t)}
-                    <span className="font-mono tabular-nums text-text-primary">{setting.current}</span>
+                    <span className="font-mono tabular-nums text-text-primary">{pendingSettings[setting.id] ?? setting.current}</span>
+                    {pendingSettings[setting.id] !== undefined && <span className="h-2.5 w-2.5 animate-spin rounded-full border border-accent border-t-transparent" aria-hidden="true" />}
                     <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <path d="M4 10l4-4 4 4" />
                     </svg>
@@ -609,12 +693,13 @@ export default function TetheringWindowPage() {
                         <button
                           key={option.value}
                           type="button"
+                          disabled={capturing}
                           onClick={() => {
                             setQuickOpen(null);
                             void applySetting(setting, option.value);
                           }}
                           className={`block w-full rounded px-2.5 py-1 text-left font-mono text-[11px] tabular-nums transition-colors hover:bg-panel ${
-                            option.value === setting.current ? "bg-panel text-accent" : "text-text-secondary hover:text-accent"
+                            option.value === (pendingSettings[setting.id] ?? setting.current) ? "bg-panel text-accent" : "text-text-secondary hover:text-accent"
                           }`}
                           data-testid={`tether-quick-${setting.id}-opt`}
                           data-value={option.value}
@@ -631,7 +716,7 @@ export default function TetheringWindowPage() {
               <button
                 type="button"
                 onClick={() => void triggerAf()}
-                disabled={!connected}
+                disabled={!connected || capturing || settingsBusy}
                 className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 border-emerald-400/80 text-[10px] font-bold tracking-wide text-emerald-400 shadow transition-all hover:bg-emerald-400/10 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:text-text-muted disabled:opacity-50 ${afFlash ? "bg-emerald-400/25" : ""}`}
                 title={t("tether.param.autofocus")}
                 aria-label={t("tether.param.autofocus")}
@@ -642,7 +727,7 @@ export default function TetheringWindowPage() {
               <button
                 type="button"
                 onClick={() => void shoot()}
-                disabled={capturing || !connected}
+                disabled={capturing || !connected || settingsBusy}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[3px] border-red-500/80 bg-red-500/15 shadow transition-all hover:bg-red-500/30 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:opacity-50"
                 title={t("tether.shutter")}
                 aria-label={t("tether.shutter")}
@@ -687,7 +772,7 @@ export default function TetheringWindowPage() {
                 key={setting.id}
                 type="button"
                 onClick={() => void applySetting(setting, "1")}
-                disabled={!setting.writable || !connected}
+                disabled={!setting.writable || !connected || capturing || settingsBusy}
                 className="w-full rounded-md border border-accent/50 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:text-text-muted"
                 data-testid={`tether-setting-${setting.id}`}
               >
@@ -698,7 +783,7 @@ export default function TetheringWindowPage() {
                 <span className="flex items-center justify-between">
                   {settingLabel(setting.id, setting.label, t)}
                   <span className="tabular-nums text-text-primary">
-                    {rangeDrafts[setting.id] ?? setting.current}
+                    {rangeDrafts[setting.id] ?? pendingSettings[setting.id] ?? setting.current}
                     {!setting.writable && <span className="ml-1 text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
                   </span>
                 </span>
@@ -707,8 +792,8 @@ export default function TetheringWindowPage() {
                   min={setting.min ?? 0}
                   max={setting.max ?? 0}
                   step={setting.step ?? 1}
-                  value={rangeDrafts[setting.id] ?? setting.current}
-                  disabled={!setting.writable || !connected}
+                  value={rangeDrafts[setting.id] ?? pendingSettings[setting.id] ?? setting.current}
+                  disabled={!setting.writable || !connected || capturing}
                   onInput={(e) => {
                     const draft = e.currentTarget.value;
                     setRangeDrafts((prev) => ({ ...prev, [setting.id]: draft }));
@@ -731,8 +816,9 @@ export default function TetheringWindowPage() {
                   {!setting.writable && <span className="text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
                 </span>
                 <select
-                  value={setting.current}
-                  disabled={!setting.writable || !connected}
+                  value={pendingSettings[setting.id] ?? setting.current}
+                  disabled={!setting.writable || !connected || capturing}
+                  aria-busy={pendingSettings[setting.id] !== undefined}
                   onChange={(e) => void applySetting(setting, e.target.value)}
                   className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40"
                 >

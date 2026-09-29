@@ -1063,20 +1063,3 @@ describe("AI tab：连拍分组（④ 起位于「高级」折叠分组内）", 
   });
 });
 
-// --- LR 交接指引（B2 静态分区） -----------------------------------------------------------
-
-describe("LR 交接指引（B2）", () => {
-  it("常规 tab 渲染指引分区：工作流/导出建议/XMP 冲突/星级边界四行", () => {
-    renderSettingsPage();
-
-    const guide = screen.getByTestId("settings-lr-guide");
-    const rows = within(guide).getAllByTestId("lr-guide-row");
-    // 纯 XMP/导出建议文档（用户定案：无内建原片/成片语义）
-    expect(rows).toHaveLength(2);
-    expect(guide).toHaveTextContent("导出建议设置");
-    expect(guide).toHaveTextContent("XMP 冲突");
-    expect(guide).toHaveTextContent("从文件读取元数据");
-    expect(guide).toHaveTextContent("_edit_v1.jpg");
-    expect(guide).toHaveTextContent("元数据选「包含全部」");
-  });
-});
