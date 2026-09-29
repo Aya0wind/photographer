@@ -575,6 +575,69 @@ fn follow_import_indexing(
     });
 }
 
+/// 启动、恢复和重试共用调度；持续跟随入库照片，收尾再唤醒一次索引。
+fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
+    let controls = engine.controls();
+    let (index_db_dir, ai_settings) = {
+        let settings = state.settings.lock().expect("settings mutex poisoned");
+        (
+            PathBuf::from(&settings.active_library().expect("库已在").db_dir),
+            settings.ai.clone(),
+        )
+    };
+    let index_supervisor = Arc::clone(&state.supervisor);
+    let ai_manager = state.ai.clone();
+    let ai_bus = state.bus.clone();
+    let enable_clip = ai_settings.enable_clip;
+    let enable_face = ai_settings.enable_face;
+    let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
+    follow_import_indexing(
+        &mut engine,
+        index_db_dir.clone(),
+        ai_manager.clone(),
+        ai_bus.clone(),
+        Arc::clone(&index_supervisor),
+        enable_clip,
+        enable_face,
+    );
+    let handle = state
+        .supervisor
+        .spawn("import", format!("job-{job_id}"), move |_| {
+            engine.run();
+            crate::index::kick(index_db_dir.clone(), &index_supervisor);
+            if enable_clip {
+                crate::ai::semantic::kick_semantic_if_ready(
+                    index_db_dir.clone(),
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
+            if enable_face {
+                crate::ai::face::kick_face_if_ready(
+                    index_db_dir.clone(),
+                    &ai_manager,
+                    &ai_bus,
+                    &index_supervisor,
+                );
+            }
+            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
+            crate::ai::selection::kick_eyes_if_ready(
+                index_db_dir.clone(),
+                &ai_manager,
+                &ai_bus,
+                &index_supervisor,
+            );
+            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
+            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
+        });
+    ActiveImport {
+        job_id,
+        controls,
+        handle: Some(handle),
+    }
+}
+
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
 /// 0018 修订（导入必落相册）：启动即确保默认相册「未分组」存在（按名幂等）；
 /// `album_id = None` 报错「必须选择相册」（引擎内另有同款防御，双保险）。
@@ -602,80 +665,7 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     let db = active_library_db(state)?;
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
-    let controls = engine.controls();
-    // 索引跟随已入库照片；engine.run 收尾后再唤醒一次，覆盖最后一批。
-    let index_db_dir = PathBuf::from(
-        &state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .expect("库已在")
-            .db_dir,
-    );
-    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
-    let ai_manager = state.ai.clone();
-    let ai_bus = state.bus.clone();
-    let enable_clip = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_clip;
-    let enable_face = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_face;
-    let burst_params = crate::bursts::BurstParams::from_settings(
-        &state.settings.lock().expect("settings mutex poisoned").ai,
-    );
-    follow_import_indexing(
-        &mut engine,
-        index_db_dir.clone(),
-        ai_manager.clone(),
-        ai_bus.clone(),
-        Arc::clone(&index_supervisor),
-        enable_clip,
-        enable_face,
-    );
-    let handle = state
-        .supervisor
-        .spawn("import", format!("job-{job_id}"), move |_| {
-            engine.run();
-            crate::index::kick(index_db_dir.clone(), &index_supervisor);
-            if enable_clip {
-                crate::ai::semantic::kick_semantic_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            if enable_face {
-                crate::ai::face::kick_face_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
-            crate::ai::selection::kick_eyes_if_ready(
-                index_db_dir.clone(),
-                &ai_manager,
-                &ai_bus,
-                &index_supervisor,
-            );
-            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
-            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
-        });
-    *active = Some(ActiveImport {
-        job_id,
-        controls,
-        handle: Some(handle),
-    });
+    *active = Some(launch_import(state, engine, job_id));
     Ok(job_id)
 }
 
@@ -697,88 +687,13 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
         }
         return Err("任务 ID 与当前活跃导入不一致".into());
     }
-    if active.is_some() {
-        return Err("已有导入任务进行中（Busy）".into());
-    }
 
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, job_id)?;
     let source = import_source(state, &device_id, &plan.target_root)?;
-    let mut engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
+    let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
-    let controls = engine.controls();
-    let index_db_dir = PathBuf::from(
-        &state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .expect("库已在")
-            .db_dir,
-    );
-    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
-    let ai_manager = state.ai.clone();
-    let ai_bus = state.bus.clone();
-    let enable_clip = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_clip;
-    let enable_face = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_face;
-    let burst_params = crate::bursts::BurstParams::from_settings(
-        &state.settings.lock().expect("settings mutex poisoned").ai,
-    );
-    follow_import_indexing(
-        &mut engine,
-        index_db_dir.clone(),
-        ai_manager.clone(),
-        ai_bus.clone(),
-        Arc::clone(&index_supervisor),
-        enable_clip,
-        enable_face,
-    );
-    let handle = state
-        .supervisor
-        .spawn("import", format!("job-{job_id}"), move |_| {
-            engine.run();
-            crate::index::kick(index_db_dir.clone(), &index_supervisor);
-            if enable_clip {
-                crate::ai::semantic::kick_semantic_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            if enable_face {
-                crate::ai::face::kick_face_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
-            crate::ai::selection::kick_eyes_if_ready(
-                index_db_dir.clone(),
-                &ai_manager,
-                &ai_bus,
-                &index_supervisor,
-            );
-            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
-            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
-        });
-    *active = Some(ActiveImport {
-        job_id,
-        controls,
-        handle: Some(handle),
-    });
+    *active = Some(launch_import(state, engine, job_id));
     state
         .bus
         .publish(crate::events::AppEvent::ImportResumed { job_id });
@@ -879,81 +794,9 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     let db = active_library_db(state)?;
     let (device_id, plan) = load_job_plan(&db, new_id)?;
     let source = import_source(state, &device_id, &plan.target_root)?;
-    let mut engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
+    let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
-    let controls = engine.controls();
-    let index_db_dir = PathBuf::from(
-        &state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .expect("库已在")
-            .db_dir,
-    );
-    let index_supervisor = std::sync::Arc::clone(&state.supervisor);
-    let ai_manager = state.ai.clone();
-    let ai_bus = state.bus.clone();
-    let enable_clip = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_clip;
-    let enable_face = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .ai
-        .enable_face;
-    let burst_params = crate::bursts::BurstParams::from_settings(
-        &state.settings.lock().expect("settings mutex poisoned").ai,
-    );
-    follow_import_indexing(
-        &mut engine,
-        index_db_dir.clone(),
-        ai_manager.clone(),
-        ai_bus.clone(),
-        Arc::clone(&index_supervisor),
-        enable_clip,
-        enable_face,
-    );
-    let handle = state
-        .supervisor
-        .spawn("import", format!("job-{new_id}"), move |_| {
-            engine.run();
-            crate::index::kick(index_db_dir.clone(), &index_supervisor);
-            if enable_clip {
-                crate::ai::semantic::kick_semantic_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            if enable_face {
-                crate::ai::face::kick_face_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
-            crate::ai::selection::kick_eyes_if_ready(
-                index_db_dir.clone(),
-                &ai_manager,
-                &ai_bus,
-                &index_supervisor,
-            );
-            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
-            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
-        });
-    *active = Some(ActiveImport {
-        job_id: new_id,
-        controls,
-        handle: Some(handle),
-    });
+    *active = Some(launch_import(state, engine, new_id));
     Ok(new_id)
 }
 

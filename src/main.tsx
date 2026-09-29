@@ -1,6 +1,5 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import "@/i18n";
 import { initAppLanguage } from "@/i18n/settingsLanguage";
@@ -18,19 +17,8 @@ void initImportStore();
 // 订阅 AI 模型下载 / 索引进度事件（M4，内部静默容错）
 void initAi();
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: false,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
-
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <AppRoutes />
-    </QueryClientProvider>
+    <AppRoutes />
   </React.StrictMode>,
 );

@@ -99,6 +99,36 @@ pub async fn search_semantic(
     .await
 }
 
+/// 模型就绪后读取当前库及设置，触发回填并补跑参数指纹比对。
+/// 三类模型共用 20 分钟等待窗口；各入口保留模型门槛和开关语义。
+fn watch_model_install(
+    state: &SharedState,
+    name: &'static str,
+    ready: fn(&crate::ai::ModelManager) -> bool,
+    backfill: fn(&super::AppState, std::path::PathBuf, &crate::settings::AiSettings),
+) {
+    let shared = std::sync::Arc::clone(state);
+    state
+        .supervisor
+        .spawn("ai-postinstall", name.into(), move |_| {
+            for _ in 0..600 {
+                if ready(&shared.ai) {
+                    let (library, ai_snapshot) = {
+                        let settings = shared.settings.lock().expect("settings mutex poisoned");
+                        (settings.active_library().cloned(), settings.ai.clone())
+                    };
+                    if let Some(library) = library {
+                        let db_dir = std::path::PathBuf::from(&library.db_dir);
+                        backfill(&shared, db_dir.clone(), &ai_snapshot);
+                        super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        });
+}
+
 /// 模型下载完成后的语义索引自动触发：轮询三件套就绪（后台下载完成）→
 /// enable_clip 时派语义回填 + 补跑参数指纹比对。轮询上限 20 分钟。
 /// 指纹补跑（2026-09-28 三档画质）：切到 accurate 时若 fp16 件未装，
@@ -106,37 +136,21 @@ pub async fn search_semantic(
 /// 后这里补跑一次，让「切档 → 提示下载 → 装好 → 自动重建+回填」闭环
 /// （marker 未动，补跑时指纹仍是旧值 → 正常触发重建；无变更则 no-op）。
 fn spawn_post_install_watch(state: &SharedState) {
-    let shared = std::sync::Arc::clone(state);
-    let supervisor = std::sync::Arc::clone(&state.supervisor);
-    supervisor.spawn("ai-postinstall", "semantic-watch".into(), move |_| {
-        for _ in 0..600 {
-            if shared.ai.semantic_ready() {
-                let (enable_clip, library, ai_snapshot) = {
-                    let settings = shared.settings.lock().expect("settings mutex poisoned");
-                    (
-                        settings.ai.enable_clip,
-                        settings.active_library().cloned(),
-                        settings.ai.clone(),
-                    )
-                };
-                if let Some(library) = library {
-                    let db_dir = std::path::PathBuf::from(&library.db_dir);
-                    if enable_clip {
-                        crate::ai::semantic::kick_semantic_if_ready(
-                            db_dir.clone(),
-                            &shared.ai,
-                            &shared.bus,
-                            &shared.supervisor,
-                        );
-                    }
-                    // 档位切换在模型就位前的指纹欠账在此补跑（幂等，marker 把关）
-                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
-                }
-                return;
+    watch_model_install(
+        state,
+        "semantic-watch",
+        crate::ai::ModelManager::semantic_ready,
+        |state, db_dir, ai| {
+            if ai.enable_clip {
+                crate::ai::semantic::kick_semantic_if_ready(
+                    db_dir,
+                    &state.ai,
+                    &state.bus,
+                    &state.supervisor,
+                );
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    });
+        },
+    );
 }
 
 /// 内置模型清单状态（installed/state/downloadedBytes…）。
@@ -221,36 +235,21 @@ pub async fn ai_face_data_clear(state: State<'_, SharedState>) -> Result<bool, S
 /// 闭环：切 fast 时 scrfd-10g 未装 → 指纹被 ready 门槛挡下不写 marker，
 /// 件装好这里补跑）。轮询上限 20 分钟。
 fn spawn_face_post_install_watch(state: &SharedState) {
-    let shared = std::sync::Arc::clone(state);
-    let supervisor = std::sync::Arc::clone(&state.supervisor);
-    supervisor.spawn("ai-postinstall", "face-watch".into(), move |_| {
-        for _ in 0..600 {
-            let (enable_face, library, ai_snapshot) = {
-                let settings = shared.settings.lock().expect("settings mutex poisoned");
-                (
-                    settings.ai.enable_face,
-                    settings.active_library().cloned(),
-                    settings.ai.clone(),
-                )
-            };
-            if shared.ai.face_models_ready() {
-                if let Some(library) = library {
-                    let db_dir = std::path::PathBuf::from(&library.db_dir);
-                    if enable_face {
-                        crate::ai::face::kick_face_if_ready(
-                            db_dir.clone(),
-                            &shared.ai,
-                            &shared.bus,
-                            &shared.supervisor,
-                        );
-                    }
-                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
-                }
-                return;
+    watch_model_install(
+        state,
+        "face-watch",
+        crate::ai::ModelManager::face_models_ready,
+        |state, db_dir, ai| {
+            if ai.enable_face {
+                crate::ai::face::kick_face_if_ready(
+                    db_dir,
+                    &state.ai,
+                    &state.bus,
+                    &state.supervisor,
+                );
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    });
+        },
+    );
 }
 
 /// facemesh 下载完成后的自动触发（0021 eyes 通道，2026-09-28 实装）：
@@ -258,28 +257,17 @@ fn spawn_face_post_install_watch(state: &SharedState) {
 /// eyes 无 enable 开关——选片分析随任务账自动跑，模型未装时通道本就
 /// 跳过不产出）。轮询上限 20 分钟。
 fn spawn_eyes_post_install_watch(state: &SharedState) {
-    let shared = std::sync::Arc::clone(state);
-    let supervisor = std::sync::Arc::clone(&state.supervisor);
-    supervisor.spawn("ai-postinstall", "eyes-watch".into(), move |_| {
-        for _ in 0..600 {
-            let (library, ai_snapshot) = {
-                let settings = shared.settings.lock().expect("settings mutex poisoned");
-                (settings.active_library().cloned(), settings.ai.clone())
-            };
-            if shared.ai.selection_eyes_ready() {
-                if let Some(library) = library {
-                    let db_dir = std::path::PathBuf::from(&library.db_dir);
-                    crate::ai::selection::kick_eyes_if_ready(
-                        db_dir.clone(),
-                        &shared.ai,
-                        &shared.bus,
-                        &shared.supervisor,
-                    );
-                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    });
+    watch_model_install(
+        state,
+        "eyes-watch",
+        crate::ai::ModelManager::selection_eyes_ready,
+        |state, db_dir, _ai| {
+            crate::ai::selection::kick_eyes_if_ready(
+                db_dir,
+                &state.ai,
+                &state.bus,
+                &state.supervisor,
+            );
+        },
+    );
 }

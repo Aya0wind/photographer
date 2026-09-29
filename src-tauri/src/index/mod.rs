@@ -299,6 +299,25 @@ pub fn resume_and_kick(
     });
 }
 
+// 代际回填共用入队、标记和消费流程；各入口保留代际名与后续业务动作。
+fn run_generation_refresh(
+    db_dir: &Path,
+    bus: &EventBus,
+    marker: &Path,
+    requeue: impl FnOnce(&Db) -> rusqlite::Result<u64>,
+) {
+    let pending = std::fs::create_dir_all(db_dir)
+        .ok()
+        .and_then(|_| crate::ipc::open_library_db(db_dir).ok())
+        .and_then(|db| requeue(&db).ok())
+        .unwrap_or(0);
+    let _ = std::fs::write(marker, b"");
+    if pending > 0 {
+        bus.publish(AppEvent::IndexTaskResumed { pending });
+        run_pending(db_dir, worker_count());
+    }
+}
+
 /// RAW 缩略图源代际自愈（开发期直改数据，不留兼容包袱）：v1（第一段
 /// 小预览）→ v2（最大段）后存量 RAW 缩略图全部偏糊，重排 thumb 任务重建。
 /// dbDir 标记文件防每次启动重排；旧档位缓存文件成为孤儿（开发期不管，
@@ -317,25 +336,9 @@ pub fn refresh_raw_thumbs_for_generation(
     }
     let bus = bus.clone();
     supervisor.spawn("index", "raw-thumbs-regen".into(), move |_| {
-        let pending = std::fs::create_dir_all(&db_dir)
-            .ok()
-            .and_then(|_| {
-                crate::ipc::open_library_db(&db_dir)
-                    .ok()
-                    .and_then(|db| db.requeue_thumb_tasks_for_raw().ok())
-            })
-            .unwrap_or(0);
-        let _ = std::fs::write(
-            db_dir.join(format!(
-                "thumbs-raw-gen-{}.marker",
-                crate::thumbs::RAW_THUMB_GENERATION
-            )),
-            b"",
-        );
-        if pending > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending });
-            run_pending(&db_dir, worker_count());
-        }
+        run_generation_refresh(&db_dir, &bus, &marker, |db| {
+            db.requeue_thumb_tasks_for_raw()
+        });
     });
 }
 
@@ -356,19 +359,9 @@ pub fn refresh_phash_for_generation(
     let spawn_handle = std::sync::Arc::clone(&supervisor);
     spawn_handle.spawn("index", "phash-gen1-regen".into(), move |_| {
         let supervisor = std::sync::Arc::clone(&supervisor);
-        let pending = std::fs::create_dir_all(&db_dir)
-            .ok()
-            .and_then(|_| {
-                crate::ipc::open_library_db(&db_dir)
-                    .ok()
-                    .and_then(|db| db.requeue_phash_tasks_for_all().ok())
-            })
-            .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("phash-gen-1.marker"), b"");
-        if pending > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending });
-            run_pending(&db_dir, worker_count());
-        }
+        run_generation_refresh(&db_dir, &bus, &marker, |db| {
+            db.requeue_phash_tasks_for_all()
+        });
         crate::bursts::regroup_kick(db_dir, params, &bus, &supervisor);
     });
 }
@@ -386,19 +379,7 @@ pub fn refresh_hash_for_generation(
     }
     let bus = bus.clone();
     supervisor.spawn("index", "hash-gen1-regen".into(), move |_| {
-        let pending = std::fs::create_dir_all(&db_dir)
-            .ok()
-            .and_then(|_| {
-                crate::ipc::open_library_db(&db_dir)
-                    .ok()
-                    .and_then(|db| db.requeue_hash_tasks_for_all().ok())
-            })
-            .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("hash-gen-1.marker"), b"");
-        if pending > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending });
-            run_pending(&db_dir, worker_count());
-        }
+        run_generation_refresh(&db_dir, &bus, &marker, |db| db.requeue_hash_tasks_for_all());
     });
 }
 
@@ -416,21 +397,11 @@ pub fn refresh_selection_for_generation(
     }
     let bus = bus.clone();
     supervisor.spawn("index", "selection-gen1-regen".into(), move |_| {
-        let created = std::fs::create_dir_all(&db_dir)
-            .ok()
-            .and_then(|_| {
-                crate::ipc::open_library_db(&db_dir).ok().and_then(|db| {
-                    let eyes = db.create_eyes_tasks_for_unindexed().ok()?;
-                    let blur = db.create_blur_tasks_for_unindexed().ok()?;
-                    Some(eyes + blur)
-                })
-            })
-            .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("selection-gen-1.marker"), b"");
-        if created > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending: created });
-            run_pending(&db_dir, worker_count());
-        }
+        run_generation_refresh(&db_dir, &bus, &marker, |db| {
+            let eyes = db.create_eyes_tasks_for_unindexed()?;
+            let blur = db.create_blur_tasks_for_unindexed()?;
+            Ok(eyes + blur)
+        });
     });
 }
 
@@ -452,18 +423,6 @@ pub fn refresh_exif_for_generation(
     }
     let bus = bus.clone();
     supervisor.spawn("index", "exif-gen5-regen".into(), move |_| {
-        let pending = std::fs::create_dir_all(&db_dir)
-            .ok()
-            .and_then(|_| {
-                crate::ipc::open_library_db(&db_dir)
-                    .ok()
-                    .and_then(|db| db.requeue_exif_tasks_for_all().ok())
-            })
-            .unwrap_or(0);
-        let _ = std::fs::write(db_dir.join("exif-gen-5.marker"), b"");
-        if pending > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending });
-            run_pending(&db_dir, worker_count());
-        }
+        run_generation_refresh(&db_dir, &bus, &marker, |db| db.requeue_exif_tasks_for_all());
     });
 }
