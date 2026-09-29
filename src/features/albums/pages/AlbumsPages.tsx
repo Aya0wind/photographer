@@ -46,12 +46,13 @@ import AlbumDetailPage from "./AlbumDetailPage";
 /** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
 export const SMART_ALBUM_TAGS: readonly string[] = DEFAULT_SMART_TAGS;
 
-/** 智能相册不显示没有照片的标签（2026-09-29 用户要求）：已索引且命中 0 → 隐藏；
- *  未索引（尚未查询）→ 先显示，索引推进后空标签经 tags-indexed 事件自然消失。 */
+/** 智能相册只显示确有照片的标签（用户定案 2026-09-29「没有条目直接隐藏」）：
+ *  命中 0 或未索引（尚未查询）都不显示——未索引的经设置页重建索引后，
+ *  有命中的标签随 tags-indexed 事件自然浮现。 */
 function smartTagsWithPhotos(tags: string[]): string[] {
   return tags.filter((tag) => {
     const hits = indexedTagHitCount(tag);
-    return hits === undefined || hits > 0;
+    return hits !== undefined && hits > 0;
   });
 }
 

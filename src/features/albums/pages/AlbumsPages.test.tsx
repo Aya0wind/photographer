@@ -157,6 +157,8 @@ beforeAll(() => {
 
 beforeEach(() => {
   localStorage.clear();
+  // 空标签隐藏后标签墙需要索引数据：默认 40 标签全命中
+  seedAllTagHits();
   searchSemanticMock.mockReset().mockResolvedValue([]);
   assetsByIdsMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
@@ -327,6 +329,35 @@ describe("智能相册标签隐藏", () => {
   });
 });
 
+// --- 空条目隐藏（2026-09-29 定案：没有条目的智能相册直接隐藏） ------------------------
+
+describe("智能相册：空条目直接隐藏", () => {
+  it("命中 0 与未索引都不显示，只渲染有命中的标签", async () => {
+    seedTagIndex({ "人像": 2, "风景": 0 }); // 其余 38 个未索引
+    renderRoutes("/albums");
+
+    const tags = await screen.findAllByTestId("albums-tag");
+    expect(tags).toHaveLength(1);
+    expect(tags[0]).toHaveAttribute("data-tag", "人像");
+  });
+
+  it("新库未建索引（全部未索引）→ 空态文案，不出标签墙", async () => {
+    localStorage.removeItem("smartphoto.albums.tagIndex.v2");
+    renderRoutes("/albums");
+
+    expect(await screen.findByTestId("albums-all-hidden")).toBeInTheDocument();
+    expect(screen.queryByTestId("albums-tag")).not.toBeInTheDocument();
+  });
+
+  it("全部命中 0 → 同样空态隐藏", async () => {
+    seedTagIndex(Object.fromEntries(SMART_ALBUM_TAGS.map((tag) => [tag, 0])));
+    renderRoutes("/albums");
+
+    expect(await screen.findByTestId("albums-all-hidden")).toBeInTheDocument();
+    expect(screen.queryByTestId("albums-tag")).not.toBeInTheDocument();
+  });
+});
+
 // --- 语义门禁（模型未齐/索引未建 → 点相册不导航、标签页不发查询） ----------------------
 
 describe("智能相册：语义搜索前置门禁", () => {
@@ -398,6 +429,24 @@ describe("智能相册：语义搜索前置门禁", () => {
 
 function makeAlbum(id: number, name: string, itemCount: number): AlbumDto {
   return { id, name, coverAssetId: null, itemCount, createdAt: "2026-09-01T00:00:00" };
+}
+
+/** 智能标签索引种子（smartTags.ts 的 localStorage 结构；hits 数=命中数）。
+ *  相册页只显示确有命中的标签（2026-09-29 定案），标签墙用例需先种索引。
+ *  不种 cover——封面留给 searchSemantic 预取路径（覆盖原封面用例语义）。 */
+function seedTagIndex(hitCounts: Record<string, number>): void {
+  const scope: Record<string, { hits: { assetId: number }[] }> = {};
+  for (const [tag, count] of Object.entries(hitCounts)) {
+    scope[tag] = {
+      hits: Array.from({ length: count }, (_, i) => ({ assetId: i + 1 })),
+    };
+  }
+  localStorage.setItem("smartphoto.albums.tagIndex.v2", JSON.stringify({ default: scope }));
+}
+
+/** 默认全量命中（40 标签都可见）；空条目隐藏用例自行覆写/清除。 */
+function seedAllTagHits(): void {
+  seedTagIndex(Object.fromEntries(SMART_ALBUM_TAGS.map((tag) => [tag, 3])));
 }
 
 describe("相册页两区：手工相册 + 智能相册", () => {
