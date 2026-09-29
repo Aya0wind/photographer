@@ -14,6 +14,7 @@ import {
   tetheringPhotoPreview,
   tetheringSession,
   tetheringSettingSet,
+  tetheringSettings,
   type TetherSessionDto,
 } from "@/ipc/api";
 import type { CameraInfo, TetherCameraSetting } from "@/ipc/api";
@@ -43,6 +44,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 const sessionMock = vi.mocked(tetheringSession);
+const settingsRefreshMock = vi.mocked(tetheringSettings);
 const settingSetMock = vi.mocked(tetheringSettingSet);
 const focusAtMock = vi.mocked(tetheringFocusAt);
 const captureMock = vi.mocked(tetheringCapture);
@@ -110,6 +112,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   handler = null;
   unsubscribe = vi.fn();
+  // 轮询默认无返回（不影响其他测试的静态快照）
+  settingsRefreshMock.mockResolvedValue(null);
   subscribeMock.mockImplementation((fn) => {
     handler = fn as (event: unknown) => void;
     return Promise.resolve(unsubscribe!);
@@ -283,8 +287,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(screen.getByTestId("tether-focus-marker")).toBeInTheDocument();
   });
 
-  it("按快门 → tetheringCapture；失败显示浮层错误", async () => {
-    sessionMock.mockResolvedValue(dto());
+  it("按快门 → tetheringCapture；失败显示浮层错误", async () => {    sessionMock.mockResolvedValue(dto());
     captureMock.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({
       ok: false,
       error: "相机无响应",
@@ -353,5 +356,52 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
 
     expect(await screen.findByTestId("tether-ended")).toHaveTextContent("拍摄会话已结束");
     expect(screen.getByTestId("tether-ended-close")).toBeInTheDocument();
+  });
+
+  it("AF 按钮触发画面中心对焦", async () => {
+    sessionMock.mockResolvedValue(dto());
+    focusAtMock.mockResolvedValue(undefined);
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("tether-af"));
+    await waitFor(() => expect(focusAtMock).toHaveBeenCalledWith("s1", 0.5, 0.5));
+  });
+
+  it("A 档快门只读隐藏 → 切回 M 档：settings 轮询自动恢复快门", async () => {
+    window.localStorage.clear();
+    // A 档快照：快门由机身控制（只读 → 隐藏），光圈只读例外保留
+    sessionMock.mockResolvedValue(
+      dto({ settings: [choice("shutterspeed", "125", false), choice("f-number", "2.8", false)] }),
+    );
+    renderPage();
+    await screen.findByTestId("tether-quickbar");
+    expect(screen.queryByTestId("tether-setting-shutterspeed")).toBeNull();
+    expect(screen.getByTestId("tether-setting-f-number")).toBeInTheDocument();
+
+    // 轮询返回 M 档快照：快门可写 → 回到工具栏
+    settingsRefreshMock.mockResolvedValue([
+      choice("shutterspeed", "125", true, ["125", "250"]),
+      choice("f-number", "2.8", true, ["2.8", "4"]),
+    ]);
+    await waitFor(
+      () => expect(screen.getByTestId("tether-setting-shutterspeed")).toBeInTheDocument(),
+      { timeout: 6000 },
+    );
+  }, 12000);
+
+  it("工具栏拖动：grip 按住拖动改变定位（脱离底部居中）并持久化", async () => {
+    window.localStorage.clear();
+    sessionMock.mockResolvedValue(dto());
+    renderPage();
+    const grip = await screen.findByTestId("tether-quickbar-grip");
+
+    fireEvent.pointerDown(grip, { button: 0, clientX: 400, clientY: 500 });
+    fireEvent.pointerMove(window, { clientX: 320, clientY: 430 });
+    fireEvent.pointerUp(window);
+
+    const bar = screen.getByTestId("tether-quickbar");
+    expect(bar.style.left).not.toBe("");
+    expect(window.localStorage.getItem("tethering.quickbar.pos")).not.toBeNull();
+    window.localStorage.clear();
   });
 });

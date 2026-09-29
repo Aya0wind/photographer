@@ -1278,7 +1278,7 @@
   "tether.param.spotfocusarea": "Spot focus position",
   "tether.refreshSettings": "Refresh settings",
   "tether.noAdjustable": "No adjustable parameters on this camera",  "albums.tether": "Tethered capture",
-  "albums.tetherHint": "Connect a camera and shoot tethered into this album",
+  "tether.quickbarDrag": "Drag toolbar",  "albums.tetherHint": "Connect a camera and shoot tethered into this album",
   "albums.tetherDialogTitle": "Tethered capture to “{{name}}”",
   "albums.tetherNoCamera": "No tetherable camera found (connect via USB and make sure the camera is in remote mode)",
   "albums.tetherRefresh": "Rescan",

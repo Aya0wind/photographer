@@ -62,7 +62,14 @@ const SETTING_ORDER = [
 
 /** 悬浮工具栏参数（曝光三要素 + 对焦 + 白平衡）：常驻取景画面底部，
  *  随手可调不用翻面板。choice 形态才进工具栏（range/action 仍走右栏）。 */
-const QUICK_IDS = ["shutterspeed", "f-number", "iso", "whitebalance", "focusmode"] as const;
+const QUICK_IDS = ["shutterspeed", "f-number", "iso", "whitebalance", "focusmode", "focusarea"] as const;
+
+/** 机身模式切换（A/S 档 ↔ M 档）会改变参数可写性——settings 轮询间隔：
+ *  只读的快门在 A 档隐藏、切回 M 档要能自动回来，靠这轮询刷新快照。 */
+const SETTINGS_POLL_MS = 3000;
+
+/** 工具栏拖动位置持久化键（相对取景容器左上的像素）。 */
+const QUICKBAR_POS_KEY = "tethering.quickbar.pos";
 
 function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   const rank = (s: TetherCameraSetting): number => {
@@ -113,7 +120,25 @@ export default function TetheringWindowPage() {
   /** 工具栏参数弹层：当前展开的设置 id（单开；点外部收起）。 */
   const [quickOpen, setQuickOpen] = useState<string | null>(null);
   const quickBarRef = useRef<HTMLDivElement | null>(null);
+  /** 工具栏拖动位置（null = 默认底部居中；持久化 localStorage）。 */
+  const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const raw = window.localStorage.getItem(QUICKBAR_POS_KEY);
+      if (raw === null) return null;
+      const p = JSON.parse(raw) as { x?: unknown; y?: unknown };
+      return typeof p.x === "number" && typeof p.y === "number" ? { x: p.x, y: p.y } : null;
+    } catch {
+      return null;
+    }
+  });
+  /** AF 触发反馈（600ms 绿闪）。 */
+  const [afFlash, setAfFlash] = useState(false);
   const motionOn = useMotionOn();
+
+  const liveViewSupported = session?.camera.capabilities.liveView === true;
+  const connected = session?.connected === true;
+  const receiving = session?.receiving === true;
+  const photos = session?.photos ?? [];
 
   // 工具栏弹层点外部收起（SelectionBar 同款契约）
   useEffect(() => {
@@ -127,10 +152,21 @@ export default function TetheringWindowPage() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [quickOpen]);
 
-  const liveViewSupported = session?.camera.capabilities.liveView === true;
-  const connected = session?.connected === true;
-  const receiving = session?.receiving === true;
-  const photos = session?.photos ?? [];
+  // 参数快照轮询：机身档位切换（A/S/M…）改变参数可写性，快门/光圈等
+  // 的显示隐藏依赖最新 writable；断连不轮询。
+  useEffect(() => {
+    if (sessionId === "" || !connected) return;
+    const timer = window.setInterval(() => {
+      void tetheringSettings(sessionId)
+        .then((next) => {
+          if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+        })
+        .catch(() => {
+          /* 单次轮询失败静默：下轮再试 */
+        });
+    }, SETTINGS_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [sessionId, connected]);
 
   // 会话快照：挂载拉一次；photoAdded/status 事件增量合并（轻路径，不整页重拉）
   const mergeSession = useCallback((next: TetherSessionDto) => {
@@ -303,6 +339,52 @@ export default function TetheringWindowPage() {
     setCapturing(false);
   }
 
+  /** 工具栏 AF 触发：画面中心对焦（不支持/模式不符静默）+ 绿闪反馈。 */
+  async function triggerAf(): Promise<void> {
+    if (sessionId === "" || !connected) return;
+    setAfFlash(true);
+    window.setTimeout(() => setAfFlash(false), 600);
+    try {
+      await tetheringFocusAt(sessionId, 0.5, 0.5);
+    } catch {
+      /* 相机不支持：绿闪照常消失 */
+    }
+  }
+
+  /** 工具栏拖动：grip 按下 → pointer 跟随（限取景容器内）→ 抬起持久化。 */
+  function beginBarDrag(e: React.PointerEvent<HTMLButtonElement>): void {
+    if (e.button !== 0) return;
+    const bar = quickBarRef.current;
+    if (bar === null || bar.parentElement === null) return;
+    setQuickOpen(null);
+    const offX = e.clientX - bar.getBoundingClientRect().left;
+    const offY = e.clientY - bar.getBoundingClientRect().top;
+    let last: { x: number; y: number } | null = null;
+    const onMove = (ev: PointerEvent) => {
+      const view = quickBarRef.current?.parentElement;
+      const barEl = quickBarRef.current;
+      if (view === null || view === undefined || barEl === null) return;
+      const vr = view.getBoundingClientRect();
+      const x = Math.min(Math.max(0, ev.clientX - vr.left - offX), Math.max(0, vr.width - barEl.offsetWidth));
+      const y = Math.min(Math.max(0, ev.clientY - vr.top - offY), Math.max(0, vr.height - barEl.offsetHeight));
+      last = { x, y };
+      setBarPos(last);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (last !== null) {
+        try {
+          window.localStorage.setItem(QUICKBAR_POS_KEY, JSON.stringify(last));
+        } catch {
+          /* 持久化失败：本次会话内仍有效 */
+        }
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   // --- 渲染 ----------------------------------------------------------------------------
   if (sessionId === "") {
     return (
@@ -452,16 +534,33 @@ export default function TetheringWindowPage() {
           )}
 
           {/* 悬浮工具栏（SelectionBar 同款浮条视觉）：曝光三要素 / 对焦 / 白平衡
-              常驻画面底部，随手可调不必翻右栏；末端快门随时可拍。
+              常驻画面底部，随手可调不必翻右栏；AF 触发 + 快门随时可拍；
+              grip 拖动可挪位（位置持久化）。
               不可调参数不进工具栏——光圈例外（镜头环控制的机身，只读也要看到值）。 */}
           <div
             ref={quickBarRef}
-            className="absolute bottom-3 left-1/2 z-20 w-max max-w-[calc(100%-2rem)] -translate-x-1/2"
+            className={`absolute z-20 ${barPos === null ? "bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2" : ""}`}
+            style={barPos === null ? undefined : { left: barPos.x, top: barPos.y }}
             onClick={(e) => e.stopPropagation()}
             data-testid="tether-quickbar"
           >
             {/* flex-wrap：放不下时控件折行而不是压缩成竖排文字 */}
             <div className="flex flex-wrap items-center justify-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
+              {/* 拖动把手 */}
+              <button
+                type="button"
+                onPointerDown={beginBarDrag}
+                className="flex h-7 w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-full text-text-muted/70 transition-colors hover:bg-panel hover:text-text-secondary active:cursor-grabbing"
+                title={t("tether.quickbarDrag")}
+                aria-label={t("tether.quickbarDrag")}
+                data-testid="tether-quickbar-grip"
+              >
+                <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                  <circle cx="5.5" cy="3.5" r="1.2" /><circle cx="10.5" cy="3.5" r="1.2" />
+                  <circle cx="5.5" cy="8" r="1.2" /><circle cx="10.5" cy="8" r="1.2" />
+                  <circle cx="5.5" cy="12.5" r="1.2" /><circle cx="10.5" cy="12.5" r="1.2" />
+                </svg>
+              </button>
               {quick.map((setting) => (
                 <div key={setting.id} className="relative shrink-0">
                   <button
@@ -505,6 +604,18 @@ export default function TetheringWindowPage() {
                 </div>
               ))}
               <span className="h-4 w-px shrink-0 bg-edge" aria-hidden="true" />
+              {/* AF 触发（画面中心对焦；绿边圆钮） */}
+              <button
+                type="button"
+                onClick={() => void triggerAf()}
+                disabled={!connected}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 border-emerald-400/80 text-[10px] font-bold tracking-wide text-emerald-400 shadow transition-all hover:bg-emerald-400/10 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:text-text-muted disabled:opacity-50 ${afFlash ? "bg-emerald-400/25" : ""}`}
+                title={t("tether.param.autofocus")}
+                aria-label={t("tether.param.autofocus")}
+                data-testid="tether-af"
+              >
+                AF
+              </button>
               <button
                 type="button"
                 onClick={() => void shoot()}

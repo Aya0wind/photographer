@@ -1278,7 +1278,7 @@
   "tether.param.spotfocusarea": "Posición de enfoque puntual",
   "tether.refreshSettings": "Actualizar ajustes",
   "tether.noAdjustable": "No hay parámetros ajustables en esta cámara",  "albums.tether": "Captura conectada",
-  "albums.tetherHint": "Conecta una cámara y dispara en directo a este álbum",
+  "tether.quickbarDrag": "Arrastrar la barra",  "albums.tetherHint": "Conecta una cámara y dispara en directo a este álbum",
   "albums.tetherDialogTitle": "Captura conectada a «{{name}}»",
   "albums.tetherNoCamera": "No se encontró una cámara compatible (conéctala por USB y actívala en modo remoto)",
   "albums.tetherRefresh": "Volver a escanear",
