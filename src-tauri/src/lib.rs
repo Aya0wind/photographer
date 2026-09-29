@@ -95,6 +95,7 @@ pub fn run() {
             // supervisor：统一后台任务框架（panic 捕获 + 命名 + 软取消）。
             let supervisor = tasks::TaskSupervisor::new(bus.clone());
             let supervisor_handle = std::sync::Arc::clone(&supervisor);
+            let config_dir_for_geo = config_dir.clone();
             let ai = ai::ModelManager::new(
                 config_dir.join("models"),
                 bus.clone(),
@@ -145,9 +146,14 @@ pub fn run() {
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
-                // 拍摄地图：地理数据包就绪则后台跑索引管线（加载/入库/回填），
-                // 幂等（下载接力或 NotInstalled 之外的 phase 不重入）
-                geo::backfill::ensure_backfill(db_dir.clone(), &bus, &supervisor_handle);
+                // 拍摄地图：内置数据包首次启动解压一次（config_dir/geo 常驻）
+                // → 后台跑索引管线（加载/入库/回填），幂等
+                geo::install::ensure_installed(
+                    config_dir_for_geo.clone(),
+                    db_dir.clone(),
+                    std::sync::Arc::new(bus.clone()),
+                    &supervisor_handle,
+                );
                 // AI 空闲卸载看护（内存审计 2026-09-29）：模型/向量索引
                 // 空闲 10 分钟统一释放，下次使用惰性重载
                 ai::idle::spawn_idle_unloader(&supervisor_handle);
@@ -275,9 +281,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
             ipc::map::map_geo_status,
-            ipc::map::map_geo_download_start,
-            ipc::map::map_geo_cancel,
-            ipc::map::map_geo_delete,
+            ipc::map::map_geo_install,
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
             ipc::settings::settings_set,

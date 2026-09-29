@@ -9,6 +9,7 @@ import { subscribeAppEvents } from "@/ipc/api/events";
 import type { AppEvent } from "@/ipc/api/types";
 import {
   mapClusters,
+  mapGeoInstall,
   mapGeoStatus,
   type GeoStatus,
   type MapCluster,
@@ -61,6 +62,7 @@ vi.mock("@/ipc/api/map", async (importOriginal) => {
   return {
     ...actual,
     mapGeoStatus: vi.fn(),
+    mapGeoInstall: vi.fn(),
     mapRegionTree: vi.fn(),
     mapClusters: vi.fn(),
   };
@@ -75,6 +77,7 @@ vi.mock("@/ipc/api/events", async (importOriginal) => {
 });
 
 const statusMock = vi.mocked(mapGeoStatus);
+const installMock = vi.mocked(mapGeoInstall);
 const clustersMock = vi.mocked(mapClusters);
 const subscribeMock = vi.mocked(subscribeAppEvents);
 
@@ -115,7 +118,6 @@ function renderPage() {
       <MemoryRouter initialEntries={["/map"]}>
         <Routes>
           <Route path="/map" element={<MapPage />} />
-          <Route path="/settings" element={<div data-testid="settings-page-stub" />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -131,6 +133,7 @@ afterEach(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   subscribeMock.mockResolvedValue(() => {});
+  installMock.mockResolvedValue(undefined);
   // hooks 无条件跑（不渲染地图的分支也会拉聚合）：统一兜底，各测试再覆盖
   clustersMock.mockResolvedValue([]);
   statusMock.mockResolvedValue(status());
@@ -139,30 +142,38 @@ beforeEach(() => {
 // --- 场景 --------------------------------------------------------------------
 
 describe("MapPage 数据管线状态机", () => {
-  it("未安装 → 下载引导；点击跳转设置地图数据 tab（下载入口都在设置）", async () => {
+  it("未安装 → 挂载即自动安装（内置包解压），期间显示准备中", async () => {
     statusMock.mockResolvedValue(status({ installed: false, phase: "notInstalled" }));
     renderPage();
-    expect(await screen.findByTestId("map-download-hint")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("map-download-start"));
-    expect(await screen.findByTestId("settings-page-stub")).toBeInTheDocument();
+    expect(await screen.findByTestId("map-preparing")).toBeInTheDocument();
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
   });
 
-  it("下载中 → 进度页", async () => {
-    statusMock.mockResolvedValue(
-      status({ phase: "downloading", done: 40, total: 400 }),
-    );
+  it("自动安装只触发一次（状态重拉不重复请求）", async () => {
+    statusMock.mockResolvedValue(status({ installed: false, phase: "notInstalled" }));
+    renderPage();
+    await screen.findByTestId("map-preparing");
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
+    // 进度事件驱动状态快进重渲染：不再发第二次
+    statusMock.mockResolvedValue(status({ installed: false, phase: "loading" }));
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("加载中 → 准备页", async () => {
+    statusMock.mockResolvedValue(status({ phase: "loading" }));
     renderPage();
     expect(await screen.findByTestId("map-preparing")).toBeInTheDocument();
+    expect(installMock).not.toHaveBeenCalled();
   });
 
-  it("失败 → 错误 + 跳转设置重试（不在本页下载）", async () => {
-    statusMock.mockResolvedValue(
-      status({ phase: "failed", message: "network" }),
-    );
+  it("失败 → 错误 + 本页重试按钮重新安装", async () => {
+    statusMock.mockResolvedValue(status({ phase: "failed", message: "解压失败" }));
     renderPage();
-    expect(await screen.findByTestId("map-failed")).toBeInTheDocument();
+    // failed 状态挂载也会自动重试一次安装
+    await screen.findByTestId("map-failed");
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByTestId("map-retry"));
-    expect(await screen.findByTestId("settings-page-stub")).toBeInTheDocument();
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(2));
   });
 
   it("就绪 + 无 GPS 照片 → 空态提示", async () => {

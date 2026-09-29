@@ -74,6 +74,7 @@ ab_glyph = "0.2"
 # 阶段 D 导出元数据：JPEG 段级改写（只替换 APP1 段，图像数据零重编码；
 # MIT，许可宽松）
 img-parts = "0.3"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 ort = { version = "2.0.0-rc.13", features = ["directml"] }

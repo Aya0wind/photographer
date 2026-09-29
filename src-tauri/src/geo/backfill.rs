@@ -23,8 +23,8 @@ const BATCH: i64 = 500;
 
 /// 包就绪时的完整管线（下载完成 / 启动钩子调用）：load → 入库 → 回填 → 缓存。
 /// cancel 观测在批次间（单批毫秒级，粒度足够）。
-pub fn run_pipeline(db_dir: &Path, bus: &EventBus, cancel: &dyn Fn() -> bool) {
-    let dir = geo_dir(db_dir);
+pub fn run_pipeline(db_dir: &Path, config_dir: &Path, bus: &EventBus, cancel: &dyn Fn() -> bool) {
+    let dir = geo_dir(config_dir);
     {
         let mut state = geo_state().lock().unwrap_or_else(|e| e.into_inner());
         state.phase = GeoPhase::Loading;
@@ -293,26 +293,4 @@ pub fn export_cache(db: &Db, path: &Path) -> Result<(), String> {
     let json = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, json).map_err(|e| format!("写缓存失败: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("缓存落盘失败: {e}"))
-}
-
-/// 启动钩子：包就绪且未在管线中 → 后台跑管线（幂等；下载中的 phase 不覆盖）。
-pub fn ensure_backfill(
-    db_dir: std::path::PathBuf,
-    bus: &EventBus,
-    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
-) {
-    if !super::packages_installed(&geo_dir(&db_dir)) {
-        return;
-    }
-    {
-        let state = geo_state().lock().unwrap_or_else(|e| e.into_inner());
-        if !matches!(state.phase, GeoPhase::NotInstalled) {
-            return; // 下载器接力或上一轮管线已安排
-        }
-    }
-    let bus = bus.clone();
-    supervisor.spawn("geo", "geo-backfill".into(), move |controls| {
-        let cancel = move || controls.is_cancelled();
-        run_pipeline(&db_dir, &bus, &cancel);
-    });
 }

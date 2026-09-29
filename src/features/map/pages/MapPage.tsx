@@ -1,18 +1,17 @@
 /**
  * 拍摄地图页（/map，组织组 · 器材统计之下）：
- * - 数据管线状态机：未安装 → 下载引导；下载/加载 → 进度；回填 → 地图 +
- *   顶部进度；就绪 → 地图；失败 → 重试
+ * - 数据管线状态机（2026-09-30 起内置数据包，无下载）：未安装 → 挂载即
+ *   自动解压安装（loading）；加载/回填 → 进度；就绪 → 地图；失败 → 重试
  * - 分层气泡：zoom 驱动切层（全局聚合），点击气泡 flyTo 下钻（parent 限定）
  * - 面包屑（全球 > 中国 > 京省…）+ 换一批（随机样本重拉）+ 回填中提示
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
 
 import { subscribeAppEvents } from "@/ipc/api/events";
 import type { AppEvent } from "@/ipc/api/types";
-import { mapGeoStatus, type GeoStatus, type MapCluster } from "@/ipc/api/map";
+import { mapGeoInstall, mapGeoStatus, type GeoStatus, type MapCluster } from "@/ipc/api/map";
 import { useMotionOn } from "@/lib/motion";
 
 import MapCanvas, { type FlyTarget } from "../components/MapCanvas";
@@ -28,7 +27,6 @@ interface Crumb {
 
 export default function MapPage() {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const motionOn = useMotionOn();
   const [status, setStatus] = useState<GeoStatus | null>(null);
   const [level, setLevel] = useState<MapLevel>(0);
@@ -77,9 +75,22 @@ export default function MapPage() {
     };
   }, [pullStatus, invalidateAll]);
 
-  // 下载/重试入口全部收进设置页「地图数据」（2026-09-29 用户定案）：
-  // 本页只读展示管线状态 + 跳转。
-  const gotoSettings = useCallback(() => navigate("/settings?tab=map"), [navigate]);
+  // 内置数据包安装（幂等）：地图页发现未就位/失败时自动触发一次；
+  // 解压常驻磁盘，仅首次发生。
+  const installRequestedRef = useRef(false);
+  const install = useCallback(() => {
+    if (installRequestedRef.current) return;
+    installRequestedRef.current = true;
+    mapGeoInstall()
+      .then(() => pullStatus())
+      .catch(() => pullStatus()); // 命令失败也刷新状态（failed 分支展示）
+  }, [pullStatus]);
+
+  // 状态到达后：未安装/失败（且未在请求中）自动安装——地图页即用即装
+  useEffect(() => {
+    if (status === null) return;
+    if (!status.installed || status.phase === "failed") install();
+  }, [status, install]);
 
   // zoom 驱动切层：回到全局聚合（drill 链清空）
   const onLevelChange = useCallback((next: MapLevel) => {
@@ -123,45 +134,24 @@ export default function MapPage() {
     );
   }
 
-  if (!status.installed) {
-    return (
-      <div className="h-full" data-testid="map-page">
-        <div className="flex h-full flex-col items-center justify-center gap-4 px-8">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-edge bg-surface">
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" className="text-accent" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9s1.3-6.3 3.8-9z" />
-            </svg>
-          </div>
-          <div className="text-sm font-semibold">{t("map.downloadTitle")}</div>
-          <p className="max-w-md text-center text-xs leading-relaxed text-text-muted" data-testid="map-download-hint">
-            {t("map.downloadHint")}
-          </p>
-          <button
-            type="button"
-            onClick={gotoSettings}
-            className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90"
-            data-testid="map-download-start"
-          >
-            {t("map.gotoSettings")}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (status.phase === "downloading" || status.phase === "loading") {
+  if (!status.installed || status.phase === "loading") {
+    // 未安装 → 挂载即自动解压安装（内置包，无用户动作）；loading → 建树。
+    // 回填阶段的进度事件会带 done/total，此时已进地图分支（顶部进度条）。
     const pct = status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
     return (
       <div className="h-full" data-testid="map-page">
         <div className="flex h-full flex-col items-center justify-center gap-3">
           <div className="animate-pulse text-sm font-semibold" data-testid="map-preparing">
-            {status.phase === "downloading" ? t("map.downloading") : t("map.loading")}
+            {t("map.loading")}
           </div>
-          <div className="h-1.5 w-64 overflow-hidden rounded-full bg-surface">
-            <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${pct}%` }} />
-          </div>
-          <div className="text-[11px] text-text-muted">{pct}%</div>
+          {status.total > 0 && (
+            <>
+              <div className="h-1.5 w-64 overflow-hidden rounded-full bg-surface">
+                <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${pct}%` }} />
+              </div>
+              <div className="text-[11px] text-text-muted">{pct}%</div>
+            </>
+          )}
         </div>
       </div>
     );
@@ -177,11 +167,14 @@ export default function MapPage() {
           {status.message && <div className="max-w-md text-center text-[11px] text-text-muted">{status.message}</div>}
           <button
             type="button"
-            onClick={gotoSettings}
+            onClick={() => {
+              installRequestedRef.current = false;
+              install();
+            }}
             className="rounded-md border border-edge px-4 py-1.5 text-xs text-text-muted transition-colors hover:border-accent hover:text-accent"
             data-testid="map-retry"
           >
-            {t("map.gotoSettings")}
+            {t("map.retry")}
           </button>
         </div>
       </div>
@@ -215,16 +208,6 @@ export default function MapPage() {
             <span className="text-[11px] text-text-muted" data-testid="map-backfill-hint">
               {t("map.backfilling")} {backfillPct}%
             </span>
-          )}
-          {status.datavFiles < 250 && (
-            <button
-              type="button"
-              onClick={gotoSettings}
-              className="rounded-md border border-accent/40 px-2 py-1 text-[11px] text-accent transition-colors hover:border-accent"
-              data-testid="map-complete-download"
-            >
-              {t("map.completeDownload")}
-            </button>
           )}
           <button
             type="button"

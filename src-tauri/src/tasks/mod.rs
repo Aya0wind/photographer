@@ -346,20 +346,6 @@ impl TaskSupervisor {
         hit
     }
 
-    /// 按 kind 批量取消（返回命中数）。软语义同 pause_kind：任务体需轮询
-    /// cancelled（geo 下载/回填已接线）。
-    pub fn cancel_kind(&self, kind: &str) -> usize {
-        let running = self.running.lock().expect("supervisor running mutex poisoned");
-        let mut hit = 0;
-        for entry in running.values() {
-            if entry.kind == kind {
-                entry.cancelled.store(true, Ordering::SeqCst);
-                hit += 1;
-            }
-        }
-        hit
-    }
-
     /// 当前运行中的任务数（观测；集成测试引用）。
     #[allow(dead_code)]
     pub fn running_count(&self) -> usize {

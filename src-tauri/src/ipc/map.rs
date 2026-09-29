@@ -1,4 +1,4 @@
-//! 拍摄地图 IPC：数据包状态/下载触发/树缓存路径 + 分层聚合气泡查询。
+//! 拍摄地图 IPC：数据包状态/安装触发/树缓存路径 + 分层聚合气泡查询。
 //!
 //! 聚合形态（map-module.md 定案）：`level` 选层（0 国 /1 省 /2 市 /3 县），
 //! `parent_region_id` 可选限定下钻范围（该节子的子节点集合）。每组带随机
@@ -16,7 +16,7 @@ use crate::ipc::{active_library_db, run_blocking, SharedState};
 pub struct GeoStatusDto {
     /// 数据包三根文件是否就绪
     pub installed: bool,
-    /// notInstalled / downloading / loading / ready / backfilling / failed
+    /// notInstalled / loading / ready / backfilling / failed
     pub phase: String,
     pub done: u64,
     pub total: u64,
@@ -30,9 +30,6 @@ pub struct GeoStatusDto {
 fn phase_parts(phase: &GeoPhase) -> (String, u64, u64, Option<String>) {
     match phase {
         GeoPhase::NotInstalled => ("notInstalled".into(), 0, 0, None),
-        GeoPhase::Downloading { done, total } => {
-            ("downloading".into(), *done as u64, *total as u64, None)
-        }
         GeoPhase::Loading => ("loading".into(), 0, 0, None),
         GeoPhase::Ready => ("ready".into(), 0, 0, None),
         GeoPhase::Backfilling { done, total } => ("backfilling".into(), *done, *total, None),
@@ -42,24 +39,10 @@ fn phase_parts(phase: &GeoPhase) -> (String, u64, u64, Option<String>) {
 
 #[tauri::command]
 pub fn map_geo_status(state: State<'_, SharedState>) -> GeoStatusDto {
-    let db_dir = state
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_library()
-        .map(|l| std::path::PathBuf::from(&l.db_dir));
-    let installed = db_dir
-        .as_deref()
-        .map(|d| geo::packages_installed(&geo::geo_dir(d)))
-        .unwrap_or(false);
-    let cache_ready = db_dir
-        .as_deref()
-        .map(|d| geo::geo_dir(d).join(backfill::CACHE_FILE).is_file())
-        .unwrap_or(false);
-    let datav_files = db_dir
-        .as_deref()
-        .map(|d| geo::datav_count(&geo::geo_dir(d)))
-        .unwrap_or(0);
+    let config_dir = state.config_dir.clone();
+    let installed = geo::packages_installed(&geo::geo_dir(&config_dir));
+    let cache_ready = geo::geo_dir(&config_dir).join(backfill::CACHE_FILE).is_file();
+    let datav_files = geo::datav_count(&geo::geo_dir(&config_dir));
     let (phase, done, total, message) = phase_parts(&geo::phase_snapshot());
     GeoStatusDto {
         installed,
@@ -72,10 +55,10 @@ pub fn map_geo_status(state: State<'_, SharedState>) -> GeoStatusDto {
     }
 }
 
-/// 触发数据包下载（幂等：已在管线中不重复启动）。重活全在 supervisor
-/// 后台线程，命令立即返回。
+/// 安装内置地理数据（幂等）：未解压则后台解压一次（config_dir/geo，
+/// 常驻磁盘）→ 自动接力回填管线。已在跑/已就位时为快路径。
 #[tauri::command]
-pub fn map_geo_download_start(app: tauri::AppHandle) -> Result<(), String> {
+pub fn map_geo_install(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<SharedState>();
     let db_dir = {
         let settings = state
@@ -91,63 +74,14 @@ pub fn map_geo_download_start(app: tauri::AppHandle) -> Result<(), String> {
         return Err("尚未创建库".into());
     };
     let bus = std::sync::Arc::new(state.bus.clone());
-    geo::download::start_download(db_dir, bus, &state.supervisor);
-    Ok(())
-}
-
-/// 取消进行中的下载/回填管线（软取消：任务体步进轮询）。状态落 Failed
-/// （「已取消」），数据包文件保留——重试断点续传。
-#[tauri::command]
-pub fn map_geo_cancel(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<SharedState>();
-    state.supervisor.cancel_kind("geo");
-    Ok(())
-}
-
-/// 删除地理数据（设置页管理）：取消管线 → 删 geo 目录与库内 regions/
-/// asset_regions 表 → 状态复位 NotInstalled。重下后回填管线全量重建。
-#[tauri::command]
-pub fn map_geo_delete(app: tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<SharedState>();
-    state.supervisor.cancel_kind("geo");
-    let db_dir = {
-        let settings = state
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        settings
-            .active_library()
-            .map(|l| std::path::PathBuf::from(&l.db_dir))
-    };
-    let Some(db_dir) = db_dir else {
-        return Err("尚未创建库".into());
-    };
-    let dir = geo::geo_dir(&db_dir);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除地理数据目录失败: {e}"))?;
-    }
-    {
-        let db = active_library_db(state.inner())?;
-        db.0.execute_batch("DELETE FROM asset_regions; DELETE FROM regions;")
-            .map_err(|e| format!("清理地区表失败: {e}"))?;
-    }
-    let mut geo_state = geo::geo_state().lock().unwrap_or_else(|e| e.into_inner());
-    geo_state.phase = GeoPhase::NotInstalled;
-    geo_state.index = None;
+    geo::install::ensure_installed(state.config_dir.clone(), db_dir, bus, &state.supervisor);
     Ok(())
 }
 
 /// 树缓存文件绝对路径（前端 convertFileSrc 直读；未就绪返回 None）。
 #[tauri::command]
 pub fn map_geo_cache_url(state: State<'_, SharedState>) -> Option<String> {
-    let db_dir = state
-        .settings
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .active_library()
-        .map(|l| std::path::PathBuf::from(&l.db_dir))?;
-    let path = geo::geo_dir(&db_dir).join(backfill::CACHE_FILE);
+    let path = geo::geo_dir(&state.config_dir).join(backfill::CACHE_FILE);
     path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 

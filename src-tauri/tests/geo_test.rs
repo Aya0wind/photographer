@@ -99,7 +99,9 @@ fn write_geo_fixture(dir: &Path) {
 fn pipeline_backfill_clusters_drilldown_reindex_and_cache() {
     let root = tempfile::tempdir().unwrap();
     let db_dir = root.path().join("lib");
-    let geo_dir = geo::geo_dir(&db_dir);
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let geo_dir = geo::geo_dir(&config_dir);
     std::fs::create_dir_all(&geo_dir).unwrap();
     write_geo_fixture(&geo_dir);
 
@@ -119,7 +121,7 @@ fn pipeline_backfill_clusters_drilldown_reindex_and_cache() {
     }
 
     let bus = EventBus::new();
-    backfill::run_pipeline(&db_dir, &bus, &|| false);
+    backfill::run_pipeline(&db_dir, &config_dir, &bus, &|| false);
 
     // —— 挂接断言：甲区 4 行/张（国省市县）、北省 2 行、海上 0 行 ——
     let count = |sql: &str| -> i64 { db.0.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -226,7 +228,7 @@ fn pipeline_backfill_clusters_drilldown_reindex_and_cache() {
     // —— 二次管线：幂等（同构跳过重刷），新资产增量补 ——
     db.insert_asset(&asset("X:/p/j4.jpg", Some(26.2), Some(101.2)))
         .unwrap();
-    backfill::run_pipeline(&db_dir, &bus, &|| false);
+    backfill::run_pipeline(&db_dir, &config_dir, &bus, &|| false);
     assert_eq!(
         count("SELECT COUNT(*) FROM asset_regions"),
         3 * 4 + 2 * 3 + 2 + 4 - 4,
@@ -243,67 +245,21 @@ fn pipeline_backfill_clusters_drilldown_reindex_and_cache() {
     assert_eq!(china_id_stable, china.region_id, "同构跳过：id 稳定");
 }
 
-/// DataV `_full` 404 → 轮廓 `{adcode}.json` 回退（台湾 710000 场景，
-/// 2026-09-29 用户真机 404）。内嵌最小 HTTP 服务确定性复现，不依赖公网。
+/// 内置数据包端到端：解压真实嵌入 zip（400 文件）→ 树可加载。
+/// 同时守住两个历史事故路径：台湾 710000（无 _full，包内为轮廓文件）与
+/// 济源市 419001（自引用轮廓，曾致递归栈溢出——现无递归）。
 #[test]
-fn datav_download_falls_back_to_outline_when_full_404() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve = std::thread::spawn(move || {
-        let outline = r#"{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"adcode":"710000","name":"台湾省","level":"province","center":[121.5,25.0],"centroid":[121.5,25.0]},"geometry":{"type":"Polygon","coordinates":[[[121,25],[122,25],[122,26],[121,25]]]}}]}"#;
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut buf = [0u8; 2048];
-            let _ = stream.read(&mut buf);
-            let path = String::from_utf8_lossy(&buf)
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
-            let (status, body): (&str, String) = if path.ends_with("710000_full.json") {
-                ("404 Not Found", String::new())
-            } else if path.ends_with("710000.json") {
-                ("200 OK", outline.to_string())
-            } else {
-                ("404 Not Found", String::new())
-            };
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(resp.as_bytes());
-        }
-    });
-
-    let dir = std::env::temp_dir().join(format!(
-        "smartphoto-geo-fallback-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let base = format!("http://{addr}");
-
-    // _full 404 → 落轮廓文件
-    geo::download::download_datav_file(&dir, "710000", &base).unwrap();
-    let raw = std::fs::read_to_string(dir.join("datav-710000.json")).unwrap();
-    assert!(raw.contains("台湾省"), "应回退到轮廓文件");
-
-    // 递归层：轮廓无子级（level=province），不深入、计数 1
-    let count =
-        geo::download::download_datav_recursive(&dir, "710000", 1, &|| false, &|| {}, &base)
-            .unwrap();
-    assert_eq!(count, 1);
-
-    // 两试都 404 → 报错，且错误指向上报 _full 的 URL（诊断口径不变）
-    let err = geo::download::download_datav_file(&dir, "999999", &base).unwrap_err();
-    assert!(err.contains("999999_full.json"), "错误应含 _full URL：{err}");
-
-    drop(serve);
-    let _ = std::fs::remove_dir_all(&dir);
+fn embedded_geo_package_extracts_and_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let geo_dir = dir.path().join("geo");
+    let count = geo::install::extract_embedded(&geo_dir).unwrap();
+    assert!(count >= 390, "嵌入包应基本齐备：{count}");
+    assert!(geo_dir.join("world-adm0.geojson").is_file());
+    assert!(geo_dir.join("world-adm1.geojson").is_file());
+    assert!(geo_dir.join("datav-710000.json").is_file(), "台湾轮廓应在包内");
+    assert!(geo_dir.join("datav-419001.json").is_file(), "济源市应在包内");
+    let index = geo::GeoIndex::load(&geo_dir).expect("嵌入包解压后树应可加载");
+    assert!(index.nodes.len() > 300, "地区节点应成规模：{}", index.nodes.len());
+    // 幂等：重复解压不报错不缺文件
+    assert_eq!(geo::install::extract_embedded(&geo_dir).unwrap(), count);
 }

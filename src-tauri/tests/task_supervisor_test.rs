@@ -266,36 +266,3 @@ fn pause_kind_and_resume_kind_toggle_running_tasks_by_kind() {
     assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
     assert!(tasks::wait_done(&other, Duration::from_secs(5)));
 }
-
-#[test]
-fn cancel_kind_sets_cancelled_flag_for_running_tasks() {
-    let supervisor = TaskSupervisor::new(EventBus::new());
-    let entered = Arc::new(AtomicUsize::new(0));
-    let probe = Arc::clone(&entered);
-    let handle = supervisor
-        .spawn("geo", "download-probe".into(), move |controls| {
-            probe.fetch_add(1, Ordering::SeqCst);
-            while !controls.is_cancelled() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        });
-    let started = std::time::Instant::now();
-    while entered.load(Ordering::SeqCst) == 0 {
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-    let other = supervisor
-        .spawn("import", "unaffected".into(), |controls| {
-            while !controls.is_cancelled() {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        });
-    // 按 kind 取消：geo 命中、import 不受影响、未知 kind 零命中
-    assert_eq!(supervisor.cancel_kind("geo"), 1);
-    assert!(handle.is_cancelled());
-    assert!(!other.is_cancelled(), "cancel_kind 不得跨 kind 生效");
-    assert_eq!(supervisor.cancel_kind("nothing"), 0);
-
-    other.cancel();
-    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
-    assert!(tasks::wait_done(&other, Duration::from_secs(5)));
-}

@@ -13,7 +13,7 @@
 //!   不走 IPC 递归查询）；指纹 = 数据包文件指纹，不符即重建。
 
 pub mod backfill;
-pub mod download;
+pub mod install;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,9 +22,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use geo::{Centroid, Contains, Coord, EuclideanDistance, MultiPolygon, Point, Polygon};
 use rstar::{RTree, RTreeObject, AABB};
 
-/// 地理数据目录（库 dbDir 下）。
-pub fn geo_dir(db_dir: &Path) -> PathBuf {
-    db_dir.join("geo")
+/// 地理数据目录（应用配置目录下，与 models 同级——静态数据全库共享；
+/// 2026-09-30 起由内置包解压而来，见 install.rs）。
+pub fn geo_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("geo")
 }
 
 /// 数据包清单：世界（Natural Earth 50m，public domain）+ 中国（DataV 递归）。
@@ -457,6 +458,12 @@ fn load_datav_tree(
         if !code.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
+        // 轮廓文件的自引用要素（_full 404 回退包只含自身，如济源市 419001
+        // level 仍为 "city"）：不是子级，跳过——否则节点自嵌套且递归无限
+        // （2026-09-30 栈溢出真因，树构建侧）
+        if code == adcode {
+            continue;
+        }
         // 层级用 DataV 语义字段（直辖市下辖区县按 district 正确落 level 3）；
         // 缺失时回退计数推导
         let level = match prop_str(props, &["level"]).as_deref() {
@@ -569,13 +576,8 @@ pub fn packages_installed(dir: &Path) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GeoPhase {
-    /// 数据包未安装（前端显示下载引导）
+    /// 数据包未解压（打开地图页/启动时自动安装，无用户动作）
     NotInstalled,
-    /// stage 语义与 MapGeoProgress 一致
-    Downloading {
-        done: u32,
-        total: u32,
-    },
     Loading,
     Ready,
     Backfilling {
