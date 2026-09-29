@@ -41,3 +41,5 @@ vendor/edsdk/
 vendor/nikon-sdk/
 vendor/fuji-sdk/
 **/bridge-build/
+src-tauri/resources/gphoto/*
+!src-tauri/resources/gphoto/.gitkeep

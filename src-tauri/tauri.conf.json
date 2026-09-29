@@ -32,6 +32,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "resources/gphoto/": "gphoto/"
+    },
     "targets": [
       "nsis"
     ],

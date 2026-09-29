@@ -45,16 +45,26 @@ Sony 通路之外的第二条通用后端：运行时 `libloading` 动态加载
 零子进程——gphoto2-rs crate 卡在 pkg-config + MSVC import 库，vcpkg 无 port，
 自持薄 FFI 是定案）。注册表 id `gphoto`，相机 id 形如 `gphoto:usb:001,011`。
 
-### DLL 部署集（MSYS2 ucrt64，objdump 传递闭包实测）
+### 部署与跨平台组织（2026-09-29 定案：随包目录，不分发进 AppData）
 
-13 个：libgphoto2-6 / libgphoto2_port-12 / libusb-1.0 / libexif-12 /
-libintl-8 / libltdl-7 / libwinpthread-1 / libsystre-0 / libiconv-2 /
-libtre-5 / libjpeg-8 / libxml2-16 / zlib1。部署目录
-`%LOCALAPPDATA%\PhotoHub\gphoto\`（或 exe 旁 `gphoto/`，或
-`PHOTO_HUB_GPHOTO_DLL` 指定绝对路径）。全部以
-`LOAD_WITH_ALTERED_SEARCH_PATH` 加载并 mem::forget 驻留——camlib
-（ptp2.dll）与 iolib（usb1.dll）运行期按模块名解析依赖，预加载句柄一 drop
-就会被 FreeLibrary 撤走。
+库目录随安装包放**安装目录**（Tauri resource 根下 `gphoto/`；Windows NSIS
+即 exe 旁，macOS 为 Contents/Resources，Linux 为 /usr/lib/…/gphoto）。
+加载顺序：`PHOTO_HUB_GPHOTO_DLL` 环境覆盖（lib.rs 启动时按 resource_dir
+注入，覆盖所有平台布局）→ exe 旁 `gphoto/` → 平台回退（Win：开发机
+LOCALAPPDATA/msys64；POSIX：系统 SONAME dlopen，发行版自带 libgphoto2）。
+
+随包目录内容（`scripts/assemble-gphoto-bundle.ps1` 从 MSYS2 组装）：
+
+```text
+gphoto/
+  libgphoto2-6.dll + libgphoto2_port-12.dll + 11 个依赖 DLL（闭包实测）
+  iolibs/   ← usb1.dll 等（运行期 ltdl 加载；IOLIBS 环境变量重定位）
+  camlibs/  ← ptp2.dll 等（同上，CAMLIBS）
+```
+
+Windows 上全部以 `LOAD_WITH_ALTERED_SEARCH_PATH` 加载并 mem::forget 驻留
+——camlib/usb iolib 运行期按模块名解析依赖，预加载句柄一 drop 就会被
+FreeLibrary 撤走；POSIX 由 ld.so/dyld 解析，无需预载与 ucrt `_putenv` 桥。
 
 ### 运行期三个坑（真机 A7R V 逐一实证，2026-09-29）
 

@@ -293,47 +293,25 @@ fn lib() -> Result<&'static GphotoLib, TetherError> {
                 errors.push(format!("{} 不存在", path.display()));
                 continue;
             }
-            // 依赖闭包先于主库入内存并驻留（drop 即 FreeLibrary，会撤走
-            // 后续 camlib/usb iolib 运行期按名解析的模块——所以 forget）。
-            // 清单 = libgphoto2(-port) 静态导入闭包 + ptp2/usb1 camlib 的
-            // 运行期依赖（objdump -p 实测，2026-09-29）。
+            #[cfg(windows)]
             if let Some(dir) = path.parent() {
-                for dep in [
-                    "libwinpthread-1.dll",
-                    "libiconv-2.dll",
-                    "libtre-5.dll",
-                    "zlib1.dll",
-                    "libusb-1.0.dll",
-                    "libexif-12.dll",
-                    "libintl-8.dll",
-                    "libsystre-0.dll",
-                    "libjpeg-8.dll",
-                    "libxml2-16.dll",
-                    "libltdl-7.dll",
-                    "libgphoto2_port-12.dll",
-                ] {
-                    let dep_path = dir.join(dep);
-                    if dep_path.is_file() {
-                        unsafe {
-                            if let Ok(h) = load_altered(&dep_path) {
-                                std::mem::forget(h);
-                            }
-                        }
-                    }
-                }
+                preload_deps(dir);
             }
             unsafe {
-                match load_altered(&path) {
+                match load_bundle_lib(&path) {
                     Ok(handle) => {
                         let port_path = path
                             .parent()
-                            .map(|d| d.join("libgphoto2_port-12.dll"))
+                            .map(|d| d.join(port_dll_name()))
                             .ok_or_else(|| "路径无父目录".to_string());
                         let loaded = match port_path {
-                            Ok(p) if p.is_file() => load_altered(&p).map_err(|e| e.to_string()),
+                            Ok(p) if p.is_file() => {
+                                load_bundle_lib(&p).map_err(|e| e.to_string())
+                            }
                             Ok(p) => Err(format!(
-                                "{} 缺少配套 libgphoto2_port-12.dll（找 {}）",
+                                "{} 缺少配套 {}（找 {}）",
                                 path.display(),
+                                port_dll_name(),
                                 p.display()
                             )),
                             Err(e) => Err(e),
@@ -365,30 +343,51 @@ fn lib() -> Result<&'static GphotoLib, TetherError> {
     .map_err(|e| TetherError::Other(e.clone()))
 }
 
-fn dll_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(path) = std::env::var_os("PHOTO_HUB_GPHOTO_DLL") {
-        out.push(PathBuf::from(path));
+/// port 库文件名（与主库同目录）。
+fn port_dll_name() -> &'static str {
+    if cfg!(windows) {
+        "libgphoto2_port-12.dll"
+    } else if cfg!(target_os = "macos") {
+        "libgphoto2_port.12.dylib"
+    } else {
+        "libgphoto2_port.so.12"
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join("gphoto").join("libgphoto2-6.dll"));
-        }
-    }
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        out.push(
-            PathBuf::from(root)
-                .join("PhotoHub")
-                .join("gphoto")
-                .join("libgphoto2-6.dll"),
-        );
-    }
-    out.push(PathBuf::from(r"C:\msys64\ucrt64\bin\libgphoto2-6.dll"));
-    out
 }
 
-/// 按绝对路径加载 DLL，依赖从其所在目录解析（LOAD_WITH_ALTERED_SEARCH_PATH）。
-unsafe fn load_altered(path: &Path) -> Result<libloading::Library, libloading::Error> {
+/// Windows：依赖闭包先于主库入内存并驻留（drop 即 FreeLibrary，会撤走后续
+/// camlib/usb iolib 运行期按名解析的模块——所以 forget）。清单 =
+/// libgphoto2(-port) 静态导入闭包 + ptp2/usb1 camlib 的运行期依赖
+/// （objdump -p 实测，2026-09-29）。POSIX 由 ld.so/dyld 按路径解析，无需预载。
+#[cfg(windows)]
+fn preload_deps(dir: &Path) {
+    for dep in [
+        "libwinpthread-1.dll",
+        "libiconv-2.dll",
+        "libtre-5.dll",
+        "zlib1.dll",
+        "libusb-1.0.dll",
+        "libexif-12.dll",
+        "libintl-8.dll",
+        "libsystre-0.dll",
+        "libjpeg-8.dll",
+        "libxml2-16.dll",
+        "libltdl-7.dll",
+        "libgphoto2_port-12.dll",
+    ] {
+        let dep_path = dir.join(dep);
+        if dep_path.is_file() {
+            unsafe {
+                if let Ok(h) = load_bundle_lib(&dep_path) {
+                    std::mem::forget(h);
+                }
+            }
+        }
+    }
+}
+
+/// Windows：按绝对路径加载，依赖从其所在目录解析（ALTERED_SEARCH_PATH）。
+#[cfg(windows)]
+unsafe fn load_bundle_lib(path: &Path) -> Result<libloading::Library, libloading::Error> {
     type RawLib = libloading::os::windows::Library;
     RawLib::load_with_flags(
         path,
@@ -397,24 +396,93 @@ unsafe fn load_altered(path: &Path) -> Result<libloading::Library, libloading::E
     .map(|raw| raw.into())
 }
 
-/// 定位 iolibs/camlibs 驱动目录（libgphoto2 从编译期前缀推导，DLL 被搬到
-/// %LOCALAPPDATA% 后失效——官方重定位钩子是 IOLIBS/CAMLIBS 环境变量）。
-/// 候选：随包布局 `<dll目录>/iolibs|camlibs` → MSYS2 布局
-/// `<父>/lib/libgphoto2[_port]/<版本>/*` → 开发机回退 C:\msys64 树。
-/// 以标志驱动文件（usb1.dll / ptp2.dll）判定命中。
-fn locate_driver_dir(dll_dir: &Path, marker: &str, msys_lib_dir: &str) -> Option<PathBuf> {
-    let bundle = if marker == "usb1.dll" { "iolibs" } else { "camlibs" };
+/// POSIX：dlopen 默认即从库自身目录（DT_RUNPATH/同目录 rpath）解析依赖。
+#[cfg(not(windows))]
+unsafe fn load_bundle_lib(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    libloading::Library::new(path)
+}
+
+fn dll_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // 1. 显式覆盖（诊断/打包布局注入——lib.rs 启动时按 Tauri resource_dir
+    //    设置，覆盖 macOS Resources 等非 exe 同级布局）
+    if let Some(path) = std::env::var_os("PHOTO_HUB_GPHOTO_DLL") {
+        out.push(PathBuf::from(path));
+    }
+    // 2. 安装目录随包布局（Windows NSIS：资源与 exe 同目录；跨平台主形态）
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("gphoto").join(bundle_dll_name()));
+        }
+    }
+    #[cfg(windows)]
+    {
+        // 3-4. Windows 开发机回退（无随包目录时）
+        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+            out.push(
+                PathBuf::from(root)
+                    .join("PhotoHub")
+                    .join("gphoto")
+                    .join(bundle_dll_name()),
+            );
+        }
+        out.push(PathBuf::from(r"C:\msys64\ucrt64\bin").join(bundle_dll_name()));
+    }
+    #[cfg(not(windows))]
+    {
+        // 3. 系统安装（dlopen 按 SONAME 搜索路径；Linux 发行版均收录）
+        out.push(PathBuf::from(if cfg!(target_os = "macos") {
+            "libgphoto2.6.dylib"
+        } else {
+            "libgphoto2.so.6"
+        }));
+    }
+    out
+}
+
+/// 随包主库文件名（平台共享对象命名差异；分发布局统一 `<资源根>/gphoto/`）。
+pub fn bundle_dll_name() -> &'static str {
+    if cfg!(windows) {
+        "libgphoto2-6.dll"
+    } else if cfg!(target_os = "macos") {
+        "libgphoto2.6.dylib"
+    } else {
+        "libgphoto2.so.6"
+    }
+}
+
+/// 定位 iolibs/camlibs 驱动目录（libgphoto2 默认按编译期前缀找驱动，库被
+/// 收进随包目录后失效——官方重定位钩子是 IOLIBS/CAMLIBS 环境变量）。
+/// 候选：随包布局 `<dll目录>/iolibs|camlibs` → 开发机 MSYS2 布局
+/// （仅 Windows）`<父>/lib/libgphoto2[_port]/<版本>/*`。Linux/macOS 系统
+/// 安装的 libgphoto2 编译前缀本身正确，无随包目录时不动环境变量。
+/// 以标志驱动文件（usb1.dll/usb.so、ptp2.dll/ptp2.so）判定命中。
+fn locate_driver_dir(dll_dir: &Path, kind: DriverKind) -> Option<PathBuf> {
+    let (bundle, msys_lib_dir): (&str, &str) = match kind {
+        DriverKind::Iolib => ("iolibs", "libgphoto2_port"),
+        DriverKind::Camlib => ("camlibs", "libgphoto2"),
+    };
+    let marker = if cfg!(windows) {
+        match kind {
+            DriverKind::Iolib => "usb1.dll",
+            DriverKind::Camlib => "ptp2.dll",
+        }
+    } else {
+        match kind {
+            DriverKind::Iolib => "usb.so",
+            DriverKind::Camlib => "ptp2.so",
+        }
+    };
     if dll_dir.join(bundle).join(marker).is_file() {
         return Some(dll_dir.join(bundle));
     }
-    for root in [
-        dll_dir.parent().map(|p| p.join("lib")),
-        Some(PathBuf::from(r"C:\msys64\ucrt64\lib")),
-    ]
-    .into_iter()
-    .flatten()
+    #[cfg(windows)]
     {
-        let lib_dir = root.join(msys_lib_dir);
+        let lib_dir = dll_dir
+            .parent()
+            .map(|p| p.join("lib"))
+            .unwrap_or_else(|| PathBuf::from(r"C:\msys64\ucrt64\lib"))
+            .join(msys_lib_dir);
         let mut hits: Vec<PathBuf> = std::fs::read_dir(&lib_dir)
             .ok()?
             .filter_map(|e| e.ok())
@@ -428,10 +496,17 @@ fn locate_driver_dir(dll_dir: &Path, marker: &str, msys_lib_dir: &str) -> Option
     None
 }
 
+enum DriverKind {
+    Iolib,
+    Camlib,
+}
+
 /// 经共享 ucrtbase 的 CRT 环境表写变量。Win32 `SetEnvironmentVariable`
 /// （= Rust `env::set_var`）与 ucrt `getenv` 的启动快照互不可见——
 /// libgphoto2 运行期读不到；`_putenv` 同时更新 CRT 表与进程块
-/// （probe2.c 实测，2026-09-29）。
+/// （probe2.c 实测，2026-09-29）。POSIX 的 getenv 读进程 environ，
+/// set_var 直接可见，无需此桥。
+#[cfg(windows)]
 fn crt_putenv(entry: &str) {
     let Ok(c) = CString::new(entry) else {
         return;
@@ -453,16 +528,14 @@ fn crt_putenv(entry: &str) {
 
 /// 设置 IOLIBS/CAMLIBS（仅在用户未设置时；进程内首次加载时调用一次）。
 fn set_driver_env(dll_dir: &Path) {
-    for (env_key, marker, msys_lib_dir) in [
-        ("IOLIBS", "usb1.dll", "libgphoto2_port"),
-        ("CAMLIBS", "ptp2.dll", "libgphoto2"),
-    ] {
+    for (env_key, kind) in [("IOLIBS", DriverKind::Iolib), ("CAMLIBS", DriverKind::Camlib)] {
         if std::env::var_os(env_key).is_some() {
             continue;
         }
-        if let Some(dir) = locate_driver_dir(dll_dir, marker, msys_lib_dir) {
+        if let Some(dir) = locate_driver_dir(dll_dir, kind) {
             let value = dir.to_string_lossy().into_owned();
             std::env::set_var(env_key, &value);
+            #[cfg(windows)]
             crt_putenv(&format!("{env_key}={value}"));
         }
     }

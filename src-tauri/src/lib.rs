@@ -52,6 +52,16 @@ pub fn run() {
                 .expect("failed to resolve app config dir");
             std::fs::create_dir_all(&config_dir)?;
             devices::diagnostics::init(&config_dir);
+            // 联拍 libgphoto2 随包目录注入：Tauri 资源根（Windows 与 exe 同
+            // 目录，macOS 为 Contents/Resources）——覆盖所有平台的安装布局。
+            if std::env::var_os("PHOTO_HUB_GPHOTO_DLL").is_none() {
+                if let Ok(resource_dir) = app.path().resource_dir() {
+                    let bundled = resource_dir.join("gphoto").join(tethering::gphoto_backend::bundle_dll_name());
+                    if bundled.is_file() {
+                        std::env::set_var("PHOTO_HUB_GPHOTO_DLL", &bundled);
+                    }
+                }
+            }
             let settings = SettingsManager::load(&config_dir).unwrap_or_else(|err| {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
