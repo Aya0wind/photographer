@@ -163,6 +163,8 @@ export type AppEvent =
   | { type: "tetheringObjectAdded"; pnpId: string; objectName: string; objectSize: number | null }
   | { type: "tetheringPhotoAdded"; sessionId: string; libraryId: string; albumId: number; assetId: number; name: string }
   | { type: "tetheringStatus"; sessionId: string; connected: boolean; error: string | null }
+  | { type: "mapGeoProgress"; stage: string; done: number; total: number; message: string | null }
+  | { type: "mapRegionsUpdated" }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------

@@ -12,6 +12,7 @@ pub mod duplicates;
 pub mod import;
 pub mod indexing;
 pub mod insights;
+pub mod map;
 pub mod migrate;
 pub mod people;
 pub mod rating;

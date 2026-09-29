@@ -30,6 +30,9 @@ avif-decode = "3"
 turbojpeg = { version = "1", features = ["image"] }
 # RAW 完整显影（查看器先显示内嵌 JPEG，后台生成 2048px 高质量 JPEG 后替换）。
 rawler = "=0.8.0"
+# 地图模块（2026-09-29 拍摄地图）：多边形点包含 / centroid、R-tree 空间预筛
+geo = "0.29"
+rstar = "0.12"
 
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-opener = "2"

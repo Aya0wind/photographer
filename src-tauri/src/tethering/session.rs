@@ -45,6 +45,7 @@ pub struct Session {
     pub backend: Arc<dyn CameraBackend>,
     pub operation: Mutex<()>,
     cancelled: AtomicBool,
+    disconnected: AtomicBool,
     connected: AtomicBool,
     receiving: AtomicBool,
     settings: Mutex<Vec<CameraSetting>>,
@@ -74,6 +75,9 @@ impl SessionStore {
     pub fn camera_in_use(&self, pnp_id: &str) -> bool {
         self.sessions.values().any(|s| s.camera.pnp_id == pnp_id)
     }
+    pub fn all(&self) -> Vec<Arc<Session>> {
+        self.sessions.values().cloned().collect()
+    }
 }
 
 fn current() -> &'static Mutex<SessionStore> {
@@ -88,7 +92,27 @@ pub fn get(id: &str) -> Result<Arc<Session>, String> {
         .get(id)
         .ok_or_else(|| "拍摄会话已结束".into())
 }
+pub fn all() -> Vec<Arc<Session>> {
+    current().lock().unwrap().all()
+}
 impl Session {
+    pub fn is_stopping(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+    pub fn ensure_open(&self) -> Result<(), String> {
+        if self.is_stopping() || !self.connected.load(Ordering::Acquire) {
+            return Err("拍摄会话已结束或相机已断开".into());
+        }
+        Ok(())
+    }
+    fn disconnect(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _operation = self.operation.lock().unwrap();
+        if !self.disconnected.swap(true, Ordering::AcqRel) {
+            self.backend.disconnect(&self.camera.pnp_id);
+        }
+        self.connected.store(false, Ordering::Release);
+    }
     pub fn dto(&self) -> SessionDto {
         SessionDto {
             id: self.id.clone(),
@@ -113,6 +137,7 @@ impl Session {
     }
     pub fn refresh_settings(&self) -> Result<Vec<CameraSetting>, String> {
         let _operation = self.operation.lock().unwrap();
+        self.ensure_open()?;
         let settings = self
             .backend
             .settings(&self.camera.pnp_id)
@@ -173,6 +198,7 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
         backend,
         operation: Mutex::new(()),
         cancelled: AtomicBool::new(false),
+        disconnected: AtomicBool::new(false),
         connected: AtomicBool::new(true),
         receiving: AtomicBool::new(false),
         settings: Mutex::new(settings),
@@ -185,18 +211,21 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     drop(guard);
     std::thread::spawn(move || {
         while !session.cancelled.load(Ordering::Acquire) {
+            // 轮询也纳入操作锁：旧会话清理后绝不能再操作相机，影响新会话。
+            let operation = session.operation.lock().unwrap();
+            if session.cancelled.load(Ordering::Acquire) {
+                break;
+            }
             match session.backend.poll_objects(&session.camera.pnp_id) {
                 Ok(objects) => {
                     // 收片与用户操作（拍摄/参数）互斥：断开清理 incoming
                     // 目录时不会删到在途文件
-                    {
-                        let _operation = session.operation.lock().unwrap();
-                        for object in &objects {
-                            if let Err(error) = receive(&state, &session, object) {
-                                session.record_error(&state, error);
-                            }
+                    for object in &objects {
+                        if let Err(error) = receive(&state, &session, object) {
+                            session.record_error(&state, error);
                         }
                     }
+                    drop(operation);
                     // 排空模式（高速连拍）：拿到事件立即回轮（驱动侧事件
                     // 还在排队）；空轮才歇——固定 200ms 会把相机自拍收片
                     // 上限压到 ~5 张/秒
@@ -213,8 +242,7 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
             }
         }
         // 与在途操作互斥后再断开（gp_camera_exit + 删收片暂存目录）
-        let _operation = session.operation.lock().unwrap();
-        session.backend.disconnect(&session.camera.pnp_id);
+        stop(&session.id);
     });
     Ok(dto)
 }
@@ -229,16 +257,26 @@ fn poll_pace_ms(received: usize) -> u64 {
 }
 
 pub fn stop(id: &str) {
-    if let Some(session) = current().lock().unwrap().remove(id) {
-        session.cancelled.store(true, Ordering::Release);
+    // 断开完成后才解除相机占用；后端断开幂等，避免旧线程误断开新会话。
+    let session = current().lock().unwrap().get(id);
+    if let Some(session) = session {
+        session.disconnect();
+        current().lock().unwrap().remove(id);
+    }
+}
+/// 窗口事件回调只发取消信号，真正断开交给后台，保持 UI 响应。
+pub fn request_stop(id: &str) {
+    // 建会话时可能持有存储锁；窗口回调不得等待它，后台 stop 会补发取消。
+    if let Ok(store) = current().try_lock() {
+        if let Some(session) = store.get(id) {
+            session.cancelled.store(true, Ordering::Release);
+        }
     }
 }
 pub fn capture(state: &SharedState, id: &str) -> Result<(), String> {
     let session = get(id)?;
     let _operation = session.operation.lock().unwrap();
-    if !session.connected.load(Ordering::Acquire) {
-        return Err("相机已断开".into());
-    }
+    session.ensure_open()?;
     *session.error.lock().unwrap() = None;
     let objects = match session.backend.trigger_capture(&session.camera.pnp_id) {
         Ok(objects) => objects,
@@ -456,7 +494,12 @@ pub fn ingest(
 mod tests {
     use super::*;
 
-    struct NoopBackend;
+    #[derive(Default)]
+    struct NoopBackend {
+        disconnects: std::sync::atomic::AtomicUsize,
+        disconnect_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        disconnect_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
     impl CameraBackend for NoopBackend {
         fn id(&self) -> &'static str {
             "noop"
@@ -470,13 +513,18 @@ mod tests {
         fn enumerate(&self) -> Result<Vec<super::super::backend::CameraInfo>, TetherError> {
             Ok(Vec::new())
         }
-        fn connect(
-            &self,
-            _pnp_id: &str,
-        ) -> Result<super::super::backend::CameraInfo, TetherError> {
+        fn connect(&self, _pnp_id: &str) -> Result<super::super::backend::CameraInfo, TetherError> {
             Err(TetherError::Other("noop".into()))
         }
-        fn disconnect(&self, _pnp_id: &str) {}
+        fn disconnect(&self, _pnp_id: &str) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = self.disconnect_started.lock().unwrap().take() {
+                started.send(()).unwrap();
+            }
+            if let Some(release) = self.disconnect_release.lock().unwrap().take() {
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+        }
         fn capture_still(
             &self,
             _pnp_id: &str,
@@ -511,9 +559,10 @@ mod tests {
                     live_view: false,
                 },
             },
-            backend: Arc::new(NoopBackend),
+            backend: Arc::new(NoopBackend::default()),
             operation: Mutex::new(()),
             cancelled: AtomicBool::new(false),
+            disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(true),
             receiving: AtomicBool::new(false),
             settings: Mutex::new(Vec::new()),
@@ -532,7 +581,9 @@ mod tests {
         store.insert(a.clone());
         store.insert(b.clone());
         store.insert(c.clone());
-        assert!(store.get("s1").is_some() && store.get("s2").is_some() && store.get("s3").is_some());
+        assert!(
+            store.get("s1").is_some() && store.get("s2").is_some() && store.get("s3").is_some()
+        );
         assert_eq!(store.sessions.len(), 3);
         // 停止一个不影响其他会话
         let removed = store.remove("s2");
@@ -561,5 +612,46 @@ mod tests {
         // 停止后可重开
         store.remove("s1");
         assert!(!store.camera_in_use("gphoto:usb:001,010"));
+    }
+
+    #[test]
+    fn stop_keeps_camera_reserved_until_disconnect_and_only_disconnects_once() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(NoopBackend {
+            disconnect_started: Mutex::new(Some(started_tx)),
+            disconnect_release: Mutex::new(Some(release_rx)),
+            ..Default::default()
+        });
+        let id = uuid::Uuid::new_v4().to_string();
+        let camera = format!("test-camera-{id}");
+        let mut session = make_session(&id, &camera, 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        current().lock().unwrap().insert(session.clone());
+        request_stop(&id);
+        assert!(session.is_stopping());
+        let stop_id = id.clone();
+        let first = std::thread::spawn(move || stop(&stop_id));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(current().lock().unwrap().camera_in_use(&camera));
+        let stop_id = id.clone();
+        let second = std::thread::spawn(move || stop(&stop_id));
+        release_tx.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(!current().lock().unwrap().camera_in_use(&camera));
+        assert!(get(&id).is_err());
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
+        // 已释放的旧 worker 再清理，也不能断开该相机的新会话。
+        let next_id = uuid::Uuid::new_v4().to_string();
+        current()
+            .lock()
+            .unwrap()
+            .insert(make_session(&next_id, &camera, 1));
+        session.disconnect();
+        stop(&id);
+        assert!(get(&next_id).is_ok());
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
+        stop(&next_id);
     }
 }

@@ -7,7 +7,7 @@ use xxhash_rust::xxh64::xxh64;
 
 pub use common::{
     platform,
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 use std::fs;

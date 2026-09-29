@@ -396,7 +396,6 @@ pub fn release() {
         .expect("facemesh slots mutex poisoned") = None;
 }
 
-
 /// 生产分类器：SCRFD 双眼点 → ROI 旋转裁剪 → facemesh 推理 → EAR/质量门。
 pub struct FacemeshEarClassifier<'a> {
     manager: &'a super::ModelManager,

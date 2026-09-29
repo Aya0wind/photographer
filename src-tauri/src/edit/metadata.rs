@@ -164,7 +164,17 @@ pub async fn asset_metadata_save(
     metadata: EditableMetadata,
 ) -> Result<EditableMetadata, String> {
     run_blocking(state.inner().clone(), move |state| {
-        save(&crate::ipc::active_library_db(state)?, asset_id, metadata)
+        let db = crate::ipc::active_library_db(state)?;
+        let saved = save(&db, asset_id, metadata)?;
+        // 编辑联动重索引（2026-09-29 地图定案）：GPS 变化（含清除）即时迁移
+        // 地区挂接；索引未就绪时静默跳过（下次管线增量补齐）
+        let (lat, lon) = (saved.gps_lat, saved.gps_lon);
+        if crate::geo::backfill::reindex_asset(&db, asset_id, lat, lon) {
+            state
+                .bus
+                .publish(crate::events::AppEvent::MapRegionsUpdated);
+        }
+        Ok(saved)
     })
     .await
 }

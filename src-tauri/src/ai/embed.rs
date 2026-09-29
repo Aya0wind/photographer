@@ -77,7 +77,6 @@ pub fn release() {
     *slots().lock().expect("infer slots mutex poisoned") = InferSlots::default();
 }
 
-
 impl ModelManager {
     /// 模型文件落位名（ModelManager 下载管线的最终文件）。
     pub fn model_path(&self, id: &str) -> PathBuf {

@@ -4,6 +4,7 @@ mod db;
 mod devices;
 mod edit;
 mod events;
+mod geo;
 mod import;
 mod index;
 mod ipc;
@@ -72,7 +73,9 @@ pub fn run() {
             // 目录，macOS 为 Contents/Resources）——覆盖所有平台的安装布局。
             if std::env::var_os("PHOTO_HUB_GPHOTO_DLL").is_none() {
                 if let Ok(resource_dir) = app.path().resource_dir() {
-                    let bundled = resource_dir.join("gphoto").join(tethering::gphoto_backend::bundle_dll_name());
+                    let bundled = resource_dir
+                        .join("gphoto")
+                        .join(tethering::gphoto_backend::bundle_dll_name());
                     if bundled.is_file() {
                         std::env::set_var("PHOTO_HUB_GPHOTO_DLL", &bundled);
                     }
@@ -141,6 +144,9 @@ pub fn run() {
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
+                // 拍摄地图：地理数据包就绪则后台跑索引管线（加载/入库/回填），
+                // 幂等（下载接力或 NotInstalled 之外的 phase 不重入）
+                geo::backfill::ensure_backfill(db_dir.clone(), &bus, &supervisor_handle);
                 // AI 空闲卸载看护（内存审计 2026-09-29）：模型/向量索引
                 // 空闲 10 分钟统一释放，下次使用惰性重载
                 ai::idle::spawn_idle_unloader(&supervisor_handle);
@@ -267,6 +273,10 @@ pub fn run() {
         // 准入模板。
         .invoke_handler(tauri::generate_handler![
             ipc::settings::settings_get,
+            ipc::map::map_geo_status,
+            ipc::map::map_geo_download_start,
+            ipc::map::map_geo_cache_url,
+            ipc::map::map_clusters,
             ipc::settings::settings_set,
             ipc::settings::library_delete,
             ipc::settings::library_relocate,

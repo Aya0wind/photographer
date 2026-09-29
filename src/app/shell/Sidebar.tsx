@@ -107,6 +107,13 @@ const ICONS = {
     </>,
     "gear",
   ),
+  map: icon(
+    <>
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M1.8 8h12.4M8 1.8c1.7 1.8 2.6 3.9 2.6 6.2S9.7 12.4 8 14.2c-1.7-1.8-2.6-3.9-2.6-6.2S6.3 3.6 8 1.8z" />
+    </>,
+    "map",
+  ),
   similar: icon(
     <>
       <rect x="2" y="2" width="7.5" height="7.5" rx="1" />
@@ -164,6 +171,7 @@ const SECTIONS: NavSection[] = [
       { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories, badge: "onThisDay" },
       { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
+      { to: "/map", labelKey: "nav.map", icon: ICONS.map },
     ],
   },
   {

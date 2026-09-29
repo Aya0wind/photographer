@@ -309,6 +309,18 @@ pub enum AppEvent {
         error: Option<String>,
     },
 
+    // 拍摄地图（geo 模块）：下载/回填进度与索引刷新
+    /// 地理数据管线进度（stage = download/load/backfill；done/total 按阶段语义：
+    /// download 为文件数、backfill 为资产数）。
+    MapGeoProgress {
+        stage: String,
+        done: u64,
+        total: u64,
+        message: Option<String>,
+    },
+    /// 地区索引有新真值：回填批次完成 / 单资产编辑联动重索引 / 数据包更新重刷。
+    MapRegionsUpdated,
+
     // 错误
     AppError {
         level: String,

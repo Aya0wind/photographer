@@ -40,7 +40,6 @@ pub fn release() {
     pool().lock().expect("semantic pool mutex poisoned").clear();
 }
 
-
 /// 规范化库根（池键；canonicalize 失败退回原样）。
 fn pool_key(db_dir: &Path) -> PathBuf {
     std::fs::canonicalize(db_dir).unwrap_or_else(|_| db_dir.to_path_buf())

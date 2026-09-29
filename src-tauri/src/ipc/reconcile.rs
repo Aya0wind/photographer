@@ -69,7 +69,9 @@ pub fn reconcile_with_truth(
                 continue;
             }
             let source: Arc<dyn DeviceSource> = match kind {
-                SourceKind::Volume => Arc::new(VolumeSource::new(crate::platform::volume_root(&id))),
+                SourceKind::Volume => {
+                    Arc::new(VolumeSource::new(crate::platform::volume_root(&id)))
+                }
                 SourceKind::Mtp => Arc::new(WpdSource::new(id.clone(), name.clone())),
                 SourceKind::Folder => unreachable!(),
             };

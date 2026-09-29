@@ -53,7 +53,9 @@ pub fn unload_timeout_secs() -> u64 {
 
 /// 是否应执行一轮卸载：用过（加载过）且空闲超时，且上轮释放后没有新使用。
 fn should_unload() -> bool {
-    !RELEASED.load(Ordering::Relaxed) && idle_secs() < u64::MAX && idle_secs() >= unload_timeout_secs()
+    !RELEASED.load(Ordering::Relaxed)
+        && idle_secs() < u64::MAX
+        && idle_secs() >= unload_timeout_secs()
 }
 
 /// 清空全部 AI 静态槽（各模块 release 取锁置空；在途推理不受影响）。

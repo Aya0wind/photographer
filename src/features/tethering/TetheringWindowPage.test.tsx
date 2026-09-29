@@ -275,7 +275,20 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     await waitFor(() => expect(screen.getByTestId("tether-capture-error")).toHaveTextContent("相机无响应"));
   });
 
-  it("tetheringPhotoAdded 事件：胶片条追加新片", async () => {
+  it("拍摄完成但未收到事件：根据后端快照显示新片和缩略图", async () => {
+    sessionMock.mockResolvedValueOnce(dto()).mockResolvedValue(dto({
+      photos: [{ id: 42, name: "DSC_0002.JPG", kind: "photo" }],
+    }));
+    captureMock.mockResolvedValue({ ok: true });
+    previewMock.mockResolvedValue("data:image/jpeg;base64,THUMB");
+    renderPage();
+    fireEvent.click(await screen.findByTestId("tether-shutter"));
+    const film = await screen.findByTestId("tether-film-42");
+    await waitFor(() => expect(film.querySelector("img")).toHaveAttribute("src", "data:image/jpeg;base64,THUMB"));
+    expect(screen.queryByText(i18n.t("tether.noPhotos"))).toBeNull();
+  });
+
+  it("tetheringPhotoAdded 事件：胶片条追加新片，重复通知不重复添加", async () => {
     sessionMock.mockResolvedValue(dto());
     renderPage();
     await screen.findByTestId("tether-window");
@@ -290,6 +303,15 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
       name: "DSC_0002.JPG",
     });
     expect(await screen.findByTestId("tether-film-42")).toBeInTheDocument();
+    handler!({
+      type: "tetheringPhotoAdded",
+      sessionId: "s1",
+      libraryId: "lib-1",
+      albumId: 7,
+      assetId: 42,
+      name: "DSC_0002.JPG",
+    });
+    await waitFor(() => expect(screen.getAllByTestId("tether-film-42")).toHaveLength(1));
   });
 
   it("tetheringStatus 事件：断连横幅 + 快门禁用", async () => {

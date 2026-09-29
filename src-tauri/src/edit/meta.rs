@@ -59,7 +59,11 @@ pub fn apply_metadata(jpeg: Vec<u8>, source_bytes: Option<&[u8]>, opts: &MetaOpt
         // Writer 重建时不再合成 GPS 块。
         fields.retain(|field| field.tag.context() != Context::Gps);
     }
-    let author = opts.author.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let author = opts
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if let Some(author) = author {
         set_ascii(&mut fields, Tag::Artist, In::PRIMARY, author);
     }
@@ -133,10 +137,7 @@ fn build_exif_app1(fields: &[Field]) -> Option<JpegSegment> {
     let mut contents = Vec::with_capacity(6 + tiff.len());
     contents.extend_from_slice(b"Exif\0\0");
     contents.extend_from_slice(&tiff);
-    Some(JpegSegment::new_with_contents(
-        0xE1,
-        Bytes::from(contents),
-    ))
+    Some(JpegSegment::new_with_contents(0xE1, Bytes::from(contents)))
 }
 
 /// APP1(XMP) 段：标准 xpacket RDF（dc:rights / dc:creator / dc:subject）。
@@ -149,7 +150,9 @@ fn build_xmp_app1(
     xml.push_str("<?xpacket begin=\"﻿\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n");
     xml.push_str("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n");
     xml.push_str(" <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n");
-    xml.push_str("  <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n");
+    xml.push_str(
+        "  <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n",
+    );
     if let Some(copyright) = copyright {
         xml.push_str("   <dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">");
         xml.push_str(&xml_escape(copyright));

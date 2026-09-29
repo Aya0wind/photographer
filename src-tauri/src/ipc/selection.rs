@@ -230,14 +230,13 @@ pub fn fetch_trash_purge(
 /// 删——源已缺失是清理前提）。日志记账每条；返回删除数。
 pub fn fetch_missing_purge(state: &super::AppState) -> Result<u64, String> {
     let db = super::active_library_db(state)?;
-    let rows: Vec<(i64, String)> = db
-        .0
-        .prepare("SELECT id, path FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')")
-        .map_err(|e| e.to_string())?
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|e| e.to_string())?;
+    let rows: Vec<(i64, String)> =
+        db.0.prepare("SELECT id, path FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')")
+            .map_err(|e| e.to_string())?
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
     let missing: Vec<i64> = rows
         .iter()
         .filter(|(_, path)| !std::path::Path::new(path).is_file())
@@ -340,4 +339,3 @@ pub async fn assets_purge_missing(state: State<'_, SharedState>) -> Result<u64, 
     let shared = state.inner().clone();
     run_blocking(shared, move |state| fetch_missing_purge(&state)).await
 }
-

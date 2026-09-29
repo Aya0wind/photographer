@@ -20,6 +20,7 @@
     "@tauri-apps/plugin-opener": "^2",
     "i18next": "^26.4.2",
     "konva": "^10.7.0",
+    "maplibre-gl": "^6.11.2",
     "motion": "^13.4.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

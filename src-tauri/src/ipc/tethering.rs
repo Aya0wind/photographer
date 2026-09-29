@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use super::{run_blocking, SharedState};
 use crate::events::{AppEvent, EventBus};
@@ -102,8 +102,13 @@ pub fn cameras_from_backends(
 ) -> Result<Vec<CameraDto>, String> {
     let mut out = Vec::new();
     for backend in backends {
-        let cameras = backend.enumerate().map_err(|e| e.to_string())?;
-        out.extend(cameras.into_iter().map(CameraDto::from));
+        match backend.enumerate() {
+            Ok(cameras) => out.extend(cameras.into_iter().map(CameraDto::from)),
+            Err(error) => crate::devices::diagnostics::record(format!(
+                "Camera enumeration {} failed: {error}",
+                backend.id()
+            )),
+        }
     }
     Ok(out)
 }
@@ -159,7 +164,15 @@ pub async fn tethering_camera_list(
 ) -> Result<Vec<CameraDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |_| {
-        cameras_from_backends(backend_registry().all())
+        let mut cameras = cameras_from_backends(backend_registry().all())?;
+        // USB 已被本应用占用时，驱动枚举可能省略该相机；仍提供唤起入口。
+        for session in super::super::tethering::session::all() {
+            if !session.is_stopping() && !cameras.iter().any(|c| c.pnp_id == session.camera.pnp_id)
+            {
+                cameras.push(session.camera.clone());
+            }
+        }
+        Ok(cameras)
     })
     .await
 }
@@ -212,6 +225,32 @@ pub async fn tethering_start(
     camera_id: String,
 ) -> Result<super::super::tethering::session::SessionDto, String> {
     let shared = state.inner().clone();
+    // 串行化查窗、清理和建窗，避免并发点击把尚未建窗的新会话视为孤儿。
+    static START_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _start = START_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    for session in super::super::tethering::session::all() {
+        let window = app.get_webview_window(&format!("tethering-{}", session.id));
+        if window.is_none() || session.is_stopping() {
+            let id = session.id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                super::super::tethering::session::stop(&id);
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            if let Some(window) = window {
+                let _ = window.close();
+            }
+        } else if session.camera.pnp_id == camera_id {
+            let window = window.unwrap();
+            window.unminimize().map_err(|e| e.to_string())?;
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+            return Ok(session.dto());
+        }
+    }
     let dto = tauri::async_runtime::spawn_blocking(move || {
         super::super::tethering::session::start(shared, album_id, &camera_id)
     })
@@ -233,14 +272,25 @@ pub async fn tethering_start(
         Ok(window) => {
             let close_id = id.clone();
             window.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed) {
-                    super::super::tethering::session::stop(&close_id);
+                if matches!(
+                    event,
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                ) {
+                    super::super::tethering::session::request_stop(&close_id);
+                    let id = close_id.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        super::super::tethering::session::stop(&id);
+                    });
                 }
             });
             Ok(dto)
         }
         Err(e) => {
-            super::super::tethering::session::stop(&id);
+            tauri::async_runtime::spawn_blocking(move || {
+                super::super::tethering::session::stop(&id);
+            })
+            .await
+            .map_err(|error| error.to_string())?;
             Err(format!("无法打开拍摄窗口：{e}"))
         }
     }
@@ -277,6 +327,7 @@ pub async fn tethering_setting_set(
         let session = super::super::tethering::session::get(&session_id)?;
         {
             let _guard = session.operation.lock().unwrap();
+            session.ensure_open()?;
             session
                 .backend
                 .set_setting(&session.camera.pnp_id, &id, &value)
@@ -296,6 +347,7 @@ pub async fn tethering_focus_at(
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
         let _guard = session.operation.lock().unwrap();
+        session.ensure_open()?;
         session
             .backend
             .focus_at(&session.camera.pnp_id, x, y)
@@ -325,6 +377,9 @@ pub async fn tethering_frame(
         let Ok(_guard) = session.operation.try_lock() else {
             return Ok(None);
         };
+        if session.ensure_open().is_err() {
+            return Ok(None);
+        }
         let bytes = session
             .backend
             .live_view_frame(&session.camera.pnp_id)

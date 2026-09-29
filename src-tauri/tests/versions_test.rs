@@ -9,7 +9,7 @@ use common::library_fixture as setup;
 
 pub use common::{
     platform,
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
 

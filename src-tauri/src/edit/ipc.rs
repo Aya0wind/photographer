@@ -53,13 +53,9 @@ fn millis_to_rfc3339(millis: i64) -> String {
 
 /// 配方读取核（返回归一化后的 JSON + 更新时间）。
 pub fn fetch_edit_recipe(db: &crate::db::Db, asset_id: i64) -> Result<EditRecipeStateDto, String> {
-    match db
-        .edit_recipe_get(asset_id)
-        .map_err(|e| e.to_string())?
-    {
+    match db.edit_recipe_get(asset_id).map_err(|e| e.to_string())? {
         Some((text, updated_at)) => {
-            let value = serde_json::from_str(&text)
-                .map_err(|e| format!("存库配方损坏: {e}"))?;
+            let value = serde_json::from_str(&text).map_err(|e| format!("存库配方损坏: {e}"))?;
             Ok(EditRecipeStateDto {
                 recipe: Some(value),
                 updated_at: Some(millis_to_rfc3339(updated_at)),
@@ -146,12 +142,14 @@ pub fn fetch_export_run(
     };
     state
         .supervisor
-        .spawn("export", format!("job-{job_id}"), move |_| {
-            match crate::ipc::open_library_db(&db_dir) {
+        .spawn(
+            "export",
+            format!("job-{job_id}"),
+            move |_| match crate::ipc::open_library_db(&db_dir) {
                 Ok(worker_db) => export::run_export_job(worker_db, &bus, request),
                 Err(error) => eprintln!("导出任务 {job_id} 无法打开库: {error}"),
-            }
-        });
+            },
+        );
     db.export_job_get(job_id)
         .map_err(|e| e.to_string())?
         .map(ExportTaskDto::from)
@@ -195,7 +193,10 @@ pub async fn edit_recipe_save(
 
 /// 删除资产编辑配方（幂等）。
 #[tauri::command]
-pub async fn edit_recipe_delete(state: State<'_, SharedState>, asset_id: String) -> Result<(), String> {
+pub async fn edit_recipe_delete(
+    state: State<'_, SharedState>,
+    asset_id: String,
+) -> Result<(), String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;

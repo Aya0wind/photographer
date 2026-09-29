@@ -130,7 +130,7 @@ export default function TetheringWindowPage() {
     void subscribeAppEvents((event) => {
       if (event.type === "tetheringPhotoAdded" && event.sessionId === sessionId) {
         setSession((prev) =>
-          prev === null
+          prev === null || prev.photos.some((photo) => photo.id === event.assetId)
             ? prev
             : {
                 ...prev,
@@ -262,6 +262,9 @@ export default function TetheringWindowPage() {
     setCaptureError(null);
     const result = await tetheringCapture(sessionId);
     if (!result.ok) setCaptureError(result.error ?? t("tether.captureFailed"));
+    // 收片完成后用后端快照校准：事件延迟或错过订阅时也能立即显示新片。
+    const next = await tetheringSession(sessionId);
+    if (next !== null) mergeSession(next);
     setCapturing(false);
   }
 
@@ -298,20 +301,21 @@ export default function TetheringWindowPage() {
   return (
     <div className="flex h-screen flex-col bg-bg text-text-primary" data-testid="tether-window">
       {/* 自绘标题栏（decorations=false） */}
-      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-edge bg-surface pl-3" data-tauri-drag-region data-testid="tether-titlebar">
-        <span className="text-xs font-semibold" data-testid="tether-title">{t("tether.windowTitle")}</span>
-        <span className="text-[11px] text-text-muted">
+      <div className="relative flex h-10 shrink-0 select-none items-center gap-3 border-b border-edge bg-surface pl-3" data-testid="tether-titlebar">
+        <div className="absolute inset-0" data-tauri-drag-region data-testid="tether-window-drag-region" />
+        <span className="pointer-events-none relative text-xs font-semibold" data-testid="tether-title">{t("tether.windowTitle")}</span>
+        <span className="pointer-events-none relative text-[11px] text-text-muted">
           {t("tether.albumTarget")}：{session.albumName} · {session.camera.name}
         </span>
         <span
-          className={`ml-2 rounded-full px-2 py-0.5 text-[10px] ${connected ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}
+          className={`pointer-events-none relative ml-2 rounded-full px-2 py-0.5 text-[10px] ${connected ? "bg-emerald-400/15 text-emerald-400" : "bg-red-400/15 text-red-400"}`}
           data-testid="tether-connection"
         >
           {connected ? (receiving ? t("tether.receiving") : t("tether.liveView")) : t("tether.disconnected")}
         </span>
         {liveViewSupported && (
           <div
-            className="flex items-center overflow-hidden rounded-full border border-edge text-[10px] leading-none"
+            className="relative flex items-center overflow-hidden rounded-full border border-edge text-[10px] leading-none"
             role="group"
             aria-label={t("tether.fps")}
             data-testid="tether-fps"
@@ -332,7 +336,7 @@ export default function TetheringWindowPage() {
             ))}
           </div>
         )}
-        <div className="ml-auto flex items-center" data-tauri-drag-region={false}>
+        <div className="relative ml-auto flex items-center">
           <button
             type="button"
             onClick={() => void getCurrentWindow().minimize()}

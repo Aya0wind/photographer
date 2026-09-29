@@ -80,7 +80,10 @@ pub fn draw_text_layer(canvas: &mut image::RgbImage, layer: &TextLayer) {
         }
     }
     factor = factor.clamp(0.5, 2.5);
-    let scale = PxScale { x: em * factor, y: em * factor };
+    let scale = PxScale {
+        x: em * factor,
+        y: em * factor,
+    };
     let scaled = font.into_scaled(scale);
     let ascent = scaled.ascent();
     // ab_glyph 的 descent 为负（height = ascent - descent）；Konva 公式里的
@@ -224,8 +227,6 @@ fn blend_pixel(canvas: &mut image::RgbImage, x: u32, y: u32, color: [u8; 3], cov
     }
     let pixel = canvas.get_pixel_mut(x, y);
     for (channel, value) in pixel.0.iter_mut().zip(color) {
-        *channel =
-            (*channel as f32 * (1.0 - coverage) + f32::from(value) * coverage).round() as u8;
+        *channel = (*channel as f32 * (1.0 - coverage) + f32::from(value) * coverage).round() as u8;
     }
 }
-

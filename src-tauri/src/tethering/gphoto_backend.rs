@@ -6,8 +6,8 @@
 //! 库解析顺序：`PHOTO_HUB_GPHOTO_DLL`（绝对路径）→ exe 旁 `gphoto/` →
 //! `%LOCALAPPDATA%\PhotoHub\gphoto\` → `C:\msys64\ucrt64\bin\`（开发机）。
 //! 依赖 DLL（libusb/libexif）先于主库预加载（Windows 按已加载模块名解析
-//! 依赖）。camlibs/iolibs 由 libgphoto2 按其编译前缀（C:\msys64 树）定位
-//! ——分发时需随包携带该树或自编译改前缀。
+//! 依赖）。每个候选库须配套 camlibs/iolibs；通过环境变量重定位随包
+//! 模块，不完整的候选目录跳过，避免主库加载成功却始终枚举不到相机。
 //!
 //! libgphoto2 的 `Camera*` 非线程安全：本后端所有相机操作过同一把
 //! `camera_mutex` 串行（会话 poller 线程与用户操作并发）。锁序恒为
@@ -52,7 +52,14 @@ mod gpt {
             )*
         };
     }
-    opaque!(GPPortInfo, GPPortInfoList, CameraList, Camera, CameraFile, CameraWidget);
+    opaque!(
+        GPPortInfo,
+        GPPortInfoList,
+        CameraList,
+        Camera,
+        CameraFile,
+        CameraWidget
+    );
 
     #[repr(C)]
     pub struct CameraFilePath {
@@ -80,11 +87,8 @@ mod gpt {
     /// 只读机型名，不依赖完整结构布局）。
     pub type gp_camera_get_abilities =
         unsafe extern "C" fn(*mut Camera, *mut std::ffi::c_void) -> c_int;
-    pub type gp_camera_get_config = unsafe extern "C" fn(
-        *mut Camera,
-        *mut *mut CameraWidget,
-        *mut std::ffi::c_void,
-    ) -> c_int;
+    pub type gp_camera_get_config =
+        unsafe extern "C" fn(*mut Camera, *mut *mut CameraWidget, *mut std::ffi::c_void) -> c_int;
     pub type gp_camera_set_config =
         unsafe extern "C" fn(*mut Camera, *mut CameraWidget, *mut std::ffi::c_void) -> c_int;
     /// 单配置枚举/读取（list_config 名 = 稳定 id；set 走全树路径，见
@@ -211,10 +215,7 @@ impl Symbols {
     /// 逐符号在 libgphoto2 与 libgphoto2_port 两库间解析（port API
     /// ——gp_context/gp_port_info_list*——只由 port 库导出；任一符号两处
     /// 皆无则视为库不可用）。
-    unsafe fn load(
-        lib: &libloading::Library,
-        port: &libloading::Library,
-    ) -> Result<Self, String> {
+    unsafe fn load(lib: &libloading::Library, port: &libloading::Library) -> Result<Self, String> {
         macro_rules! sym {
             ($name:ident) => {{
                 let n = concat!(stringify!($name), "\0").as_bytes();
@@ -294,6 +295,10 @@ fn lib() -> Result<&'static GphotoLib, TetherError> {
                 continue;
             }
             if let Some(dir) = path.parent() {
+                if let Err(error) = driver_environment(dir) {
+                    errors.push(format!("{}: {error}", path.display()));
+                    continue;
+                }
                 crate::platform::preload_dependencies(dir);
             }
             unsafe {
@@ -323,6 +328,12 @@ fn lib() -> Result<&'static GphotoLib, TetherError> {
                                 if let Some(dir) = path.parent() {
                                     set_driver_env(dir);
                                 }
+                                crate::devices::diagnostics::record(format!(
+                                    "tethering libgphoto2 loaded={} CAMLIBS={} IOLIBS={}",
+                                    path.display(),
+                                    std::env::var("CAMLIBS").unwrap_or_default(),
+                                    std::env::var("IOLIBS").unwrap_or_default()
+                                ));
                                 return Ok(GphotoLib {
                                     handle,
                                     port_handle,
@@ -378,19 +389,93 @@ enum DriverKind {
     Camlib,
 }
 
-/// 设置 IOLIBS/CAMLIBS（仅在用户未设置时；进程内首次加载时调用一次）。
-fn set_driver_env(dll_dir: &Path) {
-    for (env_key, kind) in [
+fn driver_environment(dll_dir: &Path) -> Result<Vec<(&'static str, String)>, String> {
+    [
         ("IOLIBS", DriverKind::Iolib),
         ("CAMLIBS", DriverKind::Camlib),
-    ] {
-        if std::env::var_os(env_key).is_some() {
-            continue;
+    ]
+    .into_iter()
+    .map(|(key, kind)| {
+        let dir = std::env::var_os(key)
+            .map(PathBuf::from)
+            .or_else(|| locate_driver_dir(dll_dir, kind))
+            .ok_or_else(|| format!("缺少 {key} 协议模块，请安装完整的 libgphoto2 运行库"))?;
+        if !dir.is_dir() {
+            return Err(format!("{key} 模块目录不存在：{}", dir.display()));
         }
-        if let Some(dir) = locate_driver_dir(dll_dir, kind) {
-            let value = dir.to_string_lossy().into_owned();
+        Ok((key, driver_path_string(&dir)))
+    })
+    .collect()
+}
+
+fn driver_path_string(dir: &Path) -> String {
+    let path = dir.to_string_lossy().into_owned();
+    // Tauri 的资源路径可带 Win32 扩展前缀，MinGW 的 ltdl 目录扫描不接受它。
+    #[cfg(windows)]
+    {
+        if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
+        }
+        if let Some(local) = path.strip_prefix(r"\\?\") {
+            return local.to_string();
+        }
+    }
+    path
+}
+
+/// 设置 IOLIBS/CAMLIBS（仅在用户未设置时；进程内首次加载时调用一次）。
+fn set_driver_env(dll_dir: &Path) {
+    if let Ok(environment) = driver_environment(dll_dir) {
+        for (env_key, value) in environment {
             std::env::set_var(env_key, &value);
+            // Rust 的进程环境与 DLL 的 UCRT getenv 需要同步，用户预设路径也一样。
             crate::platform::crt_putenv(&format!("{env_key}={value}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod driver_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn module_paths_remove_extended_windows_prefix() {
+        assert_eq!(
+            driver_path_string(Path::new(r"\\?\I:\Photo Hub\gphoto\camlibs")),
+            r"I:\Photo Hub\gphoto\camlibs"
+        );
+        assert_eq!(
+            driver_path_string(Path::new(r"\\?\UNC\server\share\camlibs")),
+            r"\\server\share\camlibs"
+        );
+        assert_eq!(
+            driver_path_string(Path::new(r"I:\Photo Hub\gphoto\camlibs")),
+            r"I:\Photo Hub\gphoto\camlibs"
+        );
+    }
+
+    #[test]
+    fn partial_bundle_does_not_resolve_camera_drivers() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("gphoto");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(bundle_dll_name()), []).unwrap();
+        assert!(locate_driver_dir(&dir, DriverKind::Camlib).is_none());
+        assert!(locate_driver_dir(&dir, DriverKind::Iolib).is_none());
+    }
+
+    #[test]
+    fn complete_bundle_resolves_its_own_modules() {
+        let root = tempfile::tempdir().unwrap();
+        for (folder, iolib, kind) in [
+            ("camlibs", false, DriverKind::Camlib),
+            ("iolibs", true, DriverKind::Iolib),
+        ] {
+            let dir = root.path().join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(crate::platform::gphoto_driver_marker(iolib)), []).unwrap();
+            assert_eq!(locate_driver_dir(root.path(), kind), Some(dir));
         }
     }
 }
@@ -439,7 +524,16 @@ mod widget_type {
 const ACTION_NAMES: &[&str] = &["autofocus"];
 /// 不暴露的危险/内部项（bulb/movie 长按语义危险，capture 与快门按钮重复，
 /// opcode 是 PTP 调试后门，remotekey* 是遥控键模拟）。
-const EXCLUDED_NAMES: &[&str] = &["opcode", "bulb", "movie", "capture", "remotekeyup", "remotekeydown", "remotekeyleft", "remotekeyright"];
+const EXCLUDED_NAMES: &[&str] = &[
+    "opcode",
+    "bulb",
+    "movie",
+    "capture",
+    "remotekeyup",
+    "remotekeydown",
+    "remotekeyleft",
+    "remotekeyright",
+];
 /// 只读状态文本的杂音面（serialnumber/manufacturer 等）不进参数面板。
 const EXCLUDED_SECTIONS: &[&str] = &["status"];
 
@@ -504,8 +598,8 @@ impl GphotoBackend {
                 .filter(|n| !n.is_empty() && n != "." && n != "..")
                 .ok_or_else(|| TetherError::Other("照片文件名无效".into()))?;
             let target = conn.incoming.join(&filename);
-            let mut out = std::fs::File::create(&target)
-                .map_err(|e| TetherError::Other(e.to_string()))?;
+            let mut out =
+                std::fs::File::create(&target).map_err(|e| TetherError::Other(e.to_string()))?;
             out.write_all(&bytes)
                 .and_then(|_| out.sync_all())
                 .map_err(|e| TetherError::Other(e.to_string()))?;
@@ -570,7 +664,11 @@ impl GphotoBackend {
                     widget,
                     &mut current as *mut _ as *mut std::ffi::c_void,
                 ) >= 0;
-                let current_str = if value_ok { cstr(current) } else { String::new() };
+                let current_str = if value_ok {
+                    cstr(current)
+                } else {
+                    String::new()
+                };
                 let count = (s.gp_widget_count_choices)(widget);
                 let mut options = Vec::new();
                 let mut has_current = false;
@@ -632,20 +730,34 @@ impl GphotoBackend {
                 let value_ok =
                     (s.gp_widget_get_value)(widget, &mut value as *mut _ as *mut std::ffi::c_void)
                         >= 0;
-                let current = if value_ok { value.to_string() } else { "0".into() };
+                let current = if value_ok {
+                    value.to_string()
+                } else {
+                    "0".into()
+                };
                 let is_action = ACTION_NAMES.contains(&name);
                 let options = if is_action {
                     Vec::new()
                 } else {
                     vec![
-                        CameraSettingOption { value: "1".into(), label: "On".into() },
-                        CameraSettingOption { value: "0".into(), label: "Off".into() },
+                        CameraSettingOption {
+                            value: "1".into(),
+                            label: "On".into(),
+                        },
+                        CameraSettingOption {
+                            value: "0".into(),
+                            label: "Off".into(),
+                        },
                     ]
                 };
                 Some(CameraSetting {
                     id: name.to_string(),
                     label,
-                    kind: if is_action { SettingKind::Action } else { SettingKind::Toggle },
+                    kind: if is_action {
+                        SettingKind::Action
+                    } else {
+                        SettingKind::Toggle
+                    },
                     current,
                     writable,
                     options,
@@ -734,9 +846,7 @@ impl GphotoBackend {
                     }
                 }
                 if !allowed {
-                    return Err(TetherError::Other(
-                        "该参数值在当前相机模式下不可用".into(),
-                    ));
+                    return Err(TetherError::Other("该参数值在当前相机模式下不可用".into()));
                 }
             }
             if (wtype == widget_type::TOGGLE || wtype == widget_type::BUTTON)
@@ -828,7 +938,8 @@ impl CameraBackend for GphotoBackend {
                     let r = (|| -> Result<CameraInfo, TetherError> {
                         check((s.gp_port_info_list_load)(ports))?;
                         let path_c = CString::new(&*port).unwrap();
-                        let index = check((s.gp_port_info_list_lookup_path)(ports, path_c.as_ptr()))?;
+                        let index =
+                            check((s.gp_port_info_list_lookup_path)(ports, path_c.as_ptr()))?;
                         let mut info = std::mem::zeroed::<gpt::GPPortInfo>();
                         check((s.gp_port_info_list_get_info)(ports, index, &mut info))?;
                         let mut camera: *mut gpt::Camera = std::ptr::null_mut();
@@ -931,8 +1042,12 @@ impl CameraBackend for GphotoBackend {
                     }
                     let name_c = CString::new(&*name).unwrap();
                     let mut widget: *mut gpt::CameraWidget = std::ptr::null_mut();
-                    if (s.gp_camera_get_single_config)(conn.camera, name_c.as_ptr(), &mut widget, ctx)
-                        < 0
+                    if (s.gp_camera_get_single_config)(
+                        conn.camera,
+                        name_c.as_ptr(),
+                        &mut widget,
+                        ctx,
+                    ) < 0
                     {
                         continue;
                     }
@@ -981,7 +1096,13 @@ impl CameraBackend for GphotoBackend {
             let result = (|| {
                 let px = (x.clamp(0.0, 1.0) * 639.0).round() as i32;
                 let py = (y.clamp(0.0, 1.0) * 479.0).round() as i32;
-                Self::apply_setting_by_name(s, ctx, conn.camera, "spotfocusarea", &format!("{px},{py}"))?;
+                Self::apply_setting_by_name(
+                    s,
+                    ctx,
+                    conn.camera,
+                    "spotfocusarea",
+                    &format!("{px},{py}"),
+                )?;
                 Self::apply_setting_by_name(s, ctx, conn.camera, "autofocus", "1")?;
                 Ok(())
             })();

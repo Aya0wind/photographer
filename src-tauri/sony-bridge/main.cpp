@@ -102,7 +102,7 @@ int main(int argc,char** argv) {
                         if(!selected)throw std::runtime_error("Camera not connected");
                         checked(Connect(const_cast<ICrCameraObjectInfo*>(selected),&callback,&handle,CrSdkControlMode_Remote,CrReconnecting_OFF));
                         {std::unique_lock<std::mutex> g(callback.mutex);if(!callback.cv.wait_for(g,std::chrono::seconds(20),[&]{return callback.connected||!callback.error.empty();})||!callback.connected)throw std::runtime_error("Camera connection timed out");}
-                        checked(SetSDKProperties(handle, Setting_Key_EnableLiveView, 1));
+                        checked(SetDeviceSetting(handle, Setting_Key_EnableLiveView, 1));
                         bool ready=false;
                         for(int attempt=0;attempt<60;++attempt) { Properties p(handle);if(p.find(CrDeviceProperty_ShutterSpeed)){ready=true;break;}std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
                         if(!ready)throw std::runtime_error("Camera shooting settings are not ready");

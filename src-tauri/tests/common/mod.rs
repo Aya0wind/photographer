@@ -18,6 +18,8 @@ pub mod db;
 pub mod devices;
 #[path = "../../src/events/mod.rs"]
 pub mod events;
+#[path = "../../src/geo/mod.rs"]
+pub mod geo;
 #[path = "../../src/import/mod.rs"]
 pub mod import;
 #[path = "../../src/index/mod.rs"]

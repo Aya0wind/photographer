@@ -11,7 +11,7 @@ mod common;
 
 pub use common::{
     platform,
-    ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks,
     tethering, thumbs,
 };
 
@@ -27,6 +27,33 @@ use tethering::backend::{CameraBackend, CameraInfo, Capabilities, CapturedObject
 use tethering::mtp::{
     self, capture_command, get_device_info_command, parse_device_info, DeviceInfoDataset,
 };
+
+/// 手动真机验证：只读参数和取景，不触发快门；正常测试不会访问 USB。
+#[test]
+#[ignore = "requires a connected PC Remote camera"]
+fn gphoto_connected_camera_smoke() {
+    let backend = tethering::gphoto_backend::GphotoBackend::default();
+    let cameras = backend.enumerate().expect("enumerate camera");
+    let expected = std::env::var("PHOTO_HUB_TEST_CAMERA_MODEL").expect("set expected camera model");
+    let camera = cameras.iter().find(|c| c.name.contains(&expected)).expect("camera detected");
+    println!("Detected: {} ({})", camera.name, camera.pnp_id);
+    backend.connect(&camera.pnp_id).expect("connect camera");
+    // 无论验证成功还是失败，都先释放 USB 会话供应用使用。
+    let settings = backend.settings(&camera.pnp_id);
+    let frame = backend.live_view_frame(&camera.pnp_id);
+    backend.disconnect(&camera.pnp_id);
+    let settings = settings.expect("read camera settings");
+    println!("Settings: {}", settings.len());
+    assert!(!settings.is_empty());
+    for setting in &settings {
+        if ["iso", "shutterspeed", "f-number", "aperture"].contains(&setting.id.as_str()) {
+            println!("{}: {}", setting.id, setting.current);
+        }
+    }
+    let frame = frame.expect("read live view");
+    println!("Live view: {} bytes", frame.len());
+    assert!(frame.starts_with(&[0xff, 0xd8]), "JPEG live view frame");
+}
 
 // ---------------------------------------------------------------------------
 // GetDeviceInfo 数据集 fixture 构造（小端）

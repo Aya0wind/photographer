@@ -30,6 +30,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0023_RESERVED,
     MIGRATION_0024_CULLING,
     MIGRATION_0025_EDITABLE_METADATA,
+    MIGRATION_0026_GEO_REGIONS,
 ];
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
@@ -604,4 +605,36 @@ CREATE TABLE asset_metadata (
     asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
     value TEXT NOT NULL
 );
+"#;
+
+/// 0026（拍摄地图模块）：树形地区索引——GPS 逆地理解析结果的独立索引。
+/// - `regions`：行政区树，一节点一行，元数据（中心点/名称/编码/数据包来源）
+///   单份存储；根节点 parent_id 为 NULL（世界），level 0 国家 / 1 省·州 /
+///   2 市 / 3 县·区（2026-09-29 用户定案：最深市县，无更深开关，不做街道）。
+/// - `asset_regions`：资产挂接，**每资产每层一行**（挂到该层命中节点）；
+///   任意层级聚合 = WHERE level=N GROUP BY region_id，下钻带 parent 子查询，
+///   全走 (region_id, level) 索引。资产删除级联清挂接。
+const MIGRATION_0026_GEO_REGIONS: &str = r#"
+CREATE TABLE regions (
+    id        INTEGER PRIMARY KEY,
+    parent_id INTEGER REFERENCES regions(id),
+    level     INTEGER NOT NULL,
+    name      TEXT    NOT NULL,
+    code      TEXT,
+    lat       REAL    NOT NULL,
+    lon       REAL    NOT NULL,
+    source    TEXT    NOT NULL
+);
+
+CREATE INDEX idx_regions_parent ON regions(parent_id, level);
+CREATE INDEX idx_regions_code   ON regions(code);
+
+CREATE TABLE asset_regions (
+    asset_id  INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    region_id INTEGER NOT NULL REFERENCES regions(id),
+    level     INTEGER NOT NULL,
+    PRIMARY KEY (asset_id, level)
+);
+
+CREATE INDEX idx_asset_regions_region ON asset_regions(region_id, level);
 "#;

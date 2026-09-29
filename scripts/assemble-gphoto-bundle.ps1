@@ -1,4 +1,4 @@
-# 从 MSYS2 ucrt64 组装 libgphoto2 随包目录（src-tauri/resources/gphoto/）。
+﻿# 从 MSYS2 ucrt64 组装 libgphoto2 随包目录（src-tauri/resources/gphoto/）。
 # 打包前运行（tauri build 收取该目录进安装包；LGPL-2.1 动态链接，随包
 # 附 libgphoto2 源码链接即合规——项目开源）。
 #
@@ -41,8 +41,12 @@ $camlibs = Get-ChildItem (Join-Path $UcrtLib "libgphoto2") -Directory |
 if (-not $iolibs) { Write-Error "未找到 iolibs（usb1.dll）于 $UcrtLib\libgphoto2_port" }
 if (-not $camlibs) { Write-Error "未找到 camlibs（ptp2.dll）于 $UcrtLib\libgphoto2" }
 
-Copy-Item $iolibs.FullName -Destination (Join-Path $OutDir "iolibs") -Recurse -Force
-Copy-Item $camlibs.FullName -Destination (Join-Path $OutDir "camlibs") -Recurse -Force
+foreach ($modules in @(@{ Source = $iolibs; Name = "iolibs" }, @{ Source = $camlibs; Name = "camlibs" })) {
+    $ModuleDestination = Join-Path $OutDir $modules.Name
+    New-Item -ItemType Directory -Force -Path $ModuleDestination | Out-Null
+    # 复制目录内容，重复运行时也保持模块直接位于 iolibs/camlibs 下。
+    Get-ChildItem -LiteralPath $modules.Source.FullName | Copy-Item -Destination $ModuleDestination -Recurse -Force
+}
 
 $count = (Get-ChildItem $OutDir -Recurse -File).Count
 Write-Host "完成：$OutDir（$count 个文件；DLL x$($dlls.Count) + iolibs + camlibs）"

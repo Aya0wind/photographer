@@ -113,7 +113,6 @@ pub fn release() {
     *face_slots().lock().expect("face slots mutex poisoned") = FaceSlots::default();
 }
 
-
 impl ModelManager {
     /// 人脸两件套是否齐备（检测件按当前画质档位解析：fast = scrfd-10g +
     /// arcface；normal/accurate = scrfd + arcface）。

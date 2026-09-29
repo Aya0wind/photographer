@@ -297,17 +297,19 @@ pub fn run_export_job(db: Db, bus: &EventBus, request: ExportJobRequest) {
             phase: phase.to_string(),
         });
     };
-    let finish =
-        |ok: bool, output_path: Option<String>, new_asset_id: Option<i64>, error: Option<String>| {
-            bus.publish(AppEvent::ExportTaskFinished {
-                job_id: request.job_id,
-                asset_id,
-                ok,
-                output_path,
-                new_asset_id,
-                error,
-            });
-        };
+    let finish = |ok: bool,
+                  output_path: Option<String>,
+                  new_asset_id: Option<i64>,
+                  error: Option<String>| {
+        bus.publish(AppEvent::ExportTaskFinished {
+            job_id: request.job_id,
+            asset_id,
+            ok,
+            output_path,
+            new_asset_id,
+            error,
+        });
+    };
     let _ = db.export_job_set_status(request.job_id, "running");
     match execute(&db, &request, &progress) {
         Ok(result) => {

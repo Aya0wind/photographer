@@ -11,6 +11,7 @@ import RecentPage from "@/features/gallery/pages/RecentPage";
 import TrashPage from "@/features/gallery/pages/TrashPage";
 import MemoriesPage from "@/features/memories/pages/MemoriesPage";
 import GearPage from "@/features/gear/pages/GearPage";
+import MapPage from "@/features/map/pages/MapPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import SimilarPage from "@/features/similar/pages/SimilarPage";
 import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
@@ -72,6 +73,7 @@ export const router = createBrowserRouter([
       { path: "trash", element: <TrashPage /> },
       { path: "memories", element: <MemoriesPage /> },
       { path: "gear", element: <GearPage /> },
+      { path: "map", element: <MapPage /> },
       { path: "search", element: <SearchRedirect /> },
       { path: "similar", element: <SimilarPage /> },
       // 选片会话（Culling V1）：会话列表 + 全屏过片层（浮层内挂载）
