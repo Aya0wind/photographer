@@ -58,6 +58,16 @@ impl TaskControls {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
+
+    /// 暂停旗克隆（任务体内部深循环分线程轮询用，如索引 worker 池）。
+    pub fn paused_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.paused)
+    }
+
+    /// 取消旗克隆（同上）。
+    pub fn cancelled_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
 }
 
 /// 派发返回的任务句柄：调用方侧的控制与状态观测。
@@ -121,9 +131,18 @@ impl TaskHandle {
 pub struct TaskSupervisor {
     bus: EventBus,
     next_id: AtomicU64,
-    /// id -> (kind, name)；Arc 以便任务线程收尾时自行摘除。
-    running: Arc<Mutex<HashMap<u64, (String, String)>>>,
+    /// id -> 在跑登记（kind/name + 控制旗）；Arc 以便任务线程收尾时自行摘除。
+    running: Arc<Mutex<HashMap<u64, RunningTask>>>,
     coalesced: Arc<Mutex<HashMap<(String, String), Arc<AtomicBool>>>>,
+}
+
+/// 在跑任务登记项：按 kind 批量暂停/恢复的控制旗随行（导入让路闸，
+/// 2026-09-29 用户定案：导入开始暂停索引类任务，导入结束恢复）。
+pub(crate) struct RunningTask {
+    pub kind: String,
+    pub name: String,
+    pub paused: Arc<AtomicBool>,
+    pub cancelled: Arc<AtomicBool>,
 }
 
 struct CoalescedGuard {
@@ -242,13 +261,21 @@ impl TaskSupervisor {
                 .lock()
                 .expect("supervisor running mutex poisoned");
             if unique
-                && running.values().any(|(running_kind, running_name)| {
-                    running_kind == kind && running_name == &name
-                })
+                && running
+                    .values()
+                    .any(|entry| entry.kind == kind && entry.name == name)
             {
                 return None;
             }
-            running.insert(id, (kind.to_string(), name.clone()));
+            running.insert(
+                id,
+                RunningTask {
+                    kind: kind.to_string(),
+                    name: name.clone(),
+                    paused: Arc::clone(&controls.paused),
+                    cancelled: Arc::clone(&controls.cancelled),
+                },
+            );
         }
 
         let bus = self.bus.clone();
@@ -290,6 +317,33 @@ impl TaskSupervisor {
             });
         }
         Some(handle)
+    }
+
+    /// 按 kind 批量暂停在跑任务（返回命中数）。软语义：任务体需轮询
+    /// paused 才生效——索引池已接线；不轮询的任务体无强制力。
+    pub fn pause_kind(&self, kind: &str) -> usize {
+        let running = self.running.lock().expect("supervisor running mutex poisoned");
+        let mut hit = 0;
+        for entry in running.values() {
+            if entry.kind == kind {
+                entry.paused.store(true, Ordering::SeqCst);
+                hit += 1;
+            }
+        }
+        hit
+    }
+
+    /// 按 kind 批量恢复（返回命中数）。
+    pub fn resume_kind(&self, kind: &str) -> usize {
+        let running = self.running.lock().expect("supervisor running mutex poisoned");
+        let mut hit = 0;
+        for entry in running.values() {
+            if entry.kind == kind {
+                entry.paused.store(false, Ordering::SeqCst);
+                hit += 1;
+            }
+        }
+        hit
     }
 
     /// 当前运行中的任务数（观测；集成测试引用）。

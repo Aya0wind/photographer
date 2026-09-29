@@ -20,6 +20,7 @@ import {
   indexKickNow,
   indexStatus,
   indexTaskPause,
+  indexTaskResume,
   type AppEvent,
   type ImportStats,
   type IndexStatus,
@@ -39,6 +40,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     indexStatus: vi.fn(),
     indexKickNow: vi.fn(),
     indexTaskPause: vi.fn(),
+    indexTaskResume: vi.fn(),
   };
 });
 
@@ -48,6 +50,7 @@ const cancelMock = vi.mocked(importCancel);
 const indexStatusMock = vi.mocked(indexStatus);
 const kickMock = vi.mocked(indexKickNow);
 const indexPauseMock = vi.mocked(indexTaskPause);
+const indexResumeMock = vi.mocked(indexTaskResume);
 const jobsPageMock = vi.mocked(importJobsPage);
 const jobDeleteMock = vi.mocked(importJobDelete);
 const logsPageMock = vi.mocked(importLogsPage);
@@ -369,7 +372,7 @@ describe("任务抽屉：索引通道行", () => {
     ).toBeNull();
   });
 
-  it("索引行暂停（running）/继续（无 running → indexKickNow）", async () => {
+  it("索引行暂停（running）/继续（无 running → indexTaskResume 全局恢复）；导入中禁用", async () => {
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 1, 7),
       exif: counters(0, 0, 10),
@@ -382,7 +385,7 @@ describe("任务抽屉：索引通道行", () => {
     await user.click((await screen.findByTestId("taskdrawer-index-thumb")).querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
     await waitFor(() => expect(indexPauseMock).toHaveBeenCalledTimes(1));
 
-    // running=0 的通道：继续 = index_kick_now(kind)
+    // running=0 的通道：继续 = index_task_resume（全局恢复，2026-09-29 接线）
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 0, 7),
       exif: counters(0, 0, 10),
@@ -391,7 +394,13 @@ describe("任务抽屉：索引通道行", () => {
     } satisfies IndexStatus);
     await useAiStore.getState().refreshIndexStatus();
     await user.click(screen.getByTestId("taskdrawer-index-thumb").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
-    await waitFor(() => expect(kickMock).toHaveBeenCalledWith("thumb"));
+    await waitFor(() => expect(indexResumeMock).toHaveBeenCalledTimes(1));
+    expect(kickMock).not.toHaveBeenCalled();
+
+    // 导入进行中：让路闸接管，按钮禁用（导入收尾自动恢复）
+    emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
+    const toggle = screen.getByTestId("taskdrawer-index-thumb").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement;
+    expect(toggle).toBeDisabled();
   });
 
   it("全部暂停：运行中导入逐个暂停 + 索引暂停", async () => {

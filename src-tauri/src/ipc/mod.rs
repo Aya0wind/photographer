@@ -91,13 +91,27 @@ pub struct AppState {
     pub thumb_queue: thumb::ThumbQueue,
     /// 目录迁移守卫（库 id 集合）：迁移期间该库拒绝新导入/新迁移。
     pub migrations: Mutex<HashSet<String>>,
+    /// 导入让路闸（用户定案 2026-09-29）：导入任务在场为 true——一切索引
+    /// 触发（手动/自动/跟随）拒绝，开场暂停 kind="index" 在跑任务。
+    pub import_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// AI 模型下载管理器（models 目录固定在 app 配置目录下）。
     pub ai: crate::ai::ModelManager,
 }
 
+/// 导入让路检查：导入任务在场时一切索引触发（手动/自动）拒绝。
+pub fn ensure_no_import_running(state: &AppState) -> Result<(), String> {
+    if state
+        .import_running
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        Err("导入进行中：索引已让路暂停，导入完成后自动恢复/触发".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// 活跃库迁移守卫检查：迁移中返回 Err（导入/迁移入口共用）。
-pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {
-    let library_id = state
+pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {    let library_id = state
         .settings
         .lock()
         .expect("settings mutex poisoned")
@@ -481,61 +495,7 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
     }
 }
 
-/// 已落库照片分批唤醒索引。导入结尾仍做一次无节流触发，覆盖最后一批。
-fn follow_import_indexing(
-    engine: &mut Engine,
-    db_dir: PathBuf,
-    manager: crate::ai::ModelManager,
-    bus: EventBus,
-    supervisor: Arc<crate::tasks::TaskSupervisor>,
-    enable_clip: bool,
-    enable_face: bool,
-) {
-    engine.set_on_asset_imported(move || {
-        let db_dir = db_dir.clone();
-        let manager = manager.clone();
-        let bus = bus.clone();
-        let dispatch_supervisor = Arc::clone(&supervisor);
-        supervisor.spawn_coalesced(
-            "index",
-            format!("import-follow:{}", db_dir.display()),
-            move |_| {
-                crate::index::kick(db_dir.clone(), &dispatch_supervisor);
-                if enable_clip {
-                    crate::ai::semantic::kick_semantic_if_ready(
-                        db_dir.clone(),
-                        &manager,
-                        &bus,
-                        &dispatch_supervisor,
-                    );
-                }
-                if enable_face {
-                    crate::ai::face::kick_face_if_ready(
-                        db_dir.clone(),
-                        &manager,
-                        &bus,
-                        &dispatch_supervisor,
-                    );
-                }
-                crate::ai::selection::kick_eyes_if_ready(
-                    db_dir.clone(),
-                    &manager,
-                    &bus,
-                    &dispatch_supervisor,
-                );
-                if let Ok(db) = open_library_db(&db_dir) {
-                    bus.publish(crate::events::AppEvent::IndexTaskResumed {
-                        pending: db.pending_index_count().unwrap_or(0),
-                    });
-                }
-                // 分批限频在后台做；期间收到的通知保留，暂停导入也不会漏掉最后一张。
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            },
-        );
-    });
-}
-
-/// 启动、恢复和重试共用调度；持续跟随入库照片，收尾再唤醒一次索引。
+/// 启动、恢复和重试共用调度；索引在导入结束后按需一次性唤醒。
 fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
     let controls = engine.controls();
     let (index_db_dir, ai_settings) = {
@@ -551,45 +511,65 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
     let enable_clip = ai_settings.enable_clip;
     let enable_face = ai_settings.enable_face;
     let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
-    follow_import_indexing(
-        &mut engine,
-        index_db_dir.clone(),
-        ai_manager.clone(),
-        ai_bus.clone(),
-        Arc::clone(&index_supervisor),
-        enable_clip,
-        enable_face,
-    );
+    let gate = std::sync::Arc::clone(&state.import_running);
+    let gate_supervisor = Arc::clone(&index_supervisor);
+    // 闸在派发前同步置位：调用方拿到 job_id 的瞬间，手动索引触发即被拒
+    // （闭包内才置位有窗口）。闭包 Drop 兜底放行（含 panic 路径）。
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
-            engine.run();
-            crate::index::kick(index_db_dir.clone(), &index_supervisor);
-            if enable_clip {
-                crate::ai::semantic::kick_semantic_if_ready(
+            // 导入让路闸（用户定案 2026-09-29）：在场期间索引一律不跑——
+            // 开场暂停 kind="index" 在跑任务（thumb/exif/hash/phash/blur
+            // 池 + AI 回填池同 kind），收尾恢复；手动触发由
+            // ensure_no_import_running 拒绝。Drop 兜底放行（panic 也不锁死）。
+            struct ImportGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for ImportGate {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _gate = ImportGate(gate);
+            let paused = gate_supervisor.pause_kind("index");
+            if paused > 0 {
+                eprintln!("导入让路：已暂停 {paused} 个索引任务，导入完成后自动恢复");
+            }
+            let stats = engine.run();
+            // 先放行闸再恢复（M1 单导入串行：下一个导入必在本任务收尾后
+            // 才能起跑，不存在互相踩暂停/恢复的交错）。
+            drop(_gate);
+            gate_supervisor.resume_kind("index");
+            // 索引/AI/连拍收尾统一在导入结束后一次性触发，且仅在本轮确有
+            // 新图（done_files>0；全跳过的重复导入不打扰）。索引天然增量：
+            // worker 只领取 pending 任务行，不重建已有索引。
+            if stats.done_files > 0 {
+                crate::index::kick(index_db_dir.clone(), &index_supervisor);
+                if enable_clip {
+                    crate::ai::semantic::kick_semantic_if_ready(
+                        index_db_dir.clone(),
+                        &ai_manager,
+                        &ai_bus,
+                        &index_supervisor,
+                    );
+                }
+                if enable_face {
+                    crate::ai::face::kick_face_if_ready(
+                        index_db_dir.clone(),
+                        &ai_manager,
+                        &ai_bus,
+                        &index_supervisor,
+                    );
+                }
+                // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
+                crate::ai::selection::kick_eyes_if_ready(
                     index_db_dir.clone(),
                     &ai_manager,
                     &ai_bus,
                     &index_supervisor,
                 );
+                // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
+                crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
             }
-            if enable_face {
-                crate::ai::face::kick_face_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
-            }
-            // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
-            crate::ai::selection::kick_eyes_if_ready(
-                index_db_dir.clone(),
-                &ai_manager,
-                &ai_bus,
-                &index_supervisor,
-            );
-            // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
-            crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
         });
     ActiveImport {
         job_id,

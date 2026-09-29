@@ -14,6 +14,7 @@ use crate::import::templates::{
     render_dir, render_name, resolve_captured, RenderCtx, TemplateError,
 };
 use crate::metadata::exif_lite::{self, MetaLite};
+use crate::settings::DuplicatePolicy;
 
 use super::PART_DIR;
 
@@ -28,6 +29,11 @@ const FALLBACK_LENS: &str = "未知镜头";
 /// 工作线程产出。
 pub(super) enum FileOutcome {
     Copied(Box<CopiedFile>),
+    /// 免下载预跳：Skip/Ask 策略下目标路径已存在（与收集端 ③ 同判据提前），
+    /// 只读了头段（EXIF 渲染目标路径必需），无 .part/无哈希。
+    Skipped {
+        entry: FileEntry,
+    },
     Failed {
         entry: FileEntry,
         error: String,
@@ -174,6 +180,7 @@ pub(super) fn copy_one(
     part_dir: &Path,
     seq: u64,
     move_mode: bool,
+    duplicate_policy: DuplicatePolicy,
     entry: &FileEntry,
     target_root: &Path,
     dir_template: &str,
@@ -235,6 +242,16 @@ pub(super) fn copy_one(
         Err(error) => return fail(error),
     };
     let dst = target_root.join(&rel);
+    // 免下载预跳（2026-09-29 实测重建库全量重导：重复照片被完整拉回
+    // ~600ms/张再丢弃）：Skip/Ask 策略下目标已存在与收集端 ③ 同判据
+    // 提前到这里——只花流打开+头读（EXIF 渲染目标路径必需），不写
+    // .part、不算哈希、不删临时文件；MTP 单 worker 串行下整体吞吐
+    // 量级提升。Rename 策略仍需下载落位，不预跳。
+    if matches!(duplicate_policy, DuplicatePolicy::Skip | DuplicatePolicy::Ask) && dst.exists() {
+        return FileOutcome::Skipped {
+            entry: entry.clone(),
+        };
+    }
     // 第二目的地：同公式、仅根不同
     let (dst2, second_part_dir) = match second {
         Some(root) => (Some(root.join(&rel)), Some(root.join(PART_DIR))),

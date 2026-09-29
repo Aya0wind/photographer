@@ -9,6 +9,14 @@ export async function indexTaskPause(): Promise<void> {
   }
 }
 
+/** 恢复索引任务（全局闸）；导入让路期间后端拒绝（按钮已禁用，防御性静默） */
+export async function indexTaskResume(): Promise<void> {
+  try {
+    await ipc<void>("index_task_resume");
+  } catch {
+  }
+}
+
 /** 索引状态快照；失败/负载异常返回 null（调用方隐藏/降级区块） */
 export async function indexStatus(): Promise<IndexStatus | null> {
   try {

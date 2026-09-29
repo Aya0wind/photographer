@@ -114,6 +114,7 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
 /// 侧自带去重（NOT EXISTS pending/running + ai_indexed_at/face_indexed_at
 /// 时间账）。
 pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), String> {
+    super::ensure_no_import_running(state)?;
     let (enable_clip, enable_face) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
@@ -309,6 +310,7 @@ fn kick_rebuilt_channel(
 /// 重建门槛校验（同步快路径）：语义/人脸需模型就绪 + 开关开启；
 /// thumb/exif 无门槛。通过后调用方再后台执行清理+重排+kick。
 pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> {
+    super::ensure_no_import_running(state)?;
     let (enable_clip, enable_face) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
@@ -673,4 +675,32 @@ selection={want_sel}
 "
         ),
     );
+}
+
+/// 暂停索引类后台任务（kind="index"：thumb/exif/hash/phash/blur 池 + AI
+/// 回填池）。软语义：worker 步进间轮询生效。接线 2026-09-29——此前前端
+/// 按钮静默无效（命令未注册）。
+#[tauri::command]
+pub async fn index_task_pause(state: State<'_, SharedState>) -> Result<(), String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, |state| {
+        let hit = state.supervisor.pause_kind("index");
+        eprintln!("手动暂停索引：命中 {hit} 个任务");
+        Ok(())
+    })
+    .await
+}
+
+/// 恢复索引类后台任务。导入让路闸开着时拒绝（用户定案 2026-09-29：
+/// 导入完成前无法手动恢复——导入收尾会自动恢复并按需触发一轮）。
+#[tauri::command]
+pub async fn index_task_resume(state: State<'_, SharedState>) -> Result<(), String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, |state| {
+        super::ensure_no_import_running(state)?;
+        let hit = state.supervisor.resume_kind("index");
+        eprintln!("手动恢复索引：命中 {hit} 个任务");
+        Ok(())
+    })
+    .await
 }

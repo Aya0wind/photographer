@@ -19,6 +19,7 @@
 //! - 优先级：导入 > 主图缩略图兜底 > 索引批量（共享 permit 池天然实现）。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rusqlite::params;
 
@@ -219,13 +220,24 @@ fn process_hash_task(db: &Db, asset_id: i64) -> bool {
     db.set_xxhash(asset_id, hasher.digest()).is_ok()
 }
 
-/// 单 worker 循环：跑到队列空，返回处理数。
-fn worker_loop(db_dir: &Path) -> u64 {
+/// 单 worker 循环：跑到队列空，返回处理数。暂停旗（导入让路闸）置位时
+/// 步进间挂起等待，恢复后续跑；取消旗直接退出。
+fn worker_loop(db_dir: &Path, paused: &AtomicBool, cancelled: &AtomicBool) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         return 0;
     };
     let mut count = 0u64;
-    while step(&db, db_dir) {
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if paused.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        }
+        if !step(&db, db_dir) {
+            break;
+        }
         count += 1;
     }
     count
@@ -235,14 +247,31 @@ fn worker_loop(db_dir: &Path) -> u64 {
 /// worker 数 = 物理核心数全量；每 worker 独立 Db 连接（WAL + busy_timeout），
 /// 认领经 SQLite 写锁串行化（UPDATE..RETURNING 单行独占，不重不漏）。
 pub fn run_pending(db_dir: &Path, workers: usize) -> u64 {
+    run_pending_gated(
+        db_dir,
+        workers,
+        std::sync::Arc::new(AtomicBool::new(false)),
+        std::sync::Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// 带暂停/取消旗的 [`run_pending`]（supervisor 任务体接线用）。
+pub fn run_pending_gated(
+    db_dir: &Path,
+    workers: usize,
+    paused: std::sync::Arc<AtomicBool>,
+    cancelled: std::sync::Arc<AtomicBool>,
+) -> u64 {
     let workers = workers.max(1);
     let mut processed = 0u64;
     let handles: Vec<_> = (0..workers)
         .map(|n| {
             let db_dir = db_dir.to_path_buf();
+            let paused = std::sync::Arc::clone(&paused);
+            let cancelled = std::sync::Arc::clone(&cancelled);
             std::thread::Builder::new()
                 .name(format!("index-worker-{n}"))
-                .spawn(move || worker_loop(&db_dir))
+                .spawn(move || worker_loop(&db_dir, &paused, &cancelled))
                 .expect("spawn index worker")
         })
         .collect();
@@ -262,13 +291,19 @@ pub fn worker_count() -> usize {
 }
 
 /// 导入完成后的钩子：派一个 supervisor 任务把当前待办全速跑完。
-/// job 不等它（importSessionFinished 只代表文件入库）。
+/// job 不等它（importSessionFinished 只代表文件入库）。任务体接线暂停/
+/// 取消旗（导入开始时 supervisor.pause_kind("index") 让路）。
 pub fn kick(db_dir: PathBuf, supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>) {
     let _ = supervisor.spawn_coalesced(
         "index",
         format!("index-worker-pool:{}", db_dir.display()),
-        move |_| {
-            run_pending(&db_dir, worker_count());
+        move |controls| {
+            run_pending_gated(
+                &db_dir,
+                worker_count(),
+                controls.paused_flag(),
+                controls.cancelled_flag(),
+            );
         },
     );
 }

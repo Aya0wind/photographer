@@ -360,6 +360,7 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
         bus: EventBus::new(),
         devices: Mutex::new(devices_map),
         active_import: Mutex::new(None),
+        import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ai: ai::ModelManager::new(db_dir.join("models"), EventBus::new(), supervisor.clone()),
         supervisor,
         thumb_queue: ipc::thumb::ThumbQueue::new(),

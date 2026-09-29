@@ -387,6 +387,7 @@ fn watch_state(
         bus: events::EventBus::new(),
         devices: Mutex::new(HashMap::new()),
         active_import: Mutex::new(None),
+        import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ai: ai::ModelManager::new(
             config_dir.join("models"),
             events::EventBus::new(),

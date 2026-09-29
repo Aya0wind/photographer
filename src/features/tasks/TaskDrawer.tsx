@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   importJobDelete,
   importJobsPage,
-  indexKickNow,
+  indexTaskResume,
   indexTaskPause,
   type IndexCounters,
   type IndexKind,
@@ -301,8 +301,18 @@ function ImportFinishedRow({
   );
 }
 
-/** 索引通道行：计数 + 进度条 + 暂停（indexTaskPause）/继续（indexKickNow）+ 失败红字 */
-function IndexTaskRow({ kind, counters }: { kind: IndexKind; counters: IndexCounters }) {
+/** 索引通道行：计数 + 进度条 + 暂停/继续 + 失败红字。暂停/恢复是索引
+ * 全局闸（后端按 kind="index" 整池操作）；导入进行中禁用——索引已让路，
+ * 导入收尾自动恢复（2026-09-29 用户定案）。 */
+function IndexTaskRow({
+  kind,
+  counters,
+  importActive,
+}: {
+  kind: IndexKind;
+  counters: IndexCounters;
+  importActive: boolean;
+}) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const total = Math.max(counters.total, counters.done + counters.pending + counters.running);
@@ -313,11 +323,7 @@ function IndexTaskRow({ kind, counters }: { kind: IndexKind; counters: IndexCoun
     if (counters.running > 0) {
       await indexTaskPause();
     } else {
-      try {
-        await indexKickNow(kind);
-      } catch {
-        // 模型未就绪等业务错误：抽屉内静默（设置页 AI tab 有完整引导）
-      }
+      await indexTaskResume();
     }
     setBusy(false);
     void useAiStore.getState().refreshIndexStatus();
@@ -341,7 +347,7 @@ function IndexTaskRow({ kind, counters }: { kind: IndexKind; counters: IndexCoun
           <button
             type="button"
             onClick={() => void togglePause()}
-            disabled={busy}
+            disabled={busy || importActive}
             aria-label={counters.running > 0 ? t("tasks.pause") : t("tasks.resume")}
             title={counters.running > 0 ? t("tasks.pause") : t("tasks.resume")}
             className="flex h-5 w-5 items-center justify-center rounded border border-edge text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
@@ -725,7 +731,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
                 <ErrorRow message={lastError.message} onDismiss={() => setDismissedError(lastError)} />
               )}
               {indexRows.map(({ kind, counters }) => (
-                <IndexTaskRow key={kind} kind={kind} counters={counters} />
+                <IndexTaskRow key={kind} kind={kind} counters={counters} importActive={active.length > 0} />
               ))}
               {active.map((job) => (
                 <ImportActiveRow key={job.jobId} job={job} />

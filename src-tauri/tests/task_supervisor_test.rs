@@ -222,3 +222,47 @@ fn coalesced_panic_releases_registration() {
         .unwrap();
     assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
 }
+
+#[test]
+fn pause_kind_and_resume_kind_toggle_running_tasks_by_kind() {
+    let supervisor = TaskSupervisor::new(EventBus::new());
+    let entered = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = Arc::clone(&entered);
+    let flag = Arc::clone(&release);
+    let handle = supervisor
+        .spawn(
+            "index",
+            "pool-probe".into(),
+            move |controls| {
+                probe.fetch_add(1, Ordering::SeqCst);
+                while !controls.is_cancelled() && !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            },
+        );
+    // 等任务真正进场（登记表有了条目）
+    let started = std::time::Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // 按 kind 暂停/恢复：命中在跑的 index 任务，不误伤其他 kind
+    let other = supervisor
+        .spawn("import", "other".into(), |controls| {
+            while !controls.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+    assert_eq!(supervisor.pause_kind("index"), 1);
+    assert!(handle.is_paused());
+    assert!(!other.is_paused(), "pause_kind 不得跨 kind 生效");
+    assert_eq!(supervisor.resume_kind("index"), 1);
+    assert!(!handle.is_paused());
+    assert_eq!(supervisor.pause_kind("nothing"), 0);
+
+    other.cancel();
+    release.store(true, Ordering::SeqCst);
+    assert!(tasks::wait_done(&handle, Duration::from_secs(5)));
+    assert!(tasks::wait_done(&other, Duration::from_secs(5)));
+}

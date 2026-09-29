@@ -592,6 +592,7 @@ impl Engine {
                             &part_dir,
                             seq,
                             self.plan.mode == ImportMode::Move,
+                            self.plan.duplicate_policy,
                             &entry,
                             &target_root,
                             &dir_template,
@@ -700,6 +701,29 @@ impl Engine {
                             });
                         }
                     }
+                }
+                // 免下载预跳（见 copy_one）：与 finish_copy 跳过态同款记账，
+                // journal 无哈希（未读全量）。
+                FileOutcome::Skipped { entry } => {
+                    counters.skipped += 1;
+                    counters.skipped_bytes += entry.size;
+                    last_completed_src = entry.rel_path.clone();
+                    let _ = self.db.upsert_job_file(&JobFileRow {
+                        job_id,
+                        src: entry.id.clone(),
+                        dst: String::new(),
+                        size: entry.size,
+                        state: FileState::Skipped,
+                        error: None,
+                        xxhash: None,
+                        dst2: String::new(),
+                    });
+                    self.bus.publish(AppEvent::ImportFileCompleted {
+                        job_id,
+                        src: entry.id,
+                        dst: String::new(),
+                        state: FileState::Skipped,
+                    });
                 }
                 FileOutcome::Failed { entry, error } => {
                     counters.failed += 1;
