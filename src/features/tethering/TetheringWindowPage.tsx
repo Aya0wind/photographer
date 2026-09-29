@@ -60,6 +60,10 @@ const SETTING_ORDER = [
   "imagesize", "pcsaveimgsize", "liveviewsettingeffect", "manualfocus", "focusmagnifier",
 ] as const;
 
+/** 悬浮工具栏参数（曝光三要素 + 对焦 + 白平衡）：常驻取景画面底部，
+ *  随手可调不用翻面板。choice 形态才进工具栏（range/action 仍走右栏）。 */
+const QUICK_IDS = ["shutterspeed", "f-number", "iso", "whitebalance", "focusmode"] as const;
+
 function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   const rank = (s: TetherCameraSetting): number => {
     if (s.kind === "action") return SETTING_ORDER.length + 1;
@@ -70,6 +74,22 @@ function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
     const d = rank(a) - rank(b);
     return d !== 0 ? d : a.label.localeCompare(b.label);
   });
+}
+
+/** 工具栏参数：曝光三要素/对焦/白平衡；不可调的隐藏——光圈例外
+ * （镜头环控制光圈的机身常见，只读也要能看到当前值）。 */
+function quickSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
+  return QUICK_IDS.map((id) => settings.find((s) => s.id === id))
+    .filter((s): s is TetherCameraSetting => {
+      if (s === undefined || s.kind !== "choice") return false;
+      return s.writable || s.id === "f-number";
+    });
+}
+
+/** 右栏参数：工具栏之外的**可调**参数（只读一律不显示，光圈例外在工具栏）。 */
+function panelSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
+  const quick = new Set<string>(QUICK_IDS);
+  return orderSettings(settings).filter((s) => !quick.has(s.id) && s.writable);
 }
 
 export default function TetheringWindowPage() {
@@ -90,7 +110,22 @@ export default function TetheringWindowPage() {
   const [rangeDrafts, setRangeDrafts] = useState<Record<string, string>>({});
   /** 点击对焦标记（归一化坐标 + 2s 自动消失）。 */
   const [focusMark, setFocusMark] = useState<{ x: number; y: number } | null>(null);
+  /** 工具栏参数弹层：当前展开的设置 id（单开；点外部收起）。 */
+  const [quickOpen, setQuickOpen] = useState<string | null>(null);
+  const quickBarRef = useRef<HTMLDivElement | null>(null);
   const motionOn = useMotionOn();
+
+  // 工具栏弹层点外部收起（SelectionBar 同款契约）
+  useEffect(() => {
+    if (quickOpen === null) return;
+    const onDown = (e: MouseEvent) => {
+      if (quickBarRef.current !== null && e.target instanceof Node && !quickBarRef.current.contains(e.target)) {
+        setQuickOpen(null);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [quickOpen]);
 
   const liveViewSupported = session?.camera.capabilities.liveView === true;
   const connected = session?.connected === true;
@@ -297,6 +332,9 @@ export default function TetheringWindowPage() {
 
   const lastPhoto = photos.length > 0 ? photos[photos.length - 1] : null;
   const mainImage = liveViewSupported ? frame : lastPhoto !== null ? (previews[lastPhoto.id] ?? null) : null;
+  const quick = quickSettings(session.settings);
+  const panel = panelSettings(session.settings);
+  const quickError = quick.map((s) => settingErrors[s.id]).find(Boolean);
 
   return (
     <div className="flex h-screen flex-col bg-bg text-text-primary" data-testid="tether-window">
@@ -403,7 +441,7 @@ export default function TetheringWindowPage() {
           )}
           {captureError !== null && (
             <motion.div
-              className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-md bg-red-500/90 px-3 py-1.5 text-[11px] text-white"
+              className="absolute bottom-16 left-1/2 -translate-x-1/2 rounded-md bg-red-500/90 px-3 py-1.5 text-[11px] text-white"
               initial={motionInitial(motionOn, { y: 12, opacity: 0 })}
               animate={{ y: 0, opacity: 1 }}
               transition={TRANS.slide}
@@ -412,6 +450,82 @@ export default function TetheringWindowPage() {
               {captureError}
             </motion.div>
           )}
+
+          {/* 悬浮工具栏（SelectionBar 同款浮条视觉）：曝光三要素 / 对焦 / 白平衡
+              常驻画面底部，随手可调不必翻右栏；末端快门随时可拍。
+              不可调参数不进工具栏——光圈例外（镜头环控制的机身，只读也要看到值）。 */}
+          <div
+            ref={quickBarRef}
+            className="absolute bottom-3 left-1/2 z-20 -translate-x-1/2"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="tether-quickbar"
+          >
+            <div className="flex items-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
+              {quick.map((setting) => (
+                <div key={setting.id} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setQuickOpen((v) => (v === setting.id ? null : setting.id))}
+                    disabled={!setting.writable || !connected}
+                    aria-expanded={quickOpen === setting.id}
+                    className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                    data-testid={`tether-setting-${setting.id}`}
+                  >
+                    {settingLabel(setting.id, setting.label, t)}
+                    <span className="font-mono tabular-nums text-text-primary">{setting.current}</span>
+                    <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M4 10l4-4 4 4" />
+                    </svg>
+                  </button>
+                  {quickOpen === setting.id && setting.options.length > 0 && (
+                    <div
+                      className="sp-scroll absolute bottom-9 left-1/2 z-40 max-h-60 w-max min-w-28 -translate-x-1/2 overflow-y-auto rounded-lg border border-edge bg-surface p-1 shadow-xl"
+                      data-testid={`tether-quick-${setting.id}-menu`}
+                    >
+                      {setting.options.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => {
+                            setQuickOpen(null);
+                            void applySetting(setting, option.value);
+                          }}
+                          className={`block w-full rounded px-2.5 py-1 text-left font-mono text-[11px] tabular-nums transition-colors hover:bg-panel ${
+                            option.value === setting.current ? "bg-panel text-accent" : "text-text-secondary hover:text-accent"
+                          }`}
+                          data-testid={`tether-quick-${setting.id}-opt`}
+                          data-value={option.value}
+                        >
+                          {option.label === "On" ? t("tether.on") : option.label === "Off" ? t("tether.off") : option.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <span className="h-4 w-px bg-edge" aria-hidden="true" />
+              <button
+                type="button"
+                onClick={() => void shoot()}
+                disabled={capturing || !connected}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[3px] border-red-500/80 bg-red-500/15 shadow transition-all hover:bg-red-500/30 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:opacity-50"
+                title={t("tether.shutter")}
+                aria-label={t("tether.shutter")}
+                data-testid="tether-shutter"
+              >
+                {capturing ? (
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-400" />
+                ) : (
+                  <span className="h-3 w-3 rounded-full bg-red-400/80" />
+                )}
+              </button>
+            </div>
+            {quickError !== undefined && (
+              <p className="mt-1.5 text-center text-[11px] text-red-400" data-testid="tether-quick-error" role="status">
+                {t("tether.settingFailed")}：{quickError}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* 右栏：相机参数 + 快门 */}
@@ -431,7 +545,12 @@ export default function TetheringWindowPage() {
               {t("tether.refreshSettings")}
             </button>
           </div>
-          {orderSettings(session.settings).map((setting) =>
+          {panel.length === 0 ? (
+            <p className="text-[11px] leading-relaxed text-text-muted" data-testid="tether-settings-empty">
+              {t("tether.noAdjustable")}
+            </p>
+          ) : (
+            panel.map((setting) =>
             setting.kind === "action" ? (
               <button
                 key={setting.id}
@@ -502,18 +621,9 @@ export default function TetheringWindowPage() {
                   </span>
                 )}
               </label>
-            ),
+            )
+            )
           )}
-          <button
-            type="button"
-            onClick={() => void shoot()}
-            disabled={capturing || !connected}
-            className="mx-auto mt-2 flex h-20 w-20 shrink-0 items-center justify-center rounded-full border-4 border-red-500/70 bg-red-500/15 text-[11px] font-semibold text-red-400 shadow-lg transition-all hover:bg-red-500/30 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:text-text-muted"
-            data-testid="tether-shutter"
-            aria-label={t("tether.shutter")}
-          >
-            {capturing ? t("tether.capturing") : t("tether.shutter")}
-          </button>
         </aside>
       </div>
 

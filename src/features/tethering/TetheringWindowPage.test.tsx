@@ -83,6 +83,7 @@ function dto(overrides: Partial<TetherSessionDto> = {}): TetherSessionDto {
     settings: [
       choice("shutterspeed", "125", true, ["125", "250"]),
       choice("iso", "400", false),
+      choice("f-number", "2.8", false),
     ],
     photos: [],
     connected: true,
@@ -122,7 +123,7 @@ afterEach(() => {
 });
 
 describe("TetheringWindowPage 联拍独立窗口", () => {
-  it("会话快照渲染：标题栏相册名/相机名 + 参数面板（shutter/aperture/iso 本地化）", async () => {
+  it("会话快照渲染：标题栏相册名/相机名 + 悬浮工具栏（快门本地化）", async () => {
     sessionMock.mockResolvedValue(dto());
     renderPage();
 
@@ -130,9 +131,25 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(screen.getByTestId("tether-titlebar").textContent).toContain("棚拍");
     expect(screen.getByTestId("tether-titlebar").textContent).toContain("Nikon D750");
     expect(screen.getByTestId("tether-setting-shutterspeed")).toHaveTextContent("快门");
-    expect(screen.getByTestId("tether-setting-iso")).toHaveTextContent("ISO");
     // live view 支持但还没帧：等待画面提示
     expect(screen.getByTestId("tether-view").textContent).toContain("等待取景画面");
+  });
+
+  it("悬浮工具栏：只读参数隐藏（ISO），光圈例外保留且禁用；拍摄按钮常驻", async () => {
+    sessionMock.mockResolvedValue(dto());
+    renderPage();
+
+    await screen.findByTestId("tether-quickbar");
+    // ISO 只读 → 不渲染（不能调的参数不占位）
+    expect(screen.queryByTestId("tether-setting-iso")).toBeNull();
+    // 光圈只读 → 例外保留（镜头环控制的机身要看到当前值），按钮禁用
+    const aperture = screen.getByTestId("tether-setting-f-number");
+    expect(aperture).toHaveTextContent("光圈");
+    expect(aperture).toHaveTextContent("2.8");
+    expect(aperture).toBeDisabled();
+    // 快门常驻工具栏（无需翻面板）
+    expect(screen.getByTestId("tether-setting-shutterspeed")).toBeInTheDocument();
+    expect(screen.getByTestId("tether-shutter")).toBeInTheDocument();
   });
 
   it("实时取景：帧轮询填充画面（data URL）", async () => {
@@ -187,28 +204,34 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(previewMock).toHaveBeenCalledWith("s1", 9, 256);
   });
 
-  it("改参数 → tetheringSettingSet；成功刷新面板；失败显示内联错误", async () => {
+  it("工具栏改参数：弹层选值 → tetheringSettingSet；失败浮条下提示错误", async () => {
     sessionMock.mockResolvedValue(dto());
     const updated = dto({
       settings: [
         choice("shutterspeed", "250", true, ["125", "250"]),
         choice("iso", "400", false),
+        choice("f-number", "2.8", false),
       ],
     });
     settingSetMock.mockResolvedValueOnce(updated.settings);
     renderPage();
 
-    const select = (await screen.findByTestId("tether-setting-shutterspeed")).querySelector("select");
-    expect(select).not.toBeNull();
-    fireEvent.change(select!, { target: { value: "250" } });
+    // 展开快门弹层 → 点 250
+    fireEvent.click(await screen.findByTestId("tether-setting-shutterspeed"));
+    const menu = await screen.findByTestId("tether-quick-shutterspeed-menu");
+    expect(menu).toBeInTheDocument();
+    const opt = menu.querySelector('[data-value="250"]') as HTMLElement;
+    fireEvent.click(opt);
     await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "shutterspeed", "250"));
-    await waitFor(() => expect((screen.getByTestId("tether-setting-shutterspeed").querySelector("select") as HTMLSelectElement).value).toBe("250"));
+    // 成功后按钮值刷新、弹层收起
+    await waitFor(() => expect(screen.getByTestId("tether-setting-shutterspeed")).toHaveTextContent("250"));
+    expect(screen.queryByTestId("tether-quick-shutterspeed-menu")).toBeNull();
 
+    // 失败：错误显示在浮条下方
     settingSetMock.mockRejectedValueOnce(new Error("无效拍摄参数"));
-    fireEvent.change(screen.getByTestId("tether-setting-shutterspeed").querySelector("select")!, { target: { value: "125" } });
-    await waitFor(() =>
-      expect(screen.getByTestId("tether-setting-shutterspeed").textContent).toContain("设置失败"),
-    );
+    fireEvent.click(screen.getByTestId("tether-setting-shutterspeed"));
+    fireEvent.click(screen.getByTestId("tether-quick-shutterspeed-menu").querySelector('[data-value="125"]')!);
+    await waitFor(() => expect(screen.getByTestId("tether-quick-error")).toHaveTextContent("设置失败"));
   });
 
   it("全参数面板：range 滑条松手才提交、action 按钮直接触发、未知 id 显示后端 label", async () => {

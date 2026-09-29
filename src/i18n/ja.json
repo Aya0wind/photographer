@@ -1263,7 +1263,7 @@
   "tether.param.prioritymode": "優先モード",
   "tether.param.spotfocusarea": "スポットフォーカス位置",
   "tether.refreshSettings": "設定を更新",
-  "albums.tether": "テザリング撮影",
+  "tether.noAdjustable": "このカメラに調整可能なパラメータはありません",  "albums.tether": "テザリング撮影",
   "albums.tetherHint": "カメラを接続してこのアルバムにテザリング撮影",
   "albums.tetherDialogTitle": "「{{name}}」へテザリング撮影",
   "albums.tetherNoCamera": "テザリング可能なカメラが見つかりません（USB 接続しリモートモードを確認）",

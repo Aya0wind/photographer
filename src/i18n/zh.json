@@ -1263,7 +1263,7 @@
   "tether.param.prioritymode": "控制权",
   "tether.param.spotfocusarea": "定点对焦位置",
   "tether.refreshSettings": "刷新参数",
-  "albums.tether": "联机拍摄",
+  "tether.noAdjustable": "当前相机没有可调参数",  "albums.tether": "联机拍摄",
   "albums.tetherHint": "连接相机，在本相册内进行联机拍摄",
   "albums.tetherDialogTitle": "联机拍摄到「{{name}}」",
   "albums.tetherNoCamera": "未发现可联拍的相机（请用数据线连接相机并确认机身处于可遥控模式）",

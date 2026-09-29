@@ -91,6 +91,7 @@ function status(overrides: Partial<GeoStatus> = {}): GeoStatus {
     total: 0,
     message: null,
     cacheReady: true,
+    datavFiles: 361,
     ...overrides,
   };
 }
