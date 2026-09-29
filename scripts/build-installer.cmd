@@ -14,6 +14,14 @@ setlocal enabledelayedexpansion
 set PATH=%USERPROFILE%\.local\nodejs;%USERPROFILE%\.cargo\bin;%PATH%
 cd /d "%~dp0.."
 
+REM flags may appear in any order (CI passes --nopause --online-only)
+set ONLINE_ONLY=0
+set NOPAUSE=0
+for %%A in (%*) do (
+  if /i "%%A"=="--online-only" set ONLINE_ONLY=1
+  if /i "%%A"=="--nopause" set NOPAUSE=1
+)
+
 echo [1/5] toolchain check...
 where node >nul 2>nul || (echo [FAIL] node not found, expected %USERPROFILE%\.local\nodejs & goto :fail)
 where cargo >nul 2>nul || (echo [FAIL] cargo not found, expected %USERPROFILE%\.cargo\bin & goto :fail)
@@ -33,12 +41,15 @@ for %%F in ("src-tauri\target\release\bundle\nsis\*-setup.exe") do (
   echo        exe online: %%~nxF
 )
 
+if %ONLINE_ONLY%==1 goto skip_offline
 echo [4/5] Tauri build - offline WebView2 (config overlay, incremental)...
 call npm run tauri build -- --config src-tauri\tauri.webview-offline.conf.json || goto :fail
 for %%F in ("src-tauri\target\release\bundle\nsis\*-setup.exe") do (
   copy /y "%%~fF" "%OUTDIR%\%%~nF-webview2-offline%%~xF" >nul && set FOUND=1
   echo        exe offline: %%~nF-webview2-offline%%~xF
 )
+
+:skip_offline
 
 echo [5/5] verify artifacts...
 if %FOUND%==0 (
@@ -49,11 +60,11 @@ echo.
 echo DONE. Installers at %CD%\%OUTDIR%\
 dir /b %OUTDIR%
 
-if not "%1"=="--nopause" pause
+if not %NOPAUSE%==1 pause
 exit /b 0
 
 :fail
 echo.
 echo [BUILD FAILED]
-if not "%1"=="--nopause" pause
+if not %NOPAUSE%==1 pause
 exit /b 1

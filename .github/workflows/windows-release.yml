@@ -131,7 +131,9 @@ jobs:
 
       - name: Build NSIS and MSI installers
         shell: cmd
-        run: scripts\build-installer.cmd --nopause
+        # dev 只出精简版（online 模式，缺 WebView2 时安装器引导下载）；
+        # main 才构建 offline 双产物（dev 产物保留 3 天，全量构建无意义）
+        run: scripts\build-installer.cmd --nopause ${{ github.ref == 'refs/heads/dev' && '--online-only' || '' }}
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
