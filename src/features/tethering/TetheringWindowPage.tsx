@@ -456,19 +456,20 @@ export default function TetheringWindowPage() {
               不可调参数不进工具栏——光圈例外（镜头环控制的机身，只读也要看到值）。 */}
           <div
             ref={quickBarRef}
-            className="absolute bottom-3 left-1/2 z-20 -translate-x-1/2"
+            className="absolute bottom-3 left-1/2 z-20 w-max max-w-[calc(100%-2rem)] -translate-x-1/2"
             onClick={(e) => e.stopPropagation()}
             data-testid="tether-quickbar"
           >
-            <div className="flex items-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
+            {/* flex-wrap：放不下时控件折行而不是压缩成竖排文字 */}
+            <div className="flex flex-wrap items-center justify-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
               {quick.map((setting) => (
-                <div key={setting.id} className="relative">
+                <div key={setting.id} className="relative shrink-0">
                   <button
                     type="button"
                     onClick={() => setQuickOpen((v) => (v === setting.id ? null : setting.id))}
                     disabled={!setting.writable || !connected}
                     aria-expanded={quickOpen === setting.id}
-                    className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                    className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                     data-testid={`tether-setting-${setting.id}`}
                   >
                     {settingLabel(setting.id, setting.label, t)}
@@ -503,7 +504,7 @@ export default function TetheringWindowPage() {
                   )}
                 </div>
               ))}
-              <span className="h-4 w-px bg-edge" aria-hidden="true" />
+              <span className="h-4 w-px shrink-0 bg-edge" aria-hidden="true" />
               <button
                 type="button"
                 onClick={() => void shoot()}
