@@ -32,7 +32,13 @@ use xxhash_rust::xxh64::Xxh64;
 use crate::metadata::exif_lite;
 
 /// 可解码扩展名（小写；image crate 位图格式集）。
-pub const DECODABLE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff"];
+pub const DECODABLE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff", "ico", "cur",
+    // 扩展格式（2026-09-29）：纯 Rust 解码器接入
+    "heic", "heif", // heif-oxide（iPhone HEIC：网格拼贴/10bit/Display P3）
+    "jxl",  // jxl-oxide
+    "avif", // avif-decode（rav1d）
+];
 /// RAW 扩展名（内嵌 JPEG 预览提取；提取失败回退前端占位）。
 pub const RAW_EXTS: &[&str] = &[
     "nef", "arw", "cr2", "cr3", "orf", "rw2", "dng", "raf", "pef", "srw",
@@ -505,7 +511,15 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
         }
     } else if matches!(ext.as_str(), "jpg" | "jpeg") {
         jpeg_scaled(src, size).unwrap_or_else(|| full_decode_resize(src, size))
+    } else if matches!(ext.as_str(), "heic" | "heif") {
+        // heif-oxide：输出已是 display-ready（方向已转正）→ orientation 恒 1
+        heif_decode_resize(src, size)?
+    } else if ext == "jxl" {
+        jxl_decode_resize(src, size)?
+    } else if ext == "avif" {
+        avif_decode_resize(src, size)?
     } else {
+        // png/webp/bmp/gif/tif/tiff/ico：image crate 通用路径
         full_decode_resize(src, size)
     };
     let thumb = apply_orientation(thumb, orientation);
@@ -513,6 +527,114 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80);
     thumb.write_with_encoder(encoder).ok()?;
     Some(jpeg)
+}
+
+/// HEIC/HEIF 解码（heif-oxide；输出 display-ready RGBA8，方向已转正）。
+fn heif_decode_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
+    let decoded = heif_oxide::decode_file(src).ok()?;
+    let (w, h) = (decoded.width, decoded.height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let rgba = decoded.to_rgba8();
+    let buffer = image::RgbaImage::from_raw(w, h, rgba)?;
+    Some(
+        image::DynamicImage::ImageRgba8(buffer)
+            .thumbnail(size as u32, size as u32)
+            .to_rgb8(),
+    )
+}
+
+/// JXL 解码（jxl-oxide image 集成：JxlDecoder 实现 image::ImageDecoder）。
+fn jxl_decode_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
+    let file = std::fs::File::open(src).ok()?;
+    let decoder = jxl_oxide::integration::JxlDecoder::new(file).ok()?;
+    let dynamic = image::DynamicImage::from_decoder(decoder).ok()?;
+    Some(dynamic.thumbnail(size as u32, size as u32).to_rgb8())
+}
+
+/// AVIF 解码（avif-decode/rav1d）。多档像素形态统一转 DynamicImage 缩档。
+fn avif_decode_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
+    let bytes = std::fs::read(src).ok()?;
+    let decoded = avif_decode::Decoder::from_avif(&bytes)
+        .ok()?
+        .to_image()
+        .ok()?;
+    let dynamic = match decoded {
+        avif_decode::Image::Rgb8(img) => {
+            let buf: Vec<u8> = img.buf().iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(
+                img.width() as u32,
+                img.height() as u32,
+                buf,
+            )?)
+        }
+        avif_decode::Image::Rgba8(img) => {
+            let buf: Vec<u8> = img
+                .buf()
+                .iter()
+                .flat_map(|p| [p.r, p.g, p.b, p.a])
+                .collect();
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(
+                img.width() as u32,
+                img.height() as u32,
+                buf,
+            )?)
+        }
+        avif_decode::Image::Gray8(img) => {
+            let buf: Vec<u8> = img.buf().iter().map(|p| p.0).collect();
+            image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(
+                img.width() as u32,
+                img.height() as u32,
+                buf,
+            )?)
+        }
+        // 16-bit 档罕见：高位截取到 8-bit
+        // 16-bit 档罕见：直接以 u16 原值组 RGBA16（无 alpha 补满），缩档时归一
+        avif_decode::Image::Rgb16(img) => {
+            let buf: Vec<u16> = img
+                .buf()
+                .iter()
+                .flat_map(|p| [p.r, p.g, p.b, u16::MAX])
+                .collect();
+            image::DynamicImage::ImageRgba16(
+                image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                    img.width() as u32,
+                    img.height() as u32,
+                    buf,
+                )?,
+            )
+        }
+        avif_decode::Image::Rgba16(img) => {
+            let buf: Vec<u16> = img
+                .buf()
+                .iter()
+                .flat_map(|p| [p.r, p.g, p.b, p.a])
+                .collect();
+            image::DynamicImage::ImageRgba16(
+                image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                    img.width() as u32,
+                    img.height() as u32,
+                    buf,
+                )?,
+            )
+        }
+        avif_decode::Image::Gray16(img) => {
+            let buf: Vec<u16> = img
+                .buf()
+                .iter()
+                .flat_map(|p| [p.0, p.0, p.0, u16::MAX])
+                .collect();
+            image::DynamicImage::ImageRgba16(
+                image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
+                    img.width() as u32,
+                    img.height() as u32,
+                    buf,
+                )?,
+            )
+        }
+    };
+    Some(dynamic.thumbnail(size as u32, size as u32).to_rgb8())
 }
 
 /// RAW 全量显影为屏幕预览。输出在编码前缩到查看器档位，避免把数千万像素的
@@ -556,12 +678,22 @@ pub fn apply_orientation(img: image::RgbImage, orientation: u32) -> image::RgbIm
 }
 
 /// image crate 全量解码 + thumbnail 拟合（慢路径/非 JPEG）。解码失败返回
-/// 空图（0x0）使后续编码失败 → 整体 None。
+/// 空图（0x0）使后续编码失败 → 整体 None。魔数嗅探兜底（扩展名伪装的
+/// 文件也能解）；.cur 上游无扩展名映射也无嗅探表项，但其头（00 00 02 00）
+/// 与 ICO 同构——ICO 解码器忽略 type 字段可直接认领，显式指格式打通。
 fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
-    match image::ImageReader::open(src)
-        .ok()
-        .and_then(|r| r.decode().ok())
-    {
+    let decoded = image::ImageReader::open(src).ok().and_then(|mut r| {
+        let is_cur = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("cur"))
+            .unwrap_or(false);
+        if is_cur && r.format().is_none() {
+            r.set_format(image::ImageFormat::Ico);
+        }
+        r.with_guessed_format().ok()?.decode().ok()
+    });
+    match decoded {
         Some(img) => img.thumbnail(u32::from(size), u32::from(size)).to_rgb8(),
         None => image::RgbImage::new(0, 0),
     }

@@ -114,6 +114,7 @@ pub trait DeviceSource: Send + Sync {
 /// 照片扩展名（小写）。
 pub const PHOTO_EXTS: &[&str] = &[
     "jpg", "jpeg", "png", "heic", "heif", "avif", "tif", "tiff", "bmp", "gif", "webp", "jxl",
+    "ico", "cur",
 ];
 /// RAW 扩展名（小写）。
 pub const RAW_EXTS: &[&str] = &[
@@ -156,12 +157,24 @@ fn magic_kind(head: &[u8]) -> Option<AssetKind> {
     if head.starts_with(b"FUJIFILM") {
         return Some(AssetKind::Raw); // RAF
     }
+    if head.starts_with(&[0x00, 0x00, 0x01, 0x00]) || head.starts_with(&[0x00, 0x00, 0x02, 0x00]) {
+        return Some(AssetKind::Photo); // ICO / CUR（00 00 01 00 / 00 00 02 00）
+    }
+    if head.starts_with(&[0xFF, 0x0A]) {
+        return Some(AssetKind::Photo); // JXL 裸码流（JPEG 起始为 FF D8，不冲突）
+    }
+    if head.starts_with(&[
+        0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A,
+    ]) {
+        return Some(AssetKind::Photo); // JXL 容器签名
+    }
     if head.len() >= 12 && &head[4..8] == b"ftyp" {
         let brand = &head[8..12];
         return match brand {
             b"crx " | b"CRX " => Some(AssetKind::Raw), // CR3
             b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some(AssetKind::Photo),
-            _ => Some(AssetKind::Other), // 非图片 ISOBMFF 容器
+            b"avif" | b"avis" => Some(AssetKind::Photo), // AVIF 静图 / 序列
+            _ => Some(AssetKind::Other),                 // 非图片 ISOBMFF 容器
         };
     }
     if head.starts_with(b"RIFF") {
@@ -281,6 +294,33 @@ mod tests {
         );
         assert_eq!(
             classify("a.heic", &head(b"\0\0\0\x18ftypheic\0\0")),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify("a.heic", &head(b"\0\0\0\x18ftypmif1\0\0")),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify("a.avif", &head(b"\0\0\0\x20ftypavif\0\0")),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify("a.jxl", &head(&[0xFF, 0x0A, 0x78, 0x02])),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify(
+                "a.jxl",
+                &head(&[0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A])
+            ),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify("a.ico", &head(&[0x00, 0x00, 0x01, 0x00])),
+            AssetKind::Photo
+        );
+        assert_eq!(
+            classify("a.cur", &head(&[0x00, 0x00, 0x02, 0x00])),
             AssetKind::Photo
         );
         assert_eq!(

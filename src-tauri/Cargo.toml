@@ -20,6 +20,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
+# 扩展图片格式解码（2026-09-29 格式支持批次）：全部纯 Rust/无 C 构建负担
+heif-oxide = "0.1"
+jxl-oxide = { version = "0.12", features = ["image"] }
+avif-decode = "3"
 # JPEG 缩放解码（TJSCALED：DCT 域直出小图，61MP 全量 1-3s → ~100ms）；
 # vendored 自带 libjpeg-turbo 源码构建（需 cmake，已验证本机可用）；
 # "image" feature 直接解到 image::RgbImage。
@@ -89,6 +93,7 @@ windows = { version = "0.61", features = [
   "Win32_Devices_Enumeration",
   "Win32_System_Threading",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
   "Win32_System_LibraryLoader",
 ] }
 # windows::core::implement 宏展开引用 windows_core:: 路径，需具名直依赖。
