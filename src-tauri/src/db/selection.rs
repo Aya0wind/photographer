@@ -105,6 +105,8 @@ impl Db {
     }
 
     /// 回收站还原（幂等）。返回还原行数。
+    /// 还原即归位「一照一册」模型：原相册已删（归属级联消失）的照片落入
+    /// 默认相册「未分组」（已有归属的保持不变；未分组禁删，见 albums 层）。
     pub fn trash_restore(&self, ids: &[i64]) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -119,8 +121,28 @@ impl Db {
                  WHERE id IN ({slots}) AND in_trash = 1"
             ),
             rusqlite::params_from_iter(ids.iter().copied()),
-        )?;
-        Ok(n as u64)
+        )? as u64;
+        if n > 0 {
+            let default_id = self.ensure_default_album()?;
+            // 参数序：?1=默认相册 id，?2=added_at，?3..=资产 id（IN 子句）
+            let in_slots = (0..ids.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.0.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
+                     SELECT ?1, id, ?2 FROM assets WHERE id IN ({in_slots}) \
+                     AND NOT EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = assets.id)"
+                ),
+                rusqlite::params_from_iter(
+                    std::iter::once(rusqlite::types::Value::from(default_id))
+                        .chain(std::iter::once(rusqlite::types::Value::from(now_rfc3339())))
+                        .chain(ids.iter().map(|id| rusqlite::types::Value::from(*id))),
+                ),
+            )?;
+        }
+        Ok(n)
     }
 
     /// 回收站内资产行（id → (path, origin)）：purge 物理删除前取清单，

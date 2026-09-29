@@ -320,7 +320,7 @@
   "albums.delete": "アルバムを削除",
   "albums.deleteTitle": "アルバム「{{name}}」を削除しますか?",
   "albums.deleteConfirm": "アルバムを削除",
-  "albums.deleteHint": "参照のみが削除され、{{count}} 写真はギャラリーに残ります。",
+  "albums.deleteHint":  "アルバム内の {{count}} 枚をゴミ箱へ移動します。復元した写真は「未分组」に戻ります。",
   "albums.setCover": "表紙に設定",
   "albums.coverPickTitle": "セレクトカバー・{{name}}",
   "albums.coverPickEmpty": "アルバムにはまだ写真がありません。写真を追加したら表紙を設定します。",

@@ -320,7 +320,7 @@
   "albums.delete": "Delete album",
   "albums.deleteTitle": "Delete album \"{{name}}\"?",
   "albums.deleteConfirm": "Delete album",
-  "albums.deleteHint": "Only the reference is removed, the {{count}} photo remains in the gallery.",
+  "albums.deleteHint":  "{{count}} photos in this album will be moved to the trash; restored photos go to \"未分组\".",
   "albums.setCover": "Set as cover",
   "albums.coverPickTitle": "Select cover · {{name}}",
   "albums.coverPickEmpty": "There are no photos in the album yet. Set the cover after adding photos.",

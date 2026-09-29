@@ -77,11 +77,26 @@ pub fn fetch_album_rename(state: &super::AppState, id: i64, name: &str) -> Resul
     })
 }
 
-/// 删相册核：只删引用（album_item 级联消失），资产与物理文件绝不动；
-/// 相册不存在报错（前端列表刷新前的竞态显式暴露）；默认相册「未分组」
-/// 拒删（db 层守卫，此处转友好文案）。
+/// 删相册核：一照一册模型下相册是照片的唯一归属——删册前先把全部成员
+/// 移入回收站（软删；原册已不存在时，还原会落入默认相册「未分组」），
+/// 再删相册行（album_item 引用级联消失）。相册不存在报错（前端列表刷新
+/// 前的竞态显式暴露）；默认相册「未分组」拒删（db 层守卫，此处转友好文案）。
 pub fn fetch_album_delete(state: &super::AppState, id: i64) -> Result<(), String> {
     let db = super::active_library_db(state)?;
+    let members: Vec<i64> = {
+        let mut stmt = db
+            .0
+            .prepare("SELECT asset_id FROM album_item WHERE album_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map([id], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    if !members.is_empty() {
+        db.assets_trash_move(&members)
+            .map_err(|e| e.to_string())?;
+    }
     db.album_delete(id).map_err(|e| match e {
         rusqlite::Error::InvalidParameterName(msg) => msg,
         other => map_missing(other),

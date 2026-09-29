@@ -504,7 +504,7 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument();
   });
 
-  it("卡片右键菜单：重命名 / 设为封面 / 删除；删除红色确认弹窗文案「仅移除引用，N 张照片保留在图库」", async () => {
+  it("卡片右键菜单：重命名 / 设为封面 / 删除；删除红色确认弹窗文案「N 张照片将移入回收站」", async () => {
     const user = userEvent.setup();
     albumListMock.mockResolvedValue([makeAlbum(3, "待整理", 8)]);
     renderRoutes("/albums");
@@ -520,7 +520,7 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     await user.click(within(menu).getByTestId("albums-card-context-menu-item-delete"));
     const dialog = await screen.findByTestId("album-delete-dialog");
     expect(within(dialog).getByTestId("album-delete-hint")).toHaveTextContent(
-      "仅移除引用，8 张照片保留在图库",
+      "相册内 8 张照片将移入回收站",
     );
 
     // 确认 → album_delete(3) + 卡片移除

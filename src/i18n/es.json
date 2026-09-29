@@ -320,7 +320,7 @@
   "albums.delete": "Eliminar álbum",
   "albums.deleteTitle": "¿Eliminar álbum \"{{name}}\"?",
   "albums.deleteConfirm": "Eliminar álbum",
-  "albums.deleteHint": "Solo se elimina la referencia, la foto {{count}} permanece en la galería.",
+  "albums.deleteHint":  "Las {{count}} fotos del álbum se moverán a la papelera; las restauradas irán a «未分组».",
   "albums.setCover": "Establecer como portada",
   "albums.coverPickTitle": "Seleccionar portada · {{name}}",
   "albums.coverPickEmpty": "Aún no hay fotos en el álbum. Configure la portada después de agregar fotos.",

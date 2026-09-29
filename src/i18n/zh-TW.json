@@ -320,7 +320,7 @@
   "albums.delete": "刪除相簿",
   "albums.deleteTitle": "刪除相簿「{{name}}」？",
   "albums.deleteConfirm": "刪除相簿",
-  "albums.deleteHint": "僅移除引用，{{count}} 張照片保留在圖庫。",
+  "albums.deleteHint":  "相冊內 {{count}} 張照片將移入回收站；還原後歸入「未分组」。",
   "albums.setCover": "設爲封面",
   "albums.coverPickTitle": "選擇封面 · {{name}}",
   "albums.coverPickEmpty": "相簿還沒有照片，加入照片後再設定封面。",

@@ -285,7 +285,7 @@ fn asset_permanent_delete_cascades_references_and_cover() {
 }
 
 #[test]
-fn album_delete_only_removes_references_never_assets() {
+fn album_delete_trashes_members_and_restore_lands_in_default_album() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
@@ -296,14 +296,39 @@ fn album_delete_only_removes_references_never_assets() {
     fetch_album_add_assets(&state, album.id, &[a1, a2], None).unwrap();
     assert_eq!(count_assets(&db), 2);
 
+    // 一照一册模型：删相册 = 成员全部软删入回收站（行保留 in_trash=1），
+    // 引用级联消失、列表为空
     fetch_album_delete(&state, album.id).unwrap();
-    // 只删引用：资产原封不动、引用级联清空、列表为空
-    assert_eq!(count_assets(&db), 2, "删相册绝不动资产");
+    assert_eq!(count_assets(&db), 2, "软删不删行");
+    assert_eq!(
+        db.0
+            .query_row("SELECT COUNT(*) FROM assets WHERE in_trash = 1", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "成员全部在回收站"
+    );
     assert_eq!(album_item_count(&db), 0);
     assert!(fetch_album_list(&state).unwrap().is_empty());
-    // 再删（不存在）明确报错；封面/物理文件无涉
+
+    // 还原：原册已删 → 落入默认相册「未分组」
+    assert_eq!(ipc::selection::fetch_trash_restore(&state, &[a1, a2]).unwrap(), 2);
+    let default_id = db.ensure_default_album().unwrap();
+    let in_default: i64 = db.0
+        .query_row(
+            "SELECT COUNT(*) FROM album_item WHERE album_id = ?1 AND asset_id IN (?2, ?3)",
+            rusqlite::params![default_id, a1, a2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(in_default, 2, "还原后归属「未分组」");
+    assert_eq!(count_assets(&db), 2);
+
+    // 再删（不存在）明确报错
     let err = fetch_album_delete(&state, album.id).unwrap_err();
     assert!(err.contains("相册不存在"), "{err}");
+    // 默认相册「未分组」拒删
+    let err = fetch_album_delete(&state, default_id).unwrap_err();
+    assert!(err.contains("不可删除"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
