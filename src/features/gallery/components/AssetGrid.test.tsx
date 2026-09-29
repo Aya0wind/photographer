@@ -213,34 +213,9 @@ describe("AssetGrid：多选交互", () => {
     expect(onOpenAsset).not.toHaveBeenCalled();
   });
 
-  it("按住鼠标拖过多张照片会连续选择，随后 click 不会重复切换", () => {
-    const onToggle = vi.fn();
-    renderGrid({
-      groups: groupsOf([asset(1), asset(2)]),
-      selection: { active: true, selected: [], onToggle },
-    });
 
-    const tiles = screen.getAllByTestId("gallery-tile");
-    fireEvent.pointerDown(tiles[0], { button: 0, pointerType: "mouse" });
-    fireEvent.pointerEnter(tiles[1], { pointerType: "mouse" });
-    fireEvent.pointerUp(tiles[1], { pointerType: "mouse" });
-    fireEvent.click(tiles[1]);
 
-    expect(onToggle.mock.calls.map(([a]) => a.id)).toEqual([1, 2]);
-  });
 
-  it("从已选照片开始拖动时统一取消经过的照片", () => {
-    const onToggle = vi.fn();
-    renderGrid({
-      groups: groupsOf([asset(1), asset(2)]),
-      selection: { active: true, selected: [1, 2], onToggle },
-    });
-
-    const tiles = screen.getAllByTestId("gallery-tile");
-    fireEvent.pointerDown(tiles[0], { button: 0, pointerType: "mouse" });
-    fireEvent.pointerEnter(tiles[1], { pointerType: "mouse" });
-    expect(onToggle.mock.calls.map(([a]) => a.id)).toEqual([1, 2]);
-  });
 
   it("check 圆钮点击 stopPropagation：只进多选不开查看器；默认 hover 显示、多选态常显", async () => {
     const onOpenAsset = vi.fn();
@@ -261,7 +236,7 @@ describe("AssetGrid：多选交互", () => {
 
     await user.click(checks[0]);
     expect(onCheckClick).toHaveBeenCalledTimes(1);
-    expect(onCheckClick).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+    expect(onCheckClick).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }), undefined);
     expect(onOpenAsset).not.toHaveBeenCalled(); // 不触发瓦片本身（不开查看器）
     first.unmount();
 
@@ -336,5 +311,65 @@ describe("AssetGrid：颜色标签与拒绝旗标瓦片呈现", () => {
 
     expect(screen.queryByTestId("tile-favorite")).not.toBeInTheDocument();
     expect(screen.getByTestId("tile-check")).toBeInTheDocument();
+  });
+});
+
+describe("Shift 区间选择（2026-09-29）", () => {
+  it("多选态：点击 A 后 Shift+点击 C → onToggle 收到区间选项（order=视图全序列）", async () => {
+    const onToggle = vi.fn();
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const user = userEvent.setup();
+    renderGrid({
+      groups: [{ key: "a", date: "2026-09-18", assets: [asset(1), asset(2), asset(3), asset(4)] }],
+      selection: { active: true, selected: [], onToggle },
+    });
+    const tile = (id: number) =>
+      screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === String(id)) as HTMLElement;
+
+    await user.click(tile(1));
+    expect(onToggle).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1 }));
+
+    await user.keyboard("{Shift>}");
+    await user.click(tile(3));
+    await user.keyboard("{/Shift}");
+    const calls = onToggle.mock.calls as unknown as [AssetDto, { shift: boolean; order: number[] }][];
+    const [assetArg, opts] = calls[calls.length - 1];
+    expect(assetArg.id).toBe(3);
+    expect(opts.shift).toBe(true);
+    expect(opts.order).toEqual([1, 2, 3, 4]);
+  });
+
+  it("非多选态：Shift+点击走 onCtrlClick 进多选（不打开查看器），带区间选项", async () => {
+    const onCtrlClick = vi.fn();
+    const onOpenAsset = vi.fn();
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const user = userEvent.setup();
+    renderGrid({
+      groups: [{ key: "a", date: "2026-09-18", assets: [asset(1), asset(2)] }],
+      onCtrlClick,
+      onOpenAsset,
+    });
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getAllByTestId("gallery-tile")[1]);
+    await user.keyboard("{/Shift}");
+    expect(onCtrlClick).toHaveBeenCalledTimes(1);
+    expect(onOpenAsset).not.toHaveBeenCalled();
+    const opts = onCtrlClick.mock.calls[0][1] as { shift: boolean; order: number[] };
+    expect(opts.shift).toBe(true);
+  });
+
+  it("check 圆钮：Shift+点击同样带区间选项", async () => {
+    const onCheckClick = vi.fn();
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const user = userEvent.setup();
+    renderGrid({
+      groups: [{ key: "a", date: "2026-09-18", assets: [asset(1), asset(2)] }],
+      onCheckClick,
+    });
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getAllByTestId("tile-check")[1]);
+    await user.keyboard("{/Shift}");
+    const opts = onCheckClick.mock.calls[0][1] as { shift: boolean };
+    expect(opts.shift).toBe(true);
   });
 });

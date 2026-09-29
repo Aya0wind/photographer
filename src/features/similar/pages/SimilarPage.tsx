@@ -42,16 +42,16 @@ interface GroupCardProps {
 }
 
 /** 单个重复组卡：组头 + 勾选区 + 删除所选（勾选态由本卡自持）。
- *  拖拽划选（2026-09-29）：按住勾选钮（或已选中瓦片）拖过其他瓦片 = 连续
- *  选中——AssetGrid 同款「按下定意图、划过即应用」语义。 */
+ *  选择（2026-09-29 定案：划选退役——适用移动端而非 PC）：勾选钮点击
+ *  切换单张；Shift+点击从锚点拉组内区间（Explorer 语义，锚点不随 Shift
+ *  移动）。 */
 function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
-  /** 划选意图：按下时目标态（勾选未选=true / 取消已选=false）；null=未在划选 */
-  const sweepRef = useRef<boolean | null>(null);
+  /** Shift 区间锚点：组内最近一次普通勾选；Shift 拉区间不动锚点 */
+  const anchorRef = useRef<number | null>(null);
 
-  /** 划选应用：意图方向幂等（已符合意图的瓦片不重复处理） */
-  const sweep = (id: number, target: boolean) => {
+  const apply = (id: number, target: boolean) => {
     setSelected((current) => {
       if (current.has(id) === target) return current;
       const next = new Set(current);
@@ -61,15 +61,22 @@ function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps)
     });
   };
 
-  const beginSweep = (assetId: number, checked: boolean) => {
+  const toggle = (assetId: number, checked: boolean, shift = false) => {
     const target = !checked;
-    sweepRef.current = target;
-    sweep(assetId, target);
-    const onUp = () => {
-      sweepRef.current = null;
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointerup", onUp);
+    // Shift：锚点到该瓦片的组内区间一步到位（方向=被点瓦片的目标态）
+    if (shift && anchorRef.current !== null) {
+      const assets = group.assets;
+      const anchorIdx = assets.findIndex((item) => item.id === anchorRef.current);
+      const targetIdx = assets.findIndex((item) => item.id === assetId);
+      if (anchorIdx >= 0 && targetIdx >= 0) {
+        const [lo, hi] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx];
+        for (let i = lo; i <= hi; i++) apply(assets[i].id, target);
+        return;
+      }
+      // 锚点不在组内（异常态）：按无锚点重新起锚
+    }
+    anchorRef.current = assetId;
+    apply(assetId, target);
   };
 
   const ids = [...selected];
@@ -116,26 +123,17 @@ function GroupCard({ group, index, onDelete, tileSize, onOpen }: GroupCardProps)
               data-asset-id={asset.id}
               data-selected={checked ? "true" : undefined}
               title={asset.name}
-              onPointerEnter={() => {
-                if (sweepRef.current !== null) sweep(asset.id, sweepRef.current);
-              }}
-              onPointerDown={(e) => {
-                // 已选中瓦片上按下 = 开始取消划选（未选瓦片走勾选钮开启选中划选）
-                if (e.button === 0 && checked) beginSweep(asset.id, true);
-              }}
             >
               <button type="button" onClick={() => onOpen(asset)} className="h-full w-full" aria-label={asset.name} data-testid="similar-asset-preview">
                 <AssetThumb asset={asset} size={CARD_THUMB_PX} className="h-full w-full" />
               </button>
               <button
                 type="button"
-                onPointerDown={(e) => {
-                  if (e.button === 0) {
-                    e.stopPropagation();
-                    beginSweep(asset.id, checked);
-                  }
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggle(asset.id, checked, e.shiftKey);
                 }}
-                onClick={(e) => e.stopPropagation()}
                 aria-pressed={checked}
                 aria-label={t("similar.selectPhoto")}
                 className={`absolute left-1.5 top-1.5 flex h-4 w-4 touch-none items-center justify-center rounded border text-[10px] font-bold leading-none transition-colors ${

@@ -15,6 +15,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { assetRatingSet, type AssetDto } from "@/ipc/api";
 import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING } from "../lib/colorLabels";
+import type { ToggleOptions } from "../lib/useAssetSelection";
 import {
   UNKNOWN_GROUP_KEY,
   formatDateLabel,
@@ -140,7 +141,7 @@ export interface ViewportInfo {
 export interface GridSelection {
   active: boolean;
   selected: readonly number[];
-  onToggle: (asset: AssetDto) => void;
+  onToggle: (asset: AssetDto, opts?: ToggleOptions) => void;
 }
 
 interface AssetGridProps {
@@ -148,11 +149,11 @@ interface AssetGridProps {
   /** 点击资产块（打开查看器）；省略时块为纯展示 */
   onOpenAsset?: (asset: AssetDto, group: AssetGroup) => void;
   /** Ctrl/Cmd+点击（进入多选并选中该资产）；省略时不响应 */
-  onCtrlClick?: (asset: AssetDto) => void;
+  onCtrlClick?: (asset: AssetDto, opts?: ToggleOptions) => void;
   /** 长按瓦片 500ms（进入多选并选中该资产）；省略时不响应 */
   onLongPress?: (asset: AssetDto) => void;
   /** 瓦片左上角 check 圆钮点击（进入多选并选中该资产；多选态=切换选中）；省略不渲染 */
-  onCheckClick?: (asset: AssetDto) => void;
+  onCheckClick?: (asset: AssetDto, opts?: ToggleOptions) => void;
   onFavoriteChange?: (asset: AssetDto, favorite: boolean) => void;
   /** 瓦片右键（自定义菜单；坐标为光标 client 坐标）；省略时不响应 */
   onAssetContextMenu?: (asset: AssetDto, at: { x: number; y: number }) => void;
@@ -238,6 +239,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
         : (width + GAP) / (tile + GAP),
     ),
   );
+
+  // 视图完整有序 id（Shift 区间选择的 order 来源：组序=展示序）
+  const orderedIds = useMemo(() => groups.flatMap((group) => group.assets.map((a) => a.id)), [groups]);
 
   // 行划分（useMemo 重算）：折叠组只保留头行；square 按列数切片等宽；justify 按宽高比贪心切行
   const rows = useMemo<GridRow[]>(() => {
@@ -379,10 +383,6 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   // --- 长按（进入多选）：pointerdown 起 500ms 计时，抬起/离开/滚动取消 ----------------
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
-  const dragSelection = useRef<{ intent: "select" | "deselect"; visited: Set<number> } | null>(null);
-  const suppressTileClick = useRef(false);
-  const selectedIds = useRef(new Set(selection?.selected ?? []));
-  selectedIds.current = new Set(selection?.selected ?? []);
   const clearLongPress = useCallback(() => {
     if (longPressTimer.current !== null) {
       clearTimeout(longPressTimer.current);
@@ -391,39 +391,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   }, []);
   useEffect(() => clearLongPress, [clearLongPress]);
 
-  useEffect(() => {
-    const finishDrag = () => {
-      dragSelection.current = null;
-      // click follows pointerup synchronously. Keep suppression through that click, then
-      // release it so a pointerup outside the tile cannot swallow the next interaction.
-      window.setTimeout(() => {
-        suppressTileClick.current = false;
-      }, 0);
-    };
-    window.addEventListener("pointerup", finishDrag);
-    window.addEventListener("pointercancel", finishDrag);
-    return () => {
-      window.removeEventListener("pointerup", finishDrag);
-      window.removeEventListener("pointercancel", finishDrag);
-    };
-  }, []);
-
-  function applyDragSelection(asset: AssetDto, intent: "select" | "deselect"): void {
-    const selected = selectedIds.current.has(asset.id);
-    if ((intent === "select") === selected) return;
-    if (intent === "select") selectedIds.current.add(asset.id);
-    else selectedIds.current.delete(asset.id);
-    selection?.onToggle(asset);
-  }
-
-  function handleTilePointerDown(asset: AssetDto, event: React.PointerEvent<HTMLButtonElement>): void {
-    if (selection?.active && event.button === 0 && event.pointerType === "mouse") {
-      const intent = selectedIds.current.has(asset.id) ? "deselect" : "select";
-      dragSelection.current = { intent, visited: new Set([asset.id]) };
-      suppressTileClick.current = true;
-      applyDragSelection(asset, intent);
-      return;
-    }
+  function handleTilePointerDown(asset: AssetDto): void {
+    // 划选（拖拽多选）已退役（2026-09-29 用户定案：滑动多选适用移动端，
+    // PC 保留点击切换 + Shift 区间）；pointerdown 只剩长按进多选的计时。
     if (selection?.active || !onLongPress) return; // 已在多选或调用方不支持
     longPressFired.current = false;
     clearLongPress();
@@ -434,26 +404,22 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     }, LONG_PRESS_MS);
   }
 
-  function handleTilePointerEnter(asset: AssetDto, event: React.PointerEvent<HTMLButtonElement>): void {
-    const drag = dragSelection.current;
-    if (!drag || event.pointerType !== "mouse" || drag.visited.has(asset.id)) return;
-    drag.visited.add(asset.id);
-    applyDragSelection(asset, drag.intent);
-  }
-
-  function handleTileClick(asset: AssetDto, group: AssetGroup, ctrl: boolean): void {
+  function handleTileClick(asset: AssetDto, group: AssetGroup, ctrl: boolean, shift: boolean): void {
     if (longPressFired.current) {
       // 长按刚触发：吞掉本次 click（多选已切换）
       longPressFired.current = false;
       return;
     }
+    // Shift+点击（含未进多选态）：从锚点拉区间——与 Ctrl 同入口进多选；
+    // 无 shift 保持单参调用（旧契约）
     if (selection?.active) {
-      if (suppressTileClick.current) return;
-      selection.onToggle(asset);
+      if (shift) selection.onToggle(asset, { shift: true, order: orderedIds });
+      else selection.onToggle(asset);
       return;
     }
-    if (ctrl && onCtrlClick) {
-      onCtrlClick(asset);
+    if ((ctrl || shift) && onCtrlClick) {
+      if (shift) onCtrlClick(asset, { shift: true, order: orderedIds });
+      else onCtrlClick(asset);
       return;
     }
     onOpenAsset?.(asset, group);
@@ -604,7 +570,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             aria-label={asset.name}
                             onClick={(e) => {
                               e.stopPropagation();
-                              onCheckClick(asset);
+                              onCheckClick(asset, e.shiftKey ? { shift: true, order: orderedIds } : undefined);
                             }}
                             onPointerDown={(e) => e.stopPropagation()}
                             onContextMenu={(e) => e.stopPropagation()}
@@ -679,9 +645,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                       <button
                         key={asset.id}
                         type="button"
-                        onClick={(e) => handleTileClick(asset, row.group, e.ctrlKey || e.metaKey)}
-                        onPointerDown={(e) => handleTilePointerDown(asset, e)}
-                        onPointerEnter={(e) => handleTilePointerEnter(asset, e)}
+                        onClick={(e) => handleTileClick(asset, row.group, e.ctrlKey || e.metaKey, e.shiftKey)}
+                        onPointerDown={() => handleTilePointerDown(asset)}
                         onPointerUp={clearLongPress}
                         onPointerLeave={clearLongPress}
                         onDragStart={(e) => e.preventDefault()}

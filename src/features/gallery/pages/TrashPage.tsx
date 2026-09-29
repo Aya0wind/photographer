@@ -9,6 +9,7 @@ import {
 } from "@/ipc/api";
 import { groupAssetsByDate } from "../lib/assetGroups";
 import AssetGrid from "../components/AssetGrid";
+import { useAssetSelection } from "../lib/useAssetSelection";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
 
@@ -31,7 +32,8 @@ export default function TrashPage() {
   const [assets, setAssets] = useState<AssetDto[]>([]);
   const [status, setStatus] = useState<"loading" | "ready">("loading");
   const [hasMore, setHasMore] = useState(false);
-  const [selected, setSelected] = useState<number[]>([]);
+  // 共享选择钩子（Shift 区间 + 锚点；回收站恒多选态，selecting 不用）
+  const { selected, setSelected, toggleSelected, exitSelection } = useAssetSelection();
   /** 彻底删除确认弹窗目标（null=关闭；deleteFiles 两档由弹窗内选择） */
   const [purgeTargets, setPurgeTargets] = useState<number[] | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -67,13 +69,7 @@ export default function TrashPage() {
     };
   }, []);
 
-  // --- 多选（复用 AssetGrid 选择机制；点击瓦片=切换选中） --------------------------------
-  const toggleSelected = useCallback((asset: AssetDto) => {
-    setSelected((prev) =>
-      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
-    );
-  }, []);
-  const exitSelection = useCallback(() => setSelected([]), []);
+
 
   /** 本地从列表剔除（乐观更新；IPC 失败靠重进页面重拉兜底） */
   const removeFromList = useCallback((ids: number[]) => {
