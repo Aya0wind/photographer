@@ -36,23 +36,61 @@ use crate::events::{AssetKind, FileState};
 /// 打开（必要时创建）库文件，并应用连接级 PRAGMA。
 pub struct Db(pub Connection);
 
+/// 迁移串行锁（进程级）：新库首开时多连接并发 migrate 会交错执行 DDL，
+/// 见 [`Db::migrate`]。const fn new 稳定后无需 OnceLock。
+static MIGRATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl Db {
     /// WAL（读写不互斥）+ foreign_keys + 5s busy_timeout。
+    /// busy_timeout 必须最先设置：journal_mode 的 WAL 转换在无忙等时
+    /// 会瞬时返回 BUSY（并发首开的真实竞态，schema_migrate_race_test）。
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
         // NORMAL 是与 WAL 配套的常规同步档位（断电最多丢最后事务，不损坏库）。
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
-        conn.busy_timeout(Duration::from_secs(5))?;
         Ok(Self(conn))
     }
 
+    /// 打开并迁移，open 的 PRAGMA 串与迁移全程同持 [`MIGRATE_LOCK`]：
+    /// 新库首开时并发连接的 WAL 转换与 DDL 都不会再互相踩（生产入口，
+    /// ipc::open_library_db 专用；只读/测试场景可直接 [`Db::open`]）。
+    pub fn open_migrated(path: &Path) -> Result<Self> {
+        let _guard = MIGRATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let db = Self::open(path)?;
+        db.migrate_locked()?;
+        Ok(db)
+    }
+
     /// `PRAGMA user_version` 驱动的顺序迁移；每条迁移独立事务提交。
+    /// 全程持 [`MIGRATE_LOCK`]：后到连接锁内重读版本即 no-op；已迁移库
+    /// 只多付一次 PRAGMA 读（2026-09-29 实测并发首开撞
+    /// 「table already exists / duplicate column」后引入）。
     pub fn migrate(&self) -> Result<()> {
+        let _guard = MIGRATE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.migrate_locked()
+    }
+
+    /// 锁内实现（调用方须已持 [`MIGRATE_LOCK`]，Mutex 非重入）。
+    fn migrate_locked(&self) -> Result<()> {
         let current: i64 = self
             .0
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // 测试故障注入（同 SMARTPHOTO_DL_TEST_BASE 风格）：放大「读版本→
+        // 首个建表」窗口，让并发竞态在 schema_migrate_race_test 确定性复现。
+        if current < migrations::MIGRATIONS.len() as i64 {
+            if let Ok(ms) = std::env::var("SMARTPHOTO_MIGRATE_RACE_TEST_MS") {
+                if let Ok(ms) = ms.parse::<u64>() {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+            }
+        }
         for (index, sql) in migrations::MIGRATIONS.iter().enumerate() {
             let version = (index + 1) as i64;
             if version <= current {

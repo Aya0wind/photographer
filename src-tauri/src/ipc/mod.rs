@@ -339,11 +339,12 @@ pub fn active_library_db(state: &AppState) -> Result<Db, String> {
     open_library_db(&dir)
 }
 
-/// 打开指定 dbDir 的库连接（library.db + 迁移幂等）。
+/// 打开指定 dbDir 的库连接（library.db + 迁移幂等；open 与迁移同锁串行，
+/// 新库并发首开不撞 DDL/WAL 转换，见 [`Db::open_migrated`]）。
 pub fn open_library_db(db_dir: &Path) -> Result<Db, String> {
     std::fs::create_dir_all(db_dir).map_err(|e| format!("库目录不可用: {e}"))?;
-    let db = Db::open(&db_dir.join("library.db")).map_err(|e| format!("打开库失败: {e}"))?;
-    db.migrate().map_err(|e| format!("库迁移失败: {e}"))?;
+    let db = Db::open_migrated(&db_dir.join("library.db"))
+        .map_err(|e| format!("打开/迁移库失败: {e}"))?;
     Ok(db)
 }
 
