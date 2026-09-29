@@ -11,7 +11,27 @@ pub mod present;
 #[cfg(any(windows, test))]
 pub mod timed_worker;
 pub mod volume;
+#[cfg(windows)]
+#[path = "../platform/windows/wpd.rs"]
 pub mod wpd;
+#[cfg(target_os = "macos")]
+#[path = "../platform/macos/wpd.rs"]
+pub mod wpd;
+#[cfg(target_os = "linux")]
+#[path = "../platform/linux/wpd.rs"]
+pub mod wpd;
+#[cfg(target_os = "android")]
+#[path = "../platform/android/wpd.rs"]
+pub mod wpd;
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android"
+)))]
+#[path = "../platform/unsupported/wpd.rs"]
+pub mod wpd;
+mod wpd_helpers;
 
 use std::io::Read;
 

@@ -46,8 +46,8 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 sha2 = "0.10"
 # M4 AI 推理：ONNX Runtime（directml feature = 构建期下载含 DML 的 ms
 # 预编译库；EP 选择在运行时按 settings.ai.use_gpu / env 覆盖——见
-# ai/mod.rs execution_providers，DML 注册失败 ort 自动回落 CPU EP）
-ort = { version = "2.0.0-rc.13", features = ["directml"] }
+# platform/windows/runtime.rs；DirectML feature 仅在 Windows 启用）
+ort = { version = "2.0.0-rc.13" }
 # SigLIP2 文本分词（HuggingFace 官方 Rust，加载 tokenizer.json WordPiece 词表）
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # HNSW 向量索引（768 维 cos 距离，dbDir/vectors.usearch）
@@ -68,6 +68,7 @@ ab_glyph = "0.2"
 img-parts = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+ort = { version = "2.0.0-rc.13", features = ["directml"] }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",

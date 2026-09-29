@@ -27,8 +27,27 @@
 
 pub mod backend;
 pub mod mtp;
+#[cfg(windows)]
+#[path = "../platform/windows/wpd_backend.rs"]
+pub mod wpd_backend;
+#[cfg(target_os = "macos")]
+#[path = "../platform/macos/wpd_backend.rs"]
+pub mod wpd_backend;
+#[cfg(target_os = "linux")]
+#[path = "../platform/linux/wpd_backend.rs"]
+pub mod wpd_backend;
+#[cfg(target_os = "android")]
+#[path = "../platform/android/wpd_backend.rs"]
+pub mod wpd_backend;
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "android"
+)))]
+#[path = "../platform/unsupported/wpd_backend.rs"]
 pub mod wpd_backend;
 
-pub mod sony_backend;
 pub mod gphoto_backend;
 pub mod session;
+pub mod sony_backend;

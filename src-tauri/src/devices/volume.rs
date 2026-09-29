@@ -14,10 +14,6 @@ use walkdir::WalkDir;
 use super::{is_media_ext, normalize_rel_path, DeviceError, DeviceResult, DeviceSource, FileEntry};
 use crate::events::SourceKind;
 
-/// `FILE_FLAG_SEQUENTIAL_SCAN`：提示系统按顺序访问优化预读（spec §5.1）。
-#[cfg(windows)]
-const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
-
 /// 卷内非用户数据目录（spec §5.1：跳过系统目录）。
 const IGNORED_DIRS: &[&str] = &["System Volume Information", "$RECYCLE.BIN"];
 
@@ -48,11 +44,7 @@ impl VolumeSource {
         let path = self.resolve(id)?;
         let mut opts = OpenOptions::new();
         opts.read(true);
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            opts.custom_flags(FILE_FLAG_SEQUENTIAL_SCAN);
-        }
+        crate::platform::configure_sequential_read(&mut opts);
         Ok(opts.open(path)?)
     }
 }
@@ -67,7 +59,7 @@ impl DeviceSource for VolumeSource {
     }
 
     fn name(&self) -> String {
-        volume_label(&self.root)
+        crate::platform::volume_label(&self.root)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| self.root.to_string_lossy().into_owned())
     }
@@ -151,56 +143,7 @@ pub(crate) fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     IGNORED_DIRS.contains(&name.as_ref()) || name.starts_with('.')
 }
 
-/// 查询卷标；已挂载但没有卷标时返回空字符串，与未插卡区分。
-#[cfg(windows)]
-fn volume_label(root: &Path) -> Option<String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
-
-    let mut probe = root.to_string_lossy().into_owned();
-    // 盘符根（"E:"）必须补尾反斜杠才能作为卷根查询
-    if probe.len() == 2 && probe.ends_with(':') {
-        probe.push('\\');
-    }
-    let wide: Vec<u16> = std::ffi::OsStr::new(&probe)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut name = [0u16; 256];
-    // SAFETY: wide 以 NUL 结尾且在本调用内存活；name 为合法可写缓冲
-    let ok = unsafe {
-        GetVolumeInformationW(
-            PCWSTR(wide.as_ptr()),
-            Some(&mut name),
-            None,
-            None,
-            None,
-            None,
-        )
-    };
-    if ok.is_err() {
-        return None;
-    }
-    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-    Some(String::from_utf16_lossy(&name[..len]))
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn volume_label(_root: &Path) -> Option<String> {
-    None
-}
-
-/// 热插拔卷到达时查询卷标（drive 形如 `E:`）。
-#[cfg(windows)]
+/// 热插拔卷到达时查询卷标；平台实现决定盘符/挂载点语义。
 pub(crate) fn drive_label(drive: &str) -> Option<String> {
-    volume_label(Path::new(drive))
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-pub(crate) fn drive_label(_drive: &str) -> Option<String> {
-    None
+    crate::platform::volume_label(Path::new(drive))
 }

@@ -27,37 +27,9 @@ fn volume_serial(path: &Path) -> Option<u64> {
     if let Some(hit) = cache.get(&root) {
         return *hit;
     }
-    let serial = query_serial(&root);
+    let serial = crate::platform::query_volume_serial(&root);
     cache.insert(root, serial);
     serial
-}
-
-#[cfg(windows)]
-fn query_serial(root: &Path) -> Option<u64> {
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
-    let wide: Vec<u16> = root
-        .to_str()?
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut serial: u32 = 0;
-    let ok = unsafe {
-        GetVolumeInformationW(
-            PCWSTR(wide.as_ptr()),
-            None,
-            None,
-            Some(&mut serial),
-            None,
-            None,
-        )
-    };
-    ok.is_ok().then(|| u64::from(serial))
-}
-
-#[cfg(not(windows))]
-fn query_serial(_root: &Path) -> Option<u64> {
-    None // 非 Windows 无同卷快道（dev_st_id 判定不可用）→ 恒回退复制
 }
 
 /// 两路径是否同一卷（双方序列号可得且相等）。任一失败 = false。

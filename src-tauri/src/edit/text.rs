@@ -19,7 +19,6 @@
 //! 笔迹 = 折线 + 圆头端点/连接 + 等宽：沿路径按半径步长密集盖印实心圆
 //! （单点 = 圆点），天然满足圆头/圆连接语义。
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use ab_glyph::{Font, FontArc, FontVec, PxScale, ScaleFont};
@@ -29,34 +28,11 @@ use super::recipe::{BrushStroke, TextLayer};
 /// 与前端 Konva.Text lineHeight={1.25} 对齐的行高倍数。
 const LINE_HEIGHT: f32 = 1.25;
 
-/// Windows 候选（契约顺序：msyh → simhei；simsun/arial 追加兜底）。
-#[cfg(windows)]
-fn font_candidates() -> Vec<PathBuf> {
-    ["msyh.ttc", "simhei.ttf", "simsun.ttc", "arial.ttf"]
-        .into_iter()
-        .map(|name| PathBuf::from(r"C:\Windows\Fonts").join(name))
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn font_candidates() -> Vec<PathBuf> {
-    [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect()
-}
-
 /// 进程级字体缓存（None = 已尝试且全部失败，走静态回退）。
 fn font() -> Option<&'static FontArc> {
     static FONT: OnceLock<Option<FontArc>> = OnceLock::new();
     FONT.get_or_init(|| {
-        for path in font_candidates() {
+        for path in crate::platform::font_candidates() {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };

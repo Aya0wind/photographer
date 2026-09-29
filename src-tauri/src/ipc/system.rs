@@ -12,6 +12,10 @@
 //!   （每组一窗选中），PIDL 解析或组 API 失败回退
 //!   `explorer /select,"path"`。
 
+#[cfg(test)]
+use crate::platform::group_by_parent;
+#[cfg(all(test, windows))]
+use crate::platform::{child_pidls, ShellApartment};
 use tauri::State;
 
 use super::{run_blocking, SharedState};
@@ -24,63 +28,7 @@ pub fn fetch_open_with_system(path: &str) -> Result<(), String> {
         return Err(format!("文件不存在: {path}"));
     }
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::UI::Shell::ShellExecuteW;
-        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-        let to_wide = |s: &str| -> Vec<u16> {
-            std::ffi::OsStr::new(s)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect()
-        };
-        let verb = to_wide("open");
-        let file = to_wide(path);
-        // 返回值 > 32（传统 HINSTANCE 判定）= 成功；≤32 为错误码
-        let code = unsafe {
-            ShellExecuteW(
-                None,
-                PCWSTR(verb.as_ptr()),
-                PCWSTR(file.as_ptr()),
-                None,
-                None,
-                SW_SHOWNORMAL,
-            )
-        };
-        let code = code.0 as usize;
-        if code > 32 {
-            return Ok(());
-        }
-        let reason = match code {
-            0 => "系统内存/资源不足",
-            2 => "未找到关联程序（该扩展名没有默认打开方式）",
-            3 => "路径无效",
-            5 => "访问被拒绝（权限/占用）",
-            8 => "打开程序数超限",
-            11 | 12 => "可执行文件无效",
-            15..=30 => "驱动器/关联程序异常",
-            31 => "该文件类型没有关联的打开程序",
-            _ => "系统打开失败",
-        };
-        Err(format!("系统打开失败（码 {code}）：{reason}"))
-    }
-
-    #[cfg(not(windows))]
-    {
-        // 非 Windows（CI 编译面）：open 语义交给 xdg-open 等价物
-        let status = std::process::Command::new("xdg-open")
-            .arg(target)
-            .status()
-            .map_err(|e| format!("打开失败: {e}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("xdg-open 退出码 {:?}", status.code()))
-        }
-    }
+    crate::platform::open_with_system(path)
 }
 
 /// 用系统默认程序打开文件（snake_case 命令，camelCase 负载 path）。
@@ -123,139 +71,8 @@ fn validate_file_args(paths: &[String]) -> Result<Vec<String>, String> {
 /// 在 `run_blocking` 后台线程调用；剪贴板打开带短重试（他进程占用时）。
 pub fn fetch_clipboard_copy_files(paths: &[String]) -> Result<u32, String> {
     let files = validate_file_args(paths)?;
-    #[cfg(windows)]
-    {
-        clipboard_copy_hdrop(&files)?;
-        Ok(files.len() as u32)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = files;
-        Err("复制到剪贴板仅支持 Windows".into())
-    }
-}
-
-/// CF_HDROP 常量（windows crate 未导出；WinUser.h 固定值 15）。
-#[cfg(windows)]
-const CF_HDROP: u32 = 15;
-
-/// Win32 剪贴板 CF_HDROP 写入（OpenClipboard + EmptyClipboard +
-/// SetClipboardData(HGLOBAL DROPFILES)；CloseClipboard 必走——guard 兜底）。
-#[cfg(windows)]
-fn clipboard_copy_hdrop(files: &[String]) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{GlobalFree, HANDLE};
-    use windows::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-    };
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
-    use windows::Win32::UI::Shell::DROPFILES;
-
-    // STA COM 初始化（幂等：S_FALSE=本线程已 STA 也算成功，配对 CoUninitialize；
-    // 失败不阻断——OpenClipboard/SetClipboardData 是纯 Win32 路径，仅 OLE
-    // 剪贴板变体才强制 STA，此处按调用约定保守初始化）
-    let co_hr = unsafe {
-        windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
-        )
-    };
-    let co_ok = co_hr.is_ok();
-
-    // 结构布局：DROPFILES 头（宽字符标记 fWide=TRUE）+ 每路径一个宽 NUL
-    // 结尾串 + 列表整体再补一个 L'\0'（double-null-terminated）
-    let to_wide = |p: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(p)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
-    let wide_list: Vec<Vec<u16>> = files.iter().map(|p| to_wide(p)).collect();
-    let bytes =
-        std::mem::size_of::<DROPFILES>() + wide_list.iter().map(|w| w.len() * 2).sum::<usize>() + 2; // 末尾列表终结 L'\0'
-
-    // 打开剪贴板（他进程占用时短重试；None = 不关联窗口）
-    let mut opened = false;
-    for _ in 0..5 {
-        if unsafe { OpenClipboard(None) }.is_ok() {
-            opened = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    if !opened {
-        return Err("剪贴板被其他程序占用，请重试".into());
-    }
-    // 无论后续成败必须 CloseClipboard（作用域守卫）
-    struct CloseGuard;
-    impl Drop for CloseGuard {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = CloseClipboard();
-            };
-        }
-    }
-    let _guard = CloseGuard;
-
-    unsafe {
-        EmptyClipboard().map_err(|e| format!("清空剪贴板失败: {e}"))?;
-        let handle = GlobalAlloc(GHND, bytes).map_err(|e| format!("分配剪贴板内存失败: {e}"))?;
-        let ptr = GlobalLock(handle);
-        if ptr.is_null() {
-            let _ = GlobalFree(Some(handle));
-            return Err("锁定剪贴板内存失败".into());
-        }
-        // 写 DROPFILES 头（pFiles=偏移 20、fWide=TRUE）+ 宽字符路径列表。
-        // DROPFILES 是 packed 结构（1 字节对齐）——经 write_unaligned 写入，
-        // 不可对 packed 字段取引用
-        let header = DROPFILES {
-            pFiles: std::mem::size_of::<DROPFILES>() as u32,
-            pt: windows::Win32::Foundation::POINT { x: 0, y: 0 },
-            fNC: BOOL(0),
-            fWide: BOOL(1),
-        };
-        std::ptr::write_unaligned(ptr.cast::<DROPFILES>(), header);
-        // 游标显式 *mut u16：copy_nonoverlapping 按**元素**计数——裸
-        // *mut c_void 会退化成按字节拷贝（实测曾把宽字符列表截半）
-        let mut cursor = ptr.byte_add(std::mem::size_of::<DROPFILES>()).cast::<u16>();
-        for wide in &wide_list {
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), cursor, wide.len());
-            cursor = cursor.add(wide.len());
-        }
-        *cursor = 0; // 列表终结 L' '（double-null-terminated）
-        let _ = GlobalUnlock(handle);
-
-        // 成功后系统接管 HGLOBAL（不可 GlobalFree）；失败必须释放
-        if let Err(e) = SetClipboardData(CF_HDROP, Some(HANDLE(handle.0))) {
-            let _ = GlobalFree(Some(handle));
-            return Err(format!("写入剪贴板失败: {e}"));
-        }
-    }
-    if co_ok {
-        unsafe { windows::Win32::System::Com::CoUninitialize() };
-    }
-    Ok(())
-}
-
-/// 按父目录分组（大小写不敏感归一：Windows 路径语义；保序）。
-/// 目录不可解析（无父目录的根形态）按原样成组。纯函数供单测。
-fn group_by_parent(paths: &[String]) -> Vec<(String, Vec<String>)> {
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for path in paths {
-        let p = std::path::Path::new(path);
-        let parent = p
-            .parent()
-            .map(|d| d.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        let slot = *index.entry(parent.clone()).or_insert_with(|| {
-            groups.push((parent, Vec::new()));
-            groups.len() - 1
-        });
-        groups[slot].1.push(path.clone());
-    }
-    groups
+    crate::platform::clipboard_copy_files(&files)?;
+    Ok(files.len() as u32)
 }
 
 /// 在资源管理器中定位文件（多文件单窗选中）：按父目录分组，每组
@@ -274,164 +91,7 @@ pub fn fetch_reveal_in_explorer(paths: &[String]) -> Result<u32, String> {
         let missing = validate_file_args(paths).unwrap_err();
         return Err(missing);
     }
-    #[cfg(windows)]
-    {
-        reveal_grouped(&existing)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = existing;
-        Err("资源管理器定位仅支持 Windows".into())
-    }
-}
-
-/// 后台线程的 COM 初始化与释放必须配对。
-#[cfg(windows)]
-struct ShellApartment(bool);
-
-#[cfg(windows)]
-impl ShellApartment {
-    fn initialize() -> Result<Self, String> {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if hr.is_ok() {
-            // S_OK 与 S_FALSE 都增加 COM 引用计数，必须配对释放。
-            Ok(Self(true))
-        } else if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
-            // 后台线程已初始化为 MTA；可使用已有 apartment，不替它释放。
-            Ok(Self(false))
-        } else {
-            Err(format!("初始化资源管理器接口失败: {hr:?}"))
-        }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for ShellApartment {
-    fn drop(&mut self) {
-        if self.0 {
-            unsafe { windows::Win32::System::Com::CoUninitialize() };
-        }
-    }
-}
-
-/// 子项指针借用完整 PIDL 的最后一段；调用结束前完整 PIDL 必须保持存活。
-#[cfg(windows)]
-unsafe fn child_pidls(
-    absolute: &[*const windows::Win32::UI::Shell::Common::ITEMIDLIST],
-) -> Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> {
-    absolute
-        .iter()
-        .map(|pidl| windows::Win32::UI::Shell::ILFindLastID(*pidl).cast_const())
-        .collect()
-}
-
-/// Win32 分组定位：每组一次 SHOpenFolderAndSelectItems，失败回退 explorer /select。
-#[cfg(windows)]
-fn reveal_grouped(files: &[String]) -> Result<u32, String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ILFree, SHOpenFolderAndSelectItems, SHParseDisplayName};
-
-    let _apartment = ShellApartment::initialize()?;
-
-    let to_wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
-    /// 解析单个绝对路径为 PIDL（失败 None——SFGAO_FOLDER 仅目录层可用，
-    /// 文件层用 0 请求纯解析）。
-    unsafe fn parse_pidl(
-        wide: &[u16],
-    ) -> Option<*mut windows::Win32::UI::Shell::Common::ITEMIDLIST> {
-        let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = std::ptr::null_mut();
-        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).ok()?;
-        if pidl.is_null() {
-            return None;
-        }
-        Some(pidl)
-    }
-
-    let mut revealed: u32 = 0;
-    for (parent, group) in group_by_parent(files) {
-        let parent_wide = to_wide(&parent);
-        let mut pidls: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> = Vec::new();
-        let mut parsed_files: Vec<&String> = Vec::new();
-        unsafe {
-            // 父目录 PIDL（组键）：解析失败整组回退 explorer /select
-            if let Some(folder_pidl) = parse_pidl(&parent_wide) {
-                for file in &group {
-                    let file_wide = to_wide(file);
-                    if let Some(pidl) = parse_pidl(&file_wide) {
-                        pidls.push(pidl);
-                        parsed_files.push(file);
-                    }
-                    // 解析失败的文件稍后逐个回退。
-                }
-                if pidls.is_empty() {
-                    ILFree(Some(folder_pidl));
-                    for file in &group {
-                        if explorer_select_fallback(file) {
-                            revealed += 1;
-                        }
-                    }
-                } else {
-                    // apidl 必须相对于 folder_pidl；不能传 SHParseDisplayName
-                    // 产生的完整 PIDL，否则打开目录后不能正确选中文件。
-                    let children = child_pidls(&pidls);
-                    let result = SHOpenFolderAndSelectItems(folder_pidl, Some(&children), 0);
-                    ILFree(Some(folder_pidl));
-                    for p in &pidls {
-                        ILFree(Some(*p));
-                    }
-                    match result {
-                        Ok(()) => {
-                            revealed += parsed_files.len() as u32;
-                            for file in &group {
-                                if !parsed_files.contains(&file) && explorer_select_fallback(file) {
-                                    revealed += 1;
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // 组 API 失败（Explorer 忙等）：逐文件 explorer /select
-                            for file in &group {
-                                if explorer_select_fallback(file) {
-                                    revealed += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                for file in &group {
-                    if explorer_select_fallback(file) {
-                        revealed += 1;
-                    }
-                }
-            }
-        }
-    }
-    if revealed == 0 {
-        Err("无法在资源管理器中选中文件".into())
-    } else {
-        Ok(revealed)
-    }
-}
-
-/// `explorer /select,"path"` 回退（尽力语义：explorer.exe 退出码不可靠，
-/// spawn 成功即计入）。窗口不前台聚焦风险由 Explorer 自身决定。
-#[cfg(windows)]
-fn explorer_select_fallback(path: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    // Explorer 需要 /select,"文件路径"；Command::arg 会把整个参数加引号，
-    // 导致带空格/逗号的路径失去 /select 的解析语义。有效文件名不含双引号。
-    std::process::Command::new("explorer.exe")
-        .raw_arg(format!("/select,\"{path}\""))
-        .spawn()
-        .is_ok()
+    crate::platform::reveal_files(&existing)
 }
 
 /// 文件列表复制到系统剪贴板（snake_case 命令）。
@@ -457,6 +117,8 @@ pub async fn reveal_in_explorer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    const CF_HDROP: u32 = 15;
 
     #[test]
     fn missing_path_is_clear_error() {

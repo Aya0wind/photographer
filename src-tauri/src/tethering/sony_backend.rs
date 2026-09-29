@@ -19,16 +19,7 @@ fn helper_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PHOTO_HUB_SONY_BRIDGE") {
         candidates.push(path.into());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("sony/photo-hub-sony.exe"));
-        }
-    }
-    if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(
-            PathBuf::from(root).join("PhotoHub/sony-sdk/bridge-build/Release/photo-hub-sony.exe"),
-        );
-    }
+    candidates.extend(crate::platform::sony_helper_candidates());
     candidates.into_iter().find(|p| p.is_file())
 }
 fn command() -> Result<Command, TetherError> {
@@ -39,11 +30,7 @@ fn command() -> Result<Command, TetherError> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
+    crate::platform::configure_background_command(&mut cmd);
     Ok(cmd)
 }
 struct Transport {

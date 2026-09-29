@@ -359,6 +359,9 @@ fn poison_dml(model: &str) {
 
 /// 当前意图是否 DML 优先（env 覆盖 > use_gpu；该模型已毒化则否）。
 fn dml_intended(use_gpu: bool, model: &str) -> bool {
+    if !crate::platform::supports_directml() {
+        return false;
+    }
     match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
         Ok("dml") => !dml_poisoned(model),
         Ok("cpu") => false,
@@ -375,14 +378,7 @@ pub(crate) fn execution_providers(
     use_gpu: bool,
     model: &str,
 ) -> Vec<ort::ep::ExecutionProviderDispatch> {
-    if dml_intended(use_gpu, model) {
-        vec![
-            ort::ep::DirectML::default().build(),
-            ort::ep::CPU::default().build(),
-        ]
-    } else {
-        vec![ort::ep::CPU::default().build()]
-    }
+    crate::platform::execution_providers(dml_intended(use_gpu, model))
 }
 
 /// DML 运行时故障的统一处置：`run` 失败且该模型会话确为 DML 优先时——置

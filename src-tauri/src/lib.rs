@@ -9,6 +9,7 @@ mod index;
 mod ipc;
 mod metadata;
 mod migrate;
+mod platform;
 pub mod settings;
 mod tasks;
 mod tethering;

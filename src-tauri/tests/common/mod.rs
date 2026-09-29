@@ -28,6 +28,8 @@ pub mod ipc;
 pub mod metadata;
 #[path = "../../src/migrate/mod.rs"]
 pub mod migrate;
+#[path = "../../src/platform/mod.rs"]
+pub mod platform;
 #[path = "../../src/settings/mod.rs"]
 pub mod settings;
 #[path = "../../src/tasks/mod.rs"]

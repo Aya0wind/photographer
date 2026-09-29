@@ -7,102 +7,14 @@
 //! 无 COM 状态的代理；设备枚举、每台设备的数据操作与探活分别排队。
 //! 等待有超时，旧连接调用被隔离，恢复和线程数量限制见 timed_worker。
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-
-use super::{DeviceError, DeviceResult, DeviceSource, FileEntry};
+use super::{DeviceResult, DeviceSource, FileEntry};
 use crate::events::SourceKind;
 
 // ---------------------------------------------------------------------------
 // 纯函数（跨平台，单测见 tests/devices_test.rs）
 // ---------------------------------------------------------------------------
 
-/// WPD 也会暴露盘符（包括空卡槽）；这些由文件系统卷通道统一管理。
-pub fn is_volume_alias(name: &str) -> bool {
-    let name = name.trim().as_bytes();
-    matches!(name.len(), 2 | 3)
-        && name[0].is_ascii_alphabetic()
-        && name[1] == b':'
-        && (name.len() == 2 || matches!(name[2], b'\\' | b'/'))
-}
-
-/// MTP 层级路径拼接（统一 `/` 分隔）。
-pub fn join_rel_path(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}/{name}")
-    }
-}
-
-/// OLE 自动化日期（自 1899-12-30T00:00:00Z 的天数，含小数）→ UTC 时间。
-/// OLE 序列 25569.0 恰为 Unix 纪元（1970-01-01）。
-pub fn ole_date_to_utc(days: f64) -> Option<DateTime<Utc>> {
-    if !days.is_finite() || !(-3_652_059.0..=3_652_059.0).contains(&days) {
-        return None; // NaN/Inf/超 ±10000 年（chrono 表示范围余量）
-    }
-    let base = NaiveDate::from_ymd_opt(1899, 12, 30)?
-        .and_hms_opt(0, 0, 0)?
-        .and_utc();
-    // 秒级精度足够（文件 mtime）；f64 在 4.6 万天尺度下分辨率远优于 1s
-    let seconds = chrono::Duration::try_seconds((days * 86_400.0).round() as i64)?;
-    base.checked_add_signed(seconds)
-}
-
-/// WPD 日期字符串解析：RFC3339 / ISO 无时区 / 空格分隔 / 基本格式
-/// （`20240102T030405`）。无时区一律按 UTC。
-pub fn parse_wpd_date_string(s: &str) -> Option<DateTime<Utc>> {
-    let s = s.trim();
-    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return Some(dt.with_timezone(&Utc));
-    }
-    for fmt in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%dT%H%M%S"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Some(naive.and_utc());
-        }
-    }
-    None
-}
-
-/// Windows FILETIME（自 1601-01-01T00:00:00Z 的 100ns 计数）→ UTC 时间。
-pub fn filetime_to_utc(low: u32, high: u32) -> Option<DateTime<Utc>> {
-    let ticks = ((high as u64) << 32) | low as u64;
-    let seconds = (ticks / 10_000_000) as i64;
-    let nanos = ((ticks % 10_000_000) * 100) as u32;
-    let unix = seconds.checked_sub(11_644_473_600)?; // 1601→1970 纪元差
-    DateTime::from_timestamp(unix, nanos)
-}
-
-/// 枚举期可跳过的对象级错误（跳过并计数，不中断整卷枚举）：
-/// - `AccessDenied`：受限对象/子树（相机受保护目录、并发会话被拒）；
-/// - 「对象缺文件名/基本属性」：无名内部对象（播放列表/系统对象——
-///   2026-09-18 真机：ILCE-7RM5 的 o18179B 导致整树失败、设备注册不上）。
-///
-/// 仍致命：会话丢失/拔线/枚举接口失败等（「要么完整要么报错」）。
-pub fn is_object_level_skip(err: &DeviceError) -> bool {
-    matches!(err, DeviceError::AccessDenied)
-        || matches!(err, DeviceError::Other(msg) if msg.starts_with("对象缺"))
-}
-
-/// CoInitializeEx 返回码 → apartment guard 决策（三态语义，纯函数单测覆盖）。
-///
-/// - S_OK（0）：本线程首次初始化成功 → `Ok(true)`（drop 时配对 CoUninitialize）；
-/// - S_FALSE（1）：线程已初始化（他人持有引用）→ `Ok(false)`：沿用现有
-///   apartment，**绝不 CoUninitialize**（不注销他人的初始化）；
-/// - RPC_E_CHANGED_MODE（0x80010106）：线程已按**其他线程模型**初始化——
-///   典型场景是 tao 事件循环把 Tauri IPC 命令线程（主线程）初始化为 STA。
-///   → `Ok(false)`：沿用现有 apartment 继续调用（WPD 在 STA 线程上合法
-///   可用，Windows Explorer 本身就是 STA 用 WPD），同样绝不 uninit；
-/// - 其余：`Err(hr)` 上抛（调用方转设备错误语义）。
-///
-/// 返回值 `Ok(owned)` 的 owned=true 表示本 guard 拥有这次初始化。
-pub fn com_apartment_owned(hr: i32) -> Result<bool, i32> {
-    match hr as u32 {
-        0 => Ok(true),            // S_OK
-        1 => Ok(false),           // S_FALSE
-        0x8001_0106 => Ok(false), // RPC_E_CHANGED_MODE（线程为 STA）
-        _ => Err(hr),
-    }
-}
+pub use super::wpd_helpers::*;
 
 // ---------------------------------------------------------------------------
 // 设备源
@@ -166,7 +78,6 @@ pub static WPD_RELEASE_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 impl DeviceSource for WpdSource {
-    #[cfg(windows)]
     fn thumbnail(&self, id: &str) -> DeviceResult<Option<Vec<u8>>> {
         worker::thumbnail(&self.pnp_id, id)
     }
@@ -185,12 +96,10 @@ impl DeviceSource for WpdSource {
         self.friendly_name.clone()
     }
 
-    #[cfg(windows)]
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
         worker::list(&self.pnp_id, None)
     }
 
-    #[cfg(windows)]
     fn list_with_progress(
         &self,
         on_batch: super::FileBatchCallback,
@@ -198,22 +107,10 @@ impl DeviceSource for WpdSource {
         worker::list(&self.pnp_id, Some(on_batch))
     }
 
-    #[cfg(not(windows))]
-    fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
-    }
-
-    #[cfg(windows)]
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {
         worker::open_head(&self.pnp_id, id, max)
     }
 
-    #[cfg(not(windows))]
-    fn open_head(&self, _id: &str, _max: u64) -> DeviceResult<Vec<u8>> {
-        Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
-    }
-
-    #[cfg(windows)]
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
         let rx = worker::stream(&self.pnp_id, id)?;
         Ok(Box::new(MtpChannelReader {
@@ -223,20 +120,9 @@ impl DeviceSource for WpdSource {
         }))
     }
 
-    #[cfg(not(windows))]
-    fn stream(&self, _id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
-        Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
-    }
-
     /// MTP 删源（move 模式）：经 WPD Delete（worker 线程执行）。
-    #[cfg(windows)]
     fn delete(&self, id: &str) -> DeviceResult<()> {
         worker::delete(&self.pnp_id, id)
-    }
-
-    #[cfg(not(windows))]
-    fn delete(&self, _id: &str) -> DeviceResult<()> {
-        Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
     }
 }
 
@@ -244,39 +130,23 @@ impl DeviceSource for WpdSource {
 // Windows COM 实现
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
 pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
     worker::enumerate()
 }
 
-#[cfg(not(windows))]
-pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
-    Ok(Vec::new())
-}
-
 /// 探活（健康监控接线）：worker 打开会话+列举顶层对象，5s 超时。
-#[cfg(windows)]
 pub fn worker_ping(pnp: &str) -> Option<bool> {
     worker::ping(pnp, std::time::Duration::from_secs(5))
 }
 
-#[cfg(not(windows))]
-pub fn worker_ping(_pnp: &str) -> Option<bool> {
-    Some(false)
-}
-
 /// 断开时隔离旧连接的排队调用；重连不等待旧驱动调用返回。
 pub fn invalidate_device(pnp: &str) {
-    #[cfg(windows)]
     worker::invalidate(pnp);
-    #[cfg(not(windows))]
-    let _ = pnp;
 }
 
 /// 联拍（tethering）COM 操作调度：复用同一 worker 池（COM 生命周期归宿
 /// worker 线程、超时与旧连接隔离同套语义）。`data:{pnp}` 通道与导入互斥
 /// （WPD 会话独占），`probe:{pnp}` 通道与数据操作分离。
-#[cfg(windows)]
 pub(crate) fn schedule_com_operation<T: Send + 'static>(
     lane: &str,
     timeout: std::time::Duration,
@@ -287,25 +157,16 @@ pub(crate) fn schedule_com_operation<T: Send + 'static>(
 
 /// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
 /// lib 目标内无调用点（集成测试经 #[path] 模块树引用）——豁免 dead_code。
-#[cfg(windows)]
 #[doc(hidden)]
 #[allow(dead_code)]
 pub fn panic_probe() -> DeviceResult<()> {
     worker::panic_probe()
 }
 
-#[cfg(not(windows))]
-#[doc(hidden)]
-#[allow(dead_code)]
-pub fn panic_probe() -> DeviceResult<()> {
-    Err(super::DeviceError::Other("WPD 仅在 Windows 可用".into()))
-}
-
 // ---------------------------------------------------------------------------
 // WPD worker：单一常驻线程，全部 COM 对象的生命周期归宿
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
 mod worker {
     use super::super::{DeviceResult, FileEntry};
     use super::{com, StreamChunk};
@@ -387,7 +248,6 @@ mod worker {
     }
 }
 
-#[cfg(windows)]
 pub(crate) mod com {
     use std::sync::atomic::Ordering;
 

@@ -8,6 +8,9 @@
 //! `#[path]` 把 `src/db` 及其依赖的 `src/events` 直接编译进测试 crate，
 //! 保证被测代码就是生产源码本体（events 自带的单测会随本目标重复执行一次）。
 
+#[path = "../src/platform/mod.rs"]
+#[allow(dead_code)]
+mod platform;
 #[path = "../src/db/mod.rs"]
 #[allow(dead_code)] // 测试按子集编译源码树
 mod db;

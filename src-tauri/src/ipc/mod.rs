@@ -162,56 +162,22 @@ pub async fn run_blocking<T: Send + 'static>(
     .map_err(|e| format!("后台任务失败: {e}"))?
 }
 
-/// Windows 文件属性位。
-#[cfg(windows)]
-const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-#[cfg(windows)]
-const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-
 /// 文件系统目录浏览（M2“从文件夹导入”向导，LR 风格树懒加载）：
-/// parent=None → 盘符根（'A'..='Z' 逐个探测 `X:\` 存在）；
+/// parent=None → 平台适配提供的文件系统根；
 /// parent=Some → 该目录下的一层子目录。任何读取失败 → 空数组
 /// （前端按空 children 处理，不报错）。
 pub fn list_dirs(parent: Option<&str>) -> Vec<DirEntryDto> {
     match parent {
-        None => drive_roots(),
-        Some(path) => child_dirs(path),
-    }
-}
-
-/// 盘符根列表。Windows 一次读取逻辑盘位掩码，避免逐盘访问慢映射盘。
-#[cfg(windows)]
-fn drive_roots() -> Vec<DirEntryDto> {
-    // GetLogicalDrives 一次读取位掩码，避免对断开的映射盘逐个 Path::exists。
-    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
-    (b'A'..=b'Z')
-        .enumerate()
-        .filter(|(index, _)| mask & (1 << index) != 0)
-        .map(|(_, letter)| {
-            let letter = letter as char;
-            let root = format!("{letter}:\\");
-            DirEntryDto {
-                name: format!("{letter}:"),
-                path: root,
-                has_subdirs: true,
-            }
-        })
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn drive_roots() -> Vec<DirEntryDto> {
-    (b'A'..=b'Z')
-        .filter_map(|letter| {
-            let letter = letter as char;
-            let root = format!("{letter}:\\");
-            PathBuf::from(&root).exists().then_some(DirEntryDto {
-                name: format!("{letter}:"),
-                path: root,
+        None => crate::platform::drive_roots()
+            .into_iter()
+            .map(|root| DirEntryDto {
+                name: root.name,
+                path: root.path,
                 has_subdirs: true,
             })
-        })
-        .collect()
+            .collect(),
+        Some(path) => child_dirs(path),
+    }
 }
 
 /// 列一层子目录（跳过隐藏/系统属性、黑名单与点前缀名；不含文件）。
@@ -238,7 +204,7 @@ fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_browsable_dir_name(&name) || is_hidden_or_system(&entry) {
+        if !is_browsable_dir_name(&name) || crate::platform::is_hidden_or_system(&entry) {
             continue;
         }
         // entry.path() = root.join(name)：与父路径同形态的绝对路径
@@ -257,24 +223,6 @@ fn child_dirs(parent: &str) -> Vec<DirEntryDto> {
 /// 目录名可浏览：非点前缀且不在黑名单。
 fn is_browsable_dir_name(name: &str) -> bool {
     !name.starts_with('.') && !DIR_BLACKLIST.contains(&name)
-}
-
-/// 隐藏(0x2)/系统(0x4)属性目录不展示；元数据不可得按可见处理。
-#[cfg(windows)]
-fn is_hidden_or_system(entry: &std::fs::DirEntry) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    entry
-        .metadata()
-        .map(|meta| {
-            let attrs = meta.file_attributes();
-            attrs & FILE_ATTRIBUTE_HIDDEN != 0 || attrs & FILE_ATTRIBUTE_SYSTEM != 0
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn is_hidden_or_system(_entry: &std::fs::DirEntry) -> bool {
-    false
 }
 
 impl From<&crate::devices::FileEntry> for FileEntryDto {

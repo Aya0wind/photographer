@@ -126,7 +126,6 @@ impl CameraBackend for WpdMtpBackend {
 
     /// 打开会话 + 全量探测（worker 线程执行；probe 通道与数据通道分离）。
     fn connect(&self, pnp_id: &str) -> Result<CameraInfo, TetherError> {
-        #[cfg(windows)]
         {
             let pnp = pnp_id.to_string();
             let info = crate::devices::wpd::schedule_com_operation(
@@ -137,11 +136,6 @@ impl CameraBackend for WpdMtpBackend {
             .map_err(TetherError::from)?;
             cache::insert(info.clone());
             Ok(info)
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = pnp_id;
-            Err(TetherError::Other("WPD 仅在 Windows 可用".into()))
         }
     }
 
@@ -158,7 +152,6 @@ impl CameraBackend for WpdMtpBackend {
         pnp_id: &str,
         timeout: Duration,
     ) -> Result<CapturedObject, TetherError> {
-        #[cfg(windows)]
         {
             let pnp = pnp_id.to_string();
             let pool_timeout = timeout + Duration::from_secs(30);
@@ -173,11 +166,6 @@ impl CameraBackend for WpdMtpBackend {
                 Err(device_err) => Err(TetherError::from(device_err)),
             }
         }
-        #[cfg(not(windows))]
-        {
-            let _ = (pnp_id, timeout);
-            Err(TetherError::Other("WPD 仅在 Windows 可用".into()))
-        }
     }
 }
 
@@ -185,7 +173,6 @@ impl CameraBackend for WpdMtpBackend {
 // Windows COM 实现（全部调用带 SAFETY 注释；对象生命周期归宿 worker 线程）
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
 mod com {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
