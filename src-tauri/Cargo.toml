@@ -41,6 +41,7 @@ tokio = { version = "1", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+libloading = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 sha2 = "0.10"
 # M4 AI 推理：ONNX Runtime（directml feature = 构建期下载含 DML 的 ms

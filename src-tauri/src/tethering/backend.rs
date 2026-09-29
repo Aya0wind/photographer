@@ -136,13 +136,46 @@ impl TetherError {
     }
 }
 
+/// 参数控件形态（前端按 kind 选控件：下拉/开关/滑条/按钮）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingKind {
+    /// 多选一下拉（RADIO/MENU）。
+    Choice,
+    /// 开关（TOGGLE，On/Off）。
+    Toggle,
+    /// 数值滑条（RANGE，min/max/step）。
+    Range,
+    /// 立即执行的动作按钮（如自动对焦触发）。
+    Action,
+    /// 只读文本（诊断信息，不参与设置）。
+    Text,
+}
+
+fn default_setting_kind() -> SettingKind {
+    SettingKind::Choice
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraSetting {
     pub id: String,
+    /// gphoto 面板标签（英文兜底；前端对常用 id 覆盖本地化文案）。
+    #[serde(default)]
+    pub label: String,
+    #[serde(default = "default_setting_kind")]
+    pub kind: SettingKind,
     pub current: String,
     pub writable: bool,
+    #[serde(default)]
     pub options: Vec<CameraSettingOption>,
+    /// Range 专用；Choice/Toggle/Action 无此三项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -194,6 +227,12 @@ pub trait CameraBackend: Send + Sync {
     }
     fn live_view_frame(&self, _pnp_id: &str) -> Result<Vec<u8>, TetherError> {
         Err(TetherError::Other("相机不支持实时取景".into()))
+    }
+
+    /// 点击取景画面对焦：坐标为归一化 live view 坐标（0..1，原点左上）。
+    /// 默认不支持（WPD/Sony 桥未实现）。
+    fn focus_at(&self, _pnp_id: &str, _x: f64, _y: f64) -> Result<(), TetherError> {
+        Err(TetherError::Other("该相机不支持点击对焦".into()))
     }
 
     fn trigger_capture(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
@@ -253,12 +292,14 @@ pub struct CameraBackendRegistry {
 }
 
 impl CameraBackendRegistry {
-    /// v1 构造：WPD MTP 后端（L0 文件通道 + L1 透传合一）。
+    /// v1 构造：WPD MTP 后端（L0 文件通道 + L1 透传合一）+ Sony SDK 桥 +
+    /// libgphoto2 进程内后端（DLL 运行时探测，缺失时枚举报「不可用」）。
     fn v1() -> Self {
         Self {
             backends: vec![
                 std::sync::Arc::new(WpdMtpBackend::new()),
                 std::sync::Arc::new(super::sony_backend::SonyBackend::default()),
+                std::sync::Arc::new(super::gphoto_backend::GphotoBackend::default()),
             ],
         }
     }
@@ -313,6 +354,7 @@ mod tests {
         assert_eq!(registry.primary().id(), "wpd-mtp");
         assert!(registry.get("wpd-mtp").is_some());
         assert!(registry.get("nope").is_none());
-        assert_eq!(registry.all().len(), 2);
+        assert_eq!(registry.all().len(), 3);
+        assert!(registry.get("gphoto").is_some());
     }
 }

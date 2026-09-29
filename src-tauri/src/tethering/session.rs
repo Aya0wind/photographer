@@ -123,6 +123,8 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     let backend = backend_registry()
         .get(if camera_id.starts_with("sony-sdk:") {
             "sony-sdk"
+        } else if camera_id.starts_with("gphoto:") {
+            "gphoto"
         } else {
             "wpd-mtp"
         })

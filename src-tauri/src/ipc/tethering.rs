@@ -286,6 +286,23 @@ pub async fn tethering_setting_set(
     .await
 }
 #[tauri::command]
+pub async fn tethering_focus_at(
+    state: State<'_, SharedState>,
+    session_id: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let session = super::super::tethering::session::get(&session_id)?;
+        let _guard = session.operation.lock().unwrap();
+        session
+            .backend
+            .focus_at(&session.camera.pnp_id, x, y)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+#[tauri::command]
 pub async fn tethering_capture(
     state: State<'_, SharedState>,
     session_id: String,

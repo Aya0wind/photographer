@@ -30,4 +30,5 @@ pub mod mtp;
 pub mod wpd_backend;
 
 pub mod sony_backend;
+pub mod gphoto_backend;
 pub mod session;

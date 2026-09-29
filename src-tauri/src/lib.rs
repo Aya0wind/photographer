@@ -335,6 +335,7 @@ pub fn run() {
             ipc::tethering::tethering_session,
             ipc::tethering::tethering_settings,
             ipc::tethering::tethering_setting_set,
+            ipc::tethering::tethering_focus_at,
             ipc::tethering::tethering_capture,
             ipc::tethering::tethering_frame,
             ipc::tethering::tethering_photo_preview,

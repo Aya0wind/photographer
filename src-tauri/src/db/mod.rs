@@ -7,7 +7,7 @@
 //! [`FileState`]/[`AssetKind`] 复用 events 模块的领域枚举，列存储格式与其
 //! serde camelCase 字符串严格一致（手写 rusqlite To/FromSql 映射，不引 derive 扩展 crate）。
 
-mod migrations;
+pub(crate) mod migrations;
 
 /// 选片会话仓储（0024 三表；独立子模块——并行 lane 常改本文件，缩小冲突面）。
 pub mod culling;

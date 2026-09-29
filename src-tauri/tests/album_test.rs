@@ -83,7 +83,8 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 24); // 0024 选片会话（本断言曾滞后于 0021→0022）
+    // 与迁移表总长联动（此前两次滞后于新增迁移，改为派生断言）
+    assert_eq!(version as usize, db::migrations::MIGRATIONS.len());
 
     for object in [
         "album",
@@ -130,7 +131,7 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
     let version: i64 =
         db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version, 24); // 0024 选片会话（本断言曾滞后于 0021→0022）
+    assert_eq!(version as usize, db::migrations::MIGRATIONS.len());
 }
 
 // ---------------------------------------------------------------------------

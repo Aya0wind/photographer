@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   subscribeAppEvents,
   tetheringCapture,
+  tetheringFocusAt,
   tetheringFrame,
   tetheringPhotoPreview,
   tetheringSession,
@@ -20,20 +21,52 @@ import {
  * 联机拍摄独立窗口（/tethering?session=<id>；后端 tethering_start 创建本窗口，
  * 窗口销毁即自动结束会话）。LR 式布局：
  * - 顶部：自绘标题栏（decorations=false）——相册名/相机名/连接状态 + 最小化/关闭
- * - 中央：实时取景（tethering_frame 轮询 ~120ms；不支持时回落最近一张成片）
+ * - 中央：实时取景（tethering_frame 轮询，帧率 15/30/60 档可调；不支持时回落最近一张成片）
  * - 右栏：相机参数（shutter/aperture/iso 下拉；tethering_setting_set 即时生效）
  * - 底部：本次会话胶片条（tetheringPhotoAdded 事件驱动 + 预览）
  * 会话态以后端为唯一真值（独立 webview 的 store 是空会话，不读主窗口状态）。
  */
 
-const FRAME_POLL_MS = 120;
+/** 取景帧率档位（轮询间隔 = 1000/fps；相机/USB 带宽不足时实际帧率低于档位）。 */
+const FRAME_RATE_STEPS = [15, 30, 60] as const;
+const FPS_STORAGE_KEY = "tethering.frameFps";
+const FPS_DEFAULT: number = 30;
 
-/** 后端契约的三个固定参数 id → 本地化标签；未知 id 原样展示。 */
-function settingLabel(id: string, t: (k: string) => string): string {
-  if (id === "shutter") return t("tether.setting.shutter");
-  if (id === "aperture") return t("tether.setting.aperture");
-  if (id === "iso") return t("tether.setting.iso");
-  return id;
+function framePollMs(fps: number): number {
+  return Math.round(1000 / fps);
+}
+
+function loadStoredFps(): number {
+  const raw = window.localStorage.getItem(FPS_STORAGE_KEY);
+  const parsed = raw === null ? Number.NaN : Number(raw);
+  return (FRAME_RATE_STEPS as readonly number[]).includes(parsed) ? parsed : FPS_DEFAULT;
+}
+
+/** 后端契约的参数 id → 本地化标签（tether.param.<id>）；未知 id 用后端 label。 */
+function settingLabel(id: string, fallback: string, t: (k: string) => string): string {
+  const key = `tether.param.${id}`;
+  const translated = t(key);
+  return translated === key ? fallback : translated;
+}
+
+/** 面板排序：常用拍摄参数在前，其余按标签字母序，动作按钮最后。 */
+const SETTING_ORDER = [
+  "shutterspeed", "f-number", "iso", "expprogram", "exposuremetermode", "exposurecompensation",
+  "whitebalance", "colortemperature", "imagequality", "capturemode", "focusmode", "focusarea",
+  "imagestabilization", "flashmode", "shuttertype", "silentmode", "dro", "aspectratio",
+  "imagesize", "pcsaveimgsize", "liveviewsettingeffect", "manualfocus", "focusmagnifier",
+] as const;
+
+function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
+  const rank = (s: TetherCameraSetting): number => {
+    if (s.kind === "action") return SETTING_ORDER.length + 1;
+    const i = SETTING_ORDER.indexOf(s.id as (typeof SETTING_ORDER)[number]);
+    return i === -1 ? SETTING_ORDER.length : i;
+  };
+  return [...settings].sort((a, b) => {
+    const d = rank(a) - rank(b);
+    return d !== 0 ? d : a.label.localeCompare(b.label);
+  });
 }
 
 export default function TetheringWindowPage() {
@@ -44,11 +77,16 @@ export default function TetheringWindowPage() {
   const [session, setSession] = useState<TetherSessionDto | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [frame, setFrame] = useState<string | null>(null);
+  const [fps, setFps] = useState<number>(loadStoredFps);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [settingErrors, setSettingErrors] = useState<Record<string, string>>({});
   const [previews, setPreviews] = useState<Record<number, string>>({});
   const photosRef = useRef<number[]>([]);
+  /** Range 滑条本地草稿（id → 未提交值；松手才下发，避免拖动连发）。 */
+  const [rangeDrafts, setRangeDrafts] = useState<Record<string, string>>({});
+  /** 点击对焦标记（归一化坐标 + 2s 自动消失）。 */
+  const [focusMark, setFocusMark] = useState<{ x: number; y: number } | null>(null);
 
   const liveViewSupported = session?.camera.capabilities.liveView === true;
   const connected = session?.connected === true;
@@ -121,7 +159,7 @@ export default function TetheringWindowPage() {
       void tetheringFrame(sessionId).then((url) => {
         if (stopped) return;
         if (url !== null) setFrame(url);
-        timer = window.setTimeout(tick, FRAME_POLL_MS);
+        timer = window.setTimeout(tick, framePollMs(fps));
       });
     };
     tick();
@@ -129,7 +167,7 @@ export default function TetheringWindowPage() {
       stopped = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [sessionId, liveViewSupported, connected]);
+  }, [sessionId, liveViewSupported, connected, fps]);
 
   // 胶片条预览：为还没有预览的照片拉缩略图（新片到达后缩略图生成有延迟，重试 3 次）
   useEffect(() => {
@@ -172,6 +210,46 @@ export default function TetheringWindowPage() {
       const message = err instanceof Error ? err.message : String(err);
       setSettingErrors((prev) => ({ ...prev, [setting.id]: message }));
     }
+  }
+
+  /** 点击取景画面对焦：坐标归一化下发 + 十字标记（2s 消失）。 */
+  async function focusAtView(e: React.MouseEvent<HTMLDivElement>): Promise<void> {
+    if (sessionId === "" || !liveViewSupported || !connected) return;
+    const img = e.currentTarget.querySelector("img");
+    if (img === null) return;
+    const rect = img.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    setFocusMark({ x, y });
+    window.setTimeout(() => setFocusMark(null), 2000);
+    try {
+      await tetheringFocusAt(sessionId, x, y);
+    } catch {
+      /* 相机不支持/模式不符：标记自然消失即可，不打断取景 */
+    }
+  }
+
+  function selectFps(next: number): void {
+    setFps(next);
+    try {
+      window.localStorage.setItem(FPS_STORAGE_KEY, String(next));
+    } catch {
+      /* localStorage 不可用（隐私模式等）：仅本次会话生效 */
+    }
+  }
+
+  /** Range 滑条松手/移焦提交：草稿 ≠ 当前值才下发。 */
+  function commitRange(setting: TetherCameraSetting): void {
+    const draft = rangeDrafts[setting.id];
+    if (draft === undefined || draft === setting.current) return;
+    setRangeDrafts((prev) => {
+      const next = { ...prev };
+      delete next[setting.id];
+      return next;
+    });
+    void applySetting(setting, draft);
   }
 
   async function shoot(): Promise<void> {
@@ -227,6 +305,29 @@ export default function TetheringWindowPage() {
         >
           {connected ? (receiving ? t("tether.receiving") : t("tether.liveView")) : t("tether.disconnected")}
         </span>
+        {liveViewSupported && (
+          <div
+            className="flex items-center overflow-hidden rounded-full border border-edge text-[10px] leading-none"
+            role="group"
+            aria-label={t("tether.fps")}
+            data-testid="tether-fps"
+          >
+            {FRAME_RATE_STEPS.map((step) => (
+              <button
+                key={step}
+                type="button"
+                onClick={() => selectFps(step)}
+                aria-pressed={fps === step}
+                data-testid={`tether-fps-${step}`}
+                className={`h-5 w-8 transition-colors ${
+                  fps === step ? "bg-accent font-semibold text-black" : "text-text-muted hover:bg-panel"
+                }`}
+              >
+                {step}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto flex items-center" data-tauri-drag-region={false}>
           <button
             type="button"
@@ -260,14 +361,28 @@ export default function TetheringWindowPage() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* 中央：取景画面 */}
-        <div className="relative flex min-w-0 flex-1 items-center justify-center bg-black" data-testid="tether-view">
+        {/* 中央：取景画面（点击画面对焦） */}
+        <div
+          className="relative flex min-w-0 flex-1 items-center justify-center bg-black"
+          data-testid="tether-view"
+          onClick={(e) => void focusAtView(e)}
+        >
           {mainImage !== null ? (
             <img src={mainImage} alt="live view" className="max-h-full max-w-full object-contain" data-testid="tether-view-img" />
           ) : (
             <div className="flex flex-col items-center gap-2 text-xs text-white/40">
               <span>{liveViewSupported ? t("tether.liveViewWaiting") : t("tether.liveViewUnsupported")}</span>
               {!liveViewSupported && lastPhoto === null && <span className="text-[11px]">{t("tether.noPhotos")}</span>}
+            </div>
+          )}
+          {focusMark !== null && (
+            <div
+              className="pointer-events-none absolute h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent/90 shadow-[0_0_0_2px_rgba(0,0,0,0.35)]"
+              style={{ left: `${focusMark.x * 100}%`, top: `${focusMark.y * 100}%` }}
+              data-testid="tether-focus-marker"
+            >
+              <span className="absolute left-1/2 top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
+              <span className="absolute left-1/2 top-1/2 h-0.5 w-3 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
             </div>
           )}
           {capturing && (
@@ -299,35 +414,79 @@ export default function TetheringWindowPage() {
               {t("tether.refreshSettings")}
             </button>
           </div>
-          {session.settings.map((setting) => (
-            <label key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
-              <span className="flex items-center justify-between">
-                {settingLabel(setting.id, t)}
-                {!setting.writable && <span className="text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
-              </span>
-              <select
-                value={setting.current}
+          {orderSettings(session.settings).map((setting) =>
+            setting.kind === "action" ? (
+              <button
+                key={setting.id}
+                type="button"
+                onClick={() => void applySetting(setting, "1")}
                 disabled={!setting.writable || !connected}
-                onChange={(e) => void applySetting(setting, e.target.value)}
-                className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40"
+                className="w-full rounded-md border border-accent/50 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:text-text-muted"
+                data-testid={`tether-setting-${setting.id}`}
               >
-                {setting.options.length > 0 ? (
-                  setting.options.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))
-                ) : (
-                  <option value={setting.current}>{setting.current}</option>
-                )}
-              </select>
-              {settingErrors[setting.id] !== undefined && (
-                <span className="text-[10px] text-red-400">
-                  {t("tether.settingFailed")}：{settingErrors[setting.id]}
+                {settingLabel(setting.id, setting.label, t)}
+              </button>
+            ) : setting.kind === "range" ? (
+              <div key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
+                <span className="flex items-center justify-between">
+                  {settingLabel(setting.id, setting.label, t)}
+                  <span className="tabular-nums text-text-primary">
+                    {rangeDrafts[setting.id] ?? setting.current}
+                    {!setting.writable && <span className="ml-1 text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
+                  </span>
                 </span>
-              )}
-            </label>
-          ))}
+                <input
+                  type="range"
+                  min={setting.min ?? 0}
+                  max={setting.max ?? 0}
+                  step={setting.step ?? 1}
+                  value={rangeDrafts[setting.id] ?? setting.current}
+                  disabled={!setting.writable || !connected}
+                  onInput={(e) => {
+                    const draft = e.currentTarget.value;
+                    setRangeDrafts((prev) => ({ ...prev, [setting.id]: draft }));
+                  }}
+                  onPointerUp={() => commitRange(setting)}
+                  onKeyUp={() => commitRange(setting)}
+                  onBlur={() => commitRange(setting)}
+                  className="w-full accent-[var(--color-accent)] disabled:opacity-40"
+                />
+                {settingErrors[setting.id] !== undefined && (
+                  <span className="text-[10px] text-red-400">
+                    {t("tether.settingFailed")}：{settingErrors[setting.id]}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <label key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
+                <span className="flex items-center justify-between">
+                  {settingLabel(setting.id, setting.label, t)}
+                  {!setting.writable && <span className="text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
+                </span>
+                <select
+                  value={setting.current}
+                  disabled={!setting.writable || !connected}
+                  onChange={(e) => void applySetting(setting, e.target.value)}
+                  className="w-full rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors focus:border-accent disabled:opacity-40"
+                >
+                  {setting.options.length > 0 ? (
+                    setting.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label === "On" ? t("tether.on") : option.label === "Off" ? t("tether.off") : option.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={setting.current}>{setting.current}</option>
+                  )}
+                </select>
+                {settingErrors[setting.id] !== undefined && (
+                  <span className="text-[10px] text-red-400">
+                    {t("tether.settingFailed")}：{settingErrors[setting.id]}
+                  </span>
+                )}
+              </label>
+            ),
+          )}
           <button
             type="button"
             onClick={() => void shoot()}

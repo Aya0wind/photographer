@@ -1967,17 +1967,24 @@ export async function cameraProbe(pnpId: string): Promise<CameraInfo | null> {
 
 // --- 联拍会话（tethering_*：独立窗口 + 相册锚定 + 免导入任务入册） ---------------------
 
-/** 相机拍摄参数（tethering_settings 报告）：id 恒为 shutter/aperture/iso 之一
- *  （后端契约），options 为可选值表（value=设置用值，label=展示文案）。 */
+/** 相机拍摄参数（tethering_settings 报告）：id 为后端单配置名（gphoto
+ *  list_config 名，如 shutterspeed/f-number/iso/exposuremetermode）。
+ *  kind 决定控件形态；options 为 choice 候选表（value=设置用值，label=展示）。 */
+export type TetherSettingKind = "choice" | "toggle" | "range" | "action" | "text";
 export interface TetherSettingOption {
   value: string;
   label: string;
 }
 export interface TetherCameraSetting {
   id: string;
+  label: string;
+  kind: TetherSettingKind;
   current: string;
   writable: boolean;
   options: TetherSettingOption[];
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 /** 会话内已入册照片（胶片条；后端只留最近 64 张）。 */
@@ -2027,25 +2034,40 @@ function normalizeTetherSession(value: unknown): TetherSessionDto | null {
   };
 }
 
+const TETHER_SETTING_KINDS = ["choice", "toggle", "range", "action", "text"] as const;
+
 function normalizeTetherSettings(value: unknown): TetherCameraSetting[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((s): s is Record<string, unknown> => s !== null && typeof s === "object")
     .filter((s) => typeof s.id === "string" && typeof s.current === "string")
-    .map((s) => ({
-      id: s.id as string,
-      current: s.current as string,
-      writable: s.writable === true,
-      options: Array.isArray(s.options)
-        ? s.options
-            .filter((o): o is Record<string, unknown> => o !== null && typeof o === "object")
-            .filter((o) => typeof o.value === "string")
-            .map((o) => ({
-              value: o.value as string,
-              label: typeof o.label === "string" ? o.label : (o.value as string),
-            }))
-        : [],
-    }));
+    .map((s) => {
+      const kindRaw = typeof s.kind === "string" ? s.kind : "";
+      const kind: TetherSettingKind = (TETHER_SETTING_KINDS as readonly string[]).includes(kindRaw)
+        ? (kindRaw as TetherSettingKind)
+        : "choice";
+      const num = (v: unknown): number | undefined =>
+        typeof v === "number" && Number.isFinite(v) ? v : undefined;
+      return {
+        id: s.id as string,
+        label: typeof s.label === "string" ? s.label : (s.id as string),
+        kind,
+        current: s.current as string,
+        writable: s.writable === true,
+        options: Array.isArray(s.options)
+          ? s.options
+              .filter((o): o is Record<string, unknown> => o !== null && typeof o === "object")
+              .filter((o) => typeof o.value === "string")
+              .map((o) => ({
+                value: o.value as string,
+                label: typeof o.label === "string" ? o.label : (o.value as string),
+              }))
+          : [],
+        min: num(s.min),
+        max: num(s.max),
+        step: num(s.step),
+      };
+    });
 }
 
 export type TetherStartResult =
@@ -2096,6 +2118,12 @@ export async function tetheringSettingSet(
   return normalizeTetherSettings(
     await ipc<unknown>("tethering_setting_set", { sessionId, id, value }),
   );
+}
+
+/** 点击取景画面对焦（tethering_focus_at）：坐标为归一化 live view 坐标
+ *  （0..1，原点左上）。业务错误透传文案。 */
+export async function tetheringFocusAt(sessionId: string, x: number, y: number): Promise<void> {
+  await ipc<unknown>("tethering_focus_at", { sessionId, x, y });
 }
 
 export type TetherCaptureResult = { ok: true } | { ok: false; error: string | null };
