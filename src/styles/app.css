@@ -134,6 +134,9 @@ body {
   background: #0e0f12;
 }
 
+/* 外层 = maplibre marker 定位元素：transform/animation 一律禁触
+   （fill 模式的 transform 动画会永久压过 maplibre 写的内联定位 transform，
+   气泡全部瘫在画布左上角——2026-09-29 真机定位 bug 教训）。 */
 .map-bubble {
   position: relative;
   display: flex;
@@ -144,6 +147,14 @@ body {
   border: none;
   background: none;
   cursor: pointer;
+}
+
+/* 内层动画载体：入场 stagger + hover 缩放都在这 */
+.map-bubble-in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
   animation: map-bubble-in 0.35s cubic-bezier(0.2, 0.7, 0.3, 1) both;
   animation-delay: var(--stagger, 0ms);
   transition: transform 0.18s ease;
@@ -151,8 +162,12 @@ body {
 
 .map-bubble:hover,
 .map-bubble:focus-visible {
-  transform: scale(1.12);
   z-index: 10;
+}
+
+.map-bubble:hover .map-bubble-in,
+.map-bubble:focus-visible .map-bubble-in {
+  transform: scale(1.12);
 }
 
 .map-bubble:focus {

@@ -4,6 +4,11 @@
  * 结构 = 叠放照片卡（主图 + 最多两张副图错位）+ 数量徽标 + 名称标签。
  * 入场 stagger 纯 CSS（--stagger 变量），受全局 .no-motion 契约约束。
  * 缩略图由 MapCanvas 懒加载补 src（data-asset 契约）。
+ *
+ * 【定位纪律】maplibre v6 把 marker 定位 transform 写在自定义元素的内联
+ * style 上——**任何以 fill 模式跑 transform 的 CSS 动画都会永久压过内联值**
+ * （层叠规则：animation > inline），气泡就全瘫在画布左上角。因此入场动画
+ * 和 hover 缩放一律放在内层 .map-bubble-in，marker 元素绝不碰 transform。
  */
 
 import type { MapCluster } from "@/ipc/api/map";
@@ -16,10 +21,14 @@ export function createBubbleElement(
   const root = document.createElement("button");
   root.type = "button";
   root.className = "map-bubble";
-  root.style.setProperty("--stagger", `${Math.min(index, 20) * 35}ms`);
   root.dataset.region = String(cluster.regionId);
   root.title = `${cluster.name} · ${cluster.count}`;
   root.setAttribute("aria-label", `${cluster.name}, ${cluster.count} photos`);
+
+  // 内层动画载体（外层是 maplibre 定位元素，transform 禁触）
+  const inner = document.createElement("span");
+  inner.className = "map-bubble-in";
+  inner.style.setProperty("--stagger", `${Math.min(index, 20) * 35}ms`);
 
   const stack = document.createElement("div");
   stack.className = "map-bubble-stack";
@@ -50,8 +59,9 @@ export function createBubbleElement(
   name.className = "map-bubble-name";
   name.textContent = cluster.name;
 
-  root.appendChild(stack);
-  root.appendChild(name);
+  inner.appendChild(stack);
+  inner.appendChild(name);
+  root.appendChild(inner);
   root.addEventListener("click", (e) => {
     e.stopPropagation();
     onDrill();
