@@ -158,19 +158,23 @@ export default function TetheringWindowPage() {
 
   // 参数快照轮询：机身档位切换（A/S/M…）改变参数可写性，快门/光圈等
   // 的显示隐藏依赖最新 writable；断连不轮询。
+  /** 全量参数快照刷新（轮询 / 改参联动 / 手动刷新按钮共用）；失败静默。 */
+  const refreshSettings = useCallback(() => {
+    if (sessionId === "") return;
+    void tetheringSettings(sessionId)
+      .then((next) => {
+        if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+      })
+      .catch(() => {
+        /* 单次刷新失败静默：调用方自带重试节奏 */
+      });
+  }, [sessionId]);
+
   useEffect(() => {
     if (sessionId === "" || !connected) return;
-    const timer = window.setInterval(() => {
-      void tetheringSettings(sessionId)
-        .then((next) => {
-          if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
-        })
-        .catch(() => {
-          /* 单次轮询失败静默：下轮再试 */
-        });
-    }, SETTINGS_POLL_MS);
+    const timer = window.setInterval(refreshSettings, SETTINGS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [sessionId, connected]);
+  }, [sessionId, connected, refreshSettings]);
 
   // 会话快照：挂载拉一次；photoAdded/status 事件增量合并（轻路径，不整页重拉）
   const mergeSession = useCallback((next: TetherSessionDto) => {
@@ -289,6 +293,9 @@ export default function TetheringWindowPage() {
     try {
       const next = await tetheringSettingSet(sessionId, setting.id, value);
       setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
+      // 参数联动：改一个参数会翻转其他参数的可写性/当前值（切档最典型），
+      // set 的即时返回拿不到翻转后的状态——稍等机身稳定再拉一次全量快照
+      window.setTimeout(refreshSettings, 400);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setSettingErrors((prev) => ({ ...prev, [setting.id]: message }));
@@ -548,13 +555,13 @@ export default function TetheringWindowPage() {
               M/A/S 的唯一入口，光圈常有镜头环控制的机身）。 */}
           <div
             ref={quickBarRef}
-            className={`absolute z-20 ${barPos === null ? "bottom-3 left-1/2 w-max max-w-[calc(100%-2rem)] -translate-x-1/2" : ""}`}
+            className={`absolute z-20 ${barPos === null ? "bottom-3 left-1/2 w-max -translate-x-1/2" : ""}`}
             style={barPos === null ? undefined : { left: barPos.x, top: barPos.y }}
             onClick={(e) => e.stopPropagation()}
             data-testid="tether-quickbar"
           >
-            {/* flex-wrap：放不下时控件折行而不是压缩成竖排文字 */}
-            <div className="flex flex-wrap items-center justify-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
+            {/* 单行不折行：宁可整体变长（悬浮层可盖过右栏）也不要竖排/换行 */}
+            <div className="flex items-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
               {/* 拖动把手 */}
               <button
                 type="button"
@@ -662,11 +669,7 @@ export default function TetheringWindowPage() {
             <h2 className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{t("tether.settings")}</h2>
             <button
               type="button"
-              onClick={() => {
-                if (sessionId !== "") void tetheringSettings(sessionId).then((next) => {
-                  if (next !== null) setSession((prev) => (prev === null ? prev : { ...prev, settings: next }));
-                });
-              }}
+              onClick={refreshSettings}
               className="rounded border border-edge px-1.5 py-0.5 text-[10px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
               data-testid="tether-settings-refresh"
             >

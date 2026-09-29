@@ -389,6 +389,18 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(screen.getByTestId("tether-ended-close")).toBeInTheDocument();
   });
 
+  it("改参成功后联动全量刷新（参数间可写性/取值联动）", async () => {
+    sessionMock.mockResolvedValue(dto());
+    settingSetMock.mockResolvedValue([choice("shutterspeed", "250", true, ["125", "250"])]);
+    settingsRefreshMock.mockClear();
+    renderPage();
+    fireEvent.click(await screen.findByTestId("tether-setting-shutterspeed"));
+    fireEvent.click(screen.getByTestId("tether-quick-shutterspeed-menu").querySelector('[data-value="250"]')!);
+    await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "shutterspeed", "250"));
+    // set 返回后 400ms 触发一次全量快照刷新
+    await waitFor(() => expect(settingsRefreshMock).toHaveBeenCalledWith("s1"), { timeout: 2000 });
+  });
+
   it("AF 按钮触发画面中心对焦", async () => {
     sessionMock.mockResolvedValue(dto());
     focusAtMock.mockResolvedValue(undefined);
