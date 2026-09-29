@@ -572,14 +572,55 @@ fn is_vendor_code_name(name: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
 }
 
-#[derive(Default)]
 pub struct GphotoBackend {
     connections: Mutex<HashMap<String, Arc<GphotoConnection>>>,
     /// 相机级全局串行锁（Camera 非线程安全；枚举/连接同样串行）。
     camera_mutex: Mutex<()>,
+    /// 相机锁等待超时（测试注入短值；生产 CAMERA_LOCK_TIMEOUT）。
+    lock_timeout: Duration,
 }
 
+impl Default for GphotoBackend {
+    fn default() -> Self {
+        Self {
+            connections: Mutex::new(HashMap::new()),
+            camera_mutex: Mutex::new(()),
+            lock_timeout: CAMERA_LOCK_TIMEOUT,
+        }
+    }
+}
+
+/// 拿相机锁的超时（拍摄+下载合法占锁可达数秒；超时说明持锁调用大概率
+/// 已因 USB 卡死挂住——快速失败，避免后续命令在 blocking 池无限堆积）。
+const CAMERA_LOCK_TIMEOUT: Duration = Duration::from_secs(8);
+
 impl GphotoBackend {
+    /// 相机锁（限时 + 中毒恢复）。gphoto 的 C 调用可能因 USB/相机状态
+    /// 卡死永不返回：若此处无限等锁，帧轮询（30/s）与参数轮询（3s）会
+    /// 持续把 spawn_blocking 线程堆在锁上，最终耗尽线程池让整个应用
+    /// IPC 饿死（联拍窗口卡死的根因，2026-09-29）。超时返回「相机忙」，
+    /// UI 层把错误透传给用户而非冻结。
+    fn lock_camera(&self) -> Result<std::sync::MutexGuard<'_, ()>, TetherError> {
+        let deadline = std::time::Instant::now() + self.lock_timeout;
+        loop {
+            match self.camera_mutex.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    // 持锁线程 panic 遗毒：恢复互斥量（锁本身无 invariant）
+                    return Ok(poisoned.into_inner());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(TetherError::Other(
+                            "相机忙：上一次相机操作无响应，请稍候或断开重连".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
     fn connection(&self, id: &str) -> Result<Arc<GphotoConnection>, TetherError> {
         self.connections
             .lock()
@@ -949,7 +990,7 @@ impl CameraBackend for GphotoBackend {
     fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let mut list: *mut gpt::CameraList = std::ptr::null_mut();
@@ -985,7 +1026,7 @@ impl CameraBackend for GphotoBackend {
         let lib = lib()?;
         let s = &lib.symbols;
         let port = pnp_id.strip_prefix("gphoto:").unwrap_or(pnp_id).to_string();
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| -> Result<CameraInfo, TetherError> {
@@ -1056,12 +1097,15 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connections.lock().unwrap().remove(pnp_id);
         if let Some(conn) = conn {
             if let Ok(lib) = lib() {
-                let _guard = self.camera_mutex.lock().unwrap();
-                unsafe {
-                    let ctx = context_new(&lib.symbols);
-                    let _ = (lib.symbols.gp_camera_exit)(conn.camera, ctx);
-                    (lib.symbols.gp_camera_free)(conn.camera);
-                    (lib.symbols.gp_context_unref)(ctx);
+                // 断开不能被卡死的相机锁拖住：拿不到锁直接放弃 exit/free
+                //（连接已摘表，资源由进程退出回收）
+                if let Ok(_guard) = self.lock_camera() {
+                    unsafe {
+                        let ctx = context_new(&lib.symbols);
+                        let _ = (lib.symbols.gp_camera_exit)(conn.camera, ctx);
+                        (lib.symbols.gp_camera_free)(conn.camera);
+                        (lib.symbols.gp_context_unref)(ctx);
+                    }
                 }
             }
             let _ = std::fs::remove_dir_all(&conn.incoming);
@@ -1075,7 +1119,7 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1101,7 +1145,7 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = Self::apply_setting_by_name(s, ctx, conn.camera, id, value);
@@ -1117,7 +1161,7 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1142,7 +1186,7 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let mut file: *mut gpt::CameraFile = std::ptr::null_mut();
@@ -1170,7 +1214,7 @@ impl CameraBackend for GphotoBackend {
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1198,7 +1242,7 @@ impl CameraBackend for GphotoBackend {
         }
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.camera_mutex.lock().unwrap();
+        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| -> Result<Vec<CapturedObject>, TetherError> {
@@ -1277,5 +1321,44 @@ impl CameraBackend for GphotoBackend {
             .into_iter()
             .next()
             .ok_or(TetherError::Timeout)
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    /// 持锁超过超时 → 快速失败「相机忙」，不再无限堆积等锁线程
+    ///（联拍连续拍摄卡死窗口的根因回归）。
+    #[test]
+    fn lock_camera_times_out_when_held() {
+        let mut backend = GphotoBackend::default();
+        backend.lock_timeout = Duration::from_millis(50);
+        let _held = backend.camera_mutex.lock().unwrap();
+        let started = std::time::Instant::now();
+        let err = backend.lock_camera().unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(40), "应等待到超时");
+        assert!(
+            matches!(&err, TetherError::Other(msg) if msg.contains("相机忙")),
+            "{err:?}"
+        );
+    }
+
+    /// 互斥量中毒（持锁线程 panic）恢复而非连锁 panic。
+    #[test]
+    fn lock_camera_recovers_from_poison() {
+        let backend = GphotoBackend::default();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // catch 住 panic：scope 会把子线程 panic 向外传播
+                let _ = std::panic::catch_unwind(|| {
+                    let _guard = backend.camera_mutex.lock().unwrap();
+                    panic!("持锁 panic 制造中毒");
+                });
+            });
+        });
+        // 中毒后 lock_camera 应恢复互斥量正常返回
+        let recovered = backend.lock_camera();
+        assert!(recovered.is_ok());
     }
 }
