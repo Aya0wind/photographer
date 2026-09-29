@@ -88,15 +88,6 @@ export async function albumAddAssets(
   }
 }
 
-/** 从相册移除引用（仅删引用，照片保留在图库）；失败 false */
-export async function albumRemoveAssets(id: number, assetIds: number[]): Promise<boolean> {
-  try {
-    await ipc<void>("album_remove_assets", { id, assetIds });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** 更改相册文件夹名（album_dir_rename，B1 追加包契约）：只改磁盘相册主目录名，
  *  显示名不动。重名/非法名等业务错误透传，调用方行内提示。 */

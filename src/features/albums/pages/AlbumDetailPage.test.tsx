@@ -15,7 +15,7 @@ import {
   albumItemMoveSubgroup,
   albumList,
   albumSubgroups,
-  albumRemoveAssets,
+  assetTrashMove,
   albumRename,
   assetThumbGet,
   type AssetDto,
@@ -36,7 +36,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     albumAssetsPage: vi.fn(),
     albumSubgroups: vi.fn(),
     albumItemMoveSubgroup: vi.fn(),
-    albumRemoveAssets: vi.fn(),
+    assetTrashMove: vi.fn(),
     albumRename: vi.fn(),
     albumAddAssets: vi.fn(),
     assetThumbGet: vi.fn(),
@@ -52,7 +52,7 @@ const albumListMock = vi.mocked(albumList);
 const assetsPageMock = vi.mocked(albumAssetsPage);
 const subgroupsMock = vi.mocked(albumSubgroups);
 const moveMock = vi.mocked(albumItemMoveSubgroup);
-const removeMock = vi.mocked(albumRemoveAssets);
+const trashMoveMock = vi.mocked(assetTrashMove);
 const renameMock = vi.mocked(albumRename);
 const addMock = vi.mocked(albumAddAssets);
 const thumbMock = vi.mocked(assetThumbGet);
@@ -123,7 +123,7 @@ beforeEach(() => {
   assetsPageMock.mockResolvedValue([]);
   subgroupsMock.mockReset().mockResolvedValue([]);
   moveMock.mockReset().mockResolvedValue(true);
-  removeMock.mockResolvedValue(true);
+  trashMoveMock.mockResolvedValue(undefined);
   renameMock.mockResolvedValue({ ok: true });
   addMock.mockResolvedValue(0);
   thumbMock.mockResolvedValue({ status: "pending" });
@@ -178,8 +178,8 @@ describe("相册详情页：数据与分页", () => {
   });
 });
 
-describe("相册详情页：从相册移除入口", () => {
-  it("多选操作条在相册上下文多「从相册移除」：移除后重置重拉 + 计数刷新", async () => {
+describe("相册详情页：从相册移除 = 移入回收站（一照一册）", () => {
+  it("多选操作条「移入回收站」：确认弹窗 → asset_trash_move → 重置重拉 + 计数刷新；无独立「从相册移除」按钮", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
     const user = userEvent.setup();
     renderDetail();
@@ -188,17 +188,20 @@ describe("相册详情页：从相册移除入口", () => {
     await user.click(checkOf(1));
     await user.click(tileOf(2));
     expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "2");
+    // 旧「从相册移除」按钮已删（从相册移除 = 移入回收站）
+    expect(screen.queryByTestId("selection-remove-album")).toBeNull();
 
-    // 相册上下文专属按钮
-    await user.click(screen.getByTestId("selection-remove-album"));
-    await waitFor(() => expect(removeMock).toHaveBeenCalledWith(1, [1, 2]));
+    await user.click(screen.getByTestId("selection-trash"));
+    const dialog = await screen.findByTestId("trash-move-dialog");
+    await user.click(within(dialog).getByTestId("trash-move-accept"));
+    await waitFor(() => expect(trashMoveMock).toHaveBeenCalledWith([1, 2]));
 
     // 重置重拉（reloadToken → 首页 0 重新请求）+ album_list 计数刷新
     await waitFor(() => expect(assetsPageMock.mock.calls.filter(([id, afterId]) => id === 1 && afterId === 0).length).toBeGreaterThanOrEqual(2));
     expect(albumListMock.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("右键菜单在相册上下文多「从相册移除」（danger）；多选语义作用于全部选中", async () => {
+  it("右键菜单「移入回收站」（无相册专属移除项）；多选语义作用于全部选中", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
     const user = userEvent.setup();
     renderDetail();
@@ -208,11 +211,11 @@ describe("相册详情页：从相册移除入口", () => {
     await user.click(checkOf(2));
     fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
     const menu = await screen.findByTestId("album-asset-context-menu");
-    const removeItem = within(menu).getByTestId("album-asset-context-menu-item-remove-album");
-    expect(removeItem).toHaveTextContent("从相册移除（2 张）");
-
-    await user.click(removeItem);
-    await waitFor(() => expect(removeMock).toHaveBeenCalledWith(1, [1, 2]));
+    expect(within(menu).queryByTestId("album-asset-context-menu-item-remove-album")).toBeNull();
+    await user.click(within(menu).getByTestId("album-asset-context-menu-item-trash"));
+    const dialog = await screen.findByTestId("trash-move-dialog");
+    await user.click(within(dialog).getByTestId("trash-move-accept"));
+    await waitFor(() => expect(trashMoveMock).toHaveBeenCalledWith([1, 2]));
   });
 });
 

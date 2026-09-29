@@ -11,6 +11,7 @@ import {
   albumList,
   albumRename,
   albumSubgroups,
+  assetTrashMove,
   cullSessionCreate,
   type AlbumDto,
   type AlbumSubgroupDto,
@@ -206,12 +207,26 @@ export default function AlbumDetailPage() {
     setCtxMenu({ ...at, assets: contextTargets(asset, loadedById) });
   }
 
-  /** 相册上下文刷新：移除引用后重置分页重拉 + 相册计数 + 子分组清单 */
+  /** 列表刷新（移入回收站后）：重置分页重拉 + 相册计数 + 子分组清单 */
   const handleAssetsRemoved = useCallback(() => {
     exitSelection();
     setReloadToken((token) => token + 1);
     void refreshMeta();
   }, [exitSelection, refreshMeta]);
+
+  /** 「移入回收站」确认目标（一照一册模型：从相册移除 = 移入回收站，
+   * 真删只发生在回收站页；还原时原册仍在则回原册）。null=弹窗关闭 */
+  const [trashConfirm, setTrashConfirm] = useState<{ ids: number[] } | null>(null);
+  const requestTrashMove = useCallback((targets: AssetDto[]) => {
+    setTrashConfirm({ ids: targets.map((a) => a.id) });
+  }, []);
+  async function confirmTrashMove(): Promise<void> {
+    if (trashConfirm === null) return;
+    const ids = trashConfirm.ids;
+    setTrashConfirm(null);
+    await assetTrashMove(ids);
+    handleAssetsRemoved();
+  }
 
   /** 子分组移组（B4）：target=null 移回根；输入新名即建（后端按名幂等）。
    *  完成后重拉当前视图 + 子分组清单 + 相册计数。 */
@@ -559,7 +574,7 @@ export default function AlbumDetailPage() {
         )}
       </div>
 
-      {/* 多选浮动操作条（相册上下文：多一项「从相册移除」） */}
+      {/* 多选浮动操作条（移入回收站 = 一照一册下的「从相册移除」） */}
       {selecting && (
         <SelectionBar
           count={selectedAssets.length}
@@ -569,11 +584,7 @@ export default function AlbumDetailPage() {
           onInvert={(ids) => setSelected(ids)}
           onDone={exitSelection}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
-          album={{
-            albumId,
-            albumName,
-            onRemoved: handleAssetsRemoved,
-          }}
+          onTrashRequest={requestTrashMove}
           subgroup={{
             current: subgroup,
             names: subgroups.map((g) => g.name),
@@ -582,7 +593,7 @@ export default function AlbumDetailPage() {
         />
       )}
 
-      {/* 瓦片右键菜单（相册上下文：多一项「从相册移除」） */}
+      {/* 瓦片右键菜单 */}
       {ctxMenu && (
         <AssetContextMenu
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
@@ -590,8 +601,49 @@ export default function AlbumDetailPage() {
           onClose={() => setCtxMenu(null)}
           testId="album-asset-context-menu"
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
-          albumContext={{ albumId, onRemoved: handleAssetsRemoved }}
+          onTrashRequest={requestTrashMove}
         />
+      )}
+
+      {/* 「移入回收站」确认一步（多选操作条/右键菜单共用） */}
+      {trashConfirm !== null && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-6"
+          data-testid="trash-move-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("trash.moveTitle")}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTrashConfirm(null);
+          }}
+        >
+          <div className="w-full max-w-sm rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+            <h2 className="text-sm font-semibold text-text-primary" data-testid="trash-move-title">
+              {t("trash.moveTitle")}
+            </h2>
+            <p className="mt-2 text-xs leading-relaxed text-text-secondary">
+              {t("trash.moveDesc", { count: trashConfirm.ids.length })}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setTrashConfirm(null)}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
+                data-testid="trash-move-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmTrashMove()}
+                className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-500/85"
+                data-testid="trash-move-accept"
+              >
+                {t("trash.moveConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 加入（其他）相册弹窗 */}

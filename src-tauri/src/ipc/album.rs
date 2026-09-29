@@ -274,15 +274,6 @@ pub fn fetch_album_item_move_subgroup(
     Ok(moved)
 }
 
-/// 批量移除引用核（幂等；相册不存在报错）。
-pub fn fetch_album_remove_assets(
-    state: &super::AppState,
-    id: i64,
-    asset_ids: &[i64],
-) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
-    db.album_remove_assets(id, asset_ids).map_err(map_missing)
-}
 
 /// 相册内时间线核：按 captured_at 复用画廊 keyset 分页（NULL 最先 + 时间
 /// 降序 + id tiebreak）；`filters` 透传现有 AssetFilters 与相册集合求交——
@@ -476,20 +467,6 @@ pub async fn album_item_move_subgroup(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_album_item_move_subgroup(state, id, &asset_ids, subgroup.as_deref())
-    })
-    .await
-}
-
-/// 批量移除引用（幂等；只删引用不动资产）。
-#[tauri::command]
-pub async fn album_remove_assets(
-    state: State<'_, SharedState>,
-    id: i64,
-    asset_ids: Vec<i64>,
-) -> Result<(), String> {
-    let shared = state.inner().clone();
-    run_blocking(shared, move |state| {
-        fetch_album_remove_assets(state, id, &asset_ids)
     })
     .await
 }

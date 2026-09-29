@@ -23,7 +23,7 @@ use events::{AssetKind, EventBus, FileState};
 use import::engine::Engine;
 use ipc::album::{
     fetch_album_add_assets, fetch_album_assets_page, fetch_album_cover_set, fetch_album_create,
-    fetch_album_delete, fetch_album_list, fetch_album_remove_assets, fetch_album_rename,
+    fetch_album_delete, fetch_album_list, fetch_album_rename,
 };
 use ipc::assets::{fetch_assets_page, AssetDto, AssetFilters};
 
@@ -242,12 +242,11 @@ fn album_add_idempotent_skips_missing_assets_and_requires_album() {
     let err = fetch_album_add_assets(&state, 9999, &[a1], None).unwrap_err();
     assert!(err.contains("相册不存在"), "{err}");
 
-    // 移除：单移 + 不在册 id 幂等；相册不存在报错
-    fetch_album_remove_assets(&state, album.id, &[a1, 888_888]).unwrap();
+    // 移除（db 层；album_remove_assets 命令已删——一照一册下 UI 走回收站，
+    // db 方法仍是归册挪移的核）：单移 + 不在册 id 幂等
+    db.album_remove_assets(album.id, &[a1, 888_888]).unwrap();
     assert_eq!(fetch_album_list(&state).unwrap()[0].item_count, 1);
-    fetch_album_remove_assets(&state, album.id, &[a1]).unwrap(); // 已移除：无错
-    let err = fetch_album_remove_assets(&state, 9999, &[a1]).unwrap_err();
-    assert!(err.contains("相册不存在"), "{err}");
+    db.album_remove_assets(album.id, &[a1]).unwrap(); // 已移除：无错
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +679,6 @@ fn asset_albums_reverse_lookup_order_and_empty() {
     assert!(db.asset_albums(a3).unwrap().is_empty());
 
     // 移出后反查同步收窄
-    fetch_album_remove_assets(&state, second.id, &[a1]).unwrap();
+    db.album_remove_assets(second.id, &[a1]).unwrap();
     assert_eq!(db.asset_albums(a1).unwrap().len(), 1);
 }

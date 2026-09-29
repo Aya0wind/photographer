@@ -7,7 +7,6 @@ import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import {
-  albumRemoveAssets,
   assetFlagSet,
   assetLabelSet,
   assetRejectSet,
@@ -169,7 +168,6 @@ export default function ContextMenu({
  * 复制文件到剪贴板 / 旗标 / 颜色标签（LR 五色+清除子项，作用于 targets 全部）/
  * 拒绝旗标（智能切换：全部已拒绝=取消拒绝）/ 加入相册（③ 全局入口，
  * onAddToAlbum 提供时显示）。
- * 相册上下文（相册详情页，albumContext 提供时）额外多一项「从相册移除」。
  * onTrashRequest 提供时多「移入回收站」（红色；确认一步由上层弹窗承担）。
  * 动作对 targets 全部资产逐个执行，单个失败不中断其余（reveal 非 Tauri 环境
  * 静默；clipboard 后端在途，失败静默）。onColorLabeled/onRejected 回调供
@@ -181,7 +179,6 @@ export function AssetContextMenu({
   onClose,
   testId = "asset-context-menu",
   onAddToAlbum,
-  albumContext,
   onColorLabeled,
   onRejected,
   onTrashRequest,
@@ -193,7 +190,6 @@ export function AssetContextMenu({
   /** 「加入相册」入口回调（弹窗由上层挂载）；不传则不显示该项 */
   onAddToAlbum?: (assets: AssetDto[]) => void;
   /** 相册上下文（相册详情页）：显示「从相册移除」（danger） */
-  albumContext?: { albumId: number; onRemoved: () => void };
   /** 颜色标签设置完成回调（IPC 后同步本地列表态） */
   onColorLabeled?: (assets: AssetDto[], label: string | null) => void;
   /** 拒绝旗标切换完成回调 */
@@ -257,15 +253,6 @@ export function AssetContextMenu({
     onRejected?.(assets, next);
   }
 
-  /** 相册上下文：从相册移除引用（仅删引用，照片保留图库），完成后上层刷新 */
-  async function removeFromAlbum(): Promise<void> {
-    if (!albumContext) return;
-    const ok = await albumRemoveAssets(
-      albumContext.albumId,
-      assets.map((a) => a.id),
-    );
-    if (ok) albumContext.onRemoved();
-  }
 
   const count = assets.length;
   const entries: ContextMenuEntry[] = [
@@ -302,16 +289,7 @@ export function AssetContextMenu({
       label: count > 1 ? t("albums.addManyTo", { count }) : t("albums.addToAlbum"),
       onSelect: () => onAddToAlbum(assets),
     });
-  }
-  if (albumContext) {
-    entries.push({
-      key: "remove-album",
-      label: count > 1 ? t("albums.removeManyFrom", { count }) : t("albums.removeFromAlbum"),
-      onSelect: () => void removeFromAlbum(),
-      danger: true,
-    });
-  }
-  if (onTrashRequest) {
+  }  if (onTrashRequest) {
     entries.push({
       key: "trash",
       label: count > 1 ? t("context.trashMany", { count }) : t("context.trash"),

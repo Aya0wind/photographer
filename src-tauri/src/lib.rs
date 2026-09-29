@@ -337,7 +337,6 @@ pub fn run() {
             ipc::album::album_add_assets,
             ipc::album::album_subgroups,
             ipc::album::album_item_move_subgroup,
-            ipc::album::album_remove_assets,
             ipc::album::album_assets_page,
             ipc::album::asset_albums,
             ipc::album::album_dir_rename,

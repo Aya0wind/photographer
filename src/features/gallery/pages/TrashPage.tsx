@@ -185,6 +185,32 @@ export default function TrashPage() {
               {t("trash.selectedCount", { count: selected.length })}
             </span>
             <span className="h-4 w-px bg-edge" aria-hidden="true" />
+            {/* 全选（已全选再点=取消全选）/ 反选：数据窗口=当前已加载列表 */}
+            <button
+              type="button"
+              onClick={() => {
+                const allSelected = selected.length > 0 && selected.length === assets.length;
+                setSelected(allSelected ? [] : assets.map((a) => a.id));
+              }}
+              className="rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
+              data-testid="trash-select-all"
+            >
+              {selected.length > 0 && selected.length === assets.length
+                ? t("selection.deselectAll")
+                : t("selection.all")}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const selectedSet = new Set(selected);
+                setSelected(assets.filter((a) => !selectedSet.has(a.id)).map((a) => a.id));
+              }}
+              className="rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
+              data-testid="trash-invert"
+            >
+              {t("selection.invert")}
+            </button>
+            <span className="h-4 w-px bg-edge" aria-hidden="true" />
             <button
               type="button"
               onClick={() => void restore()}

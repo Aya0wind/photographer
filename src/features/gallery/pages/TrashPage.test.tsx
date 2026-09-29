@@ -1,7 +1,7 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 
@@ -180,5 +180,33 @@ describe("回收站页：多选与批量操作", () => {
       expect(ids).not.toContain("2");
     });
     expect(screen.getByTestId("trash-toast")).toHaveTextContent("已彻底删除 1 项");
+  });
+});
+
+describe("回收站页：全选/反选", () => {
+  it("全选 → 已选=全部（按钮变取消全选）；再点 → 清空；反选取补集", async () => {
+    listMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
+    renderTrash();
+    const tiles = await screen.findAllByTestId("gallery-tile");
+
+    // 进多选（点一张）
+    fireEvent.click(tiles[0]);
+    expect(await screen.findByTestId("trash-actions")).toHaveAttribute("data-count", "1");
+
+    // 全选：3 张 + 按钮变「取消全选」
+    fireEvent.click(screen.getByTestId("trash-select-all"));
+    await waitFor(() => expect(screen.getByTestId("trash-actions")).toHaveAttribute("data-count", "3"));
+    expect(screen.getByTestId("trash-select-all")).toHaveTextContent("取消全选");
+
+    // 反选：补集 = 空集
+    fireEvent.click(screen.getByTestId("trash-invert"));
+    await waitFor(() => expect(screen.queryByTestId("trash-actions")).not.toBeInTheDocument());
+
+    // 再进多选后全选 → 取消全选回空
+    fireEvent.click(screen.getAllByTestId("gallery-tile")[1]);
+    fireEvent.click(screen.getByTestId("trash-select-all"));
+    await waitFor(() => expect(screen.getByTestId("trash-actions")).toHaveAttribute("data-count", "3"));
+    fireEvent.click(screen.getByTestId("trash-select-all"));
+    await waitFor(() => expect(screen.queryByTestId("trash-actions")).not.toBeInTheDocument());
   });
 });

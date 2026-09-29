@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import {
-  albumRemoveAssets,
   assetFlagSet,
   assetLabelSet,
   assetRatingSet,
@@ -28,13 +27,6 @@ import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
  * 相册上下文（相册详情页）：额外多一项「从相册移除」——只删引用，照片保留图库。
  */
 
-/** 相册上下文（相册详情页传入）：操作条多一项「从相册移除」 */
-export interface SelectionAlbumContext {
-  albumId: number;
-  albumName: string;
-  /** 移除完成回调（详情页刷新列表与计数） */
-  onRemoved: () => void;
-}
 
 /** 浮条拖动位置持久化键（视口左上像素坐标）。 */
 const BAR_POS_KEY = "selectionbar.pos";
@@ -181,7 +173,6 @@ export default function SelectionBar({
   onDone,
   onAddToAlbum,
   onFavoritesChanged,
-  album,
   subgroup,
   onColorLabeled,
   onRejected,
@@ -197,8 +188,6 @@ export default function SelectionBar({
   onAddToAlbum?: (assets: AssetDto[]) => void;
   /** 收藏切换完成（IPC 后同步本地列表态）；favorite = 本轮切换到的目标态 */
   onFavoritesChanged?: (assets: AssetDto[], favorite: boolean) => void;
-  /** 相册上下文（相册详情页）：额外显示「从相册移除」 */
-  album?: SelectionAlbumContext;
   /** 子分组上下文（B4，相册详情页传入）：多选操作条「移到子分组…/移到相册根」 */
   subgroup?: {
     /** 当前视图所在子分组名；null = 相册根 */
@@ -288,7 +277,8 @@ export default function SelectionBar({
 
   /** 收藏切换：全部已收藏（rating 5）→ 取消；否则批量收藏。 */
   async function favorite(): Promise<void> {
-    const target = !(assets.length > 0 && assets.every((a) => a.rating === 5));
+    const target = !allFavorited;
+    setFavOverride(target);
     for (const asset of assets) await assetRatingSet(asset.id, target ? 5 : 0);
     onFavoritesChanged?.(assets, target);
     flash(t("selection.done"));
@@ -296,7 +286,8 @@ export default function SelectionBar({
 
   /** 旗标切换：全部已旗标 → 取消；否则批量旗标。 */
   async function flag(): Promise<void> {
-    const target = !(assets.length > 0 && assets.every((a) => a.flagged));
+    const target = !allFlagged;
+    setFlagOverride(target);
     for (const asset of assets) await assetFlagSet(asset.id, target);
     flash(t("selection.done"));
   }
@@ -311,6 +302,18 @@ export default function SelectionBar({
     onColorLabeled?.(assets, target);
     flash(target === null ? t("selection.colorCleared") : t("selection.done"));
   }
+
+  // 收藏/旗标切换态的乐观覆盖：点击后立即翻转按钮文案（上层未回写
+  // flagged 的页面也能正确显示「取消×」）；选中集变化时重置。
+  const idsKey = assets.map((a) => a.id).join(",");
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  const [flagOverride, setFlagOverride] = useState<boolean | null>(null);
+  useEffect(() => {
+    setFavOverride(null);
+    setFlagOverride(null);
+  }, [idsKey]);
+  const allFavorited = assets.length > 0 && (favOverride ?? assets.every((a) => a.rating === 5));
+  const allFlagged = assets.length > 0 && (flagOverride ?? assets.every((a) => a.flagged));
 
   // 拒绝旗标智能切换：全部已拒绝 → 取消拒绝；否则批量拒绝
   const allRejected = assets.length > 0 && assets.every((a) => a.rejected === true);
@@ -361,20 +364,6 @@ export default function SelectionBar({
     flash(ok ? t("selection.done") : t("albums.subgroupMoveFailed"));
   }
 
-  /** 相册上下文：从相册移除引用（只删引用，照片保留图库），完成后上层刷新 */
-  async function removeFromAlbum(): Promise<void> {
-    if (!album) return;
-    const ok = await albumRemoveAssets(
-      album.albumId,
-      assets.map((a) => a.id),
-    );
-    if (!ok) {
-      flash(t("albums.removeFailed"));
-      return;
-    }
-    flash(t("albums.removedToast", { count: assets.length }));
-    album.onRemoved();
-  }
 
   return (
     <div
@@ -411,8 +400,8 @@ export default function SelectionBar({
           className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
           data-testid="selection-favorite"
         >
-          <GlyphStar filled />
-          {t("selection.favorite")}
+          <GlyphStar filled={allFavorited} />
+          {allFavorited ? t("selection.unfavorite") : t("selection.favorite")}
         </button>
         <button
           type="button"
@@ -422,7 +411,7 @@ export default function SelectionBar({
           data-testid="selection-flag"
         >
           <GlyphFlag />
-          {t("selection.flag")}
+          {allFlagged ? t("selection.unflag") : t("selection.flag")}
         </button>
         {/* 颜色标签（LR 五色）：弹出五色点 + 清除行，批量作用于选中集 */}
         <div ref={colorRef} className="relative">
@@ -538,18 +527,6 @@ export default function SelectionBar({
           >
             <GlyphAlbum />
             {t("albums.addToAlbum")}
-          </button>
-        )}
-        {album && (
-          <button
-            type="button"
-            onClick={() => void removeFromAlbum()}
-            disabled={count === 0}
-            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-red-400 transition-colors hover:bg-red-400/10 disabled:opacity-40"
-            title={t("albums.removeFromAlbumHint")}
-            data-testid="selection-remove-album"
-          >
-            {t("albums.removeFromAlbum")}
           </button>
         )}
         {subgroup && (

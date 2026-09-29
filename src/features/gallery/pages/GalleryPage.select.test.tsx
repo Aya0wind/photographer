@@ -425,10 +425,28 @@ describe("画廊：多选切换语义（再点即取消）", () => {
     await user.click(checkOf(1));
     await user.click(screen.getByTestId("selection-favorite"));
     await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 5));
+    // 按钮文案随切换态翻转：收藏 → 取消收藏
+    await waitFor(() => expect(screen.getByTestId("selection-favorite")).toHaveTextContent("取消收藏"));
 
     // 乐观回写 rating=5 后再点：全部已收藏 → 取消
     await user.click(screen.getByTestId("selection-favorite"));
     await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 0));
+    await waitFor(() => expect(screen.getByTestId("selection-favorite")).toHaveTextContent("收藏"));
+  });
+
+  it("旗标按钮文案随切换态翻转：旗标 → 取消旗标（乐观覆盖，无需上层回写）", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(checkOf(2));
+    await user.click(screen.getByTestId("selection-flag"));
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, true));
+    await waitFor(() => expect(screen.getByTestId("selection-flag")).toHaveTextContent("取消旗标"));
+    // 再点：取消旗标
+    await user.click(screen.getByTestId("selection-flag"));
+    await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, false));
+    await waitFor(() => expect(screen.getByTestId("selection-flag")).toHaveTextContent("旗标"));
   });
 
   it("全选：数据窗口全选；再点=取消全选（空集）", async () => {
