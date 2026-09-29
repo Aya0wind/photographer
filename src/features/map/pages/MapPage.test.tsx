@@ -199,6 +199,16 @@ describe("MapPage 地图交互", () => {
     expect(screen.getByTestId("map-breadcrumb").textContent).toContain("中国");
   });
 
+  it("同步数据按钮 → 重跑安装管线（手动增量入图入口）", async () => {
+    statusMock.mockResolvedValue(status());
+    clustersMock.mockResolvedValue([cluster()]);
+    renderPage();
+    await screen.findByTestId("map-canvas");
+    expect(installMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("map-sync"));
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
+  });
+
   it("换一批 → 重新拉当前层", async () => {
     statusMock.mockResolvedValue(status());
     clustersMock.mockResolvedValue([cluster()]);
