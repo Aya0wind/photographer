@@ -11,17 +11,44 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command) 
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x08000000);
 }
-pub(crate) fn supports_directml() -> bool {
-    true
+pub(crate) fn capabilities() -> super::super::PlatformCapabilities {
+    super::super::PlatformCapabilities {
+        filesystem_roots: true,
+        volume_devices: true,
+        portable_devices: true,
+        hotplug: true,
+        system_open: true,
+        file_clipboard: true,
+        file_reveal: true,
+        document_uris: false,
+    }
 }
-pub(crate) fn execution_providers(use_gpu: bool) -> Vec<ort::ep::ExecutionProviderDispatch> {
-    if use_gpu {
-        vec![
+
+pub(crate) fn inference_plan(
+    preference: super::super::AccelerationPreference,
+) -> super::super::InferencePlan {
+    use super::super::{AccelerationPreference, InferenceBackend, InferencePlan};
+    if preference == AccelerationPreference::Cpu {
+        InferencePlan::cpu()
+    } else {
+        InferencePlan {
+            backend: InferenceBackend::DirectMl,
+            optimization: ort::session::builder::GraphOptimizationLevel::Level1,
+            prefer_batch: true,
+        }
+    }
+}
+
+pub(crate) fn execution_providers(
+    backend: super::super::InferenceBackend,
+) -> Vec<ort::ep::ExecutionProviderDispatch> {
+    use super::super::InferenceBackend;
+    match backend {
+        InferenceBackend::DirectMl => vec![
             ort::ep::DirectML::default().build(),
             ort::ep::CPU::default().build(),
-        ]
-    } else {
-        vec![ort::ep::CPU::default().build()]
+        ],
+        InferenceBackend::Cpu => vec![ort::ep::CPU::default().build()],
     }
 }
 pub(crate) fn sony_helper_candidates() -> Vec<PathBuf> {

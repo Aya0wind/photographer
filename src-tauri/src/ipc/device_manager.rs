@@ -17,6 +17,10 @@ enum Observation {
 }
 
 pub fn spawn(state: SharedState) {
+    let capabilities = crate::platform::capabilities();
+    if !capabilities.volume_devices && !capabilities.portable_devices {
+        return;
+    }
     // 先订阅再启动系统通知，启动枚举补上 App 打开前已连接的设备。
     let mut events = state.bus.subscribe();
     std::thread::Builder::new()
@@ -28,7 +32,14 @@ pub fn spawn(state: SharedState) {
             let mut discovery = [
                 (SourceKind::Volume, false, Instant::now()),
                 (SourceKind::Mtp, false, Instant::now()),
-            ];
+            ]
+            .into_iter()
+            .filter(|(kind, ..)| match kind {
+                SourceKind::Volume => capabilities.volume_devices,
+                SourceKind::Mtp => capabilities.portable_devices,
+                SourceKind::Folder => false,
+            })
+            .collect::<Vec<_>>();
             loop {
                 let now = Instant::now();
                 loop {
@@ -91,7 +102,13 @@ pub fn spawn(state: SharedState) {
                         .spawn("discovery", format!("{kind:?}"), move |_| {
                             let found = std::panic::catch_unwind(|| match kind {
                                 SourceKind::Volume => {
-                                    Some(crate::devices::present::enumerate_present_volumes())
+                                    crate::devices::present::enumerate_present_volumes()
+                                        .map_err(|error| {
+                                            crate::devices::diagnostics::record(format!(
+                                                "volume enumeration unavailable: {error}"
+                                            ));
+                                        })
+                                        .ok()
                                 }
                                 SourceKind::Mtp => crate::devices::wpd::enumerate_mtp_devices()
                                     .map_err(|error| {

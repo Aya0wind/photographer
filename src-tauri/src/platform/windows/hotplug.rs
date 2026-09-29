@@ -1,20 +1,33 @@
 use crate::events::EventBus;
+use std::sync::{
+    atomic::{AtomicBool, AtomicIsize, Ordering},
+    Arc,
+};
 use std::thread::JoinHandle;
-/// 启动热插拔监视线程（幂等性由调用方保证：应用生命周期内启动一次）。
-pub fn spawn_hotplug_thread(bus: EventBus) -> JoinHandle<()> {
+
+struct Control {
+    cancelled: AtomicBool,
+    window: AtomicIsize,
+}
+pub struct HotplugHandle {
+    control: Arc<Control>,
+    thread: Option<JoinHandle<()>>,
+}
+impl Drop for HotplugHandle {
+    fn drop(&mut self) {
+        win::stop(self);
+    }
+}
+pub fn spawn_hotplug_thread(bus: EventBus) -> std::io::Result<HotplugHandle> {
     win::spawn_hotplug_thread(bus)
 }
-
-/// 请求线程退出（向消息窗口投递 WM_QUIT）并等待收尾。
-#[allow(dead_code)] // 预留给应用退出收尾
-pub fn stop(handle: JoinHandle<()>) {
-    win::stop(handle)
+pub fn stop(handle: HotplugHandle) {
+    drop(handle);
 }
 
 mod win {
+    use super::{Arc, AtomicBool, AtomicIsize, Control, HotplugHandle, Ordering};
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicIsize, Ordering};
-    use std::thread::JoinHandle;
 
     use crate::devices::hotplug::{pnp_display_name, unitmask_to_drives};
     use crate::events::{AppEvent, EventBus, SourceKind};
@@ -24,12 +37,12 @@ mod win {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        PostMessageW, RegisterClassW, RegisterDeviceNotificationW, TranslateMessage,
-        UnregisterDeviceNotification, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
-        DBT_DEVNODES_CHANGED, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_VOLUME,
-        DEVICE_NOTIFY_WINDOW_HANDLE, DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HDR,
-        DEV_BROADCAST_VOLUME, HDEVNOTIFY, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DEVICECHANGE,
-        WM_QUIT, WNDCLASSW,
+        PostMessageW, PostQuitMessage, RegisterClassW, RegisterDeviceNotificationW,
+        TranslateMessage, UnregisterDeviceNotification, DBT_DEVICEARRIVAL,
+        DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED, DBT_DEVTYP_DEVICEINTERFACE,
+        DBT_DEVTYP_VOLUME, DEVICE_NOTIFY_WINDOW_HANDLE, DEV_BROADCAST_DEVICEINTERFACE_W,
+        DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME, HDEVNOTIFY, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+        WM_CLOSE, WM_DEVICECHANGE, WNDCLASSW,
     };
 
     /// WPD 设备接口 GUID（DEVINTERFACE_WPD）。
@@ -39,9 +52,6 @@ mod win {
     /// DBTF_NET：网络卷不是可移动媒体，忽略。
     const DBTF_NET: u16 = 0x0001;
 
-    /// 消息窗口 HWND（0 = 未创建）；stop() 据此投递 WM_QUIT。
-    static WINDOW: AtomicIsize = AtomicIsize::new(0);
-
     thread_local! {
         /// 消息泵线程内的总线。窗口过程只在该线程被调用（message-only
         /// 窗口的消息只能由创建线程的 GetMessage 取到），无跨线程访问。
@@ -50,29 +60,43 @@ mod win {
 
     const CLASS_NAME: &str = "SmartPhotoHotplugWnd";
 
-    pub fn spawn_hotplug_thread(bus: EventBus) -> JoinHandle<()> {
-        std::thread::Builder::new()
+    pub fn spawn_hotplug_thread(bus: EventBus) -> std::io::Result<HotplugHandle> {
+        let control = Arc::new(Control {
+            cancelled: AtomicBool::new(false),
+            window: AtomicIsize::new(0),
+        });
+        let pump_control = Arc::clone(&control);
+        let thread = std::thread::Builder::new()
             .name("hotplug".into())
-            .spawn(move || run(bus))
-            .expect("failed to spawn hotplug thread")
+            .spawn(move || run(bus, pump_control))?;
+        Ok(HotplugHandle {
+            control,
+            thread: Some(thread),
+        })
     }
 
-    /// 停止热插拔线程：向消息窗口投递 WM_QUIT 使 GetMessageW 返回 0，再 join。
-    /// 窗口尚未创建时（启动初期）仅 join——该窗口在 spawn 后毫秒级完成创建。
-    #[allow(dead_code)] // 预留给应用退出收尾（外层 stop 转发）
-    pub fn stop(handle: JoinHandle<()>) {
-        let hwnd = WINDOW.swap(0, Ordering::SeqCst);
+    pub(super) fn stop(handle: &mut HotplugHandle) {
+        handle.control.cancelled.store(true, Ordering::SeqCst);
+        let hwnd = handle.control.window.load(Ordering::SeqCst);
         if hwnd != 0 {
-            // SAFETY: hwnd 由本模块创建且尚未销毁；失败仅意味着窗口已退出
+            // WM_CLOSE is handled on the owning thread, which posts WM_QUIT to its own queue.
             let _ =
-                unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_QUIT, WPARAM(0), LPARAM(0)) };
+                unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
         }
-        let _ = handle.join();
+        if let Some(thread) = handle.thread.take() {
+            let _ = thread.join();
+        }
     }
 
-    fn run(bus: EventBus) {
+    fn run(bus: EventBus, control: Arc<Control>) {
         BUS.with(|b| *b.borrow_mut() = Some(bus));
         if let Some((hwnd, notifies)) = setup() {
+            control.window.store(hwnd.0 as isize, Ordering::SeqCst);
+            if control.cancelled.load(Ordering::SeqCst) {
+                cleanup(hwnd, notifies);
+                control.window.store(0, Ordering::SeqCst);
+                return;
+            }
             eprintln!("热插拔窗口已启动（卷广播 + WPD 接口通知/轮询）");
             let mut msg = MSG::default();
             loop {
@@ -88,6 +112,7 @@ mod win {
                 }
             }
             cleanup(hwnd, notifies);
+            control.window.store(0, Ordering::SeqCst);
         } else {
             eprintln!("热插拔监听启动失败：窗口创建/设备通知注册失败，插拔事件将不可用");
         }
@@ -131,7 +156,6 @@ mod win {
             )
         }
         .ok()?;
-        WINDOW.store(hwnd.0 as isize, Ordering::SeqCst);
 
         let mut notifies = Vec::new();
 
@@ -168,7 +192,6 @@ mod win {
         }
         // SAFETY: hwnd 属于当前（泵）线程
         let _ = unsafe { DestroyWindow(hwnd) };
-        WINDOW.store(0, Ordering::SeqCst);
     }
 
     /// SAFETY: 系统按 WNDCLASSW.lpfnWndProc 约定调用；hwnd/msg/wparam/lparam
@@ -179,6 +202,12 @@ mod win {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if msg == WM_CLOSE {
+            unsafe {
+                PostQuitMessage(0);
+            }
+            return LRESULT(0);
+        }
         if msg == WM_DEVICECHANGE {
             handle_device_change(wparam.0 as u32, lparam.0 as *const core::ffi::c_void);
             return LRESULT(1); // 已处理
@@ -287,3 +316,37 @@ mod win {
 // ---------------------------------------------------------------------------
 // 非 Windows 桩（保持模块树跨平台可编译；本产品仅面向 Windows）
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_before_window_creation_delivers_cancellation_and_joins() {
+        let control = Arc::new(Control {
+            cancelled: AtomicBool::new(false),
+            window: AtomicIsize::new(0),
+        });
+        let worker_control = Arc::clone(&control);
+        let (finished, result) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !worker_control.cancelled.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            finished
+                .send(worker_control.cancelled.load(Ordering::SeqCst))
+                .unwrap();
+        });
+        stop(HotplugHandle {
+            control,
+            thread: Some(thread),
+        });
+        assert!(
+            result.recv().unwrap(),
+            "early shutdown must be remembered before HWND exists"
+        );
+    }
+}

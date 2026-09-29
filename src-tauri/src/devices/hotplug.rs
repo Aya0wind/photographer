@@ -49,4 +49,18 @@ mod native;
 
 // 平台接缝 API：个别符号暂无消费方（脚手架期），保留导出
 #[allow(unused_imports)]
-pub use native::{spawn_hotplug_thread, stop};
+pub use native::{spawn_hotplug_thread, stop, HotplugHandle};
+
+/// Start only supported monitors; retaining the handle owns the worker's lifetime.
+pub fn start_if_supported(bus: crate::events::EventBus) -> Option<HotplugHandle> {
+    if !crate::platform::capabilities().hotplug {
+        return None;
+    }
+    match spawn_hotplug_thread(bus) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            eprintln!("热插拔监视启动失败: {error}");
+            None
+        }
+    }
+}

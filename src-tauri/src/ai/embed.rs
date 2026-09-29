@@ -3,7 +3,7 @@
 //!
 //! ## 运行时选型（2026-09-21 DirectML 接入修订）
 //! - `ort` 2.0.0-rc.13 + `directml` feature（构建期下载含 DML 的 ms 预编译
-//!   库）。EP 序列见 [`super::execution_providers`]：`use_gpu=true`（默认）
+//!   库）。EP 序列见 [`super::build_session`]：`use_gpu=true`（默认）
 //!   → `[DirectML, CPU]`，DML 注册/初始化失败 ort 自动回落 CPU EP；
 //!   `use_gpu=false` → 纯 CPU；env `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖
 //!   （基准 A/B / 现场诊断）。
@@ -35,6 +35,11 @@ const MAX_TEXT_TOKENS: usize = 64;
 /// 嵌入器抽象：语义索引/搜索的数据面。真实现 = [`ModelManager`]（ONNX），
 /// 测试用确定性随机桩（tests/ai_embed_test.rs）。
 pub trait SemanticEmbedder: Send + Sync {
+    /// Whether this embedder benefits from batching; CPU/stub implementations default to single images.
+    fn prefer_batch(&self, _model: &str) -> bool {
+        false
+    }
+
     /// 图像嵌入：`src` 原图 + `db_dir`（256 档缩略图缓存根，命中免解码原图）。
     fn embed_image(&self, src: &Path, db_dir: &Path) -> Result<Vec<f32>, String>;
     /// 批量图像嵌入（索引回填主路径，2026-09-21 并发优化）：多图 squash
@@ -199,7 +204,7 @@ impl ModelManager {
     /// 批量张量单次 Run → 逐行提取 L2 归一化嵌入（输出 rank-2 [B,768]
     /// 直接行切；rank-3 为 last_hidden 兜底——按批逐行 mean-pool）。
     /// DML 运行时故障（如 int8 LayerNormFusion E_INVALIDARG，真机
-    /// 2026-09-21）经 run_with_dml_fallback 一次性回落纯 CPU 重跑。
+    /// 2026-09-21）经 run_with_acceleration_fallback 一次性回落纯 CPU 重跑。
     fn embed_batched(&self, batch: usize, data: Vec<f32>) -> Result<Vec<Vec<f32>>, String> {
         let input_size = u32::from(self.ai_params().embed_input_size);
         let dim = i64::from(input_size);
@@ -230,7 +235,8 @@ impl ModelManager {
             slots.visual = None; // 丢弃 DML 会话：重建走 execution_providers 的 CPU 分支
         };
         let vision_model = super::semantic_model_ids(self.ai_params().quality_tier)[0];
-        let (shape, flat) = super::run_with_dml_fallback(use_gpu, vision_model, extract, reset)?;
+        let (shape, flat) =
+            super::run_with_acceleration_fallback(use_gpu, vision_model, extract, reset)?;
         let (rows, dim_out) = match shape.len() {
             // [B, 768]：整块按行切
             2 => (shape[0] as usize, shape[1] as usize),
@@ -269,6 +275,10 @@ impl ModelManager {
 }
 
 impl SemanticEmbedder for ModelManager {
+    fn prefer_batch(&self, model: &str) -> bool {
+        super::prefer_batch_inference(self.ai_params().use_gpu, model)
+    }
+
     fn embed_image(&self, src: &Path, db_dir: &Path) -> Result<Vec<f32>, String> {
         // 图源 = embed_input_size 档缩略图（settings.ai 可配，默认 256；
         // 命中缓存零解码原图；缺失则顺手生成——与缩略图索引任务协同）

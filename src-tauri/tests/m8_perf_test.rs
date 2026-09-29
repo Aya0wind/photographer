@@ -1,4 +1,4 @@
-//! M8 性能包：① 同卷 rename 快道（卷序列号判定 + xxh=0 哨兵 + moved 计
+//! M8 性能包：① 同卷 rename 快道（直接尝试 rename + xxh=0 哨兵 + moved 计
 //! 数 + 被锁回退流式）② 后台哈希通道（快道登记 → worker 补算 → requeue
 //! 家族幂等 + 代际标记）③ 缩略图 LRU（touch 续命 + 淘汰边界 + 保护窗 +
 //! 上限刷新）。copy 模式回归：内联哈希照旧、零 hash 任务。

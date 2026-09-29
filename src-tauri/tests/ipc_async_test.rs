@@ -65,19 +65,23 @@ fn run_blocking_executes_off_thread_and_returns() {
 }
 
 #[test]
-fn async_fs_list_dirs_shell_keeps_contract() {
-    // 无 State 的纯 IO 命令直接 await async fn：spawn_blocking 后台执行，
-    // 返回类型不变（非 Result，失败→空数组）
-    let drives = tauri::async_runtime::block_on(ipc::device::fs_list_dirs(None));
-    assert!(
-        drives.iter().any(|d| d.path == "C:\\"),
-        "应包含 C:\\ : {drives:?}"
-    );
+fn async_fs_list_dirs_shell_preserves_success_and_platform_errors() {
+    // 根查询返回 Result：平台未适配不能伪装成没有盘符。
+    let roots = tauri::async_runtime::block_on(ipc::device::fs_list_dirs(None));
+    if platform::capabilities().filesystem_roots {
+        let drives = roots.unwrap();
+        assert!(!drives.is_empty());
+        #[cfg(windows)]
+        assert!(drives.iter().any(|d| d.path == "C:\\"), "{drives:?}");
+    } else {
+        assert!(roots.is_err());
+    }
+    // 子目录浏览继续兼容原有的无 children 降级。
     assert!(
         tauri::async_runtime::block_on(ipc::device::fs_list_dirs(Some(
             r"C:\definitely\not\here".into()
         )))
-        .is_empty(),
-        "非法路径 → 空数组不报错"
+        .unwrap()
+        .is_empty()
     );
 }

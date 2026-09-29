@@ -43,8 +43,12 @@ fn registrable_volume_matrix() {
 fn present_volume_enumeration_smoke_on_real_machine() {
     // 真机烟测：不 panic、条目为盘符形态、本地系统盘绝不出现
     //（C: 固定盘被过滤；测试机若插着有媒体的可移动盘会出现——只做性质断言）
-    let volumes = enumerate_present_volumes();
-    let empty = devices::present::enumerate_empty_readers();
+    if !platform::capabilities().volume_devices {
+        assert!(enumerate_present_volumes().is_err());
+        return;
+    }
+    let volumes = enumerate_present_volumes().unwrap();
+    let empty = devices::present::enumerate_empty_readers().unwrap();
     eprintln!("present volumes: {volumes:?}; empty readers: {empty:?}");
     assert!(empty
         .iter()

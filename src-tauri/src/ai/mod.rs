@@ -335,57 +335,49 @@ fn agent() -> &'static ureq::Agent {
 /// /"siglip2-text"/"siglip2-visual-fp16"/"siglip2-text-fp16"/"facemesh"）
 /// 运行时故障只毒化该模型——重建纯 CPU 会话时**其他模型保住 DML**（此前全局一位，单模型炸
 /// 会连坐全部通道）。推理层捕获错误后丢弃该模型的 DML 会话重建（见
-/// run_with_dml_fallback）。
-fn poison_flags() -> &'static Mutex<HashMap<String, bool>> {
-    static POISON: std::sync::OnceLock<Mutex<HashMap<String, bool>>> = std::sync::OnceLock::new();
+/// run_with_acceleration_fallback）。
+type PoisonedBackends = HashMap<String, HashSet<crate::platform::InferenceBackend>>;
+fn poison_flags() -> &'static Mutex<PoisonedBackends> {
+    static POISON: std::sync::OnceLock<Mutex<PoisonedBackends>> = std::sync::OnceLock::new();
     POISON.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn dml_poisoned(model: &str) -> bool {
+fn backend_poisoned(model: &str, backend: crate::platform::InferenceBackend) -> bool {
     poison_flags()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(model)
-        .copied()
-        .unwrap_or(false)
+        .is_some_and(|backends| backends.contains(&backend))
 }
 
-fn poison_dml(model: &str) {
+fn poison_backend(model: &str, backend: crate::platform::InferenceBackend) {
     poison_flags()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(model.to_string(), true);
+        .entry(model.to_owned())
+        .or_default()
+        .insert(backend);
 }
 
-/// 当前意图是否 DML 优先（env 覆盖 > use_gpu；该模型已毒化则否）。
-fn dml_intended(use_gpu: bool, model: &str) -> bool {
-    if !crate::platform::supports_directml() {
-        return false;
+fn inference_plan(use_gpu: bool, model: &str) -> crate::platform::InferencePlan {
+    use crate::platform::{AccelerationPreference, InferenceBackend, InferencePlan};
+    let preference = match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
+        Ok("cpu") => AccelerationPreference::Cpu,
+        Ok("dml") => AccelerationPreference::DirectMl,
+        _ if use_gpu => AccelerationPreference::Auto,
+        _ => AccelerationPreference::Cpu,
+    };
+    let plan = crate::platform::inference_plan(preference);
+    if plan.backend != InferenceBackend::Cpu && backend_poisoned(model, plan.backend) {
+        InferencePlan::cpu()
+    } else {
+        plan
     }
-    match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
-        Ok("dml") => !dml_poisoned(model),
-        Ok("cpu") => false,
-        _ => use_gpu && !dml_poisoned(model),
-    }
 }
 
-/// EP 序列：`use_gpu=true` → `[DirectML, CPU]`——DML **注册**失败时 ort 记
-/// 警告并回落（CPU EP 恒在队尾兜底，逐算子不支持的也自动回落 CPU）；
-/// `use_gpu=false` 或该模型 DML 已毒化（运行时故障）→ 纯 CPU。env
-/// `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖（"dml" 越过 use_gpu 开关，"cpu"
-/// 压制之）——基准 A/B 与现场诊断用，优先级最高。
-pub(crate) fn execution_providers(
-    use_gpu: bool,
-    model: &str,
-) -> Vec<ort::ep::ExecutionProviderDispatch> {
-    crate::platform::execution_providers(dml_intended(use_gpu, model))
-}
-
-/// DML 运行时故障的统一处置：`run` 失败且该模型会话确为 DML 优先时——置
-/// **该模型**的毒化位 + `reset` 丢弃其 DML 会话 + 重跑一次（重建会话经
-/// execution_providers 自动回落纯 CPU，其他模型不受连坐）。非 DML 会话 /
-/// 二次失败原样上抛。
-pub(crate) fn run_with_dml_fallback<T>(
+/// 加速后端运行时故障：按模型/后端隔离故障，重建 CPU 会话并重试一次。
+/// CPU 会话失败或第二次失败原样返回，其他模型保持原后端。
+pub(crate) fn run_with_acceleration_fallback<T>(
     use_gpu: bool,
     model: &str,
     mut run: impl FnMut() -> Result<T, String>,
@@ -394,10 +386,11 @@ pub(crate) fn run_with_dml_fallback<T>(
     match run() {
         Ok(v) => Ok(v),
         Err(err) => {
-            if dml_intended(use_gpu, model) {
-                poison_dml(model);
+            let backend = inference_plan(use_gpu, model).backend;
+            if backend != crate::platform::InferenceBackend::Cpu {
+                poison_backend(model, backend);
                 eprintln!(
-                    "DML 推理运行时故障（{model}），该模型本进程回落纯 CPU 并重建会话: {err}"
+                    "{backend:?} 推理运行时故障（{model}），该模型本进程回落纯 CPU 并重建会话: {err}"
                 );
                 reset();
                 run()
@@ -413,8 +406,8 @@ pub(crate) fn run_with_dml_fallback<T>(
 /// （+23%）；CPU 批16 = 12.5 vs 单图 14.1（**-12%**，单图 Run 的 intra-op
 /// 线程已吃满核，批化反而劣化）。CPU/毒化/显式 cpu 一律批 1。
 /// 这是**语义通道**的批量化决策 → 按批推理实际用的 siglip vision 标签查。
-pub(crate) fn prefer_batch_inference(model: &str) -> bool {
-    dml_intended(true, model)
+pub(crate) fn prefer_batch_inference(use_gpu: bool, model: &str) -> bool {
+    inference_plan(use_gpu, model).prefer_batch
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +418,7 @@ pub(crate) fn prefer_batch_inference(model: &str) -> bool {
 #[doc(hidden)]
 #[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
 pub fn poison_dml_for_test(model: &str) {
-    poison_dml(model);
+    poison_backend(model, crate::platform::InferenceBackend::DirectMl);
 }
 
 /// 清空全部毒化位（测试隔离：每个用例从干净态起步）。
@@ -442,10 +435,10 @@ pub fn reset_dml_poison_for_test() {
 #[doc(hidden)]
 #[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
 pub fn dml_intended_for_test(use_gpu: bool, model: &str) -> bool {
-    dml_intended(use_gpu, model)
+    inference_plan(use_gpu, model).backend == crate::platform::InferenceBackend::DirectMl
 }
 
-/// 直通 run_with_dml_fallback（tests 验证「失败一次 → 毒化该模型 + reset +
+/// 直通 run_with_acceleration_fallback（tests 验证「失败一次 → 毒化该模型 + reset +
 /// 重跑成功；其他模型不受连坐」——用假 run/reset 闭包当 EP/会话 seam）。
 #[doc(hidden)]
 #[allow(dead_code)] // 集成测试引用（lib 目标内无调用点）
@@ -455,7 +448,7 @@ pub fn run_with_dml_fallback_for_test<T>(
     run: impl FnMut() -> Result<T, String>,
     reset: impl FnOnce(),
 ) -> Result<T, String> {
-    run_with_dml_fallback(use_gpu, model, run, reset)
+    run_with_acceleration_fallback(use_gpu, model, run, reset)
 }
 
 /// ort 会话构建（embed/face 共用）：图优化 + 可选 intra 线程 + EP 序列。
@@ -473,11 +466,11 @@ pub(crate) fn build_session(
     model_label: &str,
 ) -> Result<ort::session::Session, String> {
     use ort::session::builder::GraphOptimizationLevel;
+    let plan = inference_plan(use_gpu, model_label);
     let opt_level = match std::env::var("SMARTPHOTO_AI_OPT").as_deref() {
         Ok("level1") => GraphOptimizationLevel::Level1,
         Ok("disable") => GraphOptimizationLevel::Disable,
-        _ if dml_intended(use_gpu, model_label) => GraphOptimizationLevel::Level1,
-        _ => GraphOptimizationLevel::Level3,
+        _ => plan.optimization,
     };
     let mut builder = ort::session::Session::builder().map_err(|e| e.to_string())?;
     if let Some(n) = intra_threads {
@@ -486,7 +479,7 @@ pub(crate) fn build_session(
     builder
         .with_optimization_level(opt_level)
         .map_err(|e| e.to_string())?
-        .with_execution_providers(execution_providers(use_gpu, model_label))
+        .with_execution_providers(crate::platform::execution_providers(plan.backend))
         .map_err(|e| e.to_string())?
         .commit_from_file(path)
         .map_err(|e| format!("加载 {model_label} 失败: {e}"))
@@ -516,7 +509,7 @@ pub struct AiIndexParams {
     /// 在线聚类归簇 cos 阈值。
     pub face_cluster_threshold: f32,
     /// 允许 GPU（settings.ai.use_gpu 投影）：true 时会话 EP 序列
-    /// [DirectML, CPU]（DML 失败自动落 CPU，见 execution_providers）。
+    /// [DirectML, CPU]（DML 失败自动落 CPU，见 build_session）。
     pub use_gpu: bool,
     /// 画质档位（settings.ai.quality_tier 投影，默认 normal）：推理层
     /// 经 face_detect_model_id / semantic_model_ids 解析当前档位的模型件

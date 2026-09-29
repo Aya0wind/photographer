@@ -25,7 +25,6 @@
 mod dedup;
 mod fsutil;
 mod pipeline;
-mod samevol;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

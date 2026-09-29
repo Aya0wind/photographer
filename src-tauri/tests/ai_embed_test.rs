@@ -408,6 +408,10 @@ struct FlakyBatchEmbedder {
 }
 
 impl SemanticEmbedder for FlakyBatchEmbedder {
+    fn prefer_batch(&self, _model: &str) -> bool {
+        true
+    }
+
     fn embed_image(&self, src: &Path, _db_dir: &Path) -> Result<Vec<f32>, String> {
         if src.to_string_lossy().contains(&self.bad_marker) {
             Err("坏图".into())
@@ -889,6 +893,31 @@ fn ep_overridden() -> bool {
     std::env::var("SMARTPHOTO_AI_EP").is_ok()
 }
 
+// Both cases mutate the same process-wide poison map; use one shared lock.
+#[cfg(windows)]
+static AI_EP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn cpu_failure_is_not_retried_or_reset() {
+    if ep_overridden() {
+        return;
+    }
+    let mut calls = 0;
+    let result: Result<(), String> = ai::run_with_dml_fallback_for_test(
+        false,
+        "cpu-fallback-contract",
+        || {
+            calls += 1;
+            Err("CPU failure".into())
+        },
+        || panic!("CPU errors must not rebuild the session"),
+    );
+    assert_eq!(result.unwrap_err(), "CPU failure");
+    assert_eq!(calls, 1);
+    assert!(!ai::prefer_batch_inference(false, "cpu-fallback-contract"));
+}
+
+#[cfg(windows)]
 #[test]
 fn dml_poison_isolated_per_model() {
     if ep_overridden() {
@@ -897,8 +926,7 @@ fn dml_poison_isolated_per_model() {
     }
     // 毒化位是进程级全局——与 fallback 用例并发会互相改写彼此的断言
     // 前置（真值表必须独占运行），用锁把两个用例串行化。
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = AI_EP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ai::reset_dml_poison_for_test();
     // 基线：use_gpu=true → 各模型 DML 优先；false → 全 CPU
     for m in ["scrfd", "arcface", "siglip2-visual", "siglip2-text"] {
@@ -912,7 +940,10 @@ fn dml_poison_isolated_per_model() {
         assert!(ai::dml_intended_for_test(true, m), "{m} 不应被 scrfd 连坐");
     }
     // 再毒化 siglip vision → 文本塔仍 DML
+    assert!(ai::prefer_batch_inference(true, "siglip2-visual"));
+    assert!(!ai::prefer_batch_inference(false, "siglip2-visual"));
     ai::poison_dml_for_test("siglip2-visual");
+    assert!(!ai::prefer_batch_inference(true, "siglip2-visual"));
     assert!(!ai::dml_intended_for_test(true, "siglip2-visual"));
     assert!(
         ai::dml_intended_for_test(true, "siglip2-text"),
@@ -925,14 +956,14 @@ fn dml_poison_isolated_per_model() {
     }
 }
 
+#[cfg(windows)]
 #[test]
 fn dml_fallback_poisons_only_failing_model_and_recovers_once() {
     if ep_overridden() {
         eprintln!("skip: SMARTPHOTO_AI_EP 已设置");
         return;
     }
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = AI_EP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ai::reset_dml_poison_for_test();
 
     // 模型 A（arcface）首跑失败 → 毒化 A + reset（丢 DML 会话）+ 重跑一次成功

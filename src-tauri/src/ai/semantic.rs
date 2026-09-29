@@ -311,12 +311,12 @@ pub fn run_semantic_backfill(
                     // （批化反而 -12%，见 prefer_batch_inference 注释）；
                     // DML 中途毒化后后续批次自动落 1（批量化是语义通道决策
                     // → 按当前档位的 siglip vision 标签查毒化位）
-                    let batch_size = if super::prefer_batch_inference(&vision_model) {
-                        AI_BATCH
-                    } else {
-                        1
-                    };
                     loop {
+                        let batch_size = if embedder.prefer_batch(&vision_model) {
+                            AI_BATCH
+                        } else {
+                            1
+                        };
                         // 批量认领 → 单次批推理 → 逐条结算
                         let tasks = match db.claim_index_tasks("ai", batch_size) {
                             Ok(t) => t,

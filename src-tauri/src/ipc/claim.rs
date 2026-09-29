@@ -70,16 +70,6 @@ pub struct LrStagingResultDto {
     pub copied: u64,
 }
 
-/// 卷根比较：src 与 dst 卷根字符串不同 → 视为跨卷（走 copy+校验+删源）。
-/// 注意：verbatim 前缀（`\\?\C:\`）与普通盘根（`C:\`）判为不同卷——保守
-/// 走复制路径（挪移安全性优先），同时给测试提供确定性的「模拟两卷」手段。
-fn volume_root_of(path: &Path) -> String {
-    path.ancestors()
-        .last()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 /// 路径分隔符归一（`\` → `/`）：库内 path 存在反斜杠（claim 挪移 join
 /// 产物）与正斜杠（引擎/导出 render_dir 渲染段）两种形态，前缀判定统一
 /// 按 `/` 比较。0022 起移组挪移（ipc::album）与 claim 共用。
@@ -132,56 +122,136 @@ pub(crate) fn move_file_with_sidecar(
     let sidecar_dst = crate::metadata::xmp::sidecar_path(dst);
     let sidecar = sidecar_src.is_file();
 
-    let same_volume = volume_root_of(src) == volume_root_of(dst);
-    if same_volume {
-        std::fs::rename(src, dst).map_err(|e| format!("同卷改名失败: {e}"))?;
-    } else {
-        // 跨卷：.part 原子落位 + 流式 xxhash 校验（与库内指纹对账）
-        let part = dst.with_extension("part");
-        let copy = || -> Result<u64, String> {
-            let mut reader = std::fs::File::open(src).map_err(|e| format!("打开失败: {e}"))?;
-            let mut writer = std::fs::File::create(&part).map_err(|e| format!("写失败: {e}"))?;
-            let mut hasher = xxhash_rust::xxh64::Xxh64::new(0);
-            let mut buf = vec![0u8; 8 * 1024 * 1024];
-            loop {
-                let n = reader.read(&mut buf).map_err(|e| format!("读失败: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                writer
-                    .write_all(&buf[..n])
-                    .map_err(|e| format!("写失败: {e}"))?;
-                hasher.update(&buf[..n]);
-            }
-            writer.flush().map_err(|e| format!("写失败: {e}"))?;
-            Ok(hasher.digest())
-        };
-        let copied_size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
-        match copy() {
-            Ok(hash) => {
-                if copied_size != size || (expected_xxhash != 0 && hash != expected_xxhash) {
-                    let _ = std::fs::remove_file(&part);
-                    return Err(format!("跨卷校验失败（size {copied_size}/{size}）——源保留"));
-                }
-                std::fs::rename(&part, dst).map_err(|e| format!("落位失败: {e}"))?;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&part);
-                return Err(e);
-            }
-        }
-        // 校验通过才删源
-        std::fs::remove_file(src).map_err(|e| format!("删源失败（成片已就位）: {e}"))?;
+    // Try the operation itself: mount aliases and remounts cannot invalidate a cached guess.
+    if std::fs::rename(src, dst).is_err() {
+        copy_verify_remove(src, dst, size, expected_xxhash)?;
     }
+
     if sidecar {
-        if same_volume {
-            let _ = std::fs::rename(&sidecar_src, &sidecar_dst);
-        } else {
+        if std::fs::rename(&sidecar_src, &sidecar_dst).is_err() {
             let _ = std::fs::copy(&sidecar_src, &sidecar_dst)
                 .and_then(|_| std::fs::remove_file(&sidecar_src));
         }
     }
     Ok(())
+}
+
+/// Verified copying is shared by rename failures (cross-mount, permissions, sharing modes).
+fn copy_verify_remove(
+    src: &Path,
+    dst: &Path,
+    size: u64,
+    expected_xxhash: u64,
+) -> Result<(), String> {
+    // 跨卷：.part 原子落位 + 流式 xxhash 校验（与库内指纹对账）
+    let part = dst.with_extension("part");
+    let copy = || -> Result<(u64, u64), String> {
+        let mut reader = std::fs::File::open(src).map_err(|e| format!("打开失败: {e}"))?;
+        let mut writer = std::fs::File::create(&part).map_err(|e| format!("写失败: {e}"))?;
+        let mut hasher = xxhash_rust::xxh64::Xxh64::new(0);
+        let mut copied_size = 0_u64;
+        let mut buf = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| format!("读失败: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            writer
+                .write_all(&buf[..n])
+                .map_err(|e| format!("写失败: {e}"))?;
+            hasher.update(&buf[..n]);
+            copied_size += n as u64;
+        }
+        writer.flush().map_err(|e| format!("写失败: {e}"))?;
+        Ok((copied_size, hasher.digest()))
+    };
+    match copy() {
+        Ok((copied_size, hash)) => {
+            if copied_size != size || (expected_xxhash != 0 && hash != expected_xxhash) {
+                let _ = std::fs::remove_file(&part);
+                return Err(format!("跨卷校验失败（size {copied_size}/{size}）——源保留"));
+            }
+            std::fs::rename(&part, dst).map_err(|e| format!("落位失败: {e}"))?;
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+    }
+    // 校验通过才删源
+    std::fs::remove_file(src).map_err(|e| format!("删源失败（成片已就位）: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+
+    #[test]
+    fn verified_copy_preserves_bytes_and_removes_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.jpg");
+        let dst = dir.path().join("destination.jpg");
+        let bytes = b"verified cross-mount contents";
+        std::fs::write(&src, bytes).unwrap();
+        copy_verify_remove(
+            &src,
+            &dst,
+            bytes.len() as u64,
+            xxhash_rust::xxh64::xxh64(bytes, 0),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), bytes);
+        assert!(!src.exists());
+        assert!(!dst.with_extension("part").exists());
+    }
+
+    #[test]
+    fn size_or_hash_mismatch_keeps_source_and_cleans_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.jpg");
+        let dst = dir.path().join("destination.jpg");
+        let bytes = b"source must survive verification errors";
+        std::fs::write(&src, bytes).unwrap();
+        let hash = xxhash_rust::xxh64::xxh64(bytes, 0);
+        for (size, expected_hash) in [
+            (bytes.len() as u64 + 1, hash),
+            (bytes.len() as u64, hash ^ 1),
+        ] {
+            assert!(copy_verify_remove(&src, &dst, size, expected_hash).is_err());
+            assert_eq!(std::fs::read(&src).unwrap(), bytes);
+            assert!(!dst.exists());
+            assert!(!dst.with_extension("part").exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sharing_violation_uses_verified_copy_and_keeps_locked_source() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("locked.jpg");
+        let dst = dir.path().join("destination.jpg");
+        let bytes = b"readable but not renameable";
+        std::fs::write(&src, bytes).unwrap();
+        // Permit reading/writing, but deny deletion/rename for this handle's lifetime.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&src)
+            .unwrap();
+        let error = move_file_with_sidecar(
+            &src,
+            &dst,
+            bytes.len() as u64,
+            xxhash_rust::xxh64::xxh64(bytes, 0),
+        )
+        .unwrap_err();
+        assert!(error.contains("删源失败"), "{error}");
+        assert_eq!(std::fs::read(&dst).unwrap(), bytes);
+        assert_eq!(std::fs::read(&src).unwrap(), bytes);
+        drop(lock);
+    }
 }
 
 /// 归册挪移核。
@@ -386,9 +456,8 @@ pub fn fetch_lr_staging_create(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let dst = resolve_conflict(&dir, &filename);
-        // 同卷优先硬链接（Windows = CreateHardLinkW，失败回退复制）；跨卷直接复制
-        let same_volume = volume_root_of(&src) == volume_root_of(&dir);
-        let staged = same_volume && std::fs::hard_link(&src, &dst).is_ok();
+        // 直接尝试硬链接（Windows = CreateHardLinkW）；跨卷/不支持时回退复制
+        let staged = std::fs::hard_link(&src, &dst).is_ok();
         if staged {
             result.hardlinked += 1;
         } else if std::fs::copy(&src, &dst).is_ok() {

@@ -1,9 +1,10 @@
-//! 热插拔适配占位：不监视设备，退出接口可安全调用。
+//! Unavailable watcher: no thread is created.
 use crate::events::EventBus;
-use std::thread::JoinHandle;
-pub fn spawn_hotplug_thread(bus: EventBus) -> JoinHandle<()> {
-    std::thread::spawn(move || drop(bus))
+pub struct HotplugHandle;
+pub fn spawn_hotplug_thread(_: EventBus) -> std::io::Result<HotplugHandle> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "当前平台尚未实现热插拔监视",
+    ))
 }
-pub fn stop(handle: JoinHandle<()>) {
-    let _ = handle.join();
-}
+pub fn stop(_: HotplugHandle) {}

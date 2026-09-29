@@ -411,11 +411,11 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
     assert!(result4.failed[0].error.contains("回收站"));
 }
 
+#[cfg(windows)]
 #[test]
-fn claim_cross_volume_copies_verifies_and_deletes_source() {
+fn claim_path_aliases_move_and_failed_rename_verifies_copy() {
     let dir = tempfile::tempdir().unwrap();
-    // 用 canonicalize 产生 verbatim 前缀（\\?\C:\...）——volume_root_of 判为
-    // 另一「卷」，确定性地走 copy+校验+删源分支（tempdir 模拟两卷）
+    // 普通路径和 verbatim 路径指向同一卷，不应误判为跨卷。
     let photos_real = dir.path().join("photos");
     std::fs::create_dir_all(&photos_real).unwrap();
     let photos_verbatim = std::fs::canonicalize(&photos_real).unwrap();
@@ -448,7 +448,7 @@ fn claim_cross_volume_copies_verifies_and_deletes_source() {
 
     let result = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
-    assert!(!photo.exists(), "跨卷校验通过后删源");
+    assert!(!photo.exists(), "同卷路径别名直接 rename 挪移");
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
             .unwrap();
@@ -458,7 +458,7 @@ fn claim_cross_volume_copies_verifies_and_deletes_source() {
     );
     assert!(std::path::Path::new(&moved_path).is_file());
 
-    // 指纹不符 → 校验失败、源保留
+    // 可读但禁止 rename 的文件强制进入真实复制回退；指纹不符须保留源。
     let bad = src_dir.join("DSC_0003.jpg");
     std::fs::write(&bad, b"different-bytes").unwrap();
     let bad_id = ins(&db, &bad.to_string_lossy(), AssetKind::Photo, None);
@@ -467,11 +467,18 @@ fn claim_cross_volume_copies_verifies_and_deletes_source() {
         [bad_id],
     )
     .unwrap();
+    use std::os::windows::fs::OpenOptionsExt;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&bad)
+        .unwrap();
     let result2 = fetch_album_claim_assets(&state, album.id, &[bad_id], None).unwrap();
     assert_eq!(result2.moved, 0);
     assert_eq!(result2.failed.len(), 1);
     assert!(result2.failed[0].error.contains("校验失败"));
     assert!(bad.is_file(), "校验失败源保留");
+    drop(lock);
 }
 
 /// 三调用点同公式（导入 ↔ claim）：引擎导入产物与归册挪移产物落在**同一个**
@@ -529,7 +536,7 @@ fn import_and_claim_share_the_same_album_home_formula() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn lr_staging_create_hardlinks_same_volume_and_copies_cross_volume() {
+fn lr_staging_create_hardlinks_same_volume_and_path_aliases() {
     let dir = tempfile::tempdir().unwrap();
     let db_dir = dir.path().join("db");
     let photo_root = dir.path().join("photos");
@@ -574,7 +581,7 @@ fn lr_staging_create_hardlinks_same_volume_and_copies_cross_volume() {
     assert!(r3.created);
     assert_eq!(r3.hardlinked, 1);
 
-    // 跨卷（verbatim 源路径）→ 回退复制
+    // verbatim 路径别名仍可硬链接，不额外复制
     let photos_verbatim = std::fs::canonicalize(&photo_root).unwrap();
     let verbatim_file = photos_verbatim.join("DSC_0001.jpg");
     let id_v = ins(
@@ -583,16 +590,18 @@ fn lr_staging_create_hardlinks_same_volume_and_copies_cross_volume() {
         AssetKind::Photo,
         None,
     );
-    let r4 = fetch_lr_staging_create(&state, &[id_v], Some("跨卷")).unwrap();
-    assert_eq!(r4.copied, 1, "{r4:?}");
-    assert_eq!(r4.hardlinked, 0);
+    let r4 = fetch_lr_staging_create(&state, &[id_v], Some(&format!("{uniq}-alias"))).unwrap();
+    assert_eq!(r4.copied, 0, "{r4:?}");
+    assert_eq!(r4.hardlinked, 1);
 
     // 失效 id 跳过不计数
     let r5 = fetch_lr_staging_create(&state, &[99999], Some(&uniq)).unwrap();
     assert_eq!(r5.hardlinked + r5.copied, 0);
 
     // 清理卷根暂存产物（暂存夹一次性可弃）
-    let _ = std::fs::remove_dir_all(&r.dir);
+    for staging in [&r.dir, &r3.dir, &r4.dir] {
+        let _ = std::fs::remove_dir_all(staging);
+    }
 }
 
 // ---------------------------------------------------------------------------

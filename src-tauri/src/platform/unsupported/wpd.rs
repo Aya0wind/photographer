@@ -1,4 +1,4 @@
-//! 未适配平台的设备占位；枚举为空，设备操作返回不支持。
+//! 未适配平台的设备占位；枚举与设备操作均返回不支持。
 use crate::devices::{DeviceResult, DeviceSource, FileEntry};
 use crate::events::SourceKind;
 
@@ -54,11 +54,11 @@ impl DeviceSource for WpdSource {
 }
 
 pub fn enumerate_mtp_devices() -> DeviceResult<Vec<(String, String)>> {
-    Ok(Vec::new())
+    unavailable()
 }
 
 pub fn worker_ping(_pnp: &str) -> Option<bool> {
-    Some(false)
+    None
 }
 
 pub fn invalidate_device(pnp: &str) {

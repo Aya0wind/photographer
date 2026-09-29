@@ -23,12 +23,13 @@ use super::{run_blocking, SharedState};
 /// 用系统默认程序打开文件（open 语义：视频走默认播放器）。
 /// 运行在 `run_blocking` 后台线程（绝不碰 UI/main 线程）。
 pub fn fetch_open_with_system(path: &str) -> Result<(), String> {
-    let target = std::path::Path::new(path);
-    if !target.is_file() {
-        return Err(format!("文件不存在: {path}"));
+    let resource = crate::platform::ResourceRef::parse(path);
+    if let crate::platform::ResourceRef::LocalPath(path) = resource {
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!("文件不存在: {path}"));
+        }
     }
-
-    crate::platform::open_with_system(path)
+    crate::platform::open_with_system(resource)
 }
 
 /// 用系统默认程序打开文件（snake_case 命令，camelCase 负载 path）。
@@ -52,9 +53,12 @@ fn validate_file_args(paths: &[String]) -> Result<Vec<String>, String> {
     let mut seen = std::collections::HashSet::new();
     let unique: Vec<String> = paths
         .iter()
-        .filter(|p| seen.insert(p.to_ascii_lowercase()))
+        .filter(|p| seen.insert(p.as_str()))
         .cloned()
         .collect();
+    for path in &unique {
+        crate::platform::ResourceRef::parse(path).local_file()?;
+    }
     let missing: Vec<&str> = unique
         .iter()
         .filter(|p| !std::path::Path::new(p.as_str()).is_file())
@@ -82,6 +86,9 @@ pub fn fetch_clipboard_copy_files(paths: &[String]) -> Result<u32, String> {
 pub fn fetch_reveal_in_explorer(paths: &[String]) -> Result<u32, String> {
     // reveal 不要求全有或全无：不存在的文件在 PIDL 解析层自然跳过，
     // 但**全部**不存在时是调用方错误 → 明确报错
+    for path in paths {
+        crate::platform::ResourceRef::parse(path).local_file()?;
+    }
     let existing: Vec<String> = paths
         .iter()
         .filter(|p| std::path::Path::new(p.as_str()).is_file())
@@ -167,6 +174,29 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("missing.jpg"), "{err}");
         assert!(!err.contains("ok.jpg"), "缺失清单不含存在文件: {err}");
+    }
+
+    #[test]
+    fn validation_deduplicates_exact_paths_without_collapsing_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let lower = dir.path().join("a.jpg");
+        let upper = dir.path().join("A.jpg");
+        std::fs::write(&lower, b"lower").unwrap();
+        std::fs::write(&upper, b"upper").unwrap();
+        let lower = lower.to_string_lossy().into_owned();
+        let upper = upper.to_string_lossy().into_owned();
+        let result = validate_file_args(&[lower.clone(), upper.clone(), lower.clone()]).unwrap();
+        assert_eq!(result, vec![lower, upper]);
+    }
+
+    #[test]
+    fn document_uri_is_rejected_before_local_path_validation() {
+        let uri = "content://media/external/images/media/1".to_string();
+        let error = validate_file_args(&[uri.clone()]).unwrap_err();
+        assert!(error.contains("URI"), "{error}");
+        assert!(fetch_reveal_in_explorer(&[uri])
+            .unwrap_err()
+            .contains("URI"));
     }
 
     // -----------------------------------------------------------------

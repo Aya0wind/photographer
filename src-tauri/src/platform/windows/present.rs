@@ -87,10 +87,13 @@ pub fn probe_volume(drive: &str) -> Option<String> {
 }
 
 /// 空读卡器仍显示在来源列表，但不能注册、扫描或触发相机连接提示。
-pub fn enumerate_empty_readers() -> Vec<String> {
+pub fn enumerate_empty_readers() -> crate::devices::DeviceResult<Vec<String>> {
     use windows::core::PCWSTR;
     let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
-    crate::devices::hotplug::unitmask_to_drives(mask)
+    if mask == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(crate::devices::hotplug::unitmask_to_drives(mask)
         .into_iter()
         .filter(|drive| {
             let root: Vec<u16> = format!("{drive}\\").encode_utf16().chain(Some(0)).collect();
@@ -100,16 +103,19 @@ pub fn enumerate_empty_readers() -> Vec<String> {
             (kind == DRIVE_REMOVABLE || (kind == DRIVE_FIXED && is_external_volume(drive)))
                 && crate::devices::volume::drive_label(drive).is_none()
         })
-        .collect()
+        .collect())
 }
 
 /// 存量可导入卷：`(盘符 "E:", 展示名)`。过滤决策经 [`probe_volume`]
 /// （与热插到达共用）。
-pub fn enumerate_present_volumes() -> Vec<(String, String)> {
+pub fn enumerate_present_volumes() -> crate::devices::DeviceResult<Vec<(String, String)>> {
     // 掩码格式与 DBT dbcv_unitmask 相同（bit0='A'），复用热插解码
     let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
-    crate::devices::hotplug::unitmask_to_drives(mask)
+    if mask == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(crate::devices::hotplug::unitmask_to_drives(mask)
         .into_iter()
         .filter_map(|drive| probe_volume(&drive).map(|label| (drive, label)))
-        .collect()
+        .collect())
 }

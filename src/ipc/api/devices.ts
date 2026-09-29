@@ -1,5 +1,5 @@
 import { ipc } from "../index";
-import { type DeviceSnapshot, type FileEntryDto, type FileKind, type FsDirEntry } from "./types";
+import { type DeviceSnapshot, type FileEntryDto, type FileKind, type FsDirEntry, type PlatformCapabilities } from "./types";
 
 /** 扩展名 → 文件大类（与 Rust 侧 PHOTO_EXTS/RAW_EXTS 镜像） */
 const EXT_KIND_TABLE: Record<string, FileKind> = {
@@ -20,6 +20,11 @@ export function kindFromName(name: string): FileKind {
   const dot = name.lastIndexOf(".");
   if (dot < 0 || dot === name.length - 1) return "other";
   return EXT_KIND_TABLE[name.slice(dot + 1).toLowerCase()] ?? "other";
+}
+
+/** 读取原生能力快照；查询失败向调用方返回错误，避免把未知状态当作不支持。 */
+export async function platformCapabilities(): Promise<PlatformCapabilities> {
+  return ipc<PlatformCapabilities>("platform_capabilities");
 }
 
 /** 已连接设备列表（含各类型文件统计）；非数组回退空（防御后端异常返回） */
@@ -64,12 +69,13 @@ export async function folderScan(path: string, strict = false): Promise<DeviceSn
   }
 }
 
-/** 懒加载目录列表：parent 省略 = 盘符根；失败/不可用/非数组均返回 []（静默降级） */
-export async function fsListDirs(parent?: string): Promise<FsDirEntry[]> {
+/** 懒加载目录列表：parent 省略 = 盘符根；失败/不可用/非数组默认返回 []；strict 时透传平台错误 */
+export async function fsListDirs(parent?: string, strict = false): Promise<FsDirEntry[]> {
   try {
     const dirs = await ipc<FsDirEntry[] | null>("fs_list_dirs", parent ? { parent } : undefined);
     return Array.isArray(dirs) ? dirs : [];
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }

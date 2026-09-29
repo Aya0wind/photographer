@@ -7,6 +7,87 @@ pub(crate) struct FilesystemRoot {
     pub path: String,
 }
 
+/// Availability is explicit; empty discovery results mean no connected devices.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCapabilities {
+    pub filesystem_roots: bool,
+    pub volume_devices: bool,
+    pub portable_devices: bool,
+    pub hotplug: bool,
+    pub system_open: bool,
+    pub file_clipboard: bool,
+    pub file_reveal: bool,
+    pub document_uris: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccelerationPreference {
+    Auto,
+    Cpu,
+    DirectMl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum InferenceBackend {
+    Cpu,
+    DirectMl,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InferencePlan {
+    pub backend: InferenceBackend,
+    pub optimization: ort::session::builder::GraphOptimizationLevel,
+    pub prefer_batch: bool,
+}
+impl InferencePlan {
+    pub(crate) fn cpu() -> Self {
+        Self {
+            backend: InferenceBackend::Cpu,
+            optimization: ort::session::builder::GraphOptimizationLevel::Level3,
+            prefer_batch: false,
+        }
+    }
+}
+
+/// Process-local filesystem identity. Do not persist or cache across mount changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FilesystemIdentity(pub(crate) u64);
+
+/// Borrowed reference: URI resources never pass through local filesystem validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceRef<'a> {
+    LocalPath(&'a str),
+    Uri(&'a str),
+}
+impl<'a> ResourceRef<'a> {
+    pub(crate) fn parse(value: &'a str) -> Self {
+        if value.split_once("://").is_some_and(|(scheme, _)| {
+            scheme.len() > 1 // A single letter followed by colon is a Windows drive.
+                && scheme.bytes().enumerate().all(|(index, c)| {
+                    c.is_ascii_alphabetic()
+                        || (index > 0 && (c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.')))
+                })
+        }) {
+            Self::Uri(value)
+        } else {
+            Self::LocalPath(value)
+        }
+    }
+    pub(crate) fn local_file(self) -> Result<&'a std::path::Path, String> {
+        match self {
+            Self::LocalPath(path) => Ok(std::path::Path::new(path)),
+            Self::Uri(_) => Err("当前平台尚未实现文档 URI 访问".into()),
+        }
+    }
+}
+
+/// Cold preflight only; actual moves should try rename and fall back to verified copying.
+#[allow(dead_code)]
+pub(crate) fn same_filesystem(a: &std::path::Path, b: &std::path::Path) -> std::io::Result<bool> {
+    Ok(filesystem_identity(a)? == filesystem_identity(b)?)
+}
+
 #[cfg(windows)]
 #[path = "windows/mod.rs"]
 mod native;
@@ -32,11 +113,11 @@ mod native;
 mod unsupported;
 
 pub(crate) use native::{
-    clipboard_copy_files, configure_background_command, configure_sequential_read, crt_putenv,
-    development_library_paths, drive_roots, execution_providers, font_candidates,
-    gphoto_driver_marker, gphoto_library_name, gphoto_port_library_name, is_hidden_or_system,
-    load_bundle_library, locate_development_driver_dir, open_with_system, preload_dependencies,
-    query_volume_serial, reveal_files, sony_helper_candidates, supports_directml, volume_label,
+    capabilities, clipboard_copy_files, configure_background_command, configure_sequential_read,
+    crt_putenv, development_library_paths, drive_roots, execution_providers, filesystem_identity,
+    font_candidates, gphoto_driver_marker, gphoto_library_name, gphoto_port_library_name,
+    inference_plan, is_hidden_or_system, load_bundle_library, locate_development_driver_dir,
+    open_with_system, preload_dependencies, reveal_files, sony_helper_candidates, volume_label,
     volume_root,
 };
 
@@ -59,4 +140,68 @@ pub(crate) fn group_by_parent(paths: &[String]) -> Vec<(String, Vec<String>)> {
         groups[slot].1.push(path.clone());
     }
     groups
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn resource_kind_preserves_paths_and_separates_document_uris() {
+        for path in [
+            r"C:\photos\a.jpg",
+            "C:/photos/a.jpg",
+            "C://photos/a.jpg",
+            "C:relative.jpg",
+            "/photos/A.jpg",
+            "relative.jpg",
+            r"\\server\share\a.jpg",
+        ] {
+            let resource = ResourceRef::parse(path);
+            assert_eq!(resource, ResourceRef::LocalPath(path));
+            assert_eq!(resource.local_file().unwrap(), std::path::Path::new(path));
+        }
+        for uri in [
+            "content://media/external/1",
+            "file:///photos/a.jpg",
+            "https://example.com/a.jpg",
+        ] {
+            let resource = ResourceRef::parse(uri);
+            assert_eq!(resource, ResourceRef::Uri(uri));
+            assert!(resource.local_file().is_err());
+        }
+    }
+
+    #[test]
+    fn cpu_preference_never_enables_acceleration_or_batching() {
+        let plan = inference_plan(AccelerationPreference::Cpu);
+        assert_eq!(plan.backend, InferenceBackend::Cpu);
+        assert!(!plan.prefer_batch);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unavailable_capabilities_are_errors_without_native_threads() {
+        assert!(!capabilities().portable_devices);
+        assert!(!capabilities().volume_devices);
+        assert!(!capabilities().hotplug);
+        assert_eq!(
+            drive_roots().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            filesystem_identity(std::path::Path::new("."))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            inference_plan(AccelerationPreference::Auto).backend,
+            InferenceBackend::Cpu
+        );
+        assert_eq!(
+            inference_plan(AccelerationPreference::DirectMl).backend,
+            InferenceBackend::Cpu
+        );
+    }
 }

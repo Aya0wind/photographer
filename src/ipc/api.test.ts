@@ -37,6 +37,7 @@ import {
   deviceScan,
   folderScan,
   fsListDirs,
+  platformCapabilities,
   importCancel,
   importJobsPage,
   importLogsPage,
@@ -148,6 +149,22 @@ describe("IPC 契约封装", () => {
     invokeMock.mockRejectedValue(new Error("no backend"));
 
     await expect(fsListDirs("D:\\")).resolves.toEqual([]);
+  });
+
+  it("原生能力保留 false，不把不支持当作空设备列表", async () => {
+    const capabilities = {
+      filesystemRoots: false, volumeDevices: false, portableDevices: false, hotplug: false,
+      systemOpen: false, fileClipboard: false, fileReveal: false, documentUris: false,
+    };
+    invokeMock.mockResolvedValue(capabilities);
+    await expect(platformCapabilities()).resolves.toEqual(capabilities);
+    expect(invokeMock).toHaveBeenCalledWith("platform_capabilities", undefined);
+  });
+
+  it("能力与严格目录查询透传平台错误", async () => {
+    invokeMock.mockRejectedValue(new Error("当前平台尚未实现根枚举"));
+    await expect(platformCapabilities()).rejects.toThrow("尚未实现");
+    await expect(fsListDirs(undefined, true)).rejects.toThrow("尚未实现");
   });
 
   it("importStart 传 plan 参数并返回 ok/jobId", async () => {

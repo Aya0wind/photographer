@@ -144,7 +144,7 @@ pub type SharedState = std::sync::Arc<AppState>;
 ///
 /// 核心同步逻辑保持原签名（集成测试直测）；async 命令壳从托管态 clone
 /// `SharedState` 后把工作丢 `spawn_blocking` 后台线程执行。返回 `Result`
-/// 的命令用本壳；非 `Result` 命令（如 fs_list_dirs 的"失败→空数组"契约）
+/// 的命令用本壳；其他命令
 /// 就地 spawn。本函数不依赖 tauri 运行时外壳（AppHandle/mock app），
 /// 集成测试可直接 await。
 pub async fn run_blocking<T: Send + 'static>(
@@ -168,16 +168,25 @@ pub async fn run_blocking<T: Send + 'static>(
 /// （前端按空 children 处理，不报错）。
 pub fn list_dirs(parent: Option<&str>) -> Vec<DirEntryDto> {
     match parent {
-        None => crate::platform::drive_roots()
-            .into_iter()
-            .map(|root| DirEntryDto {
-                name: root.name,
-                path: root.path,
-                has_subdirs: true,
-            })
-            .collect(),
+        None => list_root_dirs().unwrap_or_default(),
         Some(path) => child_dirs(path),
     }
+}
+
+/// 根枚举保留平台错误；旧的纯浏览入口仍兼容失败返回空集合。
+pub(crate) fn list_root_dirs() -> Result<Vec<DirEntryDto>, String> {
+    crate::platform::drive_roots()
+        .map_err(|e| e.to_string())
+        .map(|roots| {
+            roots
+                .into_iter()
+                .map(|root| DirEntryDto {
+                    name: root.name,
+                    path: root.path,
+                    has_subdirs: true,
+                })
+                .collect()
+        })
 }
 
 /// 列一层子目录（跳过隐藏/系统属性、黑名单与点前缀名；不含文件）。

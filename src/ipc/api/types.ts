@@ -5,6 +5,18 @@
 export type DeviceKind = "volume" | "mtp" | "folder";
 export type FileKind = "photo" | "raw" | "other";
 
+/** 原生平台已实现的能力；false 与「支持但当前未发现设备」分开。 */
+export interface PlatformCapabilities {
+  filesystemRoots: boolean;
+  volumeDevices: boolean;
+  portableDevices: boolean;
+  hotplug: boolean;
+  systemOpen: boolean;
+  fileClipboard: boolean;
+  fileReveal: boolean;
+  documentUris: boolean;
+}
+
 export interface DeviceSnapshot {
   /** 空读卡器槽位可见，但不能扫描或导入。旧事件省略时按已插卡处理。 */
   mediaPresent?: boolean;

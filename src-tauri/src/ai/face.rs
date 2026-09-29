@@ -200,7 +200,7 @@ pub fn detect_faces(manager: &ModelManager, img: &RgbImage) -> Result<Vec<Detect
     // 纯 CPU 重建重跑一次
     let use_gpu = manager.ai_params().use_gpu;
     let det_model = super::face_detect_model_id(manager.ai_params().quality_tier);
-    let heads = super::run_with_dml_fallback(
+    let heads = super::run_with_acceleration_fallback(
         use_gpu,
         det_model,
         || {
@@ -506,7 +506,7 @@ impl ModelManager {
         // DML 运行时故障同 embed/det 语义：毒化（仅 arcface，按模型隔离）
         // + 纯 CPU 重建重跑一次
         let use_gpu = self.ai_params().use_gpu;
-        let vec = super::run_with_dml_fallback(
+        let vec = super::run_with_acceleration_fallback(
             use_gpu,
             "arcface",
             || {

@@ -418,7 +418,7 @@ impl<'a> FacemeshEarClassifier<'a> {
             }
         }
         let use_gpu = self.manager.ai_params().use_gpu;
-        super::run_with_dml_fallback(
+        super::run_with_acceleration_fallback(
             use_gpu,
             FACEMESH_MODEL_ID,
             || {

@@ -49,7 +49,11 @@ impl From<&DeviceSnapshot> for DeviceSnapshotInfo {
 #[tauri::command]
 pub async fn device_list(state: State<'_, SharedState>) -> Result<Vec<DeviceSnapshotInfo>, String> {
     run_blocking(state.inner().clone(), |state| {
-        let empty_readers = crate::devices::present::enumerate_empty_readers();
+        let empty_readers = if crate::platform::capabilities().volume_devices {
+            crate::devices::present::enumerate_empty_readers().map_err(|error| error.to_string())?
+        } else {
+            Vec::new()
+        };
         let devices = state.devices.lock().expect("devices mutex poisoned");
         let mut result: Vec<_> = devices
             .values()
@@ -123,13 +127,15 @@ pub async fn device_files(
 
 /// 文件系统目录树浏览（M2 导入向导源面板，LR 风格懒加载）：
 /// parent=None → 盘符根；Some(path) → 一层子目录。
-/// 磁盘/NAS IO，后台线程执行；读取失败（含后台 join 失败）返回空数组，
-/// 返回类型不变（前端按空 children 处理，不报错）。
+/// 磁盘/NAS IO，后台线程执行；根枚举不支持/失败返回明确错误。
 #[tauri::command]
-pub async fn fs_list_dirs(parent: Option<String>) -> Vec<DirEntryDto> {
-    tauri::async_runtime::spawn_blocking(move || super::list_dirs(parent.as_deref()))
-        .await
-        .unwrap_or_default()
+pub async fn fs_list_dirs(parent: Option<String>) -> Result<Vec<DirEntryDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || match parent {
+        None => super::list_root_dirs(),
+        Some(path) => Ok(super::list_dirs(Some(&path))),
+    })
+    .await
+    .map_err(|e| format!("目录枚举后台任务失败: {e}"))?
 }
 
 /// 事件链路自检（同步、立即）：发布 Probe{ts} → 转发器 emit → 前端
@@ -138,4 +144,10 @@ pub async fn fs_list_dirs(parent: Option<String>) -> Vec<DirEntryDto> {
 #[tauri::command]
 pub fn event_ping(state: State<SharedState>) -> String {
     super::event_ping(&state.bus)
+}
+
+/// 平台能力快照：不支持的功能不应呈现为“没有设备”。
+#[tauri::command]
+pub fn platform_capabilities() -> crate::platform::PlatformCapabilities {
+    crate::platform::capabilities()
 }

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use xxhash_rust::xxh64::Xxh64;
 
-use super::samevol;
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
 use crate::events::AssetKind;
 use crate::import::templates::{
@@ -242,30 +241,28 @@ pub(super) fn copy_one(
         None => (None, None),
     };
 
-    // 同卷 rename 快道（M8-①）：move 模式 + 单目的地 + 源/暂存同卷 →
+    // 同卷 rename 快道（M8-①）：move 模式 + 单目的地，直接尝试 rename →
     // 源直改 .part（大 RAW 毫秒级），跳过流式复制与内联哈希（xxh=0 哨兵，
     // hash 通道后台补算——见 index::process_hash_task）。目标名已占用时
     // 不走快道：Skip 策略要保留源数据，流式 .part 才可安全丢弃；rename
     // 失败（EXDEV/权限/被锁）静默回退流式路径，绝不失败导入。
     if move_mode && second.is_none() && !dst.exists() {
         if let Some(src) = source.local_path(&entry.id) {
-            if samevol::same_volume(&src, part_dir) {
-                let part_path = part_dir.join(format!("{seq}.part"));
-                if fs::rename(&src, &part_path).is_ok() {
-                    return FileOutcome::Copied(Box::new(CopiedFile {
-                        entry: entry.clone(),
-                        kind,
-                        meta,
-                        xxh: 0,
-                        fast_moved: true,
-                        part: part_path,
-                        dst,
-                        part2: None,
-                        dst2: None,
-                    }));
-                }
-                // 回退：源未动，走流式
+            let part_path = part_dir.join(format!("{seq}.part"));
+            if fs::rename(&src, &part_path).is_ok() {
+                return FileOutcome::Copied(Box::new(CopiedFile {
+                    entry: entry.clone(),
+                    kind,
+                    meta,
+                    xxh: 0,
+                    fast_moved: true,
+                    part: part_path,
+                    dst,
+                    part2: None,
+                    dst2: None,
+                }));
             }
+            // 回退：源未动，走流式
         }
     }
 

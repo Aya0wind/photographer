@@ -27,7 +27,7 @@ use crate::ipc::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         // single-instance 必须第一个注册：二次启动时显示并聚焦已有主窗口。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -206,7 +206,8 @@ pub fn run() {
             // 后台线程 2：设备编排（热插拔 → 建源 → 扫描 → 注册表 + DeviceScanned）
             ipc::device_manager::spawn(app.state::<ipc::SharedState>().inner().clone());
             // 后台线程 4：热插拔检测（隐藏顶层窗口泵）
-            let _hotplug = hotplug::spawn_hotplug_thread(bus.clone());
+            let monitor = hotplug::start_if_supported(bus.clone());
+            app.manage(Mutex::new(monitor));
             // 后台线程 5：监视文件夹轮询（F4 v1：5min 一轮，新文件自动入册）
             ipc::watch::spawn_watch_worker(
                 app.state::<ipc::SharedState>().inner().clone(),
@@ -256,6 +257,7 @@ pub fn run() {
             ipc::device::device_files,
             ipc::device::folder_scan,
             ipc::device::fs_list_dirs,
+            ipc::device::platform_capabilities,
             ipc::import::import_start,
             ipc::import::import_pause,
             ipc::import::import_resume,
@@ -362,8 +364,25 @@ pub fn run() {
             // AI 挑图预扫（V3）：规则引擎预标记建议（只建议不自动决定）
             ipc::culling::cull_ai_prescan,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(stop_hotplug_on_exit);
+}
+
+fn stop_hotplug_on_exit(app: &AppHandle, event: tauri::RunEvent) {
+    if !matches!(event, tauri::RunEvent::Exit) {
+        return;
+    }
+    let Some(monitor) = app.try_state::<Mutex<Option<hotplug::HotplugHandle>>>() else {
+        return;
+    };
+    let handle = monitor
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(handle) = handle {
+        hotplug::stop(handle);
+    }
 }
 
 /// 事件转发：EventBus → 前端 `app://event`（唯一的前端事件通道）。
