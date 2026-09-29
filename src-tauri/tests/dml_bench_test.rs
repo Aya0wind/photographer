@@ -59,7 +59,7 @@ fn bench_inputs() -> Option<Vec<PathBuf>> {
 fn setup_manager() -> Option<ModelManager> {
     let models = PathBuf::from(env_or(
         "SMARTPHOTO_BENCH_MODELS",
-        r"C:\Users\12003\AppData\Roaming\com.smartphoto.app\models",
+        r"C:\Users\12003\AppData\Roaming\photohub\models",
     ));
     let manager = ModelManager::new(
         models.clone(),
@@ -301,7 +301,7 @@ fn face_pipeline_throughput_real_library() {
     let lib = PathBuf::from(env_or("SMARTPHOTO_BENCH_LIB", r"I:\SmartPhoto\主库"));
     let models = PathBuf::from(env_or(
         "SMARTPHOTO_BENCH_MODELS",
-        r"C:\Users\12003\AppData\Roaming\com.smartphoto.app\models",
+        r"C:\Users\12003\AppData\Roaming\photohub\models",
     ));
     if !lib.is_dir() {
         eprintln!("skip: 真库不存在 {}", lib.display());

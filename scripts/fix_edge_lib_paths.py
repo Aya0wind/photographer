@@ -3,7 +3,7 @@
 import json
 import sys
 
-p = r"C:\Users\12003\AppData\Roaming\com.smartphoto.app\settings.json"
+p = r"C:\Users\12003\AppData\Roaming\photohub\settings.json"
 d = json.load(open(p, encoding="utf-8"))
 fixed = []
 for lib in d.get("libraries", []):

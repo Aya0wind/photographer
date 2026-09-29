@@ -657,7 +657,7 @@ fn catalog_selection_entry_is_pinned_facemesh() {
 // 真机标定 + 验收（方法同语义阈值轮 fp16_semantic_calibration_and_throughput）
 // ---------------------------------------------------------------------------
 //
-// - 模型根 = 应用真实 models 目录（%APPDATA%\com.smartphoto.app\models，
+// - 模型根 = 应用真实 models 目录（%APPDATA%\photohub\models，
 //   SMARTPHOTO_EYES_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
 //   （SMARTPHOTO_EYES_LIBRARY 可覆盖）。
 // - 标定（默认，只读不写库）：全库逐张 SCRFD 检测 → facemesh EAR →
@@ -682,7 +682,7 @@ fn eyes_ear_calibration_and_throughput() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("APPDATA")
-                .map(|appdata| std::path::PathBuf::from(appdata).join(r"com.smartphoto.app\models"))
+                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photohub\models"))
                 .expect("APPDATA")
         });
     let db_dir = std::env::var("SMARTPHOTO_EYES_LIBRARY")
@@ -842,7 +842,7 @@ fn eyes_ear_calibration_and_throughput() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
                     std::env::var("APPDATA")
-                        .map(|a| std::path::PathBuf::from(a).join(r"com.smartphoto.app\models"))
+                        .map(|a| std::path::PathBuf::from(a).join(r"photohub\models"))
                         .expect("APPDATA")
                 }),
             bus.clone(),

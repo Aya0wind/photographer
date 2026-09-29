@@ -549,7 +549,7 @@ fn model_dtos_serialize_tier_field() {
 // ---------------------------------------------------------------------------
 
 /// fp16 双塔真机标定 + 吞吐（方法同 2026-09-21 int8 标定轮）：
-/// - 模型根 = 应用真实 models 目录（%APPDATA%\com.smartphoto.app\models，
+/// - 模型根 = 应用真实 models 目录（%APPDATA%\photohub\models，
 ///   SMARTPHOTO_FP16_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
 ///   （SMARTPHOTO_FP16_LIBRARY 可覆盖）。
 /// - 吞吐：全库 256 档缩略图按批 16 嵌入计时，前两批预热不计时（对比
@@ -571,7 +571,7 @@ fn fp16_semantic_calibration_and_throughput() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("APPDATA")
-                .map(|appdata| std::path::PathBuf::from(appdata).join(r"com.smartphoto.app\models"))
+                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photohub\models"))
                 .expect("APPDATA")
         });
     let db_dir = std::env::var("SMARTPHOTO_FP16_LIBRARY")

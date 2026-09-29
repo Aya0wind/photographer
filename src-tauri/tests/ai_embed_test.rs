@@ -598,14 +598,14 @@ fn real_backfill_chinese_dbdir_diagnosis() {
 
 // ---------------------------------------------------------------------------
 // 真 smoke（#[ignore]）：需先通过设置页/ai_model_download 下载三件套到
-// %APPDATA%\com.smartphoto.app\models\。手动跑：
+// %APPDATA%\photohub\models\。手动跑：
 // cargo test --test ai_embed_test real -- --ignored --nocapture
 // ---------------------------------------------------------------------------
 
 fn models_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var("APPDATA").ok()?;
     let dir = std::path::PathBuf::from(base)
-        .join("com.smartphoto.app")
+        .join("photohub")
         .join("models");
     dir.is_dir().then_some(dir)
 }

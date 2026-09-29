@@ -52,6 +52,24 @@ pub fn run() {
                 .path()
                 .app_config_dir()
                 .expect("failed to resolve app config dir");
+            // 2026-09-30 标识符改名 com.smartphoto.app → photohub：配置目录
+            // 随之换名。旧目录存在且新目录未建时整体 rename 迁移（同卷零拷贝，
+            // settings/models/geo 全保留）；迁移失败不阻塞——全新开始，旧目录不动。
+            if !config_dir.exists() {
+                if let Some(legacy) = config_dir
+                    .parent()
+                    .map(|parent| parent.join("com.smartphoto.app"))
+                    .filter(|p| p.is_dir())
+                {
+                    if let Err(err) = std::fs::rename(&legacy, &config_dir) {
+                        eprintln!(
+                            "旧配置目录迁移失败（{} → {}）: {err}",
+                            legacy.display(),
+                            config_dir.display()
+                        );
+                    }
+                }
+            }
             std::fs::create_dir_all(&config_dir)?;
             devices::diagnostics::init(&config_dir);
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
