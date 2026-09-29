@@ -407,8 +407,9 @@ describe("查看器：源缺失（missing）", () => {
     thumbMock.mockResolvedValue({ status: "missing", cachedPath: null });
     renderViewer();
 
-    const placeholder = await screen.findByTestId("viewer-missing-placeholder");
-    expect(placeholder).toHaveTextContent("源文件已被移动或删除");
+    // 2026-09-29：居中缺源占位已移除（与顶部横幅重复且切换时闪现）——仅顶部横幅
+    expect(await screen.findByTestId("viewer-missing-banner")).toBeInTheDocument();
+    expect(screen.queryByTestId("viewer-missing-placeholder")).not.toBeInTheDocument();
     expect(screen.getByTestId("viewer-missing-banner")).toBeInTheDocument();
     // 舞台不留空 img / 不出现加载 spinner（此前真机「stage 空白 + 无限 loading」根因）
     expect(screen.queryByTestId("viewer-img")).not.toBeInTheDocument();

@@ -225,6 +225,33 @@ pub fn fetch_trash_purge(
     Ok(deleted)
 }
 
+/// 清理源缺失资产核（2026-09-29 用户功能）：扫描库内活跃（in_trash=0）的
+/// photo/raw 资产，源文件已不存在的行永久删除（行级联清引用；物理文件无需
+/// 删——源已缺失是清理前提）。日志记账每条；返回删除数。
+pub fn fetch_missing_purge(state: &super::AppState) -> Result<u64, String> {
+    let db = super::active_library_db(state)?;
+    let rows: Vec<(i64, String)> = db
+        .0
+        .prepare("SELECT id, path FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')")
+        .map_err(|e| e.to_string())?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    let missing: Vec<i64> = rows
+        .iter()
+        .filter(|(_, path)| !std::path::Path::new(path).is_file())
+        .map(|(id, path)| {
+            let _ = db.append_log("info", None, &format!("清理源缺失资产：{path}"));
+            *id
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    db.assets_delete_rows(&missing).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri 命令壳（async + spawn_blocking）
 // ---------------------------------------------------------------------------
@@ -307,3 +334,10 @@ pub async fn trash_purge(
     })
     .await
 }
+
+#[tauri::command]
+pub async fn assets_purge_missing(state: State<'_, SharedState>) -> Result<u64, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| fetch_missing_purge(&state)).await
+}
+

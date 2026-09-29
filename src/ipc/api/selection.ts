@@ -51,3 +51,10 @@ export async function trashPurge(assetIds: number[], deleteFiles: boolean): Prom
   const deleted = await ipc<number>("trash_purge", { assetIds, deleteFiles });
   return typeof deleted === "number" && Number.isFinite(deleted) ? deleted : 0;
 }
+
+/** 清理所有源缺失照片（assets_purge_missing）：扫描库内活跃资产，源文件
+ *  不存在的行永久删除（级联清引用）。返回删除数；业务错误抛给调用方。 */
+export async function assetsPurgeMissing(): Promise<number> {
+  const purged = await ipc<number>("assets_purge_missing");
+  return typeof purged === "number" && Number.isFinite(purged) ? purged : 0;
+}

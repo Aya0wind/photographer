@@ -339,40 +339,26 @@ export default function PeoplePage() {
             {t("people.loading")}
           </div>
         ) : people.length === 0 ? (
-          <>
-            <p className="shrink-0 text-xs text-text-muted">{t("people.desc")}</p>
-            {/* 空态占位网格（后端未就绪/无聚类兜底；接入后由真实卡片替换） */}
-            <div
-              className="mt-4 grid flex-1 content-start grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 pb-6"
-              data-testid="people-placeholder-grid"
+          // 空态（未开人脸索引/尚无聚类）：与画廊等页一致的居中提示，
+          // 不再铺「待索引」占位卡堆（2026-09-29 用户反馈）
+          <div className="flex flex-1 flex-col items-center justify-center gap-2" data-testid="people-empty">
+            <svg
+              viewBox="0 0 24 24"
+              width="40"
+              height="40"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-text-muted"
+              aria-hidden="true"
             >
-              {Array.from({ length: 12 }, (_, i) => (
-                <div
-                  key={i}
-                  className="flex flex-col items-center gap-2 rounded-lg border border-edge/60 bg-surface/50 p-4"
-                  data-testid="people-placeholder-card"
-                >
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-panel/60 text-text-muted">
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="28"
-                      height="28"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.3"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <circle cx="12" cy="8.5" r="3.5" />
-                      <path d="M5 19.5c1.2-3.4 3.9-5 7-5s5.8 1.6 7 5" />
-                    </svg>
-                  </div>
-                  <span className="text-[11px] text-text-muted">{t("people.placeholderName")}</span>
-                </div>
-              ))}
-            </div>
-          </>
+              <circle cx="12" cy="8.5" r="3.5" />
+              <path d="M5 19.5c1.2-3.4 3.9-5 7-5s5.8 1.6 7 5" />
+            </svg>
+            <p className="text-xs text-text-muted">{t("people.desc")}</p>
+          </div>
         ) : (
           <div
             className="mt-4 grid flex-1 content-start grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-3 pb-6"

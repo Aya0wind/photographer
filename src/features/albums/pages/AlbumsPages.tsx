@@ -27,7 +27,7 @@ import {
 } from "@/ipc/api";
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
 import { isUngroupedAlbum } from "../lib/ungroupedAlbum";
-import { DEFAULT_SMART_TAGS, loadSmartTags, smartTagLabel } from "../lib/smartTags";
+import { DEFAULT_SMART_TAGS, indexedTagHitCount, loadSmartTags, smartTagLabel } from "../lib/smartTags";
 import AlbumDetailPage from "./AlbumDetailPage";
 
 /**
@@ -45,6 +45,15 @@ import AlbumDetailPage from "./AlbumDetailPage";
 
 /** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
 export const SMART_ALBUM_TAGS: readonly string[] = DEFAULT_SMART_TAGS;
+
+/** 智能相册不显示没有照片的标签（2026-09-29 用户要求）：已索引且命中 0 → 隐藏；
+ *  未索引（尚未查询）→ 先显示，索引推进后空标签经 tags-indexed 事件自然消失。 */
+function smartTagsWithPhotos(tags: string[]): string[] {
+  return tags.filter((tag) => {
+    const hits = indexedTagHitCount(tag);
+    return hits === undefined || hits > 0;
+  });
+}
 
 // --- 共享卡片件（手工 / 智能同款样式） ------------------------------------------------
 
@@ -469,13 +478,18 @@ export function AlbumsIndexPage() {
   }
 
   // --- 智能相册（标签墙，行为照旧） ---------------------------------------------------
-  const [visibleTags, setVisibleTags] = useState<string[]>(loadSmartTags);
+  const [visibleTags, setVisibleTags] = useState<string[]>(() => smartTagsWithPhotos(loadSmartTags()));
   const [manualExpanded, setManualExpanded] = useState(true);
   const [smartExpanded, setSmartExpanded] = useState(true);
   useEffect(() => {
-    const refresh = () => setVisibleTags(loadSmartTags());
+    const refresh = () => setVisibleTags(smartTagsWithPhotos(loadSmartTags()));
     window.addEventListener("smartphoto:tags-changed", refresh);
-    return () => window.removeEventListener("smartphoto:tags-changed", refresh);
+    // 标签语义索引推进时重算（未索引→已索引/空命中的可见性会变）
+    window.addEventListener("smartphoto:tags-indexed", refresh);
+    return () => {
+      window.removeEventListener("smartphoto:tags-changed", refresh);
+      window.removeEventListener("smartphoto:tags-indexed", refresh);
+    };
   }, []);
   const tagCoverAssetIds = useAlbumCoverAssetIds(visibleTags);
 

@@ -183,6 +183,7 @@ export default function SelectionBar({
   onTrashRequest,
   onLrStaging,
   windowIds,
+  onSelectAll,
   onInvert,
 }: {
   count: number;
@@ -210,6 +211,8 @@ export default function SelectionBar({
   onTrashRequest?: (assets: AssetDto[]) => void;
   /** 「生成 LR 暂存夹」请求（命名弹窗由上层挂载）；不传则不显示该按钮 */
   onLrStaging?: (assets: AssetDto[]) => void;
+  /** 全选完成（上层以窗口全量替换选中集）；与 windowIds 同给才显示按钮 */
+  onSelectAll?: (ids: number[]) => void;
   /** 反选的数据窗口（当前已加载资产 id 全集）；与 onInvert 同给才显示按钮 */
   windowIds?: number[];
   /** 反选完成（上层以补集替换选中集） */
@@ -557,6 +560,22 @@ export default function SelectionBar({
               </div>
             )}
           </div>
+        )}
+        {/* 全选：当前数据窗口全量（与反选同一窗口口径） */}
+        {windowIds !== undefined && onSelectAll && (
+          <button
+            type="button"
+            onClick={() => {
+              onSelectAll(windowIds);
+              flash(t("selection.done"));
+            }}
+            disabled={count === 0 && windowIds.length === 0}
+            className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:opacity-40"
+            data-testid="selection-all"
+          >
+            <GlyphInvert />
+            {t("selection.all")}
+          </button>
         )}
         {/* 反选：当前数据窗口内取补集（窗口 id 全集由上层传入） */}
         {windowIds !== undefined && onInvert && (

@@ -816,11 +816,14 @@ export function FilterPanel({
   onPatch,
   hideAlbum = false,
   advancedOnly = false,
+  onPurgeMissing,
 }: {
   inputs: SearchInputs;
   onPatch: (patch: Partial<SearchInputs>) => void;
   hideAlbum?: boolean;
   advancedOnly?: boolean;
+  /** 「清理源缺失照片」入口（画廊传入；不传不显示——其他调用方无此动作） */
+  onPurgeMissing?: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -1034,7 +1037,19 @@ export function FilterPanel({
         </div>}
       </div>
       {/* 智能视图（B1）：有激活条件才出现保存入口（默认全部资产无保存意义） */}
-    </div>
+          {onPurgeMissing !== undefined && (
+        <div className="mt-2 flex items-center justify-end gap-2 px-2" data-testid="search-filter-actions">
+          <button
+            type="button"
+            onClick={onPurgeMissing}
+            className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-red-400/60 hover:text-red-400"
+            data-testid="search-purge-missing"
+          >
+            {t("gallery.purgeMissing")}
+          </button>
+        </div>
+      )}
+</div>
   );
 }
 

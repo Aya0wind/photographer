@@ -234,7 +234,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 大尺寸/无压缩 TIF 等原生渲染失败，onError 逐级降档，而不是一步到 512 模糊图。
   // raw（Windows 照片同款方案）：512 内嵌 JPEG 秒出 → 最大内嵌全幅 JPEG（raw-embed
   // 直出档，毫秒级 IO）替换变清晰 → 仅当相机没存内嵌预览时才回落 2048 rawler 显影。
-  const { stage, setStage, mainSrc, mainFailed, mainMissing, showMissingPlaceholder, sourceKind,
+  const { stage, setStage, mainSrc, mainFailed, mainMissing, sourceKind,
     imageLayers, setImageLayers, slowLoading } = useViewerImage(asset, group, index);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
@@ -788,27 +788,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               </div>
             )}
             {/* 缺源且无历史缓存：居中图标+文案占位（绝不留空白舞台） */}
-            {showMissingPlaceholder && (
-              <div className="flex flex-col items-center gap-2 text-text-muted" data-testid="viewer-missing-placeholder">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="56"
-                  height="56"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="text-amber-400"
-                  aria-hidden="true"
-                >
-                  <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                  <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
-                  <path d="M14.5 5.5l4 4M18.5 5.5l-4 4" />
-                </svg>
-                <span className="text-xs text-amber-300">{t("viewer.missingSource")}</span>
-              </div>
-            )}
             {slowLoading && (
               // 大图/新图在途超过 300ms：中央小 spinner（避免黑屏被误判为失败）
               <div

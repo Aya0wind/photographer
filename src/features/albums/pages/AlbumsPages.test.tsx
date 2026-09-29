@@ -194,8 +194,8 @@ describe("M4 路由与侧栏", () => {
     renderRoutes("/people");
 
     const page = await screen.findByTestId("people-page");
-    expect(page).toHaveTextContent("人脸聚类将在索引完成后自动生成");
-    expect(screen.getAllByTestId("people-placeholder-card").length).toBeGreaterThanOrEqual(6);
+    expect(page).toHaveTextContent("还没有人物");
+    expect(screen.getByTestId("people-empty")).toBeInTheDocument();
   });
 
   it("标签卡片墙：渲染 40 个预置标签（M4.5 B1），点击跳 /albums/:tag", async () => {

@@ -166,7 +166,7 @@ export default function AlbumDetailPage() {
   const sentinelRef = usePageSentinel(status === "ready", assets.length, appendPage);
 
   // --- 多选（与画廊同语义：check 圆钮 / Ctrl+点击 / 长按；Esc 退出） -------------------
-  const { selecting, selected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
+  const { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
 
 
   function enterSubgroup(name: string): void {
@@ -564,6 +564,9 @@ export default function AlbumDetailPage() {
         <SelectionBar
           count={selectedAssets.length}
           assets={selectedAssets}
+          windowIds={assets.map((a) => a.id)}
+          onSelectAll={(ids) => setSelected(ids)}
+          onInvert={(ids) => setSelected(ids)}
           onDone={exitSelection}
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
           album={{

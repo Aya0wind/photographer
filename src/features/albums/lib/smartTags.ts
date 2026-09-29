@@ -64,6 +64,12 @@ export function rememberTagCover(tag: string, assetId: number | null): void {
   localStorage.setItem(INDEX_KEY, JSON.stringify(index));
 }
 
+/** 标签已索引的照片命中数（未索引返回 undefined；空命中=0 → 相册页隐藏该标签）。 */
+export function indexedTagHitCount(tag: string): number | undefined {
+  const record = loadIndex()[libraryKey()]?.[tag];
+  return Array.isArray(record?.hits) ? record.hits.length : undefined;
+}
+
 export function unindexedTags(tags: readonly string[]): string[] {
   const index = loadIndex()[libraryKey()] ?? {};
   return tags.filter((tag) => !Array.isArray(index[tag]?.hits));

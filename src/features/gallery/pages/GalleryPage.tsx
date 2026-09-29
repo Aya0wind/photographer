@@ -8,6 +8,7 @@ import { AnimatePresence, motion } from "motion/react";
 import {
   assetsCount,
   assetsPage,
+  assetsPurgeMissing,
   assetTrashMove,
   cullSessionCreate,
   isIpcAvailable,
@@ -56,7 +57,7 @@ import {
   EMPTY_INPUTS,
 } from "../FilterPanel";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
-import { motionInitial, useMotionOn } from "@/lib/motion";
+import { TRANS, motionInitial, useMotionOn } from "@/lib/motion";
 
 /**
  * 画廊页（M4.5 wave-3：画廊+搜索合并，搜索页已并入）：
@@ -176,6 +177,10 @@ export default function GalleryPage() {
   // --- 数据管线（默认/筛选共用 keyset；快照仅默认态） --------------------------------
   const cachedAtMount = gallerySnapshot();
   const [assets, setAssets] = useState<AssetDto[]>(() => cachedAtMount?.assets ?? []);
+  /** 清理源缺失：确认对话框态 + 完成后触发首屏重拉（nonce 进加载 effect 依赖） */
+  const [purgeAskOpen, setPurgeAskOpen] = useState(false);
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [totalCount, setTotalCount] = useState<number | null>(null);
   /** 已加载资产（与 state 同步维护，供补页循环同步读取） */
   const assetsRef = useRef<AssetDto[]>(cachedAtMount?.assets ?? []);
@@ -280,7 +285,20 @@ export default function GalleryPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedFilters, debouncedKey, semanticMode, filtersActive]);
+  }, [appliedFilters, debouncedKey, semanticMode, filtersActive, reloadNonce]);
+
+  async function confirmPurgeMissing(): Promise<void> {
+    setPurgeBusy(true);
+    try {
+      await assetsPurgeMissing();
+      setPurgeAskOpen(false);
+      setReloadNonce((n) => n + 1);
+    } catch {
+      setPurgeAskOpen(false);
+    } finally {
+      setPurgeBusy(false);
+    }
+  }
 
   const sentinelRef = usePageSentinel(status === "ready" && !semanticMode, assets.length, appendPage);
 
@@ -430,6 +448,10 @@ export default function GalleryPage() {
     [semanticMode, semantic.assets, assets],
   );
   const invertSelection = useCallback(
+    (ids: number[]) => setSelected(ids.map((id) => id)),
+    [],
+  );
+  const selectAllInWindow = useCallback(
     (ids: number[]) => setSelected(ids.map((id) => id)),
     [],
   );
@@ -659,7 +681,7 @@ export default function GalleryPage() {
         )}
 
         {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly />}
+        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onPurgeMissing={() => setPurgeAskOpen(true)} />}
 
         {/* 激活条件 chips */}
         {!semanticMode && (
@@ -803,6 +825,7 @@ export default function GalleryPage() {
           onTrashRequest={requestTrashMove}
           onLrStaging={(targets) => setLrTargets(targets)}
           windowIds={windowIds}
+          onSelectAll={selectAllInWindow}
           onInvert={invertSelection}
         />
       )}
@@ -888,6 +911,41 @@ export default function GalleryPage() {
           onAssetPatched={handleAssetPatched}
           onVersionSelect={selectVersion}
         />
+      )}
+
+      {/* 清理源缺失确认对话框（危险操作：批量永久删除库内源缺失资产） */}
+      {purgeAskOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60" role="dialog" aria-modal="true" data-testid="purge-missing-dialog">
+          <motion.div
+            initial={motionInitial(motionOn, { opacity: 0, scale: 0.96 })}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={TRANS.quick}
+            className="w-80 rounded-lg border border-edge bg-surface p-4 shadow-2xl"
+          >
+            <h2 className="text-sm font-semibold text-text-primary">{t("gallery.purgeMissingTitle")}</h2>
+            <p className="mt-2 text-xs leading-relaxed text-text-secondary">{t("gallery.purgeMissingConfirm")}</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPurgeAskOpen(false)}
+                disabled={purgeBusy}
+                className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-panel disabled:opacity-40"
+                data-testid="purge-missing-cancel"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmPurgeMissing()}
+                disabled={purgeBusy}
+                className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110 disabled:opacity-40"
+                data-testid="purge-missing-confirm"
+              >
+                {purgeBusy ? t("gallery.purgeMissingBusy") : t("gallery.purgeMissingGo")}
+              </button>
+            </div>
+          </motion.div>
+        </div>
       )}
     </div>
   );

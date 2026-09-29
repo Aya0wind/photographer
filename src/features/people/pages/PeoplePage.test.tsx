@@ -126,12 +126,11 @@ describe("人物页列表", () => {
 // --- 空态兜底 -----------------------------------------------------------------------
 
 describe("人物页空态", () => {
-  it("后端未就绪（空清单）→ 说明 + 占位网格", async () => {
+  it("后端未就绪（空清单）→ 居中空态提示", async () => {
     renderPeople();
 
-    expect(await screen.findByTestId("people-placeholder-grid")).toBeInTheDocument();
-    expect(screen.getAllByTestId("people-placeholder-card").length).toBeGreaterThanOrEqual(6);
-    expect(screen.getByTestId("people-page")).toHaveTextContent("人脸聚类将在索引完成后自动生成");
+    expect(await screen.findByTestId("people-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("people-page")).toHaveTextContent("还没有人物");
     expect(screen.queryByTestId("people-card")).not.toBeInTheDocument();
   });
 
@@ -139,7 +138,7 @@ describe("人物页空态", () => {
     peopleListMock.mockRejectedValue("ipc dead");
     renderPeople();
 
-    expect(await screen.findByTestId("people-placeholder-grid")).toBeInTheDocument();
+    expect(await screen.findByTestId("people-empty")).toBeInTheDocument();
   });
 });
 

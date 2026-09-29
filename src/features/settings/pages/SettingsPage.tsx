@@ -265,7 +265,7 @@ export default function SettingsPage() {
         })}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
         <div className="flex w-full flex-col gap-2.5">
           {tab === "general" && (
             <>

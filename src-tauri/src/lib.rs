@@ -348,6 +348,7 @@ pub fn run() {
             ipc::selection::trash_list,
             ipc::selection::trash_restore,
             ipc::selection::trash_purge,
+            ipc::selection::assets_purge_missing,
             ipc::versions::asset_versions,
             edit::ipc::edit_recipe_get,
             edit::ipc::edit_recipe_save,

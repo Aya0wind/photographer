@@ -1,6 +1,7 @@
 [package]
 name = "smart-photo"
 version = "0.1.0-alpha"
+license = "GPL-3.0-or-later"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

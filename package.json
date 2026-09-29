@@ -2,6 +2,7 @@
   "name": "smart-photo",
   "private": true,
   "version": "0.1.0-alpha",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
