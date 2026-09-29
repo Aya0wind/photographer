@@ -498,10 +498,11 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 /// 启动、恢复和重试共用调度；索引在导入结束后按需一次性唤醒。
 fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
     let controls = engine.controls();
-    let (index_db_dir, ai_settings) = {
+    let (index_db_dir, geo_config_dir, ai_settings) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (
             PathBuf::from(&settings.active_library().expect("库已在").db_dir),
+            state.config_dir.clone(),
             settings.ai.clone(),
         )
     };
@@ -544,6 +545,14 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
             // worker 只领取 pending 任务行，不重建已有索引。
             if stats.done_files > 0 {
                 crate::index::kick(index_db_dir.clone(), &index_supervisor);
+                // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
+                // 自动入图——指纹不变走 bincode 快路径 + asset_regions 增量
+                crate::geo::install::ensure_installed(
+                    geo_config_dir.clone(),
+                    index_db_dir.clone(),
+                    std::sync::Arc::new(ai_bus.clone()),
+                    &index_supervisor,
+                );
                 if enable_clip {
                     crate::ai::semantic::kick_semantic_if_ready(
                         index_db_dir.clone(),

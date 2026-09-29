@@ -211,6 +211,19 @@ export default function MapPage() {
           )}
           <button
             type="button"
+            onClick={() => {
+              // 手动同步：重置一次性闸后重跑安装管线（幂等增量）
+              installRequestedRef.current = false;
+              install();
+            }}
+            title={t("map.syncDataHint")}
+            className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-accent hover:text-accent"
+            data-testid="map-sync"
+          >
+            {t("map.syncData")}
+          </button>
+          <button
+            type="button"
             onClick={refresh}
             className="rounded-md border border-edge px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-accent hover:text-accent"
             data-testid="map-refresh"

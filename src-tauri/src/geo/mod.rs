@@ -58,13 +58,15 @@ pub const CHINA_ISO3: &str = "CHN";
 // ---------------------------------------------------------------------------
 
 /// 树节点。多边形留在内存（点包含用）；库表与缓存 JSON 只落元数据。
+/// serde 派生供 bincode 树缓存（geo-index.bin：指纹不变时免解析 400 文件）。
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RegionNode {
     pub level: u8, // 0 国家 / 1 省·州 / 2 市 / 3 县·区
     pub name: String,
     pub code: String,
     pub lat: f64,
     pub lon: f64,
-    pub source: &'static str,
+    pub source: String,
     pub bbox: (f64, f64, f64, f64), // (min_lat, min_lon, max_lat, max_lon)
     pub shape: Vec<Polygon<f64>>,
     pub children: Vec<usize>,
@@ -99,6 +101,15 @@ pub struct GeoIndex {
     countries: RTree<CountryEntry>,
     /// 数据包指纹（文件名+长度+mtime 串）；存 geo/fingerprint.txt，变化即重刷。
     pub fingerprint: String,
+}
+
+/// GeoIndex 的可序列化形态（bincode 缓存 geo-index.bin；国家 RTree 量小
+/// 不序列化，加载后现建）。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GeoIndexData {
+    nodes: Vec<RegionNode>,
+    roots: Vec<usize>,
+    fingerprint: String,
 }
 
 impl GeoIndex {
@@ -316,10 +327,116 @@ pub(crate) fn prop_code(props: &serde_json::Value, key: &str) -> Option<String> 
 // 包加载：目录 → GeoIndex
 // ---------------------------------------------------------------------------
 
+/// bincode 树缓存文件（指纹不变时免解析 400 文件；2026-09-30 提速：
+/// 全量解析 debug ~60s / release 数秒 → bincode 反序列化 ~1s）。
+pub const INDEX_CACHE_FILE: &str = "geo-index.bin";
+
+/// 并行预解析 DataV 文件族（解析占加载大头；按物理核分块）。
+/// progress 按文件计数回调；坏文件跳过（树装配时缺文件按需报错）。
+fn parse_datav_parallel(
+    dir: &Path,
+    progress: &(dyn Fn(u32, u32) + Sync),
+) -> HashMap<String, RawCollection> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let mut paths: Vec<(String, PathBuf)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(code) = name
+                .strip_prefix("datav-")
+                .and_then(|n| n.strip_suffix(".json"))
+            {
+                paths.push((code.to_string(), e.path()));
+            }
+        }
+    }
+    let total = paths.len() as u32;
+    let done_counter = AtomicU32::new(0);
+    let done = &done_counter;
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(16);
+    let chunk_size = (paths.len() / threads).max(1);
+    let mut out: HashMap<String, RawCollection> = HashMap::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut local: HashMap<String, RawCollection> = HashMap::new();
+                    for (code, path) in chunk {
+                        if let Ok(file) = std::fs::File::open(path) {
+                            if let Ok(collection) = parse_collection(file) {
+                                local.insert(code.clone(), collection);
+                            }
+                        }
+                        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                        progress(n, total);
+                    }
+                    local
+                })
+            })
+            .collect();
+        for handle in handles {
+            for (k, v) in handle.join().unwrap_or_default() {
+                out.insert(k, v);
+            }
+        }
+    });
+    out
+}
+
 impl GeoIndex {
-    /// 从 `dbDir/geo/` 加载全部就绪的数据包。世界两包必须齐；中国包可选
+    fn build_countries(nodes: &[RegionNode], roots: &[usize]) -> RTree<CountryEntry> {
+        RTree::bulk_load(
+            roots
+                .iter()
+                .map(|&i| CountryEntry {
+                    envelope: AABB::from_corners(
+                        [nodes[i].bbox.1, nodes[i].bbox.0],
+                        [nodes[i].bbox.3, nodes[i].bbox.2],
+                    ),
+                    node: i,
+                })
+                .collect(),
+        )
+    }
+
+    fn from_data(data: GeoIndexData) -> GeoIndex {
+        let countries = Self::build_countries(&data.nodes, &data.roots);
+        GeoIndex {
+            nodes: data.nodes,
+            roots: data.roots,
+            countries,
+            fingerprint: data.fingerprint,
+        }
+    }
+
+    /// 从 geo 目录加载全部就绪的数据包。世界两包必须齐；中国包可选
     /// （未装则中国照片下钻到 NE 英文省名，属可接受降级）。
     pub fn load(dir: &Path) -> Result<GeoIndex, String> {
+        Self::load_reporting(dir, &|_, _| {})
+    }
+
+    /// 带解析进度的加载（progress = 已解析文件数/总数；仅全量解析路径回调）。
+    /// 指纹与上次一致且有 bincode 缓存 → 直接反序列化（跳过全部解析）。
+    pub fn load_reporting(dir: &Path, progress: &(dyn Fn(u32, u32) + Sync)) -> Result<GeoIndex, String> {
+        let fingerprint = fingerprint_of_dir(dir);
+        if std::fs::read_to_string(dir.join(backfill::FINGERPRINT_FILE))
+            .ok()
+            .as_deref()
+            == Some(fingerprint.as_str())
+        {
+            if let Ok(bytes) = std::fs::read(dir.join(INDEX_CACHE_FILE)) {
+                if let Ok(data) = bincode::deserialize::<GeoIndexData>(&bytes) {
+                    progress(1, 1);
+                    return Ok(Self::from_data(data));
+                }
+            }
+        }
+        // DataV 文件族并行预解析（progress 由此路汇报）
+        let parsed = parse_datav_parallel(dir, progress);
         let mut nodes: Vec<RegionNode> = Vec::new();
         let mut roots: Vec<usize> = Vec::new();
         let mut code_to_idx: HashMap<(u8, String), usize> = HashMap::new();
@@ -352,7 +469,7 @@ impl GeoIndex {
                 code: code.clone(),
                 lat,
                 lon,
-                source: "ne50m",
+                source: "ne50m".into(),
                 bbox: bbox_of(&shape),
                 shape,
                 children: Vec::new(),
@@ -389,7 +506,7 @@ impl GeoIndex {
                     code: code.clone(),
                     lat,
                     lon,
-                    source: "ne50m",
+                    source: "ne50m".into(),
                     bbox: bbox_of(&shape),
                     shape,
                     children: Vec::new(),
@@ -402,34 +519,25 @@ impl GeoIndex {
         // 3) 中国包（DataV 递归文件族）：省/市/县三层；挂 NE 中国节点。
         //    DataV 全 34 省成套，就绪即整体替换 NE 的中国省级子树
         //    （中文名 + 精确边界优先，NE 中国省丢弃）。
-        let cn_root = dir.join(format!("datav-{DATAV_CHINA_CODE}.json"));
-        if cn_root.is_file() {
+        if parsed.contains_key(DATAV_CHINA_CODE) {
             if let Some(&china) = code_to_idx.get(&(0, CHINA_ISO3.to_string())) {
                 nodes[china].children.clear();
-                load_datav_tree(dir, DATAV_CHINA_CODE, china, &mut nodes, 0)?;
+                load_datav_tree(&parsed, DATAV_CHINA_CODE, china, &mut nodes, 0)?;
             }
         }
 
         // 4) 国家 R-tree（仅 level0）
-        let countries = RTree::bulk_load(
-            roots
-                .iter()
-                .map(|&i| CountryEntry {
-                    envelope: AABB::from_corners(
-                        [nodes[i].bbox.1, nodes[i].bbox.0],
-                        [nodes[i].bbox.3, nodes[i].bbox.2],
-                    ),
-                    node: i,
-                })
-                .collect(),
-        );
-
-        Ok(GeoIndex {
-            fingerprint: fingerprint_of_dir(dir),
+        let data = GeoIndexData {
             nodes,
             roots,
-            countries,
-        })
+            fingerprint,
+        };
+        // 落 bincode 缓存（best effort；fingerprint.txt 由回填管线成功后写，
+        // 两者齐了下轮走快路径）
+        if let Ok(bytes) = bincode::serialize(&data) {
+            let _ = std::fs::write(dir.join(INDEX_CACHE_FILE), bytes);
+        }
+        Ok(Self::from_data(data))
     }
 }
 
@@ -437,17 +545,15 @@ impl GeoIndex {
 /// 即子节点，逐层读文件（文件由下载器预拉齐，这里纯本地）。
 /// `parent_level` = 父节点层级（根调用传 0，文件内 features 是 level1 省）。
 fn load_datav_tree(
-    dir: &Path,
+    parsed: &HashMap<String, RawCollection>,
     adcode: &str,
     parent: usize,
     nodes: &mut Vec<RegionNode>,
     parent_level: u8,
 ) -> Result<(), String> {
-    let path = dir.join(format!("datav-{adcode}.json"));
-    let collection = parse_collection(
-        std::fs::File::open(&path)
-            .map_err(|e| format!("DataV 文件缺失（{}）: {e}", path.display()))?,
-    )?;
+    let collection = parsed
+        .get(adcode)
+        .ok_or_else(|| format!("DataV 文件缺失（datav-{adcode}.json）"))?;
     for feature in &collection.features {
         let shape = polygons_of(&feature.geometry);
         let props = &feature.properties;
@@ -499,18 +605,15 @@ fn load_datav_tree(
             code: code.clone(),
             lat,
             lon,
-            source: "datav",
+            source: "datav".into(),
             bbox,
             shape,
             children: Vec::new(),
         });
         nodes[parent].children.push(idx);
         // 市县两级继续递归（省 level1 → 市 level2 → 县 level3 即停，2026-09-29 定案）
-        if level < 3 {
-            let child_file = dir.join(format!("datav-{code}.json"));
-            if child_file.is_file() {
-                load_datav_tree(dir, &code, idx, nodes, level)?;
-            }
+        if level < 3 && parsed.contains_key(&code) {
+            load_datav_tree(parsed, &code, idx, nodes, level)?;
         }
     }
     Ok(())

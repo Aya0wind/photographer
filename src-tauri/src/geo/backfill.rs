@@ -17,7 +17,7 @@ use rusqlite::params;
 
 use super::{geo_dir, geo_state, index_snapshot, GeoIndex, GeoPhase};
 
-const FINGERPRINT_FILE: &str = "fingerprint.txt";
+pub const FINGERPRINT_FILE: &str = "fingerprint.txt";
 pub const CACHE_FILE: &str = "regions-cache.json";
 const BATCH: i64 = 500;
 
@@ -36,7 +36,16 @@ pub fn run_pipeline(db_dir: &Path, config_dir: &Path, bus: &EventBus, cancel: &d
         message: None,
     });
 
-    let index = match GeoIndex::load(&dir) {
+    // 树加载（全量解析时按文件数发进度；bincode 缓存命中则瞬时完成）
+    let load_bus = bus.clone();
+    let index = match GeoIndex::load_reporting(&dir, &move |done, total| {
+        load_bus.publish(AppEvent::MapGeoProgress {
+            stage: "loading".into(),
+            done: u64::from(done),
+            total: u64::from(total),
+            message: None,
+        });
+    }) {
         Ok(index) => Arc::new(index),
         Err(err) => return set_failed(bus, err),
     };

@@ -1257,5 +1257,7 @@
   "editor.exportAlbum": "加入相簿",
   "editor.albumPicker.title": "加入相簿",
   "editor.albumPicker.empty": "還沒有相簿，可先新增一個",
-  "editor.albumPicker.confirm": "匯出到該相簿"
+  "editor.albumPicker.confirm": "匯出到該相簿",
+  "map.syncData": "同步資料",
+  "map.syncDataHint": "將新匯入的照片納入地圖（增量，秒級）；匯入完成後也會自動同步"
 }

@@ -1271,5 +1271,7 @@
   "editor.exportAlbum": "Add to Album",
   "editor.albumPicker.title": "Add to Album",
   "editor.albumPicker.empty": "No albums yet — create one first",
-  "editor.albumPicker.confirm": "Export to this album"
+  "editor.albumPicker.confirm": "Export to this album",
+  "map.syncData": "Sync",
+  "map.syncDataHint": "Pull newly imported photos onto the map (incremental, seconds); also happens automatically after imports"
 }

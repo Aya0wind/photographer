@@ -32,6 +32,8 @@ turbojpeg = { version = "1", features = ["image"] }
 rawler = "=0.8.0"
 # 地图模块（2026-09-29 拍摄地图）：多边形点包含 / centroid、R-tree 空间预筛
 geo = "0.29"
+geo-types = { version = "0.7", features = ["serde"] }
+bincode = "1"
 rstar = "0.12"
 
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }

@@ -1257,5 +1257,7 @@
   "editor.exportAlbum": "アルバムに追加",
   "editor.albumPicker.title": "アルバムに追加",
   "editor.albumPicker.empty": "アルバムがありません。先に作成してください",
-  "editor.albumPicker.confirm": "このアルバムに書き出す"
+  "editor.albumPicker.confirm": "このアルバムに書き出す",
+  "map.syncData": "同期",
+  "map.syncDataHint": "新しくインポートした写真を地図へ反映（増分・数秒）。インポート後の自動同期もあります"
 }
