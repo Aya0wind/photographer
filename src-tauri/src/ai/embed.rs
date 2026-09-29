@@ -72,6 +72,12 @@ fn slots() -> &'static Mutex<InferSlots> {
     SLOTS.get_or_init(|| Mutex::new(InferSlots::default()))
 }
 
+/// 空闲卸载（ai::idle::release_all 调用；取锁置空，在途推理不受影响）。
+pub fn release() {
+    *slots().lock().expect("infer slots mutex poisoned") = InferSlots::default();
+}
+
+
 impl ModelManager {
     /// 模型文件落位名（ModelManager 下载管线的最终文件）。
     pub fn model_path(&self, id: &str) -> PathBuf {
@@ -111,6 +117,7 @@ impl ModelManager {
     /// visual_model 不匹配即弃缓存重载。模型缺失 → 明确错误；EP 序列按
     /// use_gpu/env，毒化位按模型 id 隔离）。
     fn ensure_visual(&self, slots: &mut InferSlots) -> Result<(), String> {
+        super::idle::touch();
         let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[0];
         if slots.visual.is_some() && slots.visual_model.as_deref() == Some(model_id) {
             return Ok(());
@@ -132,6 +139,7 @@ impl ModelManager {
 
     /// 惰性加载 text 会话 + 分词器（text 按档位解析；tokenizer 共享）。
     fn ensure_text(&self, slots: &mut InferSlots) -> Result<(), String> {
+        super::idle::touch();
         let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[1];
         if slots.text.is_none() || slots.text_model.as_deref() != Some(model_id) {
             let path = self.model_path(model_id);

@@ -34,6 +34,13 @@ fn pool() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<Index>>>> {
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 空闲卸载（ai::idle::release_all 调用）：清池只丢池侧引用，在途查询
+/// 自持 Arc，索引用完自然释放。
+pub fn release() {
+    pool().lock().expect("semantic pool mutex poisoned").clear();
+}
+
+
 /// 规范化库根（池键；canonicalize 失败退回原样）。
 fn pool_key(db_dir: &Path) -> PathBuf {
     std::fs::canonicalize(db_dir).unwrap_or_else(|_| db_dir.to_path_buf())
@@ -77,6 +84,7 @@ fn save_index(index: &Index, db_dir: &Path) -> Result<(), String> {
 /// 搜索与回填共享同一互斥把柄（搜索毫秒级、写低频，争用可忽略）；
 /// 20 万库 ~600MB 驻留的优化届时再议（分库 mmap+COW 或量化压缩）。
 pub fn shared_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
+    super::idle::touch();
     let key = pool_key(db_dir);
     let mut pool = pool().lock().expect("semantic pool mutex poisoned");
     if let Some(idx) = pool.get(&key) {

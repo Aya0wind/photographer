@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 
 pub mod embed;
 pub mod face;
+pub mod idle;
 pub mod selection;
 pub mod semantic;
 
@@ -473,6 +474,12 @@ pub(crate) fn build_session(
         _ => plan.optimization,
     };
     let mut builder = ort::session::Session::builder().map_err(|e| e.to_string())?;
+    // 关闭 ORT 内存 arena（2026-09-29 内存审计项 B）：arena 只增不还，
+    // 实测语义搜索后 commit 971MB vs 物理 342MB——关掉后分配走系统堆，
+    // 随 Session drop 全额归还；推理速度影响个位数百分比（可接受）。
+    builder = builder
+        .with_config_entry("session.disable_mem_arena", "1")
+        .map_err(|e| e.to_string())?;
     if let Some(n) = intra_threads {
         builder = builder.with_intra_threads(n).map_err(|e| e.to_string())?;
     }

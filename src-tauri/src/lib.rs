@@ -126,6 +126,9 @@ pub fn run() {
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
+                // AI 空闲卸载看护（内存审计 2026-09-29）：模型/向量索引
+                // 空闲 10 分钟统一释放，下次使用惰性重载
+                ai::idle::spawn_idle_unloader(&supervisor_handle);
                 // 孤儿导入任务终老（2026-09-21）：进程重启后引擎会话清零，
                 // 遗留 running/paused 是跨会话死任务（任务抽屉挂死 +
                 // import_job_delete 拒删）。统一转 cancelled + 日志；

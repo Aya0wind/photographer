@@ -389,6 +389,14 @@ fn facemesh_slots() -> &'static Mutex<Option<ort::session::Session>> {
     SLOTS.get_or_init(|| Mutex::new(None))
 }
 
+/// 空闲卸载（ai::idle::release_all 调用；取锁置空，在途推理不受影响）。
+pub fn release() {
+    *facemesh_slots()
+        .lock()
+        .expect("facemesh slots mutex poisoned") = None;
+}
+
+
 /// 生产分类器：SCRFD 双眼点 → ROI 旋转裁剪 → facemesh 推理 → EAR/质量门。
 pub struct FacemeshEarClassifier<'a> {
     manager: &'a super::ModelManager,
@@ -432,6 +440,7 @@ impl<'a> FacemeshEarClassifier<'a> {
                     data.clone(),
                 ))
                 .map_err(|e| format!("构造 facemesh 张量失败: {e}"))?;
+                super::idle::touch();
                 let mut slots = facemesh_slots()
                     .lock()
                     .expect("facemesh slots mutex poisoned");

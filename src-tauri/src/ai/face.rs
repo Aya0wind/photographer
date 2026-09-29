@@ -108,6 +108,12 @@ fn face_slots() -> &'static Mutex<FaceSlots> {
     SLOTS.get_or_init(|| Mutex::new(FaceSlots::default()))
 }
 
+/// 空闲卸载（ai::idle::release_all 调用；取锁置空，在途推理不受影响）。
+pub fn release() {
+    *face_slots().lock().expect("face slots mutex poisoned") = FaceSlots::default();
+}
+
+
 impl ModelManager {
     /// 人脸两件套是否齐备（检测件按当前画质档位解析：fast = scrfd-10g +
     /// arcface；normal/accurate = scrfd + arcface）。
@@ -134,6 +140,7 @@ impl ModelManager {
     /// 惰性加载检测会话（模型按当前档位解析；切档后 det_model 不匹配即
     /// 弃旧会话重载新件）。
     fn ensure_det(&self, slots: &mut FaceSlots) -> Result<(), String> {
+        super::idle::touch();
         let model_id = super::face_detect_model_id(self.ai_params().quality_tier);
         if slots.det.is_some() && slots.det_model.as_deref() == Some(model_id) {
             return Ok(());
@@ -151,6 +158,7 @@ impl ModelManager {
     }
 
     fn ensure_rec(&self, slots: &mut FaceSlots) -> Result<(), String> {
+        super::idle::touch();
         if slots.rec.is_some() {
             return Ok(());
         }
