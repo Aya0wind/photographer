@@ -55,4 +55,6 @@ mod native;
 #[path = "../platform/unsupported/present.rs"]
 mod native;
 
+// 平台接缝 API：个别符号暂无消费方（脚手架期），保留导出
+#[allow(unused_imports)]
 pub use native::{enumerate_empty_readers, enumerate_present_volumes, probe_volume};

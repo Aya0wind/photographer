@@ -47,4 +47,6 @@ mod native;
 #[path = "../platform/unsupported/hotplug.rs"]
 mod native;
 
+// 平台接缝 API：个别符号暂无消费方（脚手架期），保留导出
+#[allow(unused_imports)]
 pub use native::{spawn_hotplug_thread, stop};
