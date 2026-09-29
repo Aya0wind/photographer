@@ -9,20 +9,11 @@ pub use common::{
     ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
 
-use std::time::Duration;
-
-use common::open_db;
 use db::{AssetFilters, AssetRow};
 use events::AssetKind;
 
 fn setup() -> (tempfile::TempDir, db::Db, ipc::AppState) {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_dir = dir.path().join("db");
-    let photos = dir.path().join("photos");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&photos).unwrap();
-    let db = open_db(&db_dir);
-    let state = common::state_with_library(&db_dir, &photos, Duration::from_millis(1));
+    let (dir, state, db) = common::library_fixture();
     (dir, db, state)
 }
 

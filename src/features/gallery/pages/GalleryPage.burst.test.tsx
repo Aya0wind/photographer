@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { render, screen, waitFor, within } from "@testing-library/react";
@@ -48,16 +49,14 @@ function makeAsset(
   burst?: { burstId: number; burstCount?: number },
 ): AssetDto {
   const file = `IMG_${String(id).padStart(4, "0")}.JPG`;
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\SmartPhoto\\2026\\${file}`,
     name: file,
-    kind: "photo",
     capturedAt: "2026-09-18T10:00:00",
     camera: "Canon EOS R5",
     sizeBytes: 1024 * 1024,
     ...(burst ?? {}),
-  };
+  });
 }
 
 function ImportProbe() {

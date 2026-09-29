@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import type React from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -21,17 +22,11 @@ beforeAll(() => {
 });
 
 function asset(id: number, aspect?: { w: number; h: number }): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: "2026-09-18T10:00:00",
-    camera: null,
-    sizeBytes: 1,
     width: aspect?.w ?? null,
     height: aspect?.h ?? null,
-  };
+  });
 }
 
 function groupsOf(assets: AssetDto[]): AssetGroup[] {

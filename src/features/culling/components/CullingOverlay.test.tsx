@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -48,15 +49,14 @@ const detailMock = vi.mocked(assetDetail);
 // --- 工具 -------------------------------------------------------------------------
 
 function makeAsset(id: number, kind: AssetDto["kind"] = "photo"): AssetDto {
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\${id}.jpg`,
     name: `IMG_000${id}.JPG`,
     kind,
     capturedAt: "2026-09-18T10:00:00",
     camera: "Canon EOS R5",
     sizeBytes: 1024,
-  };
+  });
 }
 
 function makeSession(overrides: Partial<CullSessionDto> = {}): CullSessionDto {

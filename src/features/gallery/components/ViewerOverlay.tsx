@@ -1,6 +1,8 @@
+import { useViewerTransform } from "../lib/useViewerTransform";
+import { useViewerImage } from "../lib/useViewerImage";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
@@ -20,11 +22,6 @@ import {
 import EditorOverlay from "@/features/editor/components/EditorOverlay";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
 import type { AssetGroup } from "../lib/assetGroups";
-import {
-  fetchAssetThumb,
-  useAssetThumbUrl,
-  warmImageDecode,
-} from "../lib/thumbPipeline";
 import { AssetContextMenu } from "./ContextMenu";
 import AssetThumb from "./AssetThumb";
 import { formatBytes } from "@/lib/format";
@@ -43,13 +40,7 @@ import { formatBytes } from "@/lib/format";
  *   点击最多跳 8 张，没有横向滚动；相邻照片预取。
  */
 
-const VIEWER_MID_SIZE = 2048; // 中间档（后端加 2048 档后生效）：原图渲染失败时的清晰回退
-/** RAW 内嵌全幅直出档（后端语义：RAW && size > 2048 = 提取最大内嵌 JPEG 原样直出） */
-const VIEWER_RAW_EMBED_SIZE = 6000;
-const VIEWER_THUMB_SIZE = 1280; // 名义边长；后端 snap 512 档就近
 const FILM_THUMB_SIZE = 240;
-const MIN_SCALE = 1;
-const MAX_SCALE = 4;
 
 /** 切图首帧即可显示的基础信息；完整 EXIF 返回后在原位补齐，不切成骨架屏。 */
 function detailFromAsset(asset: AssetDto): AssetDetailDto {
@@ -68,15 +59,7 @@ function detailFromAsset(asset: AssetDto): AssetDetailDto {
 }
 
 /** 路径 → asset 协议 URL（非 Tauri 环境抛错回退 null） */
-function safeConvert(path: string): string | null {
-  try {
-    return convertFileSrc(path) || null;
-  } catch {
-    return null;
-  }
-}
 
-/** ISO 时间 → "YYYY-MM-DD HH:mm:ss"（本地时区）；空值 "—" */
 function isoLabel(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -176,7 +159,8 @@ interface ViewerOverlayProps {
 
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
-  const stageRef = useRef<HTMLDivElement | null>(null);
+  const { stageRef, dragRef, view, rotate, resetView, toggleZoom,
+    handlePointerDown, handlePointerMove, handlePointerUp } = useViewerTransform(asset.id);
   const [fullscreen, setFullscreen] = useState(false);
   const [exifOpen, setExifOpen] = useState(true);
   const toggleFullscreen = useCallback(async () => {
@@ -210,68 +194,6 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 大图右键菜单（与瓦片同款：reveal/复制文件/旗标，作用于当前资产）
   const [ctxAt, setCtxAt] = useState<{ x: number; y: number } | null>(null);
 
-  // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
-  const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
-  useEffect(() => {
-    setView({ scale: 1, x: 0, y: 0, rotation: 0 });
-  }, [asset.id]);
-
-  const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
-  /** 90° 步进旋转（负=逆时针）；触发拖拽/缩放之外的独立维度 */
-  const rotate = (delta: number) =>
-    // 保留连续角度，确保 -270 -> -360 的过渡继续向左，而不是归零后反向补间。
-    setView((v) => ({ ...v, rotation: v.rotation + delta }));
-
-  // 主预览滚轮始终只负责缩放；前后翻页统一由左右箭头/键盘/胶片条承担。
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const rect = el.getBoundingClientRect();
-      const cx = e.clientX - rect.left - rect.width / 2;
-      const cy = e.clientY - rect.top - rect.height / 2;
-      setView((v) => {
-        const next = clampScale(v.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2));
-        if (next === v.scale) return v;
-        if (next === MIN_SCALE) return { scale: MIN_SCALE, x: 0, y: 0, rotation: v.rotation };
-        const ratio = next / v.scale;
-        // 指针为锚：保持光标下的图像点不动
-        return { scale: next, x: cx - (cx - v.x) * ratio, y: cy - (cy - v.y) * ratio, rotation: v.rotation };
-      });
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, []);
-
-  // 拖拽平移（scale>1 时）：pointer capture，jsdom/老 WebView 缺失时静默退化
-  const dragRef = useRef<{ x: number; y: number } | null>(null);
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>): void {
-    if (view.scale <= MIN_SCALE) return;
-    // 箭头/工具按钮是操作控件，缩放状态下不能被舞台的 pointer capture 抢走点击。
-    if (e.target instanceof Element && e.target.closest("button")) return;
-    dragRef.current = { x: e.clientX, y: e.clientY };
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      // 无指针捕获时 move/up 仍在本元素内生效
-    }
-  }
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>): void {
-    const drag = dragRef.current;
-    if (!drag) return;
-    setView((v) => ({ ...v, x: v.x + (e.clientX - drag.x), y: v.y + (e.clientY - drag.y) }));
-    dragRef.current = { x: e.clientX, y: e.clientY };
-  }
-  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>): void {
-    dragRef.current = null;
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {
-      // 静默
-    }
-  }
-
   // 操作提示（#6）：首次 3s 后淡出；? 键或 hover 底部提示区重新唤出（再计时 3s）
   const [hintVisible, setHintVisible] = useState(true);
   const hintTimerRef = useRef<number | null>(null);
@@ -292,148 +214,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 大尺寸/无压缩 TIF 等原生渲染失败，onError 逐级降档，而不是一步到 512 模糊图。
   // raw（Windows 照片同款方案）：512 内嵌 JPEG 秒出 → 最大内嵌全幅 JPEG（raw-embed
   // 直出档，毫秒级 IO）替换变清晰 → 仅当相机没存内嵌预览时才回落 2048 rawler 显影。
-  const originalUrl = useMemo(
-    () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
-    [asset.kind, asset.path],
-  );
-  const [stage, setStage] = useState<"original" | "mid" | "thumb">("original");
-  useEffect(() => {
-    setStage("original");
-  }, [asset.id, originalUrl]);
-  const wantsThumb = asset.kind === "photo" || asset.kind === "raw";
-  const thumb = useAssetThumbUrl(asset.id, VIEWER_THUMB_SIZE, wantsThumb, "high");
-  // 内嵌全幅直出档（>2048 为后端语义标记）：RAW 主显示路径
-  const rawEmbed = useAssetThumbUrl(
-    asset.id,
-    VIEWER_RAW_EMBED_SIZE,
-    asset.kind === "raw",
-    "high",
-  );
-  // rawler 2048 显影：仅在「无内嵌预览」（embed 结算为 null）时才启用兜底
-  const rawFull = useAssetThumbUrl(
-    asset.id,
-    VIEWER_MID_SIZE,
-    asset.kind === "raw" && rawEmbed.status === "failed",
-    "high",
-  );
-  // 中间档仅 photo 且原图已失败时才请求（2048 档后端就位后生效；未就位时 settled null → 继续降 512）
-  const mid = useAssetThumbUrl(
-    asset.id,
-    VIEWER_MID_SIZE,
-    asset.kind === "photo" && stage !== "original",
-    "high",
-  );
-
-  let mainSrc: string | null;
-  let mainFailed = false;
-  if (asset.kind === "photo" && stage === "original" && originalUrl !== null) {
-    mainSrc = originalUrl; // img onError → 降档；渲染失败前不作无图判定
-  } else if (asset.kind === "photo" && stage === "mid") {
-    mainSrc = mid.url; // 在途 null → 走加载提示；确定无图由下方自动降档
-  } else if (asset.kind === "raw") {
-    // 512 秒出 → 内嵌全幅替换变清晰；无内嵌预览 → 2048 显影兜底
-    mainSrc = rawEmbed.url ?? rawFull.url ?? thumb.url;
-    mainFailed =
-      rawEmbed.status === "failed" &&
-      rawFull.status === "failed" &&
-      thumb.status === "failed";
-  } else {
-    mainSrc = thumb.url;
-    mainFailed = thumb.status === "failed";
-  }
-  // 源缺失（源文件被移动/删除，管线终态）：512 档在任何回退档位都请求，其 missing
-  // 结算即整链缺源信号——有历史缓存时 mainSrc 仍指向缓存 URL（尽力展示），无缓存
-  // 时 mainSrc 为 null，靠下方占位兜底（绝不让舞台空白/无限转圈）。
-  const mainMissing = thumb.status === "missing";
-  const showMissingPlaceholder = mainMissing && mainSrc === null;
-  // 中间档确定无图（后端未加 2048 档 / 提取失败）→ 自动降到 512 档；
-  // 中间档缺源且无缓存（missing+null，不会再有图）同样降档交给 512 档结算
-  useEffect(() => {
-    if (
-      asset.kind === "photo" &&
-      stage === "mid" &&
-      (mid.status === "failed" || (mid.status === "missing" && mid.url === null))
-    ) {
-      setStage("thumb");
-    }
-  }, [asset.kind, stage, mid.status, mid.url]);
-  // photo 无原图可用（非 Tauri 环境 convertFileSrc 抛错）→ 直达 512 档
-  useEffect(() => {
-    if (asset.kind === "photo" && stage === "original" && originalUrl === null) {
-      setStage("thumb");
-    }
-  }, [asset.kind, stage, originalUrl]);
-
-  // --- 无空窗单层切换 ---------------------------------------------------------------
-  // 用稳定 key 保留真正已解码的 DOM 图片节点：新图先在不可见层解码，onLoad 后把同一个
-  // 节点提升为可见层并移除旧层。不能只把新 src 写回旧 <img>，否则浏览器仍可能在重新
-  // 绘制该节点时短暂清空画面，表现为切图黑闪。
-  type ImageLayer = { src: string; phase: "active" | "loading" | "retiring" };
-  const [imageLayers, setImageLayers] = useState<ImageLayer[]>([]);
-  useEffect(() => {
-    if (mainSrc === null) return; // 源在途（等 2048/512 URL）——旧图层继续显示
-    setImageLayers((previous) => {
-      if (previous.some((layer) => layer.src === mainSrc)) return previous;
-      const active = previous.find((layer) => layer.phase === "active");
-      return active
-        ? [active, { src: mainSrc, phase: "loading" }]
-        : [{ src: mainSrc, phase: "loading" }];
-    });
-  }, [mainSrc]);
-  const hasRetiringLayer = imageLayers.some((layer) => layer.phase === "retiring");
-  useEffect(() => {
-    if (!hasRetiringLayer) return;
-    // 新图至少完整绘制一帧后才移除旧图。这样即使 WebView 合成线程比 React 提交稍慢，
-    // 也始终有上一张作为后备，不会在两个纹理之间露出黑色舞台背景。
-    const frame = requestAnimationFrame(() => {
-      setImageLayers((previous) =>
-        previous.filter((layer) => layer.phase !== "retiring"),
-      );
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [hasRetiringLayer]);
-  // 确定无图：清掉残留图层，显示占位
-  useEffect(() => {
-    if (mainFailed || showMissingPlaceholder) {
-      setImageLayers([]);
-    }
-  }, [mainFailed, showMissingPlaceholder]);
-
-  // 大图加载提示：源在途超过 300ms 才转圈（几十 MB 原图加载慢，避免黑屏误判失败）；
-  // 切换期间旧图层兜底显示，仅新图 300ms 仍未 onLoad 才叠加 spinner（快速连按不闪）。
-  const [slowLoading, setSlowLoading] = useState(false);
-  const awaitingImage =
-    imageLayers.some((layer) => layer.phase === "loading") ||
-    (mainSrc === null && !mainFailed && !showMissingPlaceholder);
-  useEffect(() => {
-    setSlowLoading(false);
-    if (!awaitingImage) return;
-    const timer = setTimeout(() => setSlowLoading(true), 300);
-    return () => clearTimeout(timer);
-  }, [awaitingImage]);
-
-  // 相邻预取（#7 预加载强化）：前后各 1 张——
-  // a) 512 回退档 URL 高优先预取；b) new Image() 解码预热（photo 的原图 asset URL 也预热），
-  // 让箭头切换时下一张大概率已在解码器缓存里。
-  useEffect(() => {
-    const neighbors = [
-      index > 0 ? group.assets[index - 1] : null,
-      index < group.assets.length - 1 ? group.assets[index + 1] : null,
-    ];
-    for (const neighbor of neighbors) {
-      if (!neighbor) continue;
-      if (neighbor.kind === "photo") warmImageDecode(safeConvert(neighbor.path));
-      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((r) => {
-        if (r.kind === "url") warmImageDecode(r.url);
-      });
-      if (neighbor.kind === "raw") {
-        // RAW 相邻预热内嵌全幅直出档（毫秒级 IO，取最大内嵌 JPEG）
-        void fetchAssetThumb(neighbor.id, VIEWER_RAW_EMBED_SIZE, "high").then((r) => {
-          if (r.kind === "url") warmImageDecode(r.url);
-        });
-      }
-    }
-  }, [index, group.assets]);
+  const { stage, setStage, mainSrc, mainFailed, mainMissing, showMissingPlaceholder, sourceKind,
+    imageLayers, setImageLayers, slowLoading } = useViewerImage(asset, group, index);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
   const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
@@ -580,11 +362,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         e.preventDefault();
         void applyRejected(!currentRejected);
       } else if (e.key === "z" || e.key === "Z") {
-        setView((v) =>
-          v.scale > MIN_SCALE
-            ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
-            : { ...v, scale: 2, x: 0, y: 0 },
-        );
+        toggleZoom();
       } else if (e.key === "i" || e.key === "I") {
         setExifOpen((open) => !open);
       } else if (e.key === "?") {
@@ -840,7 +618,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           <div
             ref={stageRef}
             className="absolute inset-0 flex touch-none items-center justify-center overflow-hidden"
-            onDoubleClick={() => setView({ scale: 1, x: 0, y: 0, rotation: 0 })}
+            onDoubleClick={resetView}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -944,17 +722,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                       ? "viewer-img"
                       : "viewer-img-retiring"
                 }
-                data-fallback={
-                  layer.src === originalUrl
-                    ? "original"
-                    : layer.src === rawEmbed.url && asset.kind === "raw"
-                      ? "raw-embed"
-                      : layer.src === rawFull.url && asset.kind === "raw"
-                        ? "raw-full"
-                        : layer.src === mid.url
-                          ? "mid"
-                          : "thumb"
-                }
+                data-fallback={sourceKind(layer.src)}
                 className={`${
                   layer.phase === "loading" ? "invisible " : "absolute "
                 }max-h-full max-w-full select-none object-contain`}

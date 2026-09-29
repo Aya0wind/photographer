@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { render, screen, waitFor, within } from "@testing-library/react";
@@ -33,15 +34,9 @@ const revealBatchMock = vi.mocked(revealInExplorer);
 const revealMock = vi.mocked(revealItemInDir);
 
 function makeAsset(id: number): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: "2026-09-18T10:00:00",
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 /** 本地今天 "MMDD"（与组件同口径） */

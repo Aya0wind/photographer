@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -33,15 +34,11 @@ vi.mock("@/ipc/api", async (importOriginal) => {
 const assetsPageMock = vi.mocked(assetsPage);
 
 function asset(id: number): AssetDto {
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:/photo/${id}.jpg`,
     name: `${id}.jpg`,
-    kind: "photo",
     capturedAt: "2026-01-01T00:00:00Z",
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 beforeEach(() => {

@@ -1,3 +1,5 @@
+import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
+import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -198,7 +200,6 @@ export default function GalleryPage() {
   /** 视口滚动位置（快照保存用；重挂载恢复） */
   const scrollTopRef = useRef(cachedAtMount?.scrollTop ?? 0);
   const gridRef = useRef<AssetGridHandle | null>(null);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [viewport, setViewport] = useState<ViewportInfo>({
     scrollTop: scrollTopRef.current,
     group: null,
@@ -281,19 +282,7 @@ export default function GalleryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appliedFilters, debouncedKey, semanticMode, filtersActive]);
 
-  // 无限滚动：哨兵进入视口（提前 800px 预载）——默认/筛选态
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el || status !== "ready" || semanticMode || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void appendPage();
-      },
-      { rootMargin: "800px 0px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [status, appendPage, assets.length, semanticMode]);
+  const sentinelRef = usePageSentinel(status === "ready" && !semanticMode, assets.length, appendPage);
 
   // 重挂载滚动恢复（仅默认态）：快照有位置且首次 ready 后立即还原
   const scrollRestoredRef = useRef(false);
@@ -313,36 +302,7 @@ export default function GalleryPage() {
   }, []);
 
   // --- 多选（M4.5 选择模式） ----------------------------------------------------------
-  const [selecting, setSelecting] = useState(false);
-  const [selected, setSelected] = useState<number[]>([]);
-  const toggleSelected = useCallback((asset: AssetDto) => {
-    setSelected((prev) =>
-      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
-    );
-  }, []);
-  const ctrlSelect = useCallback((asset: AssetDto) => {
-    setSelecting(true);
-    setSelected((prev) =>
-      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
-    );
-  }, []);
-  const exitSelection = useCallback(() => {
-    setSelecting(false);
-    setSelected([]);
-  }, []);
-
-  // Esc 退出选择模式（查看器打开时不抢：选择模式下瓦片点击不打开查看器）
-  useEffect(() => {
-    if (!selecting) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        exitSelection();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selecting, exitSelection]);
+  const { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
 
   // --- 展示分组与查看器 ---------------------------------------------------------------
   const { cards, badges } = usePhotoCards(assets);
@@ -407,17 +367,7 @@ export default function GalleryPage() {
   /** 瓦片右键目标集：非多选=该资产；多选+已选瓦片=全部选中；
    *  多选+未选瓦片=先切换选中集为该图（Windows 语义），再作用于它。 */
   function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
-    if (selecting) {
-      if (selected.includes(asset.id)) {
-        const targets = selected
-          .map((id) => assetsById.get(id))
-          .filter((a): a is AssetDto => a !== undefined);
-        setCtxMenu({ ...at, assets: targets });
-        return;
-      }
-      setSelected([asset.id]); // 选中集切换为该图（保持多选态）
-    }
-    setCtxMenu({ ...at, assets: [asset] });
+    setCtxMenu({ ...at, assets: contextTargets(asset, assetsById) });
   }
 
   /** 选中资产对象（当前态分组内查找；跨态选不中的自动忽略） */

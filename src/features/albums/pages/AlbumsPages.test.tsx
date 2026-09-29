@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -119,15 +120,12 @@ function builtIndex(): IndexStatus {
 }
 
 function makeAsset(id: number, name: string) {
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\${name}`,
     name,
     kind: "photo" as const,
     capturedAt: "2026-09-18T10:00:00",
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 function renderRoutes(initialPath: string) {

@@ -1,3 +1,5 @@
+import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
+import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
@@ -101,7 +103,6 @@ export default function AlbumDetailPage() {
   const appliedKeyRef = useRef(debouncedKey);
   appliedKeyRef.current = debouncedKey;
   const [reloadToken, setReloadToken] = useState(0);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const fetchPage = useCallback(
     async (afterId: number, key: string): Promise<AssetDto[]> => {
@@ -162,50 +163,10 @@ export default function AlbumDetailPage() {
     void refreshSubgroups();
   }, [refreshSubgroups, reloadToken]);
 
-  // 无限滚动：哨兵进入视口（提前 800px 预载）
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el || status !== "ready" || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void appendPage();
-      },
-      { rootMargin: "800px 0px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [status, appendPage, assets.length]);
+  const sentinelRef = usePageSentinel(status === "ready", assets.length, appendPage);
 
   // --- 多选（与画廊同语义：check 圆钮 / Ctrl+点击 / 长按；Esc 退出） -------------------
-  const [selecting, setSelecting] = useState(false);
-  const [selected, setSelected] = useState<number[]>([]);
-  const toggleSelected = useCallback((asset: AssetDto) => {
-    setSelected((prev) =>
-      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
-    );
-  }, []);
-  const ctrlSelect = useCallback((asset: AssetDto) => {
-    setSelecting(true);
-    setSelected((prev) =>
-      prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
-    );
-  }, []);
-  const exitSelection = useCallback(() => {
-    setSelecting(false);
-    setSelected([]);
-  }, []);
-
-  useEffect(() => {
-    if (!selecting) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        exitSelection();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [selecting, exitSelection]);
+  const { selecting, selected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
 
 
   function enterSubgroup(name: string): void {
@@ -242,17 +203,7 @@ export default function AlbumDetailPage() {
   const [addToAlbumTargets, setAddToAlbumTargets] = useState<AssetDto[] | null>(null);
 
   function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
-    if (selecting) {
-      if (selected.includes(asset.id)) {
-        const targets = selected
-          .map((id) => loadedById.get(id))
-          .filter((a): a is AssetDto => a !== undefined);
-        setCtxMenu({ ...at, assets: targets });
-        return;
-      }
-      setSelected([asset.id]);
-    }
-    setCtxMenu({ ...at, assets: [asset] });
+    setCtxMenu({ ...at, assets: contextTargets(asset, loadedById) });
   }
 
   /** 相册上下文刷新：移除引用后重置分页重拉 + 相册计数 + 子分组清单 */

@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use tauri::State;
 
+use super::sidecar::{spawn_xmp_sync, XmpSync};
 use super::{run_blocking, SharedState};
-use crate::events::AppEvent;
 
 /// XMP 评分投影（用户定案）：DB 真值 → 边车值。
 /// `rejected ? -1 : rating`（星级保留在 DB，边车显示 -1 表示拒绝）。
@@ -61,20 +61,18 @@ pub fn fetch_asset_rating_set(
         return Ok(());
     }
     let projected = projected_rating(rating, rejected);
-    let bus = state.bus.clone();
-    state
-        .supervisor
-        .spawn("xmp", format!("rating-{asset_id}"), move |_| {
-            if let Err(error) =
-                crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(&path), projected)
-            {
-                bus.publish(AppEvent::AppError {
-                    level: "warn".into(),
-                    message: format!("评分已入库，但 XMP 边车同步失败：{error}"),
-                    recoverable: true,
-                });
-            }
-        });
+    spawn_xmp_sync(
+        state,
+        XmpSync {
+            task: format!("rating-{asset_id}"),
+            subject: "评分",
+            failure: "同步失败",
+        },
+        vec![(path, projected)],
+        |(path, projected)| {
+            crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(path), projected)
+        },
+    );
     Ok(())
 }
 

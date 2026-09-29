@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -55,15 +56,9 @@ function seedLibrary(): void {
 }
 
 function makeAsset(id: number): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: "2026-09-18T10:00:00",
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 function renderDialog(assets: AssetDto[]) {

@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -69,15 +70,9 @@ const albumListMock = vi.mocked(albumList);
 const albumAddMock = vi.mocked(albumAddAssets);
 
 function makeAsset(id: number): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: `2026-09-1${id}T10:00:00`,
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 /** 按 assetId 取瓦片（组序 DESC，DOM 顺序与 id 无关） */

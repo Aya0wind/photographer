@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -54,15 +55,14 @@ function makeAsset(
   name?: string,
 ): AssetDto {
   const file = name ?? `IMG_${String(id).padStart(4, "0")}.JPG`;
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\SmartPhoto\\2026\\${file}`,
     name: file,
     kind,
     capturedAt: date === null ? null : `${date}T10:00:00`,
     camera: "Canon EOS R5",
     sizeBytes: 1024 * 1024,
-  };
+  });
 }
 
 /** N 条同日期资产的整页（id 递减，keyset DESC 语义） */

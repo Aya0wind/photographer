@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -50,15 +51,9 @@ const PEOPLE: PersonCluster[] = [
 ];
 
 function makeAsset(id: number): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: "2026-09-01T10:00:00",
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 function renderPeople() {

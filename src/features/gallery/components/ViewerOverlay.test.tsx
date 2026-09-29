@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 
@@ -68,15 +69,14 @@ const versionsMock = vi.mocked(assetVersions);
 // --- 工具 -------------------------------------------------------------------------
 
 function makeAsset(id: number, kind: AssetDto["kind"], name: string): AssetDto {
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\SmartPhoto\\2026\\${name}`,
     name,
     kind,
     capturedAt: "2026-09-18T10:00:00",
     camera: "Canon EOS R5",
     sizeBytes: 5 * 1024 * 1024,
-  };
+  });
 }
 
 const GROUP_ASSETS: AssetDto[] = [

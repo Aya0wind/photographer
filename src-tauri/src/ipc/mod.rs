@@ -18,6 +18,7 @@ pub mod rating;
 pub mod reconcile;
 pub mod selection;
 pub mod settings;
+mod sidecar;
 pub mod system;
 pub mod tethering;
 pub mod thumb;

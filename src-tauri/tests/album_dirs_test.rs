@@ -8,6 +8,8 @@
 
 mod common;
 
+use common::library_fixture as setup;
+
 pub use common::{
     ai, bursts, db, devices, events, import, index, ipc, metadata, migrate, settings, tasks, thumbs,
 };
@@ -60,16 +62,6 @@ fn ins(db: &db::Db, path: &str, kind: AssetKind, captured: Option<&str>) -> i64 
     db.asset_id_by_path(path).unwrap().unwrap()
 }
 
-fn setup() -> (tempfile::TempDir, ipc::AppState, db::Db) {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_dir = dir.path().join("db");
-    let photo_root = dir.path().join("photos");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&photo_root).unwrap();
-    let state = common::state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
-    let db = open_db(&db_dir);
-    (dir, state, db)
-}
 
 // ---------------------------------------------------------------------------
 // 目录名净化与唯一化

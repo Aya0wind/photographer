@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { AssetDto } from "@/ipc/api";
@@ -9,15 +10,12 @@ import {
 
 /** 最小 AssetDto 夹具 */
 function asset(id: number): AssetDto {
-  return {
-    id,
+  return assetFixture(id, {
     path: `X:/p/${id}.jpg`,
     name: `${id}.jpg`,
-    kind: "photo",
     capturedAt: "2026-09-19T10:00:00.000Z",
-    camera: null,
     sizeBytes: 100,
-  };
+  });
 }
 
 describe("galleryCache：画廊会话快照", () => {

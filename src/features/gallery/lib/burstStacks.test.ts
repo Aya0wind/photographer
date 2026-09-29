@@ -1,19 +1,16 @@
+import { assetFixture } from "@/test/fixtures";
 import { describe, expect, it } from "vitest";
 
 import type { AssetDto } from "@/ipc/api";
 import { collapseBursts } from "./burstStacks";
 
 function asset(id: number, burst?: { burstId: number; burstCount?: number }): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: "2026-09-18T10:00:00",
     camera: "Canon EOS R5",
     sizeBytes: 1024,
     ...(burst ?? {}),
-  };
+  });
 }
 
 describe("collapseBursts（连拍堆叠折叠）", () => {

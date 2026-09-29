@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use tauri::State;
 
+use super::sidecar::{spawn_xmp_sync, XmpSync};
 use super::{run_blocking, SharedState};
-use crate::events::AppEvent;
 
 /// LR 标准颜色标签（应用内小写 token；xmp:Label 写首字母大写标准色名）。
 pub const COLOR_LABELS: &[&str] = &["red", "yellow", "green", "blue", "purple"];
@@ -77,34 +77,21 @@ pub fn fetch_asset_label_set(
     if targets.is_empty() {
         return Ok(n);
     }
-    let bus = state.bus.clone();
-    state
-        .supervisor
-        .spawn("xmp", format!("label-batch-{n}"), move |_| {
-            let xmp_label = label.and_then(crate::metadata::xmp::label_to_xmp);
-            let mut failed = 0usize;
-            for (path, _) in &targets {
-                if let Err(error) =
-                    crate::metadata::xmp::sync_label_to_sidecar(&PathBuf::from(path), xmp_label)
-                {
-                    failed += 1;
-                    if failed == 1 {
-                        bus.publish(AppEvent::AppError {
-                            level: "warn".into(),
-                            message: format!("颜色标签已入库，但 XMP 边车同步失败：{error}"),
-                            recoverable: true,
-                        });
-                    }
-                }
-            }
-            if failed > 1 {
-                bus.publish(AppEvent::AppError {
-                    level: "warn".into(),
-                    message: format!("颜色标签已入库，{failed} 个 XMP 边车同步失败"),
-                    recoverable: true,
-                });
-            }
-        });
+    spawn_xmp_sync(
+        state,
+        XmpSync {
+            task: format!("label-batch-{n}"),
+            subject: "颜色标签",
+            failure: "同步失败",
+        },
+        targets,
+        |(path, label)| {
+            crate::metadata::xmp::sync_label_to_sidecar(
+                &PathBuf::from(path),
+                label.and_then(crate::metadata::xmp::label_to_xmp),
+            )
+        },
+    );
     Ok(n)
 }
 
@@ -152,33 +139,18 @@ pub fn fetch_asset_reject_set(
     if targets.is_empty() {
         return Ok(n);
     }
-    let bus = state.bus.clone();
-    state
-        .supervisor
-        .spawn("xmp", format!("reject-batch-{n}"), move |_| {
-            let mut failed = 0usize;
-            for (path, projected) in &targets {
-                if let Err(error) =
-                    crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(path), *projected)
-                {
-                    failed += 1;
-                    if failed == 1 {
-                        bus.publish(AppEvent::AppError {
-                            level: "warn".into(),
-                            message: format!("拒绝状态已入库，但 XMP 边车投影失败：{error}"),
-                            recoverable: true,
-                        });
-                    }
-                }
-            }
-            if failed > 1 {
-                bus.publish(AppEvent::AppError {
-                    level: "warn".into(),
-                    message: format!("拒绝状态已入库，{failed} 个 XMP 边车投影失败"),
-                    recoverable: true,
-                });
-            }
-        });
+    spawn_xmp_sync(
+        state,
+        XmpSync {
+            task: format!("reject-batch-{n}"),
+            subject: "拒绝状态",
+            failure: "投影失败",
+        },
+        targets,
+        |(path, projected)| {
+            crate::metadata::xmp::sync_rating_to_sidecar(&PathBuf::from(path), projected)
+        },
+    );
     Ok(n)
 }
 

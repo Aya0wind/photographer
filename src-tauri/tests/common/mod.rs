@@ -363,6 +363,18 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
     }
 }
 
+/// 独立临时库（含慢速卷源），调用方持有 TempDir 保证整个测试的生命周期。
+pub fn library_fixture() -> (tempfile::TempDir, AppState, Db) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_dir = dir.path().join("db");
+    let photo_root = dir.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let state = state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+    (dir, state, db)
+}
+
 /// IPC 导入计划：source_id 取注册表首个设备。0018 导入必落相册：
 /// album_id 兜底到「未分组」（不存在则自动创建）。
 pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {

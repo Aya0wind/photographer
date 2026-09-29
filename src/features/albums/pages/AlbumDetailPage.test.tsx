@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -59,15 +60,9 @@ const thumbMock = vi.mocked(assetThumbGet);
 const PAGE_LIMIT = 100;
 
 function makeAsset(id: number): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: `2026-09-1${(id % 9) + 1}T10:00:00`,
-    camera: null,
-    sizeBytes: 1,
-  };
+  });
 }
 
 function makeAlbum(id: number, name: string, itemCount: number) {

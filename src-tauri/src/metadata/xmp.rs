@@ -240,61 +240,15 @@ fn minimal_template(rating: i8) -> String {
 ///    声明一并补；无 rdf:Description 时退回整档最小模板——内容太少说明
 ///    不是有效 XMP，不冒险拼接）。
 pub fn write_rating(existing: Option<&str>, rating: i8) -> String {
-    let Some(text) = existing else {
-        return minimal_template(rating);
-    };
-    // 路径 1：属性形态原位替换（首个命中）
-    if let Some(pos) = text.find("xmp:Rating=\"") {
-        let start = pos + "xmp:Rating=\"".len();
-        let end = text[start..].find('"').map(|n| start + n);
-        if let Some(end) = end {
-            let mut out = String::with_capacity(text.len() + 8);
-            out.push_str(&text[..start]);
-            out.push_str(&rating.to_string());
-            out.push_str(&text[end..]);
-            return out;
-        }
-    }
-    // 路径 2：子元素形态原位替换（<xmp:Rating>N</xmp:Rating>，数字可为空）
-    if let Some(open) = text.find("<xmp:Rating>") {
-        let content_start = open + "<xmp:Rating>".len();
-        if let Some(close) = text[content_start..].find("</xmp:Rating>") {
-            let mut out = String::with_capacity(text.len() + 8);
-            out.push_str(&text[..content_start]);
-            out.push_str(&rating.to_string());
-            out.push_str(&text[content_start + close..]);
-            return out;
-        }
-    }
-    // 路径 3：插入属性到首个 rdf:Description
-    if let Some(tag_start) = text.find("<rdf:Description") {
-        let tag_end = text[tag_start..].find('>').map(|n| tag_start + n);
-        let Some(tag_end) = tag_end else {
-            return minimal_template(rating);
-        };
-        let tag = &text[tag_start..tag_end];
-        let needs_ns = !tag.contains("xmlns:xmp=");
-        let mut insert = String::new();
-        if needs_ns {
-            insert.push_str(&format!("\n    xmlns:xmp=\"{XMP_NS}\""));
-        }
-        insert.push_str(&format!("\n    xmp:Rating=\"{rating}\""));
-        let mut out = String::with_capacity(text.len() + insert.len());
-        out.push_str(&text[..tag_end]);
-        out.push_str(&insert);
-        out.push_str(&text[tag_end..]);
-        return out;
-    }
-    minimal_template(rating)
+    existing
+        .and_then(|text| write_field(text, "Rating", Some(&rating.to_string())))
+        .unwrap_or_else(|| minimal_template(rating))
 }
 
 /// 同步评分到边车（读已有 → 改/建 → 原子写）。返回是否真的落盘。
 /// 文件不存在 → 新建最小模板；已存在的其余内容逐字节保留。
 pub fn sync_rating_to_sidecar(asset_path: &Path, rating: i8) -> Result<(), String> {
-    let sidecar = sidecar_path(asset_path);
-    let existing = std::fs::read_to_string(&sidecar).ok();
-    let updated = write_rating(existing.as_deref(), rating);
-    atomic_write_sidecar(&sidecar, &updated)
+    sync_sidecar(asset_path, |existing| write_rating(existing, rating))
 }
 
 /// 在文本中把颜色标签写入/更新/清除为 `xmp:Label`（返回新文本；label None =
@@ -305,74 +259,49 @@ pub fn sync_rating_to_sidecar(asset_path: &Path, rating: i8) -> Result<(), Strin
 /// 3. 都没有 → 写入时在首个 `<rdf:Description` 开标签插属性（缺 xmlns:xmp
 ///    声明一并补）；清除时无事可做原样返回。
 pub fn write_label(existing: Option<&str>, label: Option<&str>) -> String {
-    let Some(text) = existing else {
-        return match label {
-            Some(l) => minimal_template_label(l),
+    existing
+        .and_then(|text| write_field(text, "Label", label))
+        .unwrap_or_else(|| match label {
+            Some(label) => minimal_template_label(label),
             None => minimal_template_noop(),
-        };
-    };
-    // 路径 1：属性形态
-    if let Some(pos) = text.find("xmp:Label=\"") {
-        let start = pos + "xmp:Label=\"".len();
+        })
+}
+
+/// 只改指定 XMP 字段，保留其他属性、元素和空白的原始字节。
+/// 无可插入的 Description 返回 None，由字段入口选择自己的最小模板。
+fn write_field(text: &str, field: &str, value: Option<&str>) -> Option<String> {
+    let attribute = format!("xmp:{field}=\"");
+    if let Some(pos) = text.find(&attribute) {
+        let start = pos + attribute.len();
         if let Some(end) = text[start..].find('"').map(|n| start + n) {
-            return match label {
-                Some(l) => {
-                    let mut out = String::with_capacity(text.len() + 8);
-                    out.push_str(&text[..start]);
-                    out.push_str(l);
-                    out.push_str(&text[end..]);
-                    out
-                }
-                // 整属性摘除：连带吃掉属性前的缩进/换行空白
-                None => remove_span(text, eat_ws_before(text, pos), end + 1),
-            };
+            return Some(match value {
+                Some(value) => replace_span(text, start, end, value),
+                None => replace_span(text, eat_ws_before(text, pos), end + 1, ""),
+            });
         }
     }
-    // 路径 2：子元素形态
-    if let Some(open) = text.find("<xmp:Label>") {
-        let content_start = open + "<xmp:Label>".len();
-        if let Some(close) = text[content_start..].find("</xmp:Label>") {
-            let close = content_start + close;
-            return match label {
-                Some(l) => {
-                    let mut out = String::with_capacity(text.len() + 8);
-                    out.push_str(&text[..content_start]);
-                    out.push_str(l);
-                    out.push_str(&text[close..]);
-                    out
-                }
-                // 整元素摘除（含元素独占行的前导空白）
-                None => remove_span(
-                    text,
-                    eat_ws_before(text, open),
-                    close + "</xmp:Label>".len(),
-                ),
-            };
+    let opening = format!("<xmp:{field}>");
+    let closing = format!("</xmp:{field}>");
+    if let Some(open) = text.find(&opening) {
+        let start = open + opening.len();
+        if let Some(end) = text[start..].find(&closing).map(|n| start + n) {
+            return Some(match value {
+                Some(value) => replace_span(text, start, end, value),
+                None => replace_span(text, eat_ws_before(text, open), end + closing.len(), ""),
+            });
         }
     }
-    // 路径 3：插入属性到首个 rdf:Description（清除无既有形态 → 原样返回）
-    let Some(l) = label else {
-        return text.to_string();
+    let Some(value) = value else {
+        return Some(text.to_string());
     };
-    if let Some(tag_start) = text.find("<rdf:Description") {
-        let tag_end = text[tag_start..].find('>').map(|n| tag_start + n);
-        let Some(tag_end) = tag_end else {
-            return minimal_template_label(l);
-        };
-        let tag = &text[tag_start..tag_end];
-        let needs_ns = !tag.contains("xmlns:xmp=");
-        let mut insert = String::new();
-        if needs_ns {
-            insert.push_str("\n    xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"");
-        }
-        insert.push_str(&format!("\n    xmp:Label=\"{l}\""));
-        let mut out = String::with_capacity(text.len() + insert.len());
-        out.push_str(&text[..tag_end]);
-        out.push_str(&insert);
-        out.push_str(&text[tag_end..]);
-        return out;
+    let tag_start = text.find("<rdf:Description")?;
+    let tag_end = tag_start + text[tag_start..].find('>')?;
+    let mut insert = String::new();
+    if !text[tag_start..tag_end].contains("xmlns:xmp=") {
+        insert.push_str(&format!("\n    xmlns:xmp=\"{XMP_NS}\""));
     }
-    minimal_template_label(l)
+    insert.push_str(&format!("\n    xmp:{field}=\"{value}\""));
+    Some(replace_span(text, tag_end, tag_end, &insert))
 }
 
 /// 摘除属性/元素时，把 span 起点前的连续空白（含换行）一并吃掉——保持
@@ -389,10 +318,11 @@ fn eat_ws_before(text: &str, mut start: usize) -> usize {
     start
 }
 
-/// 摘除 [from, to) 区间（其余字节原样保留）。
-fn remove_span(text: &str, from: usize, to: usize) -> String {
-    let mut out = String::with_capacity(text.len() - (to - from));
+/// 替换 [from, to) 区间（其余字节原样保留）。
+fn replace_span(text: &str, from: usize, to: usize, replacement: &str) -> String {
+    let mut out = String::with_capacity(text.len() - (to - from) + replacement.len());
     out.push_str(&text[..from]);
+    out.push_str(replacement);
     out.push_str(&text[to..]);
     out
 }
@@ -421,10 +351,17 @@ fn minimal_template_noop() -> String {
 
 /// 同步颜色标签到边车（读已有 → 改/建/摘除 → 原子写）。
 pub fn sync_label_to_sidecar(asset_path: &Path, label: Option<&str>) -> Result<(), String> {
+    sync_sidecar(asset_path, |existing| write_label(existing, label))
+}
+
+/// 公用边车读改写流程；字段入口只提供保留字节的改写函数。
+fn sync_sidecar(
+    asset_path: &Path,
+    update: impl FnOnce(Option<&str>) -> String,
+) -> Result<(), String> {
     let sidecar = sidecar_path(asset_path);
     let existing = std::fs::read_to_string(&sidecar).ok();
-    let updated = write_label(existing.as_deref(), label);
-    atomic_write_sidecar(&sidecar, &updated)
+    atomic_write_sidecar(&sidecar, &update(existing.as_deref()))
 }
 
 /// 边车原子落盘（.tmp + rename；rename 失败清残留 .tmp）。
@@ -470,6 +407,37 @@ mod tests {
         assert_eq!(sidecar_rating("not xml at all"), None);
         // 越界评分不认
         assert_eq!(sidecar_rating(r#"<rdf:Description xmp:Rating="9"/>"#), None);
+    }
+
+    #[test]
+    fn rating_and_label_updates_preserve_each_other_and_clear_only_label() {
+        let cases = [
+            (
+                r#"<rdf:Description xmp:Rating="2" xmp:Label="Blue" crs:Tone="保留"/>"#,
+                r#"<rdf:Description xmp:Rating="4" xmp:Label="Blue" crs:Tone="保留"/>"#,
+                r#"<rdf:Description xmp:Rating="2" xmp:Label="Red" crs:Tone="保留"/>"#,
+                r#"<rdf:Description xmp:Rating="2" crs:Tone="保留"/>"#,
+            ),
+            (
+                "<rdf:Description><xmp:Rating>2</xmp:Rating>\n　<xmp:Label>Blue</xmp:Label><crs:Tone>保留</crs:Tone></rdf:Description>",
+                "<rdf:Description><xmp:Rating>4</xmp:Rating>\n　<xmp:Label>Blue</xmp:Label><crs:Tone>保留</crs:Tone></rdf:Description>",
+                "<rdf:Description><xmp:Rating>2</xmp:Rating>\n　<xmp:Label>Red</xmp:Label><crs:Tone>保留</crs:Tone></rdf:Description>",
+                "<rdf:Description><xmp:Rating>2</xmp:Rating><crs:Tone>保留</crs:Tone></rdf:Description>",
+            ),
+        ];
+        for (source, rated, labeled, cleared) in cases {
+            assert_eq!(write_rating(Some(source), 4), rated);
+            assert_eq!(write_label(Some(source), Some("Red")), labeled);
+            assert_eq!(write_label(Some(source), None), cleared);
+            assert_eq!(write_label(Some(cleared), None), cleared);
+        }
+        let incomplete = "<rdf:Description";
+        assert_eq!(write_rating(Some(incomplete), 4), minimal_template(4));
+        assert_eq!(
+            write_label(Some(incomplete), Some("Red")),
+            minimal_template_label("Red")
+        );
+        assert_eq!(write_label(Some(incomplete), None), incomplete);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -34,15 +35,13 @@ const thumbMock = vi.mocked(assetThumbGet);
 
 function makeAsset(id: number, year: number): AssetDto {
   const file = `IMG_${String(id).padStart(4, "0")}.JPG`;
-  return {
-    id,
+  return assetFixture(id, {
     path: `Y:\\照片\\SmartPhoto\\${year}\\${file}`,
     name: file,
-    kind: "photo",
     capturedAt: `${year}-09-19T10:00:00`,
     camera: "Canon EOS R5",
     sizeBytes: 1024,
-  };
+  });
 }
 
 function renderMemories() {

@@ -1,3 +1,4 @@
+import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -71,15 +72,11 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 const convertMock = vi.mocked(convertFileSrc);
 
 function makeAsset(id: number, date: string | null): AssetDto {
-  return {
-    id,
-    path: `Y:\\照片\\IMG_${id}.JPG`,
-    name: `IMG_${id}.JPG`,
-    kind: "photo",
+  return assetFixture(id, {
     capturedAt: date === null ? null : `${date}T10:00:00`,
     camera: "Canon EOS R5",
     sizeBytes: 1024 * 1024,
-  };
+  });
 }
 
 function gateModel(

@@ -18,7 +18,6 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::state_with_library;
 use db::AssetRow;
 use events::{AppEvent, AssetKind, EventBus};
 use exif::experimental::Writer as ExifWriter;
@@ -38,13 +37,8 @@ struct Fixture {
 }
 
 fn setup() -> Fixture {
-    let dir = tempfile::TempDir::new().unwrap();
-    let db_dir = dir.path().join("db");
+    let (dir, state, database) = common::library_fixture();
     let photo_root = dir.path().join("photos");
-    std::fs::create_dir_all(&db_dir).unwrap();
-    std::fs::create_dir_all(&photo_root).unwrap();
-    let state = state_with_library(&db_dir, &photo_root, Duration::from_millis(1));
-    let database = common::open_db(&db_dir);
     Fixture {
         _dir: dir,
         state,
