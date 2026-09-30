@@ -105,6 +105,7 @@ pub fn get(id: &str) -> Result<Arc<Session>, String> {
         .lock()
         .unwrap()
         .get(id)
+        .filter(|session| !session.is_stopping())
         .ok_or_else(|| "拍摄会话已结束".into())
 }
 pub fn all() -> Vec<Arc<Session>> {
@@ -395,6 +396,7 @@ pub fn request_stop(id: &str) {
     if let Ok(store) = current().try_lock() {
         if let Some(session) = store.get(id) {
             session.cancelled.store(true, Ordering::Release);
+            session.connected.store(false, Ordering::Release);
         }
     }
 }
@@ -430,23 +432,24 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
     session.receiving.store(true, Ordering::Release);
     let result = (|| {
         let db = crate::ipc::open_library_db(Path::new(&session.library.db_dir))?;
-        let mut source = session
-            .backend
-            .open_captured(&session.camera.pnp_id, object)
-            .map_err(|e| e.to_string())?;
-        let photo = ingest(
+        let (photo, cleanup_error) = ingest_from_backend(
             &db,
             &session.library,
             session.album_id,
-            &object.object_name,
-            object.object_size,
-            &mut source,
+            session.backend.as_ref(),
+            &session.camera.pnp_id,
+            object,
         )?;
         session
             .seen
             .lock()
             .unwrap()
             .insert(object.object_id.clone());
+        // Cleanup failure does not invalidate a committed asset or trigger a
+        // duplicate ingestion. The download is retained for later recovery.
+        if let Some(error) = cleanup_error {
+            session.record_error(state, format!("照片已入库，暂存副本清理失败: {error}"));
+        }
         {
             let mut photos = session.photos.lock().unwrap();
             photos.push(photo.clone());
@@ -488,6 +491,34 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
     session.receiving.store(false, Ordering::Release);
     result
 }
+
+fn ingest_from_backend(
+    db: &Db,
+    library: &Library,
+    album_id: i64,
+    backend: &dyn CameraBackend,
+    camera_id: &str,
+    object: &CapturedObject,
+) -> Result<(TetherPhoto, Option<String>), String> {
+    let mut source = backend
+        .open_captured(camera_id, object)
+        .map_err(|e| e.to_string())?;
+    let photo = ingest(
+        db,
+        library,
+        album_id,
+        &object.object_name,
+        object.object_size,
+        &mut source,
+    )?;
+    drop(source); // Windows cannot remove the local receipt while still open.
+    let cleanup_error = backend
+        .acknowledge_captured(camera_id, object)
+        .err()
+        .map(|e| e.to_string());
+    Ok((photo, cleanup_error))
+}
+
 /// Shared by the real camera download path and regression tests; no job/journal rows.
 pub fn ingest(
     db: &Db,
@@ -862,5 +893,109 @@ mod tests {
         assert!(get(&next_id).is_ok());
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
         stop(&next_id);
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::super::backend::{CameraInfo, Capabilities, TetherError};
+    use super::super::staging;
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct ReceiptBackend {
+        root: PathBuf,
+        acknowledged: AtomicUsize,
+    }
+
+    impl CameraBackend for ReceiptBackend {
+        fn id(&self) -> &'static str {
+            "receipt-test"
+        }
+
+        fn name(&self) -> &'static str {
+            "receipt-test"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::NONE
+        }
+
+        fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
+            Ok(vec![])
+        }
+
+        fn connect(&self, _: &str) -> Result<CameraInfo, TetherError> {
+            Err(TetherError::Disconnected)
+        }
+
+        fn disconnect(&self, _: &str) {
+            staging::disconnect(&self.root);
+        }
+
+        fn capture_still(&self, _: &str, _: Duration) -> Result<CapturedObject, TetherError> {
+            Err(TetherError::CaptureNotSupported)
+        }
+
+        fn open_captured(
+            &self,
+            _: &str,
+            object: &CapturedObject,
+        ) -> Result<Box<dyn Read + Send>, TetherError> {
+            let file = std::fs::File::open(staging::validated_path(&self.root, object)?)
+                .map_err(|error| TetherError::Other(error.to_string()))?;
+            Ok(Box::new(file))
+        }
+
+        fn acknowledge_captured(
+            &self,
+            _: &str,
+            object: &CapturedObject,
+        ) -> Result<(), TetherError> {
+            self.acknowledged.fetch_add(1, Ordering::SeqCst);
+            staging::acknowledge(&self.root, object)
+        }
+    }
+
+    #[test]
+    fn failed_ingestion_keeps_receipt_and_success_acknowledges_only_after_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let incoming = root.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        let db = Db::open(&root.path().join("library.db")).unwrap();
+        db.migrate().unwrap();
+        let album = db.album_create("Capture").unwrap();
+        let library = Library {
+            photo_root: root.path().join("photos").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let backend = ReceiptBackend {
+            root: incoming.clone(),
+            acknowledged: AtomicUsize::new(0),
+        };
+        let receipt = staging::persist(&incoming, "original.jpg", b"retained bytes").unwrap();
+        let mut truncated = receipt.clone();
+        truncated.object_size += 1;
+        assert!(
+            ingest_from_backend(&db, &library, album.id, &backend, "camera", &truncated).is_err()
+        );
+        backend.disconnect("camera");
+        assert_eq!(
+            std::fs::read(&receipt.object_id).unwrap(),
+            b"retained bytes"
+        );
+        assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 0);
+
+        let (photo, error) =
+            ingest_from_backend(&db, &library, album.id, &backend, "camera", &receipt).unwrap();
+        assert!(error.is_none());
+        assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 1);
+        assert!(!Path::new(&receipt.object_id).exists());
+        let path: String =
+            db.0.query_row("SELECT path FROM assets WHERE id = ?1", [photo.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"retained bytes");
     }
 }

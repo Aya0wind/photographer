@@ -83,7 +83,14 @@ fn path_of(db: &db::Db, asset_id: i64) -> String {
 /// 路径串归一（`/` → `\`）：库内 path 混存两种分隔符形态（引擎渲染段为
 /// `/`，claim/移组 join 产物为 `\`），字符串断言统一口径。
 fn norm(p: &str) -> String {
-    p.replace('/', "\\")
+    #[cfg(windows)]
+    {
+        p.replace('/', "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_owned()
+    }
 }
 
 /// 固定创建时间的相册（2026-03-05）→ 主目录 {photo_root}\2026\03\{dir_name}

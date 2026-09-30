@@ -171,6 +171,7 @@ mod tests {
     /// id 必须由用户输入形态构成（保留映射盘符 Y:），不做 canonical 解析：
     /// canonicalize 会把 `Y:\照片` 变成 `\\?\UNC\192.168.31.103\...\照片`。
     /// 本地用 verbatim 输入复现“形态转换”：旧实现 id 被 canonical 成 C:\...。
+    #[cfg(windows)]
     #[test]
     fn folder_id_keeps_user_input_form_not_canonical() {
         let tmp = tempfile::tempdir().unwrap();
@@ -188,7 +189,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         // 尾部 `.` 段与尾分隔符清除（幂等 id）
         assert_eq!(absolutize(&root.join(".")), root);
-        let with_slash = PathBuf::from(format!(r"{}\", root.display()));
+        let with_slash = PathBuf::from(format!("{}{}", root.display(), std::path::MAIN_SEPARATOR));
         assert_eq!(absolutize(&with_slash), root);
         // 已是规范形态原样保留（含前导盘符与根）
         assert_eq!(absolutize(&root), root);

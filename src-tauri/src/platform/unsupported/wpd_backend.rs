@@ -1,7 +1,5 @@
 //! 未适配平台的相机占位；不声明可用能力。
-use crate::tethering::backend::{
-    CameraBackend, CameraInfo, Capabilities, CapturedObject, TetherError,
-};
+use super::super::backend::{CameraBackend, CameraInfo, Capabilities, CapturedObject, TetherError};
 use std::time::Duration;
 
 #[derive(Default)]

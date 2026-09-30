@@ -52,14 +52,37 @@ pub struct ClaimResultDto {
     pub failed: Vec<ClaimFailureDto>,
 }
 
-
 /// 路径分隔符归一（`\` → `/`）：库内 path 存在反斜杠（claim 挪移 join
 /// 产物）与正斜杠（引擎/导出 render_dir 渲染段）两种形态，前缀判定统一
 /// 按 `/` 比较。0022 起移组挪移（ipc::album）与 claim 共用。
 pub(crate) fn norm_sep(p: &str) -> String {
-    p.replace('\\', "/")
+    #[cfg(windows)]
+    {
+        p.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        // Backslash is a legal filename character on POSIX, not a separator.
+        p.to_owned()
+    }
 }
 
+#[cfg(test)]
+mod path_tests {
+    use super::norm_sep;
+
+    #[test]
+    fn separators_follow_host_filesystem_without_folding_case() {
+        #[cfg(windows)]
+        assert_eq!(norm_sep(r"C:\Photos\Album"), "C:/Photos/Album");
+        #[cfg(not(windows))]
+        {
+            assert_eq!(norm_sep(r"/Volumes/Photos\Trip/Album"), r"/Volumes/Photos\Trip/Album");
+            assert_ne!(norm_sep("/Photos/Album"), norm_sep("/photos/album"));
+            assert_ne!(norm_sep(r"/Photos\Trip/Album"), norm_sep("/Photos/Trip/Album"));
+        }
+    }
+}
 
 /// 相册主目录前缀（含尾分隔符；相册相对段 album_home_rel 以 `/` 拼接，
 /// 归一后与库内两种分隔符形态均能命中）。
@@ -388,7 +411,6 @@ pub fn fetch_album_claim_assets(
     Ok(result)
 }
 
-
 // ---------------------------------------------------------------------------
 // Tauri 命令壳（async + spawn_blocking）
 // ---------------------------------------------------------------------------
@@ -407,4 +429,3 @@ pub async fn album_claim_assets(
     })
     .await
 }
-

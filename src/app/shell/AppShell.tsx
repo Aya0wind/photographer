@@ -12,6 +12,7 @@ import DeviceDialog from "@/features/import/DeviceDialog";
 import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
 import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
+import { isMacPlatform } from "@/lib/platform";
 
 /**
  * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 全局搜索框 +
@@ -78,6 +79,8 @@ export default function AppShell() {
   return (
     <div
       className={`flex h-full w-full flex-col overflow-hidden bg-bg font-sans text-text-primary ${
+        isMacPlatform() ? "mac-window-content" : ""
+      } ${
         motionOn ? "" : "no-motion"
       }`}
     >

@@ -365,6 +365,7 @@ fn inference_plan(use_gpu: bool, model: &str) -> crate::platform::InferencePlan 
     let preference = match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
         Ok("cpu") => AccelerationPreference::Cpu,
         Ok("dml") => AccelerationPreference::DirectMl,
+        Ok("coreml") => AccelerationPreference::CoreMl,
         _ if use_gpu => AccelerationPreference::Auto,
         _ => AccelerationPreference::Cpu,
     };
@@ -466,8 +467,43 @@ pub(crate) fn build_session(
     use_gpu: bool,
     model_label: &str,
 ) -> Result<ort::session::Session, String> {
-    use ort::session::builder::GraphOptimizationLevel;
     let plan = inference_plan(use_gpu, model_label);
+    build_with_cpu_fallback(model_label, plan, |plan| {
+        build_session_with_plan(path, intra_threads, model_label, plan)
+    })
+}
+
+/// Provider registration and model compilation can fail before the first run.
+/// Retry with a fresh CPU builder, preserving both errors if the model itself
+/// is invalid. Only the failing model/provider pair is disabled.
+fn build_with_cpu_fallback<T>(
+    model_label: &str,
+    plan: crate::platform::InferencePlan,
+    mut build: impl FnMut(crate::platform::InferencePlan) -> Result<T, String>,
+) -> Result<T, String> {
+    use crate::platform::{InferenceBackend, InferencePlan};
+    match build(plan) {
+        Ok(session) => Ok(session),
+        Err(error) if plan.backend == InferenceBackend::Cpu => Err(error),
+        Err(acceleration_error) => {
+            poison_backend(model_label, plan.backend);
+            eprintln!(
+                "{:?} 模型初始化失败（{model_label}），尝试 CPU: {acceleration_error}",
+                plan.backend
+            );
+            build(InferencePlan::cpu())
+                .map_err(|cpu_error| format!("{acceleration_error}; CPU 回退失败: {cpu_error}"))
+        }
+    }
+}
+
+fn build_session_with_plan(
+    path: &std::path::Path,
+    intra_threads: Option<usize>,
+    model_label: &str,
+    plan: crate::platform::InferencePlan,
+) -> Result<ort::session::Session, String> {
+    use ort::session::builder::GraphOptimizationLevel;
     let opt_level = match std::env::var("SMARTPHOTO_AI_OPT").as_deref() {
         Ok("level1") => GraphOptimizationLevel::Level1,
         Ok("disable") => GraphOptimizationLevel::Disable,
@@ -490,6 +526,128 @@ pub(crate) fn build_session(
         .map_err(|e| e.to_string())?
         .commit_from_file(path)
         .map_err(|e| format!("加载 {model_label} 失败: {e}"))
+}
+
+#[cfg(test)]
+mod initialization_fallback_tests {
+    use super::*;
+    use crate::platform::{InferenceBackend, InferencePlan};
+
+    fn accelerated() -> InferencePlan {
+        InferencePlan {
+            backend: InferenceBackend::CoreMl,
+            ..InferencePlan::cpu()
+        }
+    }
+
+    #[test]
+    fn initialization_failure_retries_cpu_and_isolates_model_and_provider() {
+        let model = "test-coreml-init-isolation";
+        let mut backends = Vec::new();
+        let result = build_with_cpu_fallback(model, accelerated(), |plan| {
+            backends.push(plan.backend);
+            if plan.backend == InferenceBackend::CoreMl {
+                Err("CoreML model compilation failed".into())
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(backends, [InferenceBackend::CoreMl, InferenceBackend::Cpu]);
+        assert!(backend_poisoned(model, InferenceBackend::CoreMl));
+        assert!(!backend_poisoned(model, InferenceBackend::DirectMl));
+        assert!(!backend_poisoned(
+            "test-unaffected-model",
+            InferenceBackend::CoreMl
+        ));
+    }
+
+    #[test]
+    fn cpu_initialization_failure_is_not_retried() {
+        let mut calls = 0;
+        let result: Result<(), String> =
+            build_with_cpu_fallback("test-cpu-init", InferencePlan::cpu(), |_| {
+                calls += 1;
+                Err("bad model".into())
+            });
+        assert_eq!(result.unwrap_err(), "bad model");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn dual_failure_retains_diagnostics_without_retry_loop() {
+        let mut calls = 0;
+        let result: Result<(), String> =
+            build_with_cpu_fallback("test-dual-init-failure", accelerated(), |plan| {
+                calls += 1;
+                Err(format!("{:?} failure", plan.backend))
+            });
+        let error = result.unwrap_err();
+        assert!(error.contains("CoreMl failure") && error.contains("Cpu failure"));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn successful_accelerator_is_not_disabled_or_rebuilt() {
+        let model = "test-successful-coreml-init";
+        let mut calls = 0;
+        assert_eq!(
+            build_with_cpu_fallback(model, accelerated(), |_| {
+                calls += 1;
+                Ok::<_, String>(9)
+            }),
+            Ok(9)
+        );
+        assert_eq!(calls, 1);
+        assert!(!backend_poisoned(model, InferenceBackend::CoreMl));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn corrupt_model_uses_real_session_builders_and_preserves_both_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.onnx");
+        std::fs::write(&path, b"this is not an ONNX protobuf").unwrap();
+        let model = "test-real-coreml-initialization-failure";
+        let error = build_with_cpu_fallback(model, accelerated(), |plan| {
+            build_session_with_plan(&path, Some(1), model, plan)
+        })
+        .expect_err("invalid model must fail with both providers");
+        assert!(error.contains("CPU 回退失败"), "{error}");
+        assert!(backend_poisoned(model, InferenceBackend::CoreMl));
+        assert!(!backend_poisoned(model, InferenceBackend::Cpu));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn coreml_runtime_failure_falls_back_once_for_that_model() {
+        if std::env::var_os("SMARTPHOTO_AI_EP").is_some() {
+            return;
+        }
+        let model = "test-coreml-runtime-isolation";
+        let mut calls = 0;
+        let mut resets = 0;
+        let result = run_with_acceleration_fallback(
+            true,
+            model,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Err("runtime failure".into())
+                } else {
+                    Ok(7)
+                }
+            },
+            || resets += 1,
+        );
+        assert_eq!(result, Ok(7));
+        assert_eq!((calls, resets), (2, 1));
+        assert_eq!(inference_plan(true, model).backend, InferenceBackend::Cpu);
+        assert_eq!(
+            inference_plan(true, "test-other-coreml-model").backend,
+            InferenceBackend::CoreMl
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

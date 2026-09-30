@@ -13,6 +13,7 @@ use crate::events::AppEvent;
 /// 已确认的系统移除立即使旧连接失效；随后的到达会建立新的源 Arc。
 pub fn remove_device(state: &SharedState, id: &str) {
     let id = normalize_device_id(id);
+    super::mark_import_device_unavailable(state, &id);
     // 尚处于就绪探测、还未注册的相机同样需要作废旧会话。
     crate::devices::wpd::invalidate_device(&id);
     let mut registry = state.devices.lock().expect("devices mutex poisoned");
@@ -33,9 +34,10 @@ pub fn reconcile_with_truth(
         .map(|(id, kind, name)| (normalize_device_id(id), *kind, name.clone()))
         .collect();
     let mut scans = Vec::new();
+    let removed: Vec<String>;
     {
         let mut registry = state.devices.lock().expect("devices mutex poisoned");
-        let removed: Vec<_> = registry
+        removed = registry
             .iter()
             .filter(|(id, entry)| {
                 entry.snapshot.kind != SourceKind::Folder
@@ -43,14 +45,16 @@ pub fn reconcile_with_truth(
             })
             .map(|(id, _)| id.clone())
             .collect();
-        for id in removed {
-            if let Some(entry) = registry.remove(&id) {
+        for id in &removed {
+            if let Some(entry) = registry.remove(id) {
                 if entry.snapshot.kind == SourceKind::Mtp {
-                    crate::devices::wpd::invalidate_device(&id);
+                    crate::devices::wpd::invalidate_device(id);
                 }
             }
             crate::devices::diagnostics::record(format!("device unavailable: {id}"));
-            state.bus.publish(AppEvent::DeviceRemoved { id });
+            state
+                .bus
+                .publish(AppEvent::DeviceRemoved { id: id.clone() });
         }
         for (id, kind, name) in truth {
             if kind == SourceKind::Folder {
@@ -99,6 +103,11 @@ pub fn reconcile_with_truth(
             });
             scans.push((id, source));
         }
+    }
+    // Do this after releasing the device registry lock. Import start/resume
+    // may acquire active_import before consulting devices.
+    for id in removed {
+        super::mark_import_device_unavailable(state, &id);
     }
     for (id, source) in scans {
         spawn_scan(state, id, source, trigger);

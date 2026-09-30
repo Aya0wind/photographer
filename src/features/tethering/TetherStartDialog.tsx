@@ -38,12 +38,12 @@ export default function TetherStartDialog({
   async function start(camera: CameraInfo): Promise<void> {
     setStarting(camera.pnpId);
     setError(null);
-    const result = await tetheringStart(albumId, camera.pnpId);
+    const result = await Promise.resolve(tetheringStart(albumId, camera.pnpId)).catch(() => null);
     setStarting(null);
-    if (result.ok) {
+    if (result?.ok) {
       onClose(); // 拍摄窗口已由后端打开
     } else {
-      setError(result.error ?? t("albums.tetherStartFailed"));
+      setError(result?.error ?? t("albums.tetherStartFailed"));
     }
   }
 

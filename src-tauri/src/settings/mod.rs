@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod config_directory;
+
 /// 当前配置结构版本。
 pub const SCHEMA_VERSION: u32 = 1;
 

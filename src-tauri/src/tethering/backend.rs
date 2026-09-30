@@ -246,6 +246,15 @@ pub trait CameraBackend: Send + Sync {
     fn settings_revision(&self, _pnp_id: &str) -> u64 {
         0
     }
+    /// Library ingestion has committed successfully. Backends may now release
+    /// their local download copy; never call this on an ingestion failure.
+    fn acknowledge_captured(
+        &self,
+        _pnp_id: &str,
+        _object: &CapturedObject,
+    ) -> Result<(), TetherError> {
+        Ok(())
+    }
     fn open_captured(
         &self,
         pnp_id: &str,
@@ -314,9 +323,21 @@ impl CameraBackendRegistry {
         self.backends.iter().find(|b| b.id() == id)
     }
 
-    /// 默认后端（v1 即唯一后端；IPC 命令未指定后端 id 时使用）。
+    /// Legacy default backend for callers without a camera id.
     pub fn primary(&self) -> &std::sync::Arc<dyn CameraBackend> {
         &self.backends[0]
+    }
+
+    /// Select the backend from the stable camera id prefix.
+    pub fn for_camera_id(&self, camera_id: &str) -> Option<&std::sync::Arc<dyn CameraBackend>> {
+        let id = if camera_id.starts_with("gphoto:") {
+            "gphoto"
+        } else if camera_id.starts_with("sony-sdk:") {
+            "sony-sdk"
+        } else {
+            "wpd-mtp"
+        };
+        self.get(id)
     }
 
     /// 全部后端（枚举聚合用）。
@@ -360,5 +381,17 @@ mod tests {
         assert!(registry.get("nope").is_none());
         assert_eq!(registry.all().len(), 3);
         assert!(registry.get("gphoto").is_some());
+        assert_eq!(
+            registry.for_camera_id("gphoto:usb=001,002").unwrap().id(),
+            "gphoto"
+        );
+        assert_eq!(
+            registry.for_camera_id("sony-sdk:camera").unwrap().id(),
+            "sony-sdk"
+        );
+        assert_eq!(
+            registry.for_camera_id("wpd-camera").unwrap().id(),
+            "wpd-mtp"
+        );
     }
 }

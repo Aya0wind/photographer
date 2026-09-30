@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use devices::hotplug::unitmask_to_drives;
@@ -41,8 +41,7 @@ fn registrable_volume_matrix() {
 
 #[test]
 fn present_volume_enumeration_smoke_on_real_machine() {
-    // 真机烟测：不 panic、条目为盘符形态、本地系统盘绝不出现
-    //（C: 固定盘被过滤；测试机若插着有媒体的可移动盘会出现——只做性质断言）
+    // 真机烟测：不 panic；Windows 条目为盘符，macOS 条目为 /Volumes 挂载点。
     if !platform::capabilities().volume_devices {
         assert!(enumerate_present_volumes().is_err());
         return;
@@ -54,12 +53,35 @@ fn present_volume_enumeration_smoke_on_real_machine() {
         .iter()
         .all(|id| !volumes.iter().any(|(drive, _)| id == drive)));
     for (drive, label) in &volumes {
-        assert_eq!(drive.len(), 2, "盘符形态 X: : {drive}");
-        assert!(drive.ends_with(':'));
+        #[cfg(windows)]
+        {
+            assert_eq!(drive.len(), 2, "盘符形态 X: : {drive}");
+            assert!(drive.ends_with(':'));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                drive.starts_with("/Volumes/"),
+                "挂载点形态应为 /Volumes: {drive}"
+            );
+        }
         assert!(!label.is_empty(), "注册时必须带回退卷标");
     }
     assert!(
-        !volumes.iter().any(|(d, _)| d == "C:"),
+        !volumes.iter().any(|(d, _)| {
+            #[cfg(windows)]
+            {
+                d == "C:"
+            }
+            #[cfg(target_os = "macos")]
+            {
+                d == "/"
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                false
+            }
+        }),
         "本地系统盘不得注册为设备: {volumes:?}"
     );
 }

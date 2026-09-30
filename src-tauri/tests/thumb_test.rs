@@ -35,6 +35,23 @@ fn db_dir() -> PathBuf {
     tempfile::tempdir().unwrap().path().to_path_buf()
 }
 
+#[cfg(unix)]
+#[test]
+fn offline_preview_does_not_reuse_a_different_case_filename() {
+    let root = tempfile::tempdir().unwrap();
+    let db = root.path().join("db");
+    let source = root.path().join("IMG.jpg");
+    let other = root.path().join("img.jpg");
+    write_jpg(&source, 64, 48);
+    let cached = thumbs::thumb_file(&db, &source, 256).unwrap();
+    // Works on both case-sensitive and default case-insensitive macOS volumes:
+    // offline lookup must not infer that differently spelled paths are aliases.
+    assert!(thumbs::cached_without_source(&db, &other, 256).is_none());
+    fs::remove_file(&source).unwrap();
+    assert_eq!(thumbs::cached_without_source(&db, &source, 256), Some(cached));
+    assert!(thumbs::cached_without_source(&db, &other, 256).is_none());
+}
+
 #[test]
 fn generates_cache_returns_path_and_second_call_hits() {
     let src_dir = tempfile::tempdir().unwrap();

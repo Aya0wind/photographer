@@ -16,6 +16,7 @@ import { suggestedLibraryName } from "../onboardingConfig";
 import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
 import { useWindowReveal } from "@/lib/windowReveal";
+import { isMacPlatform } from "@/lib/platform";
 import { resetLibrarySession } from "@/lib/librarySession";
 import { useAiStore } from "@/stores/aiStore";
 import { gapsForIds } from "@/features/settings/lib/qualityTier";
@@ -191,7 +192,7 @@ export default function OnboardingPage() {
   const isLast = step === STEP_TITLES.length - 1;
 
   return (
-    <div className="flex h-full w-full flex-col bg-bg font-sans text-text-primary">
+    <div className={`flex h-full w-full flex-col bg-bg font-sans text-text-primary ${isMacPlatform() ? "mac-window-content" : ""}`}>
       {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
       <TitleBar />
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-6">

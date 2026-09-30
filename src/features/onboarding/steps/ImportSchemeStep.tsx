@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import { FIXED_ALBUM_LAYOUT } from "../onboardingConfig";
 import type { OnboardingDraft } from "../types";
+import { isMacPlatform } from "@/lib/platform";
 
 interface Props {
   draft: OnboardingDraft;
@@ -20,7 +21,7 @@ export default function ImportSchemeStep({ draft, onChange }: Props) {
       <div className="flex flex-col gap-1.5">
         <p className="text-sm font-medium text-text-primary">{t("onboarding.scheme.layout")}</p>
         <p className="text-sm text-text-secondary">
-          {FIXED_ALBUM_LAYOUT}
+          {isMacPlatform() ? FIXED_ALBUM_LAYOUT.replace(/\\/g, "/") : FIXED_ALBUM_LAYOUT}
         </p>
         <p className="text-xs text-text-muted">{t("onboarding.scheme.layoutNote")}</p>
         <p className="text-xs text-text-muted">{t("onboarding.scheme.storageNote")}</p>

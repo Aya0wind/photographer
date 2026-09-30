@@ -51,3 +51,4 @@ pub mod wpd_backend;
 pub mod gphoto_backend;
 pub mod session;
 pub mod sony_backend;
+mod staging;

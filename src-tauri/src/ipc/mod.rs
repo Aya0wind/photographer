@@ -70,6 +70,8 @@ impl DeviceEntry {
 /// 活跃导入（M1 约束：同时只允许一个）。
 pub struct ActiveImport {
     pub job_id: i64,
+    /// Pinned at launch: changing the selected library must not change source identity.
+    pub source_id: String,
     pub controls: EngineControls,
     /// supervisor 任务句柄（panic 捕获/命名；软控制走 controls，同构接口）。
     /// 持有以防提前丢弃（TaskHandle drop 不取消任务，仅保语义显式）。
@@ -129,6 +131,43 @@ pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {   
         return Err(format!("库 {library_id} 迁移中，拒绝导入"));
     }
     Ok(())
+}
+
+/// Stop an active import when reconciliation proves its source disappeared.
+/// The journal remains resumable, unlike an explicit user cancellation.
+pub fn mark_import_device_unavailable(state: &AppState, device_id: &str) {
+    let Ok(active) = state.active_import.lock() else {
+        return;
+    };
+    let Some(current) = active.as_ref() else {
+        return;
+    };
+    if current.controls.is_done() || current.controls.is_cancelled() {
+        return;
+    }
+    let source_id = crate::devices::normalize_device_id(&current.source_id);
+    let device_id = crate::devices::normalize_device_id(device_id);
+    // A user-selected folder on an ejected volume is also an affected source.
+    let matches_source = source_id == device_id
+        || source_id
+            .strip_prefix(FOLDER_ID_PREFIX)
+            .is_some_and(|folder| {
+                let mount = Path::new(&device_id);
+                mount.is_absolute() && Path::new(folder).starts_with(mount)
+            });
+    if !matches_source {
+        return;
+    }
+    if current.controls.mark_device_lost() {
+        state
+            .bus
+            .publish(crate::events::AppEvent::DeviceUnavailable {
+                id: current.source_id.clone(),
+            });
+        state.bus.publish(crate::events::AppEvent::ImportPaused {
+            job_id: current.job_id,
+        });
+    }
 }
 
 /// 设备文件条目 DTO：唯一定义在 events 层（事件载荷与 IPC 共享），此处重导出
@@ -498,6 +537,7 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 /// 启动、恢复和重试共用调度；索引在导入结束后按需一次性唤醒。
 fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
     let controls = engine.controls();
+    let source_id = engine.source_id();
     let (index_db_dir, geo_config_dir, ai_settings) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (
@@ -514,6 +554,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
     let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
     let gate = std::sync::Arc::clone(&state.import_running);
     let gate_supervisor = Arc::clone(&index_supervisor);
+    let finish_controls = controls.clone();
     // 闸在派发前同步置位：调用方拿到 job_id 的瞬间，手动索引触发即被拒
     // （闭包内才置位有窗口）。闭包 Drop 兜底放行（含 panic 路径）。
     gate.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -543,7 +584,13 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
             // 索引/AI/连拍收尾统一在导入结束后一次性触发，且仅在本轮确有
             // 新图（done_files>0；全跳过的重复导入不打扰）。索引天然增量：
             // worker 只领取 pending 任务行，不重建已有索引。
-            if stats.done_files > 0 {
+            // Cancelled/device-lost jobs may still have settled files, but must
+            // not start new SQLite-writing index/geo tasks while their journal
+            // is being reaped; a subsequent import should be able to open it.
+            if stats.done_files > 0
+                && !finish_controls.is_cancelled()
+                && !finish_controls.is_device_lost()
+            {
                 crate::index::kick(index_db_dir.clone(), &index_supervisor);
                 // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
                 // 自动入图——指纹不变走 bincode 快路径 + asset_regions 增量
@@ -582,6 +629,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
         });
     ActiveImport {
         job_id,
+        source_id,
         controls,
         handle: Some(handle),
     }
@@ -628,6 +676,9 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
     reap_finished(&mut active);
     if let Some(current) = active.as_ref() {
         if current.job_id == job_id {
+            if current.controls.is_cancelled() || current.controls.is_device_lost() {
+                return Err("导入正在收尾，请等待暂停完成后重试恢复".into());
+            }
             current.controls.resume();
             state
                 .bus

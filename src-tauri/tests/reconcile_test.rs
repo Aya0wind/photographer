@@ -5,17 +5,74 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{build_many, state_with_library};
+use common::{build_many, ipc_plan, state_with_library, wait_done};
 use devices::SourceKind;
 use events::AppEvent;
-use ipc::reconcile::reconcile_with_truth;
+use ipc::{jobs_page, reconcile::reconcile_with_truth, resume_import, start_import};
+
+#[test]
+fn removal_uses_pinned_folder_source_and_rejects_premature_resume() {
+    use devices::folder::LocalFolderSource;
+    use import::engine::Engine;
+
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("card/DCIM");
+    let db_dir = root.path().join("db");
+    let target = root.path().join("target");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(&db_dir).unwrap();
+    build_many(&folder, 2);
+    let state = state_with_library(&db_dir, &folder, Duration::ZERO);
+    let db = common::open_db(&db_dir);
+    let mut engine = Engine::new(
+        db,
+        state.bus.clone(),
+        Box::new(LocalFolderSource::new(&folder).unwrap()),
+        common::ipc_plan(&state, &target),
+    );
+    let job_id = engine.begin().unwrap();
+    let source_id = engine.source_id();
+    let controls = engine.controls();
+    *state.active_import.lock().unwrap() = Some(ipc::ActiveImport {
+        job_id,
+        source_id: source_id.clone(),
+        controls: controls.clone(),
+        handle: None,
+    });
+    let mut rx = state.bus.subscribe();
+    // A sibling whose name shares a prefix is not the same mount.
+    ipc::mark_import_device_unavailable(&state, &root.path().join("car").to_string_lossy());
+    assert!(!controls.is_device_lost());
+    // The selected library may change while the original import is running.
+    state.settings.lock().unwrap().active_library_id = None;
+    ipc::mark_import_device_unavailable(&state, &root.path().join("card").to_string_lossy());
+    ipc::mark_import_device_unavailable(&state, &root.path().join("card").to_string_lossy());
+    assert!(controls.is_device_lost());
+    assert!(controls.is_cancelled());
+    assert!(resume_import(&state, job_id).unwrap_err().contains("收尾"));
+    let mut unavailable = 0;
+    let mut paused = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::DeviceUnavailable { id } if id == source_id => unavailable += 1,
+            AppEvent::ImportPaused { job_id: id } if id == job_id => paused += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((unavailable, paused), (1, 1));
+    engine.run();
+    assert_eq!(
+        common::job_status(&common::open_db(&db_dir), job_id),
+        "paused"
+    );
+}
 
 /// 等 registry 达到谓词（上限 5s；扫描经 supervisor 异步）。
 fn eventually_registry(state: &ipc::AppState, cond: impl Fn(&str) -> bool) -> bool {
@@ -116,6 +173,59 @@ fn truth_removal_drops_device_and_emits_removed() {
             .any(|id| devices::normalize_device_id(id) == volume_id),
         "摘除必须发 DeviceRemoved（前端摘 UI 依赖）: {removed:?}"
     );
+}
+
+#[test]
+fn truth_removal_pauses_active_import_for_resumable_retry() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_many(src.path(), 20);
+    let state = Arc::new(state_with_library(
+        db_dir.path(),
+        src.path(),
+        Duration::from_millis(100),
+    ));
+    let job_id = start_import(&state, ipc_plan(&state, target.path())).unwrap();
+    let mut rx = state.bus.subscribe();
+
+    // Reconciliation sees the removable source disappear before the worker
+    // reaches the next file. The job must become resumable paused, not
+    // cancelled, and the UI receives both signals.
+    std::thread::sleep(Duration::from_millis(20));
+    reconcile_with_truth(&state, "macos-poll", &[]);
+    assert!(wait_done(&state, Duration::from_secs(10)));
+
+    let jobs = jobs_page(&state, 0, 10).unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, job_id);
+    assert_eq!(jobs[0].status, "paused");
+
+    let mut saw_unavailable = false;
+    let mut saw_paused = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AppEvent::DeviceUnavailable { .. } => saw_unavailable = true,
+            AppEvent::ImportPaused { job_id: id } if id == job_id => saw_paused = true,
+            _ => {}
+        }
+    }
+    assert!(saw_unavailable, "设备移除应发布 DeviceUnavailable");
+    assert!(saw_paused, "设备移除应发布 ImportPaused");
+
+    // The same removable volume returns: reconciliation rebuilds a fresh
+    // source generation, then journal resume completes pending work.
+    let volume_id = devices::normalize_device_id(&src.path().to_string_lossy());
+    reconcile_with_truth(
+        &state,
+        "macos-replug",
+        &[(volume_id.clone(), SourceKind::Volume, "测试卡".into())],
+    );
+    assert!(eventually_registry(&state, |id| id == volume_id));
+    resume_import(&state, job_id).unwrap();
+    assert!(wait_done(&state, Duration::from_secs(10)));
+    let jobs = jobs_page(&state, 0, 10).unwrap();
+    assert_eq!(jobs[0].status, "done");
 }
 
 #[test]

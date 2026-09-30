@@ -3,6 +3,7 @@
  * 留空由用户自选（用户定规 2026-09-28：开发机路径不适合做默认路径）。
  */
 import i18n from "@/i18n";
+import { trimDirectoryEnd } from "@/lib/filesystemPaths";
 export const SUGGESTED_LIBRARY_NAME = "主库";
 export function suggestedLibraryName(): string {
   return i18n.t("library.defaultName", { defaultValue: SUGGESTED_LIBRARY_NAME });
@@ -18,5 +19,5 @@ export const FIXED_ALBUM_LAYOUT = "{相册创建年}\\{相册创建月}\\{相册
 
 /** 导入目标根 = photoRoot（尾部多余分隔符裁剪；布局固定后无子目录前缀）。 */
 export function importRootOf(photoRoot: string): string {
-  return photoRoot.replace(/[\\/]+$/, "");
+  return trimDirectoryEnd(photoRoot);
 }

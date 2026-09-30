@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "com.smartphoto.photohub",
+  "build": {
+    "beforeBuildCommand": "python3 scripts/macos_runtime.py audit src-tauri/resources/gphoto && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Photo Hub",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 13 },
+        "visible": false,
+        "backgroundColor": "#0E0F12"
+      },
+      {
+        "label": "splash",
+        "title": "Photo Hub",
+        "url": "splash",
+        "width": 460,
+        "height": 300,
+        "resizable": false,
+        "decorations": false,
+        "backgroundColor": "#0E0F12",
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "resources": {
+      "resources/gphoto/": "gphoto/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.4"
+    }
+  }
+}

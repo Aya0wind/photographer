@@ -15,6 +15,7 @@ import {
 import {
   type DeviceSnapshot,
   deviceFiles,
+  platformCapabilities,
   kindFromName,
   type AlbumDto,
   albumList,
@@ -25,11 +26,13 @@ import {
   folderScan,
   albumCreate,
   type ImportPlan,
+  type PlatformCapabilities,
   FIXED_PLAN_DIR_TEMPLATE,
   importStart,
   isIpcAvailable,
 } from "@/ipc/api";
 import { getIntlLocale } from "@/i18n";
+import { directoryPreview } from "@/lib/filesystemPaths";
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
@@ -401,6 +404,18 @@ export default function ImportWizard() {
   // 具体落位见相册区实时预览，此处不再展示库级模板。
   const libraryPhotoRoot = activeLibrary?.photoRoot ?? "";
   const targetRoot = libraryPhotoRoot ? importRootOf(libraryPhotoRoot) : "";
+  const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void platformCapabilities()
+      .then((caps) => {
+        if (!cancelled) setPlatformCaps(caps);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
   // 存入相册（规格修订后必选）：无「不添加」分支；默认预选系统保底相册「未分组」，
@@ -466,12 +481,16 @@ export default function ImportWizard() {
         : currentDateForPreview;
   const albumYearForPreview = albumCreatedAtForPreview.slice(0, 4);
   const albumMonthForPreview = albumCreatedAtForPreview.slice(5, 7);
-  const importTargetPreview = `${targetRoot}\\${albumYearForPreview}\\${albumMonthForPreview}\\${albumDirForPreview}`;
+  const importTargetPreview = directoryPreview(
+    targetRoot, albumYearForPreview, albumMonthForPreview, albumDirForPreview,
+  );
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
   // 双目的地第二份预览：第二根目录 + 同公式（后端 engine 覆写 dir_template 后随之对齐）
-  const secondImportTargetPreview = `${secondRoot.trim().replace(/[\\/]+$/, "")}\\${albumYearForPreview}\\${albumMonthForPreview}\\${albumDirForPreview}`;
+  const secondImportTargetPreview = directoryPreview(
+    secondRoot.trim(), albumYearForPreview, albumMonthForPreview, albumDirForPreview,
+  );
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
@@ -801,7 +820,11 @@ export default function ImportWizard() {
             <div className="px-3 pb-3">
               {visibleDevices.length === 0 ? (
                 <p className="py-4 text-center text-xs leading-relaxed text-text-muted">
-                  {t("wizard.noDevice")}
+                  {platformCaps &&
+                  !platformCaps.volumeDevices &&
+                  !platformCaps.portableDevices
+                    ? t("wizard.noNativeDevice")
+                    : t("wizard.noDevice")}
                 </p>
               ) : (
                 <>
@@ -1240,7 +1263,7 @@ export default function ImportWizard() {
             <p className="ml-5 mt-1 text-[11px] text-text-muted" data-testid="wizard-album-path-preview">
               {t("wizard.album.pathPreview")}：
               <span className="break-all font-mono text-text-secondary">
-                {importTargetPreview}\
+                {importTargetPreview}
               </span>
             </p>
             <p className="ml-5 text-[11px] leading-relaxed text-text-muted" data-testid="wizard-album-flat-note">
@@ -1335,7 +1358,7 @@ export default function ImportWizard() {
                     data-testid="wizard-second-path-preview"
                     title={secondImportTargetPreview}
                   >
-                    {secondImportTargetPreview}\
+                    {secondImportTargetPreview}
                   </p>
                 )}
               </div>

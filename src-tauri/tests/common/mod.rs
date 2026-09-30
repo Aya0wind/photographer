@@ -75,7 +75,7 @@ pub fn build_source(dir: &Path) -> Vec<(String, Vec<u8>)> {
         ("DCIM/100CANON/IMG_0003.jpg".to_string(), jpg2),
     ];
     for (rel, content) in &files {
-        fs::write(dir.join(rel.replace('/', "\\")), content).unwrap();
+        fs::write(dir.join(rel), content).unwrap();
     }
     files
 }
