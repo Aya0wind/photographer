@@ -6,8 +6,8 @@
 //!
 //! - 可解码集：image crate 支持的位图格式（JPG/PNG/WEBP/BMP/GIF/TIFF）；
 //!   RAW（NEF/ARW/CR3…）走内嵌 JPEG 预览提取。
-//! - 缓存：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime unixsecs>.jpg`
-//!   （路径小写哈希：Windows 路径大小写不敏感；键含 mtime → 源变化自然
+//! - 缓存：`dbDir/thumbs/<档位>/<源路径哈希>-<mtime unixsecs>.jpg`
+//!   （Windows 保留路径小写哈希；Unix 按原始路径字节区分；键含 mtime → 源变化自然
 //!   miss）。命中直接返回，不重解码。
 //! - 并发：同 path+size in-flight 合并（OnceLock 阻塞共享首次结果）；
 //!   全局解码并发上限 2（CPU 密集）；解码超时 10s 放弃（超时后解码线程
@@ -336,11 +336,53 @@ pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     cache.exists().then(|| cache.to_string_lossy().into_owned())
 }
 
-/// 缓存键的源哈希：xxh64(路径小写)——Windows 路径大小写不敏感。
+/// Windows retains its historical case-insensitive cache key. Unix preserves
+/// case and non-UTF8 filename bytes; a version prefix excludes old folded keys.
 fn src_key(src: &Path) -> u64 {
     let mut xxh = Xxh64::new(0);
+    #[cfg(windows)]
     xxh.update(src.to_string_lossy().to_lowercase().as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        xxh.update(b"posix-path-v1\0");
+        xxh.update(src.as_os_str().as_bytes());
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        xxh.update(b"native-path-v1\0");
+        xxh.update(src.as_os_str().as_encoded_bytes());
+    }
     xxh.digest()
+}
+
+#[cfg(test)]
+mod path_key_tests {
+    use super::*;
+
+    #[test]
+    fn path_case_follows_platform_contract() {
+        let upper = src_key(Path::new("/Photos/IMG.jpg"));
+        let lower = src_key(Path::new("/Photos/img.jpg"));
+        #[cfg(windows)]
+        assert_eq!(upper, lower);
+        #[cfg(not(windows))]
+        assert_ne!(upper, lower);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distinct_non_utf8_paths_do_not_share_lossy_cache_keys() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let first = Path::new(OsStr::from_bytes(b"/Photos/\xff.jpg"));
+        let second = Path::new(OsStr::from_bytes(b"/Photos/\xfe.jpg"));
+        assert_eq!(first.to_string_lossy(), second.to_string_lossy());
+        assert_ne!(src_key(first), src_key(second));
+        let mut legacy = Xxh64::new(0);
+        legacy.update(b"/photos/img.jpg");
+        assert_ne!(src_key(Path::new("/photos/img.jpg")), legacy.digest());
+    }
 }
 
 /// 档位目录名：位图 = `<size>`；RAW 按语义细分（内嵌直出 / 2048 显影 /
@@ -360,7 +402,7 @@ fn tier_dir_name(ext: &str, size: u16) -> String {
     }
 }
 
-/// 缓存路径：`dbDir/thumbs/<档位>/<xxh64(路径小写)>-<mtime secs>.jpg`。
+/// 缓存路径：`dbDir/thumbs/<档位>/<源路径哈希>-<mtime secs>.jpg`。
 fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
     let secs = mtime
         .duration_since(UNIX_EPOCH)

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isMacPlatform } from "@/lib/platform";
 import { motion } from "motion/react";
 
 import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
@@ -535,9 +536,9 @@ export default function TetheringWindowPage() {
   const quickError = quick.map((s) => settingErrors[s.id]).find(Boolean);
 
   return (
-    <div className="flex h-screen flex-col bg-bg text-text-primary" data-testid="tether-window">
+    <div className={`flex h-screen flex-col bg-bg text-text-primary ${isMacPlatform() ? "mac-window-content" : ""}`} data-testid="tether-window">
       {/* 自绘标题栏（decorations=false） */}
-      <div className="relative flex h-10 shrink-0 select-none items-center gap-3 border-b border-edge bg-surface pl-3" data-testid="tether-titlebar">
+      {!isMacPlatform() && <div className="relative flex h-10 shrink-0 select-none items-center gap-3 border-b border-edge bg-surface pl-3" data-testid="tether-titlebar">
         <div className="absolute inset-0" data-tauri-drag-region data-testid="tether-window-drag-region" />
         <span className="pointer-events-none relative text-xs font-semibold" data-testid="tether-title">{t("tether.windowTitle")}</span>
         <span className="pointer-events-none relative text-[11px] text-text-muted">
@@ -591,7 +592,7 @@ export default function TetheringWindowPage() {
             ✕
           </button>
         </div>
-      </div>
+      </div>}
 
       {session.error !== null && (
         <div className="flex items-center justify-between gap-3 border-b border-red-400/30 bg-red-400/10 px-3 py-1.5 text-[11px] text-red-400" data-testid="tether-error-banner">

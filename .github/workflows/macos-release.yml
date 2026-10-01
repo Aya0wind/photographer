@@ -1,0 +1,125 @@
+name: macOS Apple Silicon build and release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev
+      - codex/macos-port
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: aarch64-apple-darwin
+
+      - name: Install native build tools
+        run: |
+          brew update
+          brew install cmake libgphoto2
+
+      - name: Verify Apple signing configuration
+        run: |
+          test -n "$APPLE_SIGNING_IDENTITY"
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          test -n "$APPLE_ID"
+          test -n "$APPLE_PASSWORD"
+          test -n "$APPLE_TEAM_ID"
+
+      - name: Import Developer ID certificate
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$KEYCHAIN_PASSWORD"
+          KEYCHAIN_PATH="$RUNNER_TEMP/photo-hub-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          echo "$APPLE_CERTIFICATE" | base64 -D > "$CERT_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test Mach-O runtime packaging
+        run: python3 -m unittest discover -s scripts -p 'test_macos_*.py' -v
+
+      - name: Assemble gphoto bundle
+        run: scripts/assemble-gphoto-bundle-macos.sh
+
+      - name: Load bundled gphoto drivers without opening cameras
+        run: python3 scripts/smoke-gphoto-macos.py src-tauri/resources/gphoto
+
+      - name: Verify application FFI against bundled gphoto
+        run: |
+          export PHOTO_HUB_GPHOTO_DLL="$GITHUB_WORKSPACE/src-tauri/resources/gphoto/libgphoto2.6.dylib"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
+            packaged_runtime_loads_rust_ffi_without_opening_camera -- --ignored --test-threads=1
+
+      - name: Build signed Apple Silicon app and DMG
+        run: npm run tauri:build:macos -- --target aarch64-apple-darwin
+
+      - name: Verify packaged gphoto runtime and signatures
+        run: |
+          scripts/verify-macos-bundle.sh
+
+      - name: Notarize and staple DMG
+        env:
+          DMG_DIR: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg
+        run: |
+          DMG_COUNT="$(find "$DMG_DIR" -maxdepth 1 -type f -name '*.dmg' -print | wc -l | tr -d ' ')"
+          test "$DMG_COUNT" -eq 1
+          DMG_PATH="$(find "$DMG_DIR" -maxdepth 1 -type f -name '*.dmg' -print)"
+          python3 scripts/notarize-macos.py "$DMG_PATH" "$RUNNER_TEMP/photo-hub-notarization"
+
+      - name: Retain notarization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-hub-notarization-evidence
+          path: ${{ runner.temp }}/photo-hub-notarization/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-hub-macos-arm64
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error

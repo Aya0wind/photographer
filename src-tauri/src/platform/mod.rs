@@ -1,5 +1,6 @@
 //! 平台边界。业务代码只依赖这里的接口，OS 实现在对应目录维护。
-//! macOS/Linux/Android 当前仅为扩展入口，沿用 unsupported 的安全回退。
+//! macOS 提供文件系统、系统集成、CoreML 和可移动卷轮询；Linux/Android
+//! 仍沿用 unsupported 的安全回退。
 
 #[derive(Debug, Clone)]
 pub(crate) struct FilesystemRoot {
@@ -26,12 +27,14 @@ pub(crate) enum AccelerationPreference {
     Auto,
     Cpu,
     DirectMl,
+    CoreMl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum InferenceBackend {
     Cpu,
     DirectMl,
+    CoreMl,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,12 +132,27 @@ pub(crate) fn group_by_parent(paths: &[String]) -> Vec<(String, Vec<String>)> {
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     let mut index = std::collections::HashMap::new();
     for path in paths {
-        let parent = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        let slot = *index.entry(parent.clone()).or_insert_with(|| {
-            groups.push((parent, Vec::new()));
+        // Keep the grouping contract independent of the host running tests:
+        // Windows paths may arrive while the caller is on macOS/Linux.
+        let normalized = path.replace('\\', "/");
+        let key = normalized
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let display_parent = if path.contains('\\') {
+            path.rfind('\\')
+                .or_else(|| path.rfind('/'))
+                .map(|index| path[..index].to_ascii_lowercase())
+                .unwrap_or_default()
+        } else {
+            std::path::Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        let slot = *index.entry(key).or_insert_with(|| {
+            groups.push((display_parent, Vec::new()));
             groups.len() - 1
         });
         groups[slot].1.push(path.clone());
@@ -179,7 +197,7 @@ mod contract_tests {
         assert!(!plan.prefer_batch);
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn unavailable_capabilities_are_errors_without_native_threads() {
         assert!(!capabilities().portable_devices);
@@ -202,6 +220,25 @@ mod contract_tests {
         assert_eq!(
             inference_plan(AccelerationPreference::DirectMl).backend,
             InferenceBackend::Cpu
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_capabilities_expose_folder_filesystem_and_system_integration() {
+        let caps = capabilities();
+        assert!(caps.filesystem_roots);
+        assert!(caps.volume_devices);
+        assert!(!caps.portable_devices);
+        assert!(!caps.hotplug);
+        assert!(caps.system_open);
+        assert!(caps.file_clipboard);
+        assert!(caps.file_reveal);
+        assert!(!caps.document_uris);
+        assert!(!drive_roots().unwrap().is_empty());
+        assert_eq!(
+            inference_plan(AccelerationPreference::Auto).backend,
+            InferenceBackend::CoreMl
         );
     }
 }

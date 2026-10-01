@@ -1,18 +1,18 @@
-//! 相册物理目录化 + 归册挪移 + LR 暂存夹（0018，阶段 B3；布局改版
+//! 相册物理目录化 + 归册挪移（0018，阶段 B3；布局改版
 //! 2026-09-28 定案：`photoRoot/{创建YYYY}/{创建MM}/{dir_name}/` 相册内平铺）：
 //! 布局公式 album_home_rel 表驱动、目录名净化与唯一化、受控改目录（物理
 //! rename + 路径改写 + 边车随行，父目录=创建年月）、导入落相册主目录平铺
 //! （跨天照片同目录；未分组兜底同款公式）、归册挪移（同卷 rename、跨卷
 //! copy+校验+删源、幂等、他相册主目录拒绝、外部库拒绝；落位与导入同公式）、
-//! LR 暂存夹（硬链接优先 / 跨卷复制回退 + 计数）。
+//! LR 暂存功能已由 dev 移除，不再作为验收项。
 
 mod common;
 
 use common::library_fixture as setup;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -63,7 +63,6 @@ fn ins(db: &db::Db, path: &str, kind: AssetKind, captured: Option<&str>) -> i64 
     db.asset_id_by_path(path).unwrap().unwrap()
 }
 
-
 // ---------------------------------------------------------------------------
 // 目录名净化与唯一化
 // ---------------------------------------------------------------------------
@@ -101,9 +100,15 @@ fn album_create_generates_sanitized_unique_dir_names() {
 fn album_home_rel_formula_is_table_driven() {
     use db::album_home_rel_parts as parts;
     // 外层两段 = 相册创建时间（UTC 口径）年/月，相册内平铺
-    assert_eq!(parts("2026-09-27T05:09:56.381Z", "album-1"), "2026/09/album-1");
+    assert_eq!(
+        parts("2026-09-27T05:09:56.381Z", "album-1"),
+        "2026/09/album-1"
+    );
     assert_eq!(parts("2025-12-31T23:59:59.999Z", "婚礼"), "2025/12/婚礼");
-    assert_eq!(parts("2026-01-01T00:00:00.000Z", "青海 湖-自驾"), "2026/01/青海 湖-自驾");
+    assert_eq!(
+        parts("2026-01-01T00:00:00.000Z", "青海 湖-自驾"),
+        "2026/01/青海 湖-自驾"
+    );
     assert_eq!(parts("1999-06-30T12:00:00.000Z", "a/b"), "1999/06/a/b");
     // created_at 解析失败（理论不可能）兜底 dir_name 直挂根
     assert_eq!(parts("not-a-date", "x"), "x");
@@ -171,7 +176,10 @@ fn album_dir_rename_moves_dir_rewrites_paths_and_sidecar_follows() {
         .join("03")
         .join("婚礼跟拍-精修")
         .join("DSC_9001.NEF");
-    assert!(new_photo.is_file(), "文件随目录整体移动（仍在创建年月父目录下）");
+    assert!(
+        new_photo.is_file(),
+        "文件随目录整体移动（仍在创建年月父目录下）"
+    );
     assert!(new_photo.with_extension("xmp").is_file(), "边车随行");
 
     // DB 路径已改写；dir_name 更新
@@ -207,6 +215,7 @@ fn album_dir_rename_moves_dir_rewrites_paths_and_sidecar_follows() {
 
 /// 把文件 mtime 设到指定 UTC 时刻（跨天照片平铺验证用）。
 fn set_mtime(path: &std::path::Path, at: chrono::DateTime<chrono::Utc>) {
+    assert!(path.is_file(), "测试文件不存在: {}", path.display());
     let t: std::time::SystemTime = at.into();
     let times = std::fs::FileTimes::new().set_modified(t).set_accessed(t);
     std::fs::File::options()
@@ -232,9 +241,13 @@ fn import_lands_flat_in_album_home_by_created_date() {
     .unwrap();
     common::build_source(src.path());
     // 跨天/跨月拍摄时间（mtime 回退源）：全部应落**同一个**相册主目录平铺
-    set_mtime(&src.path().join("DCIM\\100CANON\\IMG_0001.jpg"), common::utc(2026, 1, 2, 3, 0, 0));
-    set_mtime(&src.path().join("DCIM\\100CANON\\IMG_0002.CR3"), common::utc(2026, 5, 6, 7, 0, 0));
-    set_mtime(&src.path().join("DCIM\\100CANON\\IMG_0003.jpg"), common::utc(2025, 12, 31, 9, 0, 0));
+    let dcim = src.path().join("DCIM").join("100CANON");
+    set_mtime(&dcim.join("IMG_0001.jpg"), common::utc(2026, 1, 2, 3, 0, 0));
+    set_mtime(&dcim.join("IMG_0002.CR3"), common::utc(2026, 5, 6, 7, 0, 0));
+    set_mtime(
+        &dcim.join("IMG_0003.jpg"),
+        common::utc(2025, 12, 31, 9, 0, 0),
+    );
 
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |p| {
         p.album_id = Some(album.id);
@@ -247,7 +260,10 @@ fn import_lands_flat_in_album_home_by_created_date() {
         assert!(p.is_file(), "跨天照片应同目录平铺: {}", p.display());
     }
     // 相册目录内**无**内层日期目录（布局平铺铁证）
-    let entries: Vec<_> = std::fs::read_dir(&home).unwrap().collect::<Result<_, _>>().unwrap();
+    let entries: Vec<_> = std::fs::read_dir(&home)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     assert!(
         entries.iter().all(|e| !e.path().is_dir()),
         "相册内不得再有子目录: {:?}",
@@ -272,8 +288,15 @@ fn import_lands_flat_in_album_home_by_created_date() {
     .unwrap();
     let src2 = tempfile::tempdir().unwrap();
     common::build_many(src2.path(), 3);
-    set_mtime(&src2.path().join("DCIM\\IMG_0000.jpg"), common::utc(2026, 2, 1, 0, 0, 0));
-    set_mtime(&src2.path().join("DCIM\\IMG_0001.jpg"), common::utc(2026, 8, 9, 0, 0, 0));
+    let dcim2 = src2.path().join("DCIM");
+    set_mtime(
+        &dcim2.join("IMG_0000.jpg"),
+        common::utc(2026, 2, 1, 0, 0, 0),
+    );
+    set_mtime(
+        &dcim2.join("IMG_0001.jpg"),
+        common::utc(2026, 8, 9, 0, 0, 0),
+    );
     let target2 = tempfile::tempdir().unwrap();
     let (job2, stats2) = run_engine(src2.path(), db_dir.path(), target2.path(), |_| {});
     assert_eq!(job_status(&db, job2), "done");
@@ -293,6 +316,32 @@ fn job_status(db: &db::Db, job_id: i64) -> String {
         r.get(0)
     })
     .unwrap()
+}
+
+#[cfg(not(windows))]
+#[test]
+fn claim_preserves_posix_backslash_in_source_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let db_dir = root.path().join("db");
+    let photos = root.path().join("photos");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&photos).unwrap();
+    let state = common::state_with_library(&db_dir, &photos, Duration::ZERO);
+    let db = open_db(&db_dir);
+    let album = db.album_create("目标").unwrap();
+    let home = db.album_home_rel(album.id).unwrap().unwrap();
+    // Replacing '\' with '/' would make this distinct source appear already
+    // inside the destination album, skipping the required physical move.
+    let source_dir = photos.join(home.replace('/', "\\")).join("old");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("photo.jpg");
+    std::fs::write(&source, b"original").unwrap();
+    let id = ins(&db, &source.to_string_lossy(), AssetKind::Photo, None);
+    let result = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
+    assert!(result.failed.is_empty(), "{:?}", result.failed);
+    assert_eq!((result.moved, result.skipped), (1, 0));
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(photos.join(home).join("photo.jpg")).unwrap(), b"original");
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +385,11 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
     assert!(result.failed.is_empty());
 
     // 落位 = photoRoot/{创建YYYY}/{创建MM}/{dir_name}/ 平铺（与拍摄日无关）
-    let dst = photo_root.join("2026").join("03").join("青海湖").join("DSC_0001.jpg");
+    let dst = photo_root
+        .join("2026")
+        .join("03")
+        .join("青海湖")
+        .join("DSC_0001.jpg");
     assert!(dst.is_file(), "应挪到 {}", dst.display());
     assert!(dst.with_extension("xmp").is_file(), "边车随行");
     assert!(!photo.exists());
@@ -371,7 +424,11 @@ fn claim_moves_date_root_assets_into_album_dir_idempotently() {
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
             .unwrap();
-    let expected2 = photo_root.join("2026").join("07").join("另一册").join("DSC_0001.jpg");
+    let expected2 = photo_root
+        .join("2026")
+        .join("07")
+        .join("另一册")
+        .join("DSC_0001.jpg");
     assert_eq!(
         moved_path,
         expected2.to_string_lossy(),
@@ -516,7 +573,12 @@ fn import_and_claim_share_the_same_album_home_formula() {
     std::fs::create_dir_all(&root_dir).unwrap();
     let photo = root_dir.join("OLD_0001.jpg");
     std::fs::write(&photo, b"old-jpeg").unwrap();
-    let id = ins(&db, &photo.to_string_lossy(), AssetKind::Photo, Some("2019-11-23T09:00:00.000Z"));
+    let id = ins(
+        &db,
+        &photo.to_string_lossy(),
+        AssetKind::Photo,
+        Some("2019-11-23T09:00:00.000Z"),
+    );
     let result = fetch_album_claim_assets(&state, album.id, &[id], None).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
     let moved: String =
@@ -534,7 +596,6 @@ fn import_and_claim_share_the_same_album_home_formula() {
 // ---------------------------------------------------------------------------
 // LR 暂存夹
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // 默认相册「未分组」（0018 修订：导入必落相册的系统级保底）
@@ -605,7 +666,11 @@ fn claim_from_default_album_moves_file_but_keeps_reference() {
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
             .unwrap();
-    let expected = photo_root.join("2026").join("05").join("正式相册").join("DSC_0007.jpg");
+    let expected = photo_root
+        .join("2026")
+        .join("05")
+        .join("正式相册")
+        .join("DSC_0007.jpg");
     assert_eq!(moved_path, expected.to_string_lossy());
     assert!(!photo.exists());
     let in_default: i64 =

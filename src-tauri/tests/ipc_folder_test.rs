@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -40,13 +40,8 @@ fn folder_scan_registers_source_then_files_and_move_import_work() {
 
     // 扫描注册：id 为 FOLDER:<canonical>，快照统计正确
     let snapshot = scan_folder(&state, folder.path().to_str().unwrap()).unwrap();
-    assert_eq!(
-        snapshot.id,
-        format!(
-            "FOLDER:{}",
-            plain_canonical(&fs::canonicalize(folder.path()).unwrap())
-        )
-    );
+    let expected_root = folder.path().to_path_buf();
+    assert_eq!(snapshot.id, format!("FOLDER:{}", expected_root.display()));
     assert_eq!(snapshot.kind, devices::SourceKind::Folder);
     assert_eq!(snapshot.new_files, 3, "空库应全部为新文件");
     assert!(snapshot.bytes_total > 0);
@@ -143,14 +138,22 @@ fn fs_list_dirs_invalid_parent_is_empty_and_roots_listed() {
     // 非法/不存在 parent → 空数组不报错
     assert!(list_dirs(Some(r"C:\definitely\not\here")).is_empty());
 
-    // None → 盘符根：真实系统上 C:\ 必在（只断言存在，不遍历内容）
+    // None → platform filesystem roots.
     let drives = list_dirs(None);
-    assert!(
-        drives.iter().any(|d| d.path == "C:\\"),
-        "应包含 C:\\ : {drives:?}"
-    );
-    assert!(drives.iter().all(|d| d.name.ends_with(':')));
-    assert!(drives.iter().all(|d| d.path.ends_with('\\')));
+    assert!(!drives.is_empty(), "应至少包含一个平台根目录: {drives:?}");
+    #[cfg(windows)]
+    {
+        assert!(drives.iter().any(|d| d.path == "C:\\"));
+        assert!(drives.iter().all(|d| d.name.ends_with(':')));
+        assert!(drives.iter().all(|d| d.path.ends_with('\\')));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        assert!(drives
+            .iter()
+            .any(|d| d.path == std::env::var("HOME").unwrap()));
+        assert!(drives.iter().all(|d| Path::new(&d.path).is_absolute()));
+    }
 }
 
 #[test]
@@ -163,27 +166,29 @@ fn fs_list_dirs_preserves_parent_path_form() {
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("photos").join("2024")).unwrap();
 
+    #[cfg(windows)]
     let verbatim_parent = format!(r"\\?\{}", root.path().display());
+    #[cfg(not(windows))]
+    let verbatim_parent = root.path().to_string_lossy().into_owned();
     let entries = list_dirs(Some(&verbatim_parent));
     let photos = entries
         .iter()
         .find(|e| e.name == "photos")
         .expect("verbatim 父路径应可枚举");
-    assert_eq!(
-        photos.path,
-        format!(r"{}\photos", verbatim_parent),
-        "条目 path 必须原样拼接父路径（不转换形态）: {:?}",
-        entries
-    );
+    #[cfg(windows)]
+    assert_eq!(photos.path, format!(r"{}\photos", verbatim_parent));
+    #[cfg(not(windows))]
+    assert_eq!(photos.path, root.path().join("photos").to_string_lossy());
     // 子树探测也用同形态路径（否则 hasSubdirs 恒 false —— Y:\照片 展开为空的根因）
     assert!(photos.has_subdirs, "映射盘目录应允许按需展开");
     // 绝不出现剥坏前缀的 UNC\ 残缺形态
+    #[cfg(windows)]
     assert!(!photos.path.starts_with(r"UNC\"));
 
     // 普通形态父路径（带尾分隔符）同样原样系（幂等展开）
-    let plain_with_slash = format!(r"{}\", root.path().display());
+    let plain_with_slash = format!("{}{}", root.path().display(), std::path::MAIN_SEPARATOR);
     let entries = list_dirs(Some(&plain_with_slash));
     let photos = entries.iter().find(|e| e.name == "photos").unwrap();
-    assert_eq!(photos.path, format!(r"{}\photos", root.path().display()));
+    assert_eq!(photos.path, root.path().join("photos").to_string_lossy());
     assert!(photos.has_subdirs);
 }

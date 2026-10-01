@@ -15,7 +15,7 @@ use std::sync::{
 use std::time::Duration;
 
 fn helper_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("PHOTO_HUB_SONY_BRIDGE") {
         candidates.push(path.into());
     }

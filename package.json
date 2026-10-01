@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:build:macos": "tauri build --config src-tauri/tauri.macos.conf.json"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

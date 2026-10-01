@@ -28,7 +28,10 @@ pub(crate) fn inference_plan(
     preference: super::super::AccelerationPreference,
 ) -> super::super::InferencePlan {
     use super::super::{AccelerationPreference, InferenceBackend, InferencePlan};
-    if preference == AccelerationPreference::Cpu {
+    if matches!(
+        preference,
+        AccelerationPreference::Cpu | AccelerationPreference::CoreMl
+    ) {
         InferencePlan::cpu()
     } else {
         InferencePlan {
@@ -48,7 +51,7 @@ pub(crate) fn execution_providers(
             ort::ep::DirectML::default().build(),
             ort::ep::CPU::default().build(),
         ],
-        InferenceBackend::Cpu => vec![ort::ep::CPU::default().build()],
+        _ => vec![ort::ep::CPU::default().build()],
     }
 }
 pub(crate) fn sony_helper_candidates() -> Vec<PathBuf> {

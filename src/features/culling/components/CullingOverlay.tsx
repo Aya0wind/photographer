@@ -535,13 +535,17 @@ export default function CullingOverlay({
           break;
         case "prev":
           if (mode === "compare") setFocusedPane((cur) => Math.max(0, cur - 1));
-          else navigate(index - 1);
+          else {
+            setIndex((cur) => Math.max(0, cur - 1));
+            setFocusedPane(0);
+          }
           break;
         case "next":
           if (mode === "compare") {
             setFocusedPane((cur) => Math.min(comparePanes.length - 1, cur + 1));
           } else {
-            navigate(index + 1);
+            setIndex((cur) => Math.min(items.length - 1, cur + 1));
+            setFocusedPane(0);
           }
           break;
         case "accept":

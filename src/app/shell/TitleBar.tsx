@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isMacPlatform } from "@/lib/platform";
 
 /**
  * 自绘标题栏（无边框窗口，tauri.conf decorations=false）：整窗最顶部 40px 条
@@ -126,8 +127,10 @@ export default function TitleBar({
 }) {
   const { t } = useTranslation();
   const [maximized, setMaximized] = useState(false);
+  const mac = isMacPlatform();
 
   useEffect(() => {
+    if (mac) return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
     const appWindow = getCurrentWindow();
@@ -158,7 +161,9 @@ export default function TitleBar({
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [mac]);
+
+  if (mac) return null;
 
   return (
     <header

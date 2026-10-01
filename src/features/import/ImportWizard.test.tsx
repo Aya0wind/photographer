@@ -26,6 +26,7 @@ import {
   fsListDirs,
   FIXED_PLAN_DIR_TEMPLATE,
   importStart,
+  platformCapabilities,
   thumbGet,
   deviceThumbGet,
   type ImportPlan,
@@ -40,6 +41,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     fsListDirs: vi.fn(),
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
+    platformCapabilities: vi.fn(),
     thumbGet: vi.fn(),
     deviceThumbGet: vi.fn(),
     albumList: vi.fn(),
@@ -64,6 +66,7 @@ const listMock = vi.mocked(fsListDirs);
 const openMock = vi.mocked(openDialog);
 const deviceFilesMock = vi.mocked(deviceFiles);
 const deviceListMock = vi.mocked(deviceList);
+const platformCapsMock = vi.mocked(platformCapabilities);
 const convertMock = vi.mocked(convertFileSrc);
 const thumbMock = vi.mocked(thumbGet);
 const deviceThumbMock = vi.mocked(deviceThumbGet);
@@ -194,6 +197,16 @@ beforeEach(() => {
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
   deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
+  platformCapsMock.mockReset().mockResolvedValue({
+    filesystemRoots: true,
+    volumeDevices: true,
+    portableDevices: true,
+    hotplug: true,
+    systemOpen: true,
+    fileClipboard: true,
+    fileReveal: true,
+    documentUris: false,
+  });
   convertMock.mockReset().mockReturnValue("");
   thumbMock.mockReset().mockResolvedValue(null);
   albumListMock.mockReset().mockResolvedValue([
@@ -263,6 +276,24 @@ describe("ImportWizard 布局与设备", () => {
     renderWizard();
 
     expect(screen.getByText(/未检测到设备/)).toBeInTheDocument();
+  });
+
+  it("原生设备发现未适配时提示使用文件夹导入", async () => {
+    platformCapsMock.mockResolvedValue({
+      filesystemRoots: true,
+      volumeDevices: false,
+      portableDevices: false,
+      hotplug: false,
+      systemOpen: true,
+      fileClipboard: true,
+      fileReveal: true,
+      documentUris: false,
+    });
+    renderWizard();
+
+    expect(
+      await screen.findByText(/暂不支持自动发现相机设备/),
+    ).toBeInTheDocument();
   });
 
   it("设备初值补拉：错过启动事件的在位设备出现（device_list 兜底）", async () => {

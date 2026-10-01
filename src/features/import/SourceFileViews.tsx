@@ -55,10 +55,9 @@ export function FolderGlyph({ size = 14, className = "" }: { size?: number; clas
   );
 }
 
-/** Windows 路径宽松比较（大小写/分隔符/尾斜杠归一）——树节点选中高亮用 */
-export function normalizeFsPath(path: string): string {
-  return path.replace(/\//g, "\\").replace(/[\\/]+$/, "").toLowerCase();
-}
+/** 树节点高亮：Windows 归一大小写，POSIX 保留大小写与合法反斜杠。 */
+import { directoryComparisonKey as normalizeFsPath } from "@/lib/filesystemPaths";
+export { normalizeFsPath };
 
 function KindBadge({ kind }: { kind: FileKind }) {
   const { t } = useTranslation();

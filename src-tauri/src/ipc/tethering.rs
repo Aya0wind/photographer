@@ -186,10 +186,11 @@ pub async fn camera_probe(
 ) -> Result<Option<CameraDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |_| {
-        Ok(probe_with_backend(
-            backend_registry().primary().as_ref(),
-            &pnp_id,
-        ))
+        let registry = backend_registry();
+        let backend = registry
+            .for_camera_id(&pnp_id)
+            .ok_or_else(|| "相机后端不可用".to_string())?;
+        Ok(probe_with_backend(backend.as_ref(), &pnp_id))
     })
     .await
 }
@@ -207,8 +208,12 @@ pub async fn camera_capture(
     let shared = state.inner().clone();
     let timeout = clamp_capture_timeout(timeout_ms);
     run_blocking(shared, move |state| {
+        let registry = backend_registry();
+        let backend = registry
+            .for_camera_id(&pnp_id)
+            .ok_or_else(|| "相机后端不可用".to_string())?;
         Ok(capture_with_backend(
-            backend_registry().primary().as_ref(),
+            backend.as_ref(),
             &state.bus,
             &pnp_id,
             timeout,
@@ -258,16 +263,27 @@ pub async fn tethering_start(
     .map_err(|e| e.to_string())??;
     let id = dto.id.clone();
     // 窗口 label 按会话 id 隔离：多相机可同时各开一个联拍窗口
-    let window = tauri::WebviewWindowBuilder::new(
+    let mut window_builder = tauri::WebviewWindowBuilder::new(
         &app,
         format!("tethering-{id}"),
         tauri::WebviewUrl::App(format!("tethering?session={id}").into()),
     )
     .title("Photo Hub · Tethered Capture")
     .inner_size(1100.0, 760.0)
-    .min_inner_size(860.0, 600.0)
-    .decorations(false)
-    .build();
+    .min_inner_size(860.0, 600.0);
+    #[cfg(target_os = "macos")]
+    {
+        window_builder = window_builder
+            .decorations(true)
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(14.0, 13.0));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        window_builder = window_builder.decorations(false);
+    }
+    let window = window_builder.build();
     match window {
         Ok(window) => {
             let close_id = id.clone();

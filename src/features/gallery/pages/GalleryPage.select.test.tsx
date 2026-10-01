@@ -202,7 +202,7 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     });
   });
 
-  it("分享菜单：在资源管理器中显示 = 批量单窗 reveal_in_explorer；复制路径写剪贴板", async () => {
+  it("分享菜单：在文件管理器中显示 = 批量单窗 reveal_in_explorer；复制路径写剪贴板", async () => {
     const user = userEvent.setup();
     // userEvent.setup 会挂自己的 clipboard 桩——对其就地 spy（组件读到的是同一个）
     const writeText = vi
@@ -250,7 +250,7 @@ describe("画廊：瓦片右键菜单", () => {
     fireEvent.contextMenu(tileOf(2), { clientX: 200, clientY: 150 });
     const menu = await screen.findByTestId("asset-context-menu");
     expect(within(menu).getByTestId("asset-context-menu-item-reveal")).toHaveTextContent(
-      "在资源管理器中显示",
+      "在文件管理器中显示",
     );
     expect(within(menu).getByTestId("asset-context-menu-item-copy")).toHaveTextContent(
       "复制文件到剪贴板",

@@ -43,3 +43,6 @@ vendor/fuji-sdk/
 **/bridge-build/
 src-tauri/resources/gphoto/*
 !src-tauri/resources/gphoto/.gitkeep
+src-tauri/resources/.gphoto-stage-*/
+src-tauri/resources/.gphoto-backup-*/
+scripts/__pycache__/

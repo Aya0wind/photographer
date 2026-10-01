@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
+import { isMacPlatform } from "@/lib/platform";
 import { useTranslation } from "react-i18next";
 
 import TitleBar from "@/app/shell/TitleBar";
@@ -60,7 +61,7 @@ export default function LibraryPickerPage() {
   if (!loaded) return null;
 
   return (
-    <div className="flex h-full w-full flex-col bg-bg font-sans text-text-primary">
+    <div className={`flex h-full w-full flex-col bg-bg font-sans text-text-primary ${isMacPlatform() ? "mac-window-content" : ""}`}>
       {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
       <TitleBar />
       <div className="sp-scroll flex min-h-0 flex-1 flex-col items-center justify-center gap-8 overflow-y-auto px-8 py-6">

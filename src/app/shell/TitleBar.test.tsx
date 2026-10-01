@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -8,12 +8,17 @@ import { MemoryRouter } from "react-router";
 import i18n from "@/i18n";
 import TitleBar from "./TitleBar";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isTauri } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: vi.fn(),
 }));
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: vi.fn(() => false),
+}));
 
 const getCurrentWindowMock = vi.mocked(getCurrentWindow);
+const isTauriMock = vi.mocked(isTauri);
 
 interface FakeWindow {
   minimize: ReturnType<typeof vi.fn>;
@@ -54,7 +59,16 @@ function renderBar() {
 
 beforeEach(() => {
   getCurrentWindowMock.mockReset();
+  isTauriMock.mockReset().mockReturnValue(false);
   useWindow(fakeWindow());
+});
+
+const originalUserAgent = navigator.userAgent;
+afterEach(() => {
+  Object.defineProperty(navigator, "userAgent", {
+    configurable: true,
+    value: originalUserAgent,
+  });
 });
 
 describe("TitleBar 结构", () => {
@@ -82,6 +96,21 @@ describe("TitleBar 结构", () => {
     expect(close.className).toContain("hover:bg-[#C42B1C]");
     expect(close.className).toContain("hover:text-white");
     expect(min.className).not.toContain("hover:bg-[#C42B1C]");
+  });
+
+  it("macOS 使用原生 traffic lights，不渲染右侧 Windows 三钮", () => {
+    isTauriMock.mockReturnValue(true);
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4)",
+    });
+    const win = fakeWindow();
+    useWindow(win);
+    renderBar();
+
+    expect(screen.queryByTestId("titlebar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("titlebar-minimize")).not.toBeInTheDocument();
+    expect(win.isMaximized).not.toHaveBeenCalled();
   });
 });
 

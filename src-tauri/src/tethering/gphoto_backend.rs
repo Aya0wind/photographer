@@ -1,23 +1,20 @@
 //! libgphoto2 联拍后端（进程内，2026-09-29 定案）：运行时动态加载
-//! `libgphoto2-6.dll`（libloading 取符号表），直调 C API——零 C++ 桥、零
+//! 平台对应的 libgphoto2 动态库（libloading 取符号表），直调 C API——零 C++ 桥、零
 //! 子进程、零构建系统集成（不需要 pkg-config / import lib，绕开 MinGW↔MSVC
 //! 工具链墙；gphoto2-rs crate 卡在 pkg-config + MSVC import 库，故自持薄 FFI）。
 //!
-//! 库解析顺序：`PHOTO_HUB_GPHOTO_DLL`（绝对路径）→ exe 旁 `gphoto/` →
-//! `%LOCALAPPDATA%\PhotoHub\gphoto\` → `C:\msys64\ucrt64\bin\`（开发机）。
-//! 依赖 DLL（libusb/libexif）先于主库预加载（Windows 按已加载模块名解析
-//! 依赖）。每个候选库须配套 camlibs/iolibs；通过环境变量重定位随包
-//! 模块，不完整的候选目录跳过，避免主库加载成功却始终枚举不到相机。
+//! 库解析顺序：`PHOTO_HUB_GPHOTO_DLL`（绝对路径）→ 应用资源 `gphoto/` →
+//! 平台开发机路径。Windows 的 DLL 依赖会先预加载；macOS 组装脚本把
+//! 依赖重写为 `@loader_path` 并保留 camlibs/iolibs。
 //!
 //! libgphoto2 的 `Camera*` 非线程安全：本后端所有相机操作过同一把
 //! `camera_mutex` 串行（会话 poller 线程与用户操作并发）。锁序恒为
-//! camera_mutex → connections（disconnect 先摘表再取 camera_mutex）。
+//! camera_mutex → connections（包括 disconnect，查连接和释放句柄不能交错）。
 //! 真机基线（A7R V / ILCE-7RM5 PC Control，2026-09-29）：枚举/参数读写/
 //! 取景帧/拍摄+下载全通；光圈位在镜头睡眠时只读（writable 随刷新恢复）。
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_ulong, CStr, CString};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -113,12 +110,6 @@ mod gpt {
         *mut CameraFile,
         *mut std::ffi::c_void,
     ) -> c_int;
-    pub type gp_camera_file_delete = unsafe extern "C" fn(
-        *mut Camera,
-        *const c_char,
-        *const c_char,
-        *mut std::ffi::c_void,
-    ) -> c_int;
     pub type gp_camera_wait_for_event = unsafe extern "C" fn(
         *mut Camera,
         c_int,
@@ -183,7 +174,6 @@ struct Symbols {
     gp_camera_capture_preview: gpt::gp_camera_capture_preview,
     gp_camera_capture: gpt::gp_camera_capture,
     gp_camera_file_get: gpt::gp_camera_file_get,
-    gp_camera_file_delete: gpt::gp_camera_file_delete,
     gp_camera_wait_for_event: gpt::gp_camera_wait_for_event,
     gp_port_info_list_new: gpt::gp_port_info_list_new,
     gp_port_info_list_free: gpt::gp_port_info_list_free,
@@ -245,7 +235,6 @@ impl Symbols {
             gp_camera_capture_preview: sym!(gp_camera_capture_preview),
             gp_camera_capture: sym!(gp_camera_capture),
             gp_camera_file_get: sym!(gp_camera_file_get),
-            gp_camera_file_delete: sym!(gp_camera_file_delete),
             gp_camera_wait_for_event: sym!(gp_camera_wait_for_event),
             gp_port_info_list_new: sym!(gp_port_info_list_new),
             gp_port_info_list_free: sym!(gp_port_info_list_free),
@@ -436,6 +425,29 @@ fn set_driver_env(dll_dir: &Path) {
 mod driver_tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an assembled arm64 runtime and PHOTO_HUB_GPHOTO_DLL; run alone"]
+    fn packaged_runtime_loads_rust_ffi_without_opening_camera() {
+        let path = std::env::var_os("PHOTO_HUB_GPHOTO_DLL")
+            .map(PathBuf::from)
+            .expect("set PHOTO_HUB_GPHOTO_DLL to the assembled library");
+        assert!(path.is_absolute() && path.is_file());
+        let loaded = lib().expect("all Rust FFI symbols must resolve");
+        // Allocate/free only a context, never enumerate or open USB cameras.
+        unsafe {
+            let context = context_new(&loaded.symbols);
+            assert!(!context.is_null());
+            (loaded.symbols.gp_context_unref)(context);
+        }
+        for (key, directory) in [("CAMLIBS", "camlibs"), ("IOLIBS", "iolibs")] {
+            assert_eq!(
+                PathBuf::from(std::env::var_os(key).expect("driver environment")),
+                path.parent().unwrap().join(directory)
+            );
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn module_paths_remove_extended_windows_prefix() {
@@ -566,10 +578,7 @@ const EXCLUDED_SECTIONS: &[&str] = &["status"];
 
 /// 厂商裸码名（/main/other 的 4 位十六进制，无语义标签）。
 fn is_vendor_code_name(name: &str) -> bool {
-    name.len() == 4
-        && name
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+    name.len() == 4 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub struct GphotoBackend {
@@ -630,8 +639,7 @@ impl GphotoBackend {
             .ok_or(TetherError::Disconnected)
     }
 
-    /// 下载相机内文件到收片目录。delete_after=true：应用触发的拍摄从卡上
-    /// 移除（gphoto2 --capture-image-and-download 同语义）；相机端自拍保留。
+    /// Download only. Camera originals are never deleted by tethered capture.
     #[allow(clippy::too_many_arguments)]
     unsafe fn download(
         s: &Symbols,
@@ -639,7 +647,6 @@ impl GphotoBackend {
         conn: &GphotoConnection,
         folder: &CStr,
         name: &CStr,
-        delete_after: bool,
     ) -> Result<CapturedObject, TetherError> {
         let mut file: *mut gpt::CameraFile = std::ptr::null_mut();
         check((s.gp_file_new)(&mut file))?;
@@ -660,25 +667,7 @@ impl GphotoBackend {
             }
             let bytes = std::slice::from_raw_parts(data as *const u8, size as usize).to_vec();
             let name_str = cstr(name.as_ptr());
-            let filename = Path::new(&name_str)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .filter(|n| !n.is_empty() && n != "." && n != "..")
-                .ok_or_else(|| TetherError::Other("照片文件名无效".into()))?;
-            let target = conn.incoming.join(&filename);
-            let mut out =
-                std::fs::File::create(&target).map_err(|e| TetherError::Other(e.to_string()))?;
-            out.write_all(&bytes)
-                .and_then(|_| out.sync_all())
-                .map_err(|e| TetherError::Other(e.to_string()))?;
-            if delete_after {
-                let _ = (s.gp_camera_file_delete)(conn.camera, folder.as_ptr(), name.as_ptr(), ctx);
-            }
-            Ok(CapturedObject {
-                object_id: target.to_string_lossy().into_owned(),
-                object_name: filename,
-                object_size: size as u64,
-            })
+            super::staging::persist(&conn.incoming, &name_str, &bytes)
         })();
         (s.gp_file_free)(file);
         result
@@ -785,7 +774,7 @@ impl GphotoBackend {
                     id: name.to_string(),
                     label,
                     kind: SettingKind::Range,
-                    current: format!("{}", trim_float(value_ok.then_some(value).unwrap_or(lo))),
+                    current: trim_float(if value_ok { value } else { lo }),
                     writable,
                     options: Vec::new(),
                     min: Some(lo as f64),
@@ -988,9 +977,9 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
+        let _guard = self.lock_camera()?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let mut list: *mut gpt::CameraList = std::ptr::null_mut();
@@ -1027,12 +1016,15 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         let port = pnp_id.strip_prefix("gphoto:").unwrap_or(pnp_id).to_string();
         let _guard = self.lock_camera()?;
+        if self.connections.lock().unwrap().contains_key(pnp_id) {
+            return Err(TetherError::Other("相机已有连接，请先结束当前会话".into()));
+        }
         unsafe {
             let ctx = context_new(s);
             let result = (|| -> Result<CameraInfo, TetherError> {
                 let mut ports: *mut gpt::GPPortInfoList = std::ptr::null_mut();
                 check((s.gp_port_info_list_new)(&mut ports))?;
-                let inner = (|| {
+                let inner = {
                     let r = (|| -> Result<CameraInfo, TetherError> {
                         check((s.gp_port_info_list_load)(ports))?;
                         let path_c = CString::new(&*port).unwrap();
@@ -1064,8 +1056,11 @@ impl CameraBackend for GphotoBackend {
                         let incoming = std::env::temp_dir()
                             .join("PhotoHub-gphoto")
                             .join(uuid::Uuid::new_v4().to_string());
-                        std::fs::create_dir_all(&incoming)
-                            .map_err(|e| TetherError::Other(e.to_string()))?;
+                        if let Err(error) = std::fs::create_dir_all(&incoming) {
+                            let _ = (s.gp_camera_exit)(camera, ctx);
+                            (s.gp_camera_free)(camera);
+                            return Err(TetherError::Other(error.to_string()));
+                        }
                         let conn = Arc::new(GphotoConnection {
                             camera,
                             incoming,
@@ -1084,7 +1079,7 @@ impl CameraBackend for GphotoBackend {
                     })();
                     (s.gp_port_info_list_free)(ports);
                     r
-                })();
+                };
                 inner
             })();
             (s.gp_context_unref)(ctx);
@@ -1093,22 +1088,25 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn disconnect(&self, pnp_id: &str) {
-        // 先摘表（释放 connections 锁）再取 camera_mutex，锁序不倒置。
+        // Bounded locking preserves dev's responsiveness. A timed-out native
+        // call still owns its handle: retain it (and its receipts), never free
+        // it concurrently or allow a replacement connection with the same id.
+        let Ok(_guard) = self.lock_camera() else {
+            eprintln!("相机仍忙，保留连接和未入库文件: {pnp_id}");
+            return;
+        };
         let conn = self.connections.lock().unwrap().remove(pnp_id);
         if let Some(conn) = conn {
+            conn.connected.store(false, Ordering::Release);
             if let Ok(lib) = lib() {
-                // 断开不能被卡死的相机锁拖住：拿不到锁直接放弃 exit/free
-                //（连接已摘表，资源由进程退出回收）
-                if let Ok(_guard) = self.lock_camera() {
-                    unsafe {
-                        let ctx = context_new(&lib.symbols);
-                        let _ = (lib.symbols.gp_camera_exit)(conn.camera, ctx);
-                        (lib.symbols.gp_camera_free)(conn.camera);
-                        (lib.symbols.gp_context_unref)(ctx);
-                    }
+                unsafe {
+                    let ctx = context_new(&lib.symbols);
+                    let _ = (lib.symbols.gp_camera_exit)(conn.camera, ctx);
+                    (lib.symbols.gp_camera_free)(conn.camera);
+                    (lib.symbols.gp_context_unref)(ctx);
                 }
             }
-            let _ = std::fs::remove_dir_all(&conn.incoming);
+            super::staging::disconnect(&conn.incoming);
         }
     }
 
@@ -1116,10 +1114,10 @@ impl CameraBackend for GphotoBackend {
     /// 过滤：厂商裸码（/main/other 十六进制名）、EXCLUDED_NAMES 危险项、
     /// status 只读杂音（TEXT 类型天然跳过）。核心三参置顶。
     fn settings(&self, pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1142,10 +1140,10 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn set_setting(&self, pnp_id: &str, id: &str, value: &str) -> Result<(), TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = Self::apply_setting_by_name(s, ctx, conn.camera, id, value);
@@ -1158,10 +1156,10 @@ impl CameraBackend for GphotoBackend {
     /// 640×480 坐标系，格式 "x,y"）+ 触发一次 autofocus。相机需处于 AF
     /// 模式且对焦区域支持定点（否则相机侧忽略）。
     fn focus_at(&self, pnp_id: &str, x: f64, y: f64) -> Result<(), TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1183,10 +1181,10 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn live_view_frame(&self, pnp_id: &str) -> Result<Vec<u8>, TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let mut file: *mut gpt::CameraFile = std::ptr::null_mut();
@@ -1211,10 +1209,10 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn trigger_capture(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| {
@@ -1227,7 +1225,7 @@ impl CameraBackend for GphotoBackend {
                 ))?;
                 let folder = CStr::from_ptr(path.folder.as_ptr()).to_owned();
                 let name = CStr::from_ptr(path.name.as_ptr()).to_owned();
-                let object = Self::download(s, ctx, &conn, &folder, &name, true)?;
+                let object = Self::download(s, ctx, &conn, &folder, &name)?;
                 Ok(vec![object])
             })();
             (s.gp_context_unref)(ctx);
@@ -1236,13 +1234,13 @@ impl CameraBackend for GphotoBackend {
     }
 
     fn poll_objects(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         if !conn.connected.load(Ordering::Acquire) {
             return Err(TetherError::Disconnected);
         }
         let lib = lib()?;
         let s = &lib.symbols;
-        let _guard = self.lock_camera()?;
         unsafe {
             let ctx = context_new(s);
             let result = (|| -> Result<Vec<CapturedObject>, TetherError> {
@@ -1281,7 +1279,7 @@ impl CameraBackend for GphotoBackend {
                     let folder = CStr::from_ptr(path.folder.as_ptr()).to_owned();
                     let name = CStr::from_ptr(path.name.as_ptr()).to_owned();
                     // 相机端自拍：保留卡上原件（用户自己按的快门）
-                    out.push(Self::download(s, ctx, &conn, &folder, &name, false)?);
+                    out.push(Self::download(s, ctx, &conn, &folder, &name)?);
                 }
                 Ok(out)
             })();
@@ -1296,10 +1294,7 @@ impl CameraBackend for GphotoBackend {
         object: &CapturedObject,
     ) -> Result<Box<dyn std::io::Read + Send>, TetherError> {
         let conn = self.connection(pnp_id)?;
-        let path = Path::new(&object.object_id);
-        if !path.starts_with(&conn.incoming) {
-            return Err(TetherError::AccessDenied);
-        }
+        let path = super::staging::validated_path(&conn.incoming, object)?;
         std::fs::File::open(path)
             .map(|f| Box::new(f) as Box<dyn std::io::Read + Send>)
             .map_err(|e| TetherError::Other(e.to_string()))
@@ -1309,6 +1304,14 @@ impl CameraBackend for GphotoBackend {
         self.connection(pnp_id)
             .map(|connection| connection.settings_revision.load(Ordering::Acquire))
             .unwrap_or(0)
+    }
+    fn acknowledge_captured(
+        &self,
+        pnp_id: &str,
+        object: &CapturedObject,
+    ) -> Result<(), TetherError> {
+        let conn = self.connection(pnp_id)?;
+        super::staging::acknowledge(&conn.incoming, object)
     }
 
     fn capture_still(
@@ -1328,6 +1331,42 @@ impl CameraBackend for GphotoBackend {
 mod lock_tests {
     use super::*;
 
+    #[test]
+    fn busy_disconnect_retains_connection_and_unacknowledged_receipts() {
+        let backend = GphotoBackend {
+            lock_timeout: Duration::from_millis(20),
+            ..Default::default()
+        };
+        let incoming = tempfile::tempdir().unwrap();
+        let receipt =
+            super::super::staging::persist(incoming.path(), "capture.jpg", b"original").unwrap();
+        let connection = Arc::new(GphotoConnection {
+            // No FFI call is permitted while the camera lock is busy.
+            camera: std::ptr::null_mut(),
+            incoming: incoming.path().to_owned(),
+            connected: AtomicBool::new(true),
+            settings_revision: AtomicU64::new(0),
+        });
+        backend
+            .connections
+            .lock()
+            .unwrap()
+            .insert("busy".into(), connection);
+        let held = backend.camera_mutex.lock().unwrap();
+        backend.disconnect("busy");
+        assert!(backend.connections.lock().unwrap().contains_key("busy"));
+        assert_eq!(std::fs::read(receipt.object_id).unwrap(), b"original");
+        // These methods must return a bounded busy error BEFORE a handle lookup.
+        for error in [
+            backend.settings("busy").unwrap_err(),
+            backend.live_view_frame("busy").unwrap_err(),
+            backend.poll_objects("busy").unwrap_err(),
+        ] {
+            assert!(matches!(error, TetherError::Other(ref message) if message.contains("相机忙")));
+        }
+        drop(held);
+    }
+
     /// 持锁超过超时 → 快速失败「相机忙」，不再无限堆积等锁线程
     ///（联拍连续拍摄卡死窗口的根因回归）。
     #[test]
@@ -1337,7 +1376,10 @@ mod lock_tests {
         let _held = backend.camera_mutex.lock().unwrap();
         let started = std::time::Instant::now();
         let err = backend.lock_camera().unwrap_err();
-        assert!(started.elapsed() >= Duration::from_millis(40), "应等待到超时");
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "应等待到超时"
+        );
         assert!(
             matches!(&err, TetherError::Other(msg) if msg.contains("相机忙")),
             "{err:?}"

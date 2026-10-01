@@ -22,6 +22,13 @@ body,
   color: var(--color-text-primary);
 }
 
+/* macOS uses native rounded window chrome and traffic lights in the titlebar
+   overlay. Keep web content below the native controls; Windows retains the
+   custom right-side titlebar buttons. */
+.mac-window-content {
+  padding-top: 28px;
+}
+
 body {
   font-family: var(--font-sans);
   margin: 0;

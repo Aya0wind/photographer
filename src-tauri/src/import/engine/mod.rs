@@ -135,6 +135,7 @@ pub enum EngineError {
 pub struct EngineControls {
     paused: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    device_lost: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
 }
 
@@ -151,12 +152,24 @@ impl EngineControls {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Mark the source unavailable and stop workers while preserving a
+    /// resumable journal state. Returns false when it was already marked.
+    pub fn mark_device_lost(&self) -> bool {
+        let first = !self.device_lost.swap(true, Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
+        first
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn is_device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::SeqCst)
     }
 
     pub fn is_done(&self) -> bool {
@@ -332,6 +345,7 @@ impl Engine {
             controls: EngineControls {
                 paused: Arc::new(AtomicBool::new(false)),
                 cancelled: Arc::new(AtomicBool::new(false)),
+                device_lost: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(AtomicBool::new(false)),
             },
             prepared,
@@ -342,6 +356,10 @@ impl Engine {
     /// 控制柄（pause/cancel 与 run 并行使用）。
     pub fn controls(&self) -> EngineControls {
         self.controls.clone()
+    }
+
+    pub fn source_id(&self) -> String {
+        self.source.id()
     }
 
     /// 仅在文件落位并成功入库后通知后台索引；复制中的文件不可索引。
@@ -752,16 +770,19 @@ impl Engine {
                         xxhash: None,
                         dst2: String::new(),
                     });
+                    let newly_lost = self.controls.mark_device_lost();
                     self.controls.cancelled.store(true, Ordering::SeqCst);
                     device_lost = true;
-                    self.bus.publish(AppEvent::DeviceUnavailable {
-                        id: self.source.id(),
-                    });
-                    let _ = self.db.append_log(
-                        "warn",
-                        Some(job_id),
-                        "设备失联，导入已自动暂停（可恢复续传）",
-                    );
+                    if newly_lost {
+                        self.bus.publish(AppEvent::DeviceUnavailable {
+                            id: self.source.id(),
+                        });
+                        let _ = self.db.append_log(
+                            "warn",
+                            Some(job_id),
+                            "设备失联，导入已自动暂停（可恢复续传）",
+                        );
+                    }
                 }
             }
 
@@ -802,7 +823,7 @@ impl Engine {
         if let Some(second) = &self.plan.second_target {
             let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
         }
-        let status = if device_lost {
+        let status = if device_lost || self.controls.is_device_lost() {
             "paused"
         } else if self.controls.is_cancelled() {
             "cancelled"
