@@ -585,14 +585,15 @@ describe("方案面板", () => {
     // 后端逻辑错误（嵌套守卫）：原文透出
     startMock.mockResolvedValueOnce({ ok: false, error: "目标目录不能位于源目录内" });
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("目标目录不能位于源目录内");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("目标目录不能位于源目录内");
     expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确定" }));
 
     // invoke 不可用（error=null）：通用文案
     startMock.mockResolvedValueOnce({ ok: false, error: null });
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("启动失败");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("启动失败");
   });
 });
 
@@ -733,7 +734,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
   });
 
-  it("folderScan 失败（IPC 不可用）时保持原源并给出红字提示", async () => {
+  it("folderScan 失败时保持原源并弹出错误对话框", async () => {
     seedSession();
     const user = userEvent.setup();
     openMock.mockResolvedValue("D:\\老照片");
@@ -746,8 +747,7 @@ describe("文件系统目录树（LR 式源面板）", () => {
     expect(useImportStore.getState().devices).toHaveLength(2);
     const info = screen.getByTestId("wizard-device-info");
     expect(info).toHaveTextContent("读卡器");
-    // 失败不再静默：中栏一行红字（含目录名），选中其他源后清除
-    const error = screen.getByTestId("wizard-source-error");
+    const error = screen.getByRole("alertdialog");
     expect(error).toHaveTextContent("D:\\老照片");
   });
 });
@@ -795,6 +795,24 @@ describe("最近使用", () => {
 });
 
 describe("导入模式分段条（LR 式顶部切换）", () => {
+  it("仅导入提交引用模式且不设置复制目的地", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 12 });
+    renderWizard("?device=E:");
+
+    await user.click(await screen.findByTestId("wizard-mode-reference"));
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0]).toMatchObject({ mode: "reference", secondTarget: undefined });
+  });
+
+  it("MTP 相机不提供原地引用模式", async () => {
+    seedSession();
+    renderWizard("?device=MTP:CAM");
+    expect(await screen.findByTestId("wizard-mode-reference")).toBeDisabled();
+  });
+
   it("默认复制：选中态与复制说明文案", async () => {
     seedSession();
     renderWizard("?device=E:");
@@ -1458,7 +1476,7 @@ describe("ImportWizard：添加到相册步骤", () => {
     expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "精选", "成片"]);
   });
 
-  it("未选相册（清单为空）：行内提示「请选择相册」且不启动", async () => {
+  it("未选相册（清单为空）：弹窗提示「请选择相册」且不启动", async () => {
     seedSession();
     albumListMock.mockReset().mockResolvedValue([]);
     renderWizard("?device=E:");
@@ -1468,7 +1486,7 @@ describe("ImportWizard：添加到相册步骤", () => {
     await screen.findByTestId("wizard-table-stats");
     await user.click(await screen.findByRole("button", { name: "开始导入" }));
 
-    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("请选择相册");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("请选择相册");
     expect(startMock).not.toHaveBeenCalled();
   });
 
@@ -1491,7 +1509,7 @@ describe("ImportWizard：添加到相册步骤", () => {
     expect(plan.albumId).toBe(3);
   });
 
-  it("「新建相册」：先建相册再启动，plan.albumId=新相册 id；重名错误行内提示且不启动", async () => {
+  it("「新建相册」：先建相册再启动，plan.albumId=新相册 id；错误弹窗提示", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1508,16 +1526,18 @@ describe("ImportWizard：添加到相册步骤", () => {
 
     // 空名拦截
     await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("请填写新相册名称");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("请填写新相册名称");
     expect(startMock).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "确定" }));
 
     // 重名错误透传
     const input = screen.getByTestId("wizard-album-new-name");
     await user.type(input, "旅行");
     await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("wizard-album-error")).toHaveTextContent("同名相册已存在");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("同名相册已存在");
     expect(albumCreateMock).toHaveBeenCalledWith("旅行");
     expect(startMock).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "确定" }));
 
     // 修正后成功：album_create → import_start(albumId=9)
     await user.clear(input);

@@ -15,6 +15,7 @@ import {
   assetGroupDates,
   assetThumbGet,
   assetsPage,
+  assetsSeek,
   assetVersions,
   isIpcAvailable,
   type AssetDto,
@@ -26,6 +27,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     assetsPage: vi.fn(),
+    assetsSeek: vi.fn(),
     assetVersions: vi.fn(),
     assetGroupDates: vi.fn(),
     assetThumbGet: vi.fn(),
@@ -146,6 +148,7 @@ function triggerSentinel(): void {
 beforeEach(() => {
   vi.mocked(assetVersions).mockReset().mockResolvedValue({ groupId: null, members: [] });
   assetsPageMock.mockReset().mockResolvedValue([]);
+  vi.mocked(assetsSeek).mockReset().mockResolvedValue([]);
   groupDatesMock.mockReset().mockResolvedValue([]);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
@@ -158,6 +161,38 @@ beforeEach(() => {
 // --- 分组渲染 ---------------------------------------------------------------------
 
 describe("画廊：日期分组照片墙", () => {
+  it("跳转到未知日期后向上补页，仍可浏览有日期的照片，筛选条件不变", async () => {
+    assetsPageMock.mockResolvedValue(makePage(100, "2026-09-18", 1000));
+    groupDatesMock.mockResolvedValue([
+      { date: "2026-09-18", count: 100, coverAssetId: 1000 },
+      { date: "unknown", count: 100, coverAssetId: 200 },
+    ]);
+    vi.mocked(assetsSeek).mockImplementation(async (anchor, _limit, _filters, before) => before
+      ? anchor === 200 ? makePage(100, "2026-09-18", 1000) : []
+      : makePage(100, null, 200));
+    renderGallery();
+    fireEvent.click(await screen.findByRole("button", { name: "跳转到 未知日期" }));
+    await waitFor(() => expect(assetsSeek).toHaveBeenCalledWith(200, 100, undefined, true));
+    const scroll = screen.getByTestId("gallery-grid-scroll");
+    fireEvent.scroll(scroll, { target: { scrollTop: 0 } });
+    await waitFor(() => expect(screen.getAllByTestId("gallery-group")[0]).toHaveTextContent("2026年9月18日"));
+    expect(assetsPageMock).toHaveBeenCalledTimes(1);
+  });
+  it("时间轴直接加载尚未分页到的旧年份，不顺序扫描中间的分页", async () => {
+    assetsPageMock.mockResolvedValue(makePage(100, "2026-09-18", 1000));
+    groupDatesMock.mockResolvedValue([
+      { date: "2026-09-18", count: 100, coverAssetId: 1000 },
+      { date: "2020-01-01", count: 1, coverAssetId: 10 },
+    ]);
+    vi.mocked(assetsSeek).mockImplementation(async (_anchor, _limit, _filters, before) => before ? [] : [makeAsset(10, "2020-01-01")]);
+    renderGallery();
+    const target = await screen.findByRole("button", { name: /跳转到.*2020/ });
+    fireEvent.click(target);
+    await waitFor(() => expect(screen.getByTestId("gallery-group")).toHaveTextContent("2020年1月1日"));
+    expect(assetsSeek).toHaveBeenCalledWith(10, 100, undefined);
+    expect(assetsPageMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("photo-timeline")).toBeInTheDocument();
+  });
   it("按日期分组渲染组头（日期+数量）与资产块", async () => {
     assetsPageMock.mockResolvedValue([
       ...makePage(3, "2026-09-18", 5),

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { onThisDay, type AssetDto } from "@/ipc/api";
-import type { AssetGroup } from "@/features/gallery/lib/assetGroups";
+import { onThisDay, type AssetDto, type AssetGroupDate } from "@/ipc/api";
+import { groupKeyOfDate, type AssetGroup } from "@/features/gallery/lib/assetGroups";
+import PhotoTimeline from "@/features/gallery/components/PhotoTimeline";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
@@ -29,7 +30,7 @@ function buildYearBlocks(assets: AssetDto[], currentYear: number): YearBlock[] {
   // 同月日查询不可能命中 capturedAt=null，防御性跳过（无年份可归）
   const byYear = new Map<number, AssetDto[]>();
   for (const asset of assets) {
-    const year = Number(asset.capturedAt?.slice(0, 4));
+    const year = Number(groupKeyOfDate(asset.capturedAt).slice(0, 4));
     if (!Number.isFinite(year) || year <= 0 || year >= currentYear) continue;
     const list = byYear.get(year);
     if (list) list.push(asset);
@@ -39,7 +40,7 @@ function buildYearBlocks(assets: AssetDto[], currentYear: number): YearBlock[] {
     .sort((a, b) => b[0] - a[0])
     .map(([year, list]) => ({
       key: `year-${year}`,
-      date: list[0]?.capturedAt?.slice(0, 10) ?? null,
+      date: list[0] ? groupKeyOfDate(list[0].capturedAt) : null,
       assets: list,
       year,
     }));
@@ -50,6 +51,9 @@ export default function MemoriesPage() {
 
   const [assets, setAssets] = useState<AssetDto[]>([]);
   const [status, setStatus] = useState<"loading" | "ready">("loading");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [visibleDate, setVisibleDate] = useState<string | null>(null);
+  const [dateProgress, setDateProgress] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +72,14 @@ export default function MemoriesPage() {
   const { cards, badges } = usePhotoCards(assets);
   const blocks = useMemo(() => buildYearBlocks(cards, currentYear), [cards, currentYear]);
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(blocks, assets);
+  const scrollToMemory = (entry: AssetGroupDate, fraction = 0) => {
+    const element = scrollRef.current;
+    const section = element?.querySelector<HTMLElement>(`[data-year="${entry.date?.slice(0, 4)}"]`);
+    if (!element || !section) return;
+    const last = blocks[blocks.length - 1]?.year === Number(section.dataset.year);
+    element.scrollTop = section.offsetTop + fraction * Math.max(0, section.offsetHeight - (last ? element.clientHeight : 0));
+    element.dispatchEvent(new Event("scroll"));
+  };
 
   return (
     <div className="h-full" data-testid="memories-page">
@@ -79,7 +91,20 @@ export default function MemoriesPage() {
         </div>
 
         {/* 年份分块 / 空态 */}
-        <div className="sp-scroll min-h-0 flex-1 overflow-y-auto" data-testid="memories-content">
+        <div className="relative min-h-0 flex-1">
+        <div ref={scrollRef} className={`sp-scroll relative h-full overflow-y-auto ${blocks.length > 0 ? "[scrollbar-gutter:auto] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" : ""}`} data-testid="memories-content" onScroll={() => {
+          const element = scrollRef.current;
+          if (!element) return;
+          const sections = Array.from(element.querySelectorAll<HTMLElement>("[data-year]"));
+          const visible = [...sections].reverse().find((section) => section.offsetTop <= element.scrollTop + 40);
+          const block = blocks.find((item) => item.year === Number(visible?.dataset.year));
+          setVisibleDate(block?.date ?? blocks[0]?.date ?? null);
+          if (visible && block) {
+            const last = blocks[blocks.length - 1]?.year === block.year;
+            const length = visible.offsetHeight - (last ? element.clientHeight : 0);
+            setDateProgress(Math.max(0, Math.min(1, (element.scrollTop - visible.offsetTop) / Math.max(1, length))));
+          }
+        }}>
           {status === "loading" ? (
             <div
               className="flex h-full items-center justify-center text-xs text-text-muted"
@@ -132,6 +157,12 @@ export default function MemoriesPage() {
               ))}
             </div>
           )}
+        </div>
+        <PhotoTimeline dates={blocks.map((block) => ({ date: block.date, count: block.assets.length, coverAssetId: block.assets[0]?.id ?? 0 }))} currentDate={visibleDate ?? blocks[0]?.date ?? null} dateProgress={dateProgress} busy={false} onJump={scrollToMemory} onDrag={scrollToMemory} onWheelScroll={(delta) => {
+          if (!scrollRef.current) return;
+          scrollRef.current.scrollTop += delta;
+          scrollRef.current.dispatchEvent(new Event("scroll"));
+        }} />
         </div>
       </div>
 

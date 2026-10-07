@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -286,14 +286,19 @@ fn rating_set_syncs_xmp_sidecar_async() {
     assert!(text.contains("Matte"), "LR 结构保留");
     assert!(text.contains("<?xpacket end=\"w\"?>"));
 
-    // 外部库（origin=external）不写边车：评分只入库
+    // 用户主动修改外部引用照片评分时也同步原文件旁的 XMP。
     db.0.execute("UPDATE assets SET origin = 'external' WHERE id = ?1", [id])
         .unwrap();
     std::fs::remove_file(&sidecar).unwrap();
     ipc::rating::fetch_asset_rating_set(&state, id, 2).unwrap();
     assert_eq!(db.asset_by_id(id).unwrap().unwrap().rating, 2, "评分已入库");
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(!sidecar.is_file(), "外部库不写边车");
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            sidecar.is_file()
+                && xmp::sidecar_rating(&std::fs::read_to_string(&sidecar).unwrap()) == Some(2)
+        }),
+        "外部引用照片的主动评分应写入边车"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
+import { createPortal } from "react-dom";
 
 import { useViewerTransform } from "../lib/useViewerTransform";
 import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
@@ -27,6 +28,7 @@ import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type Color
 import type { AssetGroup } from "../lib/assetGroups";
 import { AssetContextMenu } from "./ContextMenu";
 import AssetThumb from "./AssetThumb";
+import ViewerImageLayer from "./ViewerImageLayer";
 import { formatBytes } from "@/lib/format";
 
 /**
@@ -35,8 +37,8 @@ import { formatBytes } from "@/lib/format";
  *   大档缩略图（名义 1280，后端 snap 512）；RAW 无可载原图（inline-JPEG 提取在 M4），
  *   直接用大档缩略图放大显示。
  * - 交互：wheel 以指针为锚缩放 1x-4x（原生非 passive 监听），scale>1 可拖拽平移，
- *   90° 步进旋转（按钮 / 键盘 . , R，transform 顺序 rotate→scale→translate，
- *   150ms 过渡），双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
+ *   90° 步进旋转（按钮 / 键盘 . , R），缩放/平移/旋转共用一条逐帧动画，
+ *   图片按实际尺寸绘制；双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
  *   Esc 返回画廊（画廊页不卸载，滚动位置保留）。旋转随资产切换重置，不持久化。
  * - 切图在不可见解码层完成后原子替换可见图层，避免新旧图片交叉叠显。
  * - 右侧 EXIF 面板可收起；底部只显示当前照片前后各 8 张缩略图，
@@ -44,6 +46,7 @@ import { formatBytes } from "@/lib/format";
  */
 
 const FILM_THUMB_SIZE = 240;
+const VIEWER_BUTTON_CLASS = "pointer-events-auto relative flex h-[31px] w-[31px] shrink-0 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white";
 
 /** 切图首帧即可显示的基础信息；完整 EXIF 返回后在原位补齐，不切成骨架屏。 */
 function detailFromAsset(asset: AssetDto): AssetDetailDto {
@@ -163,9 +166,10 @@ interface ViewerOverlayProps {
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const motionOn = useMotionOn();
-  const { stageRef, view, rotate, resetView, toggleZoom, dragging,
+  const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, dragging,
     handlePointerDown, handlePointerMove, handlePointerUp } = useViewerTransform(asset.id);
   const [fullscreen, setFullscreen] = useState(false);
+  const [topVisible, setTopVisible] = useState(false);
   const [exifOpen, setExifOpen] = useState(true);
   const toggleFullscreen = useCallback(async () => {
     if (isTauri()) {
@@ -215,12 +219,17 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     if (hintTimerRef.current !== null) clearTimeout(hintTimerRef.current);
     hintTimerRef.current = window.setTimeout(() => setHintVisible(false), 3000);
   }, []);
+  const pointerActivity = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    showHint();
+    const top = event.currentTarget.getBoundingClientRect().top;
+    setTopVisible(event.clientY - top <= 64);
+  }, [showHint]);
   useEffect(() => {
     showHint();
     return () => {
       if (hintTimerRef.current !== null) clearTimeout(hintTimerRef.current);
     };
-  }, [showHint]);
+  }, [showHint, asset.id]);
 
   // --- 大图来源（按 kind，分级回退链） -------------------------------------------------
   // photo：原图 → 中间档缩略图（名义 2048，后端加 2048 档）→ 512 档。WebView2 对
@@ -351,6 +360,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       }
       // 编辑浮层打开时，查看器快捷键全部让位（编辑器有自己的键位处理）
       if (editorOpen) return;
+      showHint();
+      if (e.key === "Tab") setTopVisible(true);
       if (e.key === "Escape") {
         if (ctxAt !== null) return; // 菜单自身的 Esc 监听负责关闭
         e.preventDefault();
@@ -544,21 +555,38 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   const hasNext = index < group.assets.length - 1;
   // 固定 17 个槽位，当前照片始终居中。边界处留空，不让缩略图条逐张伸缩。
 
-  return (
+  // A transformed page ancestor must never constrain the fullscreen overlay.
+  return createPortal(
     <motion.div
-      className="fixed inset-0 z-50 flex flex-col bg-black/95"
+      className={`fixed inset-0 z-50 flex flex-col bg-black/95 ${motionOn ? "" : "no-motion"}`}
       role="dialog"
       aria-modal="true"
       aria-label={asset.name}
       data-testid="viewer"
+      onPointerMoveCapture={pointerActivity}
+      onMouseMoveCapture={pointerActivity}
+      onPointerLeave={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        // The native resize border may stop forwarding webview pointer events.
+        // Leaving through the upper edge must keep the revealed controls available.
+        if (event.clientY <= rect.top + 64 && event.clientX >= rect.left - 2 && event.clientX <= rect.right + 2) {
+          setTopVisible(true);
+        } else {
+          setTopVisible(false);
+        }
+      }}
+      onPointerDownCapture={showHint}
+      onWheelCapture={showHint}
+      onFocusCapture={showHint}
       initial={motionInitial(motionOn, { opacity: 0 })}
       animate={closing ? { opacity: 0 } : { opacity: 1 }}
       transition={TRANS.quick}
     >
+      <div className="absolute inset-x-0 top-0 z-[60] h-3" aria-hidden="true" data-tauri-drag-region onPointerEnter={() => { setTopVisible(true); showHint(); }} onMouseEnter={() => { setTopVisible(true); showHint(); }} data-testid="viewer-top-edge" />
       {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
           查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
           （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
-      <div className="relative flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
+      <div className={`absolute left-0 top-0 z-30 flex h-12 items-center gap-3 bg-black/65 pl-4 pr-[245px] text-text-primary backdrop-blur-md transition-[transform,opacity] duration-200 ${topVisible ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-full opacity-0"}`} style={{ right: exifOpen ? 288 : 0 }} data-testid="viewer-titlebar" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
         <div className="absolute inset-0" data-tauri-drag-region />
         <div className="pointer-events-none relative flex min-w-0 items-baseline gap-4">
           <span className="truncate text-sm font-semibold" title={asset.name} data-testid="viewer-name">
@@ -571,64 +599,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             {t("viewer.index", { index: index + 1, total: group.assets.length })}
           </span>
         </div>
-        <div className="pointer-events-none relative ml-auto flex items-center gap-2">
-          {/* 编辑（阶段 D）：打开非破坏编辑浮层；已保存配方时按钮高亮 + 「已编辑」角标 */}
-          <button
-            type="button"
-            onClick={() => setEditorOpen(true)}
-            title={editRecipe !== null ? t("viewer.editEdited") : t("viewer.edit")}
-            className={`pointer-events-auto relative rounded-md border px-2.5 py-1 text-xs transition-colors ${
-              editRecipe !== null
-                ? "border-accent/70 bg-accent/10 text-accent"
-                : "border-edge text-text-secondary hover:border-accent hover:text-accent"
-            }`}
-            data-testid="viewer-edit"
-            data-edited={editRecipe !== null}
-          >
-            {t("viewer.edit")}
-            {editRecipe !== null && (
-              <span
-                className="absolute -right-1.5 -top-1.5 rounded-full bg-accent px-1 text-[9px] font-medium leading-[14px] text-black"
-                data-testid="viewer-edit-badge"
-              >
-                {t("viewer.editBadge")}
-              </span>
-            )}
-          </button>
-          {/* 旋转：90° 步进（逆/顺时针），150ms 过渡；随资产切换重置 */}
-          <button
-            type="button"
-            onClick={() => rotate(-90)}
-            aria-label={t("viewer.rotateCcw")}
-            title={t("viewer.rotateCcw")}
-            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="viewer-rotate-ccw"
-          >
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M3.5 6.5a5 5 0 1 1 1.2 5.4" />
-              <path d="M3.2 3.2v3.3h3.3" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={() => rotate(90)}
-            aria-label={t("viewer.rotateCw")}
-            title={t("viewer.rotateCw")}
-            className="pointer-events-auto rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-            data-testid="viewer-rotate-cw"
-          >
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M12.5 6.5a5 5 0 1 0-1.2 5.4" />
-              <path d="M12.8 3.2v3.3H9.5" />
-            </svg>
-          </button>
         </div>
 
-        </div>
-
-      <div className="flex min-h-0 flex-1">
+      <div className="absolute inset-0 flex min-h-0" data-testid="viewer-layout">
         {/* 左栏整体随详情抽屉伸缩：主图与底部胶片条始终保持同一宽度。 */}
-        <div className="flex min-w-0 flex-1 flex-col" data-testid="viewer-left-pane">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden" data-testid="viewer-left-pane">
         {/* 主区：大图 + 左右切换 */}
         <div className="relative min-h-0 flex-1" data-testid="viewer-preview-pane">
           <div
@@ -649,13 +624,23 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
             data-rotation={view.rotation}
             style={{ cursor: view.scale > 1 ? "grab" : "default" }}
           >
-            {/* 全屏与退出入口固定在预览区右上角。 */}
-            <div className="pointer-events-auto absolute right-3 top-3 z-20 flex gap-2">
-            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setExifOpen((open) => !open)} aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} aria-pressed={exifOpen} className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white" data-testid="viewer-exif-toggle">
-              <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7.3" /><path d="M10 9v5" strokeLinecap="round" /><circle cx="10" cy="6" r=".9" fill="currentColor" stroke="none" /></svg>
+            {/* 常用操作统一放在图片右上角，圆形按钮保持相同尺寸。 */}
+            <div className={`absolute right-3 top-3 z-40 flex gap-1.5 transition-[transform,opacity] duration-200 ${topVisible ? "pointer-events-auto translate-y-0 opacity-100" : "pointer-events-none -translate-y-[calc(100%+24px)] opacity-0"}`} onDoubleClick={(event) => event.stopPropagation()} data-testid="viewer-top-controls" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => rotate(-90)} aria-label={t("viewer.rotateCcw")} title={t("viewer.rotateCcw")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-rotate-ccw">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3.5 6.5a5 5 0 1 1 1.2 5.4" /><path d="M3.2 3.2v3.3h3.3" /></svg>
             </button>
-            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => void toggleFullscreen()} aria-label={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} title={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} className="flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white" data-testid="viewer-fullscreen">
-              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={fullscreen ? "M2 6h4V2M10 2v4h4M14 10h-4v4M6 14v-4H2" : "M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"} /></svg>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => rotate(90)} aria-label={t("viewer.rotateCw")} title={t("viewer.rotateCw")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-rotate-cw">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12.5 6.5a5 5 0 1 0-1.2 5.4" /><path d="M12.8 3.2v3.3H9.5" /></svg>
+            </button>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setEditorOpen(true)} aria-label={t("viewer.edit")} title={editRecipe !== null ? t("viewer.editEdited") : t("viewer.edit")} className={`${VIEWER_BUTTON_CLASS} ${editRecipe !== null ? "border-accent/70 text-accent" : ""}`} data-testid="viewer-edit" data-edited={editRecipe !== null}>
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10.6 2.2a1.6 1.6 0 0 1 2.3 2.3l-7.5 7.5-3.2.9.9-3.2zM9.4 3.4l2.3 2.3" /></svg>
+              {editRecipe !== null && <span className="absolute right-0 top-0 h-1.5 w-1.5 rounded-full bg-accent" data-testid="viewer-edit-badge" aria-hidden="true"><span className="sr-only">{t("viewer.editBadge")}</span></span>}
+            </button>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setExifOpen((open) => !open)} aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} aria-pressed={exifOpen} className={VIEWER_BUTTON_CLASS} data-testid="viewer-exif-toggle">
+              <svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7.3" /><path d="M10 9v5" strokeLinecap="round" /><circle cx="10" cy="6" r=".9" fill="currentColor" stroke="none" /></svg>
+            </button>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => void toggleFullscreen()} aria-label={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} title={fullscreen ? t("viewer.leaveFullscreen") : t("viewer.fullscreen")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-fullscreen">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={fullscreen ? "M2 6h4V2M10 2v4h4M14 10h-4v4M6 14v-4H2" : "M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"} /></svg>
             </button>
             <button
               type="button"
@@ -663,10 +648,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               onClick={closeViewer}
               aria-label={t("viewer.exit")}
               title={t("viewer.exit")}
-              className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-md backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
+              className={VIEWER_BUTTON_CLASS}
               data-testid="viewer-close"
             >
-              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
                 <path d="M4 4l8 8M12 4l-8 8" />
               </svg>
             </button>
@@ -690,8 +675,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 完成后原子替换，任何入场动画都会先露出黑底再淡入（一闪黑）。 */}
             <div className="absolute inset-0 flex items-center justify-center">
             {imageLayers.map((layer) => (
-              <img
+              <ViewerImageLayer
                 key={layer.src}
+                viewport={stageSize}
+                view={renderedView}
+                dragging={dragging}
+                animating={animating}
                 src={layer.src}
                 alt={layer.phase === "active" ? asset.name : ""}
                 aria-hidden={layer.phase === "active" ? undefined : "true"}
@@ -744,14 +733,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 data-fallback={sourceKind(layer.src)}
                 className={`${
                   layer.phase === "loading" ? "invisible " : "absolute "
-                }max-h-full max-w-full select-none object-contain will-change-transform [backface-visibility:hidden]`}
-                style={{
-                  // 变换顺序 translate→rotate→scale（origin=center）：图片自身中心先随平移
-                  // 移动，旋转恒绕图片当前视觉中心（Windows 照片同款，平移后旋转不绕错轴）
-                  transform: `translate(${view.x}px, ${view.y}px) rotate(${view.rotation}deg) scale(${view.scale})`,
-                  // 拖拽跟手直通；滚轮/双击/旋转目标值变化走过渡（缩放流畅）
-                  transition: dragging ? "none" : "transform 150ms cubic-bezier(0.2, 0, 0, 1)",
-                }}
+                }`}
               />
             ))}
             </div>
@@ -792,10 +774,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               onClick={() => onNavigate(index - 1)}
               disabled={!hasPrev}
               aria-label={t("viewer.prev")}
-              className="pointer-events-auto absolute left-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className={`absolute left-3 top-1/2 z-10 flex h-[31px] w-[31px] -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-[transform,opacity,background-color,border-color,color] duration-200 hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30 ${hintVisible ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none -translate-x-[calc(100%+16px)] opacity-0"}`}
+              aria-hidden={!hintVisible}
+              inert={!hintVisible}
               data-testid="viewer-prev"
             >
-              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M10 3L5 8l5 5" />
               </svg>
             </button>
@@ -805,10 +789,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               onClick={() => onNavigate(index + 1)}
               disabled={!hasNext}
               aria-label={t("viewer.next")}
-              className="pointer-events-auto absolute right-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
+              className={`absolute right-3 top-1/2 z-10 flex h-[31px] w-[31px] -translate-y-1/2 items-center justify-center rounded-full border border-edge bg-black/50 text-text-primary transition-[transform,opacity,background-color,border-color,color] duration-200 hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30 ${hintVisible ? "pointer-events-auto translate-x-0 opacity-100" : "pointer-events-none translate-x-[calc(100%+16px)] opacity-0"}`}
+              aria-hidden={!hintVisible}
+              inert={!hintVisible}
               data-testid="viewer-next"
             >
-              <svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M6 3l5 5-5 5" />
               </svg>
             </button>
@@ -816,7 +802,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           {/* 操作提示：CSS 过渡淡入淡出（确定性，不走动画帧） */}
           <p
             onMouseEnter={showHint}
-            className={`absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded bg-black/40 px-2 py-0.5 font-mono text-[10px] text-text-muted/80 transition-opacity duration-300 ${
+            className={`absolute bottom-[90px] left-1/2 -translate-x-1/2 rounded bg-black/40 px-2 py-0.5 font-mono text-[10px] text-text-muted/80 transition-opacity duration-300 ${
               hintVisible ? "opacity-100" : "pointer-events-none opacity-0"
             }`}
             data-testid="viewer-hint"
@@ -825,7 +811,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           </p>
         </div>
 
-        <div className="flex h-[70px] shrink-0 items-center justify-center gap-1 overflow-hidden border-t border-edge px-2" data-testid="viewer-filmstrip">
+        <div className={`absolute inset-x-3 bottom-3 z-20 flex h-[70px] items-center justify-center gap-1 overflow-hidden rounded-xl border border-white/10 bg-black/60 px-2 shadow-xl backdrop-blur-md transition-[transform,opacity] duration-200 ease-out ${hintVisible ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-full opacity-0"}`} data-testid="viewer-filmstrip" data-visible={hintVisible} aria-hidden={!hintVisible} inert={!hintVisible}>
           {Array.from({ length: 17 }, (_, slot) => {
             const itemIndex = index + slot - 8;
             const item = group.assets[itemIndex];
@@ -1057,10 +1043,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       {ctxAt !== null && (
         <AssetContextMenu
           at={ctxAt}
-          assets={[asset]}
+          assets={[{ ...asset, rating: currentRating, flagged: currentFlagged, colorLabel: currentColor, rejected: currentRejected }]}
           onClose={() => setCtxAt(null)}
-          onColorLabeled={(_, label) => onAssetPatched?.(asset.id, { colorLabel: label })}
-          onRejected={(_, rejected) => onAssetPatched?.(asset.id, { rejected })}
+          onFavoritesChanged={(_, favorite) => { setRatingDraft(favorite ? 5 : 0); onAssetPatched?.(asset.id, { rating: favorite ? 5 : 0 }); }}
+          onFlagged={(_, flagged) => { setFlagDraft(flagged); onAssetPatched?.(asset.id, { flagged }); }}
+          onColorLabeled={(_, label) => { setColorDraft(label); onAssetPatched?.(asset.id, { colorLabel: label }); }}
+          onRejected={(_, rejected) => { setRejectDraft(rejected); onAssetPatched?.(asset.id, { rejected }); }}
         />
       )}
 
@@ -1077,6 +1065,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
           }}
         />
       )}
-    </motion.div>
+    </motion.div>,
+    document.body,
   );
 }

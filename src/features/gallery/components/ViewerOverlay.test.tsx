@@ -443,6 +443,40 @@ describe("查看器：源缺失（missing）", () => {
 // --- 切换与关闭 ---------------------------------------------------------------------
 
 describe("查看器：左右切换与关闭", () => {
+  it("全屏预览挂在窗口顶层，画布不受页面动画或页面高度限制", async () => {
+    convertMock.mockImplementation((path: string) => `asset://${path}`);
+    const group = groupAssetsByDate(GROUP_ASSETS)[0];
+    render(<div data-testid="transformed-page" style={{ transform: "translateY(8px)", height: 300, overflow: "hidden" }}>
+      <I18nextProvider i18n={i18n}><ViewerOverlay asset={GROUP_ASSETS[0]} group={group} index={0} onNavigate={() => {}} onClose={() => {}} /></I18nextProvider>
+    </div>);
+    const viewer = await screen.findByTestId("viewer");
+    expect(viewer.parentElement).toBe(document.body);
+    expect(viewer.closest('[data-testid="transformed-page"]')).toBeNull();
+    expect(screen.getByTestId("viewer-layout")).toHaveClass("absolute", "inset-0");
+    expect(screen.getByTestId("viewer-titlebar")).toHaveClass("absolute");
+    expect(screen.getByTestId("viewer-filmstrip")).toHaveClass("absolute");
+  });
+  it("顶部标题和功能按钮默认收回，靠近顶部展开，移开后收回", async () => {
+    convertMock.mockImplementation((path: string) => `asset://${path}`);
+    renderViewer();
+    const viewer = await screen.findByTestId("viewer");
+    vi.spyOn(viewer, "getBoundingClientRect").mockReturnValue({ top: 0, left: 0, right: 1280, bottom: 800, x: 0, y: 0, width: 1280, height: 800, toJSON: () => ({}) });
+    const title = screen.getByTestId("viewer-titlebar");
+    const controls = screen.getByTestId("viewer-top-controls");
+    expect(title).toHaveAttribute("data-visible", "false");
+    expect(controls).toHaveAttribute("inert");
+    expect(title).toHaveClass("absolute");
+    fireEvent.mouseEnter(screen.getByTestId("viewer-top-edge"));
+    expect(title).toHaveAttribute("data-visible", "true");
+    fireEvent.mouseMove(viewer, { clientY: 20 });
+    expect(title).toHaveAttribute("data-visible", "true");
+    expect(controls).not.toHaveAttribute("inert");
+    fireEvent(viewer, new MouseEvent("pointerout", { bubbles: true, clientX: 300, clientY: 0, relatedTarget: null }));
+    expect(title).toHaveAttribute("data-visible", "true");
+    fireEvent.mouseMove(viewer, { clientY: 200 });
+    expect(title).toHaveAttribute("data-visible", "false");
+    expect(controls).toHaveAttribute("inert");
+  });
   it("图片缩放后点击左右箭头仍能切图，不被拖拽捕获拦截", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     function StatefulViewer() {
@@ -514,14 +548,14 @@ describe("查看器：左右切换与关闭", () => {
     expect(setIndex).toBeDefined();
   });
 
-  it("旋转 transform 顺序 translate→rotate→scale（平移后旋转绕图片视觉中心）", async () => {
+  it("旋转保持 translate→rotate 顺序，缩放由实际尺寸负责", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer();
     const img = await screen.findByTestId("viewer-img");
 
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
     await waitFor(() =>
-      expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg) scale(1)"),
+      expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg)"),
     );
   });
 
@@ -594,7 +628,10 @@ describe("查看器：左右切换与关闭", () => {
     renderViewer();
     expect(screen.getByTestId("viewer-exif")).toBeInTheDocument();
     const controls = screen.getByTestId("viewer-fullscreen").parentElement!;
-    expect(controls.firstElementChild).toBe(screen.getByTestId("viewer-exif-toggle"));
+    expect(screen.getByTestId("viewer-exif-toggle").nextElementSibling).toBe(screen.getByTestId("viewer-fullscreen"));
+    expect(screen.getByTestId("viewer-edit").parentElement).toBe(controls);
+    expect(screen.getByTestId("viewer-rotate-ccw").parentElement).toBe(controls);
+    expect(screen.getByTestId("viewer-rotate-cw").parentElement).toBe(controls);
     fireEvent.keyDown(window, { key: "F11" });
     await waitFor(() => expect(setFullscreen).toHaveBeenCalledWith(true));
     await waitFor(() => expect(screen.queryByTestId("viewer-exif")).not.toBeInTheDocument());
@@ -693,7 +730,7 @@ describe("查看器：旋转（90° 步进）", () => {
     for (let i = 0; i < 4; i += 1) fireEvent.click(rotateLeft);
 
     expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-rotation", "-360");
-    expect(screen.getByTestId("viewer-img").style.transform).toContain("rotate(-360deg)");
+    await waitFor(() => expect(screen.getByTestId("viewer-img").style.transform).toContain("rotate(-360deg)"));
   });
 
   it("键盘 . , R 旋转（./R=顺时针，,=逆时针）", async () => {
@@ -727,12 +764,28 @@ describe("查看器：旋转（90° 步进）", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(screen.getByTestId("viewer-hint")).toBeInTheDocument();
+      const strip = screen.getByTestId("viewer-filmstrip");
+      expect(strip).toHaveClass("absolute");
+      expect(strip).toHaveAttribute("data-visible", "true");
 
       // 3s 后淡出（CSS opacity 过渡：类切换确定）
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3250);
       });
       expect(screen.getByTestId("viewer-hint").className).toContain("opacity-0");
+      expect(strip).toHaveAttribute("data-visible", "false");
+      expect(strip).toHaveAttribute("inert");
+      expect(screen.getByTestId("viewer-prev")).toHaveAttribute("inert");
+      expect(screen.getByTestId("viewer-next")).toHaveAttribute("inert");
+      fireEvent.mouseMove(screen.getByTestId("viewer"));
+      expect(strip).toHaveAttribute("data-visible", "true");
+      expect(screen.getByTestId("viewer-next")).not.toHaveAttribute("inert");
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      fireEvent.wheel(screen.getByTestId("viewer-stage"), { deltaY: -1 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(strip).toHaveAttribute("data-visible", "true");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+      expect(strip).toHaveAttribute("data-visible", "false");
 
       // ? 唤出，再过 3s 又淡出
       fireEvent.keyDown(window, { key: "?" });

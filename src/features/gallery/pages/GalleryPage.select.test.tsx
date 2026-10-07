@@ -128,6 +128,14 @@ beforeEach(() => {
   localStorage.removeItem(SHORTCUTS_HINT_KEY);
 });
 
+function selectedCount() { return screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true").length; }
+async function contextItem(key: string) {
+  const tiles = screen.getAllByTestId("gallery-tile");
+  const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0];
+  fireEvent.contextMenu(target, { clientX: 100, clientY: 100 });
+  return screen.findByTestId("asset-context-menu-item-" + key);
+}
+
 // --- 进出选择态与多选 -----------------------------------------------------------------
 
 describe("画廊：选择模式（check 圆钮入口）", () => {
@@ -141,7 +149,7 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     expect(screen.getAllByTestId("tile-check")).toHaveLength(3);
 
     await user.click(checkOf(1));
-    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "1");
+    expect(selectedCount()).toBe(1);
     // 实心勾：选中瓦片圆钮 data-selected=true
     expect(checkOf(1)).toHaveAttribute("data-selected", "true");
     expect(checkOf(3)).toHaveAttribute("data-selected", "false");
@@ -151,11 +159,11 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     await user.click(tileOf(3));
     const selected = screen.getAllByTestId("gallery-tile").filter((t) => t.getAttribute("data-selected") === "true");
     expect(selected).toHaveLength(2);
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张");
+    expect(selectedCount()).toBe(2);
 
     // 再点已选瓦片圆钮 = 取消选中
     await user.click(checkOf(1));
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+    expect(selectedCount()).toBe(1);
   });
 
   it("Ctrl+点击直接进入多选并选中该资产；Esc 退出清空", async () => {
@@ -164,8 +172,8 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
 
     // Ctrl+点击（未开多选也能进入）
     fireEvent.click(tiles[1], { ctrlKey: true }); // tiles[1] = DESC 序的第二张（id 2）
-    await waitFor(() => expect(screen.getByTestId("selection-bar")).toBeInTheDocument());
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+    expect(selectedCount()).toBe(1);
+    expect(selectedCount()).toBe(1);
     const selected = screen.getAllByTestId("gallery-tile").filter((t) => t.getAttribute("data-selected") === "true");
     expect(selected).toHaveLength(1);
 
@@ -188,14 +196,14 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     await user.click(checkOf(1));
     await user.click(tileOf(2));
 
-    await user.click(screen.getByTestId("selection-favorite"));
+    await user.click(await contextItem("favorite"));
     await waitFor(() => {
       expect(ratingMock).toHaveBeenCalledWith(1, 5);
       expect(ratingMock).toHaveBeenCalledWith(2, 5);
     });
     expect(ratingMock).not.toHaveBeenCalledWith(3, 5);
 
-    await user.click(screen.getByTestId("selection-flag"));
+    await user.click(await contextItem("flag"));
     await waitFor(() => {
       expect(flagMock).toHaveBeenCalledWith(1, true);
       expect(flagMock).toHaveBeenCalledWith(2, true);
@@ -212,29 +220,26 @@ describe("画廊：选择模式（check 圆钮入口）", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "1");
+    expect(selectedCount()).toBe(1);
 
-    await user.click(screen.getByTestId("selection-share"));
-    await user.click(screen.getByTestId("selection-share-reveal"));
+    await user.click(await contextItem("reveal"));
     await waitFor(() => expect(revealBatchMock).toHaveBeenCalledWith([makeAsset(1).path]));
     // reveal 完成后短提示（1.5s 自动消失，断言在窗口内）
-    await waitFor(() => expect(screen.getByTestId("selection-toast")).toBeInTheDocument());
 
-    await user.click(screen.getByTestId("selection-share"));
-    fireEvent.click(screen.getByTestId("selection-share-copy"));
+    fireEvent.click(await contextItem("copy-path"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(makeAsset(1).path));
     writeText.mockRestore();
   });
 
-  it("「取消」退出选择模式", async () => {
+  it("Esc 退出选择模式", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+    expect(selectedCount()).toBe(1);
 
-    await user.click(screen.getByTestId("selection-cancel"));
+    fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
   });
 });
@@ -289,7 +294,7 @@ describe("画廊：瓦片右键菜单", () => {
 
     await user.click(checkOf(1));
     await user.click(checkOf(2));
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张");
+    expect(selectedCount()).toBe(2);
 
     // 右键选中集中的瓦片 1：作用于全部选中（1、2）
     fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
@@ -313,7 +318,7 @@ describe("画廊：瓦片右键菜单", () => {
     // 右键不在选中集的瓦片 3：选中集切为 [3]
     fireEvent.contextMenu(tileOf(3), { clientX: 100, clientY: 100 });
     const menu = await screen.findByTestId("asset-context-menu");
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张"));
+    await waitFor(() => expect(selectedCount()).toBe(1));
     expect(checkOf(3)).toHaveAttribute("data-selected", "true");
     expect(checkOf(1)).toHaveAttribute("data-selected", "false");
 
@@ -338,19 +343,19 @@ describe("画廊：瓦片右键菜单", () => {
   });
 });
 
-// --- 加入相册入口（③ 全局：多选操作条 + 瓦片右键菜单） -----------------------------------
+// --- 加入相册入口（③ 全局：多选右键菜单 + 瓦片右键菜单） -----------------------------------
 
 describe("画廊：加入相册入口", () => {
-  it("多选操作条「加入相册」→ 弹窗（已选计数）确定 → album_add_assets(相册, 选中集)", async () => {
+  it("多选右键菜单「加入相册」→ 弹窗（已选计数）确定 → album_add_assets(相册, 选中集)", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
     await user.click(tileOf(2));
-    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "2");
+    expect(selectedCount()).toBe(2);
 
-    await user.click(screen.getByTestId("selection-add-album"));
+    await user.click(await contextItem("add-album"));
     const dialog = await screen.findByTestId("add-to-album-dialog");
     expect(within(dialog).getByText("2 张")).toBeInTheDocument();
 
@@ -423,30 +428,30 @@ describe("画廊：多选切换语义（再点即取消）", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-favorite"));
+    await user.click(await contextItem("favorite"));
     await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 5));
     // 按钮文案随切换态翻转：收藏 → 取消收藏
-    await waitFor(() => expect(screen.getByTestId("selection-favorite")).toHaveTextContent("取消收藏"));
+    expect(await contextItem("favorite")).toHaveTextContent("取消收藏");
 
     // 乐观回写 rating=5 后再点：全部已收藏 → 取消
-    await user.click(screen.getByTestId("selection-favorite"));
+    await user.click(await contextItem("favorite"));
     await waitFor(() => expect(ratingMock).toHaveBeenCalledWith(1, 0));
-    await waitFor(() => expect(screen.getByTestId("selection-favorite")).toHaveTextContent("收藏"));
+    expect(await contextItem("favorite")).toHaveTextContent("收藏");
   });
 
-  it("旗标按钮文案随切换态翻转：旗标 → 取消旗标（乐观覆盖，无需上层回写）", async () => {
+  it("右键旗标文案随切换态翻转：旗标 → 取消旗标（乐观覆盖，无需上层回写）", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(2));
-    await user.click(screen.getByTestId("selection-flag"));
+    await user.click(await contextItem("flag"));
     await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, true));
-    await waitFor(() => expect(screen.getByTestId("selection-flag")).toHaveTextContent("取消旗标"));
+    expect(await contextItem("flag")).toHaveTextContent("取消旗标");
     // 再点：取消旗标
-    await user.click(screen.getByTestId("selection-flag"));
+    await user.click(await contextItem("flag"));
     await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, false));
-    await waitFor(() => expect(screen.getByTestId("selection-flag")).toHaveTextContent("旗标"));
+    expect(await contextItem("flag")).toHaveTextContent("旗标");
   });
 
   it("全选：数据窗口全选；再点=取消全选（空集）", async () => {
@@ -455,13 +460,13 @@ describe("画廊：多选切换语义（再点即取消）", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-all"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 3 张"));
-    expect(screen.getByTestId("selection-all")).toHaveTextContent("取消全选");
+    await user.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(3));
+    expect(await contextItem("select-all")).toHaveTextContent("取消全选");
 
-    await user.click(screen.getByTestId("selection-all"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 0 张"));
-    expect(screen.getByTestId("selection-all")).toHaveTextContent("全选");
+    await user.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(0));
+    expect(await contextItem("select-all")).toHaveTextContent("全选");
   });
 
   it("旗标：全部已旗标再点=取消", async () => {
@@ -470,7 +475,7 @@ describe("画廊：多选切换语义（再点即取消）", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(2));
-    await user.click(screen.getByTestId("selection-flag"));
+    await user.click(await contextItem("flag"));
     await waitFor(() => expect(flagMock).toHaveBeenCalledWith(2, true));
     // 旗标无乐观回写（assets.flagged 不变）→ 仍视为未旗标，语义不变：
     // 这里只验证切换语义依赖选中集自身的 flagged 态

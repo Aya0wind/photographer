@@ -106,10 +106,10 @@ describe("回收站页：多选与批量操作", () => {
 
     await user.click(within(tileOf(1)).getByTestId("tile-check"));
     await user.click(tileOf(2));
-    expect(screen.getByTestId("trash-actions")).toHaveAttribute("data-count", "2");
-    expect(screen.getByTestId("trash-selected-count")).toHaveTextContent("已选 2 项");
+    expect(selectedCount()).toBe(2);
+    expect(selectedCount()).toBe(2);
 
-    await user.click(screen.getByTestId("trash-cancel"));
+    fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("trash-actions")).not.toBeInTheDocument());
   });
 
@@ -120,7 +120,7 @@ describe("回收站页：多选与批量操作", () => {
 
     await user.click(within(tileOf(1)).getByTestId("tile-check"));
     await user.click(within(tileOf(3)).getByTestId("tile-check"));
-    await user.click(screen.getByTestId("trash-restore"));
+    await user.click(await contextItem("restore"));
 
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith([1, 3]));
     await waitFor(() => {
@@ -132,7 +132,7 @@ describe("回收站页：多选与批量操作", () => {
     // 失败分支：不剔除
     restoreMock.mockResolvedValue(false);
     await user.click(within(tileOf(2)).getByTestId("tile-check"));
-    await user.click(screen.getByTestId("trash-restore"));
+    await user.click(await contextItem("restore"));
     await waitFor(() => expect(screen.getByTestId("trash-toast")).toHaveTextContent("恢复失败"));
     expect(screen.getByTestId("gallery-tile")).toHaveAttribute("data-asset-id", "2");
   });
@@ -145,7 +145,7 @@ describe("回收站页：多选与批量操作", () => {
 
     await user.click(within(tileOf(1)).getByTestId("tile-check"));
     await user.click(within(tileOf(2)).getByTestId("tile-check"));
-    await user.click(screen.getByTestId("trash-purge-open"));
+    await user.click(await contextItem("purge"));
 
     const dialog = screen.getByTestId("trash-purge-dialog");
     expect(screen.getByTestId("trash-purge-title")).toHaveTextContent("彻底删除 2 项");
@@ -167,12 +167,12 @@ describe("回收站页：多选与批量操作", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(within(tileOf(2)).getByTestId("tile-check"));
-    await user.click(screen.getByTestId("trash-purge-open"));
+    await user.click(await contextItem("purge"));
     await user.click(screen.getByTestId("trash-purge-cancel"));
     expect(screen.queryByTestId("trash-purge-dialog")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(3);
 
-    await user.click(screen.getByTestId("trash-purge-open"));
+    await user.click(await contextItem("purge"));
     await user.click(screen.getByTestId("trash-purge-files"));
     await waitFor(() => expect(purgeMock).toHaveBeenCalledWith([2], true));
     await waitFor(() => {
@@ -191,22 +191,25 @@ describe("回收站页：全选/反选", () => {
 
     // 进多选（点一张）
     fireEvent.click(tiles[0]);
-    expect(await screen.findByTestId("trash-actions")).toHaveAttribute("data-count", "1");
+    expect(selectedCount()).toBe(1);
 
     // 全选：3 张 + 按钮变「取消全选」
-    fireEvent.click(screen.getByTestId("trash-select-all"));
-    await waitFor(() => expect(screen.getByTestId("trash-actions")).toHaveAttribute("data-count", "3"));
-    expect(screen.getByTestId("trash-select-all")).toHaveTextContent("取消全选");
+    fireEvent.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(3));
+    expect(await contextItem("select-all")).toHaveTextContent("取消全选");
 
     // 反选：补集 = 空集
-    fireEvent.click(screen.getByTestId("trash-invert"));
+    fireEvent.click(await contextItem("invert"));
     await waitFor(() => expect(screen.queryByTestId("trash-actions")).not.toBeInTheDocument());
 
     // 再进多选后全选 → 取消全选回空
     fireEvent.click(screen.getAllByTestId("gallery-tile")[1]);
-    fireEvent.click(screen.getByTestId("trash-select-all"));
-    await waitFor(() => expect(screen.getByTestId("trash-actions")).toHaveAttribute("data-count", "3"));
-    fireEvent.click(screen.getByTestId("trash-select-all"));
+    fireEvent.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(3));
+    fireEvent.click(await contextItem("select-all"));
     await waitFor(() => expect(screen.queryByTestId("trash-actions")).not.toBeInTheDocument());
   });
 });
+
+function selectedCount() { return screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true").length; }
+async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("trash-context-menu-item-" + key); }

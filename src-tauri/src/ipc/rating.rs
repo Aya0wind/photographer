@@ -2,8 +2,8 @@
 //!
 //! 铁律：评分写库快（单行 UPDATE）在 run_blocking 内完成；XMP 边车是磁盘
 //! IO → supervisor 后台线程，**失败不阻塞评分入库**（AppError 事件上报）。
-//! 外部库（origin=external）默认不写边车（spec §5.4：原地索引只读资产，
-//! 用户可后续放开）；XMP → DB 的反向回填在 exif 索引通道
+//! 仅导入时不会写源目录；用户主动修改评分后，外部照片也同步 XMP 边车。
+//! XMP → DB 的反向回填在 exif 索引通道
 //! （index::process_exif_task，只读边车不回写，无循环）。
 
 use std::path::PathBuf;
@@ -33,18 +33,12 @@ pub fn fetch_asset_rating_set(
     if !(0..=5).contains(&rating) {
         return Err(format!("评分必须在 0-5：{rating}"));
     }
-    let (path, origin, rejected) = {
+    let (path, rejected) = {
         let db = super::active_library_db(state)?;
         db.0.query_row(
-            "SELECT path, origin, rejected FROM assets WHERE id = ?1",
+            "SELECT path, rejected FROM assets WHERE id = ?1",
             [asset_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)? != 0,
-                ))
-            },
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
         )
         .map_err(|e| e.to_string())?
     };
@@ -56,10 +50,7 @@ pub fn fetch_asset_rating_set(
         return Err(format!("资产 {asset_id} 不存在"));
     }
 
-    // XMP 边车同步（异步）：外部库只读资产默认跳过
-    if origin == "external" {
-        return Ok(());
-    }
+    // 用户主动评分时，即使原文件是外部引用，也同步旁边的 XMP 边车。
     let projected = projected_rating(rating, rejected);
     spawn_xmp_sync(
         state,

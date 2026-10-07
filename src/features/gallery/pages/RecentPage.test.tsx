@@ -116,6 +116,16 @@ describe("最近浏览：查看器打点闭环", () => {
 });
 
 describe("最近浏览：多选", () => {
+  it("未进入多选时也能右键加入相册，菜单关闭后弹窗保留", async () => {
+    recentViewedMock.mockResolvedValue([makeAsset(1)]);
+    renderRecent();
+    const tiles = await screen.findAllByTestId("gallery-tile");
+    fireEvent.contextMenu(tiles[0], { clientX: 100, clientY: 100 });
+    fireEvent.click(await screen.findByTestId("asset-context-menu-item-add-album"));
+    expect(await screen.findByTestId("add-to-album-dialog")).toBeInTheDocument();
+    expect(screen.queryByTestId("asset-context-menu")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+  });
   it("Ctrl+点击进多选 → 操作条（收藏/加册/全选/回收站）；全选计数与取消全选", async () => {
     recentViewedMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
     renderRecent();
@@ -123,17 +133,20 @@ describe("最近浏览：多选", () => {
     expect(tiles).toHaveLength(3);
 
     fireEvent.click(tiles[0], { ctrlKey: true });
-    expect(await screen.findByTestId("selection-bar")).toBeInTheDocument();
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+    expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument();
+    expect(selectedCount()).toBe(1);
 
     // 全选 → 3 张；再点 → 取消全选（切换语义）
-    fireEvent.click(screen.getByTestId("selection-all"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 3 张"));
-    expect(screen.getByTestId("selection-all")).toHaveTextContent("取消全选");
-    fireEvent.click(screen.getByTestId("selection-all"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 0 张"));
+    fireEvent.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(3));
+    expect(await contextItem("select-all")).toHaveTextContent("取消全选");
+    fireEvent.click(await contextItem("select-all"));
+    await waitFor(() => expect(selectedCount()).toBe(0));
 
-    fireEvent.click(screen.getByTestId("selection-cancel"));
+    fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByTestId("selection-bar")).not.toBeInTheDocument());
   });
 });
+
+function selectedCount() { return screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true").length; }
+async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("asset-context-menu-item-" + key); }

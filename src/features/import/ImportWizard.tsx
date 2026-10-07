@@ -58,6 +58,7 @@ import {
 } from "@/features/albums/lib/ungroupedAlbum";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { formatBytes } from "@/lib/format";
+import ErrorModal from "@/shared/components/ErrorModal";
 export { fetchThumbUrl, resetThumbCacheForTests } from "./lib/sourceThumbs";
 
 export { VIEW_MODE_STORAGE_KEY, PANEL_COLLAPSE_KEY, COL_WIDTHS_KEY, TILE_SIZE_KEY } from "./lib/useImportLayout";
@@ -494,10 +495,13 @@ export default function ImportWizard() {
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
-  // 源选择失败文案（folderScan 失败等）：中栏一行红字，选中其他源时清除
+  // 源选择失败通过确认对话框展示，选中其他源时清除。
   const [sourceError, setSourceError] = useState<string | null>(null);
-  // LR 式导入模式（顶部分段条）：复制保留原文件 / 移动纳管
+  // 顶部导入模式：复制、移动或只在数据库登记原文件。
   const [mode, setMode] = useState<ImportMode>("copy");
+  useEffect(() => {
+    if (device?.kind === "mtp" && mode === "reference") setMode("copy");
+  }, [device?.kind, mode]);
   const { viewMode, setViewMode, panelCollapse, colWidths, tileSize, setTileSize,
     togglePanelSection, resizeColumn, resetColumns } = useImportLayout();
 
@@ -529,7 +533,7 @@ export default function ImportWizard() {
   // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
   const secondReady = !secondEnabled || secondRoot.trim().length > 0;
   const canStart =
-    Boolean(device && activeLibrary && targetRoot) && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed" && secondReady && selected.size > 0 && !starting;
+    Boolean(device && activeLibrary && targetRoot) && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed" && !(mode === "reference" && isMtp) && secondReady && selected.size > 0 && !starting;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -595,7 +599,7 @@ export default function ImportWizard() {
       return false;
     }
     if (!snapshot) {
-      // 失败不再静默：中栏一行红字提示（此前「点了没反应」难排查）
+      // 失败不再静默：确认对话框明确提示。
       setSourceError(t("wizard.fs.scanFailed", { dir: path }));
       return false;
     }
@@ -706,7 +710,7 @@ export default function ImportWizard() {
       streams: effectiveStreams,
       mode,
       secondTarget:
-        secondEnabled && secondRoot.trim()
+        mode === "copy" && secondEnabled && secondRoot.trim()
           ? { targetRoot: secondRoot.trim(), dirTemplate: FIXED_PLAN_DIR_TEMPLATE }
           : undefined,
       // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
@@ -742,7 +746,8 @@ export default function ImportWizard() {
         skipImported,
       },
     });
-    void save(useSettingsStore.getState().settings);
+    // 导入任务已成功启动；偏好保存失败由 store 记录，不能令任务重复启动。
+    void save(useSettingsStore.getState().settings).catch(() => {});
     // LR 式后台导入：点了导入立即回画廊继续浏览，进度由全局右下角进度卡常驻呈现
     navigate("/gallery");
   }
@@ -769,21 +774,21 @@ export default function ImportWizard() {
           aria-label={t("wizard.mode.label")}
           data-testid="wizard-mode"
         >
-          {(["copy", "move"] as const).map((option) => (
+          {(["copy", "move", "reference"] as const).map((option) => (
             <button
               key={option}
               type="button"
               role="radio"
               aria-checked={mode === option}
+              disabled={option === "reference" && device?.kind === "mtp"}
               onClick={() => {
                 setMode(option);
-                // 互斥：切到移动时自动关掉双目的地（后端拒 move+secondTarget）
-                if (option === "move") setSecondEnabled(false);
+                if (option !== "copy") setSecondEnabled(false);
               }}
               className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
                 mode === option
                   ? "bg-accent text-black"
-                  : "text-text-secondary hover:text-text-primary"
+                  : "text-text-secondary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
               }`}
               data-testid={`wizard-mode-${option}`}
             >
@@ -1074,11 +1079,6 @@ export default function ImportWizard() {
               {device.scanStatus === "scanning" && <span role="status" className="flex shrink-0 items-center gap-1.5 text-accent"><span className="h-3 w-3 animate-spin rounded-full border border-accent/30 border-t-accent" />{t("wizard.scanningPhotos", { count: files.length })}</span>}
             </div>
           )}
-          {sourceError && (
-            <p className="shrink-0 border-b border-edge px-3 py-1.5 text-[11px] text-red-400" role="alert" data-testid="wizard-source-error">
-              {sourceError}
-            </p>
-          )}
           {files.length === 0 ? (
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center">
               <FolderGlyph size={36} className="mb-4 text-text-muted" />
@@ -1156,7 +1156,9 @@ export default function ImportWizard() {
               className="flex flex-col gap-1.5 rounded-lg border border-edge bg-bg p-2.5"
               data-testid="wizard-location-card"
             >
-              {activeLibrary ? (
+              {mode === "reference" ? (
+                <span className="text-xs leading-relaxed text-text-secondary">{t("wizard.mode.referenceDesc")}</span>
+              ) : activeLibrary ? (
                 <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
                   {targetRoot}
                 </span>
@@ -1253,17 +1255,12 @@ export default function ImportWizard() {
                 data-testid="wizard-album-new-name"
               />
             )}
-            {albumError !== null && (
-              <p className="ml-5 text-[11px] text-red-400" role="alert" data-testid="wizard-album-error">
-                {albumError}
-              </p>
-            )}
             {/* 导入位置实时预览（时间/相册布局定案）：目标 = 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}，
                 相册内平铺不按日期分层（应用内按拍摄日分组），随相册选择/输入即时更新 */}
             <p className="ml-5 mt-1 text-[11px] text-text-muted" data-testid="wizard-album-path-preview">
               {t("wizard.album.pathPreview")}：
               <span className="break-all font-mono text-text-secondary">
-                {importTargetPreview}
+                {mode === "reference" ? t("wizard.mode.reference") : importTargetPreview}
               </span>
             </p>
             <p className="ml-5 text-[11px] leading-relaxed text-text-muted" data-testid="wizard-album-flat-note">
@@ -1306,14 +1303,14 @@ export default function ImportWizard() {
           <div className="mt-4 flex flex-col gap-1.5">
             <label
               className={`flex items-center gap-2 text-xs ${
-                mode === "move" ? "cursor-not-allowed text-text-muted" : "cursor-pointer text-text-secondary"
+                mode !== "copy" ? "cursor-not-allowed text-text-muted" : "cursor-pointer text-text-secondary"
               }`}
               title={mode === "move" ? t("wizard.second.moveUnsupported") : undefined}
             >
               <input
                 type="checkbox"
                 checked={secondEnabled}
-                disabled={mode === "move"}
+                disabled={mode !== "copy"}
                 onChange={(e) => setSecondEnabled(e.target.checked)}
                 className="h-3 w-3 accent-[#F0A83C] disabled:opacity-40"
                 data-testid="wizard-second-toggle"
@@ -1321,11 +1318,11 @@ export default function ImportWizard() {
               {t("wizard.second.label")}
             </label>
             <p className="pl-5 text-[11px] leading-relaxed text-text-muted">
-              {mode === "move"
+              {mode !== "copy"
                 ? t("wizard.second.moveUnsupported")
                 : t("wizard.second.desc")}
             </p>
-            {secondEnabled && mode !== "move" && (
+            {secondEnabled && mode === "copy" && (
               <div className="mt-1 flex flex-col gap-1.5" data-testid="wizard-second-panel">
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <input
@@ -1372,7 +1369,7 @@ export default function ImportWizard() {
 
           <div className="shrink-0 border-t border-edge bg-panel/30 p-4" data-testid="wizard-import-summary">
             <p className={`mb-3 text-xs leading-relaxed ${mode === "move" ? "text-amber-300" : "text-text-secondary"}`}>
-              {t(mode === "copy" ? "wizard.mode.copyDesc" : "wizard.mode.moveDesc")}
+              {t(`wizard.mode.${mode}Desc`)}
             </p>
             <div className="mb-3 flex items-baseline justify-between gap-2">
               <span className="text-sm font-semibold text-text-primary">{t("wizard.readyCount", { count: selectedCount })}</span>
@@ -1394,14 +1391,13 @@ export default function ImportWizard() {
             >
               {starting ? t("wizard.starting") : t("wizard.startCount", { count: selectedCount })}
             </button>
-            {startError && (
-              <p className="mt-2 text-[11px] text-red-400" role="alert">
-                {startError}
-              </p>
-            )}
           </div>
         </section>
       </div>
+      <ErrorModal
+        message={sourceError ?? albumError ?? startError}
+        onClose={() => { setSourceError(null); setAlbumError(null); setStartError(null); }}
+      />
     </div>
   );
 }

@@ -25,7 +25,10 @@ export interface AssetGroup {
 /** capturedAt → 组键（null/空串/短于日期 → 未知组） */
 export function groupKeyOfDate(date: string | null | undefined): string {
   if (date === null || date === undefined || date.length < 10) return UNKNOWN_GROUP_KEY;
-  return date.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return UNKNOWN_GROUP_KEY;
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
 }
 
 /** 按拍摄日期分组（保持资产在组内的到达顺序；组间排序见文件头注释） */

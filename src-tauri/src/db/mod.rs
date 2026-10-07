@@ -167,7 +167,8 @@ pub struct AssetRow {
     pub source: String,
     pub created_at: String,
     /// 资产来源（M2 迁移 0003）：'imported' 复制/移动入册；
-    /// 'external' 原地索引只读入册（文件不在库内，绝不可被清理/移动）。
+    /// 'external' 原地索引入册（原片不由库清理或移动；用户主动修改评分等
+    /// 信息时允许在原片旁同步 XMP 边车）。
     #[serde(default = "default_origin")]
     pub origin: String,
     // —— 0004 起的可空列（存量资产全 None，不回填）——

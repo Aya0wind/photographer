@@ -16,10 +16,11 @@ import {
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import AssetThumb from "@/features/gallery/components/AssetThumb";
-import SelectionToolbarHost from "@/features/gallery/components/SelectionToolbarHost";
+import AssetActionsHost from "@/features/gallery/components/AssetActionsHost";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
+import OverlayScrollArea from "@/shared/components/OverlayScrollArea";
 
 /**
  * 人物页（M4）：人脸聚类结果实化。
@@ -242,7 +243,8 @@ function PersonAssetsView({
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets ?? []);
 
   // --- 多选（与图库同语义） ---
-  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection, contextTargets } = useAssetSelection();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(null);
 
   return (
     <div className="flex h-full flex-col" data-testid="people-assets-view">
@@ -288,16 +290,19 @@ function PersonAssetsView({
             onCtrlClick={ctrlSelect}
             onLongPress={ctrlSelect}
             onCheckClick={ctrlSelect}
+            onAssetContextMenu={(asset, at) => setContextMenu({ ...at, assets: contextTargets(asset, new Map((assets ?? []).map((item) => [item.id, item]))) })}
           />
         )}
       </div>
 
-      {selecting && assets !== null && (
-        <SelectionToolbarHost
+      {assets !== null && (
+        <AssetActionsHost
           assets={assets}
           selectedIds={selected}
           onSelectIds={setSelected}
           onDone={exitSelection}
+          contextMenu={contextMenu}
+          onCloseContextMenu={() => setContextMenu(null)}
           onPatched={(ids, patch) => {
             const idSet = new Set(ids);
             setAssets((prev) => prev?.map((a) => (idSet.has(a.id) ? { ...a, ...patch } : a)) ?? prev);
@@ -354,8 +359,8 @@ export default function PeoplePage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto" data-testid="people-page">
-      <div className="flex h-full w-full flex-col px-4 pt-4">
+    <div className="h-full" data-testid="people-page">
+      <OverlayScrollArea testId="people-scroll" contentClassName="flex min-h-full w-full flex-col px-4 pt-4">
         <div className="flex shrink-0 items-baseline gap-3">
           <h1 className="text-sm font-semibold text-text-primary">{t("people.title")}</h1>
           {people !== null && people.length > 0 && (
@@ -412,7 +417,7 @@ export default function PeoplePage() {
             ))}
           </div>
         )}
-      </div>
+      </OverlayScrollArea>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
+import { usePhotoTimeline } from "../lib/usePhotoTimeline";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
@@ -25,6 +26,7 @@ import { collapseBursts } from "../lib/burstStacks";
 import {
   gallerySnapshot,
   saveGallerySnapshot,
+  clearGallerySnapshot,
 } from "../lib/galleryCache";
 import {
   GALLERY_JUSTIFY_ROW_PX,
@@ -39,7 +41,6 @@ import {
 } from "@/features/ai/SemanticResultsView";
 import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
-import SelectionBar from "../components/SelectionBar";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
@@ -190,6 +191,7 @@ export default function GalleryPage() {
   const loadingRef = useRef(false);
   const loadSeqRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  const timelineWindowRef = useRef(false);
 
   useEffect(() => {
     if (semanticMode) return;
@@ -211,7 +213,7 @@ export default function GalleryPage() {
 
   /** 快照落盘（仅默认态：筛选/语义态不落，避免脏缓存）；滚动位置由视口回调实时维护 */
   const persistSnapshot = useCallback(() => {
-    if (modeRef.current !== "default") return;
+    if (modeRef.current !== "default" || timelineWindowRef.current) return;
     saveGallerySnapshot({
       assets: assetsRef.current,
       dates: [],
@@ -253,10 +255,11 @@ export default function GalleryPage() {
     if (semanticMode) return; // 语义结果不走此管线
     let cancelled = false;
     const seq = ++loadSeqRef.current;
+    timelineWindowRef.current = false;
     // 默认态已有快照数据 → 静默 revalidate（不闪骨架）；筛选态/空库常规 loading
     if (filtersActive || assets.length === 0) setStatus("loading");
     hasMoreRef.current = true;
-    loadingRef.current = false;
+    loadingRef.current = true;
     const fetchFirstPage = filtersActive
       ? () => assetsPage(0, PAGE_LIMIT, appliedFilters)
       : () => assetsPage(0, PAGE_LIMIT);
@@ -277,6 +280,8 @@ export default function GalleryPage() {
         if (samePrefix) hasMoreRef.current = cached.hasMore;
       }
       if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
+      loadingRef.current = false;
+      setLoadingMore(false);
       setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
       persistSnapshot();
     });
@@ -317,6 +322,37 @@ export default function GalleryPage() {
     scrollTopRef.current = info.scrollTop;
     setViewport(info);
   }, []);
+
+  const timelineCurrentAssets = useCallback(() => assetsRef.current, []);
+  const beforeTimelineJump = useCallback(() => {
+    ++loadSeqRef.current;
+    loadingRef.current = true;
+    setLoadingMore(false);
+    timelineWindowRef.current = true;
+    clearGallerySnapshot();
+  }, []);
+  const finishTimelineJump = useCallback(() => { loadingRef.current = false; }, []);
+  const replaceTimelineAssets = useCallback((page: AssetDto[]) => {
+    assetsRef.current = page;
+    setAssets(page);
+    hasMoreRef.current = page.length === PAGE_LIMIT;
+    setStatus("ready");
+  }, []);
+  const prependTimelineAssets = useCallback((page: AssetDto[]) => {
+    const seen = new Set(assetsRef.current.map((asset) => asset.id));
+    assetsRef.current = [...page.filter((asset) => !seen.has(asset.id)), ...assetsRef.current];
+    setAssets(assetsRef.current);
+  }, []);
+  const timeline = usePhotoTimeline({
+    enabled: !semanticMode,
+    scopeKey: `${debouncedKey}:${reloadNonce}`,
+    filters: filtersActive ? appliedFilters : undefined,
+    currentAssets: timelineCurrentAssets,
+    onBeforeJump: beforeTimelineJump,
+    onJumpFinished: finishTimelineJump,
+    onReplace: replaceTimelineAssets,
+    onPrepend: prependTimelineAssets,
+  });
 
   // --- 多选（M4.5 选择模式） ----------------------------------------------------------
   const { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
@@ -386,18 +422,6 @@ export default function GalleryPage() {
     setCtxMenu({ ...at, assets: contextTargets(asset, assetsById) });
   }
 
-  /** 选中资产对象（当前态分组内查找；跨态选不中的自动忽略） */
-  const loadedById = useMemo(() => {
-    const map = new Map<number, AssetDto>();
-    for (const group of activeGroups) {
-      for (const asset of group.assets) map.set(asset.id, asset);
-    }
-    return map;
-  }, [activeGroups]);
-  const selectedAssets = useMemo(
-    () => selected.map((id) => loadedById.get(id)).filter((a): a is AssetDto => a !== undefined),
-    [selected, loadedById],
-  );
 
   const handleFavoriteChange = useCallback((asset: AssetDto, favorite: boolean) => {
     const favoriteOnly = parseInputs(appliedKeyRef.current).favoriteOnly;
@@ -444,14 +468,6 @@ export default function GalleryPage() {
   const windowIds = useMemo(
     () => (semanticMode ? semantic.assets.map((a) => a.id) : assets.map((a) => a.id)),
     [semanticMode, semantic.assets, assets],
-  );
-  const invertSelection = useCallback(
-    (ids: number[]) => setSelected(ids.map((id) => id)),
-    [],
-  );
-  const selectAllInWindow = useCallback(
-    (ids: number[]) => setSelected(ids.map((id) => id)),
-    [],
   );
 
   /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
@@ -747,6 +763,9 @@ export default function GalleryPage() {
             <AssetGrid
               ref={gridRef}
               groups={activeGroups}
+              timelineDates={semanticMode ? undefined : timeline.dates}
+              onTimelineJump={semanticMode ? undefined : timeline.jump}
+              onNearTop={semanticMode ? undefined : timeline.prepend}
               onOpenAsset={openAsset}
               onCtrlClick={ctrlSelect}
               onLongPress={ctrlSelect}
@@ -759,6 +778,8 @@ export default function GalleryPage() {
                   : undefined
               }
               sentinelRef={semanticMode ? undefined : sentinelRef}
+              loadingMore={!semanticMode && loadingMore}
+              hasMore={!semanticMode && hasMoreRef.current}
               onViewportChange={handleViewportChange}
               layout="justify"
               tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
@@ -802,30 +823,7 @@ export default function GalleryPage() {
           </AnimatePresence>
         </div>
 
-        {/* 底部加载指示（无限滚动补页中） */}
-        {loadingMore && !semanticMode && (
-          <div className="flex h-7 shrink-0 items-center justify-center text-[11px] text-text-muted" data-testid="gallery-loading-more">
-            {t("gallery.loadingMore")}
-          </div>
-        )}
       </div>
-
-      {/* 多选浮动操作条（已选 N | 收藏/旗标/色标/拒绝/分享/加入相册/反选/移入回收站/取消） */}
-      {selecting && (
-        <SelectionBar
-          count={selectedAssets.length}
-          assets={selectedAssets}
-          onFavoritesChanged={(items, favorite) => items.forEach((asset) => handleFavoriteChange(asset, favorite))}
-          onDone={exitSelection}
-          onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
-          onColorLabeled={handleColorLabeled}
-          onRejected={handleRejected}
-          onTrashRequest={requestTrashMove}
-          windowIds={windowIds}
-          onSelectAll={selectAllInWindow}
-          onInvert={invertSelection}
-        />
-      )}
 
       {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含色标/拒绝/加入相册/移入回收站） */}
       {ctxMenu && (
@@ -837,6 +835,11 @@ export default function GalleryPage() {
           onColorLabeled={handleColorLabeled}
           onRejected={handleRejected}
           onTrashRequest={requestTrashMove}
+          onFavoritesChanged={(items, favorite) => items.forEach((asset) => handleFavoriteChange(asset, favorite))}
+          onFlagged={(items, flagged) => { const ids = new Set(items.map((item) => item.id)); assetsRef.current = assetsRef.current.map((item) => ids.has(item.id) ? { ...item, flagged } : item); setAssets(assetsRef.current); }}
+          windowIds={windowIds}
+          selectedIds={selected}
+          onSelectIds={setSelected}
         />
       )}
 

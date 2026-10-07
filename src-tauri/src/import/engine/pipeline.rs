@@ -29,6 +29,7 @@ const FALLBACK_LENS: &str = "未知镜头";
 /// 工作线程产出。
 pub(super) enum FileOutcome {
     Copied(Box<CopiedFile>),
+    Referenced(Box<ReferenceFile>),
     /// 免下载预跳：Skip/Ask 策略下目标路径已存在（与收集端 ③ 同判据提前），
     /// 只读了头段（EXIF 渲染目标路径必需），无 .part/无哈希。
     Skipped {
@@ -43,6 +44,65 @@ pub(super) enum FileOutcome {
         entry: FileEntry,
         error: String,
     },
+}
+
+/// An indexed original stays at its source path and is never owned by the library.
+pub(super) struct ReferenceFile {
+    pub(super) entry: FileEntry,
+    pub(super) path: PathBuf,
+    pub(super) kind: AssetKind,
+    pub(super) meta: MetaLite,
+    pub(super) xxh: u64,
+}
+
+pub(super) fn reference_one(source: &dyn DeviceSource, entry: &FileEntry) -> FileOutcome {
+    let fail = |error: String| FileOutcome::Failed {
+        entry: entry.clone(),
+        error,
+    };
+    let Some(path) = source.local_path(&entry.id) else {
+        return fail("仅导入只支持本地磁盘或文件夹，不支持 MTP 相机".into());
+    };
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) => return fail(format!("无法读取原文件：{e}")),
+    };
+    let mut head = vec![0; entry.size.min(HEAD_MAX as u64) as usize];
+    if let Err(e) = file.read_exact(&mut head) {
+        return fail(format!("读取原文件失败：{e}"));
+    }
+    let kind = classify(&entry.rel_path, &head);
+    if kind == AssetKind::Other {
+        return fail("类型识别失败（扩展名与内容不符）".into());
+    }
+    let meta = exif_lite::parse(&head);
+    let mut xxh = Xxh64::new(0);
+    xxh.update(&head);
+    let mut read = head.len() as u64;
+    let mut chunk = vec![0u8; CHUNK];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                xxh.update(&chunk[..n]);
+                read += n as u64;
+            }
+            Err(e) => return fail(format!("读取原文件失败：{e}")),
+        }
+    }
+    if read != entry.size {
+        return fail(format!(
+            "原文件读取时发生变化：预期 {} 字节，实得 {read} 字节",
+            entry.size
+        ));
+    }
+    FileOutcome::Referenced(Box::new(ReferenceFile {
+        entry: entry.clone(),
+        path,
+        kind,
+        meta,
+        xxh: xxh.digest(),
+    }))
 }
 
 /// 已复制完成（写满 + 长度校验通过）的文件产物；落位/查重/入库由收集端完成。
@@ -208,7 +268,10 @@ pub(super) fn copy_one(
     // 字面量、默认命名 {原文件名} 只用清单文件名，目标路径无需 EXIF
     // 即可预测。预测路径已存在（Skip/Ask）→ 连流都不开。模板依赖
     // EXIF（含 {拍摄日期}/{相机} 等）时预测返回 None，回退头段预跳。
-    if matches!(duplicate_policy, DuplicatePolicy::Skip | DuplicatePolicy::Ask) {
+    if matches!(
+        duplicate_policy,
+        DuplicatePolicy::Skip | DuplicatePolicy::Ask
+    ) {
         if let Some(dst) = predict_dst(target_root, dir_template, name_template, entry) {
             if dst.exists() {
                 return FileOutcome::Skipped {
@@ -262,7 +325,11 @@ pub(super) fn copy_one(
     // 提前到这里——只花流打开+头读（EXIF 渲染目标路径必需），不写
     // .part、不算哈希、不删临时文件；MTP 单 worker 串行下整体吞吐
     // 量级提升。Rename 策略仍需下载落位，不预跳。
-    if matches!(duplicate_policy, DuplicatePolicy::Skip | DuplicatePolicy::Ask) && dst.exists() {
+    if matches!(
+        duplicate_policy,
+        DuplicatePolicy::Skip | DuplicatePolicy::Ask
+    ) && dst.exists()
+    {
         return FileOutcome::Skipped {
             entry: entry.clone(),
         };

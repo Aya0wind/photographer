@@ -56,17 +56,6 @@ body {
   background: transparent;
 }
 
-/* 多选浮动条：任何场景禁止换行成竖排（祖先约束/窄窗时保持横排，超宽横向滚动） */
-[data-testid="selection-bar"] .flex,
-[data-testid="selection-bar"] button,
-[data-testid="selection-bar"] span {
-  white-space: nowrap;
-}
-[data-testid="selection-bar"] > div {
-  max-width: calc(100vw - 2rem);
-  overflow-x: auto;
-}
-
 /* 主滚动容器：预留滚动条槽位，避免滚动条出现/消失时内容跳动 */
 .sp-scroll {
   scrollbar-gutter: stable;

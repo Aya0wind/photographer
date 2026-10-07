@@ -1,13 +1,13 @@
-//! 画廊数据源（M3）：assets_page keyset 分页（NULL captured_at 最先 +
+//! 画廊数据源（M3）：assets_page keyset 分页（未知日期沉底 +
 //! captured DESC + id tiebreak）、AssetFilters（kind/camera/时间范围）参数化
-//! 过滤、asset_group_dates 本地时区日期分组降序（unknown 组置顶）、
+//! 过滤、asset_group_dates 本地时区日期分组降序（unknown 组沉底）、
 //! asset_detail 全字段 + 同指纹 (size,xxh) 重复计数、DTO camelCase 契约。
 
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -17,6 +17,72 @@ use common::{state_with_library, utc};
 use db::AssetRow;
 use events::AssetKind;
 use ipc::assets::{AssetDetailDto, AssetDto, AssetFilters, DateGroupDto};
+
+#[test]
+fn timeline_seek_is_inclusive_and_loads_nearest_newer_page_without_leaking_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = common::open_db(dir.path());
+    let mut ids = Vec::new();
+    for day in 1..=8 {
+        let date = format!("2026-01-{day:02}T12:00:00.000Z");
+        ids.push(ins(
+            &database,
+            &format!("keep-{day}.jpg"),
+            Some(&date),
+            AssetKind::Photo,
+            Some("Keep"),
+            10,
+            day,
+        ));
+        ins(
+            &database,
+            &format!("exclude-{day}.jpg"),
+            Some(&date),
+            AssetKind::Photo,
+            Some("Exclude"),
+            10,
+            day + 20,
+        );
+    }
+    let filters = AssetFilters {
+        cameras: vec!["Keep".into()],
+        ..Default::default()
+    };
+    let first = database.assets_seek(ids[3], 3, &filters, false).unwrap();
+    assert_eq!(
+        first.iter().map(|asset| asset.id).collect::<Vec<_>>(),
+        vec![ids[3], ids[2], ids[1]]
+    );
+    let next = database.assets_page(ids[1], 3, &filters).unwrap();
+    assert_eq!(
+        next.iter().map(|asset| asset.id).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    let newer = database.assets_seek(ids[3], 2, &filters, true).unwrap();
+    assert_eq!(
+        newer.iter().map(|asset| asset.id).collect::<Vec<_>>(),
+        vec![ids[5], ids[4]]
+    );
+    assert!(database
+        .assets_seek(999999, 10, &filters, false)
+        .unwrap()
+        .is_empty());
+
+    let catalog = database.asset_group_dates_filtered(&filters).unwrap();
+    assert_eq!(catalog.len(), 8);
+    assert!(catalog
+        .iter()
+        .all(|entry| entry.count == 1 && ids.contains(&entry.cover_asset_id)));
+    assert_eq!(catalog[0].cover_asset_id, ids[7]);
+    database
+        .0
+        .execute("UPDATE assets SET in_trash = 1 WHERE id = ?1", [ids[7]])
+        .unwrap();
+    assert_eq!(
+        database.asset_group_dates_filtered(&filters).unwrap().len(),
+        7
+    );
+}
 
 /// 直插一行资产（path 唯一），返回自增 id。
 fn ins(
@@ -129,7 +195,7 @@ fn count_matches_filtered_pages_and_exif_display_orientation() {
 }
 
 #[test]
-fn page_orders_nulls_first_then_captured_desc_with_id_tiebreak() {
+fn page_orders_captured_desc_with_id_tiebreak_then_unknown_dates() {
     let db_dir = tempfile::tempdir().unwrap();
     let database = common::open_db(db_dir.path());
     // 3 个 NULL + 4 个有日期（含 captured 相同的 id tiebreak 对）
@@ -164,10 +230,31 @@ fn page_orders_nulls_first_then_captured_desc_with_id_tiebreak() {
     let null_b = ins(&database, "e.jpg", None, AssetKind::Photo, None, 10, 5);
     let state = query_state(db_dir.path());
 
-    // NULL 最前（id 倒序），随后 captured 降序；captured 相同按 id 倒序
+    // captured 降序，同时间 id 倒序；NULL 沉底且组内 id 倒序。
     let all = page(&state, 0, 100, AssetFilters::default());
     let ids: Vec<i64> = all.iter().map(|a| a.id).collect();
-    assert_eq!(ids, vec![null_b, null_a, dated_2, dated_1, dated_3]);
+    assert_eq!(ids, vec![dated_2, dated_1, dated_3, null_b, null_a]);
+    // Jumping to unknown dates must still allow scrolling upward into dated photos.
+    let older_window = database
+        .assets_seek(null_b, 2, &AssetFilters::default(), false)
+        .unwrap();
+    assert_eq!(
+        older_window
+            .iter()
+            .map(|asset| asset.id)
+            .collect::<Vec<_>>(),
+        vec![null_b, null_a]
+    );
+    let above_unknown = database
+        .assets_seek(null_b, 2, &AssetFilters::default(), true)
+        .unwrap();
+    assert_eq!(
+        above_unknown
+            .iter()
+            .map(|asset| asset.id)
+            .collect::<Vec<_>>(),
+        vec![dated_1, dated_3]
+    );
 
     // keyset 翻页：limit=2 走完 5 条，不重不漏
     let mut cursor = 0i64;
@@ -369,19 +456,19 @@ fn group_dates_local_timezone_desc_with_unknown_group() {
 
     let groups: Vec<DateGroupDto> = ipc::assets::fetch_asset_group_dates(&state).unwrap();
     assert_eq!(groups.len(), 3, "unknown + 两个本地日期组: {groups:?}");
-    // unknown 置顶（与画廊页序一致），随后日期降序
-    assert_eq!(groups[0].date, "unknown");
-    assert_eq!(groups[0].count, 2);
+    // 日期降序，unknown 沉底（与画廊分页一致）。
+    assert_eq!(groups[2].date, "unknown");
+    assert_eq!(groups[2].count, 2);
     assert_eq!(
-        groups[0].cover_asset_id, unknown_cover,
+        groups[2].cover_asset_id, unknown_cover,
         "unknown 组 cover=组内 id 最大（同序首张）"
     );
-    assert_eq!(groups[1].date, local_day(t2), "最近日期在前");
-    assert_eq!(groups[1].count, 1);
-    assert_eq!(groups[2].date, local_day(t1));
-    assert_eq!(groups[2].count, 2, "同日合并计数");
+    assert_eq!(groups[0].date, local_day(t2), "最近日期在前");
+    assert_eq!(groups[0].count, 1);
+    assert_eq!(groups[1].date, local_day(t1));
+    assert_eq!(groups[1].count, 2, "同日合并计数");
     // cover 是组内最新那张（captured 相同 → id 大者）
-    let cover_of_day1 = groups[2].cover_asset_id;
+    let cover_of_day1 = groups[1].cover_asset_id;
     let cover_name: String = database
         .0
         .query_row(
@@ -539,14 +626,14 @@ fn real_library_contract_smoke() {
     assert!(
         groups
             .windows(2)
-            .all(|w| (w[0].date == "unknown") || (w[1].date != "unknown" && w[0].date > w[1].date)),
-        "日期组降序、unknown 置顶: {groups:?}"
+            .all(|w| w[1].date == "unknown" || (w[0].date != "unknown" && w[0].date > w[1].date)),
+        "日期组降序、unknown 沉底: {groups:?}"
     );
-    // 首页 NULL 优先：分页第一页首个必为 NULL 资产
+    // 首页为有日期的照片，未知日期在末尾。
     let page = database
         .assets_page(0, 5, &db::AssetFilters::default())
         .unwrap();
-    assert!(page[0].captured_at.is_none(), "NULL 资产排最前");
+    assert!(page[0].captured_at.is_some(), "有日期的资产排最前");
 }
 
 // ---------------------------------------------------------------------------

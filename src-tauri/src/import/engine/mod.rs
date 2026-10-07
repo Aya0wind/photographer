@@ -44,7 +44,7 @@ use crate::settings::DuplicatePolicy;
 
 use dedup::{exact_hit, loose_hit};
 use fsutil::{cleanup_empty_dirs, ensure_directory, rfc3339, source_root_of};
-use pipeline::{copy_one, CopiedFile, FileOutcome};
+use pipeline::{copy_one, reference_one, CopiedFile, FileOutcome, ReferenceFile};
 
 /// 进度事件最小间隔（spec：≥100ms）。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -65,6 +65,8 @@ pub enum ImportMode {
     #[default]
     Copy,
     Move,
+    /// Index a local original in place without copying or taking ownership.
+    Reference,
 }
 
 /// F2 双目的地导入的第二目的地：单遍读取同时写第二份（同布局公式、
@@ -374,6 +376,16 @@ impl Engine {
         if let Some(prepared) = self.prepared.as_ref() {
             return Ok(prepared.job_id);
         }
+        if self.plan.mode == ImportMode::Reference && self.source.kind() == SourceKind::Mtp {
+            return Err(EngineError::InvalidPlan(
+                "仅导入不支持 MTP 相机：原文件必须有稳定的本地路径".into(),
+            ));
+        }
+        if self.plan.mode == ImportMode::Reference && self.plan.second_target.is_some() {
+            return Err(EngineError::InvalidPlan(
+                "仅导入不能同时设置第二目的地".into(),
+            ));
+        }
         if self.plan.mode == ImportMode::Move && self.plan.second_target.is_some() {
             return Err(EngineError::InvalidPlan(
                 "move 模式与双目的地（secondTarget）不能同时使用：移动入册后源已删除，\
@@ -381,7 +393,9 @@ impl Engine {
                     .into(),
             ));
         }
-        self.check_nesting()?;
+        if self.plan.mode != ImportMode::Reference {
+            self.check_nesting()?;
+        }
         let entries = self.filter_included(self.source.list()?)?;
         let mut base = Counters::default();
         for e in &entries {
@@ -479,7 +493,9 @@ impl Engine {
         let job_id = prepared.job_id;
 
         // resume：清除 .part 残留（上次中断的半成品，一律重做）
-        self.sweep_part_files();
+        if self.plan.mode != ImportMode::Reference {
+            self.sweep_part_files();
+        }
 
         // 待处理队列：resume 需重列源匹配 journal src（list 失败→按设备失联暂停）
         let queue = self.resolve_queue(&prepared);
@@ -531,8 +547,10 @@ impl Engine {
                 let _ = self.db.finish_job(
                     job_id,
                     "error",
-                    &serde_json::to_string(&Counters::default().into_stats(Duration::ZERO, Duration::ZERO))
-                        .unwrap_or_default(),
+                    &serde_json::to_string(
+                        &Counters::default().into_stats(Duration::ZERO, Duration::ZERO),
+                    )
+                    .unwrap_or_default(),
                 );
                 self.controls.done.store(true, Ordering::SeqCst);
                 return Counters::default().into_stats(Duration::ZERO, Duration::ZERO);
@@ -552,18 +570,22 @@ impl Engine {
         // 暂存目录只在启动工作线程前创建一次。网络共享盘可能在并发 mkdir
         // 时返回 183，且目录元数据尚未传播；不能让每个文件重复参与创建。
         let part_dir = self.plan.target_root.join(PART_DIR);
-        let staging_error = ensure_directory(&part_dir)
-            .map_err(|e| format!("创建暂存目录失败（{}）: {e}", part_dir.display()))
-            .and_then(|()| {
-                if let Some(second) = &self.plan.second_target {
-                    let dir = second.target_root.join(PART_DIR);
-                    ensure_directory(&dir).map_err(|e| {
-                        format!("创建第二目的地暂存目录失败（{}）: {e}", dir.display())
-                    })?;
-                }
-                Ok(())
-            })
-            .err();
+        let staging_error = if self.plan.mode == ImportMode::Reference {
+            None
+        } else {
+            ensure_directory(&part_dir)
+                .map_err(|e| format!("创建暂存目录失败（{}）: {e}", part_dir.display()))
+                .and_then(|()| {
+                    if let Some(second) = &self.plan.second_target {
+                        let dir = second.target_root.join(PART_DIR);
+                        ensure_directory(&dir).map_err(|e| {
+                            format!("创建第二目的地暂存目录失败（{}）: {e}", dir.display())
+                        })?;
+                    }
+                    Ok(())
+                })
+                .err()
+        };
 
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -604,6 +626,8 @@ impl Engine {
                             entry,
                             error: error.clone(),
                         }
+                    } else if self.plan.mode == ImportMode::Reference {
+                        reference_one(&*source, &entry)
                     } else {
                         copy_one(
                             &*source,
@@ -644,6 +668,52 @@ impl Engine {
             last_done_bytes = counters.done_bytes;
             let window_rate = rate.update(tick_now, counters.done_bytes);
             match outcome {
+                FileOutcome::Referenced(reference) => {
+                    let entry = &reference.entry;
+                    match self.finish_reference(job_id, &reference) {
+                        Ok((FileState::Verified, dst)) => {
+                            if let Some(callback) = self.on_asset_imported.as_mut() {
+                                callback();
+                            }
+                            counters.done_files += 1;
+                            counters.done_bytes += entry.size;
+                            last_completed_src = entry.rel_path.clone();
+                            self.bus.publish(AppEvent::ImportFileCompleted {
+                                job_id,
+                                src: entry.id.clone(),
+                                dst,
+                                state: FileState::Verified,
+                            });
+                        }
+                        Ok((FileState::Skipped, dst)) => {
+                            counters.skipped += 1;
+                            counters.skipped_bytes += entry.size;
+                            last_completed_src = entry.rel_path.clone();
+                            self.bus.publish(AppEvent::ImportFileCompleted {
+                                job_id,
+                                src: entry.id.clone(),
+                                dst,
+                                state: FileState::Skipped,
+                            });
+                        }
+                        Ok(_) => unreachable!(),
+                        Err(error) => {
+                            counters.failed += 1;
+                            counters.failed_bytes += entry.size;
+                            let _ = self.db.upsert_job_file(&JobFileRow {
+                                job_id,
+                                src: entry.id.clone(),
+                                dst: String::new(),
+                                size: entry.size,
+                                state: FileState::Failed,
+                                error: Some(error.clone()),
+                                xxhash: Some(reference.xxh),
+                                dst2: String::new(),
+                            });
+                            let _ = self.db.append_log("error", Some(job_id), &error);
+                        }
+                    }
+                }
                 FileOutcome::Copied(copied) => {
                     let entry = &copied.entry;
                     match self.finish_copy(job_id, &copied) {
@@ -819,7 +889,9 @@ impl Engine {
         }
 
         // 收尾：清空暂存目录（主 + 第二目的地）+ 终态 + SessionFinished
-        let _ = fs::remove_dir_all(self.plan.target_root.join(PART_DIR));
+        if self.plan.mode != ImportMode::Reference {
+            let _ = fs::remove_dir_all(self.plan.target_root.join(PART_DIR));
+        }
         if let Some(second) = &self.plan.second_target {
             let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
         }
@@ -962,6 +1034,98 @@ impl Engine {
                 ),
             );
         }
+    }
+
+    fn finish_reference(
+        &self,
+        job_id: i64,
+        reference: &ReferenceFile,
+    ) -> Result<(FileState, String), String> {
+        let entry = &reference.entry;
+        let path = reference.path.to_string_lossy().into_owned();
+        // A referenced original can never be renamed to resolve a collision.
+        if self
+            .db
+            .asset_id_by_path(&path)
+            .map_err(|e| e.to_string())?
+            .is_some()
+            || (self.plan.skip_imported
+                && exact_hit(&self.db, entry.size, reference.xxh).map_err(|e| e.to_string())?)
+        {
+            self.db
+                .upsert_job_file(&JobFileRow {
+                    job_id,
+                    src: entry.id.clone(),
+                    dst: String::new(),
+                    size: entry.size,
+                    state: FileState::Skipped,
+                    error: None,
+                    xxhash: Some(reference.xxh),
+                    dst2: String::new(),
+                })
+                .map_err(|e| e.to_string())?;
+            return Ok((FileState::Skipped, String::new()));
+        }
+        let filename = reference
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let meta = &reference.meta;
+        self.db
+            .insert_asset_with_album(
+                &AssetRow {
+                    path: path.clone(),
+                    filename,
+                    size: entry.size,
+                    mtime: rfc3339(entry.mtime),
+                    xxhash: reference.xxh,
+                    kind: reference.kind,
+                    captured_at: meta.captured_at.map(rfc3339),
+                    camera: meta.camera.clone(),
+                    source: "imported".into(),
+                    created_at: rfc3339(Utc::now()),
+                    origin: "external".into(),
+                    width: meta.width,
+                    height: meta.height,
+                    iso: meta.iso,
+                    f_number: meta.f_number.clone(),
+                    exposure_time: meta.exposure_time.clone(),
+                    focal_length: meta.focal_length.clone(),
+                    lens: meta.lens.clone(),
+                    pair_asset_id: None,
+                    thumb_state: 0,
+                    orientation: meta.deep.orientation,
+                    flash: meta.deep.flash.clone(),
+                    metering_mode: meta.deep.metering_mode.clone(),
+                    white_balance: meta.deep.white_balance.clone(),
+                    exposure_program: meta.deep.exposure_program.clone(),
+                    software: meta.deep.software.clone(),
+                    artist: meta.deep.artist.clone(),
+                    gps_lat: meta.deep.gps_lat,
+                    gps_lon: meta.deep.gps_lon,
+                    rating: 0,
+                    flagged: 0,
+                    color_label: None,
+                    rejected: 0,
+                },
+                self.plan.album_id,
+                self.plan.album_subgroup.as_deref(),
+            )
+            .map_err(|e| format!("登记外部照片失败：{e}"))?;
+        self.db
+            .upsert_job_file(&JobFileRow {
+                job_id,
+                src: entry.id.clone(),
+                dst: path.clone(),
+                size: entry.size,
+                state: FileState::Verified,
+                error: None,
+                xxhash: Some(reference.xxh),
+                dst2: String::new(),
+            })
+            .map_err(|e| e.to_string())?;
+        Ok((FileState::Verified, path))
     }
 
     /// 双目的地：两路都落位才算成功（任一失败按单文件失败，主路已落位的
@@ -1169,7 +1333,10 @@ mod rate_tests {
         let r = rate.update(t0 + Duration::from_secs(60), 0);
         assert_eq!(r, 0.0);
         // 随后 1 秒拷完 100MB（两个样本划出增量）
-        rate.update(t0 + Duration::from_secs(60) + Duration::from_millis(900), 90_000_000);
+        rate.update(
+            t0 + Duration::from_secs(60) + Duration::from_millis(900),
+            90_000_000,
+        );
         let r = rate.update(t0 + Duration::from_secs(61), 100_000_000);
         // 窗口内增量 100MB-0? 不——90MB 样本已把基线抬高，窗口≈100ms/10MB
         // 断言量级即可（≥10MB/s；总耗时法此时只有 ~1.6MB/s）
@@ -1195,6 +1362,9 @@ mod rate_tests {
         rate.update(t0, 0);
         rate.update(t0 + Duration::from_millis(500), 1_000_000_000);
         // 10s 后再记样本：窗口里只剩新样本 → 0（旧吞吐已滑出）
-        assert_eq!(rate.update(t0 + Duration::from_secs(10), 1_000_000_000), 0.0);
+        assert_eq!(
+            rate.update(t0 + Duration::from_secs(10), 1_000_000_000),
+            0.0
+        );
     }
 }

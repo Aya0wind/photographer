@@ -4,16 +4,16 @@ import { useTranslation } from "react-i18next";
 import { assetTrashMove, type AssetDto } from "@/ipc/api";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 
-import SelectionBar from "./SelectionBar";
+import { AssetContextMenu } from "./ContextMenu";
 
 /**
- * 多选工具栏宿主（图库/相册之外的照片页面共用）：SelectionBar + 加入相册
- * 弹窗 + 移入回收站确认 + 选中资产查找/全选/反选的一站式接线。
- * 页面只需提供资产列表、选中 id 集与三个回调，即可获得与图库一致的
- * 完整多选操作（收藏/旗标/色标/拒绝/分享/加册/全选/反选/回收站）。
+ * 照片右键操作与后续弹窗：批量标记、全选/反选、加入相册和回收站。
+ * 始终挂载，让单张照片的右键菜单关闭后，操作弹窗也能继续显示。
  */
 
 interface Props {
+  contextMenu?: { x: number; y: number; assets: AssetDto[] } | null;
+  onCloseContextMenu?: () => void;
   /** 页面当前展示的全部资产（数据窗口；全选/反选的口径） */
   assets: AssetDto[];
   selectedIds: number[];
@@ -27,20 +27,17 @@ interface Props {
   onRemoved?: (ids: number[]) => void;
 }
 
-export default function SelectionToolbarHost({
+export default function AssetActionsHost({
   assets,
   selectedIds,
   onSelectIds,
   onDone,
   onPatched,
   onRemoved,
+  contextMenu,
+  onCloseContextMenu,
 }: Props) {
   const { t } = useTranslation();
-  const byId = useMemo(() => new Map(assets.map((a) => [a.id, a])), [assets]);
-  const selectedAssets = useMemo(
-    () => selectedIds.map((id) => byId.get(id)).filter((a): a is AssetDto => a !== undefined),
-    [selectedIds, byId],
-  );
   const windowIds = useMemo(() => assets.map((a) => a.id), [assets]);
   const [addToAlbumTargets, setAddToAlbumTargets] = useState<AssetDto[] | null>(null);
   /** 「移入回收站」确认目标（null=弹窗关闭） */
@@ -57,21 +54,22 @@ export default function SelectionToolbarHost({
 
   return (
     <>
-      <SelectionBar
-        count={selectedAssets.length}
-        assets={selectedAssets}
+      {contextMenu && <AssetContextMenu
+        at={{ x: contextMenu.x, y: contextMenu.y }}
+        assets={contextMenu.assets}
+        onClose={() => onCloseContextMenu?.()}
         onFavoritesChanged={(items, favorite) =>
           onPatched?.(items.map((a) => a.id), { rating: favorite ? 5 : 0 })
         }
-        onDone={onDone}
+        onFlagged={(items, flagged) => onPatched?.(items.map((asset) => asset.id), { flagged })}
         onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
         onColorLabeled={(items, label) => onPatched?.(items.map((a) => a.id), { colorLabel: label })}
         onRejected={(items, rejected) => onPatched?.(items.map((a) => a.id), { rejected })}
         onTrashRequest={(items) => setTrashConfirm(items.map((a) => a.id))}
         windowIds={windowIds}
-        onSelectAll={onSelectIds}
-        onInvert={onSelectIds}
-      />
+        selectedIds={selectedIds}
+        onSelectIds={onSelectIds}
+      />}
 
       {/* 「加入相册」选择弹窗 */}
       {addToAlbumTargets !== null && (

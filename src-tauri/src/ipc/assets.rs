@@ -1,8 +1,8 @@
 //! assets 命令（M3 画廊数据源）：keyset 分页 / 日期分组 / 资产详情 /
 //! 相机聚合。
 //!
-//! 排序契约（真机核对 2026-09-19）：NULL captured_at 最先，随后拍摄时间
-//! 降序、id 倒序 tiebreak——db 层用 COALESCE 高哨兵归一成单键。DB 查询
+//! 排序契约：拍摄时间降序、id 倒序 tiebreak，未知日期沉底；双向分页与
+//! 页面日期分组保持一致。db 层用 COALESCE 低哨兵归一成单键。DB 查询
 //! 走 run_blocking 后台线程（铁律：大结果集不上主线程）。
 
 use tauri::State;
@@ -22,7 +22,7 @@ pub struct AssetDto {
     pub name: String,
     /// photo | raw（`AssetKind` camelCase 序列化）。
     pub kind: AssetKind,
-    /// RFC3339；未知为 null（排序时排最前）。
+    /// RFC3339；未知为 null（排序时沉底）。
     pub captured_at: Option<String>,
     pub camera: Option<String>,
     pub size_bytes: u64,
@@ -51,7 +51,7 @@ pub struct AssetDto {
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
-/// "unknown" 且置顶）。
+/// "unknown" 且沉底）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DateGroupDto {
@@ -284,10 +284,25 @@ pub fn fetch_assets_count(state: &super::AppState, filters: AssetFilters) -> Res
     db.assets_count(&filters).map_err(|e| e.to_string())
 }
 
-/// 本地时区日期分组（降序；unknown 组置顶）。
+/// 本地时区日期分组（降序；unknown 组沉底）。
 pub fn fetch_asset_group_dates(state: &super::AppState) -> Result<Vec<DateGroupDto>, String> {
+    fetch_asset_group_dates_filtered(state, AssetFilters::default())
+}
+
+pub fn fetch_asset_group_dates_filtered(
+    state: &super::AppState,
+    mut filters: AssetFilters,
+) -> Result<Vec<DateGroupDto>, String> {
+    if let Some(after) = filters.captured_after.take() {
+        filters.captured_after = Some(normalize_date_filter(&after, "起始", false)?);
+    }
+    if let Some(before) = filters.captured_before.take() {
+        filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
+    }
     let db = super::active_library_db(state)?;
-    let rows = db.asset_group_dates().map_err(|e| e.to_string())?;
+    let rows = db
+        .asset_group_dates_filtered(&filters)
+        .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .map(|r| DateGroupDto {
@@ -367,9 +382,48 @@ pub async fn assets_count(
 
 /// 日期分组（DB 查询 → 后台线程）。
 #[tauri::command]
-pub async fn asset_group_dates(state: State<'_, SharedState>) -> Result<Vec<DateGroupDto>, String> {
+pub async fn asset_group_dates(
+    state: State<'_, SharedState>,
+    filters: Option<AssetFilters>,
+) -> Result<Vec<DateGroupDto>, String> {
     let shared = state.inner().clone();
-    run_blocking(shared, fetch_asset_group_dates).await
+    run_blocking(shared, move |state| {
+        fetch_asset_group_dates_filtered(state, filters.unwrap_or_default())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn assets_seek(
+    state: State<'_, SharedState>,
+    anchor_id: i64,
+    limit: u32,
+    filters: Option<AssetFilters>,
+    before: Option<bool>,
+) -> Result<Vec<AssetDto>, String> {
+    let shared = state.inner().clone();
+    run_blocking(shared, move |state| {
+        let mut filters = filters.unwrap_or_default();
+        if let Some(after) = filters.captured_after.take() {
+            filters.captured_after = Some(normalize_date_filter(&after, "起始", false)?);
+        }
+        if let Some(end) = filters.captured_before.take() {
+            filters.captured_before = Some(normalize_date_filter(&end, "结束", true)?);
+        }
+        let db = super::active_library_db(state)?;
+        let rows = db
+            .assets_seek(
+                anchor_id,
+                limit.clamp(1, 200),
+                &filters,
+                before.unwrap_or(false),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut dtos: Vec<_> = rows.into_iter().map(page_row_to_dto).collect();
+        attach_burst_counts(&db, &mut dtos);
+        Ok(dtos)
+    })
+    .await
 }
 
 /// 资产详情（DB 查询 → 后台线程）。

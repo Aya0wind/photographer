@@ -9,12 +9,13 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   assetFlagSet,
   assetLabelSet,
+  assetRatingSet,
   assetRejectSet,
   clipboardCopyFiles,
   revealInExplorer,
   type AssetDto,
 } from "@/ipc/api";
-import { COLOR_LABELS } from "../lib/colorLabels";
+import { COLOR_LABELS, COLOR_DOT_CLASS, COLOR_DOT_RING, type ColorLabel } from "../lib/colorLabels";
 
 /**
  * 自定义右键菜单（全局 contextmenu 已被 nativeBehaviorGuard 屏蔽）：
@@ -32,6 +33,9 @@ export interface ContextMenuEntry {
   /** 子项（如「颜色标签」的五色+清除）：点击父项原地展开，子项 testid 为
    *  `${testId}-item-${父key}-${子key}`（jsdom 可测、无需悬停定位） */
   children?: ContextMenuEntry[];
+  palette?: boolean;
+  colorDot?: ColorLabel | "clear";
+  checked?: boolean;
 }
 
 export default function ContextMenu({
@@ -60,7 +64,7 @@ export default function ContextMenu({
       left: Math.max(8, Math.min(at.x, window.innerWidth - rect.width - 8)),
       top: Math.max(8, Math.min(at.y, window.innerHeight - rect.height - 8)),
     });
-  }, [at.x, at.y]);
+  }, [at.x, at.y, expandedKey]);
 
   // 点击外部 / Esc 关闭（mousedown：右键另一处会先关旧菜单再由目标开新菜单；
   // Esc 挂 window——document 层监听收不到 window 目标事件）
@@ -133,25 +137,29 @@ export default function ContextMenu({
             )}
           </button>
           {entry.children && expandedKey === entry.key && (
-            <div className="mb-1 ml-4 border-l border-edge/60 pl-2" data-testid={`${testId}-submenu-${entry.key}`}>
+            <div className={entry.palette ? "flex items-center gap-1 px-3 py-2" : "mb-1 ml-4 border-l border-edge/60 pl-2"} data-testid={`${testId}-submenu-${entry.key}`}>
               {entry.children.map((child) => (
                 <button
                   key={child.key}
                   type="button"
-                  role="menuitem"
+                  role={entry.palette ? "menuitemradio" : "menuitem"}
+                  aria-label={child.label}
+                  title={child.label}
+                  aria-checked={entry.palette ? Boolean(child.checked) : undefined}
                   disabled={child.disabled}
                   onClick={() => {
                     onClose();
                     child.onSelect?.();
                   }}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
+                  className={entry.palette ? `rounded-full p-1 transition-transform hover:scale-110 ${child.checked ? "ring-2 ring-accent" : ""}` : `flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors ${
                     child.danger
                       ? "text-red-400 hover:bg-red-400/10"
                       : "text-text-secondary hover:bg-panel hover:text-text-primary"
                   } disabled:cursor-default disabled:opacity-50`}
                   data-testid={`${testId}-item-${entry.key}-${child.key}`}
+                  data-label={child.colorDot && child.colorDot !== "clear" ? child.colorDot : undefined}
                 >
-                  {child.label}
+                  {child.colorDot && child.colorDot !== "clear" ? <span className={`block h-3.5 w-3.5 rounded-full ${COLOR_DOT_CLASS[child.colorDot]} ${COLOR_DOT_RING}`} aria-hidden="true" /> : child.colorDot === "clear" ? <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg> : child.label}
                 </button>
               ))}
             </div>
@@ -182,6 +190,12 @@ export function AssetContextMenu({
   onColorLabeled,
   onRejected,
   onTrashRequest,
+  onFavoritesChanged,
+  onFlagged,
+  windowIds,
+  selectedIds = [],
+  onSelectIds,
+  extraEntries = [],
 }: {
   at: { x: number; y: number };
   assets: AssetDto[];
@@ -196,6 +210,12 @@ export function AssetContextMenu({
   onRejected?: (assets: AssetDto[], rejected: boolean) => void;
   /** 「移入回收站」请求回调（确认弹窗由上层挂载） */
   onTrashRequest?: (assets: AssetDto[]) => void;
+  onFavoritesChanged?: (assets: AssetDto[], favorite: boolean) => void;
+  onFlagged?: (assets: AssetDto[], flagged: boolean) => void;
+  windowIds?: number[];
+  selectedIds?: number[];
+  onSelectIds?: (ids: number[]) => void;
+  extraEntries?: ContextMenuEntry[];
 }) {
   const { t } = useTranslation();
 
@@ -223,13 +243,26 @@ export function AssetContextMenu({
   }
 
   async function flag(): Promise<void> {
+    const next = !assets.every((asset) => asset.flagged);
     for (const asset of assets) {
       try {
-        await assetFlagSet(asset.id, true);
+        await assetFlagSet(asset.id, next);
       } catch {
         // 静默（乐观 UI）
       }
     }
+    onFlagged?.(assets, next);
+  }
+  async function copyPaths(): Promise<void> {
+    try { await navigator.clipboard.writeText(assets.map((asset) => asset.path).join("\n")); }
+    catch { /* Clipboard may be unavailable in the browser preview. */ }
+  }
+
+  const allFavorite = assets.length > 0 && assets.every((asset) => (asset.rating ?? 0) >= 5);
+  async function favorite(): Promise<void> {
+    const next = !allFavorite;
+    await Promise.all(assets.map((asset) => assetRatingSet(asset.id, next ? 5 : 0)));
+    onFavoritesChanged?.(assets, next);
   }
 
   /** 颜色标签批量设置（label=null 清除） */
@@ -258,17 +291,22 @@ export function AssetContextMenu({
   const entries: ContextMenuEntry[] = [
     { key: "reveal", label: t("context.reveal"), onSelect: () => void reveal() },
     { key: "copy", label: t("context.copyFiles"), onSelect: () => void copyFiles() },
-    { key: "flag", label: count > 1 ? t("context.flagMany", { count }) : t("context.flag"), onSelect: () => void flag() },
+    { key: "copy-path", label: t("selection.copyPath"), onSelect: () => { void copyPaths(); } },
+    { key: "favorite", label: t(allFavorite ? "selection.unfavorite" : "selection.favorite"), onSelect: () => void favorite() },
+    { key: "flag", label: assets.every((asset) => asset.flagged) ? t("selection.unflag") : count > 1 ? t("context.flagMany", { count }) : t("context.flag"), onSelect: () => void flag() },
     {
       key: "color",
       label: count > 1 ? t("context.colorLabelMany", { count }) : t("context.colorLabel"),
+      palette: true,
       children: [
         ...COLOR_LABELS.map((label) => ({
           key: label,
           label: t(`gallery.color.${label}`),
+          colorDot: label,
+          checked: assets.every((asset) => asset.colorLabel === label),
           onSelect: () => void colorLabel(label),
         })),
-        { key: "clear", label: t("context.colorClear"), onSelect: () => void colorLabel(null) },
+        { key: "clear", label: t("context.colorClear"), colorDot: "clear", onSelect: () => void colorLabel(null) },
       ],
     },
     {
@@ -283,6 +321,14 @@ export function AssetContextMenu({
       onSelect: () => void toggleReject(),
     },
   ];
+  if (windowIds && onSelectIds) {
+    const all = windowIds.length > 0 && windowIds.every((id) => selectedIds.includes(id));
+    entries.push(
+      { key: "select-all", label: t(all ? "selection.deselectAll" : "selection.all"), onSelect: () => onSelectIds(all ? [] : windowIds) },
+      { key: "invert", label: t("selection.invert"), onSelect: () => onSelectIds(windowIds.filter((id) => !selectedIds.includes(id))) },
+    );
+  }
+  entries.push(...extraEntries);
   if (onAddToAlbum) {
     entries.push({
       key: "add-album",

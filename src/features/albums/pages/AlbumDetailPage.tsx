@@ -1,4 +1,5 @@
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
+import { usePhotoTimeline } from "@/features/gallery/lib/usePhotoTimeline";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -23,10 +24,11 @@ import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { AssetContextMenu } from "@/features/gallery/components/ContextMenu";
-import SelectionBar from "@/features/gallery/components/SelectionBar";
 import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
+import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
+import ErrorModal from "@/shared/components/ErrorModal";
 import {
   FilterChipsRow,
   FilterPanel,
@@ -124,10 +126,11 @@ export default function AlbumDetailPage() {
     setLoadingMore(true);
     const afterId =
       assetsRef.current.length > 0 ? assetsRef.current[assetsRef.current.length - 1].id : 0;
+    const seq = loadSeqRef.current;
     const page = await fetchPage(afterId, appliedKeyRef.current);
     // 补页不参与主加载的 seq 竞争（bump 会丢弃在途主加载且 status 卡 loading）：
     // 若 await 期间发生主加载重置（loadingRef 已被主管线清零），本页丢弃由新管线接管
-    if (loadingRef.current) {
+    if (loadingRef.current && seq === loadSeqRef.current) {
       if (page.length > 0) {
         const seen = new Set(assetsRef.current.map((a) => a.id));
         const fresh = page.filter((a) => !seen.has(a.id));
@@ -146,12 +149,14 @@ export default function AlbumDetailPage() {
     const seq = ++loadSeqRef.current;
     setStatus("loading");
     hasMoreRef.current = true;
-    loadingRef.current = false;
+    loadingRef.current = true;
     void fetchPage(0, debouncedKey).then((page) => {
       if (cancelled || seq !== loadSeqRef.current) return;
       assetsRef.current = page;
       setAssets(page);
       if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
+      loadingRef.current = false;
+      setLoadingMore(false);
       setStatus("ready");
     });
     return () => {
@@ -165,6 +170,35 @@ export default function AlbumDetailPage() {
   }, [refreshSubgroups, reloadToken]);
 
   const sentinelRef = usePageSentinel(status === "ready", assets.length, appendPage);
+
+  const timelineCurrentAssets = useCallback(() => assetsRef.current, []);
+  const beforeTimelineJump = useCallback(() => {
+    ++loadSeqRef.current;
+    loadingRef.current = true;
+    setLoadingMore(false);
+  }, []);
+  const finishTimelineJump = useCallback(() => { loadingRef.current = false; }, []);
+  const replaceTimelineAssets = useCallback((page: AssetDto[]) => {
+    assetsRef.current = page;
+    setAssets(page);
+    hasMoreRef.current = page.length === PAGE_LIMIT;
+    setStatus("ready");
+  }, []);
+  const prependTimelineAssets = useCallback((page: AssetDto[]) => {
+    const seen = new Set(assetsRef.current.map((asset) => asset.id));
+    assetsRef.current = [...page.filter((asset) => !seen.has(asset.id)), ...assetsRef.current];
+    setAssets(assetsRef.current);
+  }, []);
+  const timeline = usePhotoTimeline({
+    enabled: status === "ready",
+    scopeKey: `${albumId}:${subgroup ?? "root"}:${debouncedKey}:${reloadToken}`,
+    filters: { ...buildFilters(parseInputs(debouncedKey)), albumId, ...(subgroup === null ? { subgroupIsNull: true } : { subgroup }) },
+    currentAssets: timelineCurrentAssets,
+    onBeforeJump: beforeTimelineJump,
+    onJumpFinished: finishTimelineJump,
+    onReplace: replaceTimelineAssets,
+    onPrepend: prependTimelineAssets,
+  });
 
   // --- 多选（与画廊同语义：check 圆钮 / Ctrl+点击 / 长按；Esc 退出） -------------------
   const { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
@@ -194,14 +228,19 @@ export default function AlbumDetailPage() {
     for (const group of groups) for (const a of group.assets) map.set(a.id, a);
     return map;
   }, [groups]);
-  const selectedAssets = useMemo(
-    () => selected.map((id) => loadedById.get(id)).filter((a): a is AssetDto => a !== undefined),
-    [selected, loadedById],
-  );
+  const patchAlbumAssets = useCallback((items: AssetDto[], patch: Partial<AssetDto>) => {
+    const ids = new Set(items.map((item) => item.id));
+    assetsRef.current = assetsRef.current.map((asset) => ids.has(asset.id) ? { ...asset, ...patch } : asset);
+    setAssets(assetsRef.current);
+  }, []);
 
   // --- 瓦片右键菜单（相册上下文：多一项「从相册移除」）+ 加入相册弹窗 -------------------
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(null);
   const [addToAlbumTargets, setAddToAlbumTargets] = useState<AssetDto[] | null>(null);
+  const [moveTargets, setMoveTargets] = useState<AssetDto[] | null>(null);
+  const [moveName, setMoveName] = useState("");
+  const [moving, setMoving] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
 
   function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
     setCtxMenu({ ...at, assets: contextTargets(asset, loadedById) });
@@ -242,10 +281,12 @@ export default function AlbumDetailPage() {
         setReloadToken((token) => token + 1);
         void refreshMeta();
         void refreshSubgroups();
+      } else {
+        setMoveError(t("albums.subgroupMoveFailed"));
       }
       return ok;
     },
-    [albumId, exitSelection, refreshMeta, refreshSubgroups],
+    [albumId, exitSelection, refreshMeta, refreshSubgroups, t],
   );
 
   // --- 页头行内重命名 -----------------------------------------------------------------
@@ -547,6 +588,9 @@ export default function AlbumDetailPage() {
             </div>
           ) : (
             <AssetGrid
+              timelineDates={timeline.dates}
+              onTimelineJump={timeline.jump}
+              onNearTop={timeline.prepend}
               badges={badges}
               groups={groups}
               onOpenAsset={openAsset}
@@ -556,6 +600,9 @@ export default function AlbumDetailPage() {
               onAssetContextMenu={handleTileContextMenu}
               selection={selecting ? { active: true, selected, onToggle: toggleSelected } : undefined}
               sentinelRef={sentinelRef}
+              loadingMore={loadingMore}
+              hasMore={hasMoreRef.current}
+              loadingTestId="album-detail-loading-more"
               layout="justify"
               tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
               scrollTestId="album-detail-grid-scroll"
@@ -563,35 +610,7 @@ export default function AlbumDetailPage() {
           )}
         </div>
 
-        {/* 底部加载指示（无限滚动补页中） */}
-        {loadingMore && (
-          <div
-            className="flex h-7 shrink-0 items-center justify-center text-[11px] text-text-muted"
-            data-testid="album-detail-loading-more"
-          >
-            {t("gallery.loadingMore")}
-          </div>
-        )}
       </div>
-
-      {/* 多选浮动操作条（移入回收站 = 一照一册下的「从相册移除」） */}
-      {selecting && (
-        <SelectionBar
-          count={selectedAssets.length}
-          assets={selectedAssets}
-          windowIds={assets.map((a) => a.id)}
-          onSelectAll={(ids) => setSelected(ids)}
-          onInvert={(ids) => setSelected(ids)}
-          onDone={exitSelection}
-          onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
-          onTrashRequest={requestTrashMove}
-          subgroup={{
-            current: subgroup,
-            names: subgroups.map((g) => g.name),
-            onMove: handleSubgroupMove,
-          }}
-        />
-      )}
 
       {/* 瓦片右键菜单 */}
       {ctxMenu && (
@@ -602,10 +621,30 @@ export default function AlbumDetailPage() {
           testId="album-asset-context-menu"
           onAddToAlbum={(targets) => setAddToAlbumTargets(targets)}
           onTrashRequest={requestTrashMove}
+          onFavoritesChanged={(items, favorite) => patchAlbumAssets(items, { rating: favorite ? 5 : 0 })}
+          onFlagged={(items, flagged) => patchAlbumAssets(items, { flagged })}
+          onColorLabeled={(items, label) => patchAlbumAssets(items, { colorLabel: label })}
+          onRejected={(items, rejected) => patchAlbumAssets(items, { rejected })}
+          windowIds={assets.map((asset) => asset.id)}
+          selectedIds={selected}
+          onSelectIds={setSelected}
+          extraEntries={[{ key: "move-subgroup", label: t("albums.moveToSubgroup"), onSelect: () => { setMoveTargets(ctxMenu.assets); setMoveName(""); } }, ...(subgroup !== null ? [{ key: "move-root", label: t("albums.moveToRoot"), onSelect: () => { void handleSubgroupMove(null, ctxMenu.assets); } }] : [])]}
         />
       )}
 
       {/* 「移入回收站」确认一步（多选操作条/右键菜单共用） */}
+      <ErrorModal message={moveError} onClose={() => setMoveError(null)} />
+      {moveTargets && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 p-6" role="dialog" aria-modal="true" aria-label={t("albums.moveToSubgroup")} data-testid="album-move-subgroup-dialog">
+        <div className="w-full max-w-sm rounded-xl border border-edge bg-surface p-4 shadow-2xl">
+          <h2 className="text-sm font-semibold text-text-primary">{t("albums.moveToSubgroup")}</h2>
+          <input autoFocus value={moveName} onChange={(event) => setMoveName(event.target.value)} list="album-move-subgroups" placeholder={t("albums.subgroupInputPlaceholder")} aria-label={t("albums.moveToSubgroup")} data-testid="album-move-subgroup-name" className="mt-3 w-full rounded-md border border-edge bg-bg px-3 py-2 text-sm text-text-primary outline-none focus:border-accent" />
+          <datalist id="album-move-subgroups">{subgroupSuggestions(subgroups.map((item) => item.name)).filter((name) => name !== subgroup).map((name) => <option key={name} value={name} />)}</datalist>
+          <div className="mt-4 flex justify-end gap-2">
+            <button type="button" disabled={moving} onClick={() => setMoveTargets(null)} className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary">{t("common.cancel")}</button>
+            <button type="button" data-testid="album-move-subgroup-confirm" disabled={moving || !moveName.trim()} onClick={async () => { setMoving(true); try { if (await handleSubgroupMove(moveName.trim(), moveTargets)) setMoveTargets(null); } finally { setMoving(false); } }} className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black disabled:opacity-40">{t("albums.subgroupMoveConfirm", { name: moveName.trim() || "…" })}</button>
+          </div>
+        </div>
+      </div>}
       {trashConfirm !== null && (
         <div
           className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-6"

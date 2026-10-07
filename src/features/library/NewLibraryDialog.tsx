@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { suggestedLibraryName } from "@/features/onboarding/onboardingConfig";
 import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import ErrorModal from "@/shared/components/ErrorModal";
 
 /**
  * 新建库对话框（可复用）：顶部菜单「文件 → 新建库…」与设置页「库」选项卡共用。
- * 快速录入库位置四要素（名称/数据库目录/照片存储目录/导入子目录，本机默认值预填），
+ * 快速录入库名、数据库目录、照片存储目录和并发数，
  * 创建 configured=false 的库并激活，随即进入 /onboarding?library=<id> 补完
  * 整理规则与 AI 设置（与库选择器「打开未配置库」同一条补完链）。
  */
@@ -68,12 +70,14 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
   const navigate = useNavigate();
   const [draft, setDraft] = useState<Draft>(defaultDraft);
   const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // 每次打开重置为本机默认值草稿
   useEffect(() => {
     if (open) {
       setDraft(defaultDraft());
       setCreating(false);
+      setError(null);
     }
   }, [open]);
 
@@ -96,6 +100,15 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
     setDraft((d) => ({ ...d, ...p }));
   }
 
+  async function browse(field: "dbDir" | "photoRoot"): Promise<void> {
+    try {
+      const dir = await openDialog({ directory: true });
+      if (typeof dir === "string") patch({ [field]: dir });
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function create(): Promise<void> {
     if (!canCreate) return;
     setCreating(true);
@@ -108,20 +121,25 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
       configured: false,
     };
     const current = useSettingsStore.getState().settings;
-    await useSettingsStore.getState().save({
-      ...current,
-      libraries: [...current.libraries, library],
-      activeLibraryId: library.id,
-    });
-    useSettingsStore.getState().setLibraryChosen(true);
-    // 记「本次会话新建」标记：向导取消时可安全删除这个未配置空库
     try {
-      sessionStorage.setItem(NEW_LIBRARY_DRAFT_KEY, library.id);
-    } catch {
-      // 存储不可用时静默（取消退化为不删库，仅退出）
+      await useSettingsStore.getState().save({
+        ...current,
+        libraries: [...current.libraries, library],
+        activeLibraryId: library.id,
+      });
+      useSettingsStore.getState().setLibraryChosen(true);
+      // 记「本次会话新建」标记：向导取消时可安全删除这个未配置空库
+      try {
+        sessionStorage.setItem(NEW_LIBRARY_DRAFT_KEY, library.id);
+      } catch {
+        // 存储不可用时静默（取消退化为不删库，仅退出）
+      }
+      onClose();
+      navigate(`/onboarding?library=${encodeURIComponent(library.id)}`);
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+      setCreating(false);
     }
-    onClose();
-    navigate(`/onboarding?library=${encodeURIComponent(library.id)}`);
   }
 
   return (
@@ -165,21 +183,29 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
               </label>
               <label className="flex flex-col gap-1 text-xs text-text-secondary">
                 {t("onboarding.library.photoRoot")}
-                <input
-                  type="text"
-                  value={draft.photoRoot}
-                  onChange={(e) => patch({ photoRoot: e.target.value })}
-                  className={FIELD_CLASS}
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={draft.photoRoot}
+                    onChange={(e) => patch({ photoRoot: e.target.value })}
+                    className={`${FIELD_CLASS} min-w-0 flex-1`}
+                  />
+                  <button type="button" onClick={() => void browse("photoRoot")} className="shrink-0 rounded-md border border-edge px-2 text-xs hover:border-accent">{t("onboarding.library.browse")}</button>
+                </div>
+                <span className="text-[11px] leading-relaxed text-text-muted">{t("onboarding.library.photoRootDesc")}</span>
               </label>
               <label className="flex flex-col gap-1 text-xs text-text-secondary">
                 {t("onboarding.library.dbDir")}
-                <input
-                  type="text"
-                  value={draft.dbDir}
-                  onChange={(e) => patch({ dbDir: e.target.value })}
-                  className={FIELD_CLASS}
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={draft.dbDir}
+                    onChange={(e) => patch({ dbDir: e.target.value })}
+                    className={`${FIELD_CLASS} min-w-0 flex-1`}
+                  />
+                  <button type="button" onClick={() => void browse("dbDir")} className="shrink-0 rounded-md border border-edge px-2 text-xs hover:border-accent">{t("onboarding.library.browse")}</button>
+                </div>
+                <span className="text-[11px] leading-relaxed text-text-muted">{t("onboarding.library.dbDirDesc")}</span>
               </label>
               <div className="flex flex-col gap-1 text-xs text-text-secondary">
                 <span className="flex items-center gap-2">
@@ -234,6 +260,7 @@ export default function NewLibraryDialog({ open, onClose }: NewLibraryDialogProp
               </button>
             </div>
           </motion.div>
+          <ErrorModal message={error} onClose={() => setError(null)} />
         </motion.div>
       )}
     </AnimatePresence>

@@ -1,18 +1,72 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useMotionOn } from "@/lib/motion";
 const MIN_SCALE = 1;
 const MAX_SCALE = 4;
 
 /** 舞台手势与临时变换；切换资产时复位。 */
 export function useViewerTransform(assetId: number) {
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const element = stageRef.current;
+    if (!element) return;
+    const update = () => {
+      const rect = element.getBoundingClientRect();
+      setStageSize((previous) => previous.width === rect.width && previous.height === rect.height ? previous : { width: rect.width, height: rect.height });
+    };
+    update();
+    window.addEventListener("resize", update);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(element);
+    return () => { observer?.disconnect(); window.removeEventListener("resize", update); };
+  }, []);
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
   const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
-  // 拖拽中用 state（渲染期可靠读取）：拖拽路径 transform 过渡必须关闭（跟手），
-  // 滚轮/双击/旋转等目标值变化走 CSS 过渡（缩放流畅）。ref 在渲染期读值会拿到
-  // 上一次的值（pointerup 后残留「拖拽中」→ 下一次缩放瞬跳）。
+  const [renderedView, setRenderedView] = useState(view);
+  const renderedRef = useRef(view);
+  const animationFrame = useRef<number | null>(null);
+  const [animating, setAnimating] = useState(false);
+  const motionOn = useMotionOn();
+  // All image dimensions and offsets use one interpolated frame, never separate CSS transitions.
   const [dragging, setDragging] = useState(false);
+  const stopAnimation = () => {
+    if (animationFrame.current !== null) cancelAnimationFrame(animationFrame.current);
+    animationFrame.current = null;
+  };
+  const paint = (next: typeof view) => { renderedRef.current = next; setRenderedView(next); };
   useEffect(() => {
-    setView({ scale: 1, x: 0, y: 0, rotation: 0 });
+    stopAnimation();
+    const start = renderedRef.current;
+    if (dragging || !motionOn || (start.scale === view.scale && start.x === view.x && start.y === view.y && start.rotation === view.rotation)) {
+      paint(view);
+      setAnimating(false);
+      return;
+    }
+    setAnimating(true);
+    let started: number | null = null;
+    const frame = (time: number) => {
+      started ??= time;
+      const progress = Math.min(1, (time - started) / 120);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      paint(progress === 1 ? view : {
+        scale: start.scale + (view.scale - start.scale) * eased,
+        x: start.x + (view.x - start.x) * eased,
+        y: start.y + (view.y - start.y) * eased,
+        rotation: start.rotation + (view.rotation - start.rotation) * eased,
+      });
+      if (progress < 1) animationFrame.current = requestAnimationFrame(frame);
+      else { animationFrame.current = null; setAnimating(false); }
+    };
+    animationFrame.current = requestAnimationFrame(frame);
+    return stopAnimation;
+  }, [view, dragging, motionOn]);
+  useEffect(() => {
+    stopAnimation();
+    const next = { scale: 1, x: 0, y: 0, rotation: 0 };
+    paint(next);
+    setView(next);
+    setAnimating(false);
+    setDragging(false);
   }, [assetId]);
 
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
@@ -27,16 +81,20 @@ export function useViewerTransform(assetId: number) {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      if (e.deltaY === 0) return;
       const rect = el.getBoundingClientRect();
       const cx = e.clientX - rect.left - rect.width / 2;
       const cy = e.clientY - rect.top - rect.height / 2;
       setView((v) => {
-        const next = clampScale(v.scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2));
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;
+        const delta = Math.max(-1000, Math.min(1000, e.deltaY * unit));
+        const next = clampScale(v.scale * Math.pow(1.2, -delta / 100));
         if (next === v.scale) return v;
         if (next === MIN_SCALE) return { scale: MIN_SCALE, x: 0, y: 0, rotation: v.rotation };
-        const ratio = next / v.scale;
+        const displayed = renderedRef.current;
+        const ratio = next / displayed.scale;
         // 指针为锚：保持光标下的图像点不动
-        return { scale: next, x: cx - (cx - v.x) * ratio, y: cy - (cy - v.y) * ratio, rotation: v.rotation };
+        return { scale: next, x: cx - (cx - displayed.x) * ratio, y: cy - (cy - displayed.y) * ratio, rotation: v.rotation };
       });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -49,6 +107,9 @@ export function useViewerTransform(assetId: number) {
     if (view.scale <= MIN_SCALE) return;
     // 箭头/工具按钮是操作控件，缩放状态下不能被舞台的 pointer capture 抢走点击。
     if (e.target instanceof Element && e.target.closest("button")) return;
+    stopAnimation();
+    setView({ ...renderedRef.current, rotation: view.rotation });
+    setAnimating(false);
     dragRef.current = { x: e.clientX, y: e.clientY };
     setDragging(true);
     try {
@@ -73,12 +134,18 @@ export function useViewerTransform(assetId: number) {
     }
   }
 
-  function resetView(): void { setView({ scale: 1, x: 0, y: 0, rotation: 0 }); }
+  function resetView(): void {
+    stopAnimation();
+    const next = { scale: 1, x: 0, y: 0, rotation: 0 };
+    paint(next);
+    setView(next);
+    setAnimating(false);
+  }
   function toggleZoom(): void {
     setView(v => v.scale > MIN_SCALE
       ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
       : { ...v, scale: 2, x: 0, y: 0 });
   }
-  return { stageRef, dragRef, view, rotate, resetView, toggleZoom, dragging,
+  return { stageRef, stageSize, dragRef, view, renderedView, animating, rotate, resetView, toggleZoom, dragging,
     handlePointerDown, handlePointerMove, handlePointerUp };
 }

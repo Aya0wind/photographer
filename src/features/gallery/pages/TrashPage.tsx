@@ -12,6 +12,7 @@ import AssetGrid from "../components/AssetGrid";
 import { useAssetSelection } from "../lib/useAssetSelection";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
+import ContextMenu from "../components/ContextMenu";
 
 /**
  * 回收站页（B1）：软删资产的集中管理——
@@ -33,7 +34,8 @@ export default function TrashPage() {
   const [status, setStatus] = useState<"loading" | "ready">("loading");
   const [hasMore, setHasMore] = useState(false);
   // 共享选择钩子（Shift 区间 + 锚点；回收站恒多选态，selecting 不用）
-  const { selected, setSelected, toggleSelected, exitSelection } = useAssetSelection();
+  const { selected, setSelected, ctrlSelect } = useAssetSelection();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
   /** 彻底删除确认弹窗目标（null=关闭；deleteFiles 两档由弹窗内选择） */
   const [purgeTargets, setPurgeTargets] = useState<number[] | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -79,15 +81,15 @@ export default function TrashPage() {
   }, []);
 
   // --- 恢复 ----------------------------------------------------------------------------
-  async function restore(): Promise<void> {
-    if (selected.length === 0) return;
-    const ok = await trashRestore(selected);
+  async function restore(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    const ok = await trashRestore(ids);
     if (!ok) {
       flash(t("trash.restoreFailed"));
       return;
     }
-    removeFromList(selected);
-    flash(t("trash.restored", { count: selected.length }));
+    removeFromList(ids);
+    flash(t("trash.restored", { count: ids.length }));
   }
 
   // --- 彻底删除（两档确认） --------------------------------------------------------------
@@ -150,8 +152,13 @@ export default function TrashPage() {
             <>
               <AssetGrid
                 groups={groups}
-                selection={{ active: true, selected, onToggle: toggleSelected }}
-                onCheckClick={toggleSelected}
+                selection={{ active: true, selected, onToggle: ctrlSelect }}
+                onCheckClick={ctrlSelect}
+                onAssetContextMenu={(asset, at) => {
+                  const ids = selected.includes(asset.id) ? selected : [asset.id];
+                  setSelected(ids);
+                  setContextMenu({ ...at, ids });
+                }}
                 readOnly
                 tile={GALLERY_TILE_PX[tileSize]}
                 scrollTestId="trash-grid-scroll"
@@ -173,68 +180,12 @@ export default function TrashPage() {
         </div>
       </div>
 
-      {/* 底部多选操作条：恢复 / 彻底删除（红，两档确认）/ 取消 */}
-      {selected.length > 0 && (
-        <div className="fixed bottom-6 left-1/2 z-30 -translate-x-1/2" data-testid="trash-actions" data-count={selected.length}>
-          <div className="flex items-center gap-1.5 rounded-full border border-edge bg-surface px-3 py-1.5 shadow-xl">
-            <span className="shrink-0 font-mono text-[11px] tabular-nums text-accent" data-testid="trash-selected-count">
-              {t("trash.selectedCount", { count: selected.length })}
-            </span>
-            <span className="h-4 w-px bg-edge" aria-hidden="true" />
-            {/* 全选（已全选再点=取消全选）/ 反选：数据窗口=当前已加载列表 */}
-            <button
-              type="button"
-              onClick={() => {
-                const allSelected = selected.length > 0 && selected.length === assets.length;
-                setSelected(allSelected ? [] : assets.map((a) => a.id));
-              }}
-              className="rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
-              data-testid="trash-select-all"
-            >
-              {selected.length > 0 && selected.length === assets.length
-                ? t("selection.deselectAll")
-                : t("selection.all")}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const selectedSet = new Set(selected);
-                setSelected(assets.filter((a) => !selectedSet.has(a.id)).map((a) => a.id));
-              }}
-              className="rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
-              data-testid="trash-invert"
-            >
-              {t("selection.invert")}
-            </button>
-            <span className="h-4 w-px bg-edge" aria-hidden="true" />
-            <button
-              type="button"
-              onClick={() => void restore()}
-              className="rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent"
-              data-testid="trash-restore"
-            >
-              {t("trash.restore")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setPurgeTargets([...selected])}
-              className="rounded-full px-2.5 py-1 text-[11px] text-red-400 transition-colors hover:bg-red-400/10"
-              data-testid="trash-purge-open"
-            >
-              {t("trash.purge")}
-            </button>
-            <span className="h-4 w-px bg-edge" aria-hidden="true" />
-            <button
-              type="button"
-              onClick={exitSelection}
-              className="rounded-full px-2 py-1 text-[11px] text-text-muted transition-colors hover:bg-panel hover:text-text-primary"
-              data-testid="trash-cancel"
-            >
-              {t("common.cancel")}
-            </button>
-          </div>
-        </div>
-      )}
+      {contextMenu && <ContextMenu at={{ x: contextMenu.x, y: contextMenu.y }} onClose={() => setContextMenu(null)} testId="trash-context-menu" entries={[
+        { key: "restore", label: t("trash.restore"), onSelect: () => { void restore(contextMenu.ids); } },
+        { key: "purge", label: t("trash.purge"), danger: true, onSelect: () => setPurgeTargets(contextMenu.ids) },
+        { key: "select-all", label: t(selected.length === assets.length ? "selection.deselectAll" : "selection.all"), onSelect: () => setSelected(selected.length === assets.length ? [] : assets.map((asset) => asset.id)) },
+        { key: "invert", label: t("selection.invert"), onSelect: () => setSelected(assets.filter((asset) => !selected.includes(asset.id)).map((asset) => asset.id)) },
+      ]} />}
 
       {/* 操作反馈 toast（操作条可能已随清空选中收起，独立于操作条渲染） */}
       {toast !== null && (

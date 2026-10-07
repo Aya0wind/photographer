@@ -13,6 +13,13 @@ const ORDER = [1, 2, 3, 4, 5];
 
 /** Shift 区间选择（2026-09-29）：锚点 + 有序列表驱动的并集区间。 */
 describe("useAssetSelection：Shift 区间选择", () => {
+  it("取消最后一张只清空所选照片，保留当前选择交互", () => {
+    const { result } = renderHook(() => useAssetSelection());
+    act(() => result.current.ctrlSelect(asset(1)));
+    act(() => result.current.toggleSelected(asset(1)));
+    expect(result.current.selected).toEqual([]);
+    expect(result.current.selecting).toBe(true);
+  });
   it("点击 A → Shift+点击 C：A/B/C 全进选中（并集，不清已有）", () => {
     const { result } = renderHook(() => useAssetSelection());
     act(() => result.current.ctrlSelect(asset(1)));

@@ -8,8 +8,8 @@ mod common;
 use common::library_fixture as setup;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -19,8 +19,8 @@ use db::{AssetFilters, AssetRow};
 use events::AssetKind;
 use ipc::rating::fetch_asset_rating_set;
 use ipc::selection::{
-    fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_trash_list, fetch_trash_purge,
-    fetch_trash_restore,
+    fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_trash_list,
+    fetch_trash_purge, fetch_trash_restore,
 };
 use metadata::xmp;
 
@@ -85,7 +85,6 @@ fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) -> bool {
     }
     pred()
 }
-
 
 // ---------------------------------------------------------------------------
 // 颜色标签
@@ -232,7 +231,7 @@ fn color_label_syncs_xmp_sidecar_and_clear_removes_attribute() {
         "无边车时应新建最小模板并携带 Label"
     );
 
-    // 外部库（origin=external）只写库不碰边车
+    // 用户主动修改外部引用照片的标签、拒绝状态也写原文件旁的边车。
     let ext_path = dir.path().join("elsewhere").join("DSC_0003.jpg");
     std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
     std::fs::write(&ext_path, b"ext").unwrap();
@@ -287,7 +286,25 @@ fn color_label_syncs_xmp_sidecar_and_clear_removes_attribute() {
         )
         .unwrap();
     assert_eq!(label.as_deref(), Some("green"));
-    assert!(!xmp::sidecar_path(&ext_path).exists(), "外部库不写边车");
+    let ext_sidecar = xmp::sidecar_path(&ext_path);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            ext_sidecar.is_file()
+                && xmp::read_label(&std::fs::read_to_string(&ext_sidecar).unwrap()).as_deref()
+                    == Some("Green")
+        }),
+        "外部引用照片的主动标签应写入边车"
+    );
+    fetch_asset_reject_set(&state, &[ext_id], true).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            ext_sidecar.is_file()
+                && std::fs::read_to_string(&ext_sidecar)
+                    .unwrap()
+                    .contains(r#"xmp:Rating="-1""#)
+        }),
+        "外部引用照片的主动拒绝状态应写入边车"
+    );
 }
 
 // ---------------------------------------------------------------------------

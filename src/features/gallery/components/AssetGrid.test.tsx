@@ -1,5 +1,6 @@
 import { assetFixture } from "@/test/fixtures";
 import type React from "react";
+import { createRef } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen } from "@testing-library/react";
@@ -42,6 +43,23 @@ function renderGrid(props: Partial<React.ComponentProps<typeof AssetGrid>> & { g
 }
 
 describe("虚拟行布局刷新", () => {
+  it("补页保留已有的尾行和缩略图 DOM，加载提示只在固定底部区域出现", () => {
+    const sentinel = createRef<HTMLDivElement>();
+    const first = groupsOf([asset(1), asset(2), asset(3)]);
+    const { rerender } = renderGrid({ groups: first, layout: "justify", tile: 220, sentinelRef: sentinel });
+    const original = screen.getAllByTestId("gallery-tile")[0];
+    const height = original.style.height;
+    const footer = screen.getByTestId("gallery-sentinel");
+    expect(footer).toHaveClass("h-12");
+    rerender(<I18nextProvider i18n={i18n}><AssetGrid groups={first} layout="justify" tile={220} sentinelRef={sentinel} loadingMore /></I18nextProvider>);
+    expect(screen.getByTestId("gallery-loading-more").closest('[data-testid="gallery-sentinel"]')).toBe(footer);
+    const appended = groupsOf([asset(1), asset(2), asset(3), asset(4), asset(5), asset(6), asset(7)]);
+    rerender(<I18nextProvider i18n={i18n}><AssetGrid groups={appended} layout="justify" tile={220} sentinelRef={sentinel} /></I18nextProvider>);
+    expect(screen.getAllByTestId("gallery-tile")[0]).toBe(original);
+    expect(original.style.height).toBe(height);
+    expect(screen.getByTestId("gallery-sentinel")).toBe(footer);
+    expect(screen.queryByTestId("gallery-loading-more")).not.toBeInTheDocument();
+  });
   it("语义结果替换和图大小变化后立即重算下一组位置，不需要折叠展开", () => {
     const first: AssetGroup[] = [
       { key: "a", date: "2026-09-18", assets: [asset(1)] },

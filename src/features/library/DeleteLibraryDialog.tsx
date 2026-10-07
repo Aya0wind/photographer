@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { libraryDelete } from "@/ipc/api";
 import type { Library } from "@/stores/settingsStore";
+import ErrorModal from "@/shared/components/ErrorModal";
 
 /**
  * 删除库对话框（用户定案 2026-09-27）：
@@ -41,25 +42,39 @@ export default function DeleteLibraryDialog({
     if (!nameMatches || busy) return;
     setBusy(true);
     setError(null);
+    let wasActive = false;
+    let physicalDeleted = false;
     try {
       const settingsStore = await import("@/stores/settingsStore");
       const { useSettingsStore } = settingsStore;
       const { save, setLibraryChosen, settings } = useSettingsStore.getState();
-      // 活跃库先清激活（后端拒删活跃库）；同时在册摘除该库
-      const wasActive = settings.activeLibraryId === library.id;
+      // 物理删除成功前保留注册表记录，以便失败后重试。
+      wasActive = settings.activeLibraryId === library.id;
       const next = {
         ...settings,
-        libraries: settings.libraries.filter((l) => l.id !== library.id),
         activeLibraryId: wasActive ? null : settings.activeLibraryId,
       };
-      await save(next);
+      if (wasActive) await save(next);
       if (wasActive) setLibraryChosen(false);
-      // 物理删除（库数据目录必删；勾选才连照片目录）
+      // 删除库管理的文件，原地索引的照片始终保留。
       await libraryDelete(library.dbDir, alsoPhotos ? library.photoRoot : undefined);
+      physicalDeleted = true;
+      const latest = useSettingsStore.getState().settings;
+      await save({ ...latest, libraries: latest.libraries.filter((l) => l.id !== library.id) });
       onDeleted();
       onClose();
     } catch (e) {
-      setError(String(e).replace(/^Error:\s*/, ""));
+      let message = String(e).replace(/^Error:\s*/, "");
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const current = useSettingsStore.getState().settings;
+      if (wasActive && !physicalDeleted && current.libraries.some((l) => l.id === library.id) && current.activeLibraryId === null) {
+        try {
+          await useSettingsStore.getState().save({ ...current, activeLibraryId: library.id });
+        } catch (restoreError) {
+          message += `\n${String(restoreError).replace(/^Error:\s*/, "")}`;
+        }
+      }
+      setError(message);
       setBusy(false);
     }
   }
@@ -110,11 +125,6 @@ export default function DeleteLibraryDialog({
           />
         </label>
 
-        {error && (
-          <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="delete-library-error">
-            {error}
-          </p>
-        )}
 
         <div className="mt-4 flex justify-end gap-2">
           <button
@@ -137,6 +147,7 @@ export default function DeleteLibraryDialog({
           </button>
         </div>
       </div>
+      <ErrorModal message={error} onClose={() => setError(null)} />
     </div>
   );
 }

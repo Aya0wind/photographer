@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import type { AssetDto } from "@/ipc/api";
 
 /** 切换选项（2026-09-29 Shift 区间选择）：shift=从锚点到该照片的区间
@@ -18,6 +18,10 @@ export function useAssetSelection() {
    *  不移动锚点（Explorer 语义：连续 Shift 始终从原锚点拉区间）；退出
    *  多选或锚点不在当前视图时重新起锚。 */
   const anchorRef = useRef<number | null>(null);
+  const replaceSelected = useCallback((next: SetStateAction<number[]>) => {
+    setSelecting(true);
+    setSelected(next);
+  }, []);
 
   const applyToggle = useCallback((asset: AssetDto, opts?: ToggleOptions) => {
     if (opts?.shift && anchorRef.current !== null && opts.order) {
@@ -81,5 +85,5 @@ export function useAssetSelection() {
     return [asset];
   }, [selecting, selected]);
 
-  return { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets };
+  return { selecting, selected, setSelected: replaceSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets };
 }

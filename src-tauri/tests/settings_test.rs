@@ -5,9 +5,60 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use smart_photo_lib::settings::{
-    AiSettings, DuplicatePolicy, ImportSettings, IndexSchedule, Library, Settings, SettingsError,
-    SettingsManager, SystemSettings, SCHEMA_VERSION,
+    validate_library_storage_paths, AiSettings, DuplicatePolicy, ImportSettings, IndexSchedule,
+    Library, Settings, SettingsError, SettingsManager, SystemSettings, SCHEMA_VERSION,
 };
+
+#[test]
+fn new_library_requires_dedicated_directories_and_recognizes_recovery_db() {
+    let temp = temp_dir();
+    let db_dir = temp.path().join("database");
+    let photos = temp.path().join("photos");
+    let mut proposed = Settings::default();
+    proposed.libraries.push(Library {
+        id: "new".into(),
+        name: "New library".into(),
+        db_dir: db_dir.to_string_lossy().into_owned(),
+        photo_root: photos.to_string_lossy().into_owned(),
+        ..Library::default()
+    });
+    let previous = Settings::default();
+    assert!(validate_library_storage_paths(&proposed, &previous).is_ok());
+
+    fs::create_dir_all(&photos).unwrap();
+    fs::write(photos.join("existing.jpg"), b"user photo").unwrap();
+    assert!(validate_library_storage_paths(&proposed, &previous)
+        .unwrap_err()
+        .contains("照片目录必须是空目录"));
+    fs::remove_file(photos.join("existing.jpg")).unwrap();
+
+    fs::create_dir_all(&db_dir).unwrap();
+    fs::write(db_dir.join("notes.txt"), b"user file").unwrap();
+    assert!(validate_library_storage_paths(&proposed, &previous)
+        .unwrap_err()
+        .contains("数据库目录必须为空"));
+    fs::remove_file(db_dir.join("notes.txt")).unwrap();
+    let conn = rusqlite::Connection::open(db_dir.join("library.db")).unwrap();
+    conn.execute_batch("CREATE TABLE assets (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    drop(conn);
+    assert!(validate_library_storage_paths(&proposed, &previous).is_ok());
+
+    proposed.libraries.push(Library {
+        id: "overlap".into(),
+        name: "Overlap".into(),
+        db_dir: temp
+            .path()
+            .join("database/sub")
+            .to_string_lossy()
+            .into_owned(),
+        photo_root: temp.path().join("other").to_string_lossy().into_owned(),
+        ..Library::default()
+    });
+    assert!(validate_library_storage_paths(&proposed, &previous)
+        .unwrap_err()
+        .contains("重叠"));
+}
 
 fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("failed to create temp dir")
@@ -372,8 +423,16 @@ fn library_quality_tiers_are_independent_across_switches_and_edits() {
     use smart_photo_lib::settings::normalize_library_quality_tiers;
     let mut previous = Settings::default();
     previous.libraries = vec![
-        Library { id: "main".into(), ai_quality_tier: Some("normal".into()), ..Library::default() },
-        Library { id: "new".into(), ai_quality_tier: Some("fast".into()), ..Library::default() },
+        Library {
+            id: "main".into(),
+            ai_quality_tier: Some("normal".into()),
+            ..Library::default()
+        },
+        Library {
+            id: "new".into(),
+            ai_quality_tier: Some("fast".into()),
+            ..Library::default()
+        },
     ];
     previous.active_library_id = Some("main".into());
     let mut switched = previous.clone();
@@ -383,28 +442,45 @@ fn library_quality_tiers_are_independent_across_switches_and_edits() {
     let mut edited = switched.clone();
     edited.ai.quality_tier = "accurate".into();
     normalize_library_quality_tiers(&mut edited, &switched).unwrap();
-    assert_eq!(edited.libraries[1].ai_quality_tier.as_deref(), Some("accurate"));
-    assert_eq!(edited.libraries[0].ai_quality_tier.as_deref(), Some("normal"));
+    assert_eq!(
+        edited.libraries[1].ai_quality_tier.as_deref(),
+        Some("accurate")
+    );
+    assert_eq!(
+        edited.libraries[0].ai_quality_tier.as_deref(),
+        Some("normal")
+    );
     let mut back = edited.clone();
     back.active_library_id = Some("main".into());
     normalize_library_quality_tiers(&mut back, &edited).unwrap();
     assert_eq!(back.ai.quality_tier, "normal");
     let dir = temp_dir();
     SettingsManager::save(&back, dir.path()).unwrap();
-    assert_eq!(SettingsManager::load(dir.path()).unwrap().libraries, back.libraries);
+    assert_eq!(
+        SettingsManager::load(dir.path()).unwrap().libraries,
+        back.libraries
+    );
 }
 
 #[test]
 fn legacy_quality_tier_is_migrated_per_library_and_gallery_preference_roundtrips() {
     let dir = temp_dir();
-    fs::write(settings_path(dir.path()), serde_json::json!({
-        "activeLibraryId": "old",
-        "libraries": [{"id":"old"}],
-        "ai": {"qualityTier":"accurate"},
-        "gallery": {"mergeRawJpg":false}
-    }).to_string()).unwrap();
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "activeLibraryId": "old",
+            "libraries": [{"id":"old"}],
+            "ai": {"qualityTier":"accurate"},
+            "gallery": {"mergeRawJpg":false}
+        })
+        .to_string(),
+    )
+    .unwrap();
     let loaded = SettingsManager::load(dir.path()).unwrap();
-    assert_eq!(loaded.libraries[0].ai_quality_tier.as_deref(), Some("accurate"));
+    assert_eq!(
+        loaded.libraries[0].ai_quality_tier.as_deref(),
+        Some("accurate")
+    );
     assert!(!loaded.gallery.merge_raw_jpg);
     SettingsManager::save(&loaded, dir.path()).unwrap();
     assert_eq!(SettingsManager::load(dir.path()).unwrap(), loaded);
@@ -529,10 +605,7 @@ fn normalize_library_path_rejects_non_absolute() {
         "  ",
     ] {
         let err = normalize_library_path(bad).unwrap_err();
-        assert!(
-            err.contains("路径必须是绝对路径"),
-            "{bad} 应被拒绝：{err}"
-        );
+        assert!(err.contains("路径必须是绝对路径"), "{bad} 应被拒绝：{err}");
     }
 }
 

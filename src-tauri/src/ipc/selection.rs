@@ -1,7 +1,7 @@
 //! 选片命令（阶段 B1）：颜色标签 / 接受拒绝 / 应用内回收站 / 智能视图。
 //!
-//! - 颜色标签：DB 权威 + XMP 边车异步写 `xmp:Label`（与 rating 同策略：
-//!   外部库只读资产跳过边车；LR 标准色名直映，无映射配置）。
+//! - 颜色标签：DB 权威 + XMP 边车异步写 `xmp:Label`，包括用户主动修改的
+//!   外部引用照片；LR 标准色名直映，无映射配置。
 //! - 拒绝状态：应用内选片状态；XMP 即时投影为 `xmp:Rating = -1`
 //!   （Adobe 业界约定、LR 可识别，用户定案 2026-09-27），星级在 DB 保留；
 //!   默认查询不排除已拒绝——只是可筛选项。
@@ -40,7 +40,7 @@ pub fn validate_label(raw: Option<&str>) -> Result<Option<&'static str>, String>
 }
 
 /// 批量设颜色标签核：DB 批量更新 → 派 XMP 边车同步（supervisor 后台线程，
-/// 失败经 AppError 事件上报，不阻塞入库；外部库只读资产跳过边车）。
+/// 失败经 AppError 事件上报，不阻塞入库）。
 pub fn fetch_asset_label_set(
     state: &super::AppState,
     asset_ids: &[i64],
@@ -54,10 +54,10 @@ pub fn fetch_asset_label_set(
     if n == 0 {
         return Ok(0);
     }
-    // 边车同步清单（库内复制入册的资产；xmp 值形态 = 首字母大写标准色名）
+    // 用户主动修改的照片均同步边车；xmp 值形态 = 首字母大写标准色名。
     let targets: Vec<(String, Option<&'static str>)> =
         db.0.prepare(&format!(
-            "SELECT path, origin FROM assets WHERE id IN ({})",
+            "SELECT path FROM assets WHERE id IN ({})",
             (0..asset_ids.len())
                 .map(|i| format!("?{}", i + 1))
                 .collect::<Vec<_>>()
@@ -65,14 +65,13 @@ pub fn fetch_asset_label_set(
         ))
         .and_then(|mut stmt| {
             let rows = stmt.query_map(rusqlite::params_from_iter(asset_ids.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                r.get::<_, String>(0)
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|(_, origin)| origin != "external")
-        .map(|(path, _)| (path, label))
+        .map(|path| (path, label))
         .collect();
     if targets.is_empty() {
         return Ok(n);
@@ -99,7 +98,7 @@ pub fn fetch_asset_label_set(
 /// 投影」：边车评分 = rejected ? -1 : rating，LR 可识别的拒绝表示；星级在
 /// DB 保留，取消拒绝恢复投影）。与 rating_set 共用同一投影，任一变更后
 /// 边车都按 DB 真值重写。批量逐文件；单文件失败容忍不中断（AppError 上报）；
-/// 边车缺失时新建；外部库只读资产跳过。
+/// 边车缺失时新建，包括用户主动修改的外部引用照片。
 pub fn fetch_asset_reject_set(
     state: &super::AppState,
     asset_ids: &[i64],
@@ -112,10 +111,10 @@ pub fn fetch_asset_reject_set(
     if n == 0 {
         return Ok(0);
     }
-    // 边车投影清单（库内复制入册的资产；评分取 DB 当前值做投影）
+    // 边车投影清单：评分取 DB 当前值做投影。
     let targets: Vec<(String, i8)> =
         db.0.prepare(&format!(
-            "SELECT path, origin, rating FROM assets WHERE id IN ({})",
+            "SELECT path, rating FROM assets WHERE id IN ({})",
             (0..asset_ids.len())
                 .map(|i| format!("?{}", i + 1))
                 .collect::<Vec<_>>()
@@ -123,18 +122,13 @@ pub fn fetch_asset_reject_set(
         ))
         .and_then(|mut stmt| {
             let rows = stmt.query_map(rusqlite::params_from_iter(asset_ids.iter()), |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(|e| e.to_string())?
         .into_iter()
-        .filter(|(_, origin, _)| origin != "external")
-        .map(|(path, _, rating)| (path, super::rating::projected_rating(rating, rejected)))
+        .map(|(path, rating)| (path, super::rating::projected_rating(rating, rejected)))
         .collect();
     if targets.is_empty() {
         return Ok(n);

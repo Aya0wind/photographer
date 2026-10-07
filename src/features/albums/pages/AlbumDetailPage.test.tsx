@@ -24,7 +24,7 @@ import {
 
 /**
  * 手工相册详情页（/albums/:id，数字参数经 AlbumEntryPage 分发）：
- * keyset 游标分页（afterId=上一页末条 id）、相册上下文「从相册移除」（多选操作条 +
+ * keyset 游标分页（afterId=上一页末条 id）、相册上下文「从相册移除」（多选右键菜单 +
  * 右键菜单）、FilterPanel 筛选透传（隐藏相册维度）、页头重命名、「添加照片」提示。
  */
 
@@ -179,7 +179,7 @@ describe("相册详情页：数据与分页", () => {
 });
 
 describe("相册详情页：从相册移除 = 移入回收站（一照一册）", () => {
-  it("多选操作条「移入回收站」：确认弹窗 → asset_trash_move → 重置重拉 + 计数刷新；无独立「从相册移除」按钮", async () => {
+  it("多选右键菜单「移入回收站」：确认弹窗 → asset_trash_move → 重置重拉 + 计数刷新；无独立「从相册移除」按钮", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
     const user = userEvent.setup();
     renderDetail();
@@ -187,11 +187,11 @@ describe("相册详情页：从相册移除 = 移入回收站（一照一册）"
 
     await user.click(checkOf(1));
     await user.click(tileOf(2));
-    expect(screen.getByTestId("selection-bar")).toHaveAttribute("data-count", "2");
+    expect(screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true")).toHaveLength(2);
     // 旧「从相册移除」按钮已删（从相册移除 = 移入回收站）
     expect(screen.queryByTestId("selection-remove-album")).toBeNull();
 
-    await user.click(screen.getByTestId("selection-trash"));
+    await user.click(await contextItem("trash"));
     const dialog = await screen.findByTestId("trash-move-dialog");
     await user.click(within(dialog).getByTestId("trash-move-accept"));
     await waitFor(() => expect(trashMoveMock).toHaveBeenCalledWith([1, 2]));
@@ -298,7 +298,7 @@ describe("相册详情页：页头与筛选", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-add-album"));
+    await user.click(await contextItem("add-album"));
     const dialog = await screen.findByTestId("add-to-album-dialog");
     // 相册列表含本相册自身；选择另一相册（备份册 id=5）
     const option5 = within(dialog)
@@ -348,7 +348,7 @@ describe("相册详情页：子分组", () => {
     expect(screen.queryByTestId("album-subgroup-bar")).not.toBeInTheDocument();
   });
 
-  it("子分组内多选 → 操作条「移到子分组…」输入新名即建 → album_item_move_subgroup + 重拉", async () => {
+  it("子分组内多选 → 右键菜单「移到子分组…」输入新名即建 → album_item_move_subgroup + 重拉", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
     renderDetail();
     await screen.findAllByTestId("gallery-tile");
@@ -357,10 +357,10 @@ describe("相册详情页：子分组", () => {
     await user.click(checkOf(1));
     await user.click(tileOf(2));
 
-    await user.click(screen.getByTestId("selection-subgroup-move"));
-    const menu = screen.getByTestId("selection-subgroup-menu");
-    await user.type(within(menu).getByTestId("selection-subgroup-name"), "精选");
-    await user.click(within(menu).getByTestId("selection-subgroup-confirm"));
+    await user.click(await contextItem("move-subgroup"));
+    const menu = screen.getByTestId("album-move-subgroup-dialog");
+    await user.type(within(menu).getByTestId("album-move-subgroup-name"), "精选");
+    await user.click(within(menu).getByTestId("album-move-subgroup-confirm"));
 
     await waitFor(() => expect(moveMock).toHaveBeenCalledWith(1, [1, 2], "精选"));
     // 移组后重置重拉 + 退出多选
@@ -375,9 +375,9 @@ describe("相册详情页：子分组", () => {
 
     const user = userEvent.setup();
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-subgroup-move"));
+    await user.click(await contextItem("move-subgroup"));
 
-    const datalist = document.getElementById("selection-subgroup-datalist") as HTMLDataListElement;
+    const datalist = document.getElementById("album-move-subgroups") as HTMLDataListElement;
     expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "成片", "精选"]);
   });
 
@@ -389,15 +389,15 @@ describe("相册详情页：子分组", () => {
 
     const user = userEvent.setup();
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-subgroup-move"));
-    const menu = screen.getByTestId("selection-subgroup-menu");
+    await user.click(await contextItem("move-subgroup"));
+    const menu = screen.getByTestId("album-move-subgroup-dialog");
     // 根视图没有「移到相册根」
     expect(within(menu).queryByTestId("selection-subgroup-root")).not.toBeInTheDocument();
     // 输入留空 → 确认禁用
-    expect(within(menu).getByTestId("selection-subgroup-confirm")).toBeDisabled();
+    expect(within(menu).getByTestId("album-move-subgroup-confirm")).toBeDisabled();
   });
 
-  it("子分组视图移回根：操作条出现「移到相册根」→ album_item_move_subgroup(id, ids, null)", async () => {
+  it("子分组视图移回根：右键菜单出现「移到相册根」→ album_item_move_subgroup(id, ids, null)", async () => {
     subgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 2 }]);
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
     renderDetail();
@@ -416,8 +416,9 @@ describe("相册详情页：子分组", () => {
     await user.click(checkOf(1));
     await user.click(tileOf(2));
 
-    await user.click(screen.getByTestId("selection-subgroup-move"));
-    await user.click(screen.getByTestId("selection-subgroup-root"));
+    await user.click(await contextItem("move-root"));
     await waitFor(() => expect(moveMock).toHaveBeenCalledWith(1, [1, 2], null));
   });
 });
+
+async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("album-asset-context-menu-item-" + key); }

@@ -352,6 +352,108 @@ pub fn normalize_library_paths(settings: &mut Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// Only a dedicated directory may own a library. Existing database directories are
+/// accepted for recovery, but an arbitrary non-empty folder is never adopted.
+/// Run this only for newly registered or changed paths so older libraries can still
+/// be opened and migrated without retroactively rejecting their layout.
+pub fn validate_library_storage_paths(
+    settings: &Settings,
+    previous: &Settings,
+) -> Result<(), String> {
+    fn overlaps(a: &Path, b: &Path) -> bool {
+        let a = a.to_string_lossy().replace('/', "\\").to_lowercase();
+        let b = b.to_string_lossy().replace('/', "\\").to_lowercase();
+        a == b || a.starts_with(&(b.clone() + "\\")) || b.starts_with(&(a + "\\"))
+    }
+    fn disk_root(path: &Path) -> bool {
+        path.parent()
+            .is_none_or(|parent| parent.as_os_str().is_empty())
+    }
+    for lib in &settings.libraries {
+        let old = previous.libraries.iter().find(|item| item.id == lib.id);
+        let db = Path::new(&lib.db_dir);
+        let photos = Path::new(&lib.photo_root);
+        if old.is_some_and(|item| item.db_dir == lib.db_dir && item.photo_root == lib.photo_root) {
+            continue;
+        }
+        if disk_root(db) || disk_root(photos) {
+            return Err("库目录不能直接选择磁盘或网络共享的根目录".into());
+        }
+        if overlaps(db, photos) {
+            return Err("数据库目录与照片目录不能相同或互相包含".into());
+        }
+        let real_db = db.canonicalize().ok();
+        let real_photos = photos.canonicalize().ok();
+        if let (Some(real_db), Some(real_photos)) = (&real_db, &real_photos) {
+            if overlaps(&real_db, &real_photos) {
+                return Err("数据库目录与照片目录实际指向同一位置或互相包含".into());
+            }
+        }
+        for other in &settings.libraries {
+            if other.id == lib.id {
+                continue;
+            }
+            for path in [Path::new(&other.db_dir), Path::new(&other.photo_root)] {
+                if overlaps(db, path) || overlaps(photos, path) {
+                    return Err(format!("库目录与已有库「{}」的目录重叠", other.name));
+                }
+                let real_path = path.canonicalize().ok();
+                if let (Some(real_path), Some(real_db)) = (&real_path, &real_db) {
+                    if overlaps(&real_path, &real_db) {
+                        return Err(format!("库目录与已有库「{}」的实际位置重叠", other.name));
+                    }
+                }
+                if let (Some(real_path), Some(real_photos)) = (&real_path, &real_photos) {
+                    if overlaps(&real_path, &real_photos) {
+                        return Err(format!("库目录与已有库「{}」的实际位置重叠", other.name));
+                    }
+                }
+            }
+        }
+        for (path, label) in [(db, "数据库目录"), (photos, "照片目录")] {
+            if path.exists() && !path.is_dir() {
+                return Err(format!("{label}不是文件夹：{}", path.display()));
+            }
+        }
+        if old.is_none_or(|item| item.db_dir != lib.db_dir) && db.is_dir() {
+            let database = db.join("library.db");
+            if database.is_file() {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &database,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| format!("无法恢复此数据库目录：{e}"))?;
+                let recognized: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| format!("无法验证已有数据库：{e}"))?;
+                if !recognized {
+                    return Err("所选目录中的 library.db 不是可识别的照片库".into());
+                }
+            } else if std::fs::read_dir(db)
+                .map_err(|e| format!("无法读取数据库目录：{e}"))?
+                .next()
+                .is_some()
+            {
+                return Err("数据库目录必须为空，或包含可恢复的 library.db".into());
+            }
+        }
+        if old.is_none_or(|item| item.photo_root != lib.photo_root)
+            && photos.is_dir()
+            && std::fs::read_dir(photos)
+                .map_err(|e| format!("无法读取照片目录：{e}"))?
+                .next()
+                .is_some()
+        {
+            return Err("照片目录必须是空目录，或选择尚未创建的新目录".into());
+        }
+    }
+    Ok(())
+}
+
 /// 组件级逻辑归一（目标路径尚不存在时的兜底）：`/` 分隔符经 components
 /// 重建自然折成 `\`；`.` 直接跳过；`..` 仅在上一段是普通目录名时折叠
 ///（避免把盘根/UNC 段 pop 掉退化成盘符相对路径）。

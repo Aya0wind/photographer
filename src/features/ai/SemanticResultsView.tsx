@@ -7,7 +7,7 @@ import { indexKickNow, type AssetDto } from "@/ipc/api";
 import { useAiStore } from "@/stores/aiStore";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
-import SelectionToolbarHost from "@/features/gallery/components/SelectionToolbarHost";
+import AssetActionsHost from "@/features/gallery/components/AssetActionsHost";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
 import { useAiIndexingProgress } from "./useSemanticSearch";
 
@@ -107,7 +107,8 @@ export default function SemanticResultsView({
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
 
   // --- 多选（与图库同语义；结果集为 props，乐观补丁经回调上抛） ---
-  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection, contextTargets } = useAssetSelection();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(null);
   const patchAssets = useCallback(
     (ids: number[], patch: Partial<AssetDto>) => {
       onPatched?.(ids, patch);
@@ -197,13 +198,16 @@ export default function SemanticResultsView({
         onCtrlClick={ctrlSelect}
         onLongPress={ctrlSelect}
         onCheckClick={ctrlSelect}
+        onAssetContextMenu={(asset, at) => setContextMenu({ ...at, assets: contextTargets(asset, new Map(assets.map((item) => [item.id, item]))) })}
       />
-      {selecting && (
-        <SelectionToolbarHost
+      {(
+        <AssetActionsHost
           assets={assets}
           selectedIds={selected}
           onSelectIds={setSelected}
           onDone={exitSelection}
+          contextMenu={contextMenu}
+          onCloseContextMenu={() => setContextMenu(null)}
           onPatched={patchAssets}
           onRemoved={onRemoved}
         />

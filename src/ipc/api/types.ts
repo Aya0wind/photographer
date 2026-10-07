@@ -33,7 +33,7 @@ export interface DeviceSnapshot {
 export type DuplicatePolicy = "skip" | "rename" | "ask";
 
 /** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
-export type ImportMode = "copy" | "move";
+export type ImportMode = "copy" | "move" | "reference";
 
 /**
  * plan.dirTemplate 的固定占位值（dirTemplate 配置退役，2026-09-28 定案）：
@@ -175,7 +175,7 @@ export type AppEvent =
 /** 库内资产大类（与导入侧 FileKind 对齐，不含 other——入库文件必属其一） */
 export type AssetKind = "photo" | "raw";
 
-/** 库内资产（assets_page 返回；按 capturedAt DESC 排列，capturedAt 为 NULL 的排最前） */
+/** 库内资产（assets_page 返回；按 capturedAt DESC 排列，capturedAt 为 NULL 的沉底） */
 export interface AssetDto {
   id: number;
   /** 库内绝对路径 */
@@ -284,7 +284,7 @@ export interface AssetFilters {
   subgroupIsNull?: boolean;
 }
 
-/** 日期分组统计（asset_group_dates 返回，chips 条数据源；未知日期组 date=null 排最前） */
+/** 日期目录（asset_group_dates 返回；未知日期为 null 或 "unknown"，在末尾）。 */
 export interface AssetGroupDate {
   date: string | null;
   count: number;

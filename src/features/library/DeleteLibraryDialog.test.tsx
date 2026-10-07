@@ -93,13 +93,16 @@ describe("删除库对话框", () => {
     expect(s.activeLibraryId).toBeNull();
   });
 
-  it("后端失败：错误行内展示、对话框保留", async () => {
+  it("后端失败：模态提示、删除对话框保留", async () => {
     deleteMock.mockRejectedValue(new Error("目录不像库数据目录"));
-    renderDelete();
+    const { onClose } = renderDelete();
     fireEvent.change(screen.getByTestId("delete-library-input"), { target: { value: "测试库" } });
     fireEvent.click(screen.getByTestId("delete-library-confirm"));
-    expect(await screen.findByTestId("delete-library-error")).toHaveTextContent("目录不像库数据目录");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("目录不像库数据目录");
     expect(screen.getByTestId("delete-library-dialog")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "确定" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

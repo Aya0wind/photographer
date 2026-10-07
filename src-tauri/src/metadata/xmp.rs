@@ -359,6 +359,13 @@ fn sync_sidecar(
     asset_path: &Path,
     update: impl FnOnce(Option<&str>) -> String,
 ) -> Result<(), String> {
+    // 评分、颜色与拒绝状态由不同后台任务提交。串行化读改写，避免两个
+    // 任务同时读取旧边车后互相覆盖对方的字段。
+    static WRITE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = WRITE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sidecar = sidecar_path(asset_path);
     let existing = std::fs::read_to_string(&sidecar).ok();
     atomic_write_sidecar(&sidecar, &update(existing.as_deref()))

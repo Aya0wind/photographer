@@ -2,9 +2,12 @@
 
 use super::*;
 
+// The display order and both paging directions must agree: unknown dates are last.
+const CAPTURED_UNKNOWN_LAST: &str = "";
+
 impl Db {
     /// 画廊 keyset 分页：序 = (COALESCE(captured_at, 哨兵) DESC, id DESC)，
-    /// 即 NULL captured_at 最先、随后拍摄时间降序、id 倒序 tiebreak。
+    /// 拍摄时间降序、id 倒序 tiebreak，NULL captured_at 最后。
     /// 游标 after_id 为上一页末行 id（0 = 第一页）；游标行已不存在时按第一页
     /// 处理。全参数化：所有过滤条件经动态槽位构造（`?N` 显式编号 + 同序
     /// push，绑定按编号而非文本位置），零值拼接。M5 扩展条件的 NULL 语义见
@@ -15,14 +18,39 @@ impl Db {
         limit: u32,
         filters: &AssetFilters,
     ) -> Result<Vec<AssetPageRow>> {
-        // 游标键解析：after 行的归一排序键（NULL → 高哨兵）
+        self.assets_page_cursor(after_id, limit, filters, false, false)
+    }
+
+    /// Seek directly to an anchor, or fetch the nearest newer page for upward scrolling.
+    pub fn assets_seek(
+        &self,
+        anchor_id: i64,
+        limit: u32,
+        filters: &AssetFilters,
+        before: bool,
+    ) -> Result<Vec<AssetPageRow>> {
+        if anchor_id <= 0 || self.sort_key_of(anchor_id)?.is_none() {
+            return Ok(Vec::new());
+        }
+        self.assets_page_cursor(anchor_id, limit, filters, !before, before)
+    }
+
+    fn assets_page_cursor(
+        &self,
+        after_id: i64,
+        limit: u32,
+        filters: &AssetFilters,
+        inclusive: bool,
+        before: bool,
+    ) -> Result<Vec<AssetPageRow>> {
+        // 游标键解析：after 行的归一排序键（NULL → 低哨兵）
         let (cursor_key, cursor_id) = if after_id > 0 {
             match self.sort_key_of(after_id)? {
                 Some(key) => (key, after_id),
-                None => (CAPTURED_NULL_HIGH.to_string(), 0), // 行已删：回退第一页
+                None => (CAPTURED_UNKNOWN_LAST.to_string(), 0), // 行已删：回退第一页
             }
         } else {
-            (CAPTURED_NULL_HIGH.to_string(), 0)
+            (CAPTURED_UNKNOWN_LAST.to_string(), 0)
         };
         use rusqlite::types::Value as V;
         let mut params_vec: Vec<V> = Vec::new();
@@ -34,7 +62,7 @@ impl Db {
         };
 
         // —— 排序哨兵（子查询内 COALESCE 的 NULL 归一）——
-        let sentinel_slot = slot(&mut params_vec, V::from(CAPTURED_NULL_HIGH.to_string()));
+        let sentinel_slot = slot(&mut params_vec, V::from(CAPTURED_UNKNOWN_LAST.to_string()));
 
         let conds = asset_filter_conditions(filters, &mut params_vec);
 
@@ -49,17 +77,24 @@ impl Db {
             conds.join(" AND ")
         };
         // 过滤条件作用于内层（可引用 assets 全列），游标/排序用外层投影列
+        let compare = if before { ">" } else { "<" };
+        let id_compare = if inclusive { "<=" } else { compare };
+        let order = if before { "ASC" } else { "DESC" };
         let mut stmt = self.0.prepare(&format!(
             "SELECT {ASSET_PAGE_COLS} FROM \
              (SELECT {ASSET_PAGE_COLS_A}, \
               COALESCE(a.captured_at, {sentinel_slot}) AS k \
               FROM assets a WHERE {all}) \
-             WHERE ({cursor_id_slot} = 0 OR k < {cursor_key_slot} \
-                    OR (k = {cursor_key_slot} AND id < {cursor_id_slot})) \
-             ORDER BY k DESC, id DESC LIMIT {limit_slot}",
+             WHERE ({cursor_id_slot} = 0 OR k {compare} {cursor_key_slot} \
+                    OR (k = {cursor_key_slot} AND id {id_compare} {cursor_id_slot})) \
+             ORDER BY k {order}, id {order} LIMIT {limit_slot}",
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), map_asset_page)?;
-        rows.collect()
+        let mut result = rows.collect::<Result<Vec<_>>>()?;
+        if before {
+            result.reverse();
+        }
+        Ok(result)
     }
 
     /// 当前筛选条件的真实总数，与 assets_page 复用完全相同的 SQL 条件。
@@ -113,28 +148,34 @@ impl Db {
         let mut stmt = self
             .0
             .prepare("SELECT COALESCE(captured_at, ?2) FROM assets WHERE id = ?1")?;
-        let mut rows = stmt.query(params![id, CAPTURED_NULL_HIGH])?;
+        let mut rows = stmt.query(params![id, CAPTURED_UNKNOWN_LAST])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
         }
     }
 
-    /// 本地时区日期分组（降序；unknown 组置顶与画廊页序一致）。
+    /// 本地时区日期分组（降序；unknown 组沉底，与画廊分页一致）。
     /// date() 无值（NULL）→ 'unknown'；cover 取组内同排序首张
     /// （captured DESC、id DESC）。回收站资产不计（in_trash=0）。
     pub fn asset_group_dates(&self) -> Result<Vec<DateGroupRow>> {
-        let mut stmt = self.0.prepare(
-            "SELECT day, COUNT(*), \
-               (SELECT t.id FROM assets t \
-                 WHERE COALESCE(date(t.captured_at, 'localtime'), 'unknown') = day \
-                   AND t.in_trash = 0 AND t.kind IN ('photo', 'raw') \
-                 ORDER BY COALESCE(t.captured_at, ?1) DESC, t.id DESC LIMIT 1) \
-             FROM (SELECT COALESCE(date(captured_at, 'localtime'), 'unknown') AS day \
-                   FROM assets WHERE in_trash = 0 AND kind IN ('photo', 'raw')) \
-             GROUP BY day ORDER BY (day = 'unknown') DESC, day DESC",
-        )?;
-        let rows = stmt.query_map(params![CAPTURED_NULL_HIGH], |row| {
+        self.asset_group_dates_filtered(&AssetFilters::default())
+    }
+
+    pub fn asset_group_dates_filtered(&self, filters: &AssetFilters) -> Result<Vec<DateGroupRow>> {
+        use rusqlite::types::Value as V;
+        let mut values: Vec<V> = vec![V::from(CAPTURED_UNKNOWN_LAST.to_string())];
+        let conditions = asset_filter_conditions(filters, &mut values).join(" AND ");
+        // One filtered scan; cover and counts share the same scope, including albums.
+        let mut stmt = self.0.prepare(&format!(
+            "WITH dated AS (SELECT a.id, COALESCE(date(a.captured_at, 'localtime'), 'unknown') AS day, \
+             ROW_NUMBER() OVER (PARTITION BY COALESCE(date(a.captured_at, 'localtime'), 'unknown') \
+             ORDER BY COALESCE(a.captured_at, ?1) DESC, a.id DESC) AS rn \
+             FROM assets a WHERE {conditions}) \
+             SELECT day, COUNT(*), MAX(CASE WHEN rn = 1 THEN id END) FROM dated \
+             GROUP BY day ORDER BY (day = 'unknown') ASC, day DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
             Ok(DateGroupRow {
                 date: row.get(0)?,
                 count: row.get::<_, i64>(1)? as u64,

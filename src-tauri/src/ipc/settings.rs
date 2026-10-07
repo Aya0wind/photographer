@@ -17,6 +17,7 @@ use crate::settings::{Settings, SettingsManager};
 pub struct LibraryDeleteResult {
     pub db_deleted: bool,
     pub photo_root_deleted: bool,
+    pub managed_files_deleted: u64,
 }
 
 /// 删除库核：db_dir 必删（数据库/缩略图/向量/标记），photo_root 可选连删。
@@ -29,26 +30,50 @@ pub fn fetch_library_delete(
     photo_root: Option<&str>,
 ) -> Result<LibraryDeleteResult, String> {
     let db_path = std::path::PathBuf::from(db_dir);
+    if db_path
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+    {
+        return Err("数据库目录不能是磁盘或网络共享的根目录".into());
+    }
     if !db_path.join("library.db").is_file() {
         return Err(format!(
             "目录不像库数据目录（未找到 library.db），拒绝删除：{db_dir}"
         ));
     }
+    if db_path.is_symlink() {
+        return Err("数据库目录是链接，拒绝删除其目标".into());
+    }
+    for entry in std::fs::read_dir(&db_path).map_err(|e| format!("读取数据库目录失败：{e}"))?
     {
-        let settings = state.settings.lock().expect("settings mutex poisoned");
-        if let Some(active) = settings.active_library() {
-            if active.db_dir == db_dir {
-                return Err("该库为当前活跃库，请先切换/清除激活再删除".into());
-            }
+        let entry = entry.map_err(|e| format!("读取数据库目录失败：{e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let known = matches!(
+            name.as_str(),
+            "thumbs"
+                | "geo"
+                | "vectors.usearch"
+                | "library.db"
+                | "library.db-wal"
+                | "library.db-shm"
+                | ".db-migration.json"
+                | ".db-migration.json.tmp"
+                | ".migrated-bak"
+                | "phash-gen-1.marker"
+                | "hash-gen-1.marker"
+                | "selection-gen-1.marker"
+                | "exif-gen-5.marker"
+                | "index-params.marker"
+        ) || (name.starts_with("thumbs-raw-gen-") && name.ends_with(".marker"));
+        if !known || entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
+            return Err(format!(
+                "数据库目录中还有其他文件或链接，拒绝整体删除：{name}"
+            ));
         }
     }
-    // 先全量校验再动手（避免库数据已删、照片目录校验又失败的单边半删态）
+    // 校验输入路径，再核对注册表；任何错误都发生在实际删除前。
     if let Some(root) = photo_root {
         let root_path = std::path::PathBuf::from(root);
-        if root_path == db_path {
-            return Err("照片目录与库数据目录相同，拒绝删除".into());
-        }
-        // 盘根（如 Y:\、C:\）parent 为空——防误删整盘；相对单段路径同样拒
         let root_parent_empty = root_path
             .parent()
             .map(|p| p.as_os_str().is_empty())
@@ -56,22 +81,122 @@ pub fn fetch_library_delete(
         if root_parent_empty {
             return Err(format!("拒绝删除盘根/裸目录：{}", root_path.display()));
         }
+        if root_path.starts_with(&db_path) || db_path.starts_with(&root_path) {
+            return Err("照片目录与库数据目录相同或互相包含，拒绝删除".into());
+        }
+        if let (Ok(real_db), Ok(real_root)) = (db_path.canonicalize(), root_path.canonicalize()) {
+            let real_db = real_db.to_string_lossy().replace('/', "\\").to_lowercase();
+            let real_root = real_root
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_lowercase();
+            if real_db == real_root
+                || real_db.starts_with(&(real_root.clone() + "\\"))
+                || real_root.starts_with(&(real_db + "\\"))
+            {
+                return Err("照片目录与库数据目录实际位置重叠，拒绝删除".into());
+            }
+        }
+    }
+    {
+        let settings = state.settings.lock().expect("settings mutex poisoned");
+        if let Some(active) = settings.active_library() {
+            if active.db_dir.eq_ignore_ascii_case(db_dir) {
+                return Err("该库为当前活跃库，请先切换/清除激活再删除".into());
+            }
+        }
+        let Some(registered) = settings
+            .libraries
+            .iter()
+            .find(|lib| lib.db_dir.eq_ignore_ascii_case(db_dir))
+        else {
+            return Err("该数据库目录未登记为库，拒绝删除".into());
+        };
+        if photo_root.is_some_and(|root| !registered.photo_root.eq_ignore_ascii_case(root)) {
+            return Err("照片目录与已登记的库不一致，拒绝删除".into());
+        }
+        if let Some(root) = photo_root {
+            if settings
+                .libraries
+                .iter()
+                .any(|lib| lib.id != registered.id && lib.photo_root.eq_ignore_ascii_case(root))
+            {
+                return Err("照片目录仍被其他库使用，拒绝删除".into());
+            }
+        }
     }
     let mut result = LibraryDeleteResult {
         db_deleted: false,
         photo_root_deleted: false,
+        managed_files_deleted: 0,
     };
+    // The database is the ownership ledger. Never recursively delete the photo root:
+    // it may contain user files or originals indexed in place (origin=external).
+    if let Some(root) = photo_root {
+        let root_path = std::path::PathBuf::from(root);
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path.join("library.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| format!("读取库照片清单失败，未删除任何内容：{e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM assets WHERE origin = 'imported'")
+            .map_err(|e| format!("读取库照片清单失败，未删除任何内容：{e}"))?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("读取库照片清单失败，未删除任何内容：{e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("读取库照片清单失败，未删除任何内容：{e}"))?;
+        let root_canonical = std::fs::canonicalize(&root_path).ok();
+        let mut empty_dirs = Vec::new();
+        for path in paths {
+            let file = std::path::PathBuf::from(path);
+            // Canonical paths also exclude a junction/symlink that escapes photoRoot.
+            let inside = match (&root_canonical, std::fs::canonicalize(&file).ok()) {
+                (Some(base), Some(actual)) => {
+                    #[cfg(windows)]
+                    {
+                        let base = base.to_string_lossy().replace('/', "\\").to_lowercase();
+                        let actual = actual.to_string_lossy().replace('/', "\\").to_lowercase();
+                        actual.starts_with(&(base + "\\"))
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        actual.starts_with(base) && actual != *base
+                    }
+                }
+                _ => false,
+            };
+            if !inside {
+                continue;
+            }
+            if file.exists() {
+                std::fs::remove_file(&file)
+                    .map_err(|e| format!("删除库内照片失败（{}）：{e}", file.display()))?;
+                result.managed_files_deleted += 1;
+            }
+            let mut parent = file.parent();
+            while let Some(dir) = parent {
+                if dir == root_path {
+                    break;
+                }
+                if !dir.starts_with(&root_path) {
+                    break;
+                }
+                empty_dirs.push(dir.to_path_buf());
+                parent = dir.parent();
+            }
+        }
+        empty_dirs.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        empty_dirs.dedup();
+        for dir in empty_dirs {
+            let _ = std::fs::remove_dir(dir);
+        }
+        result.photo_root_deleted = std::fs::remove_dir(&root_path).is_ok();
+    }
     std::fs::remove_dir_all(&db_path)
         .map_err(|e| format!("删除库数据目录失败（{}）：{e}", db_path.display()))?;
     result.db_deleted = true;
-    if let Some(root) = photo_root {
-        let root_path = std::path::PathBuf::from(root);
-        if root_path.is_dir() {
-            std::fs::remove_dir_all(&root_path)
-                .map_err(|e| format!("删除照片目录失败（{}）：{e}", root_path.display()))?;
-            result.photo_root_deleted = true;
-        }
-    }
     Ok(result)
 }
 
@@ -206,6 +331,7 @@ pub fn settings_set(
     // 绝对路径归一到 canonical/反斜杠形态后持久化并随 settings://changed
     // 回传前端；任一非法拒绝整次写入。
     crate::settings::normalize_library_paths(&mut settings)?;
+    crate::settings::validate_library_storage_paths(&settings, &previous)?;
     SettingsManager::save(&settings, &state.config_dir).map_err(|err| err.to_string())?;
     // 缩略图缓存上限即时生效（M8-③）
     crate::thumbs::set_thumb_cache_cap_bytes(

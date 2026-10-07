@@ -31,7 +31,7 @@ export async function thumbGet(path: string, size: number): Promise<string | nul
 // --- M3 画廊命令封装 --------------------------------------------------------------
 
 /** 画廊/搜索分页（keyset：afterId=上一页最后一条资产 id，首页传 0；capturedAt DESC，
- *  NULL capturedAt 排最前——排序由后端负责，前端分组渲染按未知组最前处理）。
+ *  NULL capturedAt 沉底；分页与页面日期分组采用相同顺序）。
  *  filters 平铺为 camelCase 负载字段；失败/非数组回退 []。 */
 export async function assetsPage(
   afterId: number,
@@ -54,9 +54,14 @@ export async function assetsCount(filters?: AssetFilters): Promise<number | null
   }
 }
 
-/** 日期分组统计（画廊顶部日期 chips 条）；未知日期组 date=null，后端排最前 */
-export async function assetGroupDates(): Promise<AssetGroupDate[]> {
-  return ipcList<AssetGroupDate>("asset_group_dates");
+/** 完整日期目录，支持当前筛选与相册范围；未知日期在末尾。 */
+export async function assetGroupDates(filters?: AssetFilters): Promise<AssetGroupDate[]> {
+  return ipcList<AssetGroupDate>("asset_group_dates", filters ? { filters } : undefined);
+}
+
+/** Direct date navigation; before=true returns the nearest newer page in display order. */
+export async function assetsSeek(anchorId: number, limit: number, filters?: AssetFilters, before = false): Promise<AssetDto[]> {
+  return ipc<AssetDto[]>("assets_seek", { anchorId, limit, filters, before });
 }
 
 /** 库内相机型号清单（搜索页相机勾选；按 count 降序）；失败/非数组回退 [] */

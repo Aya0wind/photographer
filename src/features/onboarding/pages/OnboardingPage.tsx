@@ -21,6 +21,7 @@ import { resetLibrarySession } from "@/lib/librarySession";
 import { useAiStore } from "@/stores/aiStore";
 import { gapsForIds } from "@/features/settings/lib/qualityTier";
 import { aiSetupPackages } from "../aiSetup";
+import ErrorModal from "@/shared/components/ErrorModal";
 
 const STEP_TITLES = [
   "onboarding.step.library",
@@ -87,6 +88,7 @@ export default function OnboardingPage() {
   const models = useAiStore((s) => s.models);
   const [preparingAi, setPreparingAi] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
   // 补完模式：URL ?library=<id> 指向既有库；无效/缺失时按新建处理
@@ -114,42 +116,45 @@ export default function OnboardingPage() {
     if (saving) return;
     if (!aiReady) { setPreparingAi(true); setStep(2); return; }
     setSaving(true);
-    const current = useSettingsStore.getState().settings;
-    // 并发流数是库属性：补完模式保留库既有值（NewLibraryDialog 新建的带过来），新建默认 4
-    const existing = editId
-      ? current.libraries.find((lib) => lib.id === editId) ?? undefined
-      : undefined;
-    const library: Library = {
-      id: editId ?? makeLibraryId(),
-      name: draft.libraryName.trim(),
-      dbDir: draft.dbDir.trim(),
-      photoRoot: draft.photoRoot.trim(),
-      streams: existing?.streams ?? 4,
-      configured: true,
-      aiQualityTier: draft.qualityTier,
-    };
-    const libraries = editId
-      ? current.libraries.map((lib) => (lib.id === editId ? library : lib))
-      : [...current.libraries, library];
-    await useSettingsStore.getState().save({
-      ...current,
-      // 兼容保留：后端旧迁移逻辑可能仍读该字段；不再作前端门禁
-      onboardingCompleted: true,
-      libraries,
-      activeLibraryId: library.id,
-      // 全局 ImportSettings 仅作后续新建库的默认值（目录布局固定，不再写模板）
-      import: {
-        ...current.import,
-        duplicatePolicy: draft.duplicatePolicy,
-      },
-      ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice], qualityTier: draft.qualityTier },
-    });
-    useSettingsStore.getState().setLibraryChosen(true);
-    // 新库启用：清上一个库的会话态（快照/缩略图缓存/store）
-    resetLibrarySession();
-    // 配置完成：清除「本次会话新建」标记（该库已不再是可删空库）
-    clearDraftLibraryId();
-    navigate("/gallery", { replace: true });
+    try {
+      const current = useSettingsStore.getState().settings;
+      // 并发流数是库属性：补完模式保留库既有值（NewLibraryDialog 新建的带过来），新建默认 4
+      const existing = editId
+        ? current.libraries.find((lib) => lib.id === editId) ?? undefined
+        : undefined;
+      const library: Library = {
+        id: editId ?? makeLibraryId(),
+        name: draft.libraryName.trim(),
+        dbDir: draft.dbDir.trim(),
+        photoRoot: draft.photoRoot.trim(),
+        streams: existing?.streams ?? 4,
+        configured: true,
+        aiQualityTier: draft.qualityTier,
+      };
+      const libraries = editId
+        ? current.libraries.map((lib) => (lib.id === editId ? library : lib))
+        : [...current.libraries, library];
+      await useSettingsStore.getState().save({
+        ...current,
+        // 兼容保留：后端旧迁移逻辑可能仍读该字段；不再作前端门禁
+        onboardingCompleted: true,
+        libraries,
+        activeLibraryId: library.id,
+        // 全局 ImportSettings 仅作后续新建库的默认值（目录布局固定，不再写模板）
+        import: {
+          ...current.import,
+          duplicatePolicy: draft.duplicatePolicy,
+        },
+        ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice], qualityTier: draft.qualityTier },
+      });
+      useSettingsStore.getState().setLibraryChosen(true);
+      resetLibrarySession();
+      clearDraftLibraryId();
+      navigate("/gallery", { replace: true });
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ""));
+      setSaving(false);
+    }
   };
 
   /**
@@ -250,7 +255,7 @@ export default function OnboardingPage() {
               exit={{ opacity: 0, x: -12 }}
               transition={{ duration: 0.18, ease: "easeOut" }}
             >
-              {step === 0 && <LibraryStep draft={draft} onChange={patch} />}
+              {step === 0 && <LibraryStep draft={draft} onChange={patch} onError={setError} />}
               {step === 1 && <ImportSchemeStep draft={draft} onChange={patch} />}
               {step === 2 && <AiStep draft={draft} onChange={patch} preparing={preparingAi} />}
               {step === 3 && <DoneStep draft={draft} />}
@@ -307,6 +312,7 @@ export default function OnboardingPage() {
         </div>
         </div>
       </div>
+      <ErrorModal message={error} onClose={() => setError(null)} />
     </div>
   );
 }

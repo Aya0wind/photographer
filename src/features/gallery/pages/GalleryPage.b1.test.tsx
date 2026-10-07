@@ -23,8 +23,8 @@ import {
 } from "@/ipc/api";
 
 /**
- * 画廊选片补全（B1，页面级接线）：颜色标签三入口（操作条/右键/瓦片角标回显）、
- * 拒绝旗标（操作条/右键 + 瓦片弱化）、移入回收站（确认一步 + 乐观剔除）、
+ * 画廊选片补全（B1，页面级接线）：颜色标签三入口（右键菜单/右键/瓦片角标回显）、
+ * 拒绝旗标（右键菜单/右键 + 瓦片弱化）、移入回收站（确认一步 + 乐观剔除）、
  * 反选。
  */
 
@@ -106,22 +106,25 @@ beforeEach(() => {
   localStorage.removeItem(SHORTCUTS_HINT_KEY);
 });
 
+function selectedCount() { return screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true").length; }
+async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("asset-context-menu-item-" + key); }
+
 // --- 颜色标签 ---------------------------------------------------------------------------
 
 describe("画廊：颜色标签（B1）", () => {
-  it("操作条色标：选中 2 张 → 弹出五色菜单 → 点红 → assetLabelSet([1,2],'red') + 瓦片色点回显", async () => {
+  it("右键菜单色标：选中 2 张 → 弹出五色菜单 → 点红 → assetLabelSet([1,2],'red') + 瓦片色点回显", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
     await user.click(tileOf(2));
-    await user.click(screen.getByTestId("selection-color"));
+    await user.click(await contextItem("color"));
 
-    const menu = screen.getByTestId("selection-color-menu");
-    expect(within(menu).getAllByTestId("selection-color-option")).toHaveLength(5);
+    const menu = screen.getByTestId("asset-context-menu-submenu-color");
+    expect(within(menu).getAllByRole("menuitemradio").filter((element) => element.hasAttribute("data-label"))).toHaveLength(5);
     const red = within(menu)
-      .getAllByTestId("selection-color-option")
+      .getAllByRole("menuitemradio").filter((element) => element.hasAttribute("data-label"))
       .find((el) => el.getAttribute("data-label") === "red");
     await user.click(red as HTMLElement);
 
@@ -149,14 +152,14 @@ describe("画廊：颜色标签（B1）", () => {
     await waitFor(() => expect(labelMock).toHaveBeenCalledWith([3], "blue"));
   });
 
-  it("清除入口：操作条清除行 → assetLabelSet(ids, null)", async () => {
+  it("清除入口：右键菜单清除行 → assetLabelSet(ids, null)", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(2));
-    await user.click(screen.getByTestId("selection-color"));
-    await user.click(screen.getByTestId("selection-color-clear"));
+    await user.click(await contextItem("color"));
+    await user.click(screen.getByTestId("asset-context-menu-item-color-clear"));
     await waitFor(() => expect(labelMock).toHaveBeenCalledWith([2], null));
   });
 });
@@ -164,21 +167,21 @@ describe("画廊：颜色标签（B1）", () => {
 // --- 拒绝旗标 ---------------------------------------------------------------------------
 
 describe("画廊：拒绝旗标（B1）", () => {
-  it("操作条拒绝：未拒绝选中集 → assetRejectSet(ids,true)；全部已拒绝 → 切换为取消", async () => {
+  it("右键菜单拒绝：未拒绝选中集 → assetRejectSet(ids,true)；全部已拒绝 → 切换为取消", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
-    await user.click(screen.getByTestId("selection-reject"));
+    await user.click(await contextItem("reject"));
     await waitFor(() => expect(rejectMock).toHaveBeenCalledWith([1], true));
     // 本地态更新：瓦片弱化 + 角标
     await waitFor(() => expect(tileOf(1)).toHaveAttribute("data-rejected", "true"));
 
     // 此时选中集全部已拒绝（draft 已回传）→ 按钮切换为「取消拒绝」
-    const bar = screen.getByTestId("selection-bar");
-    await waitFor(() => expect(within(bar).getByTestId("selection-reject")).toHaveAttribute("aria-pressed", "true"));
-    await user.click(within(bar).getByTestId("selection-reject"));
+    const rejectItem = await contextItem("reject");
+    expect(rejectItem).toHaveTextContent("取消拒绝");
+    await user.click(rejectItem);
     await waitFor(() => expect(rejectMock).toHaveBeenLastCalledWith([1], false));
   });
 
@@ -197,14 +200,14 @@ describe("画廊：拒绝旗标（B1）", () => {
 // --- 移入回收站 ---------------------------------------------------------------------------
 
 describe("画廊：移入回收站（B1）", () => {
-  it("操作条入口：确认弹窗列出 N 项 → 确认 → asset_trash_move + 列表剔除 + 退出多选", async () => {
+  it("右键菜单入口：确认弹窗列出 N 项 → 确认 → asset_trash_move + 列表剔除 + 退出多选", async () => {
     const user = userEvent.setup();
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(1));
     await user.click(tileOf(3));
-    await user.click(screen.getByTestId("selection-trash"));
+    await user.click(await contextItem("trash"));
 
     const dialog = screen.getByTestId("trash-move-dialog");
     expect(dialog).toHaveTextContent("将所选 2 项移入回收站");
@@ -243,16 +246,16 @@ describe("画廊：反选（B1）", () => {
     await screen.findAllByTestId("gallery-tile");
 
     await user.click(checkOf(2));
-    expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张");
+    expect(selectedCount()).toBe(1);
 
-    await user.click(screen.getByTestId("selection-invert"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 2 张"));
+    await user.click(await contextItem("invert"));
+    await waitFor(() => expect(selectedCount()).toBe(2));
     expect(checkOf(1)).toHaveAttribute("data-selected", "true");
     expect(checkOf(3)).toHaveAttribute("data-selected", "true");
     expect(checkOf(2)).toHaveAttribute("data-selected", "false");
 
-    await user.click(screen.getByTestId("selection-invert"));
-    await waitFor(() => expect(screen.getByTestId("selection-count")).toHaveTextContent("已选 1 张"));
+    await user.click(await contextItem("invert"));
+    await waitFor(() => expect(selectedCount()).toBe(1));
     expect(checkOf(2)).toHaveAttribute("data-selected", "true");
   });
 });

@@ -129,7 +129,7 @@ interface SettingsState {
   libraryChosen: boolean;
   /** 从 Rust 侧读取设置；命令尚不存在或失败时静默落回默认值 */
   load: () => Promise<void>;
-  /** 持久化设置；IPC 失败时本地状态仍保持更新 */
+  /** 持久化设置；失败时恢复原状态并把原因交给操作界面 */
   save: (next: Settings) => Promise<void>;
   /** 本地局部更新（不落盘），由调用方决定何时 save */
   update: (partial: DeepPartial<Settings>) => void;
@@ -201,14 +201,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   save: async (next: Settings) => {
-    const normalized = normalizeLibraryQuality(next, get().settings);
-    // 先更新本地，再尝试持久化；失败时本地仍保持新值
+    const previous = get().settings;
+    const normalized = normalizeLibraryQuality(next, previous);
     set({ settings: normalized });
     try {
       await ipc("settings_set", { settings: normalized });
     } catch (e) {
-      // 持久化失败不阻断 UI，但必须在控制台留痕（便于 DevTools 排查）
+      // Only roll back this write if no subsequent operation has replaced it.
+      if (get().settings === normalized) set({ settings: previous });
       console.error("settings_set failed:", e);
+      throw e;
     }
   },
 

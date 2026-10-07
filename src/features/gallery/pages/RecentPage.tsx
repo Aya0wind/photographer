@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { recentViewed, type AssetDto } from "@/ipc/api";
 import { groupAssetsByDate } from "../lib/assetGroups";
 import AssetGrid from "../components/AssetGrid";
-import SelectionToolbarHost from "../components/SelectionToolbarHost";
+import AssetActionsHost from "../components/AssetActionsHost";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import ViewerOverlay from "../components/ViewerOverlay";
 import { useAssetSelection } from "../lib/useAssetSelection";
@@ -49,8 +49,9 @@ export default function RecentPage() {
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets);
   const [tileSize, setTileSize] = useGalleryTileSize();
 
-  // --- 多选（与图库同语义；操作条/弹窗由 SelectionToolbarHost 一站接齐） ---
-  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection } = useAssetSelection();
+  // --- 多选与右键批量操作（弹窗由 AssetActionsHost 接齐） ---
+  const { selecting, selected, ctrlSelect, toggleSelected, setSelected, exitSelection, contextTargets } = useAssetSelection();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; assets: AssetDto[] } | null>(null);
   const patchAssets = useCallback((ids: number[], patch: Partial<AssetDto>) => {
     const idSet = new Set(ids);
     setAssets((prev) => prev.map((a) => (idSet.has(a.id) ? { ...a, ...patch } : a)));
@@ -99,18 +100,21 @@ export default function RecentPage() {
               onCtrlClick={ctrlSelect}
               onLongPress={ctrlSelect}
               onCheckClick={ctrlSelect}
+              onAssetContextMenu={(asset, at) => setContextMenu({ ...at, assets: contextTargets(asset, new Map(assets.map((item) => [item.id, item]))) })}
             />
           )}
         </div>
       </div>
 
-      {/* 多选操作条（收藏/旗标/色标/拒绝/分享/加册/全选/反选/回收站） */}
-      {selecting && (
-        <SelectionToolbarHost
+      {/* 右键操作和后续弹窗始终挂载，支持未进入多选时的单张操作。 */}
+      {(
+        <AssetActionsHost
           assets={assets}
           selectedIds={selected}
           onSelectIds={setSelected}
           onDone={exitSelection}
+          contextMenu={contextMenu}
+          onCloseContextMenu={() => setContextMenu(null)}
           onPatched={patchAssets}
           onRemoved={(ids) => {
             const idSet = new Set(ids);

@@ -12,7 +12,9 @@ import {
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import { assetRatingSet, type AssetDto } from "@/ipc/api";
+import { assetRatingSet, type AssetDto, type AssetGroupDate } from "@/ipc/api";
+import ErrorModal from "@/shared/components/ErrorModal";
+import PhotoTimeline from "./PhotoTimeline";
 import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING } from "../lib/colorLabels";
 import type { ToggleOptions } from "../lib/useAssetSelection";
@@ -176,6 +178,12 @@ interface AssetGridProps {
   /** 只读态（B1 回收站页）：隐藏收藏星钮等写操作入口，仅保留多选/浏览 */
   readOnly?: boolean;
   scrollTestId?: string;
+  timelineDates?: AssetGroupDate[];
+  onTimelineJump?: (entry: AssetGroupDate) => Promise<void>;
+  onNearTop?: () => Promise<unknown>;
+  loadingMore?: boolean;
+  hasMore?: boolean;
+  loadingTestId?: string;
 }
 
 const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid(
@@ -197,12 +205,26 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     burstBadges,
     readOnly = false,
     scrollTestId = "gallery-grid-scroll",
+    timelineDates,
+    onTimelineJump,
+    onNearTop,
+    loadingMore = false,
+    hasMore = false,
+    loadingTestId = "gallery-loading-more",
   },
   ref,
 ) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
+  const [visibleDate, setVisibleDate] = useState<string | null>(() => groups[0]?.date ?? null);
+  const [dateProgress, setDateProgress] = useState(0);
+  const [jumpBusy, setJumpBusy] = useState(false);
+  const [jumpError, setJumpError] = useState<string | null>(null);
+  const [pendingDate, setPendingDate] = useState<string | null>(null);
+  const pendingFraction = useRef<number | undefined>(undefined);
+  const timeline = useMemo(() => timelineDates?.length ? timelineDates : groups.map((group) => ({ date: group.date, count: group.totalCount ?? group.assets.length, coverAssetId: group.assets[0]?.id ?? 0 })), [timelineDates, groups]);
+  const showTimeline = timeline.length > 0;
 
   // --- 组头折叠（组件本地状态；切页/刷新不保留） -----------------------------------
   const [collapsedKeys, setCollapsedKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -218,7 +240,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
 
   // 容器宽自适应（offsetWidth 读初值 + ResizeObserver 跟踪；jsdom 下 RO 不触发但
   // offsetWidth 已被测试 mock 为非零）
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const update = () => setWidth(el.offsetWidth);
@@ -243,6 +265,26 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   // 视图完整有序 id（Shift 区间选择的 order 来源：组序=展示序）
   const orderedIds = useMemo(() => groups.flatMap((group) => group.assets.map((a) => a.id)), [groups]);
 
+  // Keep already displayed tail rows intact when a page appends to the same day.
+  // Otherwise filling a partial row changes its key and remounts visible thumbnails.
+  const layoutSignature = `${layout}:${usableWidth}:${tile}:${columns}`;
+  const streamLayout = useRef<{ signature: string; groups: AssetGroup[]; seals: Set<number> }>({ signature: "", groups: [], seals: new Set() });
+  const rowSeals = useMemo(() => {
+    const previous = streamLayout.current;
+    if (!sentinelRef || previous.signature !== layoutSignature) return new Set<number>();
+    const byKey = new Map(groups.map((group) => [group.key, group]));
+    const seals = new Set(previous.seals);
+    for (const old of previous.groups) {
+      const next = byKey.get(old.key);
+      if (!next || next.assets.length < old.assets.length || !old.assets.every((asset, index) => next.assets[index]?.id === asset.id)) return new Set<number>();
+      if (next.assets.length > old.assets.length && old.assets.length) seals.add(old.assets[old.assets.length - 1].id);
+    }
+    return seals;
+  }, [groups, layoutSignature, sentinelRef]);
+  useLayoutEffect(() => {
+    streamLayout.current = { signature: layoutSignature, groups, seals: rowSeals };
+  }, [groups, layoutSignature, rowSeals]);
+
   // 行划分（useMemo 重算）：折叠组只保留头行；square 按列数切片等宽；justify 按宽高比贪心切行
   const rows = useMemo<GridRow[]>(() => {
     const out: GridRow[] = [];
@@ -250,19 +292,35 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       const collapsed = collapsedKeys.has(group.key);
       out.push({ type: "header", group, collapsed });
       if (collapsed || group.assets.length === 0) continue;
-      if (layout === "justify") {
-        for (const row of justifyItems(group.assets, usableWidth, tile)) {
-          out.push({ type: "tiles", group, ...row });
+      let start = 0;
+      for (let end = 0; end < group.assets.length; end++) {
+        if (end !== group.assets.length - 1 && !rowSeals.has(group.assets[end].id)) continue;
+        const segment = group.assets.slice(start, end + 1);
+        if (layout === "justify") {
+          for (const row of justifyItems(segment, usableWidth, tile)) out.push({ type: "tiles", group, ...row });
+        } else {
+          for (let i = 0; i < segment.length; i += columns) {
+            const assets = segment.slice(i, i + columns);
+            out.push({ type: "tiles", group, assets, height: tile, widths: assets.map(() => tile) });
+          }
         }
-      } else {
-        for (let i = 0; i < group.assets.length; i += columns) {
-          const assets = group.assets.slice(i, i + columns);
-          out.push({ type: "tiles", group, assets, height: tile, widths: assets.map(() => tile) });
-        }
+        start = end + 1;
       }
     }
     return out;
-  }, [groups, columns, layout, usableWidth, tile, collapsedKeys]);
+  }, [groups, columns, layout, usableWidth, tile, collapsedKeys, rowSeals]);
+
+  const groupOffsets = useMemo(() => {
+    const result = new Map<string, { start: number; end: number }>();
+    let offset = 0;
+    for (const row of rows) {
+      if (row.type === "header") result.set(row.group.key, { start: offset, end: offset });
+      offset += row.type === "header" ? (row.collapsed ? COLLAPSED_HEADER_H : HEADER_H) : row.height + GAP;
+      const group = result.get(row.group.key);
+      if (group) group.end = offset;
+    }
+    return result;
+  }, [rows]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -281,9 +339,38 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
 
   // 搜索替换结果、图片尺寸补齐、切换大小都会改变行高；旧测量不能按
   // 数字下标复用到新行。绘制前清缓存，避免标题/照片相互覆盖。
+  const measuredRows = useRef<string[]>([]);
   useLayoutEffect(() => {
-    virtualizer.measure();
+    const keys = rows.map((row) => row.type === "header" ? `header:${row.group.key}:${row.collapsed}` : `tiles:${row.height}:${row.assets.map((asset) => asset.id).join(",")}`);
+    const previous = measuredRows.current;
+    const appendOnly = previous.length <= keys.length && previous.every((key, index) => keys[index] === key);
+    if (!appendOnly) virtualizer.measure();
+    measuredRows.current = keys;
   }, [rows, virtualizer]);
+
+  const previousLayout = useRef<{ firstId?: number; rows: GridRow[] }>({ rows: [] });
+  useLayoutEffect(() => {
+    const previous = previousLayout.current;
+    const firstId = groups[0]?.assets[0]?.id;
+    const oldId = previous.firstId;
+    if (oldId !== undefined && oldId !== firstId && !pendingDate && !jumpBusy) {
+      const offsetOf = (items: GridRow[]) => {
+        let offset = 0;
+        for (const row of items) {
+          if (row.type === "tiles" && row.assets.some((asset) => asset.id === oldId)) return offset;
+          offset += row.type === "header" ? (row.collapsed ? COLLAPSED_HEADER_H : HEADER_H) : row.height + GAP;
+        }
+        return null;
+      };
+      const before = offsetOf(previous.rows);
+      const after = offsetOf(rows);
+      if (before !== null && after !== null && after > before && scrollRef.current) {
+        scrollRef.current.scrollTop += after - before;
+        scrollRef.current.dispatchEvent(new Event("scroll"));
+      }
+    }
+    previousLayout.current = { firstId, rows };
+  }, [rows, groups, pendingDate, jumpBusy]);
 
   // --- 键盘导航（#8）：网格聚焦后 ←→↑↓ 移动高亮（outline accent），Enter 打开查看器 ---
   const [cursor, setCursor] = useState<number | null>(null);
@@ -344,15 +431,72 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   // 视口上报：首虚拟行所属组 + scrollTop（显著变化才上报，避免每次渲染触发上层 setState）
   const lastReport = useRef<{ key: string; top: number }>({ key: "", top: -1 });
   useEffect(() => {
-    const first = virtualizer.getVirtualItems()[0];
+    const top = scrollRef.current?.scrollTop ?? 0;
+    // Ignore overscan rows above the viewport when highlighting the current date.
+    const first = virtualizer.getVirtualItems().find((item) => item.end > top);
     const row = first ? rows[first.index] : undefined;
     const group = row ? row.group : null;
-    const top = scrollRef.current?.scrollTop ?? 0;
+    setVisibleDate(group?.date ?? null);
+    if (group) {
+      const bounds = groupOffsets.get(group.key);
+      if (bounds) {
+        const last = groups[groups.length - 1]?.key === group.key;
+        const length = bounds.end - bounds.start + (last && sentinelRef ? 48 : 0) - (last ? scrollRef.current?.clientHeight ?? 0 : 0);
+        let progress = Math.max(0, Math.min(1, (top - bounds.start) / Math.max(1, length)));
+        if (group.date === null && hasMore) {
+          const total = timeline.filter((entry) => !entry.date || entry.date === "unknown").reduce((sum, entry) => sum + entry.count, 0);
+          const loaded = group.totalCount ?? group.assets.length;
+          if (total > loaded) progress *= loaded / total;
+        }
+        setDateProgress(progress);
+      }
+    }
     const key = group?.key ?? "";
     if (key === lastReport.current.key && Math.abs(top - lastReport.current.top) <= 4) return;
     lastReport.current = { key, top };
     onViewportChange?.({ scrollTop: top, group });
   });
+
+  useEffect(() => {
+    if (jumpBusy || pendingDate || (scrollRef.current?.scrollTop ?? 0) > 160) return;
+    void onNearTop?.().catch((error) => setJumpError(String(error)));
+  }, [rows, virtualizer.scrollOffset, jumpBusy, pendingDate, onNearTop]);
+
+  const scrollToDate = useCallback((key: string, fraction?: number) => {
+    const index = rows.findIndex((row) => row.type === "header" && row.group.key === key);
+    if (index < 0) return false;
+    const offset = virtualizer.getOffsetForIndex(index, "start");
+    const el = scrollRef.current;
+    if (!el || !offset) return false;
+    const bounds = groupOffsets.get(key);
+    const last = groups[groups.length - 1]?.key === key;
+    const length = bounds ? Math.max(0, bounds.end - bounds.start + (last && sentinelRef ? 48 : 0) - (last ? el.clientHeight : 0)) : 0;
+    el.scrollTop = Math.max(0, offset[0] + (fraction === undefined ? -STICKY_OFFSET : fraction * length));
+    el.dispatchEvent(new Event("scroll"));
+    return true;
+  }, [rows, virtualizer, groupOffsets, groups, sentinelRef]);
+
+  useLayoutEffect(() => {
+    if (pendingDate && !jumpBusy && scrollToDate(pendingDate, pendingFraction.current)) setPendingDate(null);
+  }, [pendingDate, jumpBusy, scrollToDate]);
+
+  async function jumpToDate(entry: AssetGroupDate, fraction?: number) {
+    const key = entry.date && entry.date !== "unknown" ? entry.date : UNKNOWN_GROUP_KEY;
+    setCollapsedKeys((previous) => {
+      if (!previous.has(key)) return previous;
+      const next = new Set(previous);
+      next.delete(key);
+      return next;
+    });
+    if (scrollToDate(key, fraction)) return;
+    if (!onTimelineJump || jumpBusy) return;
+    setJumpBusy(true);
+    pendingFraction.current = fraction;
+    setPendingDate(key);
+    try { await onTimelineJump(entry); }
+    catch (error) { setPendingDate(null); setJumpError(error instanceof Error && error.message === "timeline.unavailable" ? t("timeline.unavailable") : String(error)); }
+    finally { setJumpBusy(false); }
+  }
 
   useImperativeHandle(
     ref,
@@ -426,11 +570,12 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   }
 
   return (
+    <div className="relative h-full min-h-0 min-w-0">
     <div
       ref={scrollRef}
       tabIndex={0}
       onKeyDown={handleGridKeyDown}
-      className="sp-scroll h-full overflow-y-auto outline-none"
+      className={`sp-scroll h-full min-w-0 overflow-y-auto outline-none ${showTimeline ? "[scrollbar-gutter:auto] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" : "[&::-webkit-scrollbar]:w-[5px] [&::-webkit-scrollbar-thumb]:rounded-full"}`}
       data-testid={scrollTestId}
       data-layout={layout}
     >
@@ -742,7 +887,21 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
         })}
       </div>
       {/* 无限滚动哨兵：进入视口（rootMargin 提前 800px）触发下一页 */}
-      <div ref={sentinelRef} data-testid="gallery-sentinel" className="h-px" />
+      <div ref={sentinelRef} data-testid="gallery-sentinel" className={sentinelRef ? "flex h-12 items-center justify-center" : "h-px"}>
+        {loadingMore && <div className="flex items-center gap-2 text-xs text-text-muted" role="status" data-testid={loadingTestId}>
+          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent/25 border-t-accent" aria-hidden="true" />
+          {t("gallery.loadingMore")}
+        </div>}
+      </div>
+    </div>
+    <PhotoTimeline dates={timeline} currentDate={visibleDate} dateProgress={dateProgress} busy={jumpBusy} onJump={(entry, fraction) => void jumpToDate(entry, fraction)} onDrag={(entry, fraction) => {
+      scrollToDate(entry.date && entry.date !== "unknown" ? entry.date : UNKNOWN_GROUP_KEY, fraction);
+    }} onWheelScroll={(delta) => {
+      if (!scrollRef.current) return;
+      scrollRef.current.scrollTop += delta;
+      scrollRef.current.dispatchEvent(new Event("scroll"));
+    }} />
+    <ErrorModal message={jumpError} onClose={() => setJumpError(null)} />
     </div>
   );
 });
