@@ -52,11 +52,22 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache NASM
+        id: nasm_cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\NASM
+          key: nasm-3.2.0-win-x64-v1
+
       - name: Install NASM for libjpeg-turbo
+        if: steps.nasm_cache.outputs.cache-hit != 'true'
         run: |
           $ErrorActionPreference = 'Stop'
           choco install nasm --version=3.2.0 --yes --no-progress
 
+      - name: Set up NASM environment
+        run: |
+          $ErrorActionPreference = 'Stop'
           $candidates = @(
             (Join-Path $env:ProgramFiles 'NASM\nasm.exe'),
             (Join-Path $env:ChocolateyInstall 'bin\nasm.exe')

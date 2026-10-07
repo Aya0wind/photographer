@@ -48,18 +48,39 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Windows native prerequisites
+      - name: Cache NASM
         if: runner.os == 'Windows'
+        id: nasm_cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\NASM
+          key: nasm-3.2.0-win-x64-v1
+
+      - name: Install Windows native prerequisites
+        if: runner.os == 'Windows' && steps.nasm_cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           choco install nasm --version=3.2.0 --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+
+      - name: Set up NASM environment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           $nasm = Join-Path $env:ProgramFiles 'NASM\nasm.exe'
           if (-not (Test-Path $nasm)) {
             $nasm = (Get-Command nasm -ErrorAction Stop).Source
           }
           (Split-Path $nasm) >> $env:GITHUB_PATH
           "ASM_NASM=$nasm" >> $env:GITHUB_ENV
+
+      - name: Cache Rust build files
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: cross-tests
+          cache-workspace-crates: true
+          cache-on-failure: false
 
       - name: Install dependencies
         run: npm ci

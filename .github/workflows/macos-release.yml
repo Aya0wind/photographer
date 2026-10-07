@@ -67,10 +67,21 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Compute Homebrew cache week
+        run: echo "CACHE_WEEK=$(date +%G-W%V)" >> "$GITHUB_ENV"
+
+      - name: Cache Homebrew bottles
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          # 周轮换键：bottle 版本随 formula 更新，静态键会让缓存永不刷新
+          key: brew-macos-15-${{ env.CACHE_WEEK }}
+          restore-keys: |
+            brew-macos-15-
+
       - name: Install native build tools
-        run: |
-          brew update
-          brew install cmake libgphoto2
+        # 不跑 brew update：runner 镜像每日更新，brew update 每次 1-3 分钟纯浪费
+        run: brew install cmake libgphoto2
 
       - name: Cache Rust build files
         uses: Swatinem/rust-cache@v2
