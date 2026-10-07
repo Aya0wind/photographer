@@ -1,12 +1,11 @@
 name: Cross-platform regression tests
 
+# 测试只在 main 分支跑（2026-10-07 用户定案）：dev 推送只出构建产物，
+# 测试靠本地跑，main 才做发布前的双平台回归。
 on:
   push:
     branches:
       - main
-      - dev
-      - codex/macos-port
-  pull_request:
 
 permissions:
   contents: read
@@ -48,8 +47,6 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.98.0
 
       - name: Install Windows native prerequisites
         if: runner.os == 'Windows'
@@ -95,3 +92,9 @@ jobs:
           --test album_subgroup_physical_test
           --test thumb_test
           --test thumb_queue_test
+          --test reference_import_test
+          --test assets_query_test
+          --test library_delete_test
+          --test rating_watch_test
+          --test selection_test
+          --test settings_test
