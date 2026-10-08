@@ -764,7 +764,7 @@ export default function GalleryPage() {
 
       </div>
 
-      {selecting && <SelectionDock count={selected.size} onClear={exitSelection}
+      {selecting && <SelectionDock count={selected.length} onClear={exitSelection}
         onMove={() => setAddToAlbumTargets(Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }))}
         onMore={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setCtxMenu({ x: rect.left, y: rect.top, assets: Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }) }); }} />}
 

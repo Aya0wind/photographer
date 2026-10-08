@@ -78,6 +78,7 @@ Photographer 是一款照片存档、搜索和管理应用，也服务于摄影�
 
 ```bash
 npm ci                      # 安装前端依赖
+npm run check               # 静态语法与类型检查，不运行应用或生成构建产物
 npm run tauri dev           # 开发运行（热更新）
 npm test                    # 前端 vitest 全量测试
 npm run build               # 前端类型检查 + 构建
