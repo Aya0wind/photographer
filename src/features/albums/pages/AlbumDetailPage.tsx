@@ -420,7 +420,7 @@ export default function AlbumDetailPage() {
 
 
         </div>
-        <FloatingToolbar label={t("ui.browseActions")} locked={panelOpen || toolsOpen || addHintOpen || renaming}>
+        <FloatingToolbar label={t("ui.browseActions")} locked={panelOpen || toolsOpen || addHintOpen || renaming} inactive={viewer !== null}>
           {/* 筛选按钮（激活条件计数徽标） */}
           <button
             type="button"

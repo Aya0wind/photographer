@@ -587,6 +587,7 @@ export default function GalleryPage() {
           {cullError && <span role="alert" className="text-xs text-red-400" data-testid="gallery-cull-error">{t("culling.createFailed")}</span>}
         </header>
         <GalleryBrowseControls
+          inactive={viewer !== null}
           filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen((open) => !open)}
           tileSize={tileSize} onTileSize={setTileSize} onImport={() => navigate("/import")}
           onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}

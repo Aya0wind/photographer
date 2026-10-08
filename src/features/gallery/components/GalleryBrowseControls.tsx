@@ -3,7 +3,7 @@ import FloatingToolbar from "@/shared/components/FloatingToolbar";
 import TileSizeSwitch from "./TileSizeSwitch";
 import type { GalleryTileSize } from "../lib/useGalleryTileSize";
 
-export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, onImport, onCull, cullBusy, cullDisabled }: {
+export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, onImport, onCull, cullBusy, cullDisabled, inactive = false }: {
   filterOpen: boolean;
   filterCount: number;
   onToggleFilter: () => void;
@@ -13,10 +13,11 @@ export default function GalleryBrowseControls({ filterOpen, filterCount, onToggl
   onCull: () => void;
   cullBusy: boolean;
   cullDisabled: boolean;
+  inactive?: boolean;
 }) {
   const { t } = useTranslation();
   return (
-    <FloatingToolbar label={t("ui.browseActions")} locked={filterOpen || cullBusy}>
+    <FloatingToolbar label={t("ui.browseActions")} locked={filterOpen || cullBusy} inactive={inactive}>
       <button type="button" className="ui-icon-button relative" onClick={onToggleFilter} aria-label={t("search.moreFilters")} title={t("search.moreFilters")} aria-expanded={filterOpen} data-testid="search-filter-toggle">
         <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h14l-5.5 6v5l-3 1v-6z" /></svg>
         {filterCount > 0 && <span className="absolute -right-1 -top-1 rounded-full bg-accent px-1 text-[10px] text-black" data-testid="search-filter-count">{filterCount}</span>}
