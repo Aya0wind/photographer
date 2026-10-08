@@ -744,6 +744,7 @@
   "viewer.next": "Siguiente",
   "viewer.rotateCw": "Girar 90° en el sentido de las agujas del reloj",
   "viewer.rotateCcw": "Girar 90° en sentido antihorario",
+  "viewer.zoom": "Zoom",
   "viewer.zoomHint": "Rueda de zoom · Flechas izquierda y derecha para hojear las imágenes · I Detalles · Clasificación 0–5",
   "viewer.noPreview": "Aún no hay vista previa",
   "viewer.missingSource": "El archivo fuente se ha movido o eliminado y algunas operaciones no están disponibles.",

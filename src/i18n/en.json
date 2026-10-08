@@ -744,6 +744,7 @@
   "viewer.next": "Next",
   "viewer.rotateCw": "Rotate 90° clockwise",
   "viewer.rotateCcw": "Rotate 90° counterclockwise",
+  "viewer.zoom": "Zoom",
   "viewer.zoomHint": "Wheel zoom · Left and right arrows to flip through images · I Details · 0–5 rating",
   "viewer.noPreview": "No preview yet",
   "viewer.missingSource": "The source file has been moved or deleted, and some operations are unavailable.",

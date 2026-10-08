@@ -744,6 +744,7 @@
   "viewer.next": "次へ",
   "viewer.rotateCw": "時計回りに 90°回転",
   "viewer.rotateCcw": "反時計回りに 90°回転",
+  "viewer.zoom": "ズーム",
   "viewer.zoomHint": "ホイール ズーム · 左右の矢印で画像を切り替える · I 詳細 · 0 ～ 5 の評価",
   "viewer.noPreview": "プレビューはまだありません",
   "viewer.missingSource": "ソース ファイルが移動または削除されているため、一部の操作が利用できません。",

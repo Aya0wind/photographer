@@ -166,7 +166,7 @@ interface ViewerOverlayProps {
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const motionOn = useMotionOn();
-  const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, dragging,
+  const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging, minScale, maxScale, zoomVisible, setZoomVisible, setZoomInteracting,
     handlePointerDown, handlePointerMove, handlePointerUp } = useViewerTransform(asset.id);
   const [fullscreen, setFullscreen] = useState(false);
   const [topVisible, setTopVisible] = useState(false);
@@ -586,8 +586,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
           查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
           （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
-      <div className={`absolute left-0 top-0 z-30 flex h-12 items-center gap-3 bg-black/65 pl-4 pr-[245px] text-text-primary backdrop-blur-md transition-[transform,opacity] duration-200 ${topVisible ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-full opacity-0"}`} style={{ right: exifOpen ? 288 : 0 }} data-testid="viewer-titlebar" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
-        <div className="absolute inset-0" data-tauri-drag-region />
+      <div className={`absolute left-0 top-0 z-30 pointer-events-none flex h-24 items-start gap-3 pl-4 pr-[245px] pt-4 text-text-primary transition-[transform,opacity] duration-200 ${topVisible ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-full opacity-0"}`} style={{ right: exifOpen ? 288 : 0, background: "linear-gradient(to bottom, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0.45) 50%, rgba(0, 0, 0, 0))" }} data-testid="viewer-titlebar" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
+        <div className="pointer-events-auto absolute inset-x-0 top-0 h-12" data-tauri-drag-region />
         <div className="pointer-events-none relative flex min-w-0 items-baseline gap-4">
           <span className="truncate text-sm font-semibold" title={asset.name} data-testid="viewer-name">
             {asset.name}
@@ -798,6 +798,39 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 <path d="M6 3l5 5-5 5" />
               </svg>
             </button>
+          </div>
+          {/* 缩放条与舞台分离，拖动和双击不会触发照片平移或复位。 */}
+          <div
+            className={`absolute bottom-28 left-1/2 z-30 flex w-[min(320px,calc(100%_-_32px))] -translate-x-1/2 items-center gap-3 rounded-full border border-white/15 bg-black/60 px-4 py-2 text-white shadow-lg backdrop-blur-md transition-opacity duration-200 ${zoomVisible ? "opacity-100" : "pointer-events-none opacity-0"}`}
+            aria-hidden={!zoomVisible}
+            data-testid="viewer-zoom-control"
+          >
+            <input
+              type="range"
+              min={minScale * 100}
+              max={maxScale * 100}
+              step={1}
+              value={Math.round(view.scale * 100)}
+              aria-label={t("viewer.zoom")}
+              aria-valuetext={`${Math.round(view.scale * 100)}%`}
+              tabIndex={zoomVisible ? 0 : -1}
+              className="h-5 min-w-0 flex-1 cursor-pointer touch-none appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-moz-range-track]:h-[3px] [&::-moz-range-track]:bg-transparent [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-white"
+              style={{ background: `linear-gradient(to right, rgba(255,255,255,.85) ${(view.scale - minScale) / (maxScale - minScale) * 100}%, rgba(255,255,255,.25) 0) center / 100% 3px no-repeat` }}
+              onFocus={() => setZoomVisible(true)}
+              onPointerDown={(event) => {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setZoomInteracting(true);
+              }}
+              onPointerUp={() => setZoomInteracting(false)}
+              onPointerCancel={() => setZoomInteracting(false)}
+              onLostPointerCapture={() => setZoomInteracting(false)}
+              onBlur={() => setZoomInteracting(false)}
+              onChange={(event) => setZoom(Number(event.currentTarget.value) / 100)}
+              data-testid="viewer-zoom-slider"
+            />
+            <output className="w-12 shrink-0 text-right font-mono text-xs tabular-nums" data-testid="viewer-zoom-percent">
+              {Math.round(view.scale * 100)}%
+            </output>
           </div>
           {/* 操作提示：CSS 过渡淡入淡出（确定性，不走动画帧） */}
           <p

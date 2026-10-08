@@ -744,6 +744,7 @@
   "viewer.next": "下一张",
   "viewer.rotateCw": "顺时针旋转 90°",
   "viewer.rotateCcw": "逆时针旋转 90°",
+  "viewer.zoom": "缩放",
   "viewer.zoomHint": "滚轮缩放 · 左右箭头翻图 · I 详细信息 · 0–5 评分",
   "viewer.noPreview": "暂无预览",
   "viewer.missingSource": "源文件已被移动或删除，部分操作不可用",

@@ -3,6 +3,30 @@ import { useMotionOn } from "@/lib/motion";
 const MIN_SCALE = 1;
 const MAX_SCALE = 4;
 
+/** 缩放发生后显示；拖动结束再开始计时，切换照片时清理。 */
+function useZoomIndicator(assetId: number, scale: number) {
+  const [zoomVisible, setZoomVisible] = useState(false);
+  const [zoomInteracting, setZoomInteracting] = useState(false);
+  const previousZoom = useRef({ assetId, scale: 1 });
+  useEffect(() => {
+    const previous = previousZoom.current;
+    previousZoom.current = { assetId, scale };
+    if (previous.assetId !== assetId) {
+      previousZoom.current.scale = MIN_SCALE;
+      setZoomVisible(false);
+      setZoomInteracting(false);
+    } else if (previous.scale !== scale) {
+      setZoomVisible(true);
+    }
+  }, [assetId, scale]);
+  useEffect(() => {
+    if (!zoomVisible || zoomInteracting) return;
+    const timer = window.setTimeout(() => setZoomVisible(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [zoomVisible, zoomInteracting, scale]);
+  return { zoomVisible, setZoomVisible, setZoomInteracting };
+}
+
 /** 舞台手势与临时变换；切换资产时复位。 */
 export function useViewerTransform(assetId: number) {
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -22,6 +46,7 @@ export function useViewerTransform(assetId: number) {
   }, []);
   // --- 缩放/平移/旋转状态（资产切换时复位；旋转不持久化） ----------------------------
   const [view, setView] = useState({ scale: 1, x: 0, y: 0, rotation: 0 });
+  const zoomIndicator = useZoomIndicator(assetId, view.scale);
   const [renderedView, setRenderedView] = useState(view);
   const renderedRef = useRef(view);
   const animationFrame = useRef<number | null>(null);
@@ -70,6 +95,13 @@ export function useViewerTransform(assetId: number) {
   }, [assetId]);
 
   const clampScale = (s: number) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+  /** 滑条以舞台中心缩放，并保持当前平移点的相对位置。 */
+  function setZoom(scale: number): void {
+    const next = clampScale(scale);
+    setView((v) => ({ ...v, scale: next,
+      x: next === MIN_SCALE ? 0 : v.x * next / v.scale,
+      y: next === MIN_SCALE ? 0 : v.y * next / v.scale }));
+  }
   /** 90° 步进旋转（负=逆时针）；触发拖拽/缩放之外的独立维度 */
   const rotate = (delta: number) =>
     // 保留连续角度，确保 -270 -> -360 的过渡继续向左，而不是归零后反向补间。
@@ -146,6 +178,7 @@ export function useViewerTransform(assetId: number) {
       ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
       : { ...v, scale: 2, x: 0, y: 0 });
   }
-  return { stageRef, stageSize, dragRef, view, renderedView, animating, rotate, resetView, toggleZoom, dragging,
+  return { stageRef, stageSize, dragRef, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging,
+    minScale: MIN_SCALE, maxScale: MAX_SCALE, ...zoomIndicator,
     handlePointerDown, handlePointerMove, handlePointerUp };
 }
