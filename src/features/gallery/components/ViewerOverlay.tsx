@@ -603,7 +603,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
           查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
           （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
-      <div className={`absolute left-0 top-0 z-30 pointer-events-none flex h-24 items-start gap-3 pl-4 pr-[245px] pt-4 text-text-primary transition-[transform,opacity] duration-200 ${topVisible ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-full opacity-0"}`} style={{ right: exifOpen ? 288 : 0, background: "linear-gradient(to bottom, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0.45) 50%, rgba(0, 0, 0, 0))" }} data-testid="viewer-titlebar" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
+      <div className={`absolute left-0 top-0 z-30 pointer-events-none flex h-[67px] items-start gap-3 pl-4 pr-[245px] pt-4 text-text-primary transition-[transform,opacity] duration-200 ${topVisible ? "translate-y-0 opacity-100" : "pointer-events-none -translate-y-full opacity-0"}`} style={{ right: exifOpen ? 288 : 0, background: "linear-gradient(to bottom, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0.45) 50%, rgba(0, 0, 0, 0))" }} data-testid="viewer-titlebar" data-visible={topVisible} aria-hidden={!topVisible} inert={!topVisible}>
         <div className="pointer-events-auto absolute inset-x-0 top-0 h-12" data-tauri-drag-region />
         <div className="pointer-events-none relative flex min-w-0 items-baseline gap-4">
           <span className="truncate text-sm font-semibold" title={asset.name} data-testid="viewer-name">

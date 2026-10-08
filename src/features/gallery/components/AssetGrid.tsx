@@ -13,6 +13,7 @@ import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { assetRatingSet, type AssetDto, type AssetGroupDate } from "@/ipc/api";
+import { formatBytes } from "@/lib/format";
 import ErrorModal from "@/shared/components/ErrorModal";
 import PhotoTimeline from "./PhotoTimeline";
 import { SIMILARITY_BADGE_CLASS, similarityTier } from "@/features/ai/scoreBadge";
@@ -663,9 +664,10 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isRejected = asset.rejected === true;
                     const inner = (
                       <>
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-[calc(100%-20px)] w-full" />
-                        <span className="absolute inset-x-0 bottom-0 flex h-5 items-center justify-center bg-panel/90 font-mono text-[10px] tabular-nums text-text-secondary" data-testid="tile-resolution">
-                          {asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
+                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full [&_.asset-missing-badge]:bottom-14" />
+                        <span className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-1.5 px-3 pb-1.5 pt-5 font-mono text-[10px] leading-4 tabular-nums text-white/90" style={{ background: "linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0))" }} data-testid="tile-resolution">
+                          <span className="whitespace-nowrap">{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
+                          <span className="whitespace-nowrap"><span aria-hidden="true">· </span><span data-testid="tile-file-size">{formatBytes(asset.sizeBytes)}</span></span>
                         </span>
                         {colorDot && (
                           <span
@@ -768,7 +770,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                                 e.currentTarget.click();
                               }
                             }}
-                            className={`absolute bottom-6 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
+                            className={`absolute bottom-14 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
                               isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
                             }`}
                             data-testid="tile-favorite"
@@ -831,7 +833,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         {inner}
                         {burstCount !== undefined && (
                           <span
-                            className="absolute bottom-6 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}
@@ -871,7 +873,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         {inner}
                         {burstCount !== undefined && (
                           <span
-                          className="absolute bottom-6 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                          className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}

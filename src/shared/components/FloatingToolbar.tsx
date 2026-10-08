@@ -33,7 +33,7 @@ export default function FloatingToolbar({ children, label, locked = false, class
       onPointerDown={() => setVisible(true)}
       data-visible={shown}
     >
-      <div className={`ui-floating-gradient pointer-events-none absolute inset-x-0 top-0 h-24 rounded-b-2xl transition-opacity duration-200 ${shown ? "opacity-100" : "opacity-0"}`} aria-hidden="true" />
+      <div className={`ui-floating-gradient pointer-events-none absolute inset-x-0 top-0 h-[67px] rounded-b-2xl transition-opacity duration-200 ${shown ? "opacity-100" : "opacity-0"}`} aria-hidden="true" />
       <div className={`relative flex items-center gap-2 transition-opacity duration-200 ${shown ? "opacity-100" : "pointer-events-none opacity-0"}`} inert={!shown}>
         {children}
       </div>

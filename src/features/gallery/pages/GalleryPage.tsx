@@ -579,7 +579,7 @@ export default function GalleryPage() {
         className="flex h-full w-full flex-col px-4"
         data-testid="gallery-content"
       >
-        <header className="flex h-14 shrink-0 items-center gap-3 pr-36" data-testid="gallery-toolbar">
+        <header className="flex h-14 shrink-0 items-center gap-3 pr-56" data-testid="gallery-toolbar">
           <h1 className="text-base font-semibold text-text-primary">{t("nav.gallery")}</h1>
           <span className="text-xs tabular-nums text-text-muted" data-testid="search-count">
             {t("search.count", { count: semanticMode ? semantic.assets.length : totalCount ?? assets.length })}

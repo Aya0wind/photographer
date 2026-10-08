@@ -170,7 +170,7 @@ export default function AssetThumb({
           但右下角恒标「源缺失」（琥珀系半透明底，样式参考 RAW 角标） */}
       {status === "missing" && (
         <span
-          className="absolute bottom-1 right-1 rounded bg-amber-500/85 px-1 py-0.5 text-[9px] font-medium leading-none text-black"
+          className="asset-missing-badge absolute bottom-1 right-1 rounded bg-amber-500/85 px-1 py-0.5 text-[9px] font-medium leading-none text-black"
           data-testid="thumb-missing-badge"
         >
           {t("thumb.missingBadge")}

@@ -360,7 +360,7 @@ export default function AlbumDetailPage() {
     <div className="relative h-full" data-testid="album-detail-page" data-album-id={albumId}>
       <div className="flex h-full w-full flex-col px-4">
         {/* 页头：相册名（点击重命名）+ 张数 + 添加照片 + 筛选 + 尺寸 */}
-        <div className="flex h-14 shrink-0 items-center gap-2.5 pr-44" data-testid="album-detail-toolbar">
+        <div className="flex h-14 shrink-0 items-center gap-2.5 pr-64" data-testid="album-detail-toolbar">
           {renaming ? (
             <div className="flex min-w-0 items-center gap-1.5">
               <input
@@ -438,6 +438,7 @@ export default function AlbumDetailPage() {
             )}
           </button>
 
+          <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           <ActionPopover label={t("ui.more")} onOpenChange={setToolsOpen} panelClassName="items-start">
           {/* 联机拍摄（阶段 E）：先选相册再开拍——独立窗口内调参/取景/按快门，新片直接入本相册 */}
           <button
@@ -484,7 +485,6 @@ export default function AlbumDetailPage() {
             )}
           </div>
 
-              <div className="flex w-full items-center justify-between gap-3 text-xs text-text-secondary"><span>{t("gallery.tileSize.label")}</span><TileSizeSwitch value={tileSize} onChange={setTileSize} /></div>
           </ActionPopover>
           {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
           <button
