@@ -1,3 +1,4 @@
+import ActionPopover from "@/shared/components/ActionPopover";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -496,7 +497,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   };
   const toolButton = (id: EditorTool, label: string, testId: string) => (
     <button type="button" role="tab" aria-selected={tool === id} aria-label={label} onClick={() => selectTool(id)} title={label}
-      className={`flex h-14 min-w-14 flex-col items-center justify-center gap-1 border-b-2 px-3 text-[11px] transition-colors ${tool === id ? "border-accent text-accent" : "border-transparent text-text-secondary hover:bg-panel/40 hover:text-text-primary"}`}
+      className={`flex h-14 min-w-14 flex-col items-center justify-center gap-1 rounded-xl px-3 text-[11px] transition-colors ${tool === id ? "bg-panel text-accent" : "text-text-secondary hover:bg-panel/40 hover:text-text-primary"}`}
       data-testid={testId} data-active={tool === id}>
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{TOOL_ICONS[id]}</svg>{label}
     </button>
@@ -508,10 +509,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       role="dialog"
       aria-modal="true"
       aria-label={t("editor.title")}
+      data-theme="dark"
       data-testid="editor-overlay"
     >
       {/* 顶栏 */}
-      <div className="relative flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4" data-testid="editor-titlebar">
+      <div className="ui-glass relative flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4" data-testid="editor-titlebar">
         <div className="absolute inset-0" data-tauri-drag-region data-testid="editor-window-drag-region" />
         <h2 className="pointer-events-none relative flex min-w-0 items-baseline gap-2 text-sm font-semibold text-text-primary">
           <span>{t("editor.title")}</span>
@@ -550,15 +552,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           >
             {t("editor.redo")}
           </button>
-          <button
-            type="button"
-            onClick={() => setConfirm("reset")}
-            title={t("editor.reset")}
-            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
-            data-testid="editor-reset"
-          >
-            {t("editor.reset")}
-          </button>
           <span className="mx-1 h-5 w-px bg-edge" aria-hidden="true" />
           <button
             type="button"
@@ -569,6 +562,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
             data-testid="editor-save"
           >
             {t("editor.saveChanges")}</button>
+          <ActionPopover label={t("ui.more")} closeOnAction>
           <button
             type="button"
             onClick={() => setAlbumPickerOpen(true)}
@@ -589,6 +583,16 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           >
             {t("editor.export")}
           </button>
+          <button
+            type="button"
+            onClick={() => setConfirm("reset")}
+            title={t("editor.reset")}
+            className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-red-400 hover:text-red-400"
+            data-testid="editor-reset"
+          >
+            {t("editor.reset")}
+          </button>
+          </ActionPopover>
           <button
             type="button"
             onClick={requestClose}

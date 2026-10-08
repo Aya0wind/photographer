@@ -7,6 +7,7 @@ const MAX_SCALE = 4;
 function useZoomIndicator(assetId: number, scale: number) {
   const [zoomVisible, setZoomVisible] = useState(false);
   const [zoomInteracting, setZoomInteracting] = useState(false);
+  const [zoomFocused, setZoomFocused] = useState(false);
   const previousZoom = useRef({ assetId, scale: 1 });
   useEffect(() => {
     const previous = previousZoom.current;
@@ -15,16 +16,17 @@ function useZoomIndicator(assetId: number, scale: number) {
       previousZoom.current.scale = MIN_SCALE;
       setZoomVisible(false);
       setZoomInteracting(false);
+      setZoomFocused(false);
     } else if (previous.scale !== scale) {
       setZoomVisible(true);
     }
   }, [assetId, scale]);
   useEffect(() => {
-    if (!zoomVisible || zoomInteracting) return;
+    if (!zoomVisible || zoomInteracting || zoomFocused) return;
     const timer = window.setTimeout(() => setZoomVisible(false), 3000);
     return () => window.clearTimeout(timer);
-  }, [zoomVisible, zoomInteracting, scale]);
-  return { zoomVisible, setZoomVisible, setZoomInteracting };
+  }, [zoomVisible, zoomInteracting, zoomFocused, scale]);
+  return { zoomVisible, setZoomVisible, setZoomInteracting, setZoomFocused };
 }
 
 /** 舞台手势与临时变换；切换资产时复位。 */

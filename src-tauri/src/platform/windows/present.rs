@@ -1,4 +1,46 @@
 use crate::devices::present::{is_importable_volume, DRIVE_FIXED, DRIVE_REMOVABLE};
+
+/// USB 读卡器可能仅报告 USB，此时按未知来源处理，不误伤外置 SSD/U 盘。
+pub fn is_storage_card(path: &std::path::Path) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        Storage::FileSystem::{BusTypeSd, BusTypeMmc, CreateFileW, GetVolumePathNameW,
+            GetVolumeNameForVolumeMountPointW, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
+        System::{Ioctl::{IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery,
+            StorageDeviceProperty, STORAGE_PROPERTY_QUERY, STORAGE_DEVICE_DESCRIPTOR},
+            IO::DeviceIoControl},
+    };
+    let input: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    let mut root = [0u16; 1024];
+    let mut volume = [0u16; 1024];
+    // 查询真实卷根，使从存储卡的子文件夹导入也采用相同限制。
+    if unsafe { GetVolumePathNameW(PCWSTR(input.as_ptr()), &mut root) }.is_err()
+        || unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(root.as_ptr()), &mut volume) }.is_err() {
+        return false;
+    }
+    let length = volume.iter().position(|value| *value == 0).unwrap_or(volume.len());
+    if length == 0 { return false; }
+    if volume[length - 1] == b'\\' as u16 { volume[length - 1] = 0; }
+    let Ok(handle) = (unsafe { CreateFileW(PCWSTR(volume.as_ptr()), 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }) else {
+        return false;
+    };
+    let query = STORAGE_PROPERTY_QUERY { PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery, ..Default::default() };
+    let mut buffer = [0u8; 4096];
+    let mut returned = 0;
+    let result = unsafe { DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY,
+        Some((&query as *const STORAGE_PROPERTY_QUERY).cast()), std::mem::size_of_val(&query) as u32,
+        Some(buffer.as_mut_ptr().cast()), buffer.len() as u32, Some(&mut returned), None) };
+    unsafe { let _ = CloseHandle(handle); }
+    if result.is_err() || (returned as usize) < std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() { return false; }
+    // 输出是字节缓冲，使用非对齐读取；长度由上面的返回字节数校验。
+    let descriptor = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<STORAGE_DEVICE_DESCRIPTOR>()) };
+    descriptor.BusType == BusTypeSd || descriptor.BusType == BusTypeMmc
+}
+
 fn is_external_volume(drive: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::{

@@ -65,9 +65,10 @@ export interface Settings {
     /** 连拍分组：最小组员数（低于此不成组） */
     burstMinSize: number;
   };
-  /** 外观（M4.5）：界面动画开关 */
+  /** 全局外观，旧配置沿用原深色界面。 */
   appearance: {
     animations: boolean;
+    theme?: "dark" | "light";
   };
   system: {
     launchAtLogin: boolean;
@@ -111,6 +112,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   appearance: {
     animations: true,
+    theme: "dark",
   },
   system: {
     launchAtLogin: false,

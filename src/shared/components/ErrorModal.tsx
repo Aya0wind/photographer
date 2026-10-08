@@ -32,7 +32,7 @@ export default function ErrorModal({
   if (!message) return null;
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/65 px-4" role="alertdialog" aria-modal="true" aria-labelledby="operation-error-title" aria-describedby="operation-error-message" data-testid="operation-error-dialog" onClick={(event) => event.stopPropagation()}>
-      <div className="w-full max-w-md rounded-xl border border-edge bg-surface p-5 shadow-2xl">
+      <div className="ui-glass w-full max-w-md rounded-2xl border border-edge p-5 shadow-2xl">
         <h2 id="operation-error-title" className="text-base font-semibold text-text-primary">{t("common.operationFailed")}</h2>
         <p id="operation-error-message" className="mt-3 whitespace-pre-wrap break-words text-sm leading-relaxed text-text-secondary">{message}</p>
         <div className="mt-5 flex justify-end">

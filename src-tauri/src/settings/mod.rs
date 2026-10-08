@@ -28,6 +28,7 @@ pub struct Settings {
     pub active_library_id: Option<String>,
     pub import: ImportSettings,
     pub gallery: GallerySettings,
+    pub appearance: AppearanceSettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
     /// 存储与缓存策略（M8-③：缩略图缓存 LRU 上限等）。
@@ -102,11 +103,33 @@ impl Default for Settings {
             active_library_id: None,
             import: ImportSettings::default(),
             gallery: GallerySettings::default(),
+            appearance: AppearanceSettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),
             storage: StorageSettings::default(),
             watch_folders: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AppearanceSettings {
+    pub theme: ColorTheme,
+    pub animations: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self { theme: ColorTheme::Dark, animations: true }
     }
 }
 

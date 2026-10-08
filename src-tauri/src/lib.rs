@@ -292,6 +292,7 @@ pub fn run() {
             ipc::device::device_list,
             ipc::device::device_scan,
             ipc::device::device_files,
+            ipc::device::device_copy_only,
             ipc::device::folder_scan,
             ipc::device::fs_list_dirs,
             ipc::device::platform_capabilities,

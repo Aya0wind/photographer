@@ -376,9 +376,9 @@ impl Engine {
         if let Some(prepared) = self.prepared.as_ref() {
             return Ok(prepared.job_id);
         }
-        if self.plan.mode == ImportMode::Reference && self.source.kind() == SourceKind::Mtp {
+        if self.plan.mode != ImportMode::Copy && self.source.copy_only() {
             return Err(EngineError::InvalidPlan(
-                "仅导入不支持 MTP 相机：原文件必须有稳定的本地路径".into(),
+                "相机或已识别的存储卡仅支持复制导入，不能移动或引用原文件".into(),
             ));
         }
         if self.plan.mode == ImportMode::Reference && self.plan.second_target.is_some() {

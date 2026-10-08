@@ -1284,5 +1284,19 @@
   "editor.albumPicker.empty": "No albums yet — create one first",
   "editor.albumPicker.confirm": "Export to this album",
   "map.syncData": "Sync",
-  "map.syncDataHint": "Pull newly imported photos onto the map (incremental, seconds); also happens automatically after imports"
+  "map.syncDataHint": "Pull newly imported photos onto the map (incremental, seconds); also happens automatically after imports",
+  "settings.appearance.theme": "Theme",
+  "settings.appearance.themeDesc": "Apply immediately and remember your choice. Photo previews keep a dark background.",
+  "settings.appearance.light": "Light",
+  "settings.appearance.dark": "Dark",
+  "ui.browseActions": "Browse actions",
+  "ui.selectionActions": "Selected photo actions",
+  "ui.selectedCount": "{{count}} selected",
+  "ui.moveToAlbum": "Move to album",
+  "ui.more": "More actions",
+  "ui.clearSelection": "Clear selection",
+  "ui.close": "Close",
+  "ui.viewOptions": "View options",
+  "wizard.mode.copyOnly": "This source supports copying only. Original files are preserved.",
+  "settings.appearance.saveFailed": "Could not save the theme. Please try again."
 }

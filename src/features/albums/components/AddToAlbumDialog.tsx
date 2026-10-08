@@ -200,7 +200,7 @@ export default function AddToAlbumDialog({
         role="dialog"
         aria-modal="true"
         aria-label={t("albums.addToAlbum")}
-        className="flex max-h-[70vh] w-[380px] flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-2xl"
+        className="ui-glass flex max-h-[70vh] w-[380px] flex-col overflow-hidden rounded-2xl border border-edge shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         data-testid="add-to-album-dialog"
       >

@@ -78,6 +78,10 @@ pub trait DeviceSource: Send + Sync {
     /// 稳定设备标识（卷盘符如 `E:`；WPD PnP 路径）
     fn id(&self) -> String;
     fn kind(&self) -> SourceKind;
+    /// 相机与能可靠识别的存储卡保留原文件；未知可移动卷不强行归类。
+    fn copy_only(&self) -> bool {
+        self.kind() == SourceKind::Mtp
+    }
     /// 展示名（卷标 / 相机友好名）
     fn name(&self) -> String;
     /// 枚举全部媒体文件（跳过系统目录与非媒体扩展名）。

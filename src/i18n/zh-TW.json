@@ -1270,5 +1270,19 @@
   "editor.albumPicker.empty": "還沒有相簿，可先新增一個",
   "editor.albumPicker.confirm": "匯出到該相簿",
   "map.syncData": "同步資料",
-  "map.syncDataHint": "將新匯入的照片納入地圖（增量，秒級）；匯入完成後也會自動同步"
+  "map.syncDataHint": "將新匯入的照片納入地圖（增量，秒級）；匯入完成後也會自動同步",
+  "settings.appearance.theme": "介面主題",
+  "settings.appearance.themeDesc": "立即切換並記住選擇；照片預覽維持深色背景。",
+  "settings.appearance.light": "淺色",
+  "settings.appearance.dark": "深色",
+  "ui.browseActions": "瀏覽操作",
+  "ui.selectionActions": "所選照片操作",
+  "ui.selectedCount": "已選 {{count}} 張",
+  "ui.moveToAlbum": "移入相簿",
+  "ui.more": "更多操作",
+  "ui.clearSelection": "取消選取",
+  "ui.close": "關閉",
+  "ui.viewOptions": "顯示選項",
+  "wizard.mode.copyOnly": "此來源僅支援複製，原始檔案保持不變。",
+  "settings.appearance.saveFailed": "主題設定無法儲存，請重試。"
 }

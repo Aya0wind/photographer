@@ -5,6 +5,7 @@ import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
 import NewLibraryDialog from "@/features/library/NewLibraryDialog";
 import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
+import ThemePicker from "@/features/settings/components/ThemePicker";
 import AiTab from "@/features/settings/AiTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags, smartTagLabel } from "@/features/albums/lib/smartTags";
 import { useSettingsStore, type DeepPartial, type Library, type Settings } from "@/stores/settingsStore";
@@ -87,12 +88,13 @@ export function Toggle({
   return (
     <input
       type="checkbox"
+      role="switch"
       checked={checked}
       disabled={disabled}
       onChange={(e) => onChange(e.target.checked)}
       aria-label={label}
       data-testid={testId}
-      className="h-3.5 w-3.5 accent-[#F0A83C] disabled:opacity-40"
+      className="ui-switch disabled:opacity-40"
     />
   );
 }
@@ -206,7 +208,7 @@ export default function SettingsPage() {
       <div
         role="tablist"
         aria-label={t("pages.settings.title")}
-        className="flex h-9 shrink-0 items-stretch gap-1 border-b border-edge px-4"
+        className="ui-glass mx-4 mt-3 flex min-h-10 shrink-0 flex-wrap items-stretch gap-1 rounded-xl border p-1"
       >
         {TABS.map((item) => {
           const active = tab === item.key;
@@ -217,10 +219,10 @@ export default function SettingsPage() {
               role="tab"
               aria-selected={active}
               onClick={() => setTab(item.key)}
-              className={`border-b-2 px-3 text-xs transition-colors ${
+              className={`rounded-lg px-4 py-2 text-xs transition-colors ${
                 active
-                  ? "border-accent text-accent"
-                  : "border-transparent text-text-secondary hover:text-text-primary"
+                  ? "bg-panel text-text-primary shadow-sm"
+                  : "text-text-secondary hover:bg-panel/50 hover:text-text-primary"
               }`}
               data-testid={`settings-tab-${item.key}`}
             >
@@ -230,8 +232,8 @@ export default function SettingsPage() {
         })}
       </div>
 
-      <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        <div className="flex w-full flex-col gap-2.5">
+      <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div className="ui-settings-content ui-glass flex w-full flex-col gap-3 rounded-2xl border border-edge p-5">
           {tab === "general" && (
             <>
               <SectionTitle>{t("settings.section.system")}</SectionTitle>
@@ -294,6 +296,9 @@ export default function SettingsPage() {
           {tab === "appearance" && (
             <>
               <SectionTitle>{t("settings.section.appearance")}</SectionTitle>
+              <SettingRow label={t("settings.appearance.theme")} desc={t("settings.appearance.themeDesc")} testId="settings-row-theme">
+                <ThemePicker />
+              </SettingRow>
               <SettingRow
                 label={t("settings.appearance.animations")}
                 desc={t("settings.appearance.animationsDesc")}

@@ -1270,5 +1270,19 @@
   "editor.albumPicker.empty": "还没有相册，可先新建一个",
   "editor.albumPicker.confirm": "导出到该相册",
   "map.syncData": "同步数据",
-  "map.syncDataHint": "导入的新照片自动入图（增量，秒级）；也可等导入完成后自动同步"
+  "map.syncDataHint": "导入的新照片自动入图（增量，秒级）；也可等导入完成后自动同步",
+  "settings.appearance.theme": "界面主题",
+  "settings.appearance.themeDesc": "立即切换并记住选择；照片预览保持深色背景。",
+  "settings.appearance.light": "浅色",
+  "settings.appearance.dark": "深色",
+  "ui.browseActions": "浏览操作",
+  "ui.selectionActions": "所选照片操作",
+  "ui.selectedCount": "已选 {{count}} 张",
+  "ui.moveToAlbum": "移入相册",
+  "ui.more": "更多操作",
+  "ui.clearSelection": "取消选择",
+  "ui.close": "关闭",
+  "ui.viewOptions": "显示选项",
+  "wizard.mode.copyOnly": "此来源仅支持复制，原文件保持不变。",
+  "settings.appearance.saveFailed": "主题设置未能保存，请重试。"
 }

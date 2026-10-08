@@ -359,6 +359,9 @@ impl DeviceSource for ArcSource {
     fn kind(&self) -> SourceKind {
         self.0.kind()
     }
+    fn copy_only(&self) -> bool {
+        self.0.copy_only()
+    }
     fn name(&self) -> String {
         self.0.name()
     }

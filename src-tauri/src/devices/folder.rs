@@ -67,6 +67,10 @@ impl DeviceSource for LocalFolderSource {
         SourceKind::Folder
     }
 
+    fn copy_only(&self) -> bool {
+        self.inner.copy_only()
+    }
+
     fn name(&self) -> String {
         // 展示名取末段目录名（无末段时回退完整路径）
         self.display_root

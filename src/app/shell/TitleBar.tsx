@@ -167,7 +167,7 @@ export default function TitleBar({
 
   return (
     <header
-      className="relative flex h-10 shrink-0 select-none items-stretch border-b border-edge bg-surface"
+      className="ui-glass relative flex h-12 shrink-0 select-none items-stretch border-b border-edge"
       data-testid="titlebar"
     >
       {/* 拖拽背景层：整条可拖动窗口；双击最大化由 Tauri 注入脚本处理 */}

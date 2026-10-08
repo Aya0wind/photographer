@@ -252,8 +252,8 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="sp-scroll flex h-full w-[220px] shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface">
-      <nav className="mt-2 flex flex-col gap-2 px-2 pb-3" aria-label="primary">
+    <aside className="ui-glass sp-scroll flex h-full w-[208px] shrink-0 flex-col overflow-y-auto border-r border-edge">
+      <nav className="mt-3 flex flex-col gap-3 px-3 pb-4" aria-label="primary">
         {SECTIONS.map((section) => (
           <div key={section.titleKey} data-testid="nav-section" data-section={section.titleKey}>
             <h3 className="px-3.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
@@ -266,9 +266,9 @@ export default function Sidebar() {
                   to={item.to}
                   className={({ isActive }: { isActive: boolean }) =>
                     [
-                      "relative flex items-center gap-3 rounded-md px-3.5 py-2 text-sm transition-colors duration-150",
+                      "relative flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[13px] transition-colors duration-150",
                       isActive
-                        ? "bg-panel/60 text-accent"
+                        ? "bg-accent/10 text-accent"
                         : "text-text-secondary hover:bg-panel/40 hover:text-text-primary",
                     ].join(" ")
                   }

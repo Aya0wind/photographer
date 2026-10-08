@@ -24,6 +24,9 @@ import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { AssetContextMenu } from "@/features/gallery/components/ContextMenu";
+import ActionPopover from "@/shared/components/ActionPopover";
+import FloatingToolbar from "@/shared/components/FloatingToolbar";
+import SelectionDock from "@/shared/components/SelectionDock";
 import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
@@ -222,6 +225,7 @@ export default function AlbumDetailPage() {
     if (viewer.index >= viewer.group.assets.length - 8) void appendPage();
   }, [viewer?.index, viewer?.group.assets.length, appendPage]);
   const [tileSize, setTileSize] = useGalleryTileSize();
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   const loadedById = useMemo(() => {
     const map = new Map<number, AssetDto>();
@@ -353,10 +357,10 @@ export default function AlbumDetailPage() {
   }
 
   return (
-    <div className="h-full" data-testid="album-detail-page" data-album-id={albumId}>
+    <div className="relative h-full" data-testid="album-detail-page" data-album-id={albumId}>
       <div className="flex h-full w-full flex-col px-4">
         {/* 页头：相册名（点击重命名）+ 张数 + 添加照片 + 筛选 + 尺寸 */}
-        <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge" data-testid="album-detail-toolbar">
+        <div className="flex h-14 shrink-0 items-center gap-2.5 pr-44" data-testid="album-detail-toolbar">
           {renaming ? (
             <div className="flex min-w-0 items-center gap-1.5">
               <input
@@ -415,19 +419,18 @@ export default function AlbumDetailPage() {
           </span>
 
 
+        </div>
+        <FloatingToolbar label={t("ui.browseActions")} locked={panelOpen || toolsOpen || addHintOpen || renaming}>
           {/* 筛选按钮（激活条件计数徽标） */}
           <button
             type="button"
             onClick={() => setPanelOpen((v) => !v)}
             aria-expanded={panelOpen}
-            className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
-              panelOpen || chips.length > 0
-                ? "border-accent text-accent"
-                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
-            }`}
+            className="ui-icon-button relative"
+            aria-label={t("search.filter")} title={t("search.filter")}
             data-testid="album-detail-filter-toggle"
           >
-            {t("search.filter")}
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h14l-5.5 6v5l-3 1v-6z" /></svg>
             {chips.length > 0 && (
               <span className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black">
                 {chips.length}
@@ -435,6 +438,7 @@ export default function AlbumDetailPage() {
             )}
           </button>
 
+          <ActionPopover label={t("ui.more")} onOpenChange={setToolsOpen} panelClassName="items-start">
           {/* 联机拍摄（阶段 E）：先选相册再开拍——独立窗口内调参/取景/按快门，新片直接入本相册 */}
           <button
             type="button"
@@ -444,19 +448,6 @@ export default function AlbumDetailPage() {
             data-testid="album-tether-start"
           >
             {t("albums.tether")}
-          </button>
-
-          {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
-          <button
-            type="button"
-            onClick={() => void startCulling()}
-            disabled={cullBusy || itemCount === 0}
-            title={subgroup === null ? t("albums.cullHint") : t("albums.cullHintSubgroup", { subgroup })}
-            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="album-cull-start"
-            data-busy={cullBusy}
-          >
-            {cullBusy ? t("albums.cullBusy") : t("albums.cull")}
           </button>
 
           <div className="relative shrink-0">
@@ -471,7 +462,7 @@ export default function AlbumDetailPage() {
             </button>
             {addHintOpen && (
               <div
-                className="absolute left-0 top-8 z-20 w-64 rounded-xl border border-edge bg-surface p-3 shadow-2xl shadow-black/40"
+                className="ui-glass ui-popover absolute right-0 top-8 z-40 w-64 rounded-xl border border-edge bg-surface p-3 shadow-2xl shadow-black/40"
                 data-testid="album-add-photos-hint"
               >
                 <p className="text-[11px] leading-relaxed text-text-secondary">
@@ -493,13 +484,28 @@ export default function AlbumDetailPage() {
             )}
           </div>
 
-          <div className="ml-auto shrink-0">
-            <TileSizeSwitch value={tileSize} onChange={setTileSize} />
-          </div>
-        </div>
+              <div className="flex w-full items-center justify-between gap-3 text-xs text-text-secondary"><span>{t("gallery.tileSize.label")}</span><TileSizeSwitch value={tileSize} onChange={setTileSize} /></div>
+          </ActionPopover>
+          {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
+          <button
+            type="button"
+            onClick={() => void startCulling()}
+            disabled={cullBusy || itemCount === 0}
+            title={subgroup === null ? t("albums.cullHint") : t("albums.cullHintSubgroup", { subgroup })}
+            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="album-cull-start"
+            data-busy={cullBusy}
+          >
+            {cullBusy ? t("albums.cullBusy") : t("albums.cull")}
+          </button>
+
+        </FloatingToolbar>
 
         {/* 筛选面板（相册维度隐藏：本页已在相册上下文内） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchInputs} hideAlbum />}
+        {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4">
+          <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>{t("search.filter")}</span><button type="button" className="ui-icon-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>×</button></div>
+          <FilterPanel inputs={inputs} onPatch={patchInputs} hideAlbum />
+        </div>}
 
         {/* 激活条件 chips */}
         <FilterChipsRow
@@ -611,6 +617,10 @@ export default function AlbumDetailPage() {
         </div>
 
       </div>
+
+      {selecting && <SelectionDock count={selected.size} onClear={exitSelection}
+        onMove={() => setAddToAlbumTargets(Array.from(selected).flatMap((id) => { const item = loadedById.get(id); return item ? [item] : []; }))}
+        onMore={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setCtxMenu({ x: rect.left, y: rect.top, assets: Array.from(selected).flatMap((id) => { const item = loadedById.get(id); return item ? [item] : []; }) }); }} />}
 
       {/* 瓦片右键菜单 */}
       {ctxMenu && (

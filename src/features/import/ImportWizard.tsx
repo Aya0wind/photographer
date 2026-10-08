@@ -15,6 +15,7 @@ import {
 import {
   type DeviceSnapshot,
   deviceFiles,
+  deviceCopyOnly,
   platformCapabilities,
   kindFromName,
   type AlbumDto,
@@ -58,6 +59,7 @@ import {
 } from "@/features/albums/lib/ungroupedAlbum";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { formatBytes } from "@/lib/format";
+import ActionPopover from "@/shared/components/ActionPopover";
 import ErrorModal from "@/shared/components/ErrorModal";
 export { fetchThumbUrl, resetThumbCacheForTests } from "./lib/sourceThumbs";
 
@@ -499,9 +501,26 @@ export default function ImportWizard() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   // 顶部导入模式：复制、移动或只在数据库登记原文件。
   const [mode, setMode] = useState<ImportMode>("copy");
+  const [sourceOpen, setSourceOpen] = useState(true);
+  useEffect(() => { if (device?.id) setSourceOpen(false); }, [device?.id]);
+  const [sourcePolicy, setSourcePolicy] = useState<{ id: string; copyOnly: boolean } | null>(null);
   useEffect(() => {
-    if (device?.kind === "mtp" && mode === "reference") setMode("copy");
-  }, [device?.kind, mode]);
+    const id = device?.id;
+    if (!id) { setSourcePolicy(null); return; }
+    let cancelled = false;
+    setMode("copy");
+    setSourcePolicy(null);
+    void deviceCopyOnly(id).then((copyOnly) => {
+      if (!cancelled) setSourcePolicy({ id, copyOnly });
+    }).catch(() => {
+      // 元数据不可用视为未知；默认复制，仍允许用户手动引用。
+      if (!cancelled) setSourcePolicy({ id, copyOnly: device?.kind === "mtp" });
+    });
+    return () => { cancelled = true; };
+  }, [device?.id, device?.kind]);
+  const copyOnly = device?.kind === "mtp" || (sourcePolicy?.id === device?.id && sourcePolicy?.copyOnly === true);
+  const policyPending = Boolean(device && sourcePolicy?.id !== device.id);
+  useEffect(() => { if (copyOnly) setMode("copy"); }, [copyOnly]);
   const { viewMode, setViewMode, panelCollapse, colWidths, tileSize, setTileSize,
     togglePanelSection, resizeColumn, resetColumns } = useImportLayout();
 
@@ -533,7 +552,7 @@ export default function ImportWizard() {
   // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
   const secondReady = !secondEnabled || secondRoot.trim().length > 0;
   const canStart =
-    Boolean(device && activeLibrary && targetRoot) && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed" && !(mode === "reference" && isMtp) && secondReady && selected.size > 0 && !starting;
+    Boolean(device && activeLibrary && targetRoot) && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed" && !policyPending && !(mode !== "copy" && copyOnly) && secondReady && selected.size > 0 && !starting;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -754,7 +773,7 @@ export default function ImportWizard() {
 
   return (
     <div className="flex h-full flex-col bg-bg">
-      <header className="flex min-h-[68px] shrink-0 flex-wrap items-center gap-4 border-b border-edge bg-surface/70 px-5">
+      <header className="ui-glass flex min-h-[60px] shrink-0 flex-wrap items-center gap-4 border-b border-edge px-5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold tracking-tight text-text-primary">{t("wizard.title")}</h1>
@@ -768,45 +787,20 @@ export default function ImportWizard() {
             {t("wizard.ipcUnavailable")}
           </span>
         )}
-        <div
-          className="ml-auto flex items-center rounded-lg border border-edge bg-bg/80 p-1 shadow-sm"
-          role="radiogroup"
-          aria-label={t("wizard.mode.label")}
-          data-testid="wizard-mode"
-        >
-          {(["copy", "move", "reference"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              role="radio"
-              aria-checked={mode === option}
-              disabled={option === "reference" && device?.kind === "mtp"}
-              onClick={() => {
-                setMode(option);
-                if (option !== "copy") setSecondEnabled(false);
-              }}
-              className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
-                mode === option
-                  ? "bg-accent text-black"
-                  : "text-text-secondary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
-              }`}
-              data-testid={`wizard-mode-${option}`}
-            >
-              {t(`wizard.mode.${option}`)}
-            </button>
-          ))}
-        </div>
+        <button type="button" onClick={() => setSourceOpen((open) => !open)} aria-expanded={sourceOpen}
+          className="ui-glass ml-auto flex max-w-sm items-center gap-2 rounded-xl border px-3 py-2 text-xs text-text-secondary"
+          data-testid="wizard-source-toggle"><FolderGlyph size={14} /><span className="truncate">{device?.name ?? t("wizard.chooseSource")}</span></button>
       </header>
 
       <div
         className="grid min-h-0 flex-1 gap-0 p-3"
         style={{
-          gridTemplateColumns: `${colWidths.left}px 6px minmax(0, 1fr) 6px ${colWidths.right}px`,
+          gridTemplateColumns: `${sourceOpen ? `${colWidths.left}px 6px ` : ""}minmax(0, 1fr) 6px ${colWidths.right}px`,
         }}
         data-testid="wizard-columns"
       >
         {/* 左栏：源面板（设备 / 文件系统树 / 最近使用，三区可折叠）+ 源文件树 */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-sm" aria-label={t("wizard.leftPane")}>
+        <section style={{ display: sourceOpen ? undefined : "none" }} className="ui-glass flex min-h-0 flex-col overflow-hidden rounded-2xl border border-edge" aria-label={t("wizard.leftPane")}>
           <div className="flex min-h-[64px] shrink-0 items-center gap-2 border-b border-edge px-3">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent/15 text-xs font-semibold text-accent">1</span>
             <h2 className="text-sm font-semibold text-text-primary">{t("wizard.chooseSource")}</h2>
@@ -1030,11 +1024,11 @@ export default function ImportWizard() {
         </section>
 
         {/* 左|中 列宽拖动条 */}
-        <ColumnResizeHandle
+        {sourceOpen && <ColumnResizeHandle
           side="left"
           onDelta={(dx) => resizeColumn("left", dx)}
           onReset={resetColumns}
-        />
+        />}
 
         {/* 中栏：文件区（列表/缩略图双视图，共享勾选与统计；工具栏=统计+全选/反选） */}
         <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-sm" aria-label={t("wizard.fileTable")}>
@@ -1052,10 +1046,13 @@ export default function ImportWizard() {
               </p>
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <ViewControls viewMode={viewMode} tileSize={tileSize}
-                onViewMode={setViewMode}
-                onTileSize={setTileSize} />
-              <span className="mx-0.5 h-5 w-px bg-edge" aria-hidden="true" />
+              <ActionPopover label={t("ui.viewOptions")}>
+                  <ViewControls viewMode={viewMode} tileSize={tileSize}
+                    onViewMode={setViewMode}
+                    onTileSize={setTileSize} />
+
+                  <button type="button" onClick={invertSelection} className="rounded-lg px-2 py-2 text-left text-xs text-text-secondary hover:bg-panel">{t("wizard.invert")}</button>
+              </ActionPopover>
               <button
                 type="button"
                 onClick={selectAll}
@@ -1063,13 +1060,7 @@ export default function ImportWizard() {
               >
                 {t("wizard.selectAll")}
               </button>
-              <button
-                type="button"
-                onClick={invertSelection}
-                className="rounded-md px-1.5 py-1 text-[11px] text-text-muted transition-colors hover:bg-panel hover:text-accent"
-              >
-                {t("wizard.invert")}
-              </button>
+
             </div>
           </div>
           {device && (
@@ -1128,47 +1119,19 @@ export default function ImportWizard() {
         />
 
         {/* 右栏：方案面板 */}
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-edge bg-surface shadow-sm" aria-label={t("wizard.planPane")}>
+        <section className="ui-glass flex min-h-0 flex-col overflow-hidden rounded-2xl border border-edge" aria-label={t("wizard.planPane")}>
           <div className="flex min-h-[64px] shrink-0 items-center gap-2 border-b border-edge px-4">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent/15 text-xs font-semibold text-accent">3</span>
             <h2 className="text-sm font-semibold text-text-primary">{t("wizard.saveAndImport")}</h2>
           </div>
           <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-          <p className="mt-4 text-xs leading-relaxed text-text-muted">{t("wizard.planHint")}</p>
-
-          {/* 导入位置（库属性，只读）：目标根/模板随库走，在设置中修改 */}
-          <div className="mt-5 flex flex-col gap-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-text-secondary">
-                {t("wizard.location.title")}
-              </span>
-              <button
-                type="button"
-                onClick={() => navigate("/settings")}
-                className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:text-accent"
-                title={t("wizard.location.badge")}
-                data-testid="wizard-location-edit"
-              >
-                {t("wizard.location.badge")}
-              </button>
-            </div>
-            <div
-              className="flex flex-col gap-1.5 rounded-lg border border-edge bg-bg p-2.5"
-              data-testid="wizard-location-card"
-            >
-              {mode === "reference" ? (
-                <span className="text-xs leading-relaxed text-text-secondary">{t("wizard.mode.referenceDesc")}</span>
-              ) : activeLibrary ? (
-                <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
-                  {targetRoot}
-                </span>
-              ) : (
-                <p className="text-[11px] leading-relaxed text-text-muted">
-                  {t("wizard.location.noLibrary")}
-                </p>
-              )}
-            </div>
-          </div>
+          <label className="mt-4 flex flex-col gap-2 text-xs text-text-secondary" data-testid="wizard-mode">
+            {t("wizard.mode.label")}
+            <select value={mode} disabled={policyPending || copyOnly} aria-label={t("wizard.mode.label")} onChange={(event) => { const next = event.currentTarget.value as ImportMode; setMode(next); if (next !== "copy") setSecondEnabled(false); }} className="rounded-xl border border-edge bg-bg px-3 py-2 text-text-primary">
+              {(["copy", "move", "reference"] as const).map((option) => <option key={option} value={option} disabled={option !== "copy" && copyOnly}>{t(`wizard.mode.${option}`)}</option>)}
+            </select>
+            {copyOnly && <span className="text-[11px] leading-relaxed text-text-muted">{t("wizard.mode.copyOnly")}</span>}
+          </label>
 
           {/* 存入相册（必选，规格修订）：已有相册（默认预选「未分组」）/ 新建；
               albumId 随导入启动负载下发（后端 None 报错） */}
@@ -1206,25 +1169,6 @@ export default function ImportWizard() {
                   </option>
                 ))}
               </select>
-            )}
-            {albumChoice === "existing" && albumId !== null && (
-              <input
-                type="text"
-                value={albumSubgroup}
-                onChange={(e) => setAlbumSubgroup(e.target.value)}
-                list="wizard-subgroup-options"
-                placeholder={t("wizard.album.subgroupPlaceholder")}
-                aria-label={t("wizard.album.subgroup")}
-                className="ml-5 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
-                data-testid="wizard-album-subgroup"
-              />
-            )}
-            {albumChoice === "existing" && albumId !== null && (
-              <datalist id="wizard-subgroup-options">
-                {subgroupSuggestions(albumSubgroupNames).map((name) => (
-                  <option key={name} value={name} />
-                ))}
-              </datalist>
             )}
             <label className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary">
               <input
@@ -1270,6 +1214,61 @@ export default function ImportWizard() {
 
           <details className="mt-5 rounded-lg border border-edge bg-bg/40 p-3" data-testid="wizard-advanced">
             <summary className="cursor-pointer text-xs font-medium text-text-secondary">{t("wizard.advanced")}</summary>
+            {albumChoice === "existing" && albumId !== null && (
+              <input
+                type="text"
+                value={albumSubgroup}
+                onChange={(e) => setAlbumSubgroup(e.target.value)}
+                list="wizard-subgroup-options"
+                placeholder={t("wizard.album.subgroupPlaceholder")}
+                aria-label={t("wizard.album.subgroup")}
+                className="ml-5 rounded-md border border-edge bg-bg px-2 py-1.5 text-xs text-text-primary outline-none transition-colors placeholder:text-text-muted/60 focus:border-accent"
+                data-testid="wizard-album-subgroup"
+              />
+            )}
+            {albumChoice === "existing" && albumId !== null && (
+              <datalist id="wizard-subgroup-options">
+                {subgroupSuggestions(albumSubgroupNames).map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+            )}
+
+          {/* 导入位置（库属性，只读）：目标根/模板随库走，在设置中修改 */}
+          <div className="mt-5 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-text-secondary">
+                {t("wizard.location.title")}
+              </span>
+              <button
+                type="button"
+                onClick={() => navigate("/settings")}
+                className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:text-accent"
+                title={t("wizard.location.badge")}
+                data-testid="wizard-location-edit"
+              >
+                {t("wizard.location.badge")}
+              </button>
+            </div>
+            <div
+              className="flex flex-col gap-1.5 rounded-lg border border-edge bg-bg p-2.5"
+              data-testid="wizard-location-card"
+            >
+              {mode === "reference" ? (
+                <span className="text-xs leading-relaxed text-text-secondary">{t("wizard.mode.referenceDesc")}</span>
+              ) : activeLibrary ? (
+                <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
+                  {targetRoot}
+                </span>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-text-muted">
+                  {t("wizard.location.noLibrary")}
+                </p>
+              )}
+            </div>
+          </div>
+
+
           <fieldset className="mt-4 flex flex-col gap-1">
             <legend className="mb-1 text-xs font-medium text-text-secondary">
               {t("wizard.duplicatePolicy")}
@@ -1387,7 +1386,7 @@ export default function ImportWizard() {
               disabled={!canStart}
               aria-label={t("wizard.start")}
               onClick={() => void startImport()}
-              className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              className="ui-primary w-full rounded-xl px-4 py-3 text-sm font-semibold transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {starting ? t("wizard.starting") : t("wizard.startCount", { count: selectedCount })}
             </button>

@@ -41,7 +41,8 @@ import {
 } from "@/features/ai/SemanticResultsView";
 import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
-import TileSizeSwitch from "../components/TileSizeSwitch";
+import GalleryBrowseControls from "../components/GalleryBrowseControls";
+import SelectionDock from "@/shared/components/SelectionDock";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
@@ -144,7 +145,6 @@ export default function GalleryPage() {
   }
 
   const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
-  const advancedChipCount = chips.filter((chip) => !["favorite", "orientation", "gps", "from", "to"].includes(chip.key) && !chip.key.startsWith("format:")).length;
 
   // --- URL 协议（全局搜索框 / 格式筛选直达）：?mode=semantic&q= / ?format= ----------------
   const urlQuery = searchParams.get("q") ?? "";
@@ -573,93 +573,25 @@ export default function GalleryPage() {
   const gridEmpty = activeGroups.length === 0 || activeGroups.every((g) => g.assets.length === 0);
 
   return (
-    <div className="h-full" data-testid="gallery-page">
+    <div className="relative h-full" data-testid="gallery-page">
       {/* 内容区：水平居中 + 左右对称 padding（修复贴导航边起排/首卡被切） */}
       <div
         className="flex h-full w-full flex-col px-4"
         data-testid="gallery-content"
       >
-        {/* 顶部工具条：筛选 + 计数 + 尺寸（语义入口唯一=TitleBar 全局搜索框；
-            多选入口=瓦片左上 check 圆钮 / Ctrl+点击 / 长按） */}
-        <div className="flex h-11 shrink-0 items-center gap-2.5 border-b border-edge" data-testid="gallery-toolbar">
-          {/* 筛选按钮：展开/收起面板；激活条件计数徽标 */}
-          <button
-            type="button"
-            onClick={() => setPanelOpen((v) => !v)}
-            aria-expanded={panelOpen}
-            className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
-              panelOpen || advancedChipCount > 0
-                ? "border-accent text-accent"
-                : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
-            }`}
-            data-testid="search-filter-toggle"
-          >
-            {t("search.moreFilters")}
-            {advancedChipCount > 0 && (
-              <span
-                className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black"
-                data-testid="search-filter-count"
-              >
-                {advancedChipCount}
-              </span>
-            )}
-            <svg
-              viewBox="0 0 16 16"
-              width="9"
-              height="9"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={`transition-transform ${panelOpen ? "rotate-180" : ""}`}
-              aria-hidden="true"
-            >
-              <path d="M3.5 6l4.5 4.5L12.5 6" />
-            </svg>
-          </button>
-
-
-          <button type="button" onClick={() => navigate("/import")} className="flex h-8 shrink-0 items-center gap-2 rounded-md border border-accent/60 bg-accent/10 px-3 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-accent" data-testid="gallery-import">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" /></svg>
-            {t("nav.import")}
-          </button>
-
-          {/* 从此筛选选片（Culling V1）：当前结果 id 快照开会话（语义态取内存结果） */}
-          <div className="flex shrink-0 items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => void startCullingFromFilter()}
-              disabled={cullBusy || (semanticMode ? semantic.assets.length === 0 : (totalCount ?? assets.length) === 0)}
-              className="flex h-8 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
-              data-testid="gallery-cull-start"
-              data-busy={cullBusy}
-            >
-              {cullBusy ? t("gallery.cullBusy") : t("gallery.cullFromFilter")}
-            </button>
-            {cullError && (
-              <span className="text-[11px] text-red-400" role="alert" data-testid="gallery-cull-error">
-                {t("culling.createFailed")}
-              </span>
-            )}
-          </div>
-
-          {/* 计数徽标 */}
-          <span
-            className="ml-auto shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
-            data-testid="search-count"
-          >
-            {semanticMode
-              ? t("search.count", { count: semantic.assets.length })
-              : t("search.count", { count: totalCount ?? assets.length })}
+        <header className="flex h-14 shrink-0 items-center gap-3 pr-36" data-testid="gallery-toolbar">
+          <h1 className="text-base font-semibold text-text-primary">{t("nav.gallery")}</h1>
+          <span className="text-xs tabular-nums text-text-muted" data-testid="search-count">
+            {t("search.count", { count: semanticMode ? semantic.assets.length : totalCount ?? assets.length })}
           </span>
-
-          <div className="shrink-0">
-            <TileSizeSwitch value={tileSize} onChange={setTileSize} />
-          </div>
-        </div>
-
-        <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
+          {cullError && <span role="alert" className="text-xs text-red-400" data-testid="gallery-cull-error">{t("culling.createFailed")}</span>}
+        </header>
+        <GalleryBrowseControls
+          filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen((open) => !open)}
+          tileSize={tileSize} onTileSize={setTileSize} onImport={() => navigate("/import")}
+          onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}
+          cullDisabled={(semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
+        />
 
         {/* 语义态状态头：查询词 + 结果数 + 退出（本地语义输入框已删，入口唯一=
             TitleBar 全局搜索框；本行保证语义态一眼可识别、可退出） */}
@@ -695,7 +627,14 @@ export default function GalleryPage() {
         )}
 
         {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
-        {panelOpen && <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onPurgeMissing={() => setPurgeAskOpen(true)} />}
+        {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4" data-testid="gallery-filter-popover">
+          <div className="mb-2 flex items-center justify-between text-xs text-text-secondary">
+            <span>{t("search.moreFilters")}</span>
+            <button type="button" className="ui-icon-button" onClick={() => setPanelOpen(false)} aria-label={t("ui.close")}>×</button>
+          </div>
+          <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
+          <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onPurgeMissing={() => setPurgeAskOpen(true)} />
+        </div>}
 
         {/* 激活条件 chips */}
         {!semanticMode && (
@@ -824,6 +763,10 @@ export default function GalleryPage() {
         </div>
 
       </div>
+
+      {selecting && <SelectionDock count={selected.size} onClear={exitSelection}
+        onMove={() => setAddToAlbumTargets(Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }))}
+        onMore={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setCtxMenu({ x: rect.left, y: rect.top, assets: Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }) }); }} />}
 
       {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含色标/拒绝/加入相册/移入回收站） */}
       {ctxMenu && (

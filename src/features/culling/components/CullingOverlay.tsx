@@ -603,11 +603,12 @@ export default function CullingOverlay({
       role="dialog"
       aria-modal="true"
       aria-label={session.name}
+      data-theme="dark"
       data-testid="culling-overlay"
       data-mode={mode}
     >
       {/* 顶栏：拖拽层 + 会话名 + 进度计数 + 模式切换 + AI 挑图 + 完成选片 + 退出 */}
-      <div className="relative flex h-12 shrink-0 items-center gap-3 px-4 text-text-primary">
+      <div className="ui-glass relative flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4 text-text-primary">
         <div className="absolute inset-0" data-tauri-drag-region />
         <div className="pointer-events-none relative flex min-w-0 items-baseline gap-3">
           <span className="truncate text-sm font-semibold" title={session.name} data-testid="culling-name">

@@ -58,6 +58,10 @@ impl DeviceSource for VolumeSource {
         SourceKind::Volume
     }
 
+    fn copy_only(&self) -> bool {
+        super::present::is_storage_card(&self.root)
+    }
+
     fn name(&self) -> String {
         crate::platform::volume_label(&self.root)
             .filter(|name| !name.is_empty())

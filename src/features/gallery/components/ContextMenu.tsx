@@ -89,7 +89,7 @@ export default function ContextMenu({
       ref={ref}
       role="menu"
       style={{ left: pos.left, top: pos.top, transformOrigin: "top left" }}
-      className="fixed z-[80] min-w-[190px] overflow-hidden rounded-md border border-edge bg-surface py-1 shadow-xl"
+      className="ui-glass fixed z-[80] min-w-[190px] overflow-hidden rounded-xl border border-edge py-1.5 shadow-xl"
       data-testid={testId}
       onContextMenu={(e) => e.preventDefault()}
       initial={motionInitial(motionOn, { opacity: 0, scale: 0.96 })}

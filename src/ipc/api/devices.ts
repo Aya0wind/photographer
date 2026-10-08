@@ -48,6 +48,11 @@ export async function deviceScan(id: string): Promise<DeviceSnapshot | null> {
   }
 }
 
+/** 仅可靠识别出的相机和存储卡禁止移动/引用；未知来源默认复制但可手动切换。 */
+export async function deviceCopyOnly(id: string): Promise<boolean> {
+  return ipc<boolean>("device_copy_only", { id });
+}
+
 /** 列出指定源的全部媒体文件（向导中央清单区；失败返回 null，调用方保持空态） */
 export async function deviceFiles(id: string): Promise<FileEntryDto[] | null> {
   try {

@@ -1284,5 +1284,19 @@
   "editor.albumPicker.empty": "Aún no hay álbumes; crea uno primero",
   "editor.albumPicker.confirm": "Exportar a este álbum",
   "map.syncData": "Sincronizar",
-  "map.syncDataHint": "Incorpora las fotos recién importadas al mapa (incremental, segundos); también ocurre automáticamente tras importar"
+  "map.syncDataHint": "Incorpora las fotos recién importadas al mapa (incremental, segundos); también ocurre automáticamente tras importar",
+  "settings.appearance.theme": "Tema",
+  "settings.appearance.themeDesc": "Aplicar y guardar la selección. La vista previa mantiene un fondo oscuro.",
+  "settings.appearance.light": "Claro",
+  "settings.appearance.dark": "Oscuro",
+  "ui.browseActions": "Acciones de navegación",
+  "ui.selectionActions": "Acciones de selección",
+  "ui.selectedCount": "{{count}} seleccionadas",
+  "ui.moveToAlbum": "Mover al álbum",
+  "ui.more": "Más acciones",
+  "ui.clearSelection": "Borrar selección",
+  "ui.close": "Cerrar",
+  "ui.viewOptions": "Opciones de vista",
+  "wizard.mode.copyOnly": "Esta fuente solo admite copiar. Se conservan los archivos originales.",
+  "settings.appearance.saveFailed": "No se pudo guardar el tema. Inténtalo de nuevo."
 }

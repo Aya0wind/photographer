@@ -1270,5 +1270,19 @@
   "editor.albumPicker.empty": "アルバムがありません。先に作成してください",
   "editor.albumPicker.confirm": "このアルバムに書き出す",
   "map.syncData": "同期",
-  "map.syncDataHint": "新しくインポートした写真を地図へ反映（増分・数秒）。インポート後の自動同期もあります"
+  "map.syncDataHint": "新しくインポートした写真を地図へ反映（増分・数秒）。インポート後の自動同期もあります",
+  "settings.appearance.theme": "テーマ",
+  "settings.appearance.themeDesc": "選択を保存してすぐに適用します。写真プレビューは暗い背景を維持します。",
+  "settings.appearance.light": "ライト",
+  "settings.appearance.dark": "ダーク",
+  "ui.browseActions": "閲覧操作",
+  "ui.selectionActions": "選択した写真の操作",
+  "ui.selectedCount": "{{count}} 枚選択",
+  "ui.moveToAlbum": "アルバムへ移動",
+  "ui.more": "その他の操作",
+  "ui.clearSelection": "選択を解除",
+  "ui.close": "閉じる",
+  "ui.viewOptions": "表示オプション",
+  "wizard.mode.copyOnly": "このソースはコピーのみ対応しています。元のファイルは保持されます。",
+  "settings.appearance.saveFailed": "テーマを保存できませんでした。もう一度お試しください。"
 }

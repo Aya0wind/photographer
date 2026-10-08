@@ -166,10 +166,17 @@ interface ViewerOverlayProps {
 export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const motionOn = useMotionOn();
-  const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging, minScale, maxScale, zoomVisible, setZoomVisible, setZoomInteracting,
+  const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging, minScale, maxScale, zoomVisible, setZoomVisible, setZoomInteracting, setZoomFocused,
     handlePointerDown, handlePointerMove, handlePointerUp } = useViewerTransform(asset.id);
   const [fullscreen, setFullscreen] = useState(false);
   const [topVisible, setTopVisible] = useState(false);
+  const [topHovered, setTopHovered] = useState(false);
+  const [topFocused, setTopFocused] = useState(false);
+  useEffect(() => {
+    if (!topVisible || topHovered || topFocused) return;
+    const timer = window.setTimeout(() => setTopVisible(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [topVisible, topHovered, topFocused]);
   const [exifOpen, setExifOpen] = useState(true);
   const toggleFullscreen = useCallback(async () => {
     if (isTauri()) {
@@ -220,9 +227,11 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
     hintTimerRef.current = window.setTimeout(() => setHintVisible(false), 3000);
   }, []);
   const pointerActivity = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    showHint();
-    const top = event.currentTarget.getBoundingClientRect().top;
-    setTopVisible(event.clientY - top <= 64);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const nearTop = event.clientY - rect.top <= 64;
+    setTopHovered(nearTop);
+    if (nearTop) setTopVisible(true);
+    if (rect.bottom - event.clientY <= 110) showHint();
   }, [showHint]);
   useEffect(() => {
     showHint();
@@ -562,10 +571,12 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       role="dialog"
       aria-modal="true"
       aria-label={asset.name}
+      data-theme="dark"
       data-testid="viewer"
       onPointerMoveCapture={pointerActivity}
       onMouseMoveCapture={pointerActivity}
       onPointerLeave={(event) => {
+        setTopHovered(false);
         const rect = event.currentTarget.getBoundingClientRect();
         // The native resize border may stop forwarding webview pointer events.
         // Leaving through the upper edge must keep the revealed controls available.
@@ -577,12 +588,18 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       }}
       onPointerDownCapture={showHint}
       onWheelCapture={showHint}
-      onFocusCapture={showHint}
+      onFocusCapture={(event) => {
+        showHint();
+        if ((event.target as Element).closest('[data-testid="viewer-top-controls"], [data-testid="viewer-top-edge"]')) { setTopFocused(true); setTopVisible(true); }
+      }}
+      onBlurCapture={(event) => {
+        if (!(event.relatedTarget instanceof Element) || !event.relatedTarget.closest('[data-testid="viewer-top-controls"], [data-testid="viewer-top-edge"]')) setTopFocused(false);
+      }}
       initial={motionInitial(motionOn, { opacity: 0 })}
       animate={closing ? { opacity: 0 } : { opacity: 1 }}
       transition={TRANS.quick}
     >
-      <div className="absolute inset-x-0 top-0 z-[60] h-3" aria-hidden="true" data-tauri-drag-region onPointerEnter={() => { setTopVisible(true); showHint(); }} onMouseEnter={() => { setTopVisible(true); showHint(); }} data-testid="viewer-top-edge" />
+      <div className="absolute inset-x-0 top-0 z-[60] h-3" tabIndex={0} role="button" aria-label={t("ui.browseActions")} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setTopVisible(true); } }} data-tauri-drag-region onPointerEnter={() => { setTopVisible(true); showHint(); }} onMouseEnter={() => { setTopVisible(true); showHint(); }} data-testid="viewer-top-edge" />
       {/* 顶栏：文件名（分组一） + 计数（分组二，间隔 16px） + 旋转/EXIF/关闭。
           查看器全屏覆盖了主壳标题栏，顶栏背景层带拖拽区让窗口仍可拖动
           （按钮/文件名 pointer-events 正常，仅空白处落到拖拽层）。 */}
@@ -816,15 +833,17 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               tabIndex={zoomVisible ? 0 : -1}
               className="h-5 min-w-0 flex-1 cursor-pointer touch-none appearance-none bg-transparent [&::-webkit-slider-runnable-track]:h-[3px] [&::-webkit-slider-thumb]:-mt-[4.5px] [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-moz-range-track]:h-[3px] [&::-moz-range-track]:bg-transparent [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-white"
               style={{ background: `linear-gradient(to right, rgba(255,255,255,.85) ${(view.scale - minScale) / (maxScale - minScale) * 100}%, rgba(255,255,255,.25) 0) center / 100% 3px no-repeat` }}
-              onFocus={() => setZoomVisible(true)}
+              onFocus={(event) => { setZoomVisible(true); setZoomFocused(event.currentTarget.matches(":focus-visible")); }}
+              onKeyDown={() => setZoomFocused(true)}
               onPointerDown={(event) => {
                 event.currentTarget.setPointerCapture(event.pointerId);
+                setZoomFocused(false);
                 setZoomInteracting(true);
               }}
               onPointerUp={() => setZoomInteracting(false)}
               onPointerCancel={() => setZoomInteracting(false)}
               onLostPointerCapture={() => setZoomInteracting(false)}
-              onBlur={() => setZoomInteracting(false)}
+              onBlur={() => { setZoomInteracting(false); setZoomFocused(false); }}
               onChange={(event) => setZoom(Number(event.currentTarget.value) / 100)}
               data-testid="viewer-zoom-slider"
             />

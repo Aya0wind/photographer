@@ -102,6 +102,18 @@ pub async fn device_scan(
     run_blocking(shared, move |state| scan_by_id(state, &id)).await
 }
 
+/// 元数据查询在后台进行；克隆源后释放设备锁，避免系统探测阻塞设备事件。
+#[tauri::command]
+pub async fn device_copy_only(state: State<'_, SharedState>, id: String) -> Result<bool, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        let key = crate::devices::normalize_device_id(&id);
+        let source = state.devices.lock().expect("devices mutex poisoned")
+            .get(&key).map(|entry| std::sync::Arc::clone(&entry.source))
+            .ok_or_else(|| "来源已断开，请重新选择".to_string())?;
+        Ok(source.copy_only())
+    }).await
+}
+
 /// 注册并扫描本地文件夹源（M2“从文件夹导入”），返回快照。
 /// NAS 大目录扫描分钟级，后台线程执行。
 /// 前端随后用 device_files(id) / import_start(plan) 走与设备相同的管线。

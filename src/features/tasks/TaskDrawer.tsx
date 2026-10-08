@@ -664,7 +664,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
             animate={{ x: 0 }}
             exit={{ x: 360 }}
             transition={{ duration: 0.18, ease: "easeOut" }}
-            className="fixed right-0 top-0 z-40 flex h-full w-[360px] flex-col border-l border-edge bg-surface shadow-2xl"
+            className="ui-glass fixed bottom-3 right-3 top-3 z-40 flex w-[360px] max-w-[calc(100%_-_24px)] flex-col rounded-2xl border border-edge shadow-2xl"
             role="dialog"
             aria-label={t("taskdrawer.title")}
             data-testid="taskdrawer"

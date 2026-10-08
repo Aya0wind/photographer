@@ -8,6 +8,21 @@
 use std::path::Path;
 use std::process::Command;
 
+/// 只认原生 SD 总线；USB 读卡器与普通外置盘无法确定时保留手动引用入口。
+pub fn is_storage_card(path: &Path) -> bool {
+    let Some(mount) = path.ancestors().find(|entry| entry.parent() == Some(Path::new("/Volumes"))) else {
+        return false;
+    };
+    let Ok(output) = Command::new("diskutil").args(["info", "-plist"]).arg(mount).output() else {
+        return false;
+    };
+    if !output.status.success() { return false; }
+    let plist = String::from_utf8_lossy(&output.stdout);
+    plist_string(&plist, "BusProtocol").is_some_and(|protocol| {
+        protocol.eq_ignore_ascii_case("Secure Digital") || protocol.eq_ignore_ascii_case("SD")
+    })
+}
+
 pub fn enumerate_empty_readers() -> crate::devices::DeviceResult<Vec<String>> {
     Ok(Vec::new())
 }

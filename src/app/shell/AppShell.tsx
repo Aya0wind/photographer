@@ -92,6 +92,10 @@ export default function AppShell() {
           </>
         }
       />
+      {isMacPlatform() && <div className="ui-glass flex h-12 shrink-0 items-center justify-end gap-3 border-b border-edge px-4">
+        <GlobalSearchBox />
+        <TaskDrawerToggle open={taskDrawerOpen} onClick={() => setTaskDrawerOpen((v) => !v)} />
+      </div>}
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="relative min-w-0 flex-1 overflow-hidden">

@@ -69,7 +69,7 @@ export default function GlobalSearchBox() {
         title={semanticEnabled ? undefined : t("globalsearch.disabled")}
         aria-label={t("globalsearch.placeholder")}
         data-testid="globalsearch-input"
-        className="h-7 w-56 rounded-md border border-edge bg-bg pl-7 pr-8 text-[11px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:w-64 focus:border-accent"
+        className="h-8 w-56 rounded-xl border border-edge bg-bg/70 pl-7 pr-8 text-[11px] text-text-primary outline-none transition-colors placeholder:text-text-muted focus:w-64 focus:border-accent"
       />
       {/* 左侧放大镜 */}
       <svg
