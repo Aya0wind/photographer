@@ -204,11 +204,12 @@ export default function SettingsPage() {
         <h1 className="text-sm font-semibold text-text-primary">{t("pages.settings.title")}</h1>
       </header>
 
-      {/* 水平选项卡行（下划线选中） */}
+      {/* 与下方内容使用相同边距、最大宽度和滚动条预留空间。 */}
+      <div className="sp-scroll shrink-0 overflow-y-hidden px-5 pt-3">
       <div
         role="tablist"
         aria-label={t("pages.settings.title")}
-        className="ui-glass mx-4 mt-3 flex min-h-10 shrink-0 flex-wrap items-stretch gap-1 rounded-xl border p-1"
+        className="ui-settings-content ui-glass flex min-h-10 w-full flex-wrap items-stretch gap-1 rounded-xl border p-1"
       >
         {TABS.map((item) => {
           const active = tab === item.key;
@@ -230,6 +231,7 @@ export default function SettingsPage() {
             </button>
           );
         })}
+      </div>
       </div>
 
       <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5">
