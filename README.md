@@ -61,6 +61,8 @@ Photographer 是一款照片存档、搜索和管理应用，也服务于摄影�
 
 设计背景可参考 [详细实现计划](docs/implementation-plan.md)；当前功能进度以本文的进度表为准。
 
+清晰度与闭眼判定的后续优化见 [识别准确率升级方案](docs/plans/2026-10-08-selection-accuracy-upgrade.md)（待实施）。
+
 ## 📄 许可证
 
 项目仓库使用 [GPL-3.0-or-later 许可证](LICENSE)。第三方模型、相机 SDK 和媒体组件各有自己的使用条款，具体集成会逐项核对。
