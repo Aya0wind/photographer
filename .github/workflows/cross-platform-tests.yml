@@ -48,6 +48,17 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Prepare macOS ONNX Runtime CoreML static library
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ort_lib_dir="$(python3 scripts/prepare-ort-macos.py "$RUNNER_TEMP/photographer-ort")"
+          test -s "$ort_lib_dir/libonnxruntime.a"
+          lipo -verify_arch arm64 "$ort_lib_dir/libonnxruntime.a"
+          echo "ORT_LIB_PATH=$ort_lib_dir" >> "$GITHUB_ENV"
+          echo "ORT_PREFER_DYNAMIC_LINK=0" >> "$GITHUB_ENV"
+
       - name: Cache NASM
         if: runner.os == 'Windows'
         id: nasm_cache

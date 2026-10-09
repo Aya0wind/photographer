@@ -101,6 +101,8 @@ Windows：
 
 macOS：`npm run tauri:build:macos -- --target aarch64-apple-darwin` 构建 Apple Silicon 应用和 DMG；相机运行时组装见 `scripts/assemble-gphoto-bundle-macos.sh`，CI 已包含组装步骤。
 
+macOS CI 构建前通过 `scripts/prepare-ort-macos.py` 准备与 `ort-sys` 对应的 CoreML 静态库，校验 SHA-256 和 arm64 架构，并设置 `ORT_LIB_PATH`，避免缺失 ONNX Runtime 链接库。本地构建也可先执行 `export ORT_LIB_PATH="$(python3 scripts/prepare-ort-macos.py "$HOME/Library/Caches/photo-hub/ort")"` 和 `export ORT_PREFER_DYNAMIC_LINK=0`，再运行构建命令；无需另装 ONNX Runtime 动态库。
+
 GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows build and release / macOS build and release → Run workflow**，选择运行模式：
 
 - `build-only`：只构建，在本次运行的 Artifacts 中下载安装包（dev 保留 3 天，其他分支保留 14 天）。
