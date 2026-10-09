@@ -25,6 +25,7 @@ import {
   type VersionMember,
 } from "@/ipc/api";
 import EditorOverlay from "@/features/editor/components/EditorOverlay";
+import { openAdvancedEditor, type EditorOrigin } from "@/features/editor/lib/advancedEditorStore";
 import { asColorLabel, COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "../lib/colorLabels";
 import type { AssetGroup } from "../lib/assetGroups";
 import { AssetContextMenu } from "./ContextMenu";
@@ -152,6 +153,7 @@ interface ExifSection {
 }
 
 interface ViewerOverlayProps {
+  editorOrigin?: EditorOrigin;
   asset: AssetDto;
   group: AssetGroup;
   index: number;
@@ -164,7 +166,7 @@ interface ViewerOverlayProps {
   onVersionSelect?: (assetId: number) => void;
 }
 
-export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect }: ViewerOverlayProps) {
+export default function ViewerOverlay({ asset, group, index, onNavigate, onClose, onAssetPatched, onVersionSelect, editorOrigin }: ViewerOverlayProps) {
   const { t } = useTranslation();
   const motionOn = useMotionOn();
   const { stageRef, stageSize, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging, minScale, maxScale, zoomVisible, setZoomVisible, setZoomInteracting, setZoomFocused,
@@ -664,6 +666,9 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10.6 2.2a1.6 1.6 0 0 1 2.3 2.3l-7.5 7.5-3.2.9.9-3.2zM9.4 3.4l2.3 2.3" /></svg>
               {editRecipe !== null && <span className="absolute right-0 top-0 h-1.5 w-1.5 rounded-full bg-accent" data-testid="viewer-edit-badge" aria-hidden="true"><span className="sr-only">{t("viewer.editBadge")}</span></span>}
             </button>
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => { openAdvancedEditor(asset, editorOrigin); onClose(); }} aria-label={t("advancedEditor.title")} title={t("advancedEditor.title")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-advanced-edit">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6" /></svg>
+            </button>
             <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setExifOpen((open) => !open)} aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} aria-pressed={exifOpen} className={VIEWER_BUTTON_CLASS} data-testid="viewer-exif-toggle">
               <svg viewBox="0 0 20 20" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><circle cx="10" cy="10" r="7.3" /><path d="M10 9v5" strokeLinecap="round" /><circle cx="10" cy="6" r=".9" fill="currentColor" stroke="none" /></svg>
             </button>
@@ -1106,6 +1111,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       {/* 大图右键菜单（作用于当前资产；Esc/点击外部关闭，期间查看器 Esc 让位） */}
       {ctxAt !== null && (
         <AssetContextMenu
+          editorOrigin={editorOrigin}
+          onAdvancedEdit={(photo) => { openAdvancedEditor(photo, editorOrigin); onClose(); }}
           at={ctxAt}
           assets={[{ ...asset, rating: currentRating, flagged: currentFlagged, colorLabel: currentColor, rejected: currentRejected }]}
           onClose={() => setCtxAt(null)}

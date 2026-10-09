@@ -14,6 +14,7 @@
         "minWidth": 960,
         "minHeight": 640,
         "decorations": true,
+        "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": { "x": 14, "y": 13 },
@@ -37,7 +38,8 @@
     "active": true,
     "targets": ["app", "dmg"],
     "resources": {
-      "resources/gphoto/": "gphoto/"
+      "resources/gphoto/": "gphoto/",
+      "resources/licenses/": "licenses/"
     },
     "macOS": {
       "minimumSystemVersion": "14.4"

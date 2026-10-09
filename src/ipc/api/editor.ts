@@ -64,6 +64,7 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
   const quality = numOf(output.quality);
   return {
     version: 1,
+    ...(r.renderer === "photocraft" ? { renderer: "photocraft" as const } : {}),
     rotateQuarter: quarter as EditRecipe["rotateQuarter"],
     crop,
     textLayers,
@@ -77,6 +78,52 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
       quality: Number.isNaN(quality) ? 90 : Math.min(100, Math.max(1, Math.round(quality))),
     },
   };
+}
+
+export interface EditorPreviewSession {
+  histogram: number[][];
+  sensorRaw: boolean;
+  bitDepth: string;
+  warnings: string[];
+  sessionId: string;
+  sourceUrl: string;
+  width: number;
+  height: number;
+}
+
+export async function editPreviewOpen(assetId: number, libraryId: string): Promise<EditorPreviewSession> {
+  return ipc<EditorPreviewSession>("edit_preview_open", { assetId: String(assetId), libraryId });
+}
+
+/** 返回二进制 JPEG；调用方拥有并负责释放 object URL。 */
+export async function editPreviewRender(sessionId: string, recipe: EditRecipe, interactive = false, revision?: number): Promise<string> {
+  const bytes = await ipc<ArrayBuffer | number[]>("edit_preview_render", { sessionId, recipe, interactive, revision });
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }));
+}
+
+export async function editPreviewClose(sessionId: string): Promise<void> {
+  await ipc<void>("edit_preview_close", { sessionId });
+}
+
+export async function editProjectSave(assetId: number, libraryId: string, recipe: EditRecipe): Promise<void> {
+  await ipc<void>("edit_project_save", { assetId: String(assetId), libraryId, recipe });
+}
+
+export async function editProjectOpen(assetId: number, libraryId: string): Promise<EditRecipe | null> {
+  return ipc<EditRecipe | null>("edit_project_open", { assetId: String(assetId), libraryId });
+}
+
+export async function advancedExport(assetId: number, libraryId: string, recipe: EditRecipe, sessionId: string, albumId?: number, subgroup?: string | null): Promise<ExportTask> {
+  return ipc<ExportTask>("edit_advanced_export", { assetId: String(assetId), libraryId, recipe,
+    albumId: albumId === undefined ? null : String(albumId), subgroup: subgroup ?? null, sessionId });
+}
+
+export async function advancedExportFolder(photo: { assetId: number; libraryId: string; sessionId: string }, recipe: EditRecipe, options: ExportOptions): Promise<ExportTask> {
+  return ipc<ExportTask>("edit_advanced_export_folder", { request: { ...photo, assetId: String(photo.assetId), recipe, options } });
+}
+
+export async function editExportStatus(assetId: number, libraryId: string, jobId: number): Promise<ExportTask> {
+  return ipc<ExportTask>("edit_export_status", { assetId: String(assetId), libraryId, jobId });
 }
 
 /** edit_recipe_get 结果归一 */
@@ -138,4 +185,37 @@ export async function exportRun(
     }
     return { ok: false, error: message };
   }
+}
+
+export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string) {
+  return ipc<{ sample?: [number, number, number]; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker });
+}
+
+
+export interface EditorPreviewTimings {
+  frames: number;
+  cachedFrames: number;
+  frameCacheHit: boolean;
+  cameraCacheHit: boolean;
+  annotationCacheHit: boolean;
+  rawMs: number;
+  cameraMs: number;
+  adjustmentsMs: number;
+  geometryMs: number;
+  annotationsMs: number;
+  compositeMs: number;
+  profileMs: number;
+  encodeMs: number;
+  totalMs: number;
+  gpu: boolean;
+}
+
+export interface EditorPreviewStats {
+  openMs: number;
+  interactive: EditorPreviewTimings;
+  refined: EditorPreviewTimings;
+}
+
+export function editPreviewStats(sessionId: string): Promise<EditorPreviewStats> {
+  return ipc<EditorPreviewStats>("edit_preview_stats", { sessionId });
 }

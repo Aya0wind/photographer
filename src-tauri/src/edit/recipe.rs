@@ -85,10 +85,58 @@ pub struct Adjustments {
 }
 
 /// 编辑配方（version 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RenderEngine {
+    Photocraft,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AdvancedAdjustments {
+    pub exposure: f64,
+    pub temperature: f64,
+    pub tint: f64,
+    pub vibrance: f64,
+    pub curves: Vec<[f64; 2]>,
+    pub channel_curves: ChannelCurves,
+    pub levels: Option<Levels>,
+    pub hsl: std::collections::BTreeMap<String, HslRange>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelCurves {
+    pub red: Vec<[f64; 2]>,
+    pub green: Vec<[f64; 2]>,
+    pub blue: Vec<[f64; 2]>,
+    pub luminance: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Levels {
+    pub black: f64,
+    pub white: f64,
+    pub gamma: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HslRange {
+    pub hue: f64,
+    pub saturation: f64,
+    pub lightness: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
     pub version: u32,
+    /// 缺省使用旧算法，防止历史配方打开后改变效果。新配方显式选择 PhotoCraft。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<RenderEngine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<AdvancedAdjustments>,
     #[serde(default)]
     pub rotate_quarter: u32,
     #[serde(default)]
@@ -121,6 +169,68 @@ fn clamp01(v: f64) -> f64 {
     v.clamp(0.0, 1.0)
 }
 
+fn validate_curve(curves: &[[f64; 2]]) -> Result<(), String> {
+    if !curves.is_empty()
+        && (curves.len() < 2
+            || curves.len() > 19
+            || curves
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0.0..=255.0).contains(v))
+            || curves.windows(2).any(|p| p[0][0] >= p[1][0]))
+    {
+        return Err("曲线控制点无效".into());
+    }
+    Ok(())
+}
+
+fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
+    for (v, min, max) in [
+        (&mut a.exposure, -5.0, 5.0),
+        (&mut a.temperature, -100.0, 100.0),
+        (&mut a.tint, -100.0, 100.0),
+        (&mut a.vibrance, -100.0, 100.0),
+    ] {
+        if !v.is_finite() {
+            return Err("高级调整数值无效".into());
+        }
+        *v = v.clamp(min, max);
+    }
+    for curves in [
+        &a.curves,
+        &a.channel_curves.red,
+        &a.channel_curves.green,
+        &a.channel_curves.blue,
+        &a.channel_curves.luminance,
+    ] {
+        validate_curve(curves)?;
+    }
+    if let Some(levels) = &mut a.levels {
+        if ![levels.black, levels.white, levels.gamma]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err("色阶数值无效".into());
+        }
+        levels.black = levels.black.clamp(0.0, 253.0);
+        levels.white = levels.white.clamp(levels.black + 2.0, 255.0);
+        levels.gamma = levels.gamma.clamp(0.01, 9.99);
+    }
+    for (key, range) in &mut a.hsl {
+        if !["reds", "yellows", "greens", "cyans", "blues", "magentas"].contains(&key.as_str())
+            || ![range.hue, range.saturation, range.lightness]
+                .iter()
+                .all(|v| v.is_finite())
+        {
+            return Err("HSL 数值无效".into());
+        }
+        range.hue = range.hue.clamp(-180.0, 180.0);
+        range.saturation = range.saturation.clamp(-100.0, 100.0);
+        range.lightness = range.lightness.clamp(-100.0, 100.0);
+    }
+    Ok(())
+}
+
 /// 反序列化 + 校验 + 夹取，产出归一化配方。
 ///
 /// 错误（用户可见文案）：
@@ -137,6 +247,9 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             "编辑配方版本不支持（当前支持 {RECIPE_VERSION}，收到 {}）",
             recipe.version
         ));
+    }
+    if let Some(a) = recipe.advanced.as_mut() {
+        normalize_advanced(a)?;
     }
     if let Some(adjustments) = recipe.adjustments.as_mut() {
         for v in [

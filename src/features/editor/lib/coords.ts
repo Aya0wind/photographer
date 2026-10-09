@@ -92,3 +92,12 @@ export function roundTripNorm(x: number, y: number, box: Size): { x: number; y: 
   const px = pixelFromNorm(x, y, box);
   return normFromPixel(px.x, px.y, box);
 }
+
+/** 已旋转/裁剪画布坐标 → 原片归一化坐标，供曲线取色器使用。 */
+export function sourceSamplePosition(pos: { x: number; y: number }, frame: Size,
+  crop: { x: number; y: number } | null, quarter: number): [number, number] | null {
+  const x = pos.x / frame.width + (crop?.x ?? 0);
+  const y = pos.y / frame.height + (crop?.y ?? 0);
+  const source: [number, number] = quarter === 1 ? [y, 1 - x] : quarter === 2 ? [1 - x, 1 - y] : quarter === 3 ? [1 - y, x] : [x, y];
+  return source.every((v) => v >= 0 && v <= 1) ? source : null;
+}

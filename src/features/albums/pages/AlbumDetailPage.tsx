@@ -46,6 +46,7 @@ import {
 } from "@/features/gallery/FilterPanel";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { subscribeAppEvents } from "@/ipc/api";
+import { useExportRefresh } from "@/features/editor/lib/useExportRefresh";
 import TetherStartDialog from "@/features/tethering/TetherStartDialog";
 import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
 import { GALLERY_JUSTIFY_ROW_PX, useGalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
@@ -112,6 +113,7 @@ export default function AlbumDetailPage() {
   const appliedKeyRef = useRef(debouncedKey);
   appliedKeyRef.current = debouncedKey;
   const [reloadToken, setReloadToken] = useState(0);
+  useExportRefresh(() => { setReloadToken((v) => v + 1); void refreshMeta(); });
   const loadedOnce=useRef(false);
   const resultKey=useRef<string|null>(null);
   const [resultsRevision,setResultsRevision]=useState(0);
@@ -623,6 +625,7 @@ export default function AlbumDetailPage() {
             </div>
           ) : (
             <AssetGrid
+              editorOrigin={{ albumId, subgroup }}
               timelineDates={timeline.dates}
               onTimelineJump={timeline.jump}
               onNearTop={timeline.prepend}
@@ -655,6 +658,7 @@ export default function AlbumDetailPage() {
       {/* 瓦片右键菜单 */}
       {ctxMenu && (
         <AssetContextMenu
+          editorOrigin={{ albumId, subgroup }}
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
           assets={ctxMenu.assets}
           onClose={() => setCtxMenu(null)}
@@ -736,6 +740,7 @@ export default function AlbumDetailPage() {
       {/* 全屏查看器 */}
       {viewer && (
         <ViewerOverlay
+          editorOrigin={{ albumId, subgroup }}
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}

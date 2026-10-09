@@ -22,6 +22,17 @@ tauri-build = { version = "2", features = [] }
 num_cpus = "1.17"
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
+# 编辑引擎：直接依赖上游公开 API；全部 crate 固定同一提交，不引入 egui/app。
+photocraft-engine = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-compose = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-io = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-raw = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-cms = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-codecs = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-algo = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-gpu = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "parking_lot"] }
+pollster = "1"
 # 扩展图片格式解码（2026-09-29 格式支持批次）：全部纯 Rust/无 C 构建负担
 heif-oxide = "0.1"
 jxl-oxide = { version = "0.12", features = ["image"] }
@@ -79,8 +90,13 @@ ab_glyph = "0.2"
 # MIT，许可宽松）
 img-parts = "0.3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+# wgpu-hal 30 使用 windows 0.62；gpu-allocator 0.28 的 <=0.62 仅接受到 0.62.0。
+# 锁定 GPU SDK，并在 Cargo.lock 中让二者共享 0.62.0；应用 Win32 API 仍使用 0.61。
+windows-gpu = { package = "windows", version = "=0.62.0", default-features = false }
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan"] }
 ort = { version = "2.0.0-rc.13", features = ["directml"] }
 
 windows = { version = "0.61", features = [
@@ -110,7 +126,11 @@ windows = { version = "0.61", features = [
 windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
 ort = { version = "2.0.0-rc.13", features = ["coreml"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -122,5 +142,6 @@ tempfile = "3"
 codegen-units = 16
 lto = false
 opt-level = 2
-panic = "abort"
+# GPU 驱动/合成器 panic 可隔离并回退 CPU，不能使用 abort。
+panic = "unwind"
 strip = true

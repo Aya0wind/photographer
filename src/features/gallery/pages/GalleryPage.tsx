@@ -1,4 +1,5 @@
 import FilterResultsTransition from "@/shared/components/FilterResultsTransition";
+import { useExportRefresh } from "@/features/editor/lib/useExportRefresh";
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
 import { usePhotoTimeline } from "../lib/usePhotoTimeline";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
@@ -214,6 +215,7 @@ export default function GalleryPage() {
   const [purgeAskOpen, setPurgeAskOpen] = useState(false);
   const [purgeBusy, setPurgeBusy] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
+  useExportRefresh(() => setReloadNonce((n) => n + 1));
   const [totalCount, setTotalCount] = useState<number | null>(null);
   /** 已加载资产（与 state 同步维护，供补页循环同步读取） */
   const assetsRef = useRef<AssetDto[]>(cachedAtMount?.assets ?? []);

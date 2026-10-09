@@ -25,6 +25,7 @@ import {
   type AssetGroup,
 } from "../lib/assetGroups";
 import AssetThumb from "./AssetThumb";
+import { ASSET_DRAG_TYPE, photoContext, type EditorOrigin } from "@/features/editor/lib/advancedEditorStore";
 
 /**
  * 日期分组照片墙（画廊/搜索/人物页共用）：
@@ -189,6 +190,7 @@ export interface GridSelection {
 }
 
 interface AssetGridProps {
+  editorOrigin?: EditorOrigin;
   groups: AssetGroup[];
   /** 点击资产块（打开查看器）；省略时块为纯展示 */
   onOpenAsset?: (asset: AssetDto, group: AssetGroup) => void;
@@ -237,6 +239,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   {
     groups,
     onOpenAsset,
+    editorOrigin,
     onCtrlClick,
     onLongPress,
     onCheckClick,
@@ -845,7 +848,14 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         onPointerDown={() => handleTilePointerDown(asset)}
                         onPointerUp={clearLongPress}
                         onPointerLeave={clearLongPress}
-                        onDragStart={(e) => e.preventDefault()}
+                        draggable
+                        onDragStart={(e) => {
+                          clearLongPress();
+                          const photo = photoContext(asset, editorOrigin);
+                          if (!photo || readOnly) { e.preventDefault(); return; }
+                          e.dataTransfer.effectAllowed = "copy";
+                          e.dataTransfer.setData(ASSET_DRAG_TYPE, JSON.stringify(photo));
+                        }}
                         onContextMenu={(e) => {
                           // 右键自定义菜单（原生菜单已被全局 guard 屏蔽，此处兜底）
                           e.preventDefault();

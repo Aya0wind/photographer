@@ -40,7 +40,7 @@ fn orientation_of(src: &Path) -> u32 {
 }
 
 /// 全量解码 + 方向转正（画布的绝对坐标系自此确立）。
-fn decode_upright(src: &Path) -> Result<RgbImage, String> {
+pub(super) fn decode_upright(src: &Path) -> Result<RgbImage, String> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())

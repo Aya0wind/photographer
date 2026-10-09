@@ -1,3 +1,4 @@
+import { sourceSamplePosition } from "../lib/coords";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
@@ -6,6 +7,7 @@ import type Konva from "konva";
 import type { EditRecipe, EditRecipeCrop } from "@/ipc/api";
 import { rotatedSize, type RecipeContext, type TextLayerPatch } from "../lib/recipe";
 import { clamp01, type Size } from "../lib/coords";
+import { getPreviewImage } from "../lib/previewImages";
 import {
   bakeTextScale,
   cropToRectAttrs,
@@ -44,6 +46,8 @@ function useHtmlImage(
       setImage(null);
       return;
     }
+    const ready = getPreviewImage(src);
+    if (ready) { setImage(ready); return; }
     let cancelled = false;
     const img = new Image();
     img.onload = () => {
@@ -85,7 +89,16 @@ function rotatedImageAttrs(
 }
 
 interface EditorCanvasProps {
+  showOriginal?: boolean;
+  sampleMode?: boolean;
+  onSample?: (x: number, y: number) => void;
   src: string | null;
+  /** 后端提供未旋转底图的调整结果；禁止再次叠加浏览器滤镜。 */
+  adjustedSrc?: string | null;
+  sourceSize?: Size | null;
+  backendAdjustments?: boolean;
+  nativeGeometry?: boolean;
+  nativeAnnotations?: boolean;
   zoom?: number;
   onZoom?: (factor: number) => void;
   /** naturalWidth/Height 为 0 时的兜底尺寸（EXIF 宽高；jsdom 测试路径） */
@@ -113,6 +126,14 @@ interface EditorCanvasProps {
 
 export default function EditorCanvas({
   src,
+  showOriginal = false,
+  sampleMode = false,
+  onSample,
+  adjustedSrc = null,
+  sourceSize = null,
+  backendAdjustments = false,
+  nativeGeometry = false,
+  nativeAnnotations = false,
   zoom = 1,
   onZoom,
   fallbackSize,
@@ -159,7 +180,10 @@ export default function EditorCanvas({
   }, []);
   const [avail, setAvail] = useState<Size>({ width: 912, height: 600 });
   const image = useHtmlImage(src, onImageError);
+  const backendImage = useHtmlImage(adjustedSrc === src ? null : adjustedSrc, onImageError);
   const adjustedImage = useMemo(() => {
+    if (showOriginal) return image;
+    if (backendAdjustments) return backendImage ?? image;
     if (!image || !recipe.adjustments) return image;
     const a = recipe.adjustments;
     const preview = document.createElement("canvas");
@@ -171,7 +195,7 @@ export default function EditorCanvas({
     ctx.filter = `brightness(${1 + a.brightness / 100}) contrast(${1 + a.contrast / 100}) saturate(${1 + a.saturation / 100})`;
     ctx.drawImage(image, 0, 0, preview.width, preview.height);
     return preview;
-  }, [image, recipe.adjustments]);
+  }, [image, backendImage, backendAdjustments, recipe.adjustments, showOriginal]);
   const readyRef = useRef(onImageReady);
   readyRef.current = onImageReady;
 
@@ -206,10 +230,10 @@ export default function EditorCanvas({
   // 自然尺寸上报（EXIF 兜底）——只报一次每图
   useEffect(() => {
     if (image === null) return;
-    const w = image.naturalWidth || fallbackSize?.width || 0;
-    const h = image.naturalHeight || fallbackSize?.height || 0;
+    const w = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 0;
+    const h = sourceSize?.height || image.naturalHeight || fallbackSize?.height || 0;
     if (w > 0 && h > 0) readyRef.current({ width: w, height: h });
-  }, [image, fallbackSize]);
+  }, [image, fallbackSize, sourceSize]);
 
   // Transformer 绑定（同样必须早退之前）
   useEffect(() => {
@@ -230,8 +254,8 @@ export default function EditorCanvas({
 
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
-  const baseW = image.naturalWidth || fallbackSize?.width || 1;
-  const baseH = image.naturalHeight || fallbackSize?.height || 1;
+  const baseW = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 1;
+  const baseH = sourceSize?.height || image.naturalHeight || fallbackSize?.height || 1;
   const quarter = recipe.rotateQuarter;
   const rot = rotatedSize({ width: baseW, height: baseH } satisfies RecipeContext, quarter);
   const pad = STAGE_PADDING;
@@ -270,6 +294,12 @@ export default function EditorCanvas({
   function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>): void {
     const stage = e.target.getStage();
     if (stage === null || stage === undefined) return;
+    if (sampleMode) {
+      const pos = pointerPos(stage);
+      const source = pos && sourceSamplePosition(pos, { width: frameW, height: frameH }, cropMode ? null : crop, quarter);
+      if (source) onSample?.(source[0], source[1]);
+      return;
+    }
     if (tool === "brush") {
       const pos = pointerPos(stage);
       if (pos === null) return;
@@ -323,14 +353,14 @@ export default function EditorCanvas({
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;
 
   const cursor =
-    tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
+    sampleMode || tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
     <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
       style={{ cursor, touchAction: tool === "view" ? "none" : undefined }}
       onPointerDown={(event) => {
         const viewport = event.currentTarget;
-        if (tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
+        if (sampleMode || tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
         event.preventDefault();
         panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
         viewport.setPointerCapture(event.pointerId);
@@ -357,13 +387,13 @@ export default function EditorCanvas({
         >
           {/* 底图（裁剪模式下显示整图，其余模式平移到裁剪窗口并裁剪） */}
           <Layer clip={cropMode ? undefined : { x: 0, y: 0, width: dispW, height: dispH }}>
-            <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
+            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
               <KonvaImage
                 image={adjustedImage ?? image}
                 {...rotatedImageAttrs(baseW, baseH, quarter, scale)}
                 listening={false}
               />
-            </Group>
+            </Group>}
           </Layer>
 
           {cropMode && cropRect !== null ? (
@@ -437,7 +467,7 @@ export default function EditorCanvas({
             <>
               {/* 笔迹（recipe 反序列化 + 在途一笔） */}
               <Layer listening={false}>
-                {recipe.brushStrokes.map((stroke) =>
+                {!nativeAnnotations && recipe.brushStrokes.map((stroke) =>
                   stroke.points.length > 1 ? (
                     <Line
                       key={stroke.id}
@@ -475,6 +505,7 @@ export default function EditorCanvas({
                   return (
                     <KonvaText
                       key={layer.id}
+                      opacity={nativeAnnotations ? 0 : 1}
                       name={TEXT_NODE_NAME}
                       x={attrs.x}
                       y={attrs.y}

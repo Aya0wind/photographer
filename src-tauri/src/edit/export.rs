@@ -347,17 +347,24 @@ fn execute(
         .options
         .long_edge
         .or(request.recipe.output.long_edge);
-    let rendered = render::render_recipe(&src, &request.recipe, long_edge)?;
-    let (width, height) = (rendered.image.width(), rendered.image.height());
-
-    // ② 编码（sRGB JPEG；质量 options → 配方 → 90）
-    progress("encode");
     let quality = request
         .options
         .quality
         .unwrap_or(request.recipe.output.quality)
         .clamp(1, 100);
-    let jpeg = render::encode_jpeg(&rendered.image, quality)?;
+    let (jpeg, width, height) =
+        if request.recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
+            progress("encode");
+            super::photocraft::export_native(&src, &request.recipe, long_edge, quality)?
+        } else {
+            let rendered = render::render_recipe(&src, &request.recipe, long_edge)?;
+            progress("encode");
+            (
+                render::encode_jpeg(&rendered.image, quality)?,
+                rendered.image.width(),
+                rendered.image.height(),
+            )
+        };
 
     // ③ 元数据（源 EXIF 尽量保留 + removeGps + 版权/作者/关键词）
     let source_head = read_head(&src, 2 * 1024 * 1024);

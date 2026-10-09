@@ -4,7 +4,7 @@
 
 Photographer 是一款照片存档、搜索和管理应用，也服务于摄影师从拍摄、选片到交付的工作流。当前处于 `0.1.0-alpha` 开发阶段，已具备本地照片库、相册、选片、AI 索引、基础编辑和联机拍摄等功能；网盘交付、移动端和多人协作仍在规划中。
 
-> 🧭 **关于进度**：以下按当前仓库代码整理（2026-10-08）。已实现表示已有代码和操作入口；相机兼容性、平台支持及实际使用效果仍需设备验证。
+> 🧭 **关于进度**：以下按当前仓库代码整理（2026-10-09）。已实现表示已有代码和操作入口；相机兼容性、平台支持及实际使用效果仍需设备验证。
 
 ## 🛠️ 当前进度
 
@@ -21,6 +21,8 @@ Photographer 是一款照片存档、搜索和管理应用，也服务于摄影�
 界面支持在 **设置 → 外观** 中切换浅色和深色主题，并保存选择。深色沿用原有黑色配色，浅色采用中性白灰与磨砂浮层。图库和相册的浏览操作靠近右上角时唤醒，停止操作后自动隐藏；筛选和批量操作按需显示。
 
 预览标题与右侧按钮使用从上方半透明黑色向下渐隐的背景。缩放时，底部显示可拖动的 **100%–400%** 缩放条，右侧显示百分比；停止操作 **3 秒**后隐藏，拖动期间保持显示。这里的 100% 表示当前适应预览区的尺寸。
+
+简单编辑保留原有工具。照片右键菜单或预览中的 **高级编辑** 打开独立原生窗口，提供 PhotoCraft 驱动的曝光、色彩、色阶、六色 HSL 与可拖动 RGB/亮度曲线调整，以及裁剪、文字和笔迹。高级编辑预览和导出优先使用 GPU 合成，硬件不支持或运行失败时自动回退 CPU；设备与缓存复用，大图按行带处理。编辑状态由应用按照片保存，再次打开可继续编辑；“保存成片并返回”生成新照片并导回来源相册/图库，原片保留。图库主窗口保持可用，可拖入另一张照片；按住对比按钮查看原图，松开恢复。滑块拖动采用较小代理图连续更新，停止后补高质量预览；预览会话增量更新调整层，复用显影与标注缓存，解码完成的帧直接交给画布。高级编辑使用 PhotoCraft 原生导入、RAW 传感器解码/显影、几何变换、标注、色彩管理及 JPEG 编码，保留源位深和 ICC 到输出阶段。RAW 传感器缓存与双通道预览调度避免完整显影阻塞滑块；原生解码受上游相机/格式支持范围限制，仅能读取内嵌预览时会显示提示。接入架构与存储边界见 [高级编辑接入计划](docs/plans/2026-10-09-photocraft-advanced-editor.md)，完整功能扩展、照片库特色工作流和实施顺序见 [高级编辑器 Roadmap](docs/roadmaps/advanced-editor.md)。
 
 导入采用“选择来源 → 挑选照片 → 确认导入”的流程：来源页提供设备、文件夹和最近来源入口，挑选页以照片为主，确认抽屉中选择相册和导入方式；子组、去重和第二份备份按需展开。
 
@@ -67,7 +69,7 @@ Photographer 是一款照片存档、搜索和管理应用，也服务于摄影�
 
 ## 📄 许可证
 
-项目仓库使用 [GPL-3.0-or-later 许可证](LICENSE)。第三方模型、相机 SDK 和媒体组件各有自己的使用条款，具体集成会逐项核对。
+项目仓库使用 [GPL-3.0-or-later 许可证](LICENSE)。第三方模型、相机 SDK 和媒体组件各有自己的使用条款，具体集成会逐项核对。PhotoCraft 及其内嵌字体、词典的许可说明随应用分发，见 [第三方许可](src-tauri/resources/licenses/photocraft/NOTICE)。
 
 ---
 
@@ -98,6 +100,8 @@ Windows：
 双击 `scripts\build-installer.cmd`（或仓库根执行）：release 编译后产出两种 NSIS exe（免管理员）到 `installer-output\`：精简版在缺少 WebView2 时下载运行时，离线版内置 WebView2。传入 `--online-only` 可只构建精简版。
 
 macOS：`npm run tauri:build:macos -- --target aarch64-apple-darwin` 构建 Apple Silicon 应用和 DMG；相机运行时组装见 `scripts/assemble-gphoto-bundle-macos.sh`，CI 已包含组装步骤。
+
+macOS CI 构建前通过 `scripts/prepare-ort-macos.py` 准备与 `ort-sys` 对应的 CoreML 静态库，校验 SHA-256 和 arm64 架构，并设置 `ORT_LIB_PATH`，避免缺失 ONNX Runtime 链接库。本地构建也可先执行 `export ORT_LIB_PATH="$(python3 scripts/prepare-ort-macos.py "$HOME/Library/Caches/photo-hub/ort")"` 和 `export ORT_PREFER_DYNAMIC_LINK=0`，再运行构建命令；无需另装 ONNX Runtime 动态库。
 
 GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows build and release / macOS build and release → Run workflow**，选择运行模式：
 
