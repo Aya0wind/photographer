@@ -1,3 +1,4 @@
+import FilterResultsTransition from "@/shared/components/FilterResultsTransition";
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
 import { usePhotoTimeline } from "../lib/usePhotoTimeline";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
@@ -48,6 +49,7 @@ import ViewerOverlay from "../components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
 import {
   FilterChipsRow,
+  ClearFiltersButton,
   FilterPanel,
   QuickFilterBar,
   buildChips,
@@ -84,7 +86,7 @@ type GalleryMode = "default" | "filters" | "semantic";
 export default function GalleryPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const motionOn = useMotionOn();
 
   // --- 三态：语义（useSemanticSearch）+ 筛选输入（序列化键防抖） ----------------------
@@ -141,7 +143,27 @@ export default function GalleryPage() {
   function patchFilters(patch: Partial<SearchInputsShim>): void {
     setSemanticGateNotice(false);
     semantic.reset();
+    if (searchParams.get("mode") === "semantic") {
+      appliedUrlQueryRef.current = null;
+      setSearchParams(previous=>{
+        const next=new URLSearchParams(previous);
+        next.delete("mode");next.delete("q");
+        return next;
+      },{replace:true});
+    }
     patchInputs(patch);
+  }
+
+  function clearAllFilters(): void {
+    setSemanticGateNotice(false);
+    semantic.reset();
+    setInputs(EMPTY_INPUTS);
+    appliedUrlQueryRef.current = null;
+    setSearchParams(previous=>{
+      const next=new URLSearchParams(previous);
+      next.delete("mode");next.delete("q");next.delete("format");
+      return next;
+    },{replace:true});
   }
 
   const chips = useMemo(() => buildChips(inputs, t), [inputs, t]);
@@ -192,6 +214,10 @@ export default function GalleryPage() {
   const loadSeqRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const timelineWindowRef = useRef(false);
+  const loadedOnce=useRef(assets.length>0);
+  const resultKey=useRef<string|null>(null);
+  const [resultsRevision,setResultsRevision]=useState(0);
+
 
   useEffect(() => {
     if (semanticMode) return;
@@ -257,7 +283,7 @@ export default function GalleryPage() {
     const seq = ++loadSeqRef.current;
     timelineWindowRef.current = false;
     // 默认态已有快照数据 → 静默 revalidate（不闪骨架）；筛选态/空库常规 loading
-    if (filtersActive || assets.length === 0) setStatus("loading");
+    if (filtersActive || assets.length === 0 || (resultKey.current !== null && resultKey.current !== debouncedKey)) setStatus("loading");
     hasMoreRef.current = true;
     loadingRef.current = true;
     const fetchFirstPage = filtersActive
@@ -283,6 +309,12 @@ export default function GalleryPage() {
       loadingRef.current = false;
       setLoadingMore(false);
       setStatus(page.length === 0 && !isIpcAvailable() ? "degraded" : "ready");
+      if(resultKey.current!==null&&resultKey.current!==debouncedKey) {
+        setResultsRevision(n=>n+1);
+        gridRef.current?.restoreScroll(0);
+      }
+      resultKey.current=debouncedKey;
+      loadedOnce.current=true;
       persistSnapshot();
     });
     return () => {
@@ -381,7 +413,11 @@ export default function GalleryPage() {
 
   // 查看器/选中查找用全量组；网格/视口/吸顶用折叠展示组
   const viewerGroups = semanticMode ? semanticGroups : groups;
-  const activeGroups = semanticMode ? semanticGroups : displayGroups;
+  const resultsBusy = semanticMode ? semantic.status === "loading" : status === "loading" || rawKey !== debouncedKey;
+  const currentGroups = semanticMode ? semanticGroups : displayGroups;
+  const previousReadyGroups = useRef<typeof displayGroups | null>(null);
+  useEffect(()=>{if(!resultsBusy)previousReadyGroups.current=currentGroups;},[resultsBusy,currentGroups]);
+  const activeGroups = resultsBusy ? previousReadyGroups.current ?? currentGroups : currentGroups;
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups, semanticMode ? semantic.assets : assets);
   // 预览靠近已加载末尾时提前补页，让跨日期连续翻页也能越过分页边界。
   useEffect(() => {
@@ -524,7 +560,7 @@ export default function GalleryPage() {
     currentGroup !== null && viewport.scrollTop > STICKY_MIN_SCROLL && viewer === null;
 
   // 语义态不阻塞于资产管线（两条管线独立；语义结果有自己的 loading/空态）
-  if (status === "loading" && !semanticMode) {
+  if (status === "loading" && !loadedOnce.current && !semanticMode) {
     return (
       <div className="flex h-full flex-col px-3 pt-2" data-testid="gallery-skeleton">
         {[0, 1, 2].map((row) => (
@@ -591,7 +627,7 @@ export default function GalleryPage() {
           filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen((open) => !open)}
           tileSize={tileSize} onTileSize={setTileSize} onImport={() => navigate("/import")}
           onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}
-          cullDisabled={(semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
+          cullDisabled={resultsBusy || (semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
         />
 
         {/* 语义态状态头：查询词 + 结果数 + 退出（本地语义输入框已删，入口唯一=
@@ -629,8 +665,9 @@ export default function GalleryPage() {
 
         {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
         {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4" data-testid="gallery-filter-popover">
-          <div className="mb-2 flex items-center justify-between text-xs text-text-secondary">
+          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary">
             <span>{t("search.moreFilters")}</span>
+            <ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={clearAllFilters}/><span className="flex-1"/>
             <button type="button" className="ui-icon-button" onClick={() => setPanelOpen(false)} aria-label={t("ui.close")}>×</button>
           </div>
           <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
@@ -646,11 +683,7 @@ export default function GalleryPage() {
               semantic.reset();
               setInputs(next);
             }}
-            onClearAll={() => {
-              setSemanticGateNotice(false);
-              semantic.reset();
-              setInputs(EMPTY_INPUTS);
-            }}
+            onClearAll={clearAllFilters}
           />
         )}
 
@@ -658,8 +691,20 @@ export default function GalleryPage() {
         <div className="relative min-h-0 flex-1">
           {/* 索引建立中：语义态顶部细提示条（完成自动消失；默认/筛选态不弹） */}
           <SemanticIndexingBanner progress={semanticMode ? semanticIndexing : null} />
+          <FilterResultsTransition busy={resultsBusy} revision={resultsRevision}
+            loadingLabel={semanticMode ? t("search.semantic.loading") : undefined}>
           {gridEmpty ? (
-            semanticMode ? (
+            semanticMode ? semantic.status === "loading" ? (
+              <div className="h-full" data-testid="semantic-loading" />
+            ) : semantic.status === "modelNotReady" ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="semantic-model-notready">
+                <p className="text-sm text-text-secondary">{t("search.semantic.notReady.title")}</p>
+                <p className="text-xs text-text-muted">{t("search.semantic.notReady.desc")}</p>
+                <button type="button" onClick={()=>navigate("/settings?tab=ai")} className="rounded-md bg-accent px-3 py-2 text-xs text-black">{t("search.semantic.notReady.goSettings")}</button>
+              </div>
+            ) : semantic.status === "unavailable" ? (
+              <div className="flex h-full items-center justify-center text-xs text-text-muted" data-testid="semantic-unavailable">{t("gallery.ipcUnavailable")}</div>
+            ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center" data-testid="semantic-empty">
                 <p className="text-sm text-text-secondary">{t("search.semantic.empty")}</p>
                 <p className="text-xs text-text-muted">{t("search.semantic.emptyHint")}</p>
@@ -728,6 +773,7 @@ export default function GalleryPage() {
               burstBadges={semanticMode ? undefined : burstBadges}
             />
           )}
+          </FilterResultsTransition>
           <AnimatePresence initial={false}>
             {showSticky && (
               <motion.div

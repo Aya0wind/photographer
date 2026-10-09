@@ -881,6 +881,22 @@ fn prescan_burst_keep_sharpest() {
     assert!(!dto.suggested_accepted.asset_ids.contains(&g3a));
 }
 
+#[test]
+fn prescan_never_uses_uncalibrated_candidates_or_diagnostic_scores() {
+    let (_dir, state, db) = setup();
+    let a = ins(&db,"X:/candidate-a.jpg",None,AssetKind::Photo);
+    let b = ins(&db,"X:/candidate-b.jpg",None,AssetKind::Photo);
+    burst_of(&db,&[a,b]);
+    let evidence = serde_json::json!({"calibrated":false,"regions":[]});
+    db.set_ai_analysis_details(a,"eyes","maybe",Some(0.99),"candidate",&evidence).unwrap();
+    db.set_ai_analysis_details(a,"blur","unknown",Some(99.0),"diagnostic",&evidence).unwrap();
+    db.set_ai_analysis_details(b,"blur","unknown",Some(1.0),"diagnostic",&evidence).unwrap();
+    let s = fetch_cull_session_create(&state,CullScope::Query { asset_ids:vec![a,b] }).unwrap();
+    let dto = fetch_cull_ai_prescan(&state,s.id,rules(Some("strong"),Some("strong"),true,0,None),false).unwrap();
+    assert!(dto.suggested_accepted.asset_ids.is_empty());
+    assert!(dto.suggested_rejected.asset_ids.is_empty());
+}
+
 /// maxAccepted 封顶：accepted 建议按快照序先到先得，封顶后转不动；
 /// rejected 不受限。
 #[test]

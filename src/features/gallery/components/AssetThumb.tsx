@@ -160,7 +160,7 @@ export default function AssetThumb({
       {/* RAW 水印角标：真实缩略图就位后仍可一眼区分 RAW/JPG */}
       {asset.kind === "raw" && (
         <span
-          className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+          className="asset-raw-badge absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
           data-testid="thumb-raw-badge"
         >
           RAW

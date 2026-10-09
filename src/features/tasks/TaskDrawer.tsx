@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { imageIndexCounters } from "@/lib/imageIndexStatus";
+import ErrorModal from "@/shared/components/ErrorModal";
+import ImageIndexProgress from "@/shared/components/ImageIndexProgress";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
@@ -7,6 +10,7 @@ import {
   importJobDelete,
   importJobsPage,
   indexTaskResume,
+  indexKickNow,
   indexTaskPause,
   type IndexCounters,
   type IndexKind,
@@ -39,7 +43,7 @@ const INDEX_POLL_MS = 1500;
 const HISTORY_PAGE_SIZE = 50;
 
 /** 抽屉内索引通道展示序 */
-const INDEX_KINDS: readonly IndexKind[] = ["thumb", "exif", "ai", "face"];
+const INDEX_KINDS: readonly IndexKind[] = ["image", "ai", "face"];
 
 const EMPTY_COUNTERS: IndexCounters = { pending: 0, running: 0, done: 0, failed: 0, total: 0 };
 
@@ -59,7 +63,7 @@ export function countRunningTasks(
   }
   if (indexStatus !== null) {
     for (const kind of INDEX_KINDS) {
-      if (indexActive(indexStatus[kind] ?? EMPTY_COUNTERS)) count += 1;
+      if (indexActive(kind === "image" ? imageIndexCounters(indexStatus) : indexStatus[kind] ?? EMPTY_COUNTERS)) count += 1;
     }
   }
   return count;
@@ -308,24 +312,36 @@ function IndexTaskRow({
   kind,
   counters,
   importActive,
+  selectionReady,
 }: {
   kind: IndexKind;
   counters: IndexCounters;
   importActive: boolean;
+  selectionReady?: boolean;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const total = Math.max(counters.total, counters.done + counters.pending + counters.running);
+  const indexStatus = useAiStore((s) => s.indexStatus);
   const pct = total > 0 ? Math.min(100, (counters.done / total) * 100) : 0;
 
   async function togglePause(): Promise<void> {
     setBusy(true);
-    if (counters.running > 0) {
-      await indexTaskPause();
-    } else {
-      await indexTaskResume();
+    try {
+      if (counters.running > 0) {
+        await indexTaskPause();
+      } else {
+        await indexTaskResume();
+      // A missing-model lane may have no live worker to resume. Unified kick
+      // starts available components and leaves unavailable eye tasks pending.
+        if (kind === "image") await indexKickNow("image");
+      }
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
     void useAiStore.getState().refreshIndexStatus();
   }
 
@@ -342,7 +358,8 @@ function IndexTaskRow({
         </h3>
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-            {t("jobStatus.running")}
+            {t(counters.failed > 0 && counters.running === 0 && counters.pending === 0 ? "jobStatus.failed"
+              : kind === "image" && selectionReady === false && counters.running === 0 ? "settings.ai.index.waitingModels" : "jobStatus.running")}
           </span>
           <button
             type="button"
@@ -376,6 +393,11 @@ function IndexTaskRow({
           {t("backgroundTask.queue", { pending: counters.pending, running: counters.running })}
         </span>
       </div>
+      {kind === "image" && selectionReady === false && <p className="mt-1 text-[10px] text-amber-400">
+        {t("settings.ai.index.waitingSelectionModels")}
+      </p>}
+      {kind === "image" && <ImageIndexProgress status={indexStatus} />}
+      <ErrorModal message={error} onClose={() => setError(null)} />
       {counters.failed > 0 && (
         <p className="mt-1 text-[10px] font-medium text-red-400" data-testid="taskdrawer-index-failed">
           {t("settings.ai.index.failed", { count: counters.failed })}
@@ -597,7 +619,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
 
   const indexRows = useMemo<Array<{ kind: IndexKind; counters: IndexCounters }>>(() => {
     if (indexStatus === null) return [];
-    return INDEX_KINDS.map((kind) => ({ kind, counters: indexStatus[kind] ?? EMPTY_COUNTERS })).filter(
+    return INDEX_KINDS.map((kind) => ({ kind, counters: kind === "image" ? imageIndexCounters(indexStatus) : indexStatus[kind] ?? EMPTY_COUNTERS })).filter(
       ({ counters }) => indexActive(counters) || counters.failed > 0,
     );
   }, [indexStatus]);
@@ -731,7 +753,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
                 <ErrorRow message={lastError.message} onDismiss={() => setDismissedError(lastError)} />
               )}
               {indexRows.map(({ kind, counters }) => (
-                <IndexTaskRow key={kind} kind={kind} counters={counters} importActive={active.length > 0} />
+                <IndexTaskRow key={kind} kind={kind} counters={counters} importActive={active.length > 0} selectionReady={indexStatus?.selectionReady} />
               ))}
               {active.map((job) => (
                 <ImportActiveRow key={job.jobId} job={job} />

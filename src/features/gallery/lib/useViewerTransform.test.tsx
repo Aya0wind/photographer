@@ -24,6 +24,19 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("preview zoom stability", () => {
+  it("缩放允许25%到800%，复位仍回到适应窗口100%",()=>{
+    render(<Probe/>);
+    act(()=>current.setZoom(0.01));
+    expect(current.view.scale).toBe(0.25);
+    expect(current.view.x).toBe(0);
+    expect(current.view.y).toBe(0);
+    act(()=>current.toggleZoom());
+    expect(current.view.scale).toBe(1);
+    act(()=>current.setZoom(12));
+    expect(current.view.scale).toBe(8);
+    act(()=>current.resetView());
+    expect(current.view.scale).toBe(1);
+  });
   it("keeps the cursor's image point fixed during animation and successive wheel input", () => {
     render(<Probe />);
     const stage = screen.getByTestId("stage");

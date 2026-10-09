@@ -41,7 +41,9 @@ fn phase_parts(phase: &GeoPhase) -> (String, u64, u64, Option<String>) {
 pub fn map_geo_status(state: State<'_, SharedState>) -> GeoStatusDto {
     let config_dir = state.config_dir.clone();
     let installed = geo::packages_installed(&geo::geo_dir(&config_dir));
-    let cache_ready = geo::geo_dir(&config_dir).join(backfill::CACHE_FILE).is_file();
+    let cache_ready = geo::geo_dir(&config_dir)
+        .join(backfill::CACHE_FILE)
+        .is_file();
     let datav_files = geo::datav_count(&geo::geo_dir(&config_dir));
     let (phase, done, total, message) = phase_parts(&geo::phase_snapshot());
     GeoStatusDto {

@@ -1,3 +1,4 @@
+import DateRangePicker from "./components/DateRangePicker";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -668,6 +669,24 @@ function FormatFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (pat
     onClear={() => onPatch({ formats: [] })} testId="search-format" />;
 }
 
+function DateFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch: Partial<SearchInputs>) => void }) {
+  const { t }=useTranslation();
+  const ranges=()=>(["recent7","recent30","thisYear","lastYear"] as const).map(key=>{
+    const [from,to]=quickRange(key);return {key,from,to,label:t(`search.quick.${key}`)};
+  });
+  return <DateRangePicker from={inputs.from} to={inputs.to} onApply={onPatch} ranges={ranges}/>;
+}
+
+export function ClearFiltersButton({ onClear, disabled=false, testId="search-reset-filters" }: {
+  onClear: () => void; disabled?: boolean; testId?: string;
+}) {
+  const {t}=useTranslation();
+  return <button type="button" disabled={disabled} onClick={onClear} data-testid={testId}
+    className="h-8 shrink-0 rounded-md border border-accent/40 bg-accent/10 px-3 text-xs font-medium text-accent transition-colors hover:bg-accent/20 disabled:cursor-default disabled:opacity-40">
+    {t("search.chipsClearAll")}
+  </button>;
+}
+
 /** 图库常用条件常驻工具栏，面板只展示其余条件。 */
 export function QuickFilterBar({
   inputs,
@@ -677,10 +696,6 @@ export function QuickFilterBar({
   onPatch: (patch: Partial<SearchInputs>) => void;
 }) {
   const { t } = useTranslation();
-  const applyQuickRange = (key: QuickRangeKey) => {
-    const [from, to] = quickRange(key);
-    onPatch({ from, to });
-  };
   return (
     <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-edge/60 py-1.5" data-testid="gallery-quick-filters">
       <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.format")}</span>
@@ -703,13 +718,7 @@ export function QuickFilterBar({
       </button>
 
       <span className="shrink-0 text-[11px] font-medium text-text-muted">{t("search.date")}</span>
-      <div className="flex flex-wrap items-center gap-1" data-testid="search-quick-ranges">
-        {(["recent7", "recent30", "thisYear", "lastYear"] as const).map((key) => {
-          const [from, to] = quickRange(key);
-          const active = inputs.from === from && inputs.to === to;
-          return <button key={key} type="button" onClick={() => applyQuickRange(key)} aria-pressed={active} className={`h-7 rounded-md border px-2 text-[11px] transition-colors ${active ? "border-accent bg-accent/10 text-accent" : "border-edge text-text-secondary hover:border-accent hover:text-accent"}`} data-testid={`search-quick-${key}`}>{t(`search.quick.${key}`)}</button>;
-        })}
-      </div>
+      <DateFilter inputs={inputs} onPatch={onPatch}/>
     </div>
   );
 }
@@ -848,11 +857,6 @@ export function FilterPanel({
       cancelled = true;
     };
   }, [hideAlbum]);
-
-  function applyQuickRange(key: QuickRangeKey): void {
-    const [qFrom, qTo] = quickRange(key);
-    onPatch({ from: qFrom, to: qTo });
-  }
 
   return (
     <div className="shrink-0 border-b border-edge bg-bg/40 px-2 py-3" data-testid="search-filter-panel">
@@ -1002,39 +1006,7 @@ export function FilterPanel({
             maxTestId="search-size-max"
           />
         </FieldRow>
-        <FieldRow label={t("search.dateFrom")}>
-          <input
-            type="date"
-            value={inputs.from}
-            onChange={(e) => onPatch({ from: e.target.value })}
-            aria-label={t("search.dateFrom")}
-            className={`${INPUT_CLASS} [color-scheme:dark]`}
-            data-testid="search-from"
-          />
-        </FieldRow>
-        <FieldRow label={t("search.dateTo")}>
-          <input
-            type="date"
-            value={inputs.to}
-            onChange={(e) => onPatch({ to: e.target.value })}
-            aria-label={t("search.dateTo")}
-            className={`${INPUT_CLASS} [color-scheme:dark]`}
-            data-testid="search-to"
-          />
-        </FieldRow>
-        {!advancedOnly && <div className="flex items-center gap-0.5" data-testid="search-quick-ranges">
-          {(["recent7", "recent30", "thisYear", "lastYear"] as const).map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => applyQuickRange(key)}
-              className="h-7 rounded-md border border-edge bg-panel/55 px-2 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-              data-testid={`search-quick-${key}`}
-            >
-              {t(`search.quick.${key}`)}
-            </button>
-          ))}
-        </div>}
+        {!advancedOnly && <FieldRow label={t("search.date")}><DateFilter inputs={inputs} onPatch={onPatch}/></FieldRow>}
       </div>
       {/* 智能视图（B1）：有激活条件才出现保存入口（默认全部资产无保存意义） */}
           {onPurgeMissing !== undefined && (
@@ -1191,13 +1163,13 @@ export function FilterChipsRow({
   onPatch: (next: SearchInputs) => void;
   onClearAll: () => void;
 }) {
-  const { t } = useTranslation();
   if (chips.length === 0) return null;
   return (
     <div
       className="sp-scroll flex shrink-0 flex-wrap items-center gap-1.5 overflow-x-auto border-b border-edge/60 py-1.5"
       data-testid="search-filter-chips"
     >
+      <ClearFiltersButton onClear={onClearAll} testId="search-clear-all"/>
       {chips.map((chip) => (
         <span
           key={chip.key}
@@ -1219,14 +1191,7 @@ export function FilterChipsRow({
           </button>
         </span>
       ))}
-      <button
-        type="button"
-        onClick={onClearAll}
-        className="ml-1 h-6 shrink-0 rounded-md border border-edge bg-panel/40 px-2 text-[11px] text-text-muted transition-colors hover:border-red-400 hover:bg-red-400/5 hover:text-red-400"
-        data-testid="search-clear-all"
-      >
-        {t("search.chipsClearAll")}
-      </button>
+
     </div>
   );
 }

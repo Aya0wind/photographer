@@ -1,49 +1,7 @@
-//! AI 辅助选片（阶段 C，0021）：闭眼检测 + 疑似失焦标签。
-//!
-//! 输出只是可筛选建议（ai_analysis 表），与用户决定分层，**绝不自动写
-//! XMP**（roadmap §6；XMP 写入仅由用户显式选片操作触达）。
-//!
-//! ## 失焦（blur 通道，无模型依赖，始终可用）
-//! 512 档已缓存缩略图上计算拉普拉斯方差 → 饱和归一 0-100 清晰度分；
-//! 有人脸框（faces 表，**归一化 0..1 坐标**——2026-09-28 v2 空间，随
-//! face.rs process 管线切换；映射见 [`face_crop_window_px`]）时取「全图与
-//! 人脸局部最小」双分保守判定。value：`soft`（低于保守阈值，疑似）/
-//! `sharp` / `unknown`（缩略图缺失或解码失败）。运动模糊/浅景深天然误报
-//! ——分数给 UI 展示，不硬判。
-//!
-//! ## 闭眼（eyes 通道，2026-09-28 实装）
-//! 独立 index_tasks 通道：任务处理时以 SCRFD 现场检测（5 关键点含双眼
-//! 位置），双眼点构造旋转 + MediaPipe ROI（正方形，检测框长边 ×1.5）裁
-//! 256² → **facemesh**（MediaPipe Face Landmarker 478 点 ONNX，
-//! Apache-2.0，收录见 ai::mod CATALOG 注释）推理 468 点眼睑网格 →
-//! EAR（眼部长宽比）几何判据 → 三态（closed / maybe / unknown）。
-//! 检测源与 face 通道同款降档（face::detection_source，缓存档优先）。
-//!
-//! ### 预处理（照抄 yakhyo/mediapipe-face-mesh-onnx `models/onnx_model.py`
-//! 的 FaceMesh 类，2026-09-28 核实）
-//! - ROI = 正方形 `(1 + 2×0.25) × max(box_w, box_h)`（= 1.5 倍检测框
-//!   长边，MediaPipe detection_to_roi 规则），中心 = 框中心，旋转角 =
-//!   双眼连线角（SCRFD kps[0] 左眼 → kps[1] 右眼，`atan2(dy, dx)`）。
-//! - 相似变换一次重采样直出 256²（避免二次插值），RGB `/255` NCHW f32。
-//! - landmarks 输出为 256 裁剪像素坐标，经 ROI 逆相似矩阵回映源图坐标。
-//!
-//! ### 实装校准注记（Python/ONNXRuntime 对照官方 face_landmarker，实测）
-//! - 468 点眼睑网格与官方对齐良好（双眼部索引环形结构经仓库
-//!   tessellation.py 核实存在：眼周三角化边 [160,159]/[159,158]/
-//!   [153,154]/[145,144]/[385,384]/[387,386]/[373,374]/[374,380] 等）。
-//! - **虹膜点 468-477 不可用**：相对眼睑环中心漂移 0.01-0.6 IOD 无规律
-//!   （官方模型 iris 应 <0.1 IOD）→ 原计划「虹膜辅助判据」弃用，质量
-//!   门槛改用几何自洽带（IOD/ROI 边长比，带值真库标定见阈值注释）。
-//! - **score 头不判据**：导出仓 docstring 称「confident faces 20-40」，
-//!   实测正脸裁剪 logit −8~−31，且人脸/背景无判别方向（2026-09-28
-//!   多图对照）→ 该头输出解析但不参与判定，人脸存在性由 SCRFD 检测
-//!   置信（≥ settings.ai.face_detect_threshold）+ 几何自洽带把关。
-//!
-//! ### 三态分带（阈值 settings.ai.eyes_ear_closed / eyes_ear_maybe，真库标定）
-//! EAR 越小越闭：脸级取双眼**更差**（min）EAR；资产级任一脸 closed →
-//! closed，否则任一 maybe → maybe，否则全睁不落记录。质量差（几何自洽
-//! 带外 / 小脸 / 非有限值）的脸记 unknown 维度；无人脸 → done 且不产生
-//! 记录（≠ 没有闭眼，UI 语义注意）。
+//! Fast selection evidence: oriented 1024px cached thumbnails, one SCRFD pass,
+//! per-eye candidate analysis. Insufficient pixels remain unknown. High-resolution
+//! source/tile adapters are retained only for explicit offline evaluation.
+//! Analysis never edits photos, ratings, decisions, or XMP.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -57,7 +15,7 @@ use crate::db::Db;
 /// var=20（糊）→ 29，量程内区分度好且天然封顶 100。
 pub const BLUR_LAPLACE_K: f64 = 50.0;
 /// 算法版本标签（落 ai_analysis.model_version；随指纹入重建判定）。
-pub const BLUR_ALGO_VERSION: &str = "laplacian-v1";
+pub const BLUR_ALGO_VERSION: &str = "regional-focus-1024-v8-heuristic";
 
 /// blur 软阈值运行时快照（×1000 整数原子存；worker 线程无 settings 访问，
 /// 启动 / settings_set 时刷新——同 thumbs::set_thumb_cache_cap_bytes 模式）。
@@ -82,21 +40,26 @@ pub fn laplacian_variance(gray: &image::GrayImage) -> Option<f64> {
     if w < 3 || h < 3 {
         return None;
     }
-    let px = |x: usize, y: usize| -> f64 { f64::from(gray.get_pixel(x as u32, y as u32).0[0]) };
-    // 逐像素拉普拉斯响应（跳 1px 边界），welford 单遍方差（数值稳定）
-    let mut mean = 0f64;
-    let mut m2 = 0f64;
+    let pixels = gray.as_raw();
+    // Integer moments are exact for the bounded thumbnail input. This avoids
+    // five checked pixel calls and a floating division on every pixel.
+    let mut sum = 0i64;
+    let mut squares = 0u64;
     let mut n = 0u64;
     for y in 1..h - 1 {
         for x in 1..w - 1 {
-            let lap = px(x, y + 1) + px(x, y - 1) + px(x + 1, y) + px(x - 1, y) - 4.0 * px(x, y);
+            let i = y * w + x;
+            let lap = i64::from(pixels[i + w])
+                + i64::from(pixels[i - w])
+                + i64::from(pixels[i + 1])
+                + i64::from(pixels[i - 1])
+                - 4 * i64::from(pixels[i]);
             n += 1;
-            let d = lap - mean;
-            mean += d / n as f64;
-            m2 += d * (lap - mean);
+            sum += lap;
+            squares += (lap * lap) as u64;
         }
     }
-    (n > 1).then(|| m2 / (n - 1) as f64)
+    (n > 1).then(|| ((squares as f64 - (sum as f64).powi(2) / n as f64) / (n - 1) as f64).max(0.0))
 }
 
 /// 拉普拉斯方差 → 0-100 归一清晰度分（饱和曲线）。
@@ -105,77 +68,129 @@ pub fn normalize_blur_score(variance: f64) -> f64 {
     100.0 * v / (v + BLUR_LAPLACE_K)
 }
 
-/// blur 任务核：512 档缩略图 → 全图分（有人脸框时并入人脸局部最小双分）
-/// → ai_analysis('blur')。缩略图缺失/解码失败 → value='unknown' 按完成收尾。
+/// High-resolution diagnostic regions. Final focus verdict awaits a validated model.
 pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: f64) -> bool {
     let Some((path, _thumb_state)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
         return false; // 资产已删除（级联清任务前的防御兜底）
     };
-    let src = PathBuf::from(&path);
-    let verdict = (|| -> Option<(Option<String>, f64)> {
-        let thumb = crate::thumbs::thumb_file(db_dir, &src, 512)?;
-        let img = image::ImageReader::open(&thumb)
-            .ok()?
-            .decode()
-            .ok()?
-            .to_luma8();
-        let full = laplacian_variance(&img)?;
-        let mut worst = normalize_blur_score(full);
-        // 人脸局部双分：faces 表框为归一化 0..1（v2 坐标空间）→ 按缩略图
-        // 实际宽高映射回像素
-        let faces: Vec<(f64, f64, f64)> = {
-            let mut stmt =
-                db.0.prepare("SELECT box_x, box_y, box_w FROM faces WHERE asset_id = ?1")
-                    .ok()?;
-            let rows = stmt
-                .query_map([asset_id], |r| {
-                    Ok((
-                        r.get::<_, f64>(0)?,
-                        r.get::<_, f64>(1)?,
-                        r.get::<_, f64>(2)?,
-                    ))
-                })
-                .ok()?;
-            rows.collect::<Result<Vec<_>, _>>().ok()?
-        };
-        for (bx, by, bw) in faces {
-            let (x, y, w, h) = face_crop_window_px(bx, by, bw, img.width(), img.height());
-            let crop = image::imageops::crop_imm(&img, x, y, w, h).to_image();
-            if let Some(v) = laplacian_variance(&crop) {
-                let local = normalize_blur_score(v);
-                if local < worst {
-                    worst = local;
-                }
-            }
-        }
-        Some((
-            Some(
-                if worst < soft_threshold {
-                    "soft"
-                } else {
-                    "sharp"
-                }
-                .to_string(),
-            ),
-            (worst * 100.0).round() / 100.0,
-        ))
-    })();
-    match verdict {
-        Some((value, score)) => db
-            .set_ai_analysis(
+    let _ = path;
+    let Some((img, origin)) = super::selection_regions::thumbnail(db, db_dir, asset_id) else {
+        let details =
+            serde_json::json!({"reason": "source_unavailable", "regions": [], "calibrated": false});
+        return db
+            .set_ai_analysis_details(
                 asset_id,
                 "blur",
-                value.as_deref(),
-                Some(score),
+                "unknown",
+                None,
                 BLUR_ALGO_VERSION,
+                &details,
             )
-            .is_ok(),
-        None => {
-            // 缩略图缺失/解码失败：unknown 记录 + 按完成收尾（不占重试额度）
-            db.set_ai_analysis(asset_id, "blur", Some("unknown"), None, BLUR_ALGO_VERSION)
-                .is_ok()
+            .is_ok();
+    };
+    let mut evidence = super::selection_regions::evidence(&img, origin);
+    evidence.models = vec!["regional-laplacian-sobel-v1-heuristic".into()];
+    evidence.parameters =
+        serde_json::json!({"sourceSize":super::selection_regions::ANALYSIS_SIZE,"parameterVersion":8,"softThreshold":soft_threshold});
+    let gray = image::imageops::grayscale(&img);
+    let faces: Vec<(f64, f64, f64, f64)> = {
+        let Ok(mut stmt) = db.0.prepare(
+            "SELECT box_x,box_y,box_w,box_h FROM faces WHERE asset_id=?1 ORDER BY box_w*box_h DESC",
+        ) else {
+            return false;
+        };
+        let Ok(rows) = stmt.query_map([asset_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }) else {
+            return false;
+        };
+        let Ok(rows) = rows.collect::<Result<Vec<_>, _>>() else {
+            return false;
+        };
+        rows
+    };
+    let largest = faces.first().map(|f| f.2 * f.3).unwrap_or(0.0);
+    for (x, y, w, h) in faces {
+        if [x, y, w, h].iter().any(|n| !n.is_finite()) || w * h < largest * 0.25 {
+            continue;
+        }
+        let px = (x.clamp(0.0, 1.0) * img.width() as f64) as u32;
+        let py = (y.clamp(0.0, 1.0) * img.height() as f64) as u32;
+        if px >= img.width() || py >= img.height() {
+            continue;
+        }
+        let pw = ((w * img.width() as f64) as u32).min(img.width() - px);
+        let ph = ((h * img.height() as f64) as u32).min(img.height() - py);
+        if pw.min(ph) < 48 {
+            continue;
+        }
+        let metric = super::focus_quality::measure(
+            &image::imageops::crop_imm(&gray, px, py, pw, ph).to_image(),
+            soft_threshold,
+        );
+        evidence.regions.push(super::selection_regions::Region {
+            kind: "face".into(),
+            person: 0,
+            side: None,
+            bounds: [x, y, w, h],
+            state: metric.state.into(),
+            reason: metric.reason.map(str::to_owned),
+            raw_score: metric.score,
+            auxiliary_ear: None,
+        });
+    }
+    if !evidence.regions.iter().any(|r| r.raw_score.is_some()) {
+        evidence.regions.clear();
+        for (bounds, metric) in super::focus_quality::detail_regions(&gray, soft_threshold) {
+            evidence.regions.push(super::selection_regions::Region {
+                kind: "detail".into(),
+                person: 0,
+                side: None,
+                bounds,
+                state: metric.state.into(),
+                reason: metric.reason.map(str::to_owned),
+                raw_score: metric.score,
+                auxiliary_ear: None,
+            });
         }
     }
+    let usable: Vec<_> = evidence
+        .regions
+        .iter()
+        .filter(|r| r.raw_score.is_some())
+        .collect();
+    let score = usable
+        .iter()
+        .filter_map(|r| r.raw_score)
+        .max_by(f64::total_cmp);
+    let sharp = usable.iter().any(|r| r.state == "sharp");
+    let soft = usable.iter().any(|r| r.state == "soft");
+    let value = if usable.is_empty() {
+        "unknown"
+    } else if sharp && !soft {
+        "sharp"
+    } else if soft && !sharp && usable.iter().all(|r| r.state == "soft") {
+        "soft"
+    } else {
+        "maybe"
+    };
+    evidence.reason = Some(
+        if usable.is_empty() {
+            "low_texture"
+        } else {
+            "focus_heuristic"
+        }
+        .into(),
+    );
+    db.set_ai_analysis_details(
+        asset_id,
+        "blur",
+        value,
+        score,
+        BLUR_ALGO_VERSION,
+        &serde_json::to_value(evidence).expect("selection evidence serializes"),
+    )
+    .is_ok()
 }
 
 /// faces 归一化框 `(x, y, w)` ∈ 0..1 → 缩略图像素裁剪窗 `(x, y, w, h)`
@@ -211,7 +226,7 @@ pub const EYES_INPUT_SIZE: u32 = 256;
 /// facemesh 输出点数（468 眼睑网格 + 10 虹膜；虹膜不可用，见模块注释）。
 pub const FACEMESH_POINTS: usize = 478;
 /// eyes 通道算法版本标签（落 ai_analysis.model_version）。
-pub const EYES_ALGO_VERSION: &str = "facemesh-ear-v1";
+pub const EYES_ALGO_VERSION: &str = "thumbnail-eye-1024-v8-candidate";
 /// ROI 外扩系数（MediaPipe detection_to_roi：1 + 2×margin，margin=0.25）。
 const ROI_MARGIN_SCALE: f32 = 1.5;
 
@@ -315,16 +330,15 @@ pub fn aggregate_eyes_ear(
     }
 }
 
-/// 单脸眼睛状态分类器（trait 注入：生产 = [`FacemeshEarClassifier`]；
-/// 测试用 stub）。输入 = 源图 + SCRFD 检出脸；输出 = 该脸双眼中**更差**
-/// （min）EAR；关键点质量差/小脸/几何自洽带外 → None（unknown 维度）。
-/// 推理故障 → Err（任务按失败重试，不静默吞）。
+/// Per-eye classifier contract. Unknown evidence is distinct from inference
+/// failure; the latter is retried by the task system. EAR is not required.
 pub trait FaceEyeStateClassifier: Send + Sync {
-    fn face_min_ear(
+    fn classify(
         &self,
         img: &image::RgbImage,
         face: &super::face::DetectedFace,
-    ) -> Result<Option<f32>, String>;
+        person: usize,
+    ) -> Result<Vec<super::selection_regions::Region>, String>;
 }
 
 /// SCRFD 脸 → facemesh ROI 相似矩阵（2×3 正映射，源像素 → `out`² 裁剪
@@ -391,6 +405,8 @@ fn facemesh_slots() -> &'static Mutex<Option<ort::session::Session>> {
 
 /// 空闲卸载（ai::idle::release_all 调用；取锁置空，在途推理不受影响）。
 pub fn release() {
+    super::selection_defocus::release();
+    super::selection_regions::release();
     *facemesh_slots()
         .lock()
         .expect("facemesh slots mutex poisoned") = None;
@@ -483,7 +499,11 @@ impl<'a> FacemeshEarClassifier<'a> {
                     let Ok((shape, extracted)) = value.try_extract_tensor::<f32>() else {
                         continue;
                     };
-                    if shape.len() == 3 && shape[1] >= 468 && shape[2] == 3 {
+                    if shape.len() == 3
+                        && shape[1] >= FACEMESH_POINTS as i64
+                        && shape[2] == 3
+                        && extracted.len() >= FACEMESH_POINTS * 3
+                    {
                         let mut pts = Vec::with_capacity(FACEMESH_POINTS);
                         for i in 0..FACEMESH_POINTS {
                             let (x, y) = (extracted[i * 3], extracted[i * 3 + 1]);
@@ -511,7 +531,86 @@ impl<'a> FacemeshEarClassifier<'a> {
 }
 
 impl FaceEyeStateClassifier for FacemeshEarClassifier<'_> {
-    fn face_min_ear(
+    fn classify(
+        &self,
+        img: &image::RgbImage,
+        face: &super::face::DetectedFace,
+        person: usize,
+    ) -> Result<Vec<super::selection_regions::Region>, String> {
+        use super::selection_regions::{closed_score, eye_crop, eye_state, Region};
+        let unknown = |reason: &str| {
+            ["left", "right"]
+                .iter()
+                .map(|side| Region {
+                    kind: "eye".into(),
+                    person,
+                    side: Some((*side).into()),
+                    bounds: super::face::normalized_box(face, img.width(), img.height()),
+                    state: "unknown".into(),
+                    reason: Some(reason.into()),
+                    raw_score: None,
+                    auxiliary_ear: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let eye_distance = dist(face.kps[0], face.kps[1]);
+        if face.box_w.min(face.box_h) < 48.0 || eye_distance < 18.0 {
+            return Ok(unknown("small_face"));
+        }
+        let dx = face.kps[1][0] - face.kps[0][0];
+        let dy = face.kps[1][1] - face.kps[0][1];
+        let nx = face.kps[2][0] - (face.kps[0][0] + face.kps[1][0]) / 2.0;
+        let ny = face.kps[2][1] - (face.kps[0][1] + face.kps[1][1]) / 2.0;
+        let nose_offset = (nx * dx + ny * dy).abs() / (eye_distance * eye_distance);
+        if !nose_offset.is_finite() || nose_offset > 0.35 {
+            return Ok(unknown("pose"));
+        }
+        let lm = self.infer(img, face)?;
+        let ratio = dist(lm[33], lm[263]) / (ROI_MARGIN_SCALE * face.box_w.max(face.box_h));
+        if !ratio.is_finite() || !(IOD_ROI_RATIO_MIN..=IOD_ROI_RATIO_MAX).contains(&ratio) {
+            return Ok(unknown("localization"));
+        }
+        let mut results = Vec::new();
+        for (side, indices) in [("left", EYE_LEFT_EAR), ("right", EYE_RIGHT_EAR)] {
+            let points: Vec<_> = indices.iter().map(|i| lm[*i]).collect();
+            let ear = eye_aspect_ratio(&lm, &indices);
+            let mut region = unknown("eye_pixels").remove(if side == "left" { 0 } else { 1 });
+            region.auxiliary_ear = ear.map(f64::from);
+            if let (Some((crop, box1)), Some((context, _))) =
+                (eye_crop(img, &points, 1.4), eye_crop(img, &points, 1.8))
+            {
+                region.bounds = box1;
+                if !super::selection_regions::eye_has_detail(&crop) {
+                    region.reason = Some("eye_low_contrast".into());
+                    results.push(region);
+                    continue;
+                }
+                // Localization, pose, native pixels and texture have passed.
+                // Obvious opening does not depend on an IR classifier's RGB response.
+                if super::selection_regions::eye_is_clearly_open(ear, eyes_ear_maybe()) {
+                    region.state = "open".into();
+                    region.reason = None;
+                    results.push(region);
+                    continue;
+                }
+                let scores = [
+                    closed_score(self.manager, &crop)?,
+                    closed_score(self.manager, &context)?,
+                ];
+                let (state, reason) = eye_state(scores, ear, eyes_ear_closed(), eyes_ear_maybe());
+                region.state = state.into();
+                region.reason = reason.map(str::to_owned);
+                region.raw_score = Some((scores[0] + scores[1]) / 2.0);
+            }
+            results.push(region);
+        }
+        Ok(results)
+    }
+}
+
+impl FacemeshEarClassifier<'_> {
+    /// Legacy comparison only; the production classifier contract is per-eye.
+    pub fn face_min_ear(
         &self,
         img: &image::RgbImage,
         face: &super::face::DetectedFace,
@@ -540,9 +639,8 @@ impl FaceEyeStateClassifier for FacemeshEarClassifier<'_> {
     }
 }
 
-/// eyes 任务核：检测源取图（face 通道同款降档）→ SCRFD 现场检测 →
-/// 逐脸 facemesh EAR → 三态聚合 → ai_analysis('eyes')。无人脸 → done 且
-/// 无记录；检测/分类失败 → false（走 attempts 封顶重试）。
+/// Oriented source -> tiled SCRFD -> per-eye evidence -> conservative summary.
+/// Missing source is unknown; detector/inference errors use task retries.
 pub fn process_eyes_task(
     db: &Db,
     db_dir: &Path,
@@ -553,53 +651,78 @@ pub fn process_eyes_task(
     let Some((path, _)) = db.thumb_info_by_id(asset_id).ok().flatten() else {
         return false; // 资产已删除（级联清任务前的防御兜底）
     };
-    let thumb = match super::face::detection_source(db_dir, Path::new(&path)) {
-        Some(t) => t,
-        None => return false,
-    };
-    let img = match image::ImageReader::open(&thumb)
-        .ok()
-        .and_then(|r| r.decode().ok())
-        .map(|d| d.to_rgb8())
-    {
-        Some(i) => i,
-        None => return false,
+    let _ = path;
+    let size = super::selection_regions::ANALYSIS_SIZE;
+    let Some((img, origin)) = super::selection_regions::thumbnail(db, db_dir, asset_id) else {
+        return db.set_ai_analysis_details(asset_id, "eyes", "unknown", None, EYES_ALGO_VERSION,
+            &serde_json::json!({"reason":"source_unavailable", "regions":[], "calibrated":false})).is_ok();
     };
     let faces = match super::face::detect_faces(manager, &img) {
         Ok(f) => f,
         Err(_) => return false,
     };
-    let mut face_ears: Vec<Option<f32>> =
-        Vec::with_capacity(faces.len().min(super::face::MAX_FACES_PER_IMAGE));
-    for face in faces.into_iter().take(super::face::MAX_FACES_PER_IMAGE) {
-        match classifier.face_min_ear(&img, &face) {
-            Ok(ear) => face_ears.push(ear),
-            Err(_) => return false, // 推理故障：按失败重试
+    let mut evidence = super::selection_regions::evidence(&img, origin);
+    evidence.models = [
+        super::face_detect_model_id(manager.ai_params().quality_tier),
+        FACEMESH_MODEL_ID,
+        super::selection_regions::EYE_MODEL,
+    ]
+    .iter()
+    .map(|id| {
+        super::catalog()
+            .iter()
+            .find(|m| m.id == **id)
+            .map(|m| format!("{}:{}", m.id, m.version))
+            .unwrap_or_else(|| id.to_string())
+    })
+    .collect();
+    evidence.parameters = serde_json::json!({"sourceSize":size,"parameterVersion":8,"earClosed":eyes_ear_closed(),
+        "earMaybe":eyes_ear_maybe(), "includeSingle":super::selection_regions::include_single(),
+        "faceDetectThreshold":manager.ai_params().face_detect_threshold,"minimumEyeWidth":12,"minimumFacePixels":48,"cropScales":[1.4,1.8]});
+    for (index, face) in faces.into_iter().enumerate() {
+        match classifier.classify(&img, &face, index + 1) {
+            Ok(regions) => evidence.regions.extend(regions),
+            Err(_) => return false,
         }
     }
-    match aggregate_eyes_ear(&face_ears, eyes_ear_closed(), eyes_ear_maybe()) {
-        Some((value, score)) => db
-            .set_ai_analysis(
-                asset_id,
-                "eyes",
-                Some(&value),
-                Some((score * 1000.0).round() / 1000.0),
-                EYES_ALGO_VERSION,
-            )
-            .is_ok(),
-        None => true, // 全睁或无人脸：done 且不产生记录
-    }
+    let value = super::selection_regions::photo_eyes(
+        &evidence.regions,
+        super::selection_regions::include_single(),
+    );
+    evidence.reason = (value == "maybe").then(|| {
+        if evidence.regions.iter().any(|r| r.state == "closed") {
+            "possible_closed"
+        } else {
+            "eye_state_review"
+        }
+        .into()
+    });
+    db.set_ai_analysis_details(
+        asset_id,
+        "eyes",
+        value,
+        None,
+        EYES_ALGO_VERSION,
+        &serde_json::to_value(evidence).expect("selection evidence serializes"),
+    )
+    .is_ok()
 }
 
-/// eyes 回填 + 串行执行（单 worker：SCRFD + facemesh 会话互斥天然串行，
-/// 与 face 通道阶段 1 同款约束；无聚类等顺序敏感状态，无需两阶段）：
-/// 模型未就绪 → 跳过并计数（任务保持 pending，不占失败额度；模型装好
-/// 后 kick 自然续跑）。panic 归一为该任务失败（attempts 封顶回收）。
-/// 返回本轮成功数。
+/// Bounded parallel eye analysis; CPU/cache preparation overlaps shared ONNX
+/// sessions. Missing models leave tasks pending; failures retain capped retries.
 pub fn run_eyes_backfill(
     db_dir: &Path,
     manager: &super::ModelManager,
     bus: &crate::events::EventBus,
+) -> u64 {
+    run_eyes_backfill_gated(db_dir, manager, bus, None)
+}
+
+fn run_eyes_backfill_gated(
+    db_dir: &Path,
+    manager: &super::ModelManager,
+    bus: &crate::events::EventBus,
+    controls: Option<&crate::tasks::TaskControls>,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         return 0;
@@ -612,10 +735,49 @@ pub fn run_eyes_backfill(
         }
         return 0;
     }
-    let classifier = FacemeshEarClassifier::new(manager);
     let total = db.pending_index_task_count("eyes").unwrap_or(0);
-    let mut done = 0u64;
-    while let Some(task) = db.claim_index_task("eyes").ok().flatten() {
+    let processed = std::sync::atomic::AtomicU64::new(0);
+    let workers = crate::tasks::index_parallelism();
+    // Parallel CPU/cache preparation feeds the existing serialized ONNX slots;
+    // no duplicate GPU sessions; image tasks share the CPU/2 admission budget.
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let processed = &processed;
+            scope.spawn(move || run_eyes_worker(db_dir, manager, bus, controls, processed, total));
+        }
+    });
+    processed.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn run_eyes_worker(
+    db_dir: &Path,
+    manager: &super::ModelManager,
+    bus: &crate::events::EventBus,
+    controls: Option<&crate::tasks::TaskControls>,
+    processed: &std::sync::atomic::AtomicU64,
+    total: u64,
+) {
+    let Ok(db) = crate::ipc::open_library_db(db_dir) else {
+        return;
+    };
+    let classifier = FacemeshEarClassifier::new(manager);
+    loop {
+        while controls.is_some_and(|c| c.is_paused() && !c.is_cancelled()) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if controls.is_some_and(|c| c.is_cancelled()) {
+            break;
+        }
+        let _permit = crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image)
+            .acquire(1);
+        if controls.is_some_and(|c| c.is_paused() || c.is_cancelled()) {
+            continue;
+        }
+        let barrier = crate::index::image_index_lock(db_dir);
+        let _guard = barrier.read().expect("image index barrier poisoned");
+        let Some(task) = db.claim_index_task("eyes").ok().flatten() else {
+            break;
+        };
         let ok = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             process_eyes_task(&db, db_dir, manager, &classifier, task.asset_id)
         })) {
@@ -629,14 +791,14 @@ pub fn run_eyes_backfill(
             }
         };
         let _ = db.finish_index_task(task.id, ok);
-        done += u64::from(ok);
+        let done = processed.fetch_add(u64::from(ok), std::sync::atomic::Ordering::Relaxed)
+            + u64::from(ok);
         bus.publish(crate::events::AppEvent::IndexTaskProgress {
             kind: "eyes".into(),
             done,
             total,
         });
     }
-    done
 }
 
 /// 便利入口：模型收录后统一触发（今日恒早退）。
@@ -654,8 +816,8 @@ pub fn kick_eyes_if_ready(
     let _ = supervisor.spawn_coalesced(
         "index",
         format!("eyes-backfill:{}", db_dir.display()),
-        move |_| {
-            run_eyes_backfill(&db_dir, &manager, &bus);
+        move |controls| {
+            run_eyes_backfill_gated(&db_dir, &manager, &bus, Some(&controls));
         },
     );
 }

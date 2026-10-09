@@ -5,9 +5,361 @@
 
 mod common;
 
+#[test]
+#[ignore = "read-only stage timing; set SMARTPHOTO_BENCH_DB_DIR, SMARTPHOTO_BENCH_ASSET and SMARTPHOTO_SELECTION_MODELS"]
+fn selection_stage_timing() {
+    use ai::selection::FaceEyeStateClassifier;
+    let directory = std::path::PathBuf::from(std::env::var("SMARTPHOTO_BENCH_DB_DIR").unwrap());
+    let asset_id = std::env::var("SMARTPHOTO_BENCH_ASSET")
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    let db = db::Db(
+        rusqlite::Connection::open_with_flags(
+            directory.join("library.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap(),
+    );
+    let models = std::path::PathBuf::from(std::env::var("SMARTPHOTO_SELECTION_MODELS").unwrap());
+    let bus = events::EventBus::new();
+    let manager = ai::ModelManager::new(models, bus.clone(), tasks::TaskSupervisor::new(bus));
+    manager.set_ai_params(ai::AiIndexParams {
+        quality_tier: ai::QualityTier::Accurate,
+        ..Default::default()
+    });
+    let classifier = ai::selection::FacemeshEarClassifier::new(&manager);
+    for round in 0..2 {
+        let start = std::time::Instant::now();
+        let (img, _) = ai::selection_regions::thumbnail(&db, &directory, asset_id).unwrap();
+        let decode = start.elapsed();
+        let start = std::time::Instant::now();
+        let faces = ai::face::detect_faces(&manager, &img).unwrap();
+        let detection = start.elapsed();
+        let start = std::time::Instant::now();
+        for (i, face) in faces.iter().enumerate() {
+            classifier.classify(&img, face, i + 1).unwrap();
+        }
+        eprintln!("[selection-bench] round={round} input={}x{} faces={} decode_ms={} detection_ms={} eyes_ms={}",
+            img.width(),img.height(),faces.len(),decode.as_millis(),detection.as_millis(),start.elapsed().as_millis());
+    }
+}
+
+#[test]
+fn eye_candidates_are_separate_from_calibrated_verdicts() {
+    use ai::selection_regions::{eye_state, photo_eyes, Region};
+    assert_eq!(eye_state([0.97, 0.96], Some(0.1), 0.13, 0.2).0, "closed");
+    assert_eq!(
+        eye_state([0.97, 0.05], Some(0.1), 0.13, 0.2),
+        ("unknown", Some("crop_disagreement"))
+    );
+    assert_eq!(eye_state([0.01, 0.03], Some(0.3), 0.13, 0.2).0, "open");
+    assert_eq!(
+        eye_state([0.99, 0.98], Some(0.3), 0.13, 0.2).0,
+        "open",
+        "clear geometric opening is not vetoed by the IR candidate"
+    );
+    assert_eq!(
+        eye_state([f64::NAN, 0.98], Some(0.1), 0.13, 0.2).0,
+        "unknown"
+    );
+    assert_eq!(
+        eye_state([0.99, 0.98], Some(0.21), 0.13, 0.2),
+        ("maybe", Some("model_geometry_disagreement")),
+        "borderline opening still needs review"
+    );
+    assert_eq!(eye_state([0.97, 0.05], Some(0.3), 0.13, 0.2).0, "open");
+    let eye = |state: &str| Region {
+        kind: "eye".into(),
+        person: 1,
+        side: None,
+        bounds: [0.0, 0.0, 0.1, 0.1],
+        state: state.into(),
+        reason: None,
+        raw_score: None,
+        auxiliary_ear: None,
+    };
+    assert_eq!(photo_eyes(&[eye("open"), eye("open")], false), "open");
+    assert_eq!(photo_eyes(&[eye("unknown"), eye("open")], false), "unknown");
+    assert_eq!(
+        photo_eyes(&[eye("closed"), eye("open")], false),
+        "single_closed"
+    );
+    assert_eq!(photo_eyes(&[eye("closed"), eye("open")], true), "maybe");
+    assert_eq!(
+        photo_eyes(&[eye("closed"), eye("closed")], false),
+        "maybe",
+        "unvalidated candidate must not become a definitive verdict"
+    );
+    assert_eq!(photo_eyes(&[], false), "no_face");
+    let mut small = eye("unknown");
+    small.person = 2;
+    assert_eq!(
+        photo_eyes(&[eye("open"), eye("open"), small], false),
+        "partial_open"
+    );
+}
+
+#[test]
+fn eye_crop_rejects_pixels_created_by_padding_or_upscaling() {
+    let img = image::RgbImage::new(128, 128);
+    let points = |x: f32, width: f32| {
+        [
+            [x, 50.0],
+            [x + width * 0.25, 48.0],
+            [x + width * 0.75, 48.0],
+            [x + width, 50.0],
+            [x + width * 0.75, 52.0],
+            [x + width * 0.25, 52.0],
+        ]
+    };
+    assert!(ai::selection_regions::eye_crop(&img, &points(50.0, 10.0), 1.4).is_none());
+    assert!(ai::selection_regions::eye_crop(&img, &points(0.0, 20.0), 1.4).is_none());
+    let (crop, bounds) = ai::selection_regions::eye_crop(&img, &points(50.0, 20.0), 1.4).unwrap();
+    assert_eq!(crop.dimensions(), (32, 32));
+    assert!((bounds[2] * 128.0 - 28.0).abs() < 0.001);
+    assert!(bounds.iter().all(|n| (0.0..=1.0).contains(n)));
+    assert!(!ai::selection_regions::eye_has_detail(&crop));
+}
+
+#[test]
+fn region_evidence_preserves_unknown_and_null_scores_through_ipc() {
+    let (dir, db, state) = setup();
+    let id = ins(
+        &db,
+        &dir.path().join("photos"),
+        "unknown.jpg",
+        &sharp_image(),
+    );
+    let evidence = serde_json::json!({"source":"original", "width":2048,"height":1365,
+        "calibrated":false,"reason":"small_face","regions":[]});
+    db.set_ai_analysis_details(id, "eyes", "unknown", None, "region-test", &evidence)
+        .unwrap();
+    let detail = ipc::assets::fetch_asset_detail(&state, id)
+        .unwrap()
+        .unwrap();
+    let eyes = detail.ai_analysis.eyes.unwrap();
+    assert_eq!(eyes.value.as_deref(), Some("unknown"));
+    assert_eq!(eyes.score, None);
+    assert_eq!(eyes.details.unwrap(), evidence);
+    db.set_ai_analysis_details(
+        id,
+        "eyes",
+        "open",
+        None,
+        "region-test-2",
+        &serde_json::json!({"regions":[]}),
+    )
+    .unwrap();
+    assert_eq!(db.ai_analysis_for(id).unwrap().len(), 1);
+    assert!(!db
+        .ai_analysis_details(id, "eyes")
+        .unwrap()
+        .unwrap()
+        .contains("small_face"));
+    db.set_ai_analysis(id, "eyes", Some("open"), None, "legacy-test")
+        .unwrap();
+    assert!(
+        db.ai_analysis_details(id, "eyes").unwrap().is_none(),
+        "legacy write must clear stale candidate evidence"
+    );
+}
+
+#[test]
+fn selection_source_is_high_resolution_and_not_the_browsing_cache() {
+    let _permit = ai::selection_regions::analysis_lock().lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.png");
+    image::RgbImage::new(2200, 1100).save(&path).unwrap();
+    let (img, origin) = thumbs::selection_source(&path, 2048).unwrap();
+    assert_eq!((img.width(), img.height()), (2048, 1024));
+    assert_eq!(origin, "original");
+    let (a, _) = ai::selection_regions::source(&path, 2048).unwrap();
+    let (b, _) = ai::selection_regions::source(&path, 2048).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        ai::selection_regions::source(&dir.path().join("source.png"), 2048).is_none(),
+        "cached image cannot hide an absent source"
+    );
+}
+
+#[test]
+fn production_selection_reads_small_cache_even_when_original_is_offline() {
+    let (dir, db, _state) = setup();
+    let img = image::RgbImage::new(2400, 1200);
+    let photos = dir.path().join("photos");
+    let id = ins(&db, &photos, "large.jpg", &img);
+    let source = photos.join("large.jpg");
+    let cache = thumbs::thumb_file(&dir.path().join("db"), &source, 1024).unwrap();
+    let mtime: chrono::DateTime<chrono::Utc> = std::fs::metadata(&source)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    db.0.execute(
+        "UPDATE assets SET mtime=?1 WHERE id=?2",
+        rusqlite::params![mtime.to_rfc3339(), id],
+    )
+    .unwrap();
+    std::fs::remove_file(&source).unwrap();
+    assert_eq!(
+        thumbs::cached_for_asset(&dir.path().join("db"), &source, 1024, &mtime.to_rfc3339()),
+        Some(cache)
+    );
+    let (pixels, origin) =
+        ai::selection_regions::thumbnail(&db, &dir.path().join("db"), id).unwrap();
+    assert_eq!(pixels.dimensions(), (1024, 512));
+    assert_eq!(origin, "thumbnail");
+    assert!(ai::selection::process_blur_task(
+        &db,
+        &dir.path().join("db"),
+        id,
+        30.0
+    ));
+    let details: serde_json::Value =
+        serde_json::from_str(&db.ai_analysis_details(id, "blur").unwrap().unwrap()).unwrap();
+    assert_eq!(details["source"], "thumbnail");
+    assert_eq!(details["width"], 1024);
+}
+
+#[test]
+#[ignore = "photography evaluation export; requires photos and downloaded models"]
+fn export_selection_candidate_samples() {
+    use ai::selection::FaceEyeStateClassifier;
+    use std::io::Write;
+    let input = std::path::PathBuf::from(
+        std::env::var("SMARTPHOTO_SELECTION_PHOTOS").expect("photo directory"),
+    );
+    let models = std::path::PathBuf::from(
+        std::env::var("SMARTPHOTO_SELECTION_MODELS").expect("global models directory"),
+    );
+    let output = std::path::PathBuf::from(
+        std::env::var("SMARTPHOTO_SELECTION_OUTPUT").expect("new JSONL output file"),
+    );
+    let bus = events::EventBus::new();
+    let manager = ai::ModelManager::new(models, bus.clone(), tasks::TaskSupervisor::new(bus));
+    assert!(
+        manager.selection_eyes_ready(),
+        "download current selection package and SCRFD first"
+    );
+    let classifier = ai::selection::FacemeshEarClassifier::new(&manager);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .unwrap();
+    let mut paths: Vec<_> = std::fs::read_dir(input)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file() && thumbs::is_decodable(p))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let _permit = ai::selection_regions::analysis_lock().lock().unwrap();
+        let (img, source) = ai::selection_regions::source(&path, 2048).expect("source decode");
+        let faces = ai::face::detect_selection_faces(&manager, &img).unwrap();
+        let mut evidence = ai::selection_regions::evidence(&img, source);
+        for (i, face) in faces.iter().enumerate() {
+            evidence
+                .regions
+                .extend(classifier.classify(&img, face, i + 1).unwrap());
+        }
+        let summary = ai::selection_regions::photo_eyes(&evidence.regions, false);
+        let (legacy_img, _) = thumbs::selection_source(&path, 512).unwrap();
+        let legacy_faces = ai::face::detect_faces(&manager, &legacy_img).unwrap();
+        let ears: Vec<_> = legacy_faces
+            .iter()
+            .map(|f| classifier.face_min_ear(&legacy_img, f).unwrap())
+            .collect();
+        let legacy_eyes = ai::selection::aggregate_eyes_ear(&ears, 0.13, 0.20)
+            .map(|(value, _)| value)
+            .unwrap_or_else(|| {
+                if legacy_faces.is_empty() {
+                    "unknown"
+                } else {
+                    "open"
+                }
+                .into()
+            });
+        let legacy_blur =
+            ai::selection::laplacian_variance(&image::imageops::grayscale(&legacy_img))
+                .map(|v| {
+                    if ai::selection::normalize_blur_score(v) < 30.0 {
+                        "soft"
+                    } else {
+                        "sharp"
+                    }
+                })
+                .unwrap_or("unknown");
+        let boxes: Vec<_> = faces
+            .iter()
+            .map(|f| ai::face::normalized_box(f, img.width(), img.height()))
+            .collect();
+        let defocus = if manager.model_path("defocus-candidate").is_file() {
+            Some(
+                ai::selection_defocus::evaluate(&manager, &img, source, &boxes)
+                    .expect("defocus evaluation"),
+            )
+        } else {
+            None
+        };
+        writeln!(out,"{}",serde_json::json!({"path":path.to_string_lossy(),
+            "legacy":{"eyes":legacy_eyes,"blur":legacy_blur},
+            "candidate":{"eyes":summary,"blur":"unknown"}, "eyesEvidence":evidence,"defocusEvidence":defocus})).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires downloaded pinned ONNX; set SMARTPHOTO_EYE_ONNX"]
+fn eye_onnx_contract_smoke() {
+    let path = std::env::var("SMARTPHOTO_EYE_ONNX").expect("set SMARTPHOTO_EYE_ONNX");
+    let dir = tempfile::tempdir().unwrap();
+    let bus = events::EventBus::new();
+    let manager = ai::ModelManager::new(
+        dir.path().into(),
+        bus.clone(),
+        tasks::TaskSupervisor::new(bus),
+    );
+    manager.set_ai_params(ai::AiIndexParams {
+        use_gpu: false,
+        ..Default::default()
+    });
+    std::fs::copy(path, manager.model_path(ai::selection_regions::EYE_MODEL)).unwrap();
+    ai::selection_regions::release();
+    let score =
+        ai::selection_regions::closed_score(&manager, &image::RgbImage::new(32, 32)).unwrap();
+    assert!((0.0..=1.0).contains(&score));
+}
+
+#[test]
+#[ignore = "adapter contract test; set SMARTPHOTO_DEFOCUS_TEST_MODELS to generated test model directory"]
+fn defocus_onnx_contract_smoke() {
+    let root = std::path::PathBuf::from(std::env::var("SMARTPHOTO_DEFOCUS_TEST_MODELS").unwrap());
+    let bus = events::EventBus::new();
+    let manager = ai::ModelManager::new(root, bus.clone(), tasks::TaskSupervisor::new(bus));
+    manager.set_ai_params(ai::AiIndexParams {
+        use_gpu: false,
+        ..Default::default()
+    });
+    let evidence = ai::selection_defocus::evaluate(
+        &manager,
+        &image::RgbImage::new(640, 480),
+        "original",
+        &[[0.25, 0.25, 0.5, 0.5]],
+    )
+    .unwrap();
+    assert_eq!(evidence.regions.len(), 2);
+    assert_eq!(evidence.regions[0].kind, "subject");
+    assert_eq!(evidence.regions[1].kind, "background");
+    assert_eq!(evidence.regions[0].raw_score, Some(0.5));
+    assert!(!evidence.calibrated);
+    assert!(evidence.regions.iter().all(|r| r.state == "unknown"));
+}
+
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    settings, tasks, thumbs,
 };
 
 use db::{AssetFilters, AssetRow};
@@ -101,7 +453,7 @@ fn analysis(db: &db::Db, id: i64, kind: &str) -> Option<(Option<String>, Option<
 // ---------------------------------------------------------------------------
 
 #[test]
-fn blur_task_scores_sharp_and_soft_with_threshold() {
+fn blur_task_reports_detail_clarity_and_abstains_on_low_texture() {
     let (dir, db, _state) = setup();
     let db_dir = dir.path().join("db");
     let photos = dir.path().join("photos");
@@ -130,15 +482,18 @@ fn blur_task_scores_sharp_and_soft_with_threshold() {
     let (sharp_value, sharp_score) = analysis(&db, sharp, "blur").unwrap();
     let (soft_value, soft_score) = analysis(&db, soft, "blur").unwrap();
     assert_eq!(sharp_value.as_deref(), Some("sharp"));
-    assert_eq!(soft_value.as_deref(), Some("soft"));
-    assert!(sharp_score.unwrap() > soft_score.unwrap());
+    assert_eq!(soft_value.as_deref(), Some("unknown"));
+    assert!(
+        soft_score.is_none(),
+        "a smooth gradient has no focus evidence"
+    );
     assert!((0.0..=100.0).contains(&sharp_score.unwrap()));
 
-    // 高阈值下清晰图也可判 soft（阈值参与判定；归一分恒 < 100）
+    // A higher threshold cannot turn strong edges into a definite soft verdict
     assert!(ai::selection::process_blur_task(&db, &db_dir, sharp, 100.0));
     assert_eq!(
         analysis(&db, sharp, "blur").unwrap().0.as_deref(),
-        Some("soft")
+        Some("maybe")
     );
 
     // upsert：同一 (asset, kind) 只有一行
@@ -160,7 +515,7 @@ fn blur_missing_thumb_records_unknown() {
     let id = ins(&db, &photos, "ghost.jpg", &sharp_image());
     std::fs::remove_file(photos.join("ghost.jpg")).unwrap(); // 源消失
 
-    // 源消失 → 512 档无法生成 → unknown + 按完成收尾（真机语义：不占重试）
+    // 源消失 → 1024 档无法生成 → unknown + 按完成收尾（真机语义：不占重试）
     assert!(ai::selection::process_blur_task(&db, &db_dir, id, 30.0));
     assert_eq!(
         analysis(&db, id, "blur").unwrap().0.as_deref(),
@@ -188,10 +543,9 @@ fn blur_face_crop_window_maps_normalized_box() {
     assert_eq!(win(0.0, 0.0, 1.0, 100, 100), (0, 0, 100, 100));
 }
 
-/// 端到端：faces 表归一化框参与 blur 局部双分——无人脸框全图判 sharp，
-/// 归一化框盖住柔和区后局部最小分拉回 soft。
+/// A low-texture face region does not condemn sharp details elsewhere.
 #[test]
-fn blur_task_uses_normalized_face_boxes_for_local_score() {
+fn blur_task_ignores_low_texture_face_and_retains_detail_evidence() {
     let (dir, db, _state) = setup();
     let db_dir = dir.path().join("db");
     let photos = dir.path().join("photos");
@@ -218,14 +572,14 @@ fn blur_task_uses_normalized_face_boxes_for_local_score() {
         Some("sharp")
     );
 
-    // 归一化人脸框 (0,0,0.4,0.4)（外扩 20% 后仍在左半渐变内）→ 局部最小 → soft
+    // Low-texture normalized face region: use detail evidence instead of a false soft verdict
     db.insert_face(id, 0.0, 0.0, 0.4, 0.4, &[0.5f32; 512], None)
         .unwrap();
     assert!(ai::selection::process_blur_task(&db, &db_dir, id, 30.0));
     assert_eq!(
         analysis(&db, id, "blur").unwrap().0.as_deref(),
-        Some("soft"),
-        "归一化框应映射回缩略图像素并参与局部双分"
+        Some("sharp"),
+        "low texture is not evidence of defocus"
     );
 }
 
@@ -638,13 +992,13 @@ fn catalog_selection_entry_is_pinned_facemesh() {
     );
     assert_eq!(entry.bytes_total, 4_864_717);
     assert!(entry.url.starts_with("https://github.com/yakhyo/"));
-    // selection 条目恰一件（清单结构稳定性）
+    // Localization + dedicated candidate classifier.
     assert_eq!(
         ai::catalog()
             .iter()
             .filter(|e| e.feature == "selection")
             .count(),
-        1
+        2
     );
     // 全量 feature 集合：semantic + face + selection
     let mut features: Vec<&str> = ai::catalog().iter().map(|e| e.feature.as_str()).collect();
@@ -902,4 +1256,22 @@ fn eyes_ear_calibration_and_throughput() {
             }
         }
     }
+}
+
+#[test]
+fn regional_focus_distinguishes_edges_from_defocus_and_plain_gradients() {
+    let stripes = image::GrayImage::from_fn(256, 256, |x, _| {
+        image::Luma([if (x / 40) % 2 == 0 { 16 } else { 240 }])
+    });
+    let blurred = image::imageops::blur(&stripes, 5.0);
+    let sharp = ai::focus_quality::measure(&stripes, 30.0);
+    let soft = ai::focus_quality::measure(&blurred, 30.0);
+    assert_eq!(sharp.state, "sharp");
+    assert_eq!(soft.state, "soft");
+    assert!(sharp.score.unwrap() > soft.score.unwrap());
+    let gradient = image::GrayImage::from_fn(256, 256, |_, y| image::Luma([y as u8]));
+    let unknown = ai::focus_quality::measure(&gradient, 30.0);
+    assert_eq!(unknown.state, "unknown");
+    assert_eq!(unknown.reason, Some("low_texture"));
+    assert!(unknown.score.is_none());
 }

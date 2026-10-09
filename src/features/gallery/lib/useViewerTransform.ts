@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMotionOn } from "@/lib/motion";
-const MIN_SCALE = 1;
-const MAX_SCALE = 4;
+const MIN_SCALE = 0.25;
+const MAX_SCALE = 8;
+const FIT_SCALE = 1;
 
 /** 缩放发生后显示；拖动结束再开始计时，切换照片时清理。 */
 function useZoomIndicator(assetId: number, scale: number) {
@@ -13,7 +14,7 @@ function useZoomIndicator(assetId: number, scale: number) {
     const previous = previousZoom.current;
     previousZoom.current = { assetId, scale };
     if (previous.assetId !== assetId) {
-      previousZoom.current.scale = MIN_SCALE;
+      previousZoom.current.scale = FIT_SCALE;
       setZoomVisible(false);
       setZoomInteracting(false);
       setZoomFocused(false);
@@ -101,8 +102,8 @@ export function useViewerTransform(assetId: number) {
   function setZoom(scale: number): void {
     const next = clampScale(scale);
     setView((v) => ({ ...v, scale: next,
-      x: next === MIN_SCALE ? 0 : v.x * next / v.scale,
-      y: next === MIN_SCALE ? 0 : v.y * next / v.scale }));
+      x: next <= FIT_SCALE ? 0 : v.x * next / v.scale,
+      y: next <= FIT_SCALE ? 0 : v.y * next / v.scale }));
   }
   /** 90° 步进旋转（负=逆时针）；触发拖拽/缩放之外的独立维度 */
   const rotate = (delta: number) =>
@@ -124,7 +125,7 @@ export function useViewerTransform(assetId: number) {
         const delta = Math.max(-1000, Math.min(1000, e.deltaY * unit));
         const next = clampScale(v.scale * Math.pow(1.2, -delta / 100));
         if (next === v.scale) return v;
-        if (next === MIN_SCALE) return { scale: MIN_SCALE, x: 0, y: 0, rotation: v.rotation };
+        if (next <= FIT_SCALE) return { scale: next, x: 0, y: 0, rotation: v.rotation };
         const displayed = renderedRef.current;
         const ratio = next / displayed.scale;
         // 指针为锚：保持光标下的图像点不动
@@ -138,7 +139,7 @@ export function useViewerTransform(assetId: number) {
   // 拖拽平移（scale>1 时）：pointer capture，jsdom/老 WebView 缺失时静默退化
   const dragRef = useRef<{ x: number; y: number } | null>(null);
   function handlePointerDown(e: React.PointerEvent<HTMLDivElement>): void {
-    if (view.scale <= MIN_SCALE) return;
+    if (view.scale <= FIT_SCALE) return;
     // 箭头/工具按钮是操作控件，缩放状态下不能被舞台的 pointer capture 抢走点击。
     if (e.target instanceof Element && e.target.closest("button")) return;
     stopAnimation();
@@ -176,8 +177,8 @@ export function useViewerTransform(assetId: number) {
     setAnimating(false);
   }
   function toggleZoom(): void {
-    setView(v => v.scale > MIN_SCALE
-      ? { ...v, scale: MIN_SCALE, x: 0, y: 0 }
+    setView(v => v.scale !== FIT_SCALE
+      ? { ...v, scale: FIT_SCALE, x: 0, y: 0 }
       : { ...v, scale: 2, x: 0, y: 0 });
   }
   return { stageRef, stageSize, dragRef, view, renderedView, animating, rotate, resetView, toggleZoom, setZoom, dragging,

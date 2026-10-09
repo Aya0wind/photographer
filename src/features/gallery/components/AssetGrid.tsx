@@ -664,7 +664,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isRejected = asset.rejected === true;
                     const inner = (
                       <>
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className="h-full w-full [&_.asset-missing-badge]:bottom-14" />
+                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className={`h-full w-full [&_.asset-missing-badge]:bottom-14 ${!readOnly ? "[&_.asset-raw-badge]:top-8" : ""}`} />
                         <span className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-1.5 px-3 pb-1.5 pt-5 font-mono text-[10px] leading-4 tabular-nums text-white/90" style={{ background: "linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0))" }} data-testid="tile-resolution">
                           <span className="whitespace-nowrap">{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
                           <span className="whitespace-nowrap"><span aria-hidden="true">· </span><span data-testid="tile-file-size">{formatBytes(asset.sizeBytes)}</span></span>
@@ -679,7 +679,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                         {isRejected && (
                           <span
-                            className="absolute right-1 top-7 z-10 flex h-4 w-4 items-center justify-center rounded-sm bg-red-500/90 text-white"
+                            className={`absolute right-1 ${readOnly ? "top-7" : "top-14"} z-10 flex h-4 w-4 items-center justify-center rounded-sm bg-red-500/90 text-white`}
                             data-testid="tile-reject-badge"
                             title={t("gallery.rejectedBadge")}
                           >
@@ -690,7 +690,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                         {badge && (
                           <span
-                            className="absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            className={`absolute right-1 ${readOnly ? "top-1" : "top-8"} rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white`}
                             data-testid="gallery-pair-badge"
                           >
                             {badge}
@@ -770,7 +770,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                                 e.currentTarget.click();
                               }
                             }}
-                            className={`absolute bottom-14 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
+                            className={`absolute top-1.5 right-1.5 z-20 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-black/45 transition-colors ${
                               isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
                             }`}
                             data-testid="tile-favorite"

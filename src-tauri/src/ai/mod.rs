@@ -33,8 +33,11 @@ use sha2::{Digest, Sha256};
 
 pub mod embed;
 pub mod face;
+pub mod focus_quality;
 pub mod idle;
 pub mod selection;
+pub mod selection_defocus;
+pub mod selection_regions;
 pub mod semantic;
 
 use crate::events::{AppEvent, EventBus, Throttle};
@@ -85,7 +88,20 @@ const CHUNK: usize = 256 * 1024;
 /// 检索优于 CLIP），但可用 ONNX 量化转换版的 URL/SHA 需先核实——以下暂以
 /// Xenova/clip-vit-base-patch32 量化版占位，M4 推理落地前替换为
 /// siglip2-base-patch16-256 的 onnx 社区转换源（维度 512→768，HNSW/DB 同步改）。
+// open-closed-eye: official OMZ original ONNX, Apache-2.0 training extensions.
+// BGR mean/scale are applied by selection_regions; infrared training is not
+// treated as photography calibration. SHA256 and size verified from the download.
 const CATALOG_JSON: &str = r#"[
+  {
+    "id": "open-closed-eye",
+    "url": "https://storage.openvinotoolkit.org/repositories/open_model_zoo/public/2022.1/open-closed-eye-0001/open_closed_eye.onnx",
+    "mirrorUrl": "https://download.01.org/opencv/openvino_training_extensions/models/open_closed_eye/open_closed_eye.onnx",
+    "sha256": "4daa100034482525a26c9afb9297c16580a531189e66e3d2b2ac7d32becfd593",
+    "bytesTotal": 46164,
+    "version": "omz-2022.1-candidate-v1",
+    "feature": "selection",
+    "tier": null
+  },
   {
     "id": "siglip2-visual",
     "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_quantized.onnx",
@@ -252,7 +268,7 @@ pub fn catalog() -> &'static [ModelEntry] {
 // 三档画质（快速/普通/精准，用户定案 2026-09-28）
 // ---------------------------------------------------------------------------
 
-/// AI 索引画质档位。blur 不分档、ArcFace 不换（既定决策）、eyes 无模型。
+/// AI 索引画质档位。ArcFace 不换；选片闭眼通道统一使用 512px 缓存缩略图。
 ///
 /// | 档 | 人脸检测 | 检测源策略 | 语义 |
 /// |---|---|---|---|

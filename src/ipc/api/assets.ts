@@ -182,23 +182,39 @@ export async function assetsByIds(ids: number[]): Promise<AssetDto[]> {
 }
 
 /** AI 选片分析负载归一（脏数据容错；非对象/字段缺失 → null/剔除） */
-function normalizeAiAnalysis(value: unknown): {
-  eyes?: { value: string; score: number };
-  blur?: { value: string; score: number };
-} | null {
+function normalizeAiAnalysis(value: unknown): AssetDetailDto["aiAnalysis"] {
   if (value === null || typeof value !== "object") return null;
   const r = value as Record<string, unknown>;
-  const chOf = (v: unknown): { value: string; score: number } | undefined => {
+  const chOf = (v: unknown): NonNullable<AssetDetailDto["aiAnalysis"]>["eyes"] => {
     if (v === null || typeof v !== "object") return undefined;
     const c = v as Record<string, unknown>;
-    if (typeof c.value !== "string" || typeof c.score !== "number" || !Number.isFinite(c.score)) {
-      return undefined;
+    if (typeof c.value !== "string" || (c.score != null && (typeof c.score !== "number" || !Number.isFinite(c.score)))) return undefined;
+    const channel: NonNullable<NonNullable<AssetDetailDto["aiAnalysis"]>["eyes"]> = {
+      value: c.value, score: typeof c.score === "number" ? c.score : null,
+      modelVersion: typeof c.modelVersion === "string" ? c.modelVersion : undefined,
+    };
+    if (c.details && typeof c.details === "object") {
+      const d = c.details as Record<string, unknown>;
+      const finite = (n: unknown): number | null => typeof n === "number" && Number.isFinite(n) ? n : null;
+      channel.details = {
+        source: typeof d.source === "string" ? d.source : undefined,
+        width: finite(d.width) ?? undefined, height: finite(d.height) ?? undefined,
+        calibrated: d.calibrated === true, reason: typeof d.reason === "string" ? d.reason : null,
+        regions: Array.isArray(d.regions) ? d.regions.flatMap((v: unknown) => {
+          if (!v || typeof v !== "object") return [];
+          const e = v as Record<string, unknown>;
+          if (typeof e.kind !== "string" || typeof e.state !== "string" || finite(e.person) == null
+            || !Array.isArray(e.bounds) || e.bounds.length !== 4 || e.bounds.some(n => finite(n) == null || n < 0 || n > 1)) return [];
+          return [{ kind: e.kind, state: e.state, person: e.person as number, bounds: e.bounds as number[],
+            side: typeof e.side === "string" ? e.side : null, reason: typeof e.reason === "string" ? e.reason : null,
+            rawScore: finite(e.rawScore), auxiliaryEar: finite(e.auxiliaryEar) }];
+        }) : [],
+      };
     }
-    return { value: c.value, score: c.score };
+    return channel;
   };
-  const out: { eyes?: { value: string; score: number }; blur?: { value: string; score: number } } = {};
-  const eyes = chOf(r.eyes);
-  const blur = chOf(r.blur);
+  const out: NonNullable<AssetDetailDto["aiAnalysis"]> = {};
+  const eyes = chOf(r.eyes), blur = chOf(r.blur);
   if (eyes !== undefined) out.eyes = eyes;
   if (blur !== undefined) out.blur = blur;
   return out;

@@ -1,3 +1,4 @@
+import { SelectionEvidencePanel } from "@/features/culling/components/SelectionEvidencePanel";
 import { AnimatePresence, motion } from "motion/react";
 import { createPortal } from "react-dom";
 
@@ -36,7 +37,7 @@ import { formatBytes } from "@/lib/format";
  * - 大图策略按 kind：photo 优先原图 asset 协议（convertFileSrc(path)），加载失败回退
  *   大档缩略图（名义 1280，后端 snap 512）；RAW 无可载原图（inline-JPEG 提取在 M4），
  *   直接用大档缩略图放大显示。
- * - 交互：wheel 以指针为锚缩放 1x-4x（原生非 passive 监听），scale>1 可拖拽平移，
+ * - 交互：wheel 以指针为锚缩放 25%-800%（原生非 passive 监听），scale>1 可拖拽平移，
  *   90° 步进旋转（按钮 / 键盘 . , R），缩放/平移/旋转共用一条逐帧动画，
  *   图片按实际尺寸绘制；双击复位（含旋转与平移）；←/→ 同组切换（首尾禁用）；
  *   Esc 返回画廊（画廊页不卸载，滚动位置保留）。旋转随资产切换重置，不持久化。
@@ -247,6 +248,8 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
   // 直出档，毫秒级 IO）替换变清晰 → 仅当相机没存内嵌预览时才回落 2048 rawler 显影。
   const { stage, setStage, mainSrc, mainFailed, mainMissing, sourceKind,
     imageLayers, setImageLayers, slowLoading } = useViewerImage(asset, group, index);
+  const [highlightedRegion, setHighlightedRegion] = useState<number[] | null>(null);
+  useEffect(() => setHighlightedRegion(null), [asset.id]);
 
   // --- EXIF 面板 ---------------------------------------------------------------------
   const [detail, setDetail] = useState<AssetDetailDto | null>(() => detailFromAsset(asset));
@@ -470,18 +473,20 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       ai === null || ai === undefined
         ? "not_analyzed"
         : ai.eyes === undefined
-          ? "no_face"
+          ? "not_analyzed"
           : ai.eyes.value;
     const eyesText =
       eyesState === "closed"
         ? t("viewer.ai.eyes.closed")
         : eyesState === "maybe"
-          ? t("viewer.ai.eyes.maybe")
+          ? ai?.eyes?.details?.reason === "eye_state_review"
+            ? t("viewer.ai.reason.eye_state_review")
+            : t("viewer.ai.eyes.maybe")
           : eyesState === "no_face"
             ? t("viewer.ai.eyes.noFace")
             : eyesState === "not_analyzed"
               ? t("viewer.ai.eyes.notAnalyzed")
-              : eyesState;
+              : t(`viewer.ai.state.${eyesState}`);
     const blur = ai?.blur;
     imageRows.push({
       label: t("viewer.ai.eyesLabel"),
@@ -500,13 +505,15 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
         <span key="ai-blur" className="flex w-full min-w-0 items-center justify-end gap-1.5" data-testid="viewer-ai-blur" data-soft={blur?.value === "soft" ? "true" : "false"}>
           {blur === undefined ? (
             <span className="min-w-0 truncate" title={t("viewer.ai.eyes.notAnalyzed")}>{t("viewer.ai.eyes.notAnalyzed")}</span>
+          ) : blur.value === "unknown" ? (
+            <span className="min-w-0 truncate">{t("viewer.ai.state.unknown")}</span>
           ) : (
             <>
-              <span className={`tabular-nums ${blur.value === "soft" ? "text-amber-300" : undefined}`}>{Math.round(blur.score)}</span>
+              <span className={`tabular-nums ${blur.value === "soft" ? "text-amber-300" : undefined}`}>{Math.round(blur.score ?? 0)}</span>
               <span className="inline-flex h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-panel align-middle">
                 <span
                   className={`h-full rounded-full ${blur.value === "soft" ? "bg-amber-400" : "bg-sky-400"}`}
-                  style={{ width: `${Math.max(0, Math.min(100, blur.score))}%` }}
+                  style={{ width: `${Math.max(0, Math.min(100, blur.score ?? 0))}%` }}
                 />
               </span>
             </>
@@ -518,6 +525,10 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       ),
     });
 
+    if (ai?.eyes?.details || ai?.blur?.details) {
+      imageRows.push({ label: t("viewer.ai.evidence"), value: <SelectionEvidencePanel analysis={ai}
+        onRegionSelect={(bounds) => setHighlightedRegion(previous => JSON.stringify(previous) === JSON.stringify(bounds) ? null : bounds)} /> });
+    }
     if (imageRows.length > 0) sections.push({ key: "image", rows: imageRows });
 
     // 【拍摄】相机/镜头核心行恒在（缺值「—」）；其余字段有值才渲染
@@ -699,6 +710,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
                 dragging={dragging}
                 animating={animating}
                 src={layer.src}
+                highlightBounds={layer.phase === "active" ? highlightedRegion : null}
                 alt={layer.phase === "active" ? asset.name : ""}
                 aria-hidden={layer.phase === "active" ? undefined : "true"}
                 draggable={false}

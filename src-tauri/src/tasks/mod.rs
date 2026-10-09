@@ -25,6 +25,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::events::{AppEvent, EventBus};
+pub mod index_budget;
+
+/// Half the physical cores, respecting a more restrictive process affinity.
+pub fn index_parallelism() -> usize {
+    let physical = num_cpus::get_physical();
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(physical);
+    index_parallelism_for(physical, available)
+}
+
+pub fn index_parallelism_for(physical: usize, available: usize) -> usize {
+    (physical.min(available) / 2).max(1)
+}
 
 /// 任务控制柄（任务体收到的软控制接口）：pause/resume/cancel 均为原子
 /// 标志，由任务体轮询决定何时生效（软语义）。
@@ -322,7 +336,10 @@ impl TaskSupervisor {
     /// 按 kind 批量暂停在跑任务（返回命中数）。软语义：任务体需轮询
     /// paused 才生效——索引池已接线；不轮询的任务体无强制力。
     pub fn pause_kind(&self, kind: &str) -> usize {
-        let running = self.running.lock().expect("supervisor running mutex poisoned");
+        let running = self
+            .running
+            .lock()
+            .expect("supervisor running mutex poisoned");
         let mut hit = 0;
         for entry in running.values() {
             if entry.kind == kind {
@@ -335,7 +352,10 @@ impl TaskSupervisor {
 
     /// 按 kind 批量恢复（返回命中数）。
     pub fn resume_kind(&self, kind: &str) -> usize {
-        let running = self.running.lock().expect("supervisor running mutex poisoned");
+        let running = self
+            .running
+            .lock()
+            .expect("supervisor running mutex poisoned");
         let mut hit = 0;
         for entry in running.values() {
             if entry.kind == kind {

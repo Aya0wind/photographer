@@ -122,6 +122,7 @@ pub fn run() {
             });
             // 选片分析参数快照（blur 软阈值 + eyes EAR 阈值 worker 侧读取，0021）
             crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);
+            crate::ai::selection_regions::set_include_single(settings.ai.eyes_include_single);
             crate::ai::selection::set_eyes_ear_thresholds(
                 settings.ai.eyes_ear_closed,
                 settings.ai.eyes_ear_maybe,

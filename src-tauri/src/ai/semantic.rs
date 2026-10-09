@@ -248,21 +248,9 @@ fn process_ai_batch(
 /// 完整矩阵见 tests/dml_bench_test.rs 基准记录。
 pub const AI_BATCH: usize = 16;
 
-/// 语义回填 worker 数（2026-09-21 实测曲线，RTX 5070 Ti DML 批16）：
-/// 1w=24.5 / 2w=43.4 / 4w=57.7 / 6w=66.9 img/s——推理虽经全局会话互斥
-/// （ort rc.13 Session::run 收 &mut self，共享会话并发 Run 不可行），
-/// 但多 worker 的**预处理**（解码+squash，锁外）与 GPU Run 流水线重叠，
-/// 4 worker 到达 6 worker 的 86% 而 embed 会话 intra 线程 4×(核/4)=全核
-/// 不超订；≥16 核取 4，≥8 核取 2，更少取 1（内存/连接footprint 权衡）。
+/// Workers and claimed batches obey the environment CPU/2 semantic budget.
 pub fn worker_count_for_ai() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .map(|n| match n {
-            k if k >= 16 => 4,
-            k if k >= 8 => 2,
-            _ => 1,
-        })
-        .unwrap_or(1)
+    crate::tasks::index_parallelism()
 }
 
 /// 语义回填 + 并发执行（模型齐备 && enable_clip 时由调用方触发）：
@@ -319,11 +307,16 @@ pub fn run_semantic_backfill(
                     // DML 中途毒化后后续批次自动落 1（批量化是语义通道决策
                     // → 按当前档位的 siglip vision 标签查毒化位）
                     loop {
-                        let batch_size = if embedder.prefer_batch(&vision_model) {
+                        let requested_batch = if embedder.prefer_batch(&vision_model) {
                             AI_BATCH
                         } else {
                             1
                         };
+                        let _permit = crate::tasks::index_budget::budget(
+                            crate::tasks::index_budget::Domain::Semantic,
+                        )
+                        .acquire(requested_batch);
+                        let batch_size = _permit.count;
                         // 批量认领 → 单次批推理 → 逐条结算
                         let tasks = match db.claim_index_tasks("ai", batch_size) {
                             Ok(t) => t,

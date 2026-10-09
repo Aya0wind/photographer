@@ -357,8 +357,8 @@ describe("任务抽屉：索引通道行", () => {
     } satisfies IndexStatus);
     renderDrawer();
 
-    const thumbRow = await screen.findByTestId("taskdrawer-index-thumb");
-    expect(thumbRow).toHaveTextContent("正在生成缩略图索引");
+    const thumbRow = await screen.findByTestId("taskdrawer-index-image");
+    expect(thumbRow).toHaveTextContent("正在建立图片索引");
     expect(screen.getByTestId("taskdrawer-index-ai")).toHaveTextContent("正在建立语义索引");
     expect(screen.queryByTestId("taskdrawer-index-exif")).not.toBeInTheDocument();
     expect(screen.queryByTestId("taskdrawer-index-face")).not.toBeInTheDocument();
@@ -368,7 +368,7 @@ describe("任务抽屉：索引通道行", () => {
       .toHaveTextContent("失败 2");
     // thumb 无失败：不渲染红字
     expect(
-      screen.getByTestId("taskdrawer-index-thumb").querySelector('[data-testid="taskdrawer-index-failed"]'),
+      screen.getByTestId("taskdrawer-index-image").querySelector('[data-testid="taskdrawer-index-failed"]'),
     ).toBeNull();
   });
 
@@ -382,7 +382,7 @@ describe("任务抽屉：索引通道行", () => {
     const user = userEvent.setup();
     renderDrawer();
 
-    await user.click((await screen.findByTestId("taskdrawer-index-thumb")).querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
+    await user.click((await screen.findByTestId("taskdrawer-index-image")).querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
     await waitFor(() => expect(indexPauseMock).toHaveBeenCalledTimes(1));
 
     // running=0 的通道：继续 = index_task_resume（全局恢复，2026-09-29 接线）
@@ -393,13 +393,13 @@ describe("任务抽屉：索引通道行", () => {
       face: counters(0, 0, 10),
     } satisfies IndexStatus);
     await useAiStore.getState().refreshIndexStatus();
-    await user.click(screen.getByTestId("taskdrawer-index-thumb").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
+    await user.click(screen.getByTestId("taskdrawer-index-image").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
     await waitFor(() => expect(indexResumeMock).toHaveBeenCalledTimes(1));
-    expect(kickMock).not.toHaveBeenCalled();
+    expect(kickMock).toHaveBeenCalledWith("image");
 
     // 导入进行中：让路闸接管，按钮禁用（导入收尾自动恢复）
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
-    const toggle = screen.getByTestId("taskdrawer-index-thumb").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement;
+    const toggle = screen.getByTestId("taskdrawer-index-image").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement;
     expect(toggle).toBeDisabled();
   });
 

@@ -63,12 +63,20 @@ export function useAssetViewer(groups: AssetGroup[], sourceAssets: AssetDto[] = 
       ++versionRequest.current;
       setVersion(null);
       markAssetViewed(asset.id);
-      setSearchParams({ asset: String(asset.id) });
+      setSearchParams(previous => {
+        const next=new URLSearchParams(previous);
+        next.set("asset",String(asset.id));
+        return next;
+      });
     },
     closeViewer: () => {
       ++versionRequest.current;
       setVersion(null);
-      setSearchParams({});
+      setSearchParams(previous => {
+        const next=new URLSearchParams(previous);
+        next.delete("asset");
+        return next;
+      });
     },
     /** 在当前结果集切换（可跨日期）；切图同样算一次浏览 */
     navigateTo: (index: number) => {
@@ -78,7 +86,11 @@ export function useAssetViewer(groups: AssetGroup[], sourceAssets: AssetDto[] = 
         ++versionRequest.current;
         setVersion(null);
         markAssetViewed(next.id);
-        setSearchParams({ asset: String(next.id) });
+        setSearchParams(previous => {
+          const params=new URLSearchParams(previous);
+          params.set("asset",String(next.id));
+          return params;
+        });
       }
     },
     /** 格式/版本切换只替换预览文件，不插入网格或改变胶片条的位置。 */

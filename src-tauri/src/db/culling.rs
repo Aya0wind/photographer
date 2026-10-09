@@ -418,7 +418,9 @@ impl Db {
              JOIN assets a ON a.id = s.asset_id \
              LEFT JOIN cull_decision d ON d.session_id = s.session_id AND d.asset_id = s.asset_id \
              LEFT JOIN ai_analysis ee ON ee.asset_id = s.asset_id AND ee.kind = 'eyes' \
+               AND (ee.details_json IS NULL OR json_extract(ee.details_json, '$.calibrated') = 1) \
              LEFT JOIN ai_analysis bb ON bb.asset_id = s.asset_id AND bb.kind = 'blur' \
+               AND (bb.details_json IS NULL OR json_extract(bb.details_json, '$.calibrated') = 1) \
              LEFT JOIN (SELECT asset_id AS aid, COUNT(*) AS cnt FROM faces GROUP BY asset_id) fc \
                ON fc.aid = s.asset_id \
              {SNAPSHOT_BURST_SIZE_JOIN} \

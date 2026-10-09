@@ -27,6 +27,19 @@ use crate::db::Db;
 use crate::events::{AppEvent, EventBus};
 use crate::thumbs::SIZE_TIERS;
 
+/// Rebuild excludes active image-task writes. Workers keep their existing
+/// pause/resume controls and continue against the newly queued tasks afterwards.
+pub fn image_index_lock(db_dir: &Path) -> std::sync::Arc<std::sync::RwLock<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::RwLock<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("image index locks poisoned");
+    locks.entry(db_dir.to_owned()).or_default().clone()
+}
+
 /// 缩略图任务：生成全部低清档才算 done；档位失败时区分两种归因——
 /// **源缺失**（第三方移动/删除）是暂态：不落 thumb_state、保持 0，按
 /// attempts 策略重试，文件移回后自然完成（2026-09-28 边界修复：此前
@@ -81,7 +94,11 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 /// 层）→ phash → thumb（数量大头）。每 worker 一次认领一条，认领经
 /// SQLite 写锁串行化，不重不漏。
 fn step(db: &Db, db_dir: &Path) -> bool {
-    let task = ["exif", "hash", "phash", "blur"]
+    let _permit =
+        crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
+    let barrier = image_index_lock(db_dir);
+    let _guard = barrier.read().expect("image index barrier poisoned");
+    let task = ["exif", "thumb", "hash", "phash", "blur"]
         .iter()
         .find_map(|kind| db.claim_index_task(kind).ok().flatten())
         .or_else(|| db.claim_index_task("thumb").ok().flatten());
@@ -93,14 +110,15 @@ fn step(db: &Db, db_dir: &Path) -> bool {
         "exif" => process_exif_task(db, task.asset_id),
         "phash" => process_phash_task(db, db_dir, task.asset_id),
         "hash" => process_hash_task(db, task.asset_id),
-        // 0021 失焦通道：512 档缩略图拉普拉斯清晰度分（无模型依赖）
+        // Selection source-v2: high-resolution regional diagnostics; no focus
+        // verdict from an uncalibrated Laplacian/background score.
         "blur" => crate::ai::selection::process_blur_task(
             db,
             db_dir,
             task.asset_id,
             crate::ai::selection::blur_soft_threshold(),
         ),
-        // eyes 通道由 ai::selection::run_eyes_backfill 串行消费（依赖
+        // eyes 通道由 ai::selection::run_eyes_backfill 并发消费（依赖
         // SCRFD + 闭眼分类器，index worker 无模型会话，不在此认领）
         _ => false,
     };
@@ -285,9 +303,7 @@ pub fn run_pending_gated(
 
 /// worker 数（物理核心数全量；测试断言用）。
 pub fn worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
+    crate::tasks::index_parallelism()
 }
 
 /// 导入完成后的钩子：派一个 supervisor 任务把当前待办全速跑完。

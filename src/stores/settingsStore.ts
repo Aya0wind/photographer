@@ -42,6 +42,7 @@ export interface Settings {
     enableClip: boolean;
     enableFace: boolean;
     enableSceneTags: boolean;
+    eyesIncludeSingle?: boolean;
     indexSchedule: "idleOnly" | "afterImport" | "manual";
     cpuLimitPercent: number;
     useGpu: boolean;

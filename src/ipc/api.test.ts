@@ -1,5 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+it("AI 区域结果保留 null 分数和不确定状态，剔除无效坐标", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce({ id: 1, path: "a.jpg", filename: "a.jpg", kind: "photo",
+    aiAnalysis: { eyes: { value: "unknown", score: null, modelVersion: "candidate",
+      details: { calibrated: false, source: "original", width: 2048, height: 1365,
+        regions: [{ kind: "eye", person: 1, side: "left", bounds: [0.1,0.2,0.1,0.1], state: "unknown", reason: "eye_pixels" },
+          { kind: "eye", person: 1, bounds: [2,0,0,0], state: "closed" }] } } } });
+  const result = await assetDetail(1);
+  expect(result?.aiAnalysis?.eyes?.value).toBe("unknown");
+  expect(result?.aiAnalysis?.eyes?.score).toBeNull();
+  expect(result?.aiAnalysis?.eyes?.details?.regions).toHaveLength(1);
+  expect(result?.aiAnalysis?.eyes?.details?.regions[0]?.reason).toBe("eye_pixels");
+});
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";

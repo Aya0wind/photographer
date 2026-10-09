@@ -26,6 +26,8 @@ pub struct IndexKindStatus {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatusDto {
+    pub image: IndexKindStatus,
+    pub selection_ready: bool,
     pub thumb: IndexKindStatus,
     pub exif: IndexKindStatus,
     pub ai: IndexKindStatus,
@@ -36,8 +38,8 @@ pub struct IndexStatusDto {
     pub blur: IndexKindStatus,
 }
 
-const KINDS: [&str; 8] = [
-    "thumb", "exif", "ai", "face", "phash", "hash", "eyes", "blur",
+const KINDS: [&str; 9] = [
+    "image", "thumb", "exif", "ai", "face", "phash", "hash", "eyes", "blur",
 ];
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
@@ -106,7 +108,41 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     if dto.exif.pending == 0 && dto.exif.running == 0 {
         dto.exif.done = total_assets;
     }
+    dto.image = image_index_status(&db)?;
+    dto.selection_ready = state.ai.selection_eyes_ready();
     Ok(dto)
+}
+
+/// Count each photo once; completion requires every component. EXIF with no
+/// task is the synchronous import path. Eyes/blur without task/result are pending.
+fn image_index_status(db: &crate::db::Db) -> Result<IndexKindStatus, String> {
+    let mut result = IndexKindStatus::default();
+    let mut stmt = db.0.prepare("WITH parts AS (
+        SELECT a.id, a.thumb_state,
+          MAX(CASE WHEN t.state='running' THEN 1 ELSE 0 END) AS running,
+          MAX(CASE WHEN t.state='failed' THEN 1 ELSE 0 END) AS failed,
+          MAX(CASE WHEN t.state='pending' THEN 1 ELSE 0 END) AS pending,
+          MAX(CASE WHEN t.kind='eyes' AND t.state='done' THEN 1 ELSE 0 END) AS eyes_done,
+          MAX(CASE WHEN t.kind='blur' AND t.state='done' THEN 1 ELSE 0 END) AS blur_done
+        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ('thumb','exif','eyes','blur')
+        WHERE a.kind IN ('photo','raw') GROUP BY a.id
+      ) SELECT CASE WHEN running=1 THEN 'running' WHEN failed=1 THEN 'failed'
+          WHEN pending=1 OR thumb_state=0 OR eyes_done=0 OR blur_done=0 THEN 'pending'
+          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1").map_err(|e|e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (status, count) = row.map_err(|e| e.to_string())?;
+        match status.as_str() {
+            "running" => result.running = count,
+            "failed" => result.failed = count,
+            "pending" => result.pending = count,
+            _ => result.done = count,
+        }
+        result.total += count;
+    }
+    Ok(result)
 }
 
 /// 手动触发核：thumb/exif → index::kick（全核跑待办）；ai → 语义回填
@@ -130,6 +166,22 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
+        "image" => {
+            state.supervisor.resume_kind("index");
+            db.create_thumb_tasks_for_unindexed()
+                .map_err(|e| e.to_string())?;
+            db.create_eyes_tasks_for_unindexed()
+                .map_err(|e| e.to_string())?;
+            db.create_blur_tasks_for_unindexed()
+                .map_err(|e| e.to_string())?;
+            for component in ["thumb", "exif", "eyes", "blur"] {
+                db.retry_failed_index_tasks(component)
+                    .map_err(|e| e.to_string())?;
+            }
+            crate::index::kick(db_dir.clone(), &supervisor);
+            crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
+            Ok(())
+        }
         "thumb" | "exif" | "phash" | "hash" | "eyes" | "blur" => {
             match kind {
                 "thumb" => {
@@ -223,7 +275,7 @@ pub async fn index_kick_now(state: State<'_, SharedState>, kind: String) -> Resu
 // ---------------------------------------------------------------------------
 
 /// 重建通道名（IPC kind）。
-const REBUILD_KINDS: [&str; 5] = ["semantic", "face", "thumb", "exif", "selection"];
+const REBUILD_KINDS: [&str; 6] = ["image", "semantic", "face", "thumb", "exif", "selection"];
 
 /// 单通道重建核（同步、可测）：清理该通道全部持久化产物 + 时间账/任务账
 /// 重排。返回重排后的待办数。不 kick worker（调用方决定：手动 IPC 后台
@@ -234,6 +286,32 @@ pub fn rebuild_channel_core(
     kind: &str,
 ) -> Result<u64, String> {
     match kind {
+        "image" => {
+            let barrier = crate::index::image_index_lock(db_dir);
+            let _guard = barrier.write().map_err(|e| e.to_string())?;
+            // The target is the established cache folder below this library,
+            // never the photo root or the library directory itself.
+            let cache = db_dir.join("thumbs");
+            if cache.exists() {
+                std::fs::remove_dir_all(&cache).map_err(|e| e.to_string())?;
+            }
+            let transaction = db.0.unchecked_transaction().map_err(|e| e.to_string())?;
+            db.reset_thumb_states().map_err(|e| e.to_string())?;
+            db.clear_exif_columns().map_err(|e| e.to_string())?;
+            db.0.execute_batch(
+                "DELETE FROM ai_analysis WHERE kind IN ('eyes','blur');
+                DELETE FROM index_tasks WHERE kind IN ('thumb','exif','eyes','blur');",
+            )
+            .map_err(|e| e.to_string())?;
+            let pending = db
+                .requeue_thumb_tasks_for_all()
+                .map_err(|e| e.to_string())?
+                + db.requeue_exif_tasks_for_all().map_err(|e| e.to_string())?
+                + db.requeue_eyes_tasks_for_all().map_err(|e| e.to_string())?
+                + db.requeue_blur_tasks_for_all().map_err(|e| e.to_string())?;
+            transaction.commit().map_err(|e| e.to_string())?;
+            Ok(pending)
+        }
         "semantic" => {
             // 向量真值（usearch 文件）+ 时间账 + 任务账；先逐出双池再删文件
             // （真机事故 2026-09-20：先删后逐出时，重建+回填竞态下 worker 持
@@ -299,6 +377,10 @@ fn kick_rebuilt_channel(
     }
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
+        "image" | "selection" => {
+            crate::index::kick(db_dir.clone(), &supervisor);
+            crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &bus, &supervisor);
+        }
         "semantic" => {
             crate::ai::semantic::kick_semantic_if_ready(db_dir, &state.ai, &bus, &supervisor)
         }
@@ -339,7 +421,7 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
             }
         }
-        "thumb" | "exif" | "selection" => {}
+        "image" | "thumb" | "exif" | "selection" => {}
         other => return Err(format!("未知重建通道: {other}（可选 {REBUILD_KINDS:?}）")),
     }
     Ok(())
@@ -391,9 +473,13 @@ pub async fn index_rebuild(state: State<'_, SharedState>, kind: String) -> Resul
     let db_dir = run_blocking(shared.clone(), active_db_dir).await?;
     // 清理+重排+kick 后台执行（删大目录/批量 UPDATE 不阻塞 IPC）
     let supervisor = std::sync::Arc::clone(&shared.supervisor);
-    supervisor.spawn("index", format!("rebuild-{kind}"), move |_| {
-        run_rebuild(&shared, &db_dir, &kind);
-    });
+    supervisor.spawn_unique(
+        "index",
+        format!("rebuild-{kind}:{}", db_dir.display()),
+        move |_| {
+            run_rebuild(&shared, &db_dir, &kind);
+        },
+    );
     Ok(())
 }
 
@@ -515,12 +601,14 @@ pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
         ai.blur_soft_threshold.to_bits() as u64,
         ai.eyes_ear_closed.to_bits() as u64,
         ai.eyes_ear_maybe.to_bits() as u64,
+        u64::from(ai.eyes_include_single),
     ] {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     let mut h = hash;
     for tag in [
+        ai.quality_tier.as_str(),
         crate::ai::selection::BLUR_ALGO_VERSION,
         crate::ai::selection::EYES_ALGO_VERSION,
     ] {

@@ -19,6 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+num_cpus = "1.17"
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
 # 扩展图片格式解码（2026-09-29 格式支持批次）：全部纯 Rust/无 C 构建负担

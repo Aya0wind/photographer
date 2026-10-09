@@ -200,6 +200,7 @@ describe("画廊合并：工具条与默认态", () => {
     renderGallery();
     await waitFor(() => expect(screen.getByTestId("search-count")).toHaveTextContent("412"));
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2);
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
     expect(screen.getByTestId("gallery-favorite-filter")).toHaveTextContent("已收藏");
 
     fireEvent.click(screen.getByTestId("gallery-favorite-filter"));
@@ -245,6 +246,20 @@ describe("画廊合并：工具条与默认态", () => {
 // --- URL 协议 -------------------------------------------------------------------------
 
 describe("画廊合并：URL 协议", () => {
+  it("未知日期语义结果可打开预览，关闭后仍保持搜索结果",async()=>{
+    assetsPageMock.mockResolvedValue([]);
+    vi.mocked(searchSemantic).mockResolvedValue([{assetId:99,score:0.9}]);
+    vi.mocked(assetsByIds).mockResolvedValue([makeAsset(99,null)]);
+    renderGallery("/gallery?mode=semantic&q=cat");
+    const tiles=await screen.findAllByTestId("gallery-tile");
+    fireEvent.click(tiles[0]);
+    expect(await screen.findByTestId("viewer-stage")).toBeInTheDocument();
+    expect(screen.getByTestId("semantic-status-header")).toHaveTextContent("cat");
+    fireEvent.click(screen.getByTestId("viewer-close"));
+    await waitFor(()=>expect(screen.queryByTestId("viewer-stage")).not.toBeInTheDocument());
+    expect(screen.getByTestId("semantic-status-header")).toHaveTextContent("cat");
+    expect(searchSemantic).toHaveBeenCalledTimes(1);
+  });
   it("?mode=semantic&q=… → 语义模式自动执行（分数角标渲染）", async () => {
     assetsPageMock.mockResolvedValue([]);
     vi.mocked(searchSemantic).mockResolvedValue([
@@ -378,10 +393,13 @@ describe("画廊合并：筛选面板", () => {
       fireEvent.click(screen.getByTestId("search-filter-toggle"));
       expect(screen.getByTestId("search-filter-panel")).toBeInTheDocument();
       expect(within(screen.getByTestId("search-filter-panel")).queryByTestId("search-format-button")).not.toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
 
       fireEvent.click(screen.getByTestId("search-format-button"));
       fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /JPG/ }));
+      fireEvent.click(screen.getByTestId("search-date-picker"));
       fireEvent.change(screen.getByTestId("search-from"), { target: { value: "2026-01-01" } });
+      fireEvent.click(screen.getByTestId("search-date-apply"));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(300);
       });
@@ -403,12 +421,13 @@ describe("画廊合并：筛选面板", () => {
     renderGallery();
     await screen.findAllByTestId("gallery-tile");
     expect(screen.queryByText("已存视图")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
     fireEvent.click(screen.getByTestId("search-format-button"));
     const menu = await screen.findByTestId("search-format-menu");
-    fireEvent.click(within(menu).getByRole("checkbox", { name: /JPG/ }));
+    fireEvent.click(await within(menu).findByRole("checkbox", { name: /JPG/ }));
     fireEvent.click(within(menu).getByRole("checkbox", { name: /NEF/ }));
     await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["JPG", "NEF"] }));
-    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+    expect(screen.getByTestId("search-filter-count")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("search-format-clear"));
     await waitFor(() => expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100));
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
@@ -421,10 +440,11 @@ describe("画廊合并：筛选面板", () => {
     await screen.findAllByTestId("gallery-tile");
 
     expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
     expect(screen.getByTestId("gallery-quick-filters")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("search-orientation-portrait"));
 
-    expect(screen.queryByTestId("search-filter-count")).not.toBeInTheDocument();
+    expect(screen.getByTestId("search-filter-count")).toHaveTextContent("1");
     expect(screen.getByTestId("search-chip")).toHaveTextContent("竖拍");
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { orientation: "portrait" }),
@@ -444,6 +464,36 @@ describe("画廊合并：筛选面板", () => {
 // --- 三态切换 -------------------------------------------------------------------------
 
 describe("画廊合并：三态切换", () => {
+  it("语义请求未完成时只显示搜索中和转圈，返回空结果后才显示无匹配",async()=>{
+    let finish!:(hits:Awaited<ReturnType<typeof searchSemantic>>)=>void;
+    vi.mocked(searchSemantic).mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
+    renderGallery("/gallery?mode=semantic&q=test");
+    const loading=await screen.findByTestId("filter-results-loading");
+    expect(loading).toHaveTextContent("搜索中");
+    expect(loading.querySelector(".animate-spin")).not.toBeNull();
+    expect(screen.queryByTestId("semantic-empty")).not.toBeInTheDocument();
+    await act(async()=>{finish([]);});
+    expect(await screen.findByTestId("semantic-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("filter-results-loading")).not.toBeInTheDocument();
+  });
+
+  it("慢筛选保留旧照片作加载背景，返回后才替换为空结果",async()=>{
+    let finish!:(assets:AssetDto[])=>void;
+    assetsPageMock.mockResolvedValueOnce([makeAsset(1,"2026-09-18")])
+      .mockReturnValue(new Promise(resolve=>{finish=resolve;}));
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+    fireEvent.click(screen.getByTestId("search-filter-toggle"));
+    fireEvent.click(screen.getByTestId("search-orientation-portrait"));
+    await waitFor(()=>expect(assetsPageMock).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByTestId("gallery-tile")).toHaveLength(1);
+    expect(screen.queryByTestId("gallery-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByTestId("filter-results-transition")).toHaveAttribute("aria-busy","true");
+    expect(screen.getByTestId("search-filter-chips").firstElementChild).toHaveAttribute("data-testid","search-clear-all");
+    await act(async()=>{finish([]);});
+    expect(await screen.findByTestId("search-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("filter-results-loading")).not.toBeInTheDocument();
+  });
   it("语义态 → 修改筛选自动退出回筛选态", async () => {
     assetsPageMock.mockResolvedValue([]);
     vi.mocked(searchSemantic).mockResolvedValue([{ assetId: 1, score: 0.9 }]);
@@ -456,7 +506,7 @@ describe("画廊合并：三态切换", () => {
     // 展开筛选面板改条件 → 退出语义态（分数角标消失、走 assetsPage filters）
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
     fireEvent.click(screen.getByTestId("search-format-button"));
-    fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /NEF/ }));
+    fireEvent.click(await within(screen.getByTestId("search-format-menu")).findByRole("checkbox", { name: /NEF/ }));
     await waitFor(() =>
       expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100, { formats: ["NEF"] }),
     );
@@ -473,7 +523,7 @@ describe("画廊合并：三态切换", () => {
 
     fireEvent.click(screen.getByTestId("search-filter-toggle"));
     fireEvent.click(screen.getByTestId("search-format-button"));
-    fireEvent.click(within(screen.getByTestId("search-format-menu")).getByRole("checkbox", { name: /NEF/ }));
+    fireEvent.click(await within(screen.getByTestId("search-format-menu")).findByRole("checkbox", { name: /NEF/ }));
     await waitFor(() => expect(screen.getByTestId("search-empty")).toBeInTheDocument());
     expect(screen.queryByTestId("gallery-empty-import")).not.toBeInTheDocument();
   });

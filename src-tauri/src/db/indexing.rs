@@ -1,6 +1,7 @@
 //! 索引任务与分析结果仓储。
 
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl Db {
     // —— 索引任务（index_tasks）——
@@ -273,7 +274,7 @@ impl Db {
         model_version: &str,
     ) -> Result<()> {
         self.0.execute(
-            "INSERT INTO ai_analysis (asset_id, kind, value, score, model_version, analyzed_at)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)              ON CONFLICT (asset_id, kind) DO UPDATE SET              value = excluded.value, score = excluded.score,              model_version = excluded.model_version, analyzed_at = excluded.analyzed_at",
+            "INSERT INTO ai_analysis (asset_id, kind, value, score, model_version, analyzed_at)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)              ON CONFLICT (asset_id, kind) DO UPDATE SET              value = excluded.value, score = excluded.score,              model_version = excluded.model_version, analyzed_at = excluded.analyzed_at, details_json = NULL",
             params![asset_id, kind, value, score, model_version, now_rfc3339()],
         )?;
         Ok(())
@@ -293,6 +294,38 @@ impl Db {
             ))
         })?;
         rows.collect()
+    }
+
+    /// Summary and region evidence are committed together, never a mixture of
+    /// an old summary and a new analysis after interruption.
+    pub fn set_ai_analysis_details(
+        &self,
+        asset_id: i64,
+        kind: &str,
+        value: &str,
+        score: Option<f64>,
+        version: &str,
+        details: &serde_json::Value,
+    ) -> Result<()> {
+        self.0.execute(
+            "INSERT INTO ai_analysis (asset_id, kind, value, score, model_version, analyzed_at, details_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(asset_id, kind) DO UPDATE SET value=excluded.value, score=excluded.score,
+             model_version=excluded.model_version, analyzed_at=excluded.analyzed_at, details_json=excluded.details_json",
+            params![asset_id, kind, value, score, version, now_rfc3339(), details.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn ai_analysis_details(&self, asset_id: i64, kind: &str) -> Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT details_json FROM ai_analysis WHERE asset_id=?1 AND kind=?2",
+                params![asset_id, kind],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|r| r.flatten())
     }
 
     /// 为闭眼通道建任务：photo/raw 且无 eyes 任务的行（任意状态——检测在

@@ -96,6 +96,63 @@ fn write_real_jpg(path: &std::path::Path, w: u32, h: u32) {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn rebuild_image_requeues_all_components_without_touching_user_or_ai_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    std::fs::create_dir_all(db_dir.join("thumbs/256")).unwrap();
+    let photo = dir.path().join("original.jpg");
+    write_real_jpg(&photo,800,600);
+    let original = std::fs::read(&photo).unwrap();
+    let db = open_db(&db_dir);
+    db.insert_asset(&asset(&photo.to_string_lossy(),Photo)).unwrap();
+    db.0.execute_batch("UPDATE assets SET rating=4, flagged=1, ai_indexed_at='done', face_indexed_at='done';
+        UPDATE index_tasks SET state='done' WHERE kind IN ('thumb','eyes','blur');").unwrap();
+    db.set_ai_analysis(1,"eyes",Some("maybe"),None,"old").unwrap();
+    let pid = db.create_person().unwrap();
+    db.insert_face(1,0.1,0.1,0.3,0.3,&[0.1;512],Some(pid)).unwrap();
+    std::fs::write(db_dir.join("thumbs/256/old.jpg"),b"cache").unwrap();
+    std::fs::write(db_dir.join("vectors.usearch"),b"unchanged").unwrap();
+    assert_eq!(rebuild_channel_core(&db,&db_dir,"image").unwrap(),4);
+    for component in ["thumb","exif","eyes","blur"] { assert_eq!(pending_count(&db,component),1); }
+    assert!(!db_dir.join("thumbs").exists());
+    assert!(db.ai_analysis_for(1).unwrap().is_empty());
+    let retained:(i32,i32,String,String,i32,Option<i32>)=db.0.query_row(
+        "SELECT rating,flagged,ai_indexed_at,face_indexed_at,thumb_state,iso FROM assets WHERE id=1",[],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).unwrap();
+    assert_eq!(retained,(4,1,"done".into(),"done".into(),0,None));
+    assert_eq!(db.0.query_row("SELECT COUNT(*) FROM faces",[],|r|r.get::<_,i32>(0)).unwrap(),1);
+    assert_eq!(std::fs::read(photo).unwrap(),original);
+    assert_eq!(std::fs::read(db_dir.join("vectors.usearch")).unwrap(),b"unchanged");
+}
+
+#[test]
+fn image_rebuild_waits_for_previous_component_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let db = open_db(&db_dir);
+    db.insert_asset(&asset("X:/original.jpg",Photo)).unwrap();
+    let barrier = index::image_index_lock(&db_dir);
+    let old_task = barrier.read().unwrap();
+    let (started_tx,started_rx)=std::sync::mpsc::channel();
+    let (done_tx,done_rx)=std::sync::mpsc::channel();
+    let destination=db_dir.clone();
+    let worker=std::thread::spawn(move || {
+        let db=open_db(&destination);
+        started_tx.send(()).unwrap();
+        rebuild_channel_core(&db,&destination,"image").unwrap();
+        done_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    db.set_ai_analysis(1,"blur",Some("soft"),Some(1.0),"old-task").unwrap();
+    drop(old_task);
+    done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    worker.join().unwrap();
+    assert!(db.ai_analysis_for(1).unwrap().is_empty(),"old task cannot repopulate results after rebuilding");
+}
+
+#[test]
 fn rebuild_semantic_clears_vectors_and_requeues() {
     let dir = tempfile::tempdir().unwrap();
     let db_dir = dir.path().join("db");

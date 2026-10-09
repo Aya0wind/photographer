@@ -77,9 +77,15 @@ mod path_tests {
         assert_eq!(norm_sep(r"C:\Photos\Album"), "C:/Photos/Album");
         #[cfg(not(windows))]
         {
-            assert_eq!(norm_sep(r"/Volumes/Photos\Trip/Album"), r"/Volumes/Photos\Trip/Album");
+            assert_eq!(
+                norm_sep(r"/Volumes/Photos\Trip/Album"),
+                r"/Volumes/Photos\Trip/Album"
+            );
             assert_ne!(norm_sep("/Photos/Album"), norm_sep("/photos/album"));
-            assert_ne!(norm_sep(r"/Photos\Trip/Album"), norm_sep("/Photos/Trip/Album"));
+            assert_ne!(
+                norm_sep(r"/Photos\Trip/Album"),
+                norm_sep("/Photos/Trip/Album")
+            );
         }
     }
 }

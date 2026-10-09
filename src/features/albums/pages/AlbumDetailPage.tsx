@@ -1,3 +1,4 @@
+import FilterResultsTransition from "@/shared/components/FilterResultsTransition";
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
 import { usePhotoTimeline } from "@/features/gallery/lib/usePhotoTimeline";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
@@ -34,6 +35,7 @@ import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
 import ErrorModal from "@/shared/components/ErrorModal";
 import {
   FilterChipsRow,
+  ClearFiltersButton,
   FilterPanel,
   buildChips,
   buildFilters,
@@ -109,6 +111,10 @@ export default function AlbumDetailPage() {
   const appliedKeyRef = useRef(debouncedKey);
   appliedKeyRef.current = debouncedKey;
   const [reloadToken, setReloadToken] = useState(0);
+  const loadedOnce=useRef(false);
+  const resultKey=useRef<string|null>(null);
+  const [resultsRevision,setResultsRevision]=useState(0);
+
 
   const fetchPage = useCallback(
     async (afterId: number, key: string): Promise<AssetDto[]> => {
@@ -160,6 +166,9 @@ export default function AlbumDetailPage() {
       if (page.length < PAGE_LIMIT) hasMoreRef.current = false;
       loadingRef.current = false;
       setLoadingMore(false);
+      if(resultKey.current!==null&&resultKey.current!==debouncedKey)setResultsRevision(n=>n+1);
+      resultKey.current=debouncedKey;
+      loadedOnce.current=true;
       setStatus("ready");
     });
     return () => {
@@ -503,7 +512,7 @@ export default function AlbumDetailPage() {
 
         {/* 筛选面板（相册维度隐藏：本页已在相册上下文内） */}
         {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4">
-          <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>{t("search.filter")}</span><button type="button" className="ui-icon-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>×</button></div>
+          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary"><span>{t("search.filter")}</span><ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={()=>setInputs(EMPTY_INPUTS)}/><span className="flex-1"/><button type="button" className="ui-icon-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>×</button></div>
           <FilterPanel inputs={inputs} onPatch={patchInputs} hideAlbum />
         </div>}
 
@@ -569,7 +578,8 @@ export default function AlbumDetailPage() {
 
         {/* 照片墙（与图库同款虚拟网格） */}
         <div className="relative min-h-0 flex-1">
-          {status === "loading" ? (
+          <FilterResultsTransition busy={status==="loading"||rawKey!==debouncedKey} revision={resultsRevision}>
+          {status === "loading" && !loadedOnce.current ? (
             <div
               className="flex h-full items-center justify-center text-xs text-text-muted"
               data-testid="album-detail-loading"
@@ -614,6 +624,7 @@ export default function AlbumDetailPage() {
               scrollTestId="album-detail-grid-scroll"
             />
           )}
+          </FilterResultsTransition>
         </div>
 
       </div>

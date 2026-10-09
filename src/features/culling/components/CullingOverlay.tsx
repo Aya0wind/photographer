@@ -1,3 +1,4 @@
+import { SelectionEvidencePanel } from "./SelectionEvidencePanel";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -458,7 +459,7 @@ export default function CullingOverlay({
     if (ai === null || ai === undefined) return [];
     const chips: Array<{ key: string; tone: "red" | "amber" }> = [];
     if (ai.eyes?.value === "closed") chips.push({ key: "eyesClosed", tone: "red" });
-    else if (ai.eyes?.value === "maybe") chips.push({ key: "eyesMaybe", tone: "amber" });
+    else if (ai.eyes?.value === "maybe") chips.push({ key: ai.eyes.details?.reason === "eye_state_review" ? "eyesReview" : "eyesMaybe", tone: "amber" });
     if (ai.blur?.value === "soft") chips.push({ key: "blurSoft", tone: "amber" });
     return chips;
   }, [aiDetail]);
@@ -954,6 +955,11 @@ export default function CullingOverlay({
               )}
 
               {/* 左右翻片 */}
+              {(aiDetail?.aiAnalysis?.eyes?.details || aiDetail?.aiAnalysis?.blur?.details) && (
+                <div className="absolute right-3 bottom-10 z-20 max-h-[40%] w-64 overflow-auto rounded-lg border border-edge bg-surface/95 p-3">
+                  <SelectionEvidencePanel analysis={aiDetail.aiAnalysis} />
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => navigate(index - 1)}

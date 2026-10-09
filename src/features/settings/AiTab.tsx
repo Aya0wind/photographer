@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { imageIndexCounters } from "@/lib/imageIndexStatus";
+import ErrorModal from "@/shared/components/ErrorModal";
+import ImageIndexProgress from "@/shared/components/ImageIndexProgress";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -77,7 +80,10 @@ function groupState(models: AiModelStatus[]): GroupState {
   return models.some((m) => m.state === "done") ? "partial" : "none";
 }
 function modelsForPackage(models: AiModelStatus[], tier: QualityTier, feature: AiFeature): AiModelStatus[] {
-  if (feature === "selection") return models.filter((m) => m.feature === "selection");
+  if (feature === "selection") {
+    const detector = tierFaceIds(tier).find(id => id.startsWith("scrfd"));
+    return models.filter((m) => m.feature === "selection" || normalizeModelId(m.id) === detector);
+  }
   const ids = new Set(feature === "semantic" ? tierSemanticIds(tier) : tierFaceIds(tier));
   return models.filter((m) => ids.has(normalizeModelId(m.id)));
 }
@@ -90,6 +96,7 @@ function ModelGroupCard({ feature, models }: { feature: AiFeature; models: AiMod
   const [error, setError] = useState(false);
   const badge = groupState(models);
   const installed = models.filter((m) => m.state === "done").length;
+  const deletable = models.some(m => m.state === "done" && (feature !== "selection" || m.feature === "selection"));
   const active = models.some((m) => m.state === "downloading" || m.state === "verifying");
   const totalBytes = models.reduce((sum, m) => sum + m.bytesTotal, 0);
   const doneBytes = models.reduce((sum, m) => sum + (m.state === "done" ? m.bytesTotal :
@@ -104,7 +111,7 @@ function ModelGroupCard({ feature, models }: { feature: AiFeature; models: AiMod
     const targets = models.filter((m) => action === "download"
       ? m.state === "idle" || m.state === "failed"
       : action === "cancel" ? m.state === "downloading" || m.state === "verifying"
-      : m.state === "done");
+      : m.state === "done" && (feature !== "selection" || m.feature === "selection"));
     // 共用资源使用同一个真实 id；下载跳过已装资源，状态刷新会同步更新各档。
     for (const model of targets) {
       try {
@@ -136,7 +143,7 @@ function ModelGroupCard({ feature, models }: { feature: AiFeature; models: AiMod
             : badge !== "ready" && <button type="button" disabled={busy} onClick={() => void operate("download")}
               className="rounded bg-accent px-2.5 py-1 text-xs font-medium text-black disabled:opacity-50"
               data-testid={`ai-group-download-${feature}`}>{t(badge === "partialFailed" ? "settings.ai.package.retry" : "settings.ai.model.download")}</button>}
-          {installed > 0 && !active && <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)}
+          {deletable && !active && <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)}
             className="rounded border border-edge px-2.5 py-1 text-xs text-text-secondary disabled:opacity-50"
             data-testid={`ai-group-delete-${feature}`}>{t("settings.ai.model.delete")}</button>}
         </div>
@@ -535,7 +542,7 @@ function RebuildButton({ kind }: { kind: RebuildKind }) {
     <span className="flex items-center gap-1.5" data-testid={`settings-rebuild-${kind}`}>
       {confirming ? (
         <span className="flex items-center gap-1.5">
-          <span className="text-[11px] text-red-400">{t("settings.ai.rebuild.confirm")}</span>
+          <span className="text-[11px] text-red-400">{t(kind === "image" ? "settings.ai.rebuild.imageConfirm" : "settings.ai.rebuild.confirm")}</span>
           <button
             type="button"
             onClick={() => void rebuild()}
@@ -563,11 +570,12 @@ function RebuildButton({ kind }: { kind: RebuildKind }) {
           {t("settings.ai.rebuild.run")}
         </button>
       )}
-      {error !== null && (
+      {error !== null && kind !== "image" && (
         <span className="max-w-[160px] truncate text-[11px] text-red-400" title={error} data-testid="ai-rebuild-error">
           {error}
         </span>
       )}
+      {kind === "image" && <ErrorModal message={error} onClose={() => setError(null)} />}
     </span>
   );
 }
@@ -698,6 +706,12 @@ type T = ReturnType<typeof useTranslation>["t"];
 
 /** 行计数文案（thumb/exif：待处理/已完成/失败；ai：待处理 + 已索引 N/M + 失败） */
 function countersText(kind: IndexKind, status: IndexStatus, t: T): string {
+  if (kind === "image") {
+    const c = imageIndexCounters(status);
+    return [t("settings.ai.index.pending", { count: c.pending }),
+      t("settings.ai.index.imageProgress", { done: c.done, total: c.total }),
+      c.failed > 0 ? t("settings.ai.index.failed", { count: c.failed }) : null].filter(Boolean).join(" · ");
+  }
   if (kind === "ai" || kind === "face") {
     const c = kind === "ai" ? status.ai : status.face;
     if (!c) return "—";
@@ -729,6 +743,7 @@ function IndexStatusSection() {
   const refreshIndexStatus = useAiStore((s) => s.refreshIndexStatus);
   const [error, setError] = useState<string | null>(null);
   const [kicking, setKicking] = useState<Set<IndexKind>>(() => new Set());
+  const [errorKind, setErrorKind] = useState<IndexKind | null>(null);
 
   // 进 tab 拉一次；此后 indexTaskProgress/indexTaskResumed 事件经 aiStore 驱动重拉
   useEffect(() => {
@@ -744,6 +759,7 @@ function IndexStatusSection() {
         await indexKickNow(kind);
       } catch (err) {
         // 后端 Err 文案透传（如 ai 模型未就绪「请先在设置中下载模型」）
+        setErrorKind(kind);
         setError(err instanceof Error ? err.message : typeof err === "string" ? err : null);
         return;
       } finally {
@@ -758,7 +774,7 @@ function IndexStatusSection() {
     [kicking, refreshIndexStatus],
   );
 
-  const rows: IndexKind[] = status?.face ? ["thumb", "exif", "ai", "face"] : ["thumb", "exif", "ai"];
+  const rows: IndexKind[] = ["image", "ai", "face"];
 
   return (
     <>
@@ -768,7 +784,7 @@ function IndexStatusSection() {
           <p className="py-2 text-[11px] text-text-muted" data-testid="index-status-unavailable">
             {t("settings.ai.index.unavailable")}
           </p>
-          {(["thumb", "exif", "ai", "face"] as const).map((kind) => (
+          {(["image", "ai", "face"] as const).map((kind) => (
             <div
               key={kind}
               className="flex min-h-[36px] items-center justify-between gap-8 border-b border-edge/40 py-2"
@@ -785,12 +801,12 @@ function IndexStatusSection() {
           // 运行态从持久化任务账派生（index_tasks 表是唯一真值）：
           // 切页重挂载/应用重启后快照重拉，按钮状态随之恢复——
           // 本地 state 派生会在重挂载时丢失（真机修复 2026-09-19）
-          const c = status[kind];
+          const c = kind === "image" ? imageIndexCounters(status) : status[kind];
           if (!c) return null;
-          const running = kicking.has(kind) || c.pending > 0 || c.running > 0;
+          const running = kicking.has(kind) || c.running > 0 || (kind !== "image" && c.pending > 0);
           const complete = c.total === 0 || c.done >= c.total;
           const followingImport = importing && complete &&
-            (kind === "thumb" || kind === "exif" ||
+            (kind === "image" ||
               (kind === "ai" && aiSettings?.enableClip) ||
               (kind === "face" && aiSettings?.enableFace));
           return (
@@ -802,9 +818,13 @@ function IndexStatusSection() {
             >
               <div className="min-w-0">
                 <div className="text-xs text-text-primary">{label}</div>
+                {kind === "image" && <p className="mt-1 text-[11px] text-text-muted">{t("settings.ai.index.imageDescription")}</p>}
+                {kind === "image" && status.selectionReady === false && !complete &&
+                  <p className="mt-1 text-[11px] text-amber-400">{t("settings.ai.index.waitingSelectionModels")}</p>}
                 <div className="mt-0.5 font-mono text-[11px] tabular-nums text-text-muted" data-testid={`index-count-${kind}`}>
                   {countersText(kind, status, t)}
                 </div>
+                {kind === "image" && <ImageIndexProgress status={status} />}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <button
@@ -830,11 +850,12 @@ function IndexStatusSection() {
           );
         })
       )}
-      {error !== null && (
+      {error !== null && errorKind !== "image" && (
         <p className="text-[11px] text-red-400" role="alert" data-testid="index-kick-error">
           {t("settings.ai.index.kickError", { error })}
         </p>
       )}
+      <ErrorModal message={errorKind === "image" ? error : null} onClose={() => setError(null)} />
     </>
   );
 }
@@ -1124,6 +1145,11 @@ export default function AiTab() {
           label={t("settings.ai.scene")}
           onChange={() => {}}
         />
+      </SettingRow>
+      <SettingRow label={t("viewer.ai.singleEyeSetting")} desc={t("viewer.ai.singleEyeSettingDesc")}>
+        <Toggle checked={settings.ai.eyesIncludeSingle ?? false}
+          label={t("viewer.ai.singleEyeSetting")}
+          onChange={(next) => commit({ ai: { eyesIncludeSingle: next } })} />
       </SettingRow>
 
       {/* 人脸数据一键清除（红色强确认） */}

@@ -46,7 +46,10 @@ mod tests {
         let new = root.path().join("photohub");
         prepare_with_legacy_migration(&new, true).unwrap();
         assert!(!old.exists());
-        assert_eq!(std::fs::read(new.join("settings.json")).unwrap(), b"legacy-settings");
+        assert_eq!(
+            std::fs::read(new.join("settings.json")).unwrap(),
+            b"legacy-settings"
+        );
     }
 
     #[test]
@@ -57,8 +60,14 @@ mod tests {
         std::fs::create_dir(&new).unwrap();
         std::fs::write(new.join("settings.json"), b"current-settings").unwrap();
         prepare_with_legacy_migration(&new, true).unwrap();
-        assert_eq!(std::fs::read(old.join("settings.json")).unwrap(), b"legacy-settings");
-        assert_eq!(std::fs::read(new.join("settings.json")).unwrap(), b"current-settings");
+        assert_eq!(
+            std::fs::read(old.join("settings.json")).unwrap(),
+            b"legacy-settings"
+        );
+        assert_eq!(
+            std::fs::read(new.join("settings.json")).unwrap(),
+            b"current-settings"
+        );
     }
 
     #[test]
@@ -75,7 +84,10 @@ mod tests {
             prepare_with_legacy_migration(&new, migrate).unwrap();
             assert!(new.is_dir());
             assert!(!new.join("settings.json").exists());
-            assert_eq!(std::fs::read(old.join("settings.json")).unwrap(), b"legacy-settings");
+            assert_eq!(
+                std::fs::read(old.join("settings.json")).unwrap(),
+                b"legacy-settings"
+            );
         }
     }
 

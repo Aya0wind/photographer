@@ -107,11 +107,16 @@ pub async fn device_scan(
 pub async fn device_copy_only(state: State<'_, SharedState>, id: String) -> Result<bool, String> {
     run_blocking(state.inner().clone(), move |state| {
         let key = crate::devices::normalize_device_id(&id);
-        let source = state.devices.lock().expect("devices mutex poisoned")
-            .get(&key).map(|entry| std::sync::Arc::clone(&entry.source))
+        let source = state
+            .devices
+            .lock()
+            .expect("devices mutex poisoned")
+            .get(&key)
+            .map(|entry| std::sync::Arc::clone(&entry.source))
             .ok_or_else(|| "来源已断开，请重新选择".to_string())?;
         Ok(source.copy_only())
-    }).await
+    })
+    .await
 }
 
 /// 注册并扫描本地文件夹源（M2“从文件夹导入”），返回快照。

@@ -129,7 +129,10 @@ pub struct AppearanceSettings {
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        Self { theme: ColorTheme::Dark, animations: true }
+        Self {
+            theme: ColorTheme::Dark,
+            animations: true,
+        }
     }
 }
 
@@ -293,6 +296,8 @@ pub struct AiSettings {
     /// 标定同上）。改任一 EAR 阈值经 selection 指纹重排 eyes 任务
     /// （分析结果随阈值变）。
     pub eyes_ear_maybe: f32,
+    /// Include intentional single-eye closure in review suggestions (default off).
+    pub eyes_include_single: bool,
 }
 
 impl Default for AiSettings {
@@ -316,6 +321,7 @@ impl Default for AiSettings {
             blur_soft_threshold: 30.0,
             eyes_ear_closed: 0.13,
             eyes_ear_maybe: 0.20,
+            eyes_include_single: false,
         }
     }
 }

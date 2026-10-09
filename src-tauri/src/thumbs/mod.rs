@@ -148,7 +148,7 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
         return None; // 其他类型永久不支持
     }
     // 内嵌直出档不 snap（>2048 是语义标记而非目标边长）
-    let size = if is_raw_embed_request(&ext, size) {
+    let size = if size == 1024 || is_raw_embed_request(&ext, size) {
         size
     } else {
         snap_size(size)
@@ -319,7 +319,7 @@ pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
         .extension()
         .and_then(|e| e.to_str())?
         .to_ascii_lowercase();
-    let size = if is_raw_embed_request(&ext, size) {
+    let size = if size == 1024 || is_raw_embed_request(&ext, size) {
         size
     } else {
         snap_size(size)
@@ -433,7 +433,7 @@ pub fn cached_without_source(db_dir: &Path, src: &Path, size: u16) -> Option<Str
     if !is_decodable(src) {
         return None;
     }
-    let size = if is_raw_embed_request(&ext, size) {
+    let size = if size == 1024 || is_raw_embed_request(&ext, size) {
         size
     } else {
         snap_size(size)
@@ -452,6 +452,28 @@ pub fn cached_without_source(db_dir: &Path, src: &Path, size: u16) -> Option<Str
     hits.sort(); // 同 16-hex 前缀下按 mtime 秒字典序 → 最后一个 = 最新代
     hits.pop()
         .map(|name| dir.join(name).to_string_lossy().into_owned())
+}
+
+/// Asset-ledger lookup avoids a network metadata request when the indexed
+/// source is on a NAS. A rebuild discards these caches before updating metadata.
+pub fn cached_for_asset(db_dir: &Path, src: &Path, size: u16, mtime: &str) -> Option<String> {
+    let timestamp = chrono::DateTime::parse_from_rfc3339(mtime)
+        .ok()?
+        .timestamp();
+    let time = if timestamp >= 0 {
+        UNIX_EPOCH.checked_add(Duration::from_secs(timestamp as u64))?
+    } else {
+        UNIX_EPOCH.checked_sub(Duration::from_secs(timestamp.unsigned_abs()))?
+    };
+    let cache = cache_path(
+        db_dir,
+        src,
+        if size == 1024 { 1024 } else { snap_size(size) },
+        time,
+    );
+    cache
+        .is_file()
+        .then(|| cache.to_string_lossy().into_owned())
 }
 
 /// 生成一枚缩略图：并发许可 + 解码线程 + 超时放弃。
@@ -566,7 +588,10 @@ fn decode_and_encode(src: &Path, size: u16) -> Option<Vec<u8>> {
     };
     let thumb = apply_orientation(thumb, orientation);
     let mut jpeg = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80);
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+        &mut jpeg,
+        if size == 1024 { 90 } else { 80 },
+    );
     thumb.write_with_encoder(encoder).ok()?;
     Some(jpeg)
 }
@@ -688,6 +713,71 @@ fn develop_raw_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
     let developed = RawDevelop::default().develop_intermediate(&raw).ok()?;
     let image = developed.to_dynamic_image()?;
     Some(image.thumbnail(size as u32, size as u32).to_rgb8())
+}
+
+/// Selection analysis uses decoded source pixels, never the lossy browsing cache.
+/// The caller bounds concurrent analyses; embedded RAW previews are accepted only
+/// when they contain enough detail, otherwise the RAW is developed.
+pub fn selection_source(src: &Path, size: u16) -> Option<(image::RgbImage, &'static str)> {
+    if size == 0 {
+        return None;
+    }
+    let ext = src.extension()?.to_str()?.to_ascii_lowercase();
+    let orientation = orientation_from_file(src).unwrap_or(1);
+    let (img, source) = if is_raw_ext(&ext) {
+        let preview = raw_preview_jpeg(src);
+        let adequate = preview
+            .as_ref()
+            .and_then(|p| jpeg_header_dims(p))
+            .is_some_and(|(w, h)| w.max(h) >= u32::from(size));
+        let embedded = || {
+            jpeg_scaled_bytes(preview.as_ref()?, size).or_else(|| {
+                full_decode_bytes(preview.as_ref()?).map(|img| {
+                    image::DynamicImage::ImageRgb8(img)
+                        .thumbnail(size.into(), size.into())
+                        .to_rgb8()
+                })
+            })
+        };
+        if adequate {
+            if let Some(preview) = embedded() {
+                (preview, "raw_embedded_jpeg")
+            } else {
+                (develop_raw_resize(src, size)?, "raw_developed")
+            }
+        } else if let Some(developed) = develop_raw_resize(src, size) {
+            (developed, "raw_developed")
+        } else {
+            // Unsupported RAW development does not invalidate its usable preview;
+            // per-eye/subject pixel gates decide whether it contains enough detail.
+            (embedded()?, "raw_embedded_jpeg")
+        }
+    } else if matches!(ext.as_str(), "jpg" | "jpeg") {
+        (
+            jpeg_scaled(src, size).or_else(|| {
+                image::open(src)
+                    .ok()
+                    .map(|d| d.thumbnail(size.into(), size.into()).to_rgb8())
+            })?,
+            "original",
+        )
+    } else if matches!(ext.as_str(), "heic" | "heif") {
+        // HEIF decoder already applies orientation.
+        return Some((heif_decode_resize(src, size)?, "original"));
+    } else if ext == "jxl" {
+        (jxl_decode_resize(src, size)?, "original")
+    } else if ext == "avif" {
+        (avif_decode_resize(src, size)?, "original")
+    } else {
+        (
+            image::open(src)
+                .ok()?
+                .thumbnail(size.into(), size.into())
+                .to_rgb8(),
+            "original",
+        )
+    };
+    Some((apply_orientation(img, orientation), source))
 }
 
 /// 从文件头解析 EXIF Orientation（JPEG APP1 / RAW TIFF IFD0 同源）。

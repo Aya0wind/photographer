@@ -298,6 +298,24 @@ export interface AssetGroupDate {
  * 顶层 duplicate_count 未做 camelCase 重命名；EXIF 扩展字段（宽高/ISO/光圈/快门/焦距）
  * 后端暂未返回（契约扩展中），存在即透出、缺失为 null/undefined。
  */
+export interface SelectionEvidence {
+  source?: string;
+  width?: number;
+  height?: number;
+  calibrated?: boolean;
+  reason?: string | null;
+  regions: Array<{ kind: string; person: number; side: string | null;
+    bounds: number[]; state: string; reason: string | null; rawScore: number | null;
+    auxiliaryEar: number | null }>;
+}
+export interface AiAnalysisChannel {
+  value: string;
+  /** Uncalibrated diagnostic/model output, not an accuracy percentage. */
+  score: number | null;
+  modelVersion?: string;
+  details?: SelectionEvidence;
+}
+
 export interface AssetDetailDto {
   id: number;
   path: string;
@@ -348,10 +366,10 @@ export interface AssetDetailDto {
   /** AI 选片分析（C 阶段；null=未分析）。
    *  eyes.value：closed=有人闭眼 | maybe=可能闭眼 | no_face=未检出人脸（后端
    *  归一 token，未知值原样透传）；blur.value：soft=疑似软片。
-   *  score 均为 0-100 置信分。 */
+   *  score 为诊断值，不代表准确率；unknown 的 score 可以为空。 */
   aiAnalysis: {
-    eyes?: { value: string; score: number };
-    blur?: { value: string; score: number };
+    eyes?: AiAnalysisChannel;
+    blur?: AiAnalysisChannel;
   } | null;
 }
 
@@ -507,7 +525,7 @@ export type ThumbGetResult =
 
 // --- 索引任务（缩略图/EXIF/语义）：状态与手动触发 -------------------------------------
 
-export type IndexKind = "thumb" | "exif" | "ai" | "face";
+export type IndexKind = "image" | "thumb" | "exif" | "ai" | "face";
 
 /**
  * 单通道任务计数（index_status，对应后端 IndexKindStatus）。与后端持久化
@@ -524,6 +542,11 @@ export interface IndexCounters {
 
 /** 索引状态（index_status 返回；thumb/exif/ai 三通道计数） */
 export interface IndexStatus {
+  /** Each photo completes only after thumbnail, metadata and selection tasks. */
+  image?: IndexCounters;
+  selectionReady?: boolean;
+  eyes?: IndexCounters;
+  blur?: IndexCounters;
   thumb: IndexCounters;
   exif: IndexCounters;
   ai: IndexCounters;
@@ -534,7 +557,7 @@ export interface IndexStatus {
 // --- 索引重建 / 资产标记（M5） --------------------------------------------------------
 
 /** 重建索引的通道（index_rebuild；语义通道在重建命令里叫 semantic，与 IndexKind 的 ai 区分） */
-export type RebuildKind = "thumb" | "exif" | "semantic" | "face";
+export type RebuildKind = "image" | "thumb" | "exif" | "semantic" | "face";
 
 /** 删除库（library_delete）：库数据目录必删；photoRoot 给定时连照片目录
  *  一起删（后端三道闸：library.db 存在性/非活跃库/照片目录非盘根）。

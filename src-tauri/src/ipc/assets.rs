@@ -92,9 +92,10 @@ pub struct AssetDetailDto {
 pub struct AiAnalysisValue {
     /// eyes: closed/maybe/unknown；blur: sharp/soft/unknown
     pub value: Option<String>,
-    /// 0-100 清晰度分 / 0-1 闭眼概率
+    /// Uncalibrated diagnostic score; null when no scalar verdict is justified.
     pub score: Option<f64>,
     pub model_version: String,
+    pub details: Option<serde_json::Value>,
 }
 
 /// 按分析类型分桶的详情载荷：eyes/blur 各自缺省 None（未分析）。
@@ -331,6 +332,10 @@ pub fn fetch_asset_detail(
             value,
             score,
             model_version,
+            details: db
+                .ai_analysis_details(id, &kind)
+                .map_err(|e| e.to_string())?
+                .and_then(|s| serde_json::from_str(&s).ok()),
         };
         match kind.as_str() {
             "eyes" => ai_analysis.eyes = Some(entry),

@@ -294,7 +294,7 @@ fn semantic_backfill_persists_in_non_ascii_library_path() {
 #[test]
 fn ai_worker_count_capped() {
     let n = ai::semantic::worker_count_for_ai();
-    assert!((1..=4).contains(&n), "AI worker 应 ∈ [1,4]，实际 {n}");
+    assert_eq!(n,tasks::index_parallelism());
 }
 
 // ---------------------------------------------------------------------------

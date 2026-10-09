@@ -31,7 +31,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     MIGRATION_0024_CULLING,
     MIGRATION_0025_EDITABLE_METADATA,
     MIGRATION_0026_GEO_REGIONS,
+    MIGRATION_0027_SELECTION_REGIONS,
 ];
+
+const MIGRATION_0027_SELECTION_REGIONS: &str = r#"
+ALTER TABLE ai_analysis ADD COLUMN details_json TEXT;
+DELETE FROM ai_analysis WHERE kind IN ('eyes', 'blur');
+UPDATE index_tasks SET state = 'pending', attempts = 0 WHERE kind IN ('eyes', 'blur');
+"#;
 
 /// 0001：初始 schema——assets（查重索引与资产表）、jobs / job_files
 /// （断点恢复 journal）、logs（任务日志），外加查询所需的索引。

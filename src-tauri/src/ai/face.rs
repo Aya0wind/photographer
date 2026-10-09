@@ -123,17 +123,17 @@ impl ModelManager {
             .all(|id| self.model_path(id).is_file())
     }
 
-    /// 闭眼检测模型是否就绪（feature="selection" 清单条目全部落盘：
-    /// 2026-09-28 起 = facemesh，MediaPipe Face Landmarker 478 点 ONNX）。
+    /// 闭眼检测依赖：当前档 SCRFD、FaceMesh 定位、专用睁闭眼候选分类器。
     /// 未安装 → eyes 通道跳过并计数，任务保持 pending（下载完成后
     /// eyes-postinstall watch 自然续跑）。
     pub fn selection_eyes_ready(&self) -> bool {
-        let ids: Vec<String> = super::catalog()
-            .iter()
-            .filter(|e| e.feature == "selection")
-            .map(|e| e.id.clone())
-            .collect();
-        !ids.is_empty() && ids.iter().all(|id| self.model_path(id).is_file())
+        [
+            "facemesh",
+            super::selection_regions::EYE_MODEL,
+            super::face_detect_model_id(self.ai_params().quality_tier),
+        ]
+        .iter()
+        .all(|id| self.model_path(id).is_file())
     }
 
     /// 惰性加载检测会话（模型按当前档位解析；切档后 det_model 不匹配即
@@ -414,6 +414,65 @@ fn nms(faces: Vec<DetectedFace>, iou_threshold: f32) -> Vec<DetectedFace> {
         kept.push(face);
     }
     kept
+}
+
+/// Selection-only tiled detection. Overlapping tiles retain small faces at the
+/// detector's native resolution; NMS merges duplicates in source coordinates.
+pub fn detect_selection_faces(
+    manager: &ModelManager,
+    img: &RgbImage,
+) -> Result<Vec<DetectedFace>, String> {
+    let mut faces = detect_faces(manager, img)?;
+    let tile = 1024u32;
+    if img.width().max(img.height()) > tile {
+        let starts = |length: u32| {
+            let mut result = vec![0];
+            while *result.last().unwrap() + tile < length {
+                let next = (*result.last().unwrap() + 768).min(length.saturating_sub(tile));
+                if result.last() == Some(&next) {
+                    break;
+                }
+                result.push(next);
+            }
+            result
+        };
+        for y in starts(img.height()) {
+            for x in starts(img.width()) {
+                let crop = image::imageops::crop_imm(
+                    img,
+                    x,
+                    y,
+                    tile.min(img.width() - x),
+                    tile.min(img.height() - y),
+                )
+                .to_image();
+                for mut face in detect_faces(manager, &crop)? {
+                    // A cropped face at an internal tile boundary is not evidence
+                    // of a second person. Its full representation belongs to the overlap.
+                    if (x > 0 && face.box_x < 8.0)
+                        || (y > 0 && face.box_y < 8.0)
+                        || (x + crop.width() < img.width()
+                            && face.box_x + face.box_w > crop.width() as f32 - 8.0)
+                        || (y + crop.height() < img.height()
+                            && face.box_y + face.box_h > crop.height() as f32 - 8.0)
+                    {
+                        continue;
+                    }
+                    face.box_x += x as f32;
+                    face.box_y += y as f32;
+                    for point in &mut face.kps {
+                        point[0] += x as f32;
+                        point[1] += y as f32;
+                    }
+                    faces.push(face);
+                }
+            }
+        }
+    }
+    faces.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut faces = nms(faces, NMS_IOU);
+    faces.truncate(MAX_FACES_PER_IMAGE);
+    Ok(faces)
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +995,7 @@ pub struct FaceTaskOutcome {
     pub task_id: i64,
     pub asset_id: i64,
     pub payload: Option<FacePayload>,
+    _permit: crate::tasks::index_budget::Permit,
 }
 
 /// 阶段 1 推理核（可注入：生产 = [`infer_face_payload`]；集成测试 = 假嵌入
@@ -1069,10 +1129,13 @@ fn face_stage1_loop(
     gate: &InFlightGate,
 ) {
     loop {
+        let permit =
+            crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Face).acquire(1);
         gate.begin();
         let task = match db.claim_index_task("face") {
             Ok(Some(t)) => t,
             Ok(None) => {
+                drop(permit);
                 // 无可认领：无在途 ⇒ 退出安全；等过 ⇒ 失败任务可能已回
                 // pending，必须重新认领（防两阶段竞态下任务滞留）。
                 if gate.settle_or_wait_exit() {
@@ -1103,6 +1166,7 @@ fn face_stage1_loop(
                 task_id: task.id,
                 asset_id: task.asset_id,
                 payload,
+                _permit: permit,
             })
             .is_err()
         {
@@ -1142,16 +1206,11 @@ fn face_stage2_consume(
     done
 }
 
-/// face 回填阶段 1 worker 数（2026-09-28 定值，RTX 5070 Ti / 24 核实测）：
-/// SCRFD DML 107ms/张 + 每脸 ArcFace，推理经会话互斥天然串行 ≈ 9 张/秒
-/// 上限——3 个 worker 的取图/解码/对齐预处理（锁外）与 GPU Run 流水线
-/// 重叠即可喂饱推理；更多 worker 只会排队等会话锁。
-const FACE_WORKERS: usize = 3;
-
+/// Face inference uses the dynamic CPU/2 budget; clustering stays single-threaded.
 /// 人脸回填两阶段执行核（推理核可注入，见 [`FaceInfer`]；生产入口 =
 /// [`run_face_backfill`]）。① 为 `face_indexed_at IS NULL` 的照片建任务
 /// （派 worker 看存量 pending，不看本轮新建数——任务已存在时新建数为 0，
-/// 直接空转会假成功）。② 阶段 1 FACE_WORKERS 个 worker 认领→取图（新
+/// 直接空转会假成功）。② 阶段 1 CPU/2 个 worker 认领→取图（新
 /// 档位策略）→解码→letterbox→SCRFD→对齐→ArcFace（会话互斥天然把 GPU
 /// 推理串行化，会话槽结构不动）；阶段 2 单线程消费 mpsc → 在线聚类
 /// （顺序敏感单点）→ assign/absorb → insert_face（归一化坐标）→
@@ -1177,7 +1236,7 @@ pub fn run_face_backfill_with(
     let (tx, rx) = std::sync::mpsc::channel::<FaceTaskOutcome>();
     let gate = Arc::new(InFlightGate::default());
     let mut handles = Vec::new();
-    for n in 0..FACE_WORKERS {
+    for n in 0..crate::tasks::index_parallelism() {
         let db_dir = db_dir.to_path_buf();
         let infer = Arc::clone(&infer);
         let tx = tx.clone();

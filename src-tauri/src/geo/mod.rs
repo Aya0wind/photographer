@@ -421,7 +421,10 @@ impl GeoIndex {
 
     /// 带解析进度的加载（progress = 已解析文件数/总数；仅全量解析路径回调）。
     /// 指纹与上次一致且有 bincode 缓存 → 直接反序列化（跳过全部解析）。
-    pub fn load_reporting(dir: &Path, progress: &(dyn Fn(u32, u32) + Sync)) -> Result<GeoIndex, String> {
+    pub fn load_reporting(
+        dir: &Path,
+        progress: &(dyn Fn(u32, u32) + Sync),
+    ) -> Result<GeoIndex, String> {
         let fingerprint = fingerprint_of_dir(dir);
         if std::fs::read_to_string(dir.join(backfill::FINGERPRINT_FILE))
             .ok()
@@ -656,11 +659,7 @@ pub fn datav_count(dir: &Path) -> usize {
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("datav-")
-                })
+                .filter(|e| e.file_name().to_string_lossy().starts_with("datav-"))
                 .count()
         })
         .unwrap_or(0)

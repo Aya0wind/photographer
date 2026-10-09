@@ -7,7 +7,7 @@ export function aiSetupPackages(draft: Pick<OnboardingDraft, "aiChoice" | "quali
     { feature: "semantic", ids: tierSemanticIds(draft.qualityTier) },
     ...(draft.aiChoice === "all" ? [
       { feature: "face", ids: tierFaceIds(draft.qualityTier) },
-      { feature: "selection", ids: ["facemesh"] },
+      { feature: "selection", ids: ["facemesh", "open-closed-eye"] },
     ] : []),
   ];
 }

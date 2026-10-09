@@ -14,18 +14,19 @@ export function viewerImageSize(source: { width: number; height: number }, viewp
   };
 }
 
-export default function ViewerImageLayer({ viewport, view, dragging, animating = false, onLoad, className = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & {
+export default function ViewerImageLayer({ viewport, view, dragging, animating = false, onLoad, className = "", highlightBounds, ...props }: ImgHTMLAttributes<HTMLImageElement> & {
   viewport: { width: number; height: number };
   view: ViewerImageView;
   dragging: boolean;
   animating?: boolean;
+  highlightBounds?: number[] | null;
 }) {
   const [source, setSource] = useState({ width: 0, height: 0 });
   const ratio = window.devicePixelRatio || 1;
   const align = !animating && !dragging;
   const size = viewerImageSize(source, viewport, view.scale, ratio, align);
   const snap = (value: number) => align ? Math.round(value * ratio) / ratio : value;
-  return <img {...props}
+  return <><img {...props}
     className={`${className} select-none object-contain ${size ? "" : "max-h-full max-w-full"}`}
     onLoad={(event) => {
       const image = event.currentTarget;
@@ -39,5 +40,13 @@ export default function ViewerImageLayer({ viewport, view, dragging, animating =
       transform: `translate(${snap(view.x)}px, ${snap(view.y)}px) rotate(${view.rotation}deg)`,
       transition: "none",
     }}
-  />;
+  />
+    {size && highlightBounds?.length === 4 && <div className="pointer-events-none absolute left-1/2 top-1/2 z-10"
+      style={{ width: size.width, height: size.height,
+        transform: `translate(calc(-50% + ${snap(view.x)}px), calc(-50% + ${snap(view.y)}px)) rotate(${view.rotation}deg)` }}>
+      <div data-testid="selection-region-highlight" className="absolute rounded border-2 border-amber-400 bg-amber-400/10"
+        style={{ left: `${highlightBounds[0]! * 100}%`, top: `${highlightBounds[1]! * 100}%`,
+          width: `${highlightBounds[2]! * 100}%`, height: `${highlightBounds[3]! * 100}%` }} />
+    </div>}
+  </>;
 }

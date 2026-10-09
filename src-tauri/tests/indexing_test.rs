@@ -3,6 +3,42 @@
 
 mod common;
 
+#[test]
+fn image_status_counts_photos_once_and_requires_all_components() {
+    let (_dir,state,db)=common::library_fixture();
+    for name in ["done","pending","running","failed"] {
+        db.insert_asset(&asset_row(&format!("X:/{name}.jpg"),AssetKind::Photo)).unwrap();
+    }
+    db.0.execute_batch("UPDATE assets SET thumb_state=1;
+        UPDATE index_tasks SET state='done' WHERE kind IN ('thumb','eyes','blur');
+        UPDATE index_tasks SET state='pending' WHERE asset_id=2 AND kind='eyes';
+        UPDATE index_tasks SET state='running' WHERE asset_id=3 AND kind='blur';
+        UPDATE index_tasks SET state='failed' WHERE asset_id=4 AND kind='eyes';").unwrap();
+    let status=ipc::indexing::fetch_index_status(&state).unwrap();
+    assert_eq!(status.image.total,4);
+    assert_eq!((status.image.done,status.image.pending,status.image.running,status.image.failed),(1,1,1,1));
+    assert!(!status.selection_ready);
+    db.0.execute("UPDATE index_tasks SET state='done' WHERE asset_id=2 AND kind='eyes'",[]).unwrap();
+    assert_eq!(ipc::indexing::fetch_index_status(&state).unwrap().image.done,2);
+}
+
+#[test]
+fn image_kick_runs_available_components_without_selection_models() {
+    let (dir,state,db)=common::library_fixture();
+    let path=dir.path().join("photos/source.jpg");
+    image::RgbImage::new(64,64).save(&path).unwrap();
+    db.insert_asset(&asset_row(&path.to_string_lossy(),AssetKind::Photo)).unwrap();
+    ipc::indexing::fetch_index_kick_now(&state,"image").unwrap();
+    let deadline=std::time::Instant::now()+Duration::from_secs(4);
+    while db.0.query_row("SELECT thumb_state FROM assets WHERE id=1",[],|r|r.get::<_,i32>(0)).unwrap()==0 {
+        assert!(std::time::Instant::now()<deadline,"thumbnail should run without the eye model");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let eyes_state:String=db.0.query_row("SELECT state FROM index_tasks WHERE asset_id=1 AND kind='eyes'",[],|r|r.get(0)).unwrap();
+    assert_eq!(eyes_state,"pending");
+    assert!(!ipc::indexing::fetch_index_status(&state).unwrap().selection_ready);
+}
+
 pub use common::{
     platform,
     ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,

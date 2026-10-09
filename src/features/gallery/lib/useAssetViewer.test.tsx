@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 
 vi.mock("./viewMark", () => ({ markAssetViewed: vi.fn() }));
 vi.mock("@/ipc/api", async (importOriginal) => ({
@@ -45,6 +45,30 @@ function PairHarness({ loaded = true }: { loaded?: boolean }) {
 }
 
 describe("useAssetViewer", () => {
+  it("未知日期预览打开、翻页和关闭都保留语义查询及格式参数",()=>{
+    function SemanticHarness(){
+      const state=useAssetViewer([{key:"unknown",date:null,assets:[asset(99),asset(100)]}]);
+      const location=useLocation();
+      return <>
+        <button onClick={()=>state.openAsset(asset(99))}>open</button>
+        <button onClick={()=>state.navigateTo(1)}>next</button>
+        <button onClick={state.closeViewer}>close</button>
+        <span data-testid="url">{location.search}</span>
+        <span data-testid="active">{state.viewer?.asset.id??"closed"}</span>
+      </>;
+    }
+    render(<MemoryRouter initialEntries={["/gallery?mode=semantic&q=cat&format=NEF"]}><SemanticHarness/></MemoryRouter>);
+    fireEvent.click(screen.getByText("open"));
+    expect(screen.getByTestId("active")).toHaveTextContent("99");
+    fireEvent.click(screen.getByText("next"));
+    expect(screen.getByTestId("active")).toHaveTextContent("100");
+    fireEvent.click(screen.getByText("close"));
+    const params=new URLSearchParams(screen.getByTestId("url").textContent!);
+    expect(params.get("asset")).toBeNull();
+    expect(params.get("mode")).toBe("semantic");
+    expect(params.get("q")).toBe("cat");
+    expect(params.get("format")).toBe("NEF");
+  });
   it("RAW 已打开后被分页合并到 JPG 卡，预览仍保留在同一组", () => {
     render(<MemoryRouter initialEntries={["/?asset=2"]}><PairHarness /></MemoryRouter>);
     expect(screen.getByTestId("viewer-position")).toHaveTextContent("2:0:2");

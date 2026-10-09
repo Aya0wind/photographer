@@ -56,6 +56,7 @@ export function useSemanticSearch() {
     try {
       hits = await searchSemantic(trimmed, limit, minScore);
     } catch {
+      if (seq !== seqRef.current) return;
       // 后端可达但拒绝（模型未就绪/索引未建） vs 传输失败
       setState({
         status: isIpcAvailable() ? "modelNotReady" : "unavailable",

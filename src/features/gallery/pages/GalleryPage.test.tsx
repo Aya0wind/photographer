@@ -519,7 +519,7 @@ describe("画廊工具条：居中与尺寸", () => {
     expect(tiles[0].style.height).toBe("220px");
     expect(tiles[0].style.width).toBe("293px");
 
-    await user.click(screen.getByTestId("gallery-tile-size-small"));
+    await user.click(screen.getByTestId("gallery-tile-size"));
     expect(screen.getAllByTestId("gallery-tile")[0].style.height).toBe("160px");
     expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("213px");
     expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("small");

@@ -458,7 +458,7 @@ describe("AI tab（M4 实化）", () => {
     await switchTab(user, "ai");
 
     const pkg = await screen.findByTestId("ai-model-group-selection");
-    expect(pkg).toHaveAttribute("data-total", "1");
+    expect(pkg).toHaveAttribute("data-total", "2"); // classifier + shared SCRFD dependency
     expect(within(pkg).getByText("选片辅助模型")).toBeInTheDocument();
     expect(screen.getByTestId("ai-group-badge-selection")).toHaveTextContent("未安装");
     expect(screen.getByTestId("ai-group-download-selection")).toBeInTheDocument();
@@ -755,11 +755,45 @@ describe("AI tab：索引状态与操作", () => {
     renderSettingsPage();
     await switchTab(user, "ai");
 
-    expect(await screen.findByTestId("index-status-thumb")).toBeInTheDocument();
-    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 3");
-    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("已完成 117");
-    expect(screen.getByTestId("index-count-exif")).toHaveTextContent("待处理 0");
+    expect(await screen.findByTestId("index-status-image")).toBeInTheDocument();
+    expect(screen.getByTestId("index-count-image")).toHaveTextContent("待处理 3");
+    expect(screen.getByTestId("index-count-image")).toHaveTextContent("已完成 117");
+    expect(screen.queryByTestId("index-count-exif")).not.toBeInTheDocument();
     expect(screen.getByTestId("index-count-ai")).toHaveTextContent("45 / 120");
+  });
+
+  it("图片索引统一重建四个内部通道，模型未下载时允许处理基础信息", async () => {
+    indexStatusMock.mockResolvedValue({ ...statusOf(), selectionReady:false,
+      image: { pending:2, running:0, done:118, failed:0, total:120 } });
+    indexRebuildMock.mockReset().mockResolvedValue(undefined);
+    const user=userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user,"ai");
+    const row=await screen.findByTestId("index-status-image");
+    expect(row).toHaveTextContent("图片索引");
+    expect(row).toHaveTextContent("包含缩略图、详细信息和选片分析");
+    expect(row).toHaveTextContent("等待模型下载");
+    expect(row).toHaveTextContent("118 / 120");
+    expect(screen.queryByTestId("index-status-thumb")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-status-exif")).not.toBeInTheDocument();
+    expect(screen.getByTestId("index-kick-image")).toBeEnabled();
+    await user.click(screen.getByTestId("ai-rebuild-image"));
+    await user.click(screen.getByTestId("ai-rebuild-confirm-image"));
+    await waitFor(()=>expect(indexRebuildMock).toHaveBeenCalledWith("image"));
+  });
+
+  it("整图尚未完成时仍显示已完成的子项，避免把零完成误认为没有处理",async()=>{
+    const c={pending:0,running:0,done:120,failed:0,total:120};
+    indexStatusMock.mockResolvedValue({...statusOf(),image:{...c,done:0,pending:120},
+      thumb:c,exif:c,eyes:{...c,done:0,pending:120},blur:c,selectionReady:true});
+    const user=userEvent.setup();renderSettingsPage();await switchTab(user,"ai");
+    const row=await screen.findByTestId("index-status-image");
+    expect(within(row).getByTestId("index-count-image")).toHaveTextContent("已完成 0 / 120");
+    const parts=within(row).getByTestId("image-index-parts");
+    expect(parts).toHaveTextContent("缩略图 120 / 120");
+    expect(parts).toHaveTextContent("详细信息 120 / 120");
+    expect(parts).toHaveTextContent("闭眼 0 / 120");
+    expect(parts).toHaveTextContent("清晰度 120 / 120");
   });
 
   it("导入尚未结束时，索引追上当前照片显示等待新照片", async () => {
@@ -771,9 +805,9 @@ describe("AI tab：索引状态与操作", () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
-    expect(await screen.findByTestId("index-kick-thumb")).toHaveTextContent("等待新照片");
+    expect(await screen.findByTestId("index-kick-image")).toHaveTextContent("等待新照片");
     act(() => useImportStore.setState({ activeJobs: {} }));
-    expect(screen.getByTestId("index-kick-thumb")).toHaveTextContent("已完成");
+    expect(screen.getByTestId("index-kick-image")).toHaveTextContent("已完成");
   });
 
   it("ai 行显示失败数（任务账 failed>0 时可见，失败不可再隐藏）", async () => {
@@ -793,7 +827,7 @@ describe("AI tab：索引状态与操作", () => {
     await switchTab(user, "ai");
 
     expect(await screen.findByTestId("index-status-unavailable")).toBeInTheDocument();
-    expect(screen.queryByTestId("index-status-thumb")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-status-image")).not.toBeInTheDocument();
   });
 
   it("立即索引：按钮负载 index_kick_now(kind)；kick 后重拉 pending>0 → 「进行中」", async () => {
@@ -815,8 +849,8 @@ describe("AI tab：索引状态与操作", () => {
     await waitFor(() => expect(kickAi).toBeDisabled());
     expect(kickAi).toHaveTextContent("进行中");
     // thumb 尚未完成可重建；EXIF 已随导入完成，不再提交空任务
-    expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
-    expect(screen.getByTestId("index-kick-exif")).toBeDisabled();
+    expect(screen.getByTestId("index-kick-image")).toBeEnabled();
+    expect(screen.queryByTestId("index-kick-exif")).not.toBeInTheDocument();
   });
 
   it("运行态从持久化任务账派生：未点击任何按钮，pending>0 直接「进行中」（切页重挂载不丢）", async () => {
@@ -832,7 +866,7 @@ describe("AI tab：索引状态与操作", () => {
     expect(kickAi).toHaveTextContent("进行中");
     expect(screen.getByTestId("index-status-ai")).toHaveAttribute("data-running", "true");
     // 其余通道无待办 → 正常可点
-    expect(screen.getByTestId("index-kick-thumb")).toBeEnabled();
+    expect(screen.getByTestId("index-kick-image")).toBeEnabled();
   });
 
   it("ai 模型未就绪：后端 Err 文案透传显示", async () => {
@@ -841,7 +875,7 @@ describe("AI tab：索引状态与操作", () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
-    await screen.findByTestId("index-status-thumb");
+    await screen.findByTestId("index-status-image");
 
     await user.click(screen.getByTestId("index-kick-ai"));
     expect(await screen.findByTestId("index-kick-error")).toHaveTextContent(
@@ -856,8 +890,8 @@ describe("AI tab：索引状态与操作", () => {
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");
-    await screen.findByTestId("index-status-thumb");
-    expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 3");
+    await screen.findByTestId("index-status-image");
+    expect(screen.getByTestId("index-count-image")).toHaveTextContent("待处理 3");
 
     act(() => {
       useAiStore.getState().handleAppEvent({
@@ -869,7 +903,7 @@ describe("AI tab：索引状态与操作", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByTestId("index-count-thumb")).toHaveTextContent("待处理 0"),
+      expect(screen.getByTestId("index-count-image")).toHaveTextContent("待处理 0"),
     );
   });
 });

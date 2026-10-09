@@ -658,17 +658,17 @@ describe("查看器：缩放与复位", () => {
 
     fireEvent.wheel(stage, { deltaY: 100 });
     expect(onNavigate).not.toHaveBeenCalled();
-    expect(stage).toHaveAttribute("data-scale", "1.00");
+    expect(stage).toHaveAttribute("data-scale", "0.83");
 
     fireEvent.wheel(stage, { deltaY: -100 });
-    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.20"));
+    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.00"));
     expect(onNavigate).not.toHaveBeenCalled();
 
     fireEvent.wheel(stage, { deltaY: -100 });
-    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.44"));
+    await waitFor(() => expect(stage).toHaveAttribute("data-scale", "1.20"));
   });
 
-  it("wheel 放大至 1.2x（钳制 1x-4x），双击复位", async () => {
+  it("wheel 放大至 1.2x（钳制25%-800%），双击复位", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer();
     const stage = await screen.findByTestId("viewer-stage");
@@ -677,21 +677,21 @@ describe("查看器：缩放与复位", () => {
     fireEvent.wheel(stage, { deltaY: -100, ctrlKey: true });
     await waitFor(() => expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.20"));
 
-    // 连续放大钳制 4x
+    // 连续放大钳制8x
     for (let i = 0; i < 12; i += 1) fireEvent.wheel(stage, { deltaY: -100 });
-    await waitFor(() => expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "4.00"));
+    await waitFor(() => expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "8.00"));
 
     fireEvent.dblClick(stage);
     await waitFor(() => expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00"));
   });
 
-  it("1x 时缩小无效（下限钳制）", async () => {
+  it("连续缩小钳制到25%", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     renderViewer();
     const stage = await screen.findByTestId("viewer-stage");
 
-    fireEvent.wheel(stage, { deltaY: 100 });
-    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "1.00");
+    for(let i=0;i<20;i++)fireEvent.wheel(stage, { deltaY: 100 });
+    expect(screen.getByTestId("viewer-stage")).toHaveAttribute("data-scale", "0.25");
   });
 });
 
@@ -1405,6 +1405,18 @@ describe("查看器：版本区（B2）", () => {
 // --- AI 选片行（C 阶段） ----------------------------------------------------------------
 
 describe("查看器：AI 选片行（C）", () => {
+  it("无法判定时展示原因，不把空分数展示成零或把缺失记录显示成无人脸", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, aiAnalysis: {
+      blur: { value: "unknown", score: 90, details: { source: "original", width: 2048, height: 1365,
+        calibrated: false, reason: "subject_unknown", regions: [] } },
+    } });
+    renderViewer();
+    const blur = await screen.findByTestId("viewer-ai-blur");
+    expect(blur).toHaveTextContent("无法判断");
+    expect(blur).not.toHaveTextContent("90");
+    expect(screen.getByTestId("viewer-ai-eyes")).toHaveAttribute("data-state", "not_analyzed");
+    expect(screen.getByTestId("selection-evidence")).toHaveTextContent("未确定主体");
+  });
   it("已分析：闭眼三态文案 + 清晰度分与软片标黄 + 「AI 建议」徽标", async () => {
     detailMock.mockResolvedValue({
       ...DETAIL,
@@ -1429,13 +1441,36 @@ describe("查看器：AI 选片行（C）", () => {
   it("已分析无人脸：文案「未检出人脸（无法判定闭眼）」与未分析区分", async () => {
     detailMock.mockResolvedValue({
       ...DETAIL,
-      aiAnalysis: { blur: { value: "sharp", score: 88 } },
+      aiAnalysis: { eyes: { value: "no_face", score: null }, blur: { value: "sharp", score: 88 } },
     });
     renderViewer();
     const eyes = await screen.findByTestId("viewer-ai-eyes");
     expect(eyes).toHaveAttribute("data-state", "no_face");
     expect(eyes).toHaveTextContent("未检出人脸（无法判定闭眼）");
     expect(screen.getByTestId("viewer-ai-blur")).toHaveAttribute("data-soft", "false");
+  });
+
+  it("睁闭眼结果冲突时显示复核，不冒充检测到闭眼或眼部失焦", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, aiAnalysis: {
+      eyes: {value:"maybe",score:null,details:{source:"thumbnail",width:1024,height:683,
+        calibrated:false,reason:"eye_state_review",regions:[]}},
+    }});
+    renderViewer();
+    const eyes=await screen.findByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveTextContent("睁闭眼状态需要复核");
+    expect(eyes).not.toHaveTextContent("可能闭眼");
+    expect(eyes).not.toHaveTextContent("清晰");
+  });
+  it("明确睁开的眼睛不显示通用复核提示", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, aiAnalysis: {
+      eyes: {value:"open",score:null,details:{source:"thumbnail",width:1024,height:683,
+        calibrated:false,reason:null,regions:[]}},
+    }});
+    renderViewer();
+    const eyes=await screen.findByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveTextContent("睁眼");
+    expect(eyes).not.toHaveTextContent("复核");
+    expect(screen.getByTestId("selection-evidence")).not.toHaveTextContent("尚未");
   });
 
   it("可能闭眼：maybe 文案", async () => {

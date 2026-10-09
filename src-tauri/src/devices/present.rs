@@ -62,7 +62,12 @@ pub use native::{enumerate_empty_readers, enumerate_present_volumes, probe_volum
 /// 只采纳原生设备元数据，不用卷标或 DCIM 目录推断介质类型。
 pub fn is_storage_card(path: &std::path::Path) -> bool {
     #[cfg(any(windows, target_os = "macos"))]
-    { native::is_storage_card(path) }
+    {
+        native::is_storage_card(path)
+    }
     #[cfg(not(any(windows, target_os = "macos")))]
-    { let _ = path; false }
+    {
+        let _ = path;
+        false
+    }
 }

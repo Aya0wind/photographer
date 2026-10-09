@@ -19,7 +19,7 @@ import { useAiStore } from "@/stores/aiStore";
 import type { AiModelStatus } from "@/ipc/api";
 
 function readyModels(): AiModelStatus[] {
-  return ["siglip2-visual", "siglip2-text", "siglip2-tokenizer", "siglip2-visual-fp16", "siglip2-text-fp16", "scrfd", "scrfd-10g", "arcface", "facemesh"].map((id) => ({ id, state: "done", installed: true, bytesTotal: 100, downloadedBytes: 100, version: "1", feature: id.startsWith("siglip2") ? "semantic" : id === "facemesh" ? "selection" : "face" }));
+  return ["siglip2-visual", "siglip2-text", "siglip2-tokenizer", "siglip2-visual-fp16", "siglip2-text-fp16", "scrfd", "scrfd-10g", "arcface", "facemesh", "open-closed-eye"].map((id) => ({ id, state: "done", installed: true, bytesTotal: 100, downloadedBytes: 100, version: "1", feature: id.startsWith("siglip2") ? "semantic" : ["facemesh", "open-closed-eye"].includes(id) ? "selection" : "face" }));
 }
 import {
   DEFAULT_SETTINGS,

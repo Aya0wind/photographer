@@ -53,8 +53,7 @@ pub fn extract_embedded(dir: &Path) -> Result<usize, String> {
         let final_path = dir.join(&name);
         let tmp = dir.join(format!("{name}.part"));
         std::fs::write(&tmp, &buf).map_err(|e| format!("写盘失败 {name}: {e}"))?;
-        std::fs::rename(&tmp, &final_path)
-            .map_err(|e| format!("落盘失败 {name}: {e}"))?;
+        std::fs::rename(&tmp, &final_path).map_err(|e| format!("落盘失败 {name}: {e}"))?;
         count += 1;
     }
     Ok(count)
@@ -72,7 +71,10 @@ pub fn ensure_installed(
 ) {
     {
         let mut state = super::geo_state().lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(state.phase, GeoPhase::Loading | GeoPhase::Backfilling { .. }) {
+        if matches!(
+            state.phase,
+            GeoPhase::Loading | GeoPhase::Backfilling { .. }
+        ) {
             return;
         }
         state.phase = GeoPhase::Loading;

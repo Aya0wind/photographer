@@ -118,7 +118,8 @@ export default function SemanticResultsView({
 
   if (status === "loading") {
     return (
-      <div className="flex h-full animate-pulse items-center justify-center text-xs text-text-muted" data-testid="semantic-loading">
+      <div className="flex h-full items-center justify-center gap-2 text-xs text-text-muted" data-testid="semantic-loading" role="status">
+        <span className="h-4 w-4 rounded-full border-2 border-edge border-t-accent motion-safe:animate-spin" aria-hidden="true"/>
         {t("search.semantic.loading")}
       </div>
     );

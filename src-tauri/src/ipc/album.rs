@@ -84,18 +84,16 @@ pub fn fetch_album_rename(state: &super::AppState, id: i64, name: &str) -> Resul
 pub fn fetch_album_delete(state: &super::AppState, id: i64) -> Result<(), String> {
     let db = super::active_library_db(state)?;
     let members: Vec<i64> = {
-        let mut stmt = db
-            .0
-            .prepare("SELECT asset_id FROM album_item WHERE album_id = ?1")
-            .map_err(|e| e.to_string())?;
+        let mut stmt =
+            db.0.prepare("SELECT asset_id FROM album_item WHERE album_id = ?1")
+                .map_err(|e| e.to_string())?;
         let mapped = stmt
             .query_map([id], |r| r.get::<_, i64>(0))
             .map_err(|e| e.to_string())?;
         mapped.filter_map(|r| r.ok()).collect()
     };
     if !members.is_empty() {
-        db.assets_trash_move(&members)
-            .map_err(|e| e.to_string())?;
+        db.assets_trash_move(&members).map_err(|e| e.to_string())?;
     }
     db.album_delete(id).map_err(|e| match e {
         rusqlite::Error::InvalidParameterName(msg) => msg,
@@ -273,7 +271,6 @@ pub fn fetch_album_item_move_subgroup(
     }
     Ok(moved)
 }
-
 
 /// 相册内时间线核：按 captured_at 复用画廊 keyset 分页（NULL 最先 + 时间
 /// 降序 + id tiebreak）；`filters` 透传现有 AssetFilters 与相册集合求交——

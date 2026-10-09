@@ -113,7 +113,8 @@ pub fn ensure_no_import_running(state: &AppState) -> Result<(), String> {
 }
 
 /// 活跃库迁移守卫检查：迁移中返回 Err（导入/迁移入口共用）。
-pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {    let library_id = state
+pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {
+    let library_id = state
         .settings
         .lock()
         .expect("settings mutex poisoned")
