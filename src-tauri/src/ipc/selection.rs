@@ -88,7 +88,7 @@ pub fn fetch_asset_label_set(
     if targets.is_empty() {
         return Ok(n);
     }
-    let db_dir = super::app_database_dir(state);
+    let db_dir = super::app_database_dir(state)?;
     spawn_xmp_sync(
         state,
         XmpSync {
@@ -152,7 +152,7 @@ pub fn fetch_asset_reject_set(
     if targets.is_empty() {
         return Ok(n);
     }
-    let db_dir = super::app_database_dir(state);
+    let db_dir = super::app_database_dir(state)?;
     spawn_xmp_sync(
         state,
         XmpSync {

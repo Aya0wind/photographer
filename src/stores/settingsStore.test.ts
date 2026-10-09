@@ -13,8 +13,9 @@ describe("应用级设置", () => {
     vi.mocked(ipc).mockClear();
   });
 
-  it("默认设置为应用数据库目录缺省（跟随应用数据目录）", () => {
-    expect(DEFAULT_SETTINGS.databaseDir).toBeNull();
+  it("默认设置无数据库（空注册表 + 无激活 id）", () => {
+    expect(DEFAULT_SETTINGS.databases).toEqual([]);
+    expect(DEFAULT_SETTINGS.activeDatabaseId).toBeNull();
     expect("libraries" in DEFAULT_SETTINGS).toBe(false);
     expect("activeLibraryId" in DEFAULT_SETTINGS).toBe(false);
   });
@@ -28,7 +29,7 @@ describe("应用级设置", () => {
     expect(calls[calls.length - 1]?.[1]).toMatchObject({ settings: { ai: { qualityTier: "accurate" } } });
   });
 
-  it("load 兜底合并远端缺省字段（后端未实装 databaseDir 时补 null）", async () => {
+  it("load 兜底合并远端缺省字段（后端未实装注册表时补空表/null）", async () => {
     vi.mocked(ipc).mockResolvedValueOnce({
       schemaVersion: 1,
       onboardingCompleted: true,
@@ -36,7 +37,8 @@ describe("应用级设置", () => {
     });
     await useSettingsStore.getState().load();
     const settings = useSettingsStore.getState().settings;
-    expect(settings.databaseDir).toBeNull();
+    expect(settings.databases).toEqual([]);
+    expect(settings.activeDatabaseId).toBeNull();
     expect(settings.onboardingCompleted).toBe(true);
     expect(settings.gallery.mergeRawJpg).toBe(true);
   });
@@ -45,7 +47,7 @@ describe("应用级设置", () => {
     const before = useSettingsStore.getState().settings;
     vi.mocked(ipc).mockRejectedValueOnce(new Error("boom"));
     await expect(
-      useSettingsStore.getState().save({ ...before, databaseDir: "D:\\SmartPhotoDB" }),
+      useSettingsStore.getState().save({ ...before, activeDatabaseId: "db-9" }),
     ).rejects.toThrow("boom");
     expect(useSettingsStore.getState().settings).toBe(before);
   });

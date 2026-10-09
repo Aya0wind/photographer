@@ -416,7 +416,7 @@ pub async fn tethering_photo_preview(
             .map_err(|e| e.to_string())?
             .ok_or("照片不存在")?;
         let path = crate::thumbs::thumb_file(
-            &super::app_database_dir(state),
+            &super::app_database_dir(state)?,
             std::path::Path::new(&row.path),
             if size > 512 { 2048 } else { 256 },
         );

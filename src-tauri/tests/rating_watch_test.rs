@@ -378,13 +378,13 @@ fn watch_state(
 ) -> ipc::AppState {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    // 应用级设置（2026-10-09）：库注册表/activeLibrary 退役；「数据库位置」
-    // 指向 db_dir（settings.json 落 config_dir，数据库/照片库登记表在 db_dir）
+    // 多数据库修正（2026-10-09）：注册表登记指向 db_dir 的数据库并激活
+    //（settings.json 落 config_dir，数据库/照片库登记表在 db_dir）
     let _ = photo_root;
+    let settings = common::settings_with_database(db_dir);
     let settings = settings::Settings {
-        database_dir: Some(db_dir.to_string_lossy().into_owned()),
         watch_folders: Vec::new(),
-        ..settings::Settings::default()
+        ..settings
     };
     let supervisor = tasks::TaskSupervisor::new(events::EventBus::new());
     ipc::AppState {

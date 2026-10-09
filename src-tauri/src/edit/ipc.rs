@@ -138,7 +138,7 @@ fn fetch_export_in_library(
     // worker 自带库连接 + 事件总线（后台任务资源所有权规则：线程内获取释放）。
     // album 模式落位锚点 = 源资产所属照片库 root（§一 静态归属；无归属的
     // 历史行拒绝 album 模式）。
-    let db_dir = crate::ipc::app_database_dir(state);
+    let db_dir = crate::ipc::app_database_dir(state)?;
     let library_root = match asset.library_id.as_deref() {
         Some(library_id) => {
             let row = db

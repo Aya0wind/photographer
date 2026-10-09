@@ -203,12 +203,12 @@ fn payload(n: usize) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn catalog_has_nine_models_with_full_metadata() {
+fn catalog_has_ten_models_with_full_metadata() {
     let catalog = ai::catalog();
     assert_eq!(
         catalog.len(),
-        9,
-        "siglip2-visual/text/tokenizer + fp16 双塔 + scrfd/scrfd-10g/arcface + facemesh（0021 eyes）"
+        10,
+        "siglip2-visual/text/tokenizer + fp16 双塔 + scrfd/scrfd-10g/arcface + facemesh + open-closed-eye（闭眼检测）"
     );
     let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
     for expect in [
@@ -221,6 +221,7 @@ fn catalog_has_nine_models_with_full_metadata() {
         "scrfd-10g",
         "arcface",
         "facemesh",
+        "open-closed-eye",
     ] {
         assert!(ids.contains(&expect), "缺 {expect}: {ids:?}");
     }
@@ -237,16 +238,20 @@ fn catalog_has_nine_models_with_full_metadata() {
     );
     for m in catalog {
         assert!(m.url.starts_with("https://"), "{} url", m.id);
-        // facemesh 例外：GitHub Releases 件，hf-mirror 不镜像 → mirror 填
-        // 同主源（重试语义，见 CATALOG 注释）
-        if m.id != "facemesh" {
+        // 非 HuggingFace 源例外：facemesh（GitHub Releases）与
+        // open-closed-eye（OpenVINO OMZ，01.org 备源）→ mirror 填官方
+        // 备用源（重试语义，见 CATALOG 注释）
+        if m.id != "facemesh" && m.id != "open-closed-eye" {
             assert!(m.mirror_url.contains("hf-mirror.com"), "{} mirror", m.id);
         }
         assert_eq!(m.sha256.len(), 64, "{} sha256", m.id);
         assert!(m.bytes_total > 0, "{} bytesTotal", m.id);
         assert!(!m.version.is_empty(), "{} version", m.id);
         assert!(
-            m.feature == "semantic" || m.feature == "face" || m.feature == "selection",
+            m.feature == "semantic"
+                || m.feature == "face"
+                || m.feature == "selection"
+                || m.feature == "evaluation",
             "{} feature",
             m.id
         );

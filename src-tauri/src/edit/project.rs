@@ -18,9 +18,11 @@ struct Project {
     recipe: serde_json::Value,
 }
 
-/// 解析资产并校验照片库归属，拒绝旧会话跨库沿用资产 id。
-/// 大一统定案（2026-10-09）：库是资产的静态归属，不再有「活动库切换」，
-/// 等价守卫 = 会话期望库与资产实际所属库一致。
+/// 解析资产并校验照片库归属，拒绝旧会话资产 id 沿用。
+/// 多数据库修正（2026-10-09）：project 文件落激活数据库目录
+///（[`crate::ipc::app_database_dir`] 自动跟随切换），不同数据库的高级编辑
+/// 状态天然隔离；本守卫校验**激活库内**会话期望库与资产实际所属库一致
+///（跨数据库则是另一份 SQLite，资产 id 天然不串）。
 pub(super) fn resolve(
     state: &crate::ipc::AppState,
     library_id: &str,
@@ -42,7 +44,7 @@ pub(super) fn resolve(
     Ok((library, asset))
 }
 
-/// 编辑状态归应用数据库目录（asset id 全局唯一，无需按库分目录）。
+/// 编辑状态归激活数据库目录（asset id 库内唯一，无需按照片库分目录）。
 fn project_path(app_db_dir: &std::path::Path, asset_id: i64) -> PathBuf {
     app_db_dir
         .join("advanced-edits")
@@ -68,7 +70,7 @@ pub async fn edit_project_save(
         let id = super::ipc::parse_asset_id(&asset_id)?;
         resolve(state, &library_id, &asset_id)?;
         let recipe = validate_recipe(&recipe)?;
-        let path = project_path(&crate::ipc::app_database_dir(state), id);
+        let path = project_path(&crate::ipc::app_database_dir(state)?, id);
         let project = Project {
             version: 1,
             library_id,
@@ -100,7 +102,7 @@ pub async fn edit_project_open(
     run_blocking(state.inner().clone(), move |state| {
         let id = super::ipc::parse_asset_id(&asset_id)?;
         resolve(state, &library_id, &asset_id)?;
-        let path = project_path(&crate::ipc::app_database_dir(state), id);
+        let path = project_path(&crate::ipc::app_database_dir(state)?, id);
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

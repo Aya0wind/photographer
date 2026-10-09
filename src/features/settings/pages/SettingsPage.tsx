@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
 import ThemePicker from "@/features/settings/components/ThemePicker";
+import DatabaseSettings from "@/features/settings/components/DatabaseSettings";
 import AiTab from "@/features/settings/AiTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags, smartTagLabel } from "@/features/albums/lib/smartTags";
 import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
@@ -14,7 +15,8 @@ import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/sett
  * 说明小字（下一行），分组用 uppercase 小节标题，不用卡片框。
  * 修改即存：settingsStore.update + save（IPC 失败本地仍生效）。
  * 旧「库」tab 已随 2026-10-09 单库多照片库定案退役：照片库管理（新建/
- * 从文件夹建立/重定位/移除登记）由左侧导航「存储」页承担（M3 已实装）。
+ * 从文件夹建立/重定位/移除登记）由左侧导航「存储」页承担（M3 已实装）；
+ * 数据库注册表（多数据库修正：新建/切换/移除）卡片置于「常规」tab 顶部。
  */
 
 type SettingsTab = "general" | "appearance" | "gallery" | "import" | "ai";
@@ -212,6 +214,8 @@ export default function SettingsPage() {
         <div className="ui-settings-content ui-glass flex w-full flex-col gap-3 rounded-2xl border border-edge p-5">
           {tab === "general" && (
             <>
+              <SectionTitle>{t("settings.section.database")}</SectionTitle>
+              <DatabaseSettings />
               <SectionTitle>{t("settings.section.system")}</SectionTitle>
               <SettingRow
                 label={t("settings.closeBehavior")}

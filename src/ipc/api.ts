@@ -8,6 +8,7 @@ export * from "./api/indexing";
 export * from "./api/ai";
 export * from "./api/system";
 export * from "./api/library";
+export * from "./api/databases";
 export * from "./api/albums";
 export * from "./api/selection";
 export * from "./api/versions";

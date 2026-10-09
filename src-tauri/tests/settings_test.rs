@@ -1,15 +1,15 @@
-//! SettingsManager / Settings 行为测试（2026-10-09 单数据库多照片库新语义）：
-//! settings.json 只留应用级设置——默认值、缺文件、roundtrip、损坏 JSON
-//! 恢复、原子写、旧键忽略（库注册表残留键 serde 丢弃）、camelCase 序列化、
-//! 「数据库位置」归一化闸门。
+//! SettingsManager / Settings 行为测试（2026-10-09 多数据库修正语义）：
+//! 默认值、缺文件、roundtrip、损坏 JSON 恢复、原子写、旧键忽略（单库
+//! databaseDir 残留键 serde 丢弃）、camelCase 序列化、数据库注册表解析、
+//! db_dir 互斥闸门、「数据库位置」归一化闸门。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use smart_photo_lib::settings::{
-    normalize_database_path, normalize_library_path, normalize_settings_database_dir,
-    validate_ai_settings, AiSettings, DuplicatePolicy, ImportSettings, IndexSchedule, Settings,
-    SettingsError, SettingsManager, SystemSettings, SCHEMA_VERSION,
+    normalize_database_path, normalize_library_path, validate_ai_settings,
+    validate_database_dir_overlap, AiSettings, DatabaseEntry, DuplicatePolicy, ImportSettings,
+    IndexSchedule, Settings, SettingsError, SettingsManager, SystemSettings, SCHEMA_VERSION,
 };
 
 fn temp_dir() -> tempfile::TempDir {
@@ -42,8 +42,9 @@ fn default_settings_match_spec() {
     assert_eq!(s.schema_version, 1);
     assert_eq!(s.schema_version, SCHEMA_VERSION);
     assert!(!s.onboarding_completed);
-    // 「数据库位置」（§一）：默认 None = 应用数据目录
-    assert_eq!(s.database_dir, None);
+    // 数据库注册表（多数据库修正）：默认空表 + 无激活数据库
+    assert!(s.databases.is_empty());
+    assert_eq!(s.active_database_id, None);
 
     assert!(s.import.prompt_on_device);
     assert!(s.import.skip_imported);
@@ -73,7 +74,12 @@ fn save_then_load_roundtrip_with_custom_values() {
     let dir = temp_dir();
     let s = Settings {
         onboarding_completed: true,
-        database_dir: Some(r"I:\SmartPhoto\db".to_string()),
+        databases: vec![DatabaseEntry {
+            id: "db-1".into(),
+            name: "主数据库".into(),
+            db_dir: r"I:\SmartPhoto\db".into(),
+        }],
+        active_database_id: Some("db-1".into()),
         import: ImportSettings {
             duplicate_policy: DuplicatePolicy::Rename,
             skip_imported: false,
@@ -211,7 +217,9 @@ fn serialization_uses_camel_case() {
     let value = serde_json::to_value(Settings::default()).expect("serialize");
     assert_eq!(value["schemaVersion"], serde_json::json!(1));
     assert_eq!(value["onboardingCompleted"], serde_json::json!(false));
-    assert_eq!(value["databaseDir"], serde_json::json!(null));
+    // 数据库注册表（多数据库修正）：默认空表 + null 激活 id
+    assert_eq!(value["databases"], serde_json::json!([]));
+    assert_eq!(value["activeDatabaseId"], serde_json::json!(null));
     assert_eq!(value["import"]["promptOnDevice"], serde_json::json!(true));
     // 布局键已退役：import 序列化产物不再含 dirTemplate
     assert!(value["import"].get("dirTemplate").is_none());
@@ -382,45 +390,91 @@ fn normalize_library_path_folds_forward_slashes_and_dots() {
 }
 
 // ---------------------------------------------------------------------------
-// 「数据库位置」设置项（§一：默认应用数据目录，可改）
+// 数据库注册表（2026-10-09 多数据库修正：databases + activeDatabaseId）
 // ---------------------------------------------------------------------------
 
-/// 解析契约：None → 应用数据目录；Some → 自定义路径优先。
+/// 解析契约：无激活数据库 → Err("尚未创建数据库")；激活条目 db_dir 优先。
 #[test]
-fn database_dir_resolution_defaults_to_app_data_dir() {
+fn active_database_dir_requires_active_entry() {
     let dir = temp_dir();
     let mut s = Settings::default();
+    let err = s.active_database_dir(dir.path()).unwrap_err();
+    assert_eq!(err, "尚未创建数据库");
+
+    let custom = dir.path().join("custom-db");
+    s.databases = vec![DatabaseEntry {
+        id: "db-1".into(),
+        name: "主数据库".into(),
+        db_dir: custom.to_string_lossy().into_owned(),
+    }];
+    // 指向不存在的激活 id（注册表被手改坏）→ Err 拒绝
+    s.active_database_id = Some("db-x".into());
+    assert!(s.active_database_dir(dir.path()).is_err());
+    // 正常：激活条目 db_dir 即数据库目录
+    s.active_database_id = Some("db-1".into());
     assert_eq!(
-        s.database_dir_path(dir.path()),
-        dir.path().to_path_buf(),
-        "缺省 = 应用数据目录（settings.json 所在处）"
+        s.active_database_dir(dir.path()).unwrap(),
+        custom,
+        "激活数据库目录 = 注册表条目 db_dir"
     );
-    s.database_dir = Some(dir.path().join("custom-db").to_string_lossy().into_owned());
-    assert_eq!(
-        s.database_dir_path(dir.path()),
-        dir.path().join("custom-db"),
-        "自定义位置优先于应用数据目录"
-    );
+    // 注册表序首个 id（database_remove 删激活库后的切换目标）
+    assert_eq!(s.first_database_id(), Some("db-1"));
+    assert_eq!(Settings::default().first_database_id(), None);
 }
 
-/// roundtrip：databaseDir 落盘/读回；旧 settings.json 缺键 → None（默认）。
+/// roundtrip：databases/activeDatabaseId 落盘读回；旧配置缺键 → 空表/None。
 #[test]
-fn database_dir_roundtrips_and_missing_key_defaults_to_none() {
+fn database_registry_roundtrips_and_missing_keys_default_empty() {
     let dir = temp_dir();
     let mut s = Settings::default();
-    s.database_dir = Some(r"I:\SmartPhoto\db".to_string());
+    s.databases = vec![DatabaseEntry {
+        id: "db-1".into(),
+        name: "主数据库".into(),
+        db_dir: r"I:\SmartPhoto\db".into(),
+    }];
+    s.active_database_id = Some("db-1".into());
     SettingsManager::save(&s, dir.path()).unwrap();
     let loaded = SettingsManager::load(dir.path()).unwrap();
-    assert_eq!(loaded.database_dir.as_deref(), Some(r"I:\SmartPhoto\db"));
+    assert_eq!(loaded.databases, s.databases);
+    assert_eq!(loaded.active_database_id.as_deref(), Some("db-1"));
 
-    // 旧配置（无 databaseDir 键）→ serde default 落 None，不报错
+    // 旧配置（无 databases/activeDatabaseId 键）→ serde default 空表/None；
+    // 旧单库 databaseDir 残留键同样被忽略（不做迁移）
     fs::write(
         settings_path(dir.path()),
-        r#"{"schemaVersion":1,"onboardingCompleted":true}"#,
+        r#"{"schemaVersion":1,"onboardingCompleted":true,"databaseDir":"I:\\old"}"#,
     )
     .unwrap();
     let legacy = SettingsManager::load(dir.path()).unwrap();
-    assert_eq!(legacy.database_dir, None);
+    assert!(legacy.databases.is_empty());
+    assert_eq!(legacy.active_database_id, None);
+}
+
+/// 注册表内互斥：db_dir 之间不得相同或互相包含（大小写/分隔符不敏感）。
+#[test]
+fn database_dir_overlap_registry_gate() {
+    let dir = temp_dir();
+    let base = dir.path().join("databases").join("db-1");
+    let registry = vec![DatabaseEntry {
+        id: "db-1".into(),
+        name: "主数据库".into(),
+        db_dir: base.to_string_lossy().into_owned(),
+    }];
+    // 完全相同
+    assert!(validate_database_dir_overlap(&registry, &base).is_err());
+    #[cfg(windows)]
+    {
+        // 互相包含（新库套旧库 / 旧库套新库）+ 大小写与正斜杠变形
+        let inside = base.join("nested");
+        assert!(validate_database_dir_overlap(&registry, &inside).is_err());
+        let variant = base.to_string_lossy().replace('\\', "/");
+        assert!(validate_database_dir_overlap(&registry, std::path::Path::new(&variant)).is_err());
+        // 前缀相近但非包含（db-1 vs db-10）必须放行
+        let sibling = dir.path().join("databases").join("db-10");
+        assert!(validate_database_dir_overlap(&registry, &sibling).is_ok());
+    }
+    // 空注册表放行
+    assert!(validate_database_dir_overlap(&[], &base).is_ok());
 }
 
 /// 归一化闸门：相对/盘符相对路径拒绝、盘根拒绝、正斜杠与 `.`/`..` 折叠。
@@ -455,22 +509,3 @@ fn dir_path_ancestors_root(dir: &tempfile::TempDir) -> String {
         .into_owned()
 }
 
-/// Settings 级闸门：None 通过（默认应用数据目录无路径可归一）。
-#[test]
-fn normalize_settings_database_dir_passes_none_and_normalizes_some() {
-    let mut s = Settings::default();
-    normalize_settings_database_dir(&mut s).unwrap();
-    assert_eq!(s.database_dir, None);
-    #[cfg(windows)]
-    {
-        let dir = temp_dir();
-        let raw = format!("{}/a/./b", dir.path().to_string_lossy().replace('\\', "/"));
-        s.database_dir = Some(raw);
-        normalize_settings_database_dir(&mut s).unwrap();
-        assert_eq!(
-            Path::new(s.database_dir.as_deref().unwrap()),
-            dir.path().join("a").join("b"),
-            "Some 值归一为反斜杠绝对形态（折叠 . 与正斜杠）"
-        );
-    }
-}

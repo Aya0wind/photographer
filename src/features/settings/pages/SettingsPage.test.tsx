@@ -10,11 +10,13 @@ vi.mock("@/ipc", () => ({ ipc: vi.fn(async () => undefined) }));
 import { ipc } from "@/ipc";
 const ipcMock = vi.mocked(ipc);
 
-// M4 AI：模型命令 mock（ai_models_status 走 useAiStore.refresh）
+// M4 AI：模型命令 mock（ai_models_status 走 useAiStore.refresh）；
+// 数据库卡片 mock databaseList（避免走 ipc 影响「修改即存」的调用计数断言）
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
   return {
     ...actual,
+    databaseList: vi.fn(async () => ({ databases: [], activeId: null })),
     aiModelsStatus: vi.fn(),
     aiModelDownload: vi.fn(),
     aiModelCancel: vi.fn(),

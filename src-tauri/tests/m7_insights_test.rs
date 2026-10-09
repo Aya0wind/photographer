@@ -195,9 +195,10 @@ fn sidebar_counts_before_any_library_returns_zeros() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    // 应用唯一数据库常在（§一）：尚未登记任何照片库（引导向导前）侧栏
-    // 拉取 = 全 0 优雅返回，不再有「库未开」错误态
-    *state.settings.lock().unwrap() = settings::Settings::default();
+    // 激活数据库常在（多数据库修正）：尚未登记任何照片库（引导向导前）
+    // 侧栏拉取 = 全 0 优雅返回，不再有「库未开」错误态
+    let db_dir_owned = db_dir.path().to_path_buf();
+    *state.settings.lock().unwrap() = common::settings_with_database(&db_dir_owned);
     let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
     assert_eq!(counts.assets, 0);
     assert_eq!(counts.albums, 0);

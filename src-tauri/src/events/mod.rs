@@ -330,6 +330,11 @@ pub enum AppEvent {
     /// 地区索引有新真值：回填批次完成 / 单资产编辑联动重索引 / 数据包更新重刷。
     MapRegionsUpdated,
 
+    // 数据库注册表（2026-10-09 多数据库修正；命令见 ipc/databases.rs）
+    /// 数据库注册表或激活数据库变更（新建/切换/移除）：前端全量刷新——
+    /// 重拉 database_list、照片库列表与画廊等一切库内数据（换库语义）。
+    DatabasesChanged,
+
     // 照片库登记表（2026-10-09 单数据库多照片库定案；命令骨架见
     // ipc/photo_library.rs，实装 M1/M2）
     /// photos_libraries 变更（新建/移除登记/重定位/在线状态翻转）：存储页与

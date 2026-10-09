@@ -13,6 +13,7 @@ import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
 import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
 import { isMacPlatform } from "@/lib/platform";
+import { subscribeAppEvents } from "@/ipc/api";
 
 /**
  * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 全局搜索框 +
@@ -23,6 +24,10 @@ import { isMacPlatform } from "@/lib/platform";
  * 任务抽屉（M4.5 A2）全局挂载：替代右下角浮动进度卡的唯一任务入口，
  * 开关在 TitleBar 动作位（运行中任务数徽标），面板常驻轮询索引状态。
  * 界面动画关闭（settings.appearance.animations=false）时根节点挂 .no-motion。
+ * 数据库切换全量刷新（2026-10-09 多数据库修正）：databasesChanged（新建/
+ * 切换/移除）后内容区整体重挂载——画廊/相册/照片库列表等一切库内数据随
+ * 各页挂载 effect 重拉（换库语义，模仿 photoLibrariesChanged 的重拉方式，
+ * 但作用于全部页面）。
  */
 
 /** 全局导航快捷键（原菜单栏能力，菜单移除后保留）：Ctrl+1..5 → 主页面 */
@@ -38,6 +43,21 @@ export default function AppShell() {
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const motionOn = useMotionOn();
+  // 数据库注册表/激活库变更 → 内容区重挂（nonce 作 key；见组件头注释）
+  const [dbReloadNonce, setDbReloadNonce] = useState(0);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void subscribeAppEvents((event) => {
+      if (event.type === "databasesChanged") setDbReloadNonce((n) => n + 1);
+    })
+      .then((off) => {
+        unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => unlisten?.();
+  }, []);
 
   // 屏蔽 WebView 原生行为：右键菜单（瓦片/图片改用自定义菜单）与开发者
   // 工具快捷键（F12 / Ctrl+Shift+I/J/C）
@@ -99,7 +119,7 @@ export default function AppShell() {
       <div className="flex min-h-0 flex-1">
         <Sidebar />
         <main className="relative min-w-0 flex-1 overflow-hidden">
-          <div className="h-full">
+          <div className="h-full" key={dbReloadNonce}>
             <PageTransition>
               <Outlet />
             </PageTransition>

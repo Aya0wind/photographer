@@ -9,6 +9,7 @@ import type { ReactElement } from "react";
 
 import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
 import { useCullingStore } from "@/features/culling/cullingStore";
+import { useDatabases } from "@/lib/useDatabases";
 
 /**
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
@@ -22,6 +23,8 @@ import { useCullingStore } from "@/features/culling/cullingStore";
  * 计数徽标：图库/最近浏览/那年今天/相册走 sidebar_counts（一次性纯
  * COUNT，挂载拉一次 + 导入会话完成事件后重拉——最小事件集，不上轮询；
  * 0 或后端不可用不显示）；人物走 peopleList 聚类人脸总数（照旧）。
+ * 底部只读展示当前数据库名（多数据库修正：useDatabases +
+ * databasesChanged 重拉；切换入口在 设置 → 常规 →「数据库」卡片）。
  */
 
 /** sidebar_counts 键 → 徽标数据源 */
@@ -201,6 +204,28 @@ const SECTIONS: NavSection[] = [
   },
 ];
 
+/** 当前数据库只读展示（系统组语义补充；切换入口在设置页数据库卡片） */
+function DatabaseLabel() {
+  const { t } = useTranslation();
+  const databases = useDatabases();
+  const list = databases?.databases ?? [];
+  const active =
+    list.find((db) => db.id === databases?.activeId) ?? list[0] ?? null;
+  if (active === null) return null;
+  return (
+    <div
+      className="mx-3 mb-3 flex min-w-0 items-center gap-1.5 rounded-lg border border-edge/60 bg-panel/30 px-2.5 py-1.5 text-[11px] text-text-muted"
+      data-testid="sidebar-database"
+      title={active.dbDir}
+    >
+      <span className="shrink-0">{t("nav.databaseLabel")}</span>
+      <span className="truncate text-text-secondary" data-testid="sidebar-database-name">
+        {active.name}
+      </span>
+    </div>
+  );
+}
+
 export default function Sidebar() {
   const motionOn = useMotionOn();
   const { t } = useTranslation();
@@ -324,6 +349,9 @@ export default function Sidebar() {
           </div>
         ))}
       </nav>
+      <div className="mt-auto">
+        <DatabaseLabel />
+      </div>
     </aside>
   );
 }

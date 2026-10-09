@@ -64,7 +64,7 @@ pub fn map_geo_install(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<SharedState>();
     let db_dir = {
         let settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
-        settings.database_dir_path(&state.config_dir)
+        settings.active_database_dir(&state.config_dir)?
     };
     let bus = std::sync::Arc::new(state.bus.clone());
     geo::install::ensure_installed(state.config_dir.clone(), db_dir, bus, &state.supervisor);

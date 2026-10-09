@@ -5,10 +5,12 @@
 //! - 旧版本缺字段 -> 依赖 serde `#[serde(default)]` 容错填充，并视为已迁移。
 //! - 保存采用原子写：先写 `settings.json.tmp` 再 rename 覆盖。
 //!
-//! 2026-10-09 单数据库多照片库定案（§二）：settings.json 只留**应用级**设置。
-//! 旧「libraries 注册表 / activeLibraryId / dbDir 库模型」整体退役——照片库
-//! 登记表由数据库 `photos_libraries` 表承载（`crate::db::libraries`），旧
-//! settings.json 残留键 serde 反序列化自动忽略（不做迁移，版本未发布红线）。
+//! 2026-10-09 多数据库修正：settings.json 在应用级设置之外承载**数据库注册表**
+//!（`databases` + `activeDatabaseId`）——应用可登记多个数据库（为多用户协作
+//! 预埋），每个 = 独立 SQLite(library.db) + thumbs/ + 向量，落在各自的
+//! db_dir；任一时刻恰有一个「激活数据库」，一切库内操作（照片库登记表/
+//! 资产/相册）都作用于它，切换数据库即整体换库。旧单库时代的
+//! `databaseDir` 键 serde 反序列化自动忽略（不做迁移，版本未发布红线）。
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,17 +24,20 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 const SETTINGS_FILE: &str = "settings.json";
 
-/// 应用配置根结构（camelCase JSON；只含应用级设置）。
+/// 应用配置根结构（camelCase JSON；应用级设置 + 数据库注册表）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub schema_version: u32,
     pub onboarding_completed: bool,
-    /// 应用级唯一数据库位置（2026-10-09 单数据库多照片库定案 §一）：
-    /// None = 默认应用数据目录；Some = 自定义绝对路径（Windows 数据盘
-    /// 需求，规范化形态）。library.db / thumbs / 向量等一切数据落在该
-    /// 目录；修改后重启生效（M5 设置 UI）。
-    pub database_dir: Option<String>,
+    /// 数据库注册表（2026-10-09 多数据库修正）：每个条目 = 一个独立数据库
+    ///（SQLite/thumbs/向量同居 db_dir）；照片库登记表（photos_libraries）
+    /// 在各数据库内部，不同数据库的照片库天然隔离。经 `database_*` 命令族
+    /// 维护，settings_set 对该字段原样保留后端真值。
+    pub databases: Vec<DatabaseEntry>,
+    /// 激活数据库 id（注册表内恰好一个；None=尚未创建任何数据库，一切
+    /// 依赖数据库的命令返回「尚未创建数据库」）。
+    pub active_database_id: Option<String>,
     pub import: ImportSettings,
     pub gallery: GallerySettings,
     pub appearance: AppearanceSettings,
@@ -46,15 +51,92 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// 数据库目录解析（§一）：自定义「数据库位置」优先，否则应用数据目录
-    ///（`app_config_dir` = Tauri app_config_dir，settings.json 所在处）。
-    /// 一切数据库件（library.db / thumbs / vectors.usearch 等）落该目录；
-    /// 与照片库 root 的互斥校验（§八-6）以此为基准。
-    pub fn database_dir_path(&self, app_config_dir: &Path) -> PathBuf {
-        self.database_dir
+    /// 激活数据库目录解析（多数据库修正）：取激活 [`DatabaseEntry`] 的
+    /// db_dir——library.db / thumbs / 向量等一切数据件所在处；与照片库
+    /// root 的互斥校验（§八-6）以此为基准。
+    ///
+    /// 无激活数据库返回 Err("尚未创建数据库")；注册表内查无该 id（注册表
+    /// 被外部手改坏）同样报错拒绝启动库操作。`app_config_dir` 仅为签名
+    /// 对称保留（默认 db_dir 约定 = `<app_config_dir>/databases/<id>` 在
+    /// `database_create` 落地，解析侧不需要）。
+    pub fn active_database_dir(&self, _app_config_dir: &Path) -> Result<PathBuf, String> {
+        let id = self
+            .active_database_id
             .as_deref()
-            .map_or_else(|| app_config_dir.to_path_buf(), PathBuf::from)
+            .ok_or_else(|| "尚未创建数据库".to_string())?;
+        let entry = self
+            .databases
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| format!("激活数据库不在注册表内：{id}"))?;
+        Ok(PathBuf::from(&entry.db_dir))
     }
+
+    /// 按注册表序取激活条目之后的下一个数据库 id（database_remove 删激活
+    /// 库时切换用）；注册表空返回 None。
+    pub fn first_database_id(&self) -> Option<&str> {
+        self.databases.first().map(|entry| entry.id.as_str())
+    }
+}
+
+/// 数据库注册表条目（camelCase；与前端 `DatabaseEntry` 契约对齐）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseEntry {
+    /// uuid（database_create 生成）。
+    pub id: String,
+    pub name: String,
+    /// 数据件目录（规范化绝对路径；library.db / thumbs / 向量同居于此）。
+    pub db_dir: String,
+}
+
+/// 两路径「相同或互相包含」（忽略大小写与 `/`\\` 方向；前缀后必须是分隔
+/// 符，防 `I:\db` 误匹配 `I:\db2`——与 db::libraries::paths_overlap 同
+/// 语义的本模块内副本，settings 不依赖 db 层）。
+fn db_paths_overlap(a: &str, b: &str) -> bool {
+    fn norm(c: char) -> char {
+        if c == '/' {
+            '\\'
+        } else {
+            c.to_ascii_lowercase()
+        }
+    }
+    fn starts_with(path: &str, prefix: &str) -> bool {
+        let prefix = prefix.trim_end_matches(['/', '\\']);
+        let mut p = path.chars();
+        let mut r = prefix.chars();
+        loop {
+            match (r.next(), p.next()) {
+                (Some(rc), Some(pc)) if norm(rc) == norm(pc) => continue,
+                (None, Some(pc)) => return pc == '/' || pc == '\\',
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+    starts_with(a, b) || starts_with(b, a)
+}
+
+/// 数据库目录注册表内互斥校验（settings 层闸门，database_create 前置）：
+/// 新 db_dir 不得与任一已注册数据库的 db_dir 相同或互相包含（数据件
+/// 目录混同会让两个注册表条目指向同一份 SQLite，切库形同虚设）。
+/// **不含**与照片库 root 的重叠校验——照片库 root 在各数据库的
+/// photos_libraries 表里，需要开库查，由 IPC 层（`crate::ipc::databases`）
+/// 完成；本函数只做注册表内互斥。
+pub fn validate_database_dir_overlap(
+    databases: &[DatabaseEntry],
+    db_dir: &Path,
+) -> Result<(), String> {
+    let new_dir = db_dir.to_string_lossy().into_owned();
+    for entry in databases {
+        if db_paths_overlap(&new_dir, &entry.db_dir) {
+            return Err(format!(
+                "数据库位置与已有数据库「{}」相同或互相包含（{}）",
+                entry.name, entry.db_dir
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Default for Settings {
@@ -62,7 +144,8 @@ impl Default for Settings {
         Self {
             schema_version: SCHEMA_VERSION,
             onboarding_completed: false,
-            database_dir: None,
+            databases: Vec::new(),
+            active_database_id: None,
             import: ImportSettings::default(),
             gallery: GallerySettings::default(),
             appearance: AppearanceSettings::default(),
@@ -279,10 +362,10 @@ pub fn normalize_library_path(input: &str) -> Result<String, String> {
     normalize_absolute_path(input, "照片库根目录")
 }
 
-/// 「数据库位置」规范化（同一闸门，2026-10-09 单数据库多照片库 §一）：
-/// 拒绝相对路径（同 `I:xxx` 盘符相对陷阱）与盘根（数据库目录承载一切
-/// 数据件，不得与整盘混同——照片库 root 互斥校验以它为基准，盘根会与
-/// 任何同盘照片库互相包含）。
+/// 数据库目录规范化（database_create 统一闸门，多数据库修正沿用单库时代
+/// 规则）：拒绝相对路径（同 `I:xxx` 盘符相对陷阱）与盘根（数据库目录承载
+/// 一切数据件，不得与整盘混同——db_dir 互斥校验以它为基准，盘根会与任何
+/// 同盘照片库互相包含）。
 pub fn normalize_database_path(input: &str) -> Result<String, String> {
     let normalized = normalize_absolute_path(input, "数据库位置")?;
     let path = Path::new(&normalized);
@@ -297,7 +380,7 @@ pub fn normalize_database_path(input: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
-/// 绝对路径规范化闸门内核（照片库 root / 数据库位置共用，规则见
+/// 绝对路径规范化闸门内核（照片库 root / 数据库目录共用，规则见
 /// [`normalize_library_path`]；`label` 进错误文案）。
 fn normalize_absolute_path(input: &str, label: &str) -> Result<String, String> {
     let trimmed = input.trim();
@@ -309,15 +392,6 @@ fn normalize_absolute_path(input: &str, label: &str) -> Result<String, String> {
         return Err(format!("{label}必须是绝对路径：{trimmed}"));
     }
     Ok(logical_normalize(path).to_string_lossy().into_owned())
-}
-
-/// database_dir 规范化（settings_set 前置）：Some → 绝对路径归一 + 盘根
-/// 拒绝（见 [`normalize_database_path`]）；None（默认应用数据目录）通过。
-pub fn normalize_settings_database_dir(settings: &mut Settings) -> Result<(), String> {
-    if let Some(dir) = settings.database_dir.as_deref() {
-        settings.database_dir = Some(normalize_database_path(dir)?);
-    }
-    Ok(())
 }
 
 /// 组件级逻辑归一（目标路径尚不存在时的兜底）：`/` 分隔符经 components
@@ -399,7 +473,8 @@ impl SettingsManager {
     /// 文件不存在返回默认值；JSON 损坏时把坏文件改名为
     /// `settings.json.corrupt-{unix秒}` 后返回默认值；旧版本缺字段由
     /// serde default 容错填充并升到当前 SCHEMA_VERSION（视为已迁移）。
-    /// 旧库注册表（libraries/activeLibraryId/dbDir）键自动忽略（§二 退役）。
+    /// 旧键（libraries/activeLibraryId/单库 databaseDir）自动忽略
+    ///（2026-10-09 多数据库修正，不做迁移）。
     pub fn load(dir: &Path) -> Result<Settings, SettingsError> {
         let path = dir.join(SETTINGS_FILE);
         if !path.is_file() {

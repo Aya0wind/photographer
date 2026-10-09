@@ -6,9 +6,10 @@
 //! （embed 输入档位/人脸阈值即时生效）；② 参数指纹比对——变了就后台
 //! 重建对应通道（改参数即自动重建，设置页手动按钮是兜底入口）。
 //!
-//! 2026-10-09 单数据库多照片库（M2a）：settings.json 只留应用级设置；
-//! 旧 library_delete / library_relocate 命令随库注册表退役（照片库登记
-//! 改由 photo_library_* 命令族承载，见 `ipc::photo_library`）。
+//! 2026-10-09 多数据库修正：settings.json 的数据库注册表（databases /
+//! activeDatabaseId）由 `database_*` 命令族独占维护——settings_set 对这两
+//! 个字段**原样保留后端真值**（前端回显值不信任），杜绝设置保存路径绕开
+//! database_create/switch/remove 的校验闸门。旧单库 databaseDir 键退役。
 
 use tauri::{AppHandle, Emitter, State};
 
@@ -40,32 +41,11 @@ pub fn settings_set(
         .lock()
         .expect("settings mutex poisoned")
         .clone();
-    // 「数据库位置」规范化（2026-10-09 单数据库多照片库 §一）：Some 走
-    // 绝对路径归一 + 盘根拒绝；None（默认应用数据目录）原样通过。
-    crate::settings::normalize_settings_database_dir(&mut settings)?;
-    // 数据库位置变更的反向互斥（§八-6）：新数据库目录不得与已登记照片库
-    // root 相同或互相包含（防 thumbs/ 等数据件落进照片库被扫描登记）。
-    // 打开的是**新设置解析出的**数据库目录——photos_libraries 登记表
-    // 随库就位（尚未建库时为空表，校验自然通过）。
-    if settings.database_dir != previous.database_dir {
-        let database_dir = settings.database_dir_path(&state.config_dir);
-        let db =
-            super::open_library_db(&database_dir).map_err(|e| format!("数据库位置不可用：{e}"))?;
-        let libraries = db.photos_library_list().map_err(|e| e.to_string())?;
-        for library in &libraries {
-            crate::db::libraries::validate_photos_library_root(
-                &[],
-                &database_dir,
-                std::path::Path::new(&library.root_path),
-            )
-            .map_err(|_| {
-                format!(
-                    "数据库位置与照片库「{}」的根目录相同或互相包含（{}）",
-                    library.name, library.root_path
-                )
-            })?;
-        }
-    }
+    // 数据库注册表真值保留（多数据库修正）：databases/activeDatabaseId 只经
+    // database_* 命令族变更（带 db_dir 互斥/照片库 root 重叠/切换校验），
+    // settings_set 回收前端的回显值并还原后端真值。
+    settings.databases = previous.databases;
+    settings.active_database_id = previous.active_database_id;
     SettingsManager::save(&settings, &state.config_dir).map_err(|err| err.to_string())?;
     // 缩略图缓存上限即时生效（M8-③）
     crate::thumbs::set_thumb_cache_cap_bytes(
@@ -90,10 +70,11 @@ pub fn settings_set(
         settings.ai.eyes_ear_closed,
         settings.ai.eyes_ear_maybe,
     );
-    // 参数指纹比对：变更通道后台自动重建（无变更为 no-op）。应用唯一
-    // 数据库（§一）随设置解析；迟到任务比对内存快照防重复重建。
+    // 参数指纹比对：变更通道后台自动重建（无变更为 no-op）。目标 = 激活
+    // 数据库（多数据库修正按 activeDatabaseId 解析）；迟到任务比对内存
+    // 快照防重复重建。
     let ai_snapshot = settings.ai.clone();
-    let rebuild_db_dir = settings.database_dir_path(&state.config_dir);
+    let rebuild_db_dir = settings.active_database_dir(&state.config_dir)?;
     *state.settings.lock().expect("settings mutex poisoned") = settings.clone();
     let shared = state.inner().clone();
     state

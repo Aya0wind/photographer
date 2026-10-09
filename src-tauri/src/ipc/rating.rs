@@ -65,7 +65,7 @@ pub fn fetch_asset_rating_set(
     // 用户主动评分时，即使原文件是外部引用，也同步旁边的 XMP 边车。
     // 成功后清脏（xmp_dirty 归零）；失败保持脏 → 下轮库扫描兜底补写。
     let projected = projected_rating(rating, rejected);
-    let db_dir = super::app_database_dir(state);
+    let db_dir = super::app_database_dir(state)?;
     spawn_xmp_sync(
         state,
         XmpSync {

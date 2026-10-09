@@ -214,7 +214,7 @@ pub fn fetch_asset_thumb(
     asset_id: i64,
     size: u16,
 ) -> Result<ThumbOutcome, String> {
-    let db_dir = super::app_database_dir(state);
+    let db_dir = super::app_database_dir(state)?;
     let db = super::open_library_db(&db_dir)?;
     // 状态分流（thumb_state 列 O(1) 判断）：1=缓存命中直返（文件被清则
     // 落入兜底入队重生成）；2=永久占位（不可解码/三次失败）不排队；
@@ -294,7 +294,7 @@ pub async fn thumb_get_by_path(
 ) -> Result<Option<String>, String> {
     let shared = state.inner().clone();
     let thumb = run_blocking(shared, move |state| {
-        let db_dir = super::app_database_dir(state);
+        let db_dir = super::app_database_dir(state)?;
         let thumb = crate::thumbs::thumb_file(&db_dir, std::path::Path::new(&path), size);
         Ok::<Option<String>, String>(thumb)
     })
@@ -322,7 +322,7 @@ pub fn fetch_device_thumb(
         .ok_or("设备已断开")?;
     let db_dir = {
         let settings = state.settings.lock().map_err(|_| "库状态不可用")?;
-        settings.database_dir_path(&state.config_dir)
+        settings.active_database_dir(&state.config_dir)?
     };
     let size = crate::thumbs::snap_size(size);
     let cache_key =

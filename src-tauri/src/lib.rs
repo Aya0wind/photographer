@@ -45,10 +45,11 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 存储模型（2026-10-09 单数据库多照片库，§一）：全局配置固定在
-            // 应用标准配置目录；应用级唯一数据库（SQLite/缩略图/向量）默认
-            // 同居配置目录（「数据库位置」设置项可改到数据盘）；照片库 =
-            // 照片文件夹的登记项（photos_libraries 表，N 个）。
+            // 存储模型（2026-10-09 多数据库修正）：全局配置固定在应用标准
+            // 配置目录；数据库可多个、可切换（settings.databases 注册表，
+            // 每个 = 独立 SQLite/thumbs/向量同居各自 db_dir，为多用户协作
+            // 预埋）；照片库 = 照片文件夹的登记项（photos_libraries 表，
+            // N 个，全部作用于激活数据库内部）。
             let config_dir = app
                 .path()
                 .app_config_dir()
@@ -88,8 +89,10 @@ pub fn run() {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
-            // 应用唯一数据库目录（§一「数据库位置」解析；索引/自愈任务目标）
-            let active_db_dir = settings.database_dir_path(&config_dir);
+            // 激活数据库目录（多数据库修正，按 activeDatabaseId 解析）：
+            // 尚未创建数据库（首次启动）→ None，索引/自愈等启动任务整段
+            // 跳过；用户建库后由各命令按需触发（database_create 物化建表）。
+            let active_db_dir = settings.active_database_dir(&config_dir).ok();
             let bus = EventBus::new();
             // 托管 Arc<AppState>（SharedState）：async 慢命令壳需要 'static
             // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
@@ -144,11 +147,12 @@ pub fn run() {
 
             // 索引任务启动恢复（导入/索引分离）：遗留 running 复位 pending
             // → indexTaskResumed 事件 → 后台 worker 全核续跑。
+            // 尚未创建数据库（首次启动引导前）整段跳过，建库后各入口按需
+            // 触发（导入收尾/手动索引/下载完成 watcher）。
             // 真机修复（2026-09-19）：AI 回填原只挂在「下载完成 watcher +
             // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
-            {
-                let db_dir = active_db_dir;
+            if let Some(db_dir) = active_db_dir {
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
                 // 拍摄地图：内置数据包首次启动解压一次（config_dir/geo 常驻）
                 // → 后台跑索引管线（加载/入库/回填），幂等
@@ -296,6 +300,12 @@ pub fn run() {
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
             ipc::settings::settings_set,
+            // 数据库注册表（2026-10-09 多数据库修正：应用可登记多个数据库
+            // 并切换激活库，为多用户协作预埋；照片库全部作用于激活库内部）
+            ipc::databases::database_list,
+            ipc::databases::database_create,
+            ipc::databases::database_switch,
+            ipc::databases::database_remove,
             // 照片库登记表（2026-10-09 单库多照片库；M2a 实装 CRUD；
             // scan_status/scan_cancel 骨架待 M4 登记管道）
             ipc::photo_library::photo_library_list,

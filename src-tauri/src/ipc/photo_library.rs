@@ -99,7 +99,7 @@ fn validate_name(raw: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// 照片库列表核（photo_library_list）：应用唯一数据库 photos_libraries 表
+/// 照片库列表核（photo_library_list）：激活数据库 photos_libraries 表
 /// 全量登记（登记序）+ **在线状态即时对账**（§五 M2c 整库 offline 维护：
 /// 逐库 stat root 在盘性——外置卷拔插后不等下一轮扫描（60s）即翻
 /// status，存储页永远看到真值；有翻转时发 PhotoLibrariesChanged）。
@@ -123,7 +123,7 @@ pub fn fetch_photo_library_list(state: &super::AppState) -> Result<Vec<PhotoLibr
     Ok(rows.into_iter().map(PhotoLibraryDto::from).collect())
 }
 
-/// 照片库列表（photo_library_list）：应用唯一数据库 photos_libraries 表
+/// 照片库列表（photo_library_list）：激活数据库 photos_libraries 表
 /// 全量登记（登记序）+ 在线状态即时对账（stat root；DB 访问走后台线程）。
 #[tauri::command]
 pub async fn photo_library_list(
@@ -169,7 +169,7 @@ pub fn fetch_photo_library_create(
         }
     }
     let db = super::app_database_db(state)?;
-    let row = db.photos_library_register(&name, &root_path, &super::app_database_dir(state))?;
+    let row = db.photos_library_register(&name, &root_path, &super::app_database_dir(state)?)?;
     if reference {
         // 从文件夹建立：登记即建任务（持久化——重启后 worker 仍会拾取），
         // kick 让轮询线程秒级开跑（不等 60s 轮询拍）。
@@ -253,7 +253,7 @@ pub fn fetch_photo_library_relocate(
     let same_root = new_root.eq_ignore_ascii_case(&library.root_path);
     let (affected, unaffected) = if apply && !same_root {
         // 先互斥校验（排除自身）再改库 root；路径前缀批量重写同库事务。
-        db.photos_library_set_root(id, &new_root, &super::app_database_dir(state))?;
+        db.photos_library_set_root(id, &new_root, &super::app_database_dir(state)?)?;
         db.rewrite_asset_roots(&library.root_path, &new_root)?
     } else {
         db.inspect_asset_roots(&library.root_path)?
@@ -378,7 +378,11 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
     {
         return Vec::new();
     }
-    let Ok(db) = super::app_database_db(state) else {
+    let Ok(db_dir) = super::app_database_dir(state) else {
+        eprintln!("[library-scan] 数据库不可用，跳过本轮");
+        return Vec::new();
+    };
+    let Ok(db) = super::open_library_db(&db_dir) else {
         eprintln!("[library-scan] 数据库不可用，跳过本轮");
         return Vec::new();
     };
@@ -386,7 +390,6 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
         eprintln!("[library-scan] 照片库登记表不可读，跳过本轮");
         return Vec::new();
     };
-    let db_dir = super::app_database_dir(state);
     let gate = std::sync::Arc::clone(&state.register_gate);
     let options = crate::scan::ScanOptions::default();
     let mut out = Vec::new();
@@ -507,7 +510,11 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
     {
         return;
     }
-    let Ok(db) = super::app_database_db(state) else {
+    let Ok(db_dir) = super::app_database_dir(state) else {
+        eprintln!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
+        return;
+    };
+    let Ok(db) = super::open_library_db(&db_dir) else {
         eprintln!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
         return;
     };
@@ -515,7 +522,6 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
         eprintln!("[library-scan] 批量登记任务表不可读，本轮跳过");
         return;
     };
-    let db_dir = super::app_database_dir(state);
     let gate = std::sync::Arc::clone(&state.register_gate);
     for job in jobs {
         // 每任务前重查导入在场（上一任务跑的当口用户可能开了导入）

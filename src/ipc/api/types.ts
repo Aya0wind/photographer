@@ -35,11 +35,44 @@ export type DuplicatePolicy = "skip" | "rename" | "ask";
 /** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
 export type ImportMode = "copy" | "move" | "reference";
 
+// --- 数据库注册表（2026-10-09 多数据库修正） ------------------
+// 应用可登记多个数据库（为多用户协作预埋），每个 = 独立 SQLite(library.db) +
+// thumbs/ + 向量同居各自 dbDir；任一时刻恰有一个「激活数据库」，照片库登记
+// 表（photos_libraries）全部作用于激活数据库内部——不同数据库的照片库天然
+// 隔离，切换数据库即整体换库（databasesChanged 事件后前端全量刷新）。
+
+/** 数据库注册表条目（database_list 返回；settings.databases 行投影） */
+export interface DatabaseEntry {
+  id: string;
+  name: string;
+  /** 数据件目录绝对路径（library.db/thumbs/向量同居于此；规范化形态） */
+  dbDir: string;
+}
+
+/** 注册表快照（database_list 返回）：databases 与 activeId 同帧返回，
+ *  避免两次读取之间被切换造成的前后不一致 */
+export interface DatabaseList {
+  databases: DatabaseEntry[];
+  /** 激活数据库 id（null=尚未创建数据库，一切库内操作报「尚未创建数据库」） */
+  activeId: string | null;
+}
+
+/** database_create 结果：ok=false 时 error 为后端 Err 文案；null=invoke 不可用 */
+export type DatabaseCreateResult =
+  | { ok: true; database: DatabaseEntry }
+  | { ok: false; error: string | null };
+
+/** database_remove 结果：dataDirsDeleted=deleteData=true 时实际删除的
+ *  数据目录数（仅摘登记模式为 0）；**绝不删照片库文件夹**（用户红线） */
+export interface DatabaseRemoveResult {
+  dataDirsDeleted: number;
+}
+
 // --- 单数据库多照片库（2026-10-09 定案，docs/plans/2026-10-09-...） ------------------
-// 应用级唯一数据库（SQLite+缩略图+向量+人脸，默认应用数据目录，设置「数据库
-// 位置」可改）；照片库 = 一个文件夹的登记项（photos_libraries 表，N 个，纯
-// 物理概念）；相册/子组是数据库全局逻辑概念，不分库、无物理足迹。旧
-// libraries 注册表 / activeLibrary / dbDir 模型整体退役（不做兼容不迁移）。
+// 应用可登记多个数据库（上一节），每个数据库内部：照片库 = 一个文件夹的
+// 登记项（photos_libraries 表，N 个，纯物理概念）；相册/子组是数据库全局
+// 逻辑概念，不分库、无物理足迹。旧 settings.libraries 注册表 / activeLibrary
+// / 单库 databaseDir 模型整体退役（不做兼容不迁移）。
 
 /** 照片库在线状态：整库离线标记（reconcile 按照片库粒度判定；单文件缺失走 assets.missing） */
 export type PhotoLibraryStatus = "online" | "offline";
@@ -226,6 +259,9 @@ export type AppEvent =
   | { type: "tetheringSettingsChanged"; sessionId: string }
   | { type: "mapGeoProgress"; stage: string; done: number; total: number; message: string | null }
   | { type: "mapRegionsUpdated" }
+  /** 数据库注册表/激活数据库变更（新建/切换/移除）：前端全量刷新——重拉
+   *  database_list、照片库列表与画廊等一切库内数据（换库语义） */
+  | { type: "databasesChanged" }
   /** photos_libraries 登记表变更（新建/移除登记/重定位/在线状态翻转）：
    *  存储页与导入目标选择器重拉 photo_library_list */
   | { type: "photoLibrariesChanged" }

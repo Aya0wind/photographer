@@ -5,17 +5,20 @@ import { ipc } from "@/ipc";
 import type { AiQualityTier } from "@/ipc/api";
 
 /**
- * 应用级设置（settings.json，2026-10-09 单数据库多照片库定案）：
- * 只留应用级配置——库注册表（libraries）/activeLibraryId/dbDir 模型整体退役，
- * 照片库登记表由数据库 photos_libraries 承载（photo_library_list 等命令），
- * 相册/子组为全局逻辑概念。旧 settings.json 残留键由后端 serde 忽略（不迁移）。
+ * 应用级设置（settings.json，2026-10-09 多数据库修正）：
+ * 应用级配置 + **数据库注册表**（databases/activeDatabaseId——应用可登记
+ * 多个数据库并切换激活库，为多用户协作预埋；由 database_* 命令族独占维护，
+ * settings_set 对这两个字段原样保留后端真值）。照片库登记表由激活数据库
+ * photos_libraries 承载（photo_library_list 等命令）。旧键（libraries/
+ * activeLibraryId/单库 databaseDir）由后端 serde 忽略（不迁移）。
  */
 export interface Settings {
   schemaVersion: number;
   onboardingCompleted: boolean;
-  /** 应用级唯一数据库位置（null=默认应用数据目录；「数据库位置」设置项，
-   *  Windows 数据盘需求。M1 后端落盘该字段，过渡期后端忽略不报错）。 */
-  databaseDir: string | null;
+  /** 数据库注册表（只读回显；变更走 database_* 命令族，见 ipc/api/databases） */
+  databases: { id: string; name: string; dbDir: string }[];
+  /** 激活数据库 id（null=尚未创建数据库；切换走 database_switch） */
+  activeDatabaseId: string | null;
   import: {
     promptOnDevice: boolean;
     skipImported: boolean;
@@ -72,7 +75,8 @@ export type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: 1,
   onboardingCompleted: false,
-  databaseDir: null,
+  databases: [],
+  activeDatabaseId: null,
   import: {
     promptOnDevice: true,
     skipImported: true,

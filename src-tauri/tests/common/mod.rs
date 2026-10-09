@@ -341,9 +341,24 @@ impl DeviceSource for DeleteFailSource {
 // IPC / AppState 脚手架
 // ---------------------------------------------------------------------------
 
-/// 构造带慢速卷源注册表的 AppState（IPC 编排测试用）。应用唯一数据库 =
-/// config_dir（= db_dir，tests 的 open_db(db_dir) 与 AppState 解析同库）；
-/// settings 只含应用级配置（2026-10-09：库注册表/activeLibrary 退役）。
+/// 单数据库注册表 settings（2026-10-09 多数据库修正测试脚手架）：
+/// 注册一个指向 db_dir 的数据库并激活——tests 的 open_db(db_dir) 与
+/// AppState 解析（app_database_dir）同库。
+pub fn settings_with_database(db_dir: &Path) -> Settings {
+    let entry = settings::DatabaseEntry {
+        id: "test-db".into(),
+        name: "测试数据库".into(),
+        db_dir: db_dir.to_string_lossy().into_owned(),
+    };
+    Settings {
+        databases: vec![entry],
+        active_database_id: Some("test-db".into()),
+        ..Settings::default()
+    }
+}
+
+/// 构造带慢速卷源注册表的 AppState（IPC 编排测试用）。激活数据库 =
+/// config_dir（= db_dir，tests 的 open_db(db_dir) 与 AppState 解析同库）。
 pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> AppState {
     let source: Arc<dyn DeviceSource> = Arc::new(SlowSource {
         inner: VolumeSource::new(source_dir),
@@ -361,7 +376,7 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
     devices_map.insert(source.id(), DeviceEntry::ready(source, snapshot));
     let supervisor = tasks::TaskSupervisor::new(EventBus::new());
     AppState {
-        settings: Mutex::new(Settings::default()),
+        settings: Mutex::new(settings_with_database(db_dir)),
         config_dir: db_dir.to_path_buf(),
         bus: EventBus::new(),
         devices: Mutex::new(devices_map),

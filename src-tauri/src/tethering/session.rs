@@ -476,9 +476,9 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             asset_id: photo.id,
             name: photo.name,
         });
-        let app_db_dir = crate::ipc::app_database_dir(state);
+        let app_db_dir = crate::ipc::app_database_dir(state)?;
         crate::index::kick(app_db_dir.clone(), &state.supervisor);
-        // 应用唯一数据库（§一）：AI 回填不再依赖库切换条件，直接触发。
+        // 激活数据库（多数据库修正）：AI 回填直接触发。
         {
             let settings = state.settings.lock().unwrap().clone();
             if settings.ai.enable_clip {

@@ -413,7 +413,7 @@ pub fn fetch_album_export_run(
     }
     // worker 库连接预开（打开失败 = 任务同步 error 收尾 + 槽回摘——不留
     // 「行 queued + 槽占用」的泄漏窗口）。
-    let db_dir = crate::ipc::app_database_dir(state);
+    let db_dir = crate::ipc::app_database_dir(state)?;
     let worker_db = match crate::ipc::open_library_db(&db_dir) {
         Ok(worker_db) => worker_db,
         Err(error) => {

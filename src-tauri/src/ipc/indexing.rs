@@ -155,7 +155,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
     };
-    let db_dir = super::app_database_dir(state);
+    let db_dir = super::app_database_dir(state)?;
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
@@ -420,9 +420,9 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// 应用唯一数据库目录（重建后台任务用；§一「数据库位置」解析）。
+/// 激活数据库目录（重建后台任务用；多数据库修正按 activeDatabaseId 解析）。
 pub fn app_db_dir(state: &super::AppState) -> Result<std::path::PathBuf, String> {
-    Ok(super::app_database_dir(state))
+    super::app_database_dir(state)
 }
 
 /// 重建执行体（supervisor 线程 / 测试直调）：开库 → 清理+重排 → 事件 →

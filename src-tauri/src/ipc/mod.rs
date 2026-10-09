@@ -7,6 +7,7 @@ pub mod album_export;
 pub mod assets;
 pub mod claim;
 pub mod culling;
+pub mod databases;
 pub mod device;
 pub mod device_manager;
 pub mod duplicates;
@@ -80,12 +81,12 @@ pub struct ActiveImport {
     pub handle: Option<crate::tasks::TaskHandle>,
 }
 
-/// 全局应用状态：内存中的设置快照（应用级）+ 配置目录 + 事件总线 +
-/// 设备注册表 + 活跃导入。
+/// 全局应用状态：内存中的设置快照（应用级 + 数据库注册表）+ 配置目录 +
+/// 事件总线 + 设备注册表 + 活跃导入。
 ///
-/// 2026-10-09 单数据库多照片库：settings 只含应用级配置（库注册表/
-/// activeLibrary/migrations 守卫全部退役——照片库登记在应用唯一数据库
-/// photos_libraries 表，数据库目录由 settings.database_dir 解析）。
+/// 2026-10-09 多数据库修正：settings.databases 承载数据库注册表，一切
+/// 库内操作作用于 `activeDatabaseId` 指向的激活数据库（切换见
+/// `ipc::databases`，切换后前后端各自全量刷新数据）。
 pub struct AppState {
     pub settings: Mutex<Settings>,
     pub config_dir: PathBuf,
@@ -372,19 +373,20 @@ impl DeviceSource for ArcSource {
     }
 }
 
-/// 应用唯一数据库目录（§一「数据库位置」设置项解析：None = 应用数据目录，
-/// Some = 自定义路径）。
-pub fn app_database_dir(state: &AppState) -> PathBuf {
+/// 激活数据库目录（多数据库修正，2026-10-09）：settings 注册表按
+/// `activeDatabaseId` 解析——一切库内操作（照片库登记/资产/相册）都作用
+/// 于该目录下的独立 SQLite；尚未创建数据库时 Err（调用方转成明确 UI 态）。
+pub fn app_database_dir(state: &AppState) -> Result<PathBuf, String> {
     let settings = state.settings.lock().expect("settings mutex poisoned");
-    settings.database_dir_path(&state.config_dir)
+    settings.active_database_dir(&state.config_dir)
 }
 
-/// 应用唯一数据库连接（单数据库多照片库，2026-10-09 定案）：library.db +
-/// thumbs/ + 向量等一切数据件所在目录即 [`app_database_dir`]；照片库登记
-/// （photos_libraries）、资产、相册等一切表同居于此。打开即建 schema
-/// （单版本幂等）。
+/// 激活数据库连接（多数据库修正，2026-10-09）：library.db + thumbs/ +
+/// 向量等一切数据件所在目录即 [`app_database_dir`]；照片库登记
+/// （photos_libraries）、资产、相册等一切表同居于此，切换数据库即整体
+/// 换库（不同数据库的照片库天然隔离）。打开即建 schema（单版本幂等）。
 pub fn app_database_db(state: &AppState) -> Result<Db, String> {
-    open_library_db(&app_database_dir(state))
+    open_library_db(&app_database_dir(state)?)
 }
 
 /// 打开指定目录的数据库连接（library.db；打开即幂等执行单版本建表脚本，
@@ -529,7 +531,7 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 }
 
 /// 启动、恢复和重试共用调度；索引在导入结束后按需一次性唤醒。
-fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
+fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<ActiveImport, String> {
     // 登记单管道闸（§八-5）：引擎登记段与库扫描互斥（run 前 spawn 注入点）
     engine.set_registration_gate(std::sync::Arc::clone(&state.register_gate));
     let controls = engine.controls();
@@ -537,8 +539,10 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
     let (index_db_dir, geo_config_dir, ai_settings) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         // app_database_dir 内部会再锁 settings——此处持锁，直接同式解析。
+        // 调用方（start/resume/retry）此前都已开过激活数据库；这里 Err 只在
+        // 「校验后瞬间被切换数据库」的竞态窗口出现，如实上抛。
         (
-            settings.database_dir_path(&state.config_dir),
+            settings.active_database_dir(&state.config_dir)?,
             state.config_dir.clone(),
             settings.ai.clone(),
         )
@@ -626,12 +630,12 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
                 crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
             }
         });
-    ActiveImport {
+    Ok(ActiveImport {
         job_id,
         source_id,
         controls,
         handle: Some(handle),
-    }
+    })
 }
 
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
@@ -662,7 +666,7 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
     let db = app_database_db(state)?;
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
-    *active = Some(launch_import(state, engine, job_id));
+    *active = Some(launch_import(state, engine, job_id)?);
     Ok(job_id)
 }
 
@@ -702,7 +706,7 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
     let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
-    *active = Some(launch_import(state, engine, job_id));
+    *active = Some(launch_import(state, engine, job_id)?);
     state
         .bus
         .publish(crate::events::AppEvent::ImportResumed { job_id });
@@ -804,7 +808,7 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
-    *active = Some(launch_import(state, engine, new_id));
+    *active = Some(launch_import(state, engine, new_id)?);
     Ok(new_id)
 }
 

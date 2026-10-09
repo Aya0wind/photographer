@@ -20,6 +20,7 @@ import SplashPage from "@/app/SplashPage";
 import { useWindowReveal } from "@/lib/windowReveal";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
 import { usePhotoLibraries } from "@/features/onboarding/lib/usePhotoLibraries";
+import { useDatabases } from "@/lib/useDatabases";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import CullingPage from "@/features/culling/pages/CullingPage";
 import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsPages";
@@ -30,20 +31,24 @@ import { useSettingsStore } from "@/stores/settingsStore";
 const AdvancedEditorWindowPage = lazy(() => import("@/features/editor/components/AdvancedEditorWindowPage"));
 
 /**
- * 主壳守卫（2026-10-09 单库多照片库定案，M5 收尾）：设置未加载完成时空白等待；
- * 加载后**尚无任何照片库且未完成引导** → 送 /onboarding（数据库就位 → 引导
- * 建立第一个照片库），替代旧达芬奇式「启动先选库」闸。已有照片库（或引导已
- * 完成）直进主壳——多照片库并存、画廊全局跨库混排。后端不可用时登记表按空
- * 处理：首启会进引导，引导可「稍后再建」跳过，不阻塞开发调试。
+ * 主壳守卫（2026-10-09 多数据库修正）：设置未加载完成/注册表未拉到时空白
+ * 等待；加载后**尚无数据库，或无任何照片库且未完成引导** → 送 /onboarding
+ *（创建数据库 → 引导建立第一个照片库）。已有数据库且引导已完成（或有照片
+ * 库）直进主壳——照片库/画廊等一切库内操作作用于激活数据库。后端不可用
+ * 时注册表按空处理：首启会进引导，引导可「稍后再建」跳过，不阻塞开发调试。
  */
 export function GatedShell() {
   const loaded = useSettingsStore((s) => s.loaded);
   const onboardingCompleted = useSettingsStore((s) => s.settings.onboardingCompleted);
+  const databases = useDatabases();
   const libraries = usePhotoLibraries();
   useWindowReveal(loaded);
 
-  if (!loaded) return null;
-  if (libraries !== null && libraries.length === 0 && !onboardingCompleted) {
+  if (!loaded || databases === null) return null;
+  const hasDatabase = databases.databases.length > 0;
+  const needsOnboarding =
+    !hasDatabase || (libraries !== null && libraries.length === 0);
+  if (needsOnboarding && !onboardingCompleted) {
     return <Navigate to="/onboarding" replace />;
   }
   return <AppShell />;
@@ -59,7 +64,7 @@ export function SearchRedirect() {
 export const router = createBrowserRouter([
   // 启动画面（splash 窗口加载；主窗口就绪后被关闭——见 lib/windowReveal）
   { path: "/splash", element: <SplashPage /> },
-  // 首次引导（M5：数据库就位 → 引导建立第一个照片库）
+  // 首次引导（2026-10-09 多数据库修正：创建数据库 → 引导建立第一个照片库）
   { path: "/onboarding", element: <OnboardingPage /> },
   // 联机拍摄独立窗口（后端 tethering_start 创建的第二 webview 加载；独立于
   // 主壳守卫——该窗口的 store 是全新会话态，会话真值全部来自后端命令）

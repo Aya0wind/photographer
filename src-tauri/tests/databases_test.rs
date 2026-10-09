@@ -1,0 +1,235 @@
+//! 数据库命令族测试（2026-10-09 多数据库修正）：database_create/switch/
+//! remove 核心（fetch_* 直测，命令壳只做 tauri 包装）。
+//!
+//! 覆盖：首个库自动激活、默认约定路径物化、db_dir 注册表内互斥、跨库
+//! 照片库 root 重叠校验、切换校验（存在/可用）、两级移除（仅摘登记 /
+//! 连数据目录删）与「绝不删照片库文件夹」安全闸、删激活库后的回退切换。
+
+mod common;
+
+pub use common::{
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, thumbs,
+};
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Mutex;
+
+use events::EventBus;
+use ipc::AppState;
+
+/// 空注册表 AppState（config_dir = settings.json 落点 = 默认约定路径锚）。
+fn state_at(config_dir: &Path) -> AppState {
+    let supervisor = tasks::TaskSupervisor::new(EventBus::new());
+    AppState {
+        settings: Mutex::new(settings::Settings::default()),
+        config_dir: config_dir.to_path_buf(),
+        bus: EventBus::new(),
+        devices: Mutex::new(HashMap::new()),
+        active_import: Mutex::new(None),
+        import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        register_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+        library_scan_kick: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        supervisor: supervisor.clone(),
+        thumb_queue: ipc::thumb::ThumbQueue::new(),
+        ai: ai::ModelManager::new(config_dir.join("models"), EventBus::new(), supervisor),
+    }
+}
+
+/// 新建数据库并断言注册表/激活态/物化（复用样板）。
+fn create_db(state: &AppState, name: &str, db_dir: Option<&str>) -> settings::DatabaseEntry {
+    let entry = ipc::databases::fetch_database_create(state, name, db_dir)
+        .unwrap_or_else(|e| panic!("新建数据库「{name}」失败: {e}"));
+    assert!(
+        Path::new(&entry.db_dir).join("library.db").is_file(),
+        "建库即物化（建目录 + 单版本 schema）"
+    );
+    entry
+}
+
+#[test]
+fn database_create_activates_first_and_defaults_to_convention_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    // 首个库自动激活；dbDir 缺省 = <config>/databases/<id>（约定路径）
+    let entry = create_db(&state, "主数据库", None);
+    assert_eq!(entry.name, "主数据库");
+    let expect = config.join("databases").join(&entry.id);
+    assert_eq!(std::path::PathBuf::from(&entry.db_dir), expect);
+
+    let list = ipc::databases::fetch_database_list(&state).unwrap();
+    assert_eq!(list.databases.len(), 1);
+    assert_eq!(list.active_id.as_deref(), Some(entry.id.as_str()));
+
+    // 激活目录解析指向新库（一切库内操作的作用域）
+    let resolved = ipc::app_database_dir(&state).unwrap();
+    assert_eq!(resolved, expect);
+
+    // 无激活数据库时明确报错（新会话/删光后）
+    let mut bare = settings::Settings::default();
+    assert_eq!(
+        bare.active_database_dir(&config).unwrap_err(),
+        "尚未创建数据库"
+    );
+}
+
+#[test]
+fn database_create_second_keeps_active_and_rejects_overlap() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+    // 第二个库不抢激活
+    let list = ipc::databases::fetch_database_list(&state).unwrap();
+    assert_eq!(list.active_id.as_deref(), Some(first.id.as_str()));
+
+    // 注册表内互斥：相同 / 互相包含（含嵌套子目录）一律拒绝
+    for bad in [
+        first.db_dir.clone(),
+        std::path::PathBuf::from(&first.db_dir)
+            .join("nested")
+            .to_string_lossy()
+            .into_owned(),
+    ] {
+        let err = ipc::databases::fetch_database_create(&state, "坏库", Some(&bad)).unwrap_err();
+        assert!(err.contains("相同或互相包含"), "{bad} 应被互斥拒绝：{err}");
+    }
+    // 相对路径 / 空名拒绝
+    assert!(ipc::databases::fetch_database_create(&state, "相对路径库", Some("relative/db")).is_err());
+    assert!(ipc::databases::fetch_database_create(&state, "  ", None).is_err());
+    assert_eq!(
+        ipc::databases::fetch_database_list(&state).unwrap().databases.len(),
+        2,
+        "失败请求不落注册表"
+    );
+    assert!(Path::new(&second.db_dir).join("library.db").is_file());
+}
+
+#[test]
+fn database_switch_changes_active_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+
+    // 不存在的 id 拒绝切换
+    assert!(ipc::databases::fetch_database_switch(&state, "no-such-db").is_err());
+
+    ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+    assert_eq!(
+        ipc::databases::fetch_database_list(&state).unwrap().active_id,
+        Some(second.id.clone()),
+        "切换后激活 = 库 B"
+    );
+    assert_eq!(
+        ipc::app_database_dir(&state).unwrap(),
+        std::path::PathBuf::from(&second.db_dir),
+        "激活目录解析跟随切换"
+    );
+
+    // 幂等：切回当前库 no-op 成功
+    ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+}
+
+#[test]
+fn database_remove_two_tiers_and_active_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+
+    // 两级之一：仅摘登记——数据目录原样留在磁盘
+    ipc::databases::fetch_database_remove(&state, &second.id, false).unwrap();
+    assert!(Path::new(&second.db_dir).join("library.db").is_file(), "摘登记不删数据");
+    assert_eq!(ipc::databases::fetch_database_list(&state).unwrap().databases.len(), 1);
+
+    // 两级之二：连数据目录删；删的是激活库 → 回退剩余第一个（此处无剩余 → None）
+    let result = ipc::databases::fetch_database_remove(&state, &first.id, true).unwrap();
+    assert_eq!(result.data_dirs_deleted, 1);
+    assert!(!Path::new(&first.db_dir).exists(), "数据目录已整棵删除");
+    let list = ipc::databases::fetch_database_list(&state).unwrap();
+    assert!(list.databases.is_empty());
+    assert_eq!(list.active_id, None, "删激活库且无剩余 → 回到未建库态");
+    assert_eq!(
+        ipc::app_database_dir(&state).unwrap_err(),
+        "尚未创建数据库",
+        "库内操作在无数据库时明确报错"
+    );
+
+    // 不存在的 id 拒绝
+    assert!(ipc::databases::fetch_database_remove(&state, &first.id, false).is_err());
+}
+
+#[test]
+fn database_remove_and_create_guard_photo_library_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+
+    // 场景一（create 闸门）：在库 B 里登记一个**远离一切 dbDir** 的照片库
+    // root；新 dbDir 落它之内 → 注册表内互斥放行、跨库照片库重叠拒绝。
+    ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+    let photo_root = dir.path().join("照片");
+    std::fs::create_dir_all(&photo_root).unwrap();
+    let db = ipc::app_database_db(&state).unwrap();
+    db.photos_library_register(
+        "库 B 的照片库",
+        &photo_root.to_string_lossy(),
+        &std::path::PathBuf::from(&second.db_dir),
+    )
+    .unwrap();
+
+    let inside_root = photo_root.join("nested");
+    let err =
+        ipc::databases::fetch_database_create(&state, "坏库", Some(inside_root.to_str().unwrap()))
+            .unwrap_err();
+    assert!(err.contains("照片库"), "新建闸门应点名列出照片库：{err}");
+
+    // 场景二（remove 闸门）：再登记一个**落库 A 数据目录之内**的照片库
+    // root（库 A 建库时它尚不存在——跨库重叠只能开库查，正是被测闸门的
+    // 目标场景）；deleteData=true 删库 A 与照片库文件夹重叠 → 拒绝。
+    let inner_root = std::path::PathBuf::from(&first.db_dir).join("库内照片");
+    std::fs::create_dir_all(&inner_root).unwrap();
+    db.photos_library_register(
+        "落库 A 目录的照片库",
+        &inner_root.to_string_lossy(),
+        &std::path::PathBuf::from(&second.db_dir),
+    )
+    .unwrap();
+    let err = ipc::databases::fetch_database_remove(&state, &first.id, true).unwrap_err();
+    assert!(err.contains("拒绝删除"), "重叠保护应拒绝删除：{err}");
+    // 仅摘登记不受影响（不动任何文件），照片库文件夹原样保留
+    ipc::databases::fetch_database_remove(&state, &first.id, false).unwrap();
+    assert!(photo_root.is_dir() && inner_root.is_dir(), "照片库文件夹原样保留");
+}
+
+#[test]
+fn database_switch_rejects_unavailable_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    // 手动删掉数据目录后注册表条目仍在：切换要求文件在盘，拒绝保持现库
+    std::fs::remove_dir_all(&first.db_dir).unwrap();
+    let err = ipc::databases::fetch_database_switch(&state, &first.id).unwrap_err();
+    assert!(err.contains("未切换"), "{err}");
+}
