@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use image::RgbImage;
+use photocraft_engine::doc::{ColorMode, Surface};
 use photocraft_engine::doc::{DocId, Document, Rect};
 use photocraft_gpu::{Compositor, DeviceHealth};
 
@@ -20,7 +20,7 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 struct Request {
     doc: Document,
     // None 是行带完成心跳，避免大图总耗时被误认为设备卡死。
-    reply: mpsc::Sender<Result<Option<RgbImage>, String>>,
+    reply: mpsc::Sender<Result<Option<Surface>, String>>,
 }
 
 struct Worker {
@@ -74,7 +74,7 @@ impl Gpu {
         })
     }
 
-    fn render(&mut self, request: &Request) -> Result<RgbImage, String> {
+    fn render(&mut self, request: &Request) -> Result<Surface, String> {
         // 基础文档和 raster tile 身份稳定，连续调整复用已上传的原片。
         self.documents.retain(|id| *id != request.doc.id);
         self.documents.push_back(request.doc.id);
@@ -84,7 +84,7 @@ impl Gpu {
             }
         }
         let doc = &request.doc;
-        let mut output = RgbImage::new(doc.size.width, doc.size.height);
+        let mut output = Surface::new(doc.pixel_format());
         // 每次 float 读回最多约 16 MiB，行带最多 256 行。
         let rows = (1024 * 1024 / doc.size.width.max(1)).clamp(1, 256);
         for y in (0..doc.size.height).step_by(rows as usize) {
@@ -103,23 +103,14 @@ impl Gpu {
             if let Some(fault) = self.health.fault() {
                 return Err(fault.to_string());
             }
-            let start = y as usize * doc.size.width as usize * 3;
-            for (pixel, rgb) in pixels
-                .iter()
-                .zip(output.as_mut()[start..].chunks_exact_mut(3))
-            {
-                let alpha = pixel[3].clamp(0.0, 1.0);
-                for channel in 0..3 {
-                    rgb[channel] = ((pixel[channel] * alpha + 1.0 - alpha).clamp(0.0, 1.0) * 255.0)
-                        .round() as u8;
-                }
-            }
+            let flat: Vec<f32> = pixels.into_iter().flatten().collect();
+            output.write_region(Rect::from_xywh(0, y as i32, doc.size.width, height), &flat);
         }
         Ok(output)
     }
 }
 
-fn process(gpu: &mut Option<Gpu>, request: &Request) -> (Result<RgbImage, String>, bool) {
+fn process(gpu: &mut Option<Gpu>, request: &Request) -> (Result<Surface, String>, bool) {
     let mut unsupported = false;
     let result = catch_unwind(AssertUnwindSafe(|| {
         if gpu.is_none() {
@@ -177,7 +168,10 @@ fn start() -> Worker {
 }
 
 /// None 代表立即使用既有 CPU 合成；队列满时不阻塞后台任务堆积。
-pub(super) fn composite(doc: &Document) -> Option<RgbImage> {
+pub(super) fn composite(doc: &Document) -> Option<Surface> {
+    if doc.mode != ColorMode::Rgb {
+        return None;
+    }
     static WORKER: OnceLock<Worker> = OnceLock::new();
     let worker = WORKER.get_or_init(start);
     if worker.disabled.load(Ordering::Acquire) {

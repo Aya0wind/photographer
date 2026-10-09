@@ -378,6 +378,7 @@ pub fn run() {
             edit::preview::edit_preview_open,
             edit::preview::edit_preview_render,
             edit::preview::edit_preview_close,
+            edit::preview::edit_preview_pick,
             edit::project::edit_project_open,
             edit::project::edit_project_save,
             edit::ipc::edit_advanced_export,

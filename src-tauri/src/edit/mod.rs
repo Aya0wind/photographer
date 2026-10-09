@@ -38,4 +38,5 @@ pub mod preview;
 pub mod project;
 pub mod recipe;
 pub mod render;
+mod source;
 pub mod text;

@@ -32,7 +32,7 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, b
     <section className="space-y-2.5">
       <h3 className="text-xs font-semibold text-text-primary">{t("advancedEditor.light")}</h3>
       <Slider label={t("advancedEditor.exposure")} value={a.exposure} min={-5} max={5} step={0.1} onChange={(exposure) => onAdvanced({ exposure }, false)} begin={begin} end={end} />
-      {(["brightness", "contrast"] as const).map((key) => <Slider key={key} label={t(`editor.adjust.${key}`)} value={basic[key]} onChange={(value) => onBasic({ [key]: value })} begin={begin} end={end} />)}
+      {(["brightness", "contrast"] as const).map((key) => <Slider key={key} label={t(`editor.adjust.${key}`)} value={key === "contrast" ? Math.max(-50, basic[key]) : basic[key]} min={key === "contrast" ? -50 : -100} onChange={(value) => onBasic({ [key]: value })} begin={begin} end={end} />)}
     </section>
     <section className="space-y-2.5 border-t border-edge pt-3">
       <h3 className="text-xs font-semibold text-text-primary">{t("advancedEditor.color")}</h3>

@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { AdvancedAdjustments } from "@/ipc/api";
-import { addCurvePoint, clampTone, curveSamples, IDENTITY, inverseCurve, moveCurvePoint, pickCurveEndpoint, type CurveChannel, type CurvePicker, type CurvePoint } from "../lib/curves";
+import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint } from "../lib/curves";
 
 export interface CurveSampling {
   picker: CurvePicker | null;
   setPicker: (picker: CurvePicker | null) => void;
   sample: [number, number, number] | null;
-  sourceUrl: string | null;
+  histogram: number[][];
 }
 const COLORS = { rgb: "#b7bcc6", red: "#f87171", green: "#4ade80", blue: "#60a5fa", luminance: "#facc15" };
 const PRESETS: Record<string, CurvePoint[]> = {
@@ -22,34 +22,13 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
   const { t } = useTranslation();
   const [channel, setChannel] = useState<CurveChannel>("rgb");
   const [selected, setSelected] = useState<number | null>(null);
-  const [histogram, setHistogram] = useState<number[][]>([]);
+  const histogram = sampling.histogram;
   const drag = useRef<{ id: number; index: number; points: CurvePoint[]; x: number; y: number } | null>(null);
   const raw = channel === "rgb" ? adjustments.curves : adjustments.channelCurves?.[channel];
   const points = raw?.length ? raw : IDENTITY;
   const samples = curveSamples(points);
   const apply = (curve: CurvePoint[], record = true) => onChange(channel === "rgb" ? { curves: curve }
     : { channelCurves: { ...adjustments.channelCurves, [channel]: curve } }, record);
-  useEffect(() => {
-    if (!sampling.sourceUrl) return;
-    let cancelled = false;
-    const image = new Image();
-    image.onload = () => {
-      if (cancelled) return;
-      const canvas = document.createElement("canvas"); canvas.width = image.width; canvas.height = image.height;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) return;
-      context.drawImage(image, 0, 0);
-      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      const bins = Array.from({ length: 4 }, () => Array<number>(256).fill(0));
-      for (let i = 0; i < pixels.length; i += 16) {
-        for (let c = 0; c < 3; c++) bins[c][pixels[i + c]]++;
-        bins[3][Math.round(pixels[i] * .2126 + pixels[i + 1] * .7152 + pixels[i + 2] * .0722)]++;
-      }
-      setHistogram(bins);
-    };
-    image.src = sampling.sourceUrl;
-    return () => { cancelled = true; };
-  }, [sampling.sourceUrl]);
   const sampleRef = useRef(sampling.sample);
   useEffect(() => {
     if (!sampling.sample || sampleRef.current === sampling.sample || !sampling.picker) return;
@@ -57,23 +36,9 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
     const rgb = sampling.sample;
     const luma = rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
     if (sampling.picker === "point") {
-      const x = channel === "red" ? rgb[0] : channel === "green" ? rgb[1] : channel === "blue" ? rgb[2] : luma;
+      const x = clampTone(channel === "red" ? rgb[0] : channel === "green" ? rgb[1] : channel === "blue" ? rgb[2] : luma);
       const added = addCurvePoint(points, x, samples[Math.round(x)]);
       apply(added.points); setSelected(added.index >= 0 ? added.index : null);
-    } else {
-      const picker = sampling.picker;
-      const channels = { ...adjustments.channelCurves };
-      const composite = curveSamples(adjustments.curves.length ? adjustments.curves : IDENTITY);
-      const grayTarget = inverseCurve(composite, luma, luma);
-      (["red", "green", "blue"] as const).forEach((key, i) => {
-        const source = channels[key]?.length ? channels[key]! : IDENTITY;
-        channels[key] = picker === "gray" ? addCurvePoint(source, rgb[i], grayTarget).points
-          : pickCurveEndpoint(source, rgb[i], picker === "black");
-      });
-      const master: CurvePoint[] = (adjustments.curves.length ? adjustments.curves : IDENTITY).map(([x, y]) => [x, y]);
-      if (picker === "black") master[0][1] = 0;
-      if (picker === "white") master[master.length - 1][1] = 255;
-      onChange({ curves: master, channelCurves: channels });
     }
   }, [sampling, channel, adjustments, points, samples]);
   function position(event: PointerEvent<SVGSVGElement>): [number, number] {

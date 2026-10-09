@@ -25,6 +25,11 @@ image = "0.25"
 # 编辑引擎：直接依赖上游公开 API；全部 crate 固定同一提交，不引入 egui/app。
 photocraft-engine = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
 photocraft-compose = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-io = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-raw = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-cms = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-codecs = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-algo = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
 photocraft-gpu = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "parking_lot"] }
 pollster = "1"

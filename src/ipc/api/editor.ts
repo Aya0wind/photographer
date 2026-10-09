@@ -81,6 +81,10 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
 }
 
 export interface EditorPreviewSession {
+  histogram: number[][];
+  sensorRaw: boolean;
+  bitDepth: string;
+  warnings: string[];
   sessionId: string;
   sourceUrl: string;
   width: number;
@@ -181,4 +185,8 @@ export async function exportRun(
     }
     return { ok: false, error: message };
   }
+}
+
+export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string) {
+  return ipc<{ sample?: [number, number, number]; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker });
 }

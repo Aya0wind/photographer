@@ -5,7 +5,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  albumList, assetAlbums, editProjectOpen, editProjectSave, advancedExportFolder, advancedExport, editExportStatus, subscribeAppEvents,
+  editPreviewPick, albumList, assetAlbums, editProjectOpen, editProjectSave, advancedExportFolder, advancedExport, editExportStatus, subscribeAppEvents,
   type AlbumDto, type AssetDto, type EditRecipe, type ExportOptions,
 } from "@/ipc/api";
 import ActionPopover from "@/shared/components/ActionPopover";
@@ -39,10 +39,10 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     undefined, () => ({ past: [], present: advancedRecipe(), future: [] }),
   );
   const recipe = history.present;
-  const preview = useEditorPreview(asset.id, recipe, libraryId);
+  const [tool, setTool] = useState<EditorTool>("adjust");
+  const preview = useEditorPreview(asset.id, tool === "crop" ? { ...recipe, crop: null, textLayers: [], brushStrokes: [] } : recipe, libraryId);
   const sourceSize = useMemo<Size | null>(() => preview.session ? { width: preview.session.width, height: preview.session.height } : null, [preview.session]);
   context.current = sourceSize ?? { width: 0, height: 0 };
-  const [tool, setTool] = useState<EditorTool>("adjust");
   const [zoom, setZoom] = useState(1);
   const [zoomVisible, setZoomVisible] = useState(true);
   const zoomControls = useRef<HTMLDivElement>(null);
@@ -62,26 +62,22 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [compare, setCompare] = useState(false);
   const [picker, setPicker] = useState<CurvePicker | null>(null);
   const [sample, setSample] = useState<[number, number, number] | null>(null);
-  const sourcePixels = useRef<ImageData | null>(null);
-  useEffect(() => {
-    sourcePixels.current = null;
-    if (!preview.session?.sourceUrl) return;
-    let cancelled = false;
-    const image = new Image();
-    image.onload = () => {
-      if (cancelled) return;
-      const canvas = document.createElement("canvas"); canvas.width = image.width; canvas.height = image.height;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (ctx) { ctx.drawImage(image, 0, 0); sourcePixels.current = ctx.getImageData(0, 0, image.width, image.height); }
-    };
-    image.src = preview.session.sourceUrl;
-    return () => { cancelled = true; sourcePixels.current = null; };
-  }, [preview.session?.sourceUrl]);
-  function samplePhoto(x: number, y: number) {
-    const pixels = sourcePixels.current;
-    if (!pixels) return;
-    const offset = (Math.min(pixels.height - 1, Math.floor(y * pixels.height)) * pixels.width + Math.min(pixels.width - 1, Math.floor(x * pixels.width))) * 4;
-    setSample([pixels.data[offset], pixels.data[offset + 1], pixels.data[offset + 2]]);
+  const [samplingError, setSamplingError] = useState<string | null>(null);
+  const pickSequence = useRef(0);
+  useEffect(() => { pickSequence.current++; }, [recipe, picker]);
+  async function samplePhoto(x: number, y: number) {
+    const sessionId = preview.session?.sessionId;
+    if (!sessionId || !picker) return;
+    const sequence = ++pickSequence.current;
+    try {
+      const result = await editPreviewPick(sessionId, recipe, x, y, picker);
+      if (sequence !== pickSequence.current) return;
+      setSamplingError(null);
+      if (result.sample) setSample(result.sample);
+      else dispatch({ type: "advanced", patch: { curves: result.points ?? [], channelCurves: {
+        ...recipe.advanced?.channelCurves, red: result.red ?? [], green: result.green ?? [], blue: result.blue ?? [],
+      } } });
+    } catch (error) { if (sequence === pickSequence.current) setSamplingError(String(error)); }
   }
   const [cropDraft, setCropDraft] = useState<EditRecipe["crop"]>(null);
   const [cropRatio, setCropRatio] = useState<number | null>(null);
@@ -326,7 +322,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
           sampleMode={picker !== null && !compare} onSample={samplePhoto}
           src={preview.session?.sourceUrl ?? null} adjustedSrc={preview.url} showOriginal={compare}
-          sourceSize={sourceSize} backendAdjustments fallbackSize={sourceSize} zoom={zoom}
+          sourceSize={sourceSize} nativeGeometry nativeAnnotations backendAdjustments fallbackSize={sourceSize} zoom={zoom}
           onZoom={(factor) => setZoom((v) => Math.max(0.25, Math.min(4, v * factor)))}
           recipe={compare ? { ...recipe, textLayers: [], brushStrokes: [] } : recipe}
           tool={compare || busy || exporting || unavailable ? "view" : tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
@@ -344,9 +340,12 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         </div>
       </main>
       <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
+        {samplingError && <p role="alert" className="mb-2 text-xs text-amber-500">{samplingError}</p>}
+        {preview.session && <p className="mb-2 text-[11px] text-text-muted">{preview.session.sensorRaw ? "RAW · " : ""}{preview.session.bitDepth}</p>}
+        {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
-          <AdvancedToolPanel sampling={{ picker, setPicker, sample, sourceUrl: preview.session?.sourceUrl ?? null }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
+          <AdvancedToolPanel sampling={{ picker, setPicker, sample, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}
             brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportFolder={exportFolder} />

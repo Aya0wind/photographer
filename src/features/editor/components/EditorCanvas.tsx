@@ -94,6 +94,8 @@ interface EditorCanvasProps {
   adjustedSrc?: string | null;
   sourceSize?: Size | null;
   backendAdjustments?: boolean;
+  nativeGeometry?: boolean;
+  nativeAnnotations?: boolean;
   zoom?: number;
   onZoom?: (factor: number) => void;
   /** naturalWidth/Height 为 0 时的兜底尺寸（EXIF 宽高；jsdom 测试路径） */
@@ -127,6 +129,8 @@ export default function EditorCanvas({
   adjustedSrc = null,
   sourceSize = null,
   backendAdjustments = false,
+  nativeGeometry = false,
+  nativeAnnotations = false,
   zoom = 1,
   onZoom,
   fallbackSize,
@@ -380,13 +384,13 @@ export default function EditorCanvas({
         >
           {/* 底图（裁剪模式下显示整图，其余模式平移到裁剪窗口并裁剪） */}
           <Layer clip={cropMode ? undefined : { x: 0, y: 0, width: dispW, height: dispH }}>
-            <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
+            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
               <KonvaImage
                 image={adjustedImage ?? image}
                 {...rotatedImageAttrs(baseW, baseH, quarter, scale)}
                 listening={false}
               />
-            </Group>
+            </Group>}
           </Layer>
 
           {cropMode && cropRect !== null ? (
@@ -460,7 +464,7 @@ export default function EditorCanvas({
             <>
               {/* 笔迹（recipe 反序列化 + 在途一笔） */}
               <Layer listening={false}>
-                {recipe.brushStrokes.map((stroke) =>
+                {!nativeAnnotations && recipe.brushStrokes.map((stroke) =>
                   stroke.points.length > 1 ? (
                     <Line
                       key={stroke.id}
@@ -498,6 +502,7 @@ export default function EditorCanvas({
                   return (
                     <KonvaText
                       key={layer.id}
+                      opacity={nativeAnnotations ? 0 : 1}
                       name={TEXT_NODE_NAME}
                       x={attrs.x}
                       y={attrs.y}

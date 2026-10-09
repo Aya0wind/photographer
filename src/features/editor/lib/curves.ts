@@ -40,27 +40,3 @@ export function moveCurvePoint(points: CurvePoint[], index: number, x: number, y
   const max = index === points.length - 1 ? 255 : points[index + 1][0] - 1;
   return points.map((point, i) => i === index ? [clampTone(Math.max(min, Math.min(max, x))), clampTone(y)] : point);
 }
-
-/** 非单调曲线可能有多个逆，选择最接近当前输入的解。 */
-export function inverseCurve(samples: number[], target: number, preferred: number): number {
-  let closest = 0, distance = Infinity;
-  for (let x = 0; x < samples.length - 1; x++) {
-    const a = samples[x], b = samples[x + 1];
-    if (target < Math.min(a, b) || target > Math.max(a, b)) continue;
-    const result = a === b ? x : x + (target - a) / (b - a);
-    if (Math.abs(result - preferred) < distance) { closest = result; distance = Math.abs(result - preferred); }
-  }
-  if (distance !== Infinity) return clampTone(closest);
-  return samples.reduce((best, value, x) => Math.abs(value - target) < Math.abs(samples[best] - target) ? x : best, 0);
-}
-
-/** PhotoCraft black/white picker semantics: move endpoints, retaining edited interior tones. */
-export function pickCurveEndpoint(points: CurvePoint[], input: number, black: boolean): CurvePoint[] {
-  const sample = clampTone(input);
-  const candidate: CurvePoint[] = points.map(([x, y]) => [clampTone(black ? sample + x * (1 - sample / 255) : x * sample / 255), y]);
-  const endpoint = black ? 0 : candidate.length - 1;
-  candidate[endpoint] = [sample, black ? 0 : 255];
-  if (candidate.every((point, i) => i === 0 || point[0] - candidate[i - 1][0] >= 1)) return candidate;
-  // Very dark/bright samples can collapse points. A plateau keeps a valid curve.
-  return points.map((point, i) => (black ? i >= points.length - 2 : i < 2) ? [point[0], black ? 0 : 255] : point);
-}

@@ -1,37 +1,19 @@
 //! 上游 PhotoCraft 的唯一接入层；不依赖图库、数据库或存储目录。
 //! v1 配方是持久化真值，每次从未修改的文档重建，避免滑块累计调整。
 
-use image::RgbImage;
 use photocraft_engine::{
-    doc::{ColorMode, Document, Layer, LayerContent, PixelFormat, Rect, SampleType, Size, Surface},
+    doc::{Document, Layer, LayerContent},
     Session,
 };
 use serde_json::json;
 
 use super::recipe::{Adjustments, AdvancedAdjustments, EditRecipe};
 
-pub fn document(image: &RgbImage) -> Result<Document, String> {
-    let (w, h) = image.dimensions();
-    if w == 0 || h == 0 || w > i32::MAX as u32 || h > i32::MAX as u32 {
-        return Err("编辑图像尺寸无效".into());
-    }
-    // 直接填充上游分块像素，无损复用现有 RAW/EXIF 解码；无需 PNG 中转或整图 RGBA 副本。
-    let mut surface = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::U8, true));
-    let mut row = vec![255u8; w as usize * 4];
-    for (y, source) in image.as_raw().chunks_exact(w as usize * 3).enumerate() {
-        for (rgb, rgba) in source.chunks_exact(3).zip(row.chunks_exact_mut(4)) {
-            rgba[..3].copy_from_slice(rgb);
-        }
-        surface.write_interleaved(Rect::from_xywh(0, y as i32, w, 1), &row);
-    }
-    let mut document = Document::new("Photo", Size::new(w, h), ColorMode::Rgb, SampleType::U8);
-    document
-        .layers
-        .push(Layer::new("Photo", LayerContent::Raster(surface)));
-    Ok(document)
-}
-
-fn execute(session: &mut Session, command: &str, params: serde_json::Value) -> Result<(), String> {
+pub(super) fn execute(
+    session: &mut Session,
+    command: &str,
+    params: serde_json::Value,
+) -> Result<(), String> {
     session
         .execute(command, params)
         .map(|_| ())
@@ -41,12 +23,12 @@ fn execute(session: &mut Session, command: &str, params: serde_json::Value) -> R
 fn basic_adjustments(session: &mut Session, values: Option<Adjustments>) -> Result<(), String> {
     let Some(a) = values else { return Ok(()) };
     if a.brightness != 0.0 || a.contrast != 0.0 {
-        // UI 保持 -100..100；上游现代对比度下限为 -50。
+        // 使用上游现代对比度范围 -50..100。
         execute(
             session,
             "layer.newAdjustmentLayer.brightnessContrast",
             json!({
-                "brightness": a.brightness, "contrast": if a.contrast < 0.0 { a.contrast / 2.0 } else { a.contrast }
+                "brightness": a.brightness, "contrast": a.contrast.clamp(-50.0, 100.0)
             }),
         )?;
     }
@@ -62,11 +44,11 @@ fn basic_adjustments(session: &mut Session, values: Option<Adjustments>) -> Resu
 
 fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
     if let Some(a) = &recipe.advanced {
-        if a.exposure != 0.0 {
+        if a.exposure != 0.0 || a.temperature != 0.0 || a.tint != 0.0 {
             execute(
                 session,
-                "layer.newAdjustmentLayer.exposure",
-                json!({"exposure": a.exposure}),
+                "filter.cameraRaw",
+                json!({"exposure": a.exposure, "temperature": a.temperature, "tint": a.tint}),
             )?;
         }
     }
@@ -77,17 +59,6 @@ fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String>
                 session,
                 "layer.newAdjustmentLayer.vibrance",
                 json!({"vibrance": a.vibrance}),
-            )?;
-        }
-        if a.temperature != 0.0 || a.tint != 0.0 {
-            // RGB 中间调色彩平衡，不冒充 RAW 白平衡或绝对色温。
-            execute(
-                session,
-                "layer.newAdjustmentLayer.colorBalance",
-                json!({
-                    "midtones": [a.temperature / 2.0, -a.tint / 2.0, -a.temperature / 2.0],
-                    "preserveLuminosity": true
-                }),
             )?;
         }
         tonal_adjustments(session, a)?;
@@ -152,29 +123,63 @@ pub fn adjusted_document(base: &Document, recipe: &EditRecipe) -> Result<Documen
         .ok_or("编辑文档不存在".into())
 }
 
-pub fn composite(doc: &Document) -> Result<RgbImage, String> {
-    if let Some(image) = super::gpu::composite(doc) {
-        return Ok(image);
+/// 原生缩放保留位深、色彩空间、图层和 ICC。
+pub fn resize(doc: &Document, long_edge: Option<u32>) -> Result<Document, String> {
+    let Some(edge) = long_edge.filter(|n| *n > 0) else {
+        return Ok(doc.clone());
+    };
+    let current = doc.size.width.max(doc.size.height);
+    if current <= edge {
+        return Ok(doc.clone());
     }
-    // 按行带合成，避免全尺寸 float RGBA 缓冲与成品 RGB 同时占用大量内存。
-    let mut output = RgbImage::new(doc.size.width, doc.size.height);
-    photocraft_compose::render_bands(doc, doc.bounds(), 64, |band| {
-        for (i, p) in band.px.iter().enumerate() {
-            let x = band.rect.x0 as u32 + (i % band.rect.width() as usize) as u32;
-            let y = band.rect.y0 as u32 + (i / band.rect.width() as usize) as u32;
-            let a = p[3].clamp(0.0, 1.0);
-            let rgb = [p[0], p[1], p[2]]
-                .map(|v| ((v * a + 1.0 - a).clamp(0.0, 1.0) * 255.0).round() as u8);
-            output.put_pixel(x, y, image::Rgb(rgb));
-        }
-        Ok::<(), String>(())
-    })?;
-    Ok(output)
+    let width = (u64::from(doc.size.width) * u64::from(edge) / u64::from(current)).max(1) as u32;
+    let height = (u64::from(doc.size.height) * u64::from(edge) / u64::from(current)).max(1) as u32;
+    let mut session = Session::new();
+    session.add_document(doc.clone(), None);
+    execute(
+        &mut session,
+        "image.imageSize",
+        json!({"width": width, "height": height}),
+    )?;
+    let mut out = active_document(&session)?;
+    out.id = photocraft_engine::doc::DocId::fresh();
+    Ok(out)
 }
 
-pub fn render(image: &RgbImage, recipe: &EditRecipe) -> Result<RgbImage, String> {
-    let mut session = Session::new();
-    session.add_document(document(image)?, None);
+fn active_document(session: &Session) -> Result<Document, String> {
+    session
+        .active()
+        .map(|s| (*s.doc).clone())
+        .ok_or("编辑文档不存在".into())
+}
+
+/// GPU 只负责原生合成；格式转换、ICC、透明背景和编码均由上游处理。
+pub fn jpeg(doc: &Document, quality: u8) -> Result<Vec<u8>, String> {
+    let mut flat = if let Some(surface) = super::gpu::composite(doc) {
+        let mut out = doc.clone();
+        out.layers = vec![Layer::new("Composite", LayerContent::Raster(surface))];
+        out
+    } else {
+        let image =
+            photocraft_io::document_to_image(doc, &mut Vec::new()).map_err(|e| e.to_string())?;
+        super::source::from_image("Composite", &image)?
+    };
+    photocraft_engine::color_cmds::convert_document(
+        &mut flat,
+        photocraft_cms::Builtin::Srgb.profile(),
+        photocraft_cms::Intent::RelativeColorimetric,
+        true,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut opts = photocraft_io::ExportOptions::default();
+    opts.encode.jpeg_quality = quality;
+    opts.xmp = photocraft_io::XmpEmbed::None;
+    photocraft_io::export(&flat, "jpg", &opts)
+        .map(|r| r.bytes)
+        .map_err(|e| e.to_string())
+}
+
+pub fn geometry(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
     let rotation = match recipe.rotate_quarter {
         1 => Some("image.imageRotation.90cw"),
         2 => Some("image.imageRotation.180"),
@@ -182,7 +187,7 @@ pub fn render(image: &RgbImage, recipe: &EditRecipe) -> Result<RgbImage, String>
         _ => None,
     };
     if let Some(command) = rotation {
-        execute(&mut session, command, json!({}))?;
+        execute(session, command, json!({}))?;
     }
     if let Some(crop) = recipe.crop {
         let doc = session.active().ok_or("编辑文档不存在")?;
@@ -194,12 +199,83 @@ pub fn render(image: &RgbImage, recipe: &EditRecipe) -> Result<RgbImage, String>
         let bottom = ((crop.y + crop.h) * h).ceil().clamp(f64::from(y), h) as u32;
         if right > x && bottom > y {
             execute(
-                &mut session,
+                session,
                 "image.crop",
                 json!({"x": x, "y": y, "width": right - x, "height": bottom - y}),
             )?;
         }
     }
+    Ok(())
+}
+
+/// 标注也是上游原生图层/笔刷；此处仅将 UI 归一化坐标适配为像素/点。
+fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
+    let doc = session.active().ok_or("编辑文档不存在")?;
+    let width = f64::from(doc.doc.size.width);
+    let height = f64::from(doc.doc.size.height);
+    let dpi = f64::from(doc.doc.resolution_dpi);
+    for layer in &recipe.text_layers {
+        if layer.text.trim().is_empty() {
+            continue;
+        }
+        execute(
+            session,
+            "type.create",
+            json!({"text": layer.text, "color": layer.color,
+            "box": [layer.x * width, layer.y * height, ((1.0 - layer.x) * width).max(1.0), ((1.0 - layer.y) * height).max(1.0)],
+            "size": (layer.size_rel * width * 72.0 / dpi).clamp(0.1, 1296.0), "name": layer.id}),
+        )?;
+    }
+    for stroke in &recipe.brush_strokes {
+        execute(session, "layer.new.layer", json!({"name": stroke.id}))?;
+        let points: Vec<_> = stroke
+            .points
+            .iter()
+            .map(|p| [p.x * width, p.y * height])
+            .collect();
+        execute(
+            session,
+            "paint.stroke",
+            json!({"points": points, "color": stroke.color, "size": stroke.width_rel * width,
+            "brush": {"hardness": 1.0, "spacing": 0.1}, "seed": 0}),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn render_document(base: &Document, recipe: &EditRecipe) -> Result<Document, String> {
+    let mut session = Session::new();
+    session.add_document(base.clone(), None);
     adjustments(&mut session, recipe)?;
-    composite(&session.active().ok_or("编辑文档不存在")?.doc)
+    geometry(&mut session, recipe)?;
+    annotations(&mut session, recipe)?;
+    active_document(&session)
+}
+
+pub fn export_native(
+    path: &std::path::Path,
+    recipe: &EditRecipe,
+    long_edge: Option<u32>,
+    quality: u8,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let source = super::source::open(path)?;
+    let mut values = recipe.clone();
+    let base = if let Some(raw) = source.raw {
+        let a = recipe.advanced.clone().unwrap_or_default();
+        let base = if [a.exposure, a.temperature, a.tint] == [0.0; 3] {
+            source.document
+        } else {
+            raw.develop(recipe)?
+        };
+        if let Some(a) = &mut values.advanced {
+            a.exposure = 0.0;
+            a.temperature = 0.0;
+            a.tint = 0.0;
+        }
+        base
+    } else {
+        source.document
+    };
+    let doc = resize(&render_document(&base, &values)?, long_edge)?;
+    Ok((jpeg(&doc, quality)?, doc.size.width, doc.size.height))
 }
