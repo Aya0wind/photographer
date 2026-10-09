@@ -22,6 +22,9 @@ tauri-build = { version = "2", features = [] }
 num_cpus = "1.17"
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
+# 编辑引擎：直接依赖上游公开 API；全部 crate 固定同一提交，不引入 egui/app。
+photocraft-engine = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-compose = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
 # 扩展图片格式解码（2026-09-29 格式支持批次）：全部纯 Rust/无 C 构建负担
 heif-oxide = "0.1"
 jxl-oxide = { version = "0.12", features = ["image"] }
@@ -79,6 +82,7 @@ ab_glyph = "0.2"
 # MIT，许可宽松）
 img-parts = "0.3"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 ort = { version = "2.0.0-rc.13", features = ["directml"] }

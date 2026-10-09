@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { openAdvancedEditor, type EditorOrigin } from "@/features/editor/lib/advancedEditorStore";
 import { motion } from "motion/react";
 
 import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
@@ -182,6 +183,8 @@ export default function ContextMenu({
  * 上层在 IPC 后同步本地列表（乐观 UI）。
  */
 export function AssetContextMenu({
+  editorOrigin,
+  onAdvancedEdit,
   at,
   assets,
   onClose,
@@ -197,6 +200,8 @@ export function AssetContextMenu({
   onSelectIds,
   extraEntries = [],
 }: {
+  editorOrigin?: EditorOrigin;
+  onAdvancedEdit?: (asset: AssetDto) => void;
   at: { x: number; y: number };
   assets: AssetDto[];
   onClose: () => void;
@@ -289,6 +294,7 @@ export function AssetContextMenu({
 
   const count = assets.length;
   const entries: ContextMenuEntry[] = [
+    ...(count === 1 ? [{ key: "advanced-edit", label: t("advancedEditor.title"), onSelect: () => onAdvancedEdit ? onAdvancedEdit(assets[0]) : openAdvancedEditor(assets[0], editorOrigin) }] : []),
     { key: "reveal", label: t("context.reveal"), onSelect: () => void reveal() },
     { key: "copy", label: t("context.copyFiles"), onSelect: () => void copyFiles() },
     { key: "copy-path", label: t("selection.copyPath"), onSelect: () => { void copyPaths(); } },

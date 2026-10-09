@@ -692,9 +692,19 @@ export interface EditRecipeOutput {
 
 /** 非破坏编辑配方（后端 edit_recipe 表存储的同一 JSON） */
 export interface EditAdjustments { brightness: number; contrast: number; saturation: number; }
+export interface AdvancedAdjustments {
+  exposure: number;
+  temperature: number;
+  tint: number;
+  vibrance: number;
+  curves: [number, number][];
+}
 
 export interface EditRecipe {
   version: 1;
+  /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
+  renderer?: "photocraft";
+  advanced?: AdvancedAdjustments;
   rotateQuarter: 0 | 1 | 2 | 3;
   adjustments?: EditAdjustments;
   crop: EditRecipeCrop | null;

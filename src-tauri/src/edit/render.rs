@@ -40,7 +40,7 @@ fn orientation_of(src: &Path) -> u32 {
 }
 
 /// 全量解码 + 方向转正（画布的绝对坐标系自此确立）。
-fn decode_upright(src: &Path) -> Result<RgbImage, String> {
+pub(super) fn decode_upright(src: &Path) -> Result<RgbImage, String> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
@@ -115,6 +115,19 @@ pub fn render_recipe(
     long_edge: Option<u32>,
 ) -> Result<Rendered, String> {
     let upright = decode_upright(src)?;
+    if recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
+        let mut canvas = super::photocraft::render(&upright, recipe)?;
+        // 标注的 v1 坐标/字体契约继续由现有适配器负责。
+        for layer in &recipe.text_layers {
+            draw_text_layer(&mut canvas, layer);
+        }
+        for stroke in &recipe.brush_strokes {
+            draw_brush_stroke(&mut canvas, stroke);
+        }
+        return Ok(Rendered {
+            image: resize_long_edge(canvas, long_edge),
+        });
+    }
     let rotated = rotate_quarter(upright, recipe.rotate_quarter);
     let mut canvas = match recipe.crop {
         Some(crop) => crop_normalized(&rotated, crop),

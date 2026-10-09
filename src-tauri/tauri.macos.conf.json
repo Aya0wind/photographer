@@ -37,7 +37,8 @@
     "active": true,
     "targets": ["app", "dmg"],
     "resources": {
-      "resources/gphoto/": "gphoto/"
+      "resources/gphoto/": "gphoto/",
+      "resources/licenses/": "licenses/"
     },
     "macOS": {
       "minimumSystemVersion": "14.4"

@@ -82,6 +82,9 @@ pub fn fetch_edit_recipe_save(
         return Err(format!("资产 {asset_id} 不存在"));
     }
     let normalized = recipe::parse_recipe(value)?;
+    if normalized.renderer.is_some() || normalized.advanced.is_some() {
+        return Err("高级编辑状态应通过独立编辑接口保存".into());
+    }
     let text = serde_json::to_string(&normalized).map_err(|e| format!("配方序列化失败: {e}"))?;
     let updated_at = chrono::Utc::now().timestamp_millis();
     db.edit_recipe_upsert(asset_id, &text, updated_at)
@@ -105,7 +108,29 @@ pub fn fetch_export_run(
     value: &serde_json::Value,
     options: &ExportOptions,
 ) -> Result<ExportTaskDto, String> {
-    let db = crate::ipc::active_library_db(state)?;
+    fetch_export_in_library(state, asset_id, value, options, None)
+}
+
+fn fetch_export_in_library(
+    state: &crate::ipc::AppState,
+    asset_id: i64,
+    value: &serde_json::Value,
+    options: &ExportOptions,
+    expected_library: Option<&str>,
+) -> Result<ExportTaskDto, String> {
+    let library = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用")?
+        .active_library()
+        .cloned()
+        .ok_or("尚未创建库")?;
+    if expected_library.is_some_and(|id| id != library.id) {
+        return Err("照片库已切换，请重新打开高级编辑".into());
+    }
+    let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let photo_root = std::path::PathBuf::from(&library.photo_root);
+    let db = crate::ipc::open_library_db(&db_dir)?;
     export::reap_orphan_jobs(&db);
     let asset = db
         .asset_by_id(asset_id)
@@ -118,19 +143,6 @@ pub fn fetch_export_run(
         .map_err(|e| e.to_string())?;
 
     // worker 自带库连接 + 事件总线（后台任务资源所有权规则：线程内获取释放）
-    let (db_dir, photo_root) = {
-        let library = state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .cloned()
-            .ok_or("尚未创建库")?;
-        (
-            std::path::PathBuf::from(&library.db_dir),
-            std::path::PathBuf::from(&library.photo_root),
-        )
-    };
     let bus = state.bus.clone();
     let request = ExportJobRequest {
         job_id,
@@ -218,6 +230,102 @@ pub async fn export_run(
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
         fetch_export_run(state, id, &recipe, &options)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedFolderExport {
+    library_id: String,
+    asset_id: String,
+    session_id: String,
+    recipe: serde_json::Value,
+    options: ExportOptions,
+}
+
+#[tauri::command]
+pub async fn edit_advanced_export_folder(
+    state: State<'_, SharedState>,
+    request: AdvancedFolderExport,
+) -> Result<ExportTaskDto, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        if request.options.mode != super::export::ExportMode::Folder {
+            return Err("导出目标无效".into());
+        }
+        let (_, asset) = super::project::resolve(state, &request.library_id, &request.asset_id)?;
+        super::preview::validate_source(&request.session_id, std::path::Path::new(&asset.path))?;
+        fetch_export_in_library(
+            state,
+            asset.id,
+            &request.recipe,
+            &request.options,
+            Some(&request.library_id),
+        )
+    })
+    .await
+}
+
+/// 成片直接返回照片库；前端传来源相册，未指定时进入既有默认相册。
+#[tauri::command]
+pub async fn edit_advanced_export(
+    state: State<'_, SharedState>,
+    library_id: String,
+    asset_id: String,
+    recipe: serde_json::Value,
+    album_id: Option<String>,
+    subgroup: Option<String>,
+    session_id: String,
+) -> Result<ExportTaskDto, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        let (library, asset) = super::project::resolve(state, &library_id, &asset_id)?;
+        super::preview::validate_source(&session_id, std::path::Path::new(&asset.path))?;
+        let db = crate::ipc::open_library_db(std::path::Path::new(&library.db_dir))?;
+        let target = match album_id {
+            Some(id) => id,
+            None => db
+                .ensure_default_album()
+                .map_err(|e| e.to_string())?
+                .to_string(),
+        };
+        let options = ExportOptions {
+            mode: super::export::ExportMode::Album,
+            folder: None,
+            album: Some(super::export::ExportAlbumTarget {
+                album_id: target,
+                subgroup,
+            }),
+            long_edge: None,
+            quality: None,
+            remove_gps: false,
+            copyright: None,
+            author: None,
+            keywords: Vec::new(),
+        };
+        fetch_export_in_library(state, asset.id, &recipe, &options, Some(&library_id))
+    })
+    .await
+}
+
+/// 事件通道的补偿读取，处理快速任务在前端记住 job id 前已完成的情况。
+#[tauri::command]
+pub async fn edit_export_status(
+    state: State<'_, SharedState>,
+    library_id: String,
+    asset_id: String,
+    job_id: i64,
+) -> Result<ExportTaskDto, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        let (library, asset) = super::project::resolve(state, &library_id, &asset_id)?;
+        let db = crate::ipc::open_library_db(std::path::Path::new(&library.db_dir))?;
+        let job = db
+            .export_job_get(job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("导出任务不存在")?;
+        if job.asset_id != asset.id {
+            return Err("导出任务与照片不匹配".into());
+        }
+        Ok(ExportTaskDto::from(job))
     })
     .await
 }

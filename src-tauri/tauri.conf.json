@@ -47,6 +47,7 @@
     "active": true,
     "resources": {
       "resources/gphoto/": "gphoto/",
+      "resources/licenses/": "licenses/",
       "resources/installer/purge-user-data.ps1": "purge-user-data.ps1"
     },
     "targets": [

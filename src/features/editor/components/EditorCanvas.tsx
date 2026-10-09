@@ -86,6 +86,10 @@ function rotatedImageAttrs(
 
 interface EditorCanvasProps {
   src: string | null;
+  /** 后端提供未旋转底图的调整结果；禁止再次叠加浏览器滤镜。 */
+  adjustedSrc?: string | null;
+  sourceSize?: Size | null;
+  backendAdjustments?: boolean;
   zoom?: number;
   onZoom?: (factor: number) => void;
   /** naturalWidth/Height 为 0 时的兜底尺寸（EXIF 宽高；jsdom 测试路径） */
@@ -113,6 +117,9 @@ interface EditorCanvasProps {
 
 export default function EditorCanvas({
   src,
+  adjustedSrc = null,
+  sourceSize = null,
+  backendAdjustments = false,
   zoom = 1,
   onZoom,
   fallbackSize,
@@ -159,7 +166,9 @@ export default function EditorCanvas({
   }, []);
   const [avail, setAvail] = useState<Size>({ width: 912, height: 600 });
   const image = useHtmlImage(src, onImageError);
+  const backendImage = useHtmlImage(adjustedSrc, onImageError);
   const adjustedImage = useMemo(() => {
+    if (backendAdjustments) return backendImage ?? image;
     if (!image || !recipe.adjustments) return image;
     const a = recipe.adjustments;
     const preview = document.createElement("canvas");
@@ -171,7 +180,7 @@ export default function EditorCanvas({
     ctx.filter = `brightness(${1 + a.brightness / 100}) contrast(${1 + a.contrast / 100}) saturate(${1 + a.saturation / 100})`;
     ctx.drawImage(image, 0, 0, preview.width, preview.height);
     return preview;
-  }, [image, recipe.adjustments]);
+  }, [image, backendImage, backendAdjustments, recipe.adjustments]);
   const readyRef = useRef(onImageReady);
   readyRef.current = onImageReady;
 
@@ -206,10 +215,10 @@ export default function EditorCanvas({
   // 自然尺寸上报（EXIF 兜底）——只报一次每图
   useEffect(() => {
     if (image === null) return;
-    const w = image.naturalWidth || fallbackSize?.width || 0;
-    const h = image.naturalHeight || fallbackSize?.height || 0;
+    const w = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 0;
+    const h = sourceSize?.height || image.naturalHeight || fallbackSize?.height || 0;
     if (w > 0 && h > 0) readyRef.current({ width: w, height: h });
-  }, [image, fallbackSize]);
+  }, [image, fallbackSize, sourceSize]);
 
   // Transformer 绑定（同样必须早退之前）
   useEffect(() => {
@@ -230,8 +239,8 @@ export default function EditorCanvas({
 
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
-  const baseW = image.naturalWidth || fallbackSize?.width || 1;
-  const baseH = image.naturalHeight || fallbackSize?.height || 1;
+  const baseW = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 1;
+  const baseH = sourceSize?.height || image.naturalHeight || fallbackSize?.height || 1;
   const quarter = recipe.rotateQuarter;
   const rot = rotatedSize({ width: baseW, height: baseH } satisfies RecipeContext, quarter);
   const pad = STAGE_PADDING;

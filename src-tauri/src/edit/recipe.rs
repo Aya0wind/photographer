@@ -85,10 +85,31 @@ pub struct Adjustments {
 }
 
 /// 编辑配方（version 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RenderEngine {
+    Photocraft,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AdvancedAdjustments {
+    pub exposure: f64,
+    pub temperature: f64,
+    pub tint: f64,
+    pub vibrance: f64,
+    pub curves: Vec<[f64; 2]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
     pub version: u32,
+    /// 缺省使用旧算法，防止历史配方打开后改变效果。新配方显式选择 PhotoCraft。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer: Option<RenderEngine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<AdvancedAdjustments>,
     #[serde(default)]
     pub rotate_quarter: u32,
     #[serde(default)]
@@ -121,6 +142,32 @@ fn clamp01(v: f64) -> f64 {
     v.clamp(0.0, 1.0)
 }
 
+fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
+    for (v, min, max) in [
+        (&mut a.exposure, -5.0, 5.0),
+        (&mut a.temperature, -100.0, 100.0),
+        (&mut a.tint, -100.0, 100.0),
+        (&mut a.vibrance, -100.0, 100.0),
+    ] {
+        if !v.is_finite() {
+            return Err("高级调整数值无效".into());
+        }
+        *v = v.clamp(min, max);
+    }
+    if !a.curves.is_empty()
+        && (a.curves.len() < 2
+            || a.curves.len() > 19
+            || a.curves
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0.0..=255.0).contains(v))
+            || a.curves.windows(2).any(|p| p[0][0] >= p[1][0]))
+    {
+        return Err("曲线控制点无效".into());
+    }
+    Ok(())
+}
+
 /// 反序列化 + 校验 + 夹取，产出归一化配方。
 ///
 /// 错误（用户可见文案）：
@@ -137,6 +184,9 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             "编辑配方版本不支持（当前支持 {RECIPE_VERSION}，收到 {}）",
             recipe.version
         ));
+    }
+    if let Some(a) = recipe.advanced.as_mut() {
+        normalize_advanced(a)?;
     }
     if let Some(adjustments) = recipe.adjustments.as_mut() {
         for v in [
