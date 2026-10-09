@@ -1,5 +1,5 @@
 //! 上游 PhotoCraft 的唯一接入层；不依赖图库、数据库或存储目录。
-//! v1 配方是持久化真值，每次从未修改的文档重建，避免滑块累计调整。
+//! v1 配方是持久化真值；导出从基础文档重建，增量预览共享原生参数并缓存各阶段。
 
 use photocraft_engine::{
     doc::{Document, Layer, LayerContent},
@@ -7,7 +7,7 @@ use photocraft_engine::{
 };
 use serde_json::json;
 
-use super::recipe::{Adjustments, AdvancedAdjustments, EditRecipe};
+use super::recipe::EditRecipe;
 
 pub(super) fn execute(
     session: &mut Session,
@@ -20,95 +20,119 @@ pub(super) fn execute(
         .map_err(|e| format!("PhotoCraft {command}: {e}"))
 }
 
-fn basic_adjustments(session: &mut Session, values: Option<Adjustments>) -> Result<(), String> {
-    let Some(a) = values else { return Ok(()) };
-    if a.brightness != 0.0 || a.contrast != 0.0 {
-        // 使用上游现代对比度范围 -50..100。
-        execute(
-            session,
-            "layer.newAdjustmentLayer.brightnessContrast",
-            json!({
-                "brightness": a.brightness, "contrast": a.contrast.clamp(-50.0, 100.0)
-            }),
-        )?;
+pub(super) struct AdjustmentSpec {
+    pub key: &'static str,
+    pub kind: &'static str,
+    pub params: serde_json::Value,
+    pub luminosity: bool,
+}
+
+/// 导出与增量预览共享原生参数，避免两条路径的操作顺序/默认值分叉。
+pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Vec<AdjustmentSpec> {
+    let mut specs = Vec::new();
+    let mut add = |key, kind, params, luminosity| {
+        specs.push(AdjustmentSpec {
+            key,
+            kind,
+            params,
+            luminosity,
+        })
+    };
+    if let Some(a) = recipe.adjustments {
+        if a.brightness != 0.0 || a.contrast != 0.0 {
+            add(
+                "basic",
+                "brightnessContrast",
+                json!({"brightness": a.brightness, "contrast": a.contrast.clamp(-50.0, 100.0)}),
+                false,
+            );
+        }
+        if a.saturation != 0.0 {
+            add(
+                "saturation",
+                "hueSaturation",
+                json!({"saturation": a.saturation}),
+                false,
+            );
+        }
     }
-    if a.saturation != 0.0 {
+    let Some(a) = &recipe.advanced else {
+        return specs;
+    };
+    if a.vibrance != 0.0 {
+        add(
+            "vibrance",
+            "vibrance",
+            json!({"vibrance": a.vibrance}),
+            false,
+        );
+    }
+    if let Some(levels) = &a.levels {
+        add(
+            "levels",
+            "levels",
+            json!({"inBlack": levels.black, "inWhite": levels.white, "gamma": levels.gamma}),
+            false,
+        );
+    }
+    if !a.hsl.is_empty() {
+        add("hsl", "hueSaturation", json!(a.hsl), false);
+    }
+    let mut curves = serde_json::Map::new();
+    for (key, points) in [
+        ("points", &a.curves),
+        ("red", &a.channel_curves.red),
+        ("green", &a.channel_curves.green),
+        ("blue", &a.channel_curves.blue),
+    ] {
+        if !points.is_empty() {
+            curves.insert(key.into(), json!(points));
+        }
+    }
+    if !curves.is_empty() {
+        add("curves", "curves", curves.into(), false);
+    }
+    if !a.channel_curves.luminance.is_empty() {
+        add(
+            "luminance",
+            "curves",
+            json!({"points": a.channel_curves.luminance}),
+            true,
+        );
+    }
+    specs
+}
+
+pub(super) fn camera_tuning(recipe: &EditRecipe) -> [f64; 3] {
+    recipe
+        .advanced
+        .as_ref()
+        .map_or([0.0; 3], |a| [a.exposure, a.temperature, a.tint])
+}
+
+pub(super) fn camera_adjustment(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
+    let [exposure, temperature, tint] = camera_tuning(recipe);
+    if [exposure, temperature, tint] != [0.0; 3] {
         execute(
             session,
-            "layer.newAdjustmentLayer.hueSaturation",
-            json!({"saturation": a.saturation}),
+            "filter.cameraRaw",
+            json!({"exposure": exposure, "temperature": temperature, "tint": tint}),
         )?;
     }
     Ok(())
 }
 
 fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
-    if let Some(a) = &recipe.advanced {
-        if a.exposure != 0.0 || a.temperature != 0.0 || a.tint != 0.0 {
-            execute(
-                session,
-                "filter.cameraRaw",
-                json!({"exposure": a.exposure, "temperature": a.temperature, "tint": a.tint}),
-            )?;
-        }
-    }
-    basic_adjustments(session, recipe.adjustments)?;
-    if let Some(a) = &recipe.advanced {
-        if a.vibrance != 0.0 {
-            execute(
-                session,
-                "layer.newAdjustmentLayer.vibrance",
-                json!({"vibrance": a.vibrance}),
-            )?;
-        }
-        tonal_adjustments(session, a)?;
-    }
-    Ok(())
-}
-
-fn tonal_adjustments(session: &mut Session, a: &AdvancedAdjustments) -> Result<(), String> {
-    if let Some(levels) = &a.levels {
+    camera_adjustment(session, recipe)?;
+    for spec in adjustment_specs(recipe) {
         execute(
             session,
-            "layer.newAdjustmentLayer.levels",
-            json!({
-                "inBlack": levels.black, "inWhite": levels.white, "gamma": levels.gamma
-            }),
+            &format!("layer.newAdjustmentLayer.{}", spec.kind),
+            spec.params,
         )?;
-    }
-    if !a.hsl.is_empty() {
-        execute(
-            session,
-            "layer.newAdjustmentLayer.hueSaturation",
-            serde_json::to_value(&a.hsl).map_err(|e| e.to_string())?,
-        )?;
-    }
-    let channels = &a.channel_curves;
-    if !a.curves.is_empty()
-        || !channels.red.is_empty()
-        || !channels.green.is_empty()
-        || !channels.blue.is_empty()
-    {
-        let mut params = serde_json::Map::new();
-        for (key, curve) in [
-            ("points", &a.curves),
-            ("red", &channels.red),
-            ("green", &channels.green),
-            ("blue", &channels.blue),
-        ] {
-            if !curve.is_empty() {
-                params.insert(key.into(), json!(curve));
-            }
+        if spec.luminosity {
+            execute(session, "layer.setProps", json!({"blend": "Luminosity"}))?;
         }
-        execute(session, "layer.newAdjustmentLayer.curves", params.into())?;
-    }
-    if !channels.luminance.is_empty() {
-        execute(
-            session,
-            "layer.newAdjustmentLayer.curves",
-            json!({"points": channels.luminance}),
-        )?;
-        execute(session, "layer.setProps", json!({"blend": "Luminosity"}))?;
     }
     Ok(())
 }
@@ -146,7 +170,7 @@ pub fn resize(doc: &Document, long_edge: Option<u32>) -> Result<Document, String
     Ok(out)
 }
 
-fn active_document(session: &Session) -> Result<Document, String> {
+pub(super) fn active_document(session: &Session) -> Result<Document, String> {
     session
         .active()
         .map(|s| (*s.doc).clone())
@@ -154,8 +178,27 @@ fn active_document(session: &Session) -> Result<Document, String> {
 }
 
 /// GPU 只负责原生合成；格式转换、ICC、透明背景和编码均由上游处理。
+#[derive(Default)]
+pub(super) struct DisplayTimings {
+    pub composite_ms: f64,
+    pub profile_ms: f64,
+    pub encode_ms: f64,
+    pub gpu: bool,
+}
+
 pub fn jpeg(doc: &Document, quality: u8) -> Result<Vec<u8>, String> {
-    let mut flat = if let Some(surface) = super::gpu::composite(doc) {
+    jpeg_with_timings(doc, quality).map(|(bytes, _)| bytes)
+}
+
+pub(super) fn jpeg_with_timings(
+    doc: &Document,
+    quality: u8,
+) -> Result<(Vec<u8>, DisplayTimings), String> {
+    let started = std::time::Instant::now();
+    let mut timing = DisplayTimings::default();
+    let gpu = super::gpu::composite(doc);
+    timing.gpu = gpu.is_some();
+    let mut flat = if let Some(surface) = gpu {
         let mut out = doc.clone();
         out.layers = vec![Layer::new("Composite", LayerContent::Raster(surface))];
         out
@@ -164,19 +207,33 @@ pub fn jpeg(doc: &Document, quality: u8) -> Result<Vec<u8>, String> {
             photocraft_io::document_to_image(doc, &mut Vec::new()).map_err(|e| e.to_string())?;
         super::source::from_image("Composite", &image)?
     };
-    photocraft_engine::color_cmds::convert_document(
-        &mut flat,
-        photocraft_cms::Builtin::Srgb.profile(),
-        photocraft_cms::Intent::RelativeColorimetric,
-        true,
-    )
-    .map_err(|e| e.to_string())?;
+    timing.composite_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let phase = std::time::Instant::now();
+    let srgb = photocraft_cms::Builtin::Srgb.profile();
+    // 只在原生解析的源/目标 ICC 完全一致时省略像素转换。
+    if flat.mode == photocraft_engine::doc::ColorMode::Rgb
+        && photocraft_engine::color_cmds::document_profile(&flat).to_bytes() == srgb.to_bytes()
+    {
+        flat.icc_profile = Some(srgb.to_bytes());
+    } else {
+        photocraft_engine::color_cmds::convert_document(
+            &mut flat,
+            srgb,
+            photocraft_cms::Intent::RelativeColorimetric,
+            true,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    timing.profile_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    let phase = std::time::Instant::now();
     let mut opts = photocraft_io::ExportOptions::default();
     opts.encode.jpeg_quality = quality;
     opts.xmp = photocraft_io::XmpEmbed::None;
-    photocraft_io::export(&flat, "jpg", &opts)
-        .map(|r| r.bytes)
-        .map_err(|e| e.to_string())
+    let bytes = photocraft_io::export(&flat, "jpg", &opts)
+        .map_err(|e| e.to_string())?
+        .bytes;
+    timing.encode_ms = phase.elapsed().as_secs_f64() * 1000.0;
+    Ok((bytes, timing))
 }
 
 pub fn geometry(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
@@ -209,7 +266,7 @@ pub fn geometry(session: &mut Session, recipe: &EditRecipe) -> Result<(), String
 }
 
 /// 标注也是上游原生图层/笔刷；此处仅将 UI 归一化坐标适配为像素/点。
-fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
+pub(super) fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
     let doc = session.active().ok_or("编辑文档不存在")?;
     let width = f64::from(doc.doc.size.width);
     let height = f64::from(doc.doc.size.height);

@@ -35,6 +35,7 @@ pub mod meta;
 pub mod metadata;
 pub mod photocraft;
 pub mod preview;
+mod preview_renderer;
 pub mod project;
 pub mod recipe;
 pub mod render;

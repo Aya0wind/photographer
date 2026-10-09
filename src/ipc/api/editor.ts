@@ -96,8 +96,8 @@ export async function editPreviewOpen(assetId: number, libraryId: string): Promi
 }
 
 /** 返回二进制 JPEG；调用方拥有并负责释放 object URL。 */
-export async function editPreviewRender(sessionId: string, recipe: EditRecipe, interactive = false): Promise<string> {
-  const bytes = await ipc<ArrayBuffer | number[]>("edit_preview_render", { sessionId, recipe, interactive });
+export async function editPreviewRender(sessionId: string, recipe: EditRecipe, interactive = false, revision?: number): Promise<string> {
+  const bytes = await ipc<ArrayBuffer | number[]>("edit_preview_render", { sessionId, recipe, interactive, revision });
   return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }));
 }
 
@@ -189,4 +189,33 @@ export async function exportRun(
 
 export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string) {
   return ipc<{ sample?: [number, number, number]; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker });
+}
+
+
+export interface EditorPreviewTimings {
+  frames: number;
+  cachedFrames: number;
+  frameCacheHit: boolean;
+  cameraCacheHit: boolean;
+  annotationCacheHit: boolean;
+  rawMs: number;
+  cameraMs: number;
+  adjustmentsMs: number;
+  geometryMs: number;
+  annotationsMs: number;
+  compositeMs: number;
+  profileMs: number;
+  encodeMs: number;
+  totalMs: number;
+  gpu: boolean;
+}
+
+export interface EditorPreviewStats {
+  openMs: number;
+  interactive: EditorPreviewTimings;
+  refined: EditorPreviewTimings;
+}
+
+export function editPreviewStats(sessionId: string): Promise<EditorPreviewStats> {
+  return ipc<EditorPreviewStats>("edit_preview_stats", { sessionId });
 }

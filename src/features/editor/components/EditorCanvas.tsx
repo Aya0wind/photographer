@@ -7,6 +7,7 @@ import type Konva from "konva";
 import type { EditRecipe, EditRecipeCrop } from "@/ipc/api";
 import { rotatedSize, type RecipeContext, type TextLayerPatch } from "../lib/recipe";
 import { clamp01, type Size } from "../lib/coords";
+import { getPreviewImage } from "../lib/previewImages";
 import {
   bakeTextScale,
   cropToRectAttrs,
@@ -45,6 +46,8 @@ function useHtmlImage(
       setImage(null);
       return;
     }
+    const ready = getPreviewImage(src);
+    if (ready) { setImage(ready); return; }
     let cancelled = false;
     const img = new Image();
     img.onload = () => {
@@ -177,7 +180,7 @@ export default function EditorCanvas({
   }, []);
   const [avail, setAvail] = useState<Size>({ width: 912, height: 600 });
   const image = useHtmlImage(src, onImageError);
-  const backendImage = useHtmlImage(adjustedSrc, onImageError);
+  const backendImage = useHtmlImage(adjustedSrc === src ? null : adjustedSrc, onImageError);
   const adjustedImage = useMemo(() => {
     if (showOriginal) return image;
     if (backendAdjustments) return backendImage ?? image;

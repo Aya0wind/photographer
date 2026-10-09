@@ -1,7 +1,10 @@
 //! 编辑器临时预览会话；只读源文件，内存文档有数量/有效期限制，不写照片库存储。
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
@@ -9,7 +12,7 @@ use photocraft_engine::doc::Document;
 use serde::Serialize;
 use tauri::State;
 
-use super::{photocraft, recipe, source};
+use super::{photocraft, preview_renderer, recipe, source};
 use crate::ipc::{run_blocking, SharedState};
 
 const PREVIEW_EDGE: u32 = 1600;
@@ -21,10 +24,48 @@ struct Preview {
     raw: Option<Arc<source::RawSource>>,
     refined: Option<([f64; 3], Document)>,
     interactive_document: Document,
+    interactive_renderer: Arc<Mutex<preview_renderer::Renderer>>,
+    refined_renderer: Arc<Mutex<preview_renderer::Renderer>>,
+    open_ms: f64,
+    generation: Arc<Generation>,
     path: PathBuf,
     modified: Option<SystemTime>,
     length: u64,
     touched: Instant,
+}
+
+#[derive(Default)]
+struct Generation {
+    revision: AtomicU64,
+    closed: AtomicBool,
+}
+
+struct PreviewRequest {
+    interactive: bool,
+    revision: Option<u64>,
+    generation: Arc<Generation>,
+}
+
+impl PreviewRequest {
+    fn current(&self) -> bool {
+        !self.generation.closed.load(Ordering::Acquire)
+            && (self.interactive
+                || self.revision.is_none_or(|revision| {
+                    revision == self.generation.revision.load(Ordering::Acquire)
+                }))
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.current() {
+            Ok(())
+        } else {
+            Err("预览请求已被更新或关闭".into())
+        }
+    }
+}
+
+fn new_renderer(document: &Document) -> Arc<Mutex<preview_renderer::Renderer>> {
+    Arc::new(Mutex::new(preview_renderer::Renderer::new(document)))
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, Arc<Mutex<Preview>>>> {
@@ -114,6 +155,50 @@ pub struct PreviewOpened {
     histogram: Vec<Vec<u64>>,
 }
 
+struct PreparedSource {
+    document: Document,
+    interactive_document: Document,
+    raw: Option<Arc<source::RawSource>>,
+    details: PreviewOpened,
+}
+
+fn prepare_source(path: &std::path::Path) -> Result<PreparedSource, String> {
+    let source::Opened {
+        document: full,
+        raw,
+        warnings,
+    } = source::open(path)?;
+    let (width, height) = (full.size.width, full.size.height);
+    let bit_depth = match full.depth {
+        photocraft_engine::doc::SampleType::U8 => "8 bit",
+        photocraft_engine::doc::SampleType::U16 => "16 bit",
+        photocraft_engine::doc::SampleType::F32 => "32 bit",
+    }
+    .to_string();
+    let sensor_raw = raw.is_some();
+    let document = photocraft::resize(&full, Some(PREVIEW_EDGE))?;
+    drop(full);
+    let interactive_document = photocraft::resize(&document, Some(800))?;
+    let source_url = jpeg_url(&document)?;
+    let histogram = source_histogram(&interactive_document)?;
+    let details = PreviewOpened {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        source_url,
+        width,
+        height,
+        sensor_raw,
+        bit_depth,
+        warnings,
+        histogram,
+    };
+    Ok(PreparedSource {
+        document,
+        interactive_document,
+        raw,
+        details,
+    })
+}
+
 #[tauri::command]
 pub async fn edit_preview_open(
     state: State<'_, SharedState>,
@@ -121,24 +206,16 @@ pub async fn edit_preview_open(
     asset_id: String,
 ) -> Result<PreviewOpened, String> {
     run_blocking(state.inner().clone(), move |state| {
+        let opened_at = Instant::now();
         let (_, asset) = super::project::resolve(state, &library_id, &asset_id)?;
         let path = PathBuf::from(asset.path);
         let metadata = std::fs::metadata(&path).map_err(|e| format!("源文件不可用: {e}"))?;
-        let opened = source::open(&path)?;
-        let (width, height) = (opened.document.size.width, opened.document.size.height);
-        let bit_depth = match opened.document.depth {
-            photocraft_engine::doc::SampleType::U8 => "8 bit",
-            photocraft_engine::doc::SampleType::U16 => "16 bit",
-            photocraft_engine::doc::SampleType::F32 => "32 bit",
-        }
-        .to_string();
-        let sensor_raw = opened.raw.is_some();
-        let warnings = opened.warnings;
-        let document = photocraft::resize(&opened.document, Some(PREVIEW_EDGE))?;
-        let interactive_document = photocraft::resize(&document, Some(800))?;
-        let source_url = jpeg_url(&document)?;
-        let histogram = source_histogram(&interactive_document)?;
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let PreparedSource {
+            document,
+            interactive_document,
+            raw,
+            details,
+        } = prepare_source(&path)?;
         let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
         cache.retain(|_, value| {
             value
@@ -147,12 +224,16 @@ pub async fn edit_preview_open(
                 .unwrap_or(false)
         });
         // 不淘汰仍在编辑的会话；前端关闭编辑器时主动释放。
-        admit_session(&cache, opened.raw.as_deref())?;
+        admit_session(&cache, raw.as_deref())?;
         cache.insert(
-            session_id.clone(),
+            details.session_id.clone(),
             Arc::new(Mutex::new(Preview {
+                interactive_renderer: new_renderer(&interactive_document),
+                refined_renderer: new_renderer(&document),
+                open_ms: opened_at.elapsed().as_secs_f64() * 1000.0,
+                generation: Arc::new(Generation::default()),
                 document,
-                raw: opened.raw,
+                raw,
                 refined: None,
                 interactive_document,
                 path,
@@ -161,16 +242,7 @@ pub async fn edit_preview_open(
                 touched: Instant::now(),
             })),
         );
-        Ok(PreviewOpened {
-            session_id,
-            source_url,
-            width,
-            height,
-            sensor_raw,
-            bit_depth,
-            warnings,
-            histogram,
-        })
+        Ok(details)
     })
     .await
 }
@@ -185,11 +257,11 @@ fn refine_source(
     preview: &Mutex<Preview>,
     snapshot: Snapshot,
     recipe: &recipe::EditRecipe,
-    interactive: bool,
+    request: &PreviewRequest,
 ) -> Result<(Document, recipe::EditRecipe), String> {
     let (mut base, raw, refined) = snapshot;
     let mut values = recipe.clone();
-    let Some(raw) = raw.filter(|_| !interactive) else {
+    let Some(raw) = raw.filter(|_| !request.interactive) else {
         return Ok((base, values));
     };
     let a = recipe.advanced.clone().unwrap_or_default();
@@ -198,7 +270,11 @@ fn refine_source(
         base = match refined.filter(|(key, _)| *key == tuning) {
             Some((_, document)) => document,
             None => {
-                let document = photocraft::resize(&raw.develop(recipe)?, Some(PREVIEW_EDGE))?;
+                let full = raw.develop_if_current(recipe, || request.current())?;
+                request.check()?;
+                let document = photocraft::resize(&full, Some(PREVIEW_EDGE))?;
+                drop(full);
+                request.check()?;
                 preview.lock().map_err(|_| "预览锁不可用")?.refined =
                     Some((tuning, document.clone()));
                 document
@@ -213,12 +289,62 @@ fn refine_source(
     Ok((base, values))
 }
 
+struct PreviewInput {
+    snapshot: Snapshot,
+    renderer: Arc<Mutex<preview_renderer::Renderer>>,
+    request: PreviewRequest,
+}
+
+fn preview_input(
+    preview: &Mutex<Preview>,
+    interactive: bool,
+    revision: Option<u64>,
+) -> Result<PreviewInput, String> {
+    let mut p = preview.lock().map_err(|_| "预览会话锁不可用")?;
+    if p.touched.elapsed() >= IDLE_TTL {
+        return Err("预览会话已过期，请重新打开编辑器".into());
+    }
+    let meta = std::fs::metadata(&p.path).map_err(|e| format!("源文件不可用: {e}"))?;
+    if meta.len() != p.length || meta.modified().ok() != p.modified {
+        return Err("源文件已改变，请重新打开编辑器".into());
+    }
+    p.touched = Instant::now();
+    let base = if interactive {
+        p.interactive_document.clone()
+    } else {
+        p.document.clone()
+    };
+    let renderer = if interactive {
+        p.interactive_renderer.clone()
+    } else {
+        p.refined_renderer.clone()
+    };
+    if let Some(revision) = revision {
+        p.generation.revision.fetch_max(revision, Ordering::AcqRel);
+    }
+    let request = PreviewRequest {
+        interactive,
+        revision,
+        generation: p.generation.clone(),
+    };
+    Ok(PreviewInput {
+        snapshot: (
+            base,
+            if interactive { None } else { p.raw.clone() },
+            if interactive { None } else { p.refined.clone() },
+        ),
+        renderer,
+        request,
+    })
+}
+
 #[tauri::command]
 pub async fn edit_preview_render(
     state: State<'_, SharedState>,
     session_id: String,
     recipe: serde_json::Value,
     interactive: Option<bool>,
+    revision: Option<u64>,
 ) -> Result<tauri::ipc::Response, String> {
     // 在进入后台前只校验 JSON；源图和合成工作都在阻塞线程。
     let recipe = recipe::parse_recipe(&recipe)?;
@@ -229,40 +355,47 @@ pub async fn edit_preview_render(
             .get(&session_id)
             .cloned()
             .ok_or("预览会话已关闭或过期，请重新打开编辑器")?;
-        let base = {
-            let mut p = preview.lock().map_err(|_| "预览会话锁不可用")?;
-            if p.touched.elapsed() >= IDLE_TTL {
-                return Err("预览会话已过期，请重新打开编辑器".into());
-            }
-            let meta = std::fs::metadata(&p.path).map_err(|e| format!("源文件不可用: {e}"))?;
-            if meta.len() != p.length || meta.modified().ok() != p.modified {
-                return Err("源文件已改变，请重新打开编辑器".into());
-            }
-            p.touched = Instant::now();
-            (
-                if interactive.unwrap_or(false) {
-                    p.interactive_document.clone()
-                } else {
-                    p.document.clone()
-                },
-                p.raw.clone(),
-                p.refined.clone(),
-            )
-        };
-        let (base, values) = refine_source(&preview, base, &recipe, interactive.unwrap_or(false))?;
-        let doc = photocraft::render_document(&base, &values)?;
-        photocraft::jpeg(&doc, if interactive.unwrap_or(false) { 80 } else { 90 })
-            .map(tauri::ipc::Response::new)
+        let PreviewInput {
+            snapshot,
+            renderer,
+            request,
+        } = preview_input(&preview, interactive.unwrap_or(false), revision)?;
+        request.check()?;
+        let refining = Instant::now();
+        let (base, mut values) = refine_source(&preview, snapshot, &recipe, &request)?;
+        let raw_ms = refining.elapsed().as_secs_f64() * 1000.0;
+        // 输出偏好不改变固定代理预览；不使它们失效整个渲染缓存。
+        values.output = Default::default();
+        request.check()?;
+        let mut renderer = renderer.lock().map_err(|_| "预览渲染锁不可用")?;
+        request.check()?;
+        let jpeg = renderer.render(
+            &base,
+            &values,
+            if interactive.unwrap_or(false) { 80 } else { 90 },
+        )?;
+        renderer.timings.raw_ms = raw_ms;
+        renderer.timings.total_ms += raw_ms;
+        request.check()?;
+        Ok(tauri::ipc::Response::new(jpeg))
     })
     .await
 }
 
 #[tauri::command]
 pub fn edit_preview_close(session_id: String) -> Result<(), String> {
-    sessions()
+    let preview = sessions()
         .lock()
         .map_err(|_| "预览会话锁不可用")?
         .remove(&session_id);
+    if let Some(preview) = preview {
+        preview
+            .lock()
+            .map_err(|_| "预览会话锁不可用")?
+            .generation
+            .closed
+            .store(true, Ordering::Release);
+    }
     Ok(())
 }
 
@@ -330,6 +463,50 @@ pub async fn edit_preview_pick(
                 .map_err(|e| e.to_string())?
                 .ok_or("取色参数无效")?;
         Ok(photocraft_engine::adjust_params::to_params(&adjustment))
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewStats {
+    open_ms: f64,
+    interactive: preview_renderer::Timings,
+    refined: preview_renderer::Timings,
+}
+
+/// 按需查询诊断数据；不为每一帧增加额外 IPC，且不暴露源路径。
+#[tauri::command]
+pub async fn edit_preview_stats(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<PreviewStats, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let preview = sessions()
+            .lock()
+            .map_err(|_| "预览锁不可用")?
+            .get(&session_id)
+            .cloned()
+            .ok_or("预览会话已关闭")?;
+        let (open_ms, interactive, refined) = {
+            let p = preview.lock().map_err(|_| "预览锁不可用")?;
+            (
+                p.open_ms,
+                p.interactive_renderer.clone(),
+                p.refined_renderer.clone(),
+            )
+        };
+        let interactive = interactive
+            .lock()
+            .map_err(|_| "渲染锁不可用")?
+            .timings
+            .clone();
+        let refined = refined.lock().map_err(|_| "渲染锁不可用")?.timings.clone();
+        Ok(PreviewStats {
+            open_ms,
+            interactive,
+            refined,
+        })
     })
     .await
 }

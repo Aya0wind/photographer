@@ -101,6 +101,14 @@ impl RawSource {
     }
 
     pub fn develop(&self, recipe: &EditRecipe) -> Result<Document, String> {
+        self.develop_if_current(recipe, || true)
+    }
+
+    pub fn develop_if_current(
+        &self,
+        recipe: &EditRecipe,
+        current: impl Fn() -> bool,
+    ) -> Result<Document, String> {
         let a = recipe.advanced.clone().unwrap_or_default();
         let gains =
             photocraft_algo::camera_raw::white_balance_gains(a.temperature as f32, a.tint as f32);
@@ -111,14 +119,32 @@ impl RawSource {
             })),
             ..Default::default()
         };
-        let developed = develop(&self.sensor, &options)?;
+        let developed = develop_when(&self.sensor, &options, &current)?;
+        if !current() {
+            return Err("预览请求已被更新或关闭".into());
+        }
         developed_document(&developed)
     }
 }
 
 // 初始化、精细预览和导出共用限流，避免多个完整显影争抢内存和工作线程。
 fn develop(sensor: &Sensor, options: &DevelopOptions) -> Result<Developed, String> {
+    develop_when(sensor, options, || true)
+}
+
+fn develop_when(
+    sensor: &Sensor,
+    options: &DevelopOptions,
+    current: impl Fn() -> bool,
+) -> Result<Developed, String> {
     static DEVELOPMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = DEVELOPMENT.lock().map_err(|_| "RAW 显影锁不可用")?;
-    photocraft_raw::develop_sensor(sensor, options).map_err(|e| e.to_string())
+    if !current() {
+        return Err("预览请求已被更新或关闭".into());
+    }
+    let developed = photocraft_raw::develop_sensor(sensor, options).map_err(|e| e.to_string())?;
+    if !current() {
+        return Err("预览请求已被更新或关闭".into());
+    }
+    Ok(developed)
 }
