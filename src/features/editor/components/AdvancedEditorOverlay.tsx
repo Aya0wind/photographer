@@ -344,7 +344,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         </div>
       </main>
       <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
-        <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-5">
+        <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
           <AdvancedToolPanel sampling={{ picker, setPicker, sample, sourceUrl: preview.session?.sourceUrl ?? null }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} cropRatio={cropRatio} setCropRatio={setCropRatio}
