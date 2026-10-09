@@ -1,3 +1,6 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { CurvePicker } from "../lib/curves";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -57,6 +60,29 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     return () => { if (zoomTimer.current) clearTimeout(zoomTimer.current); };
   }, []);
   const [compare, setCompare] = useState(false);
+  const [picker, setPicker] = useState<CurvePicker | null>(null);
+  const [sample, setSample] = useState<[number, number, number] | null>(null);
+  const sourcePixels = useRef<ImageData | null>(null);
+  useEffect(() => {
+    sourcePixels.current = null;
+    if (!preview.session?.sourceUrl) return;
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled) return;
+      const canvas = document.createElement("canvas"); canvas.width = image.width; canvas.height = image.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (ctx) { ctx.drawImage(image, 0, 0); sourcePixels.current = ctx.getImageData(0, 0, image.width, image.height); }
+    };
+    image.src = preview.session.sourceUrl;
+    return () => { cancelled = true; sourcePixels.current = null; };
+  }, [preview.session?.sourceUrl]);
+  function samplePhoto(x: number, y: number) {
+    const pixels = sourcePixels.current;
+    if (!pixels) return;
+    const offset = (Math.min(pixels.height - 1, Math.floor(y * pixels.height)) * pixels.width + Math.min(pixels.width - 1, Math.floor(x * pixels.width))) * 4;
+    setSample([pixels.data[offset], pixels.data[offset + 1], pixels.data[offset + 2]]);
+  }
   const [cropDraft, setCropDraft] = useState<EditRecipe["crop"]>(null);
   const [cropRatio, setCropRatio] = useState<number | null>(null);
   const [selectedText, setSelectedText] = useState<string | null>(null);
@@ -65,7 +91,6 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [projectLoading, setProjectLoading] = useState(true);
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectRetry, setProjectRetry] = useState(0);
-  const [docked, setDocked] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const pendingPhoto = useAdvancedEditorStore((s) => s.pending);
   const returnAfterExport = useRef(false);
@@ -106,7 +131,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         job.current = null;
         setExporting(false);
         setNotice(event.ok ? t("advancedEditor.exported") : event.error ?? t("editor.exportFailed"));
-        if (event.ok && returnAfterExport.current) onClose();
+        if (event.ok && returnAfterExport.current) closeEditor();
         returnAfterExport.current = false;
       }
     }).then((value) => { if (cancelled) value(); else off = value; }).catch(() => {});
@@ -126,7 +151,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         if (task.status === "done" || task.status === "error") {
           job.current = null; setExporting(false);
           setNotice(task.status === "done" ? t("advancedEditor.exported") : task.error ?? t("editor.exportFailed"));
-          if (task.status === "done" && returnAfterExport.current) onClose();
+          if (task.status === "done" && returnAfterExport.current) closeEditor();
           returnAfterExport.current = false;
           return;
         }
@@ -153,26 +178,44 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     if (dirty) setConfirm("switch");
     else useAdvancedEditorStore.getState().accept();
   }, [pendingPhoto, dirty, busy, exporting, projectLoading]);
+  useEffect(() => { rootRef.current?.focus(); }, []);
+  const requestCloseRef = useRef<() => void>(() => {});
+  requestCloseRef.current = requestClose;
   useEffect(() => {
-    rootRef.current?.focus();
-    const background = document.getElementById("root");
-    if (!docked && background) background.inert = true;
-    return () => { if (background) background.inert = false; };
-  }, [docked]);
+    if (!isTauri()) return;
+    let disposed = false;
+    let release: (() => void) | undefined;
+    void getCurrentWindow().onCloseRequested((event) => {
+      event.preventDefault(); requestCloseRef.current();
+    }).then((off) => { if (disposed) off(); else release = off; });
+    return () => { disposed = true; release?.(); };
+  }, []);
+  useEffect(() => {
+    const release = () => setCompare(false);
+    window.addEventListener("blur", release);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    window.addEventListener("keyup", release);
+    return () => { window.removeEventListener("blur", release); window.removeEventListener("pointerup", release); window.removeEventListener("pointercancel", release); window.removeEventListener("keyup", release); };
+  }, []);
 
   function beginGesture() { gesture.current ??= recipe; }
   function endGesture() {
-    if (gesture.current) dispatch({ type: "commitFrom", snapshot: gesture.current });
+    if (gesture.current && !recipeEquals(gesture.current, recipe)) dispatch({ type: "commitFrom", snapshot: gesture.current });
     gesture.current = null;
   }
   function chooseTool(next: EditorTool) {
     endGesture();
-    setCompare(false);
+    setCompare(false); setPicker(null);
     if (tool === "crop" && next !== "crop") setCropDraft(null);
     if (next === "crop") { setCropDraft(recipe.crop ?? { x: 0, y: 0, w: 1, h: 1 }); setCropRatio(null); }
     setTool(next);
   }
-  function requestClose() { if (!busyRef.current) dirty ? setConfirm("close") : onClose(); }
+  function closeEditor() {
+    busyRef.current = true; setBusy(true);
+    void preview.close().finally(onClose);
+  }
+  function requestClose() { if (!busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }
 
   async function saveProject(): Promise<boolean> {
     if (busyRef.current || unavailable) return false;
@@ -227,12 +270,14 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
 
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || (docked && !rootRef.current?.contains(event.target as Node))) return;
+      if (event.defaultPrevented) return;
       const input = event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
       if (input) return;
+      if (event.key === "\\" && !event.ctrlKey && !event.metaKey && !unavailable) { event.preventDefault(); setCompare(true); return; }
       if (event.key === "Escape") {
         event.preventDefault(); event.stopImmediatePropagation();
-        if (confirm) { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }
+        if (picker) setPicker(null);
+        else if (confirm) { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }
         else if (albumPicker) setAlbumPicker(false);
         else requestClose();
       } else if (!busyRef.current && !exporting && !unavailable && (event.metaKey || event.ctrlKey)) {
@@ -244,10 +289,11 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     return () => window.removeEventListener("keydown", key, true);
   });
 
-  return <div ref={rootRef} tabIndex={-1} role="dialog" aria-modal={!docked} aria-label={t("advancedEditor.title")} className={`${docked ? "fixed bottom-3 right-3 top-16 w-[70vw] min-w-[640px] rounded-2xl border border-edge shadow-2xl" : "fixed inset-0"} z-[70] flex flex-col bg-bg outline-none`} data-testid="advanced-editor-overlay"
+  return <div ref={rootRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t("advancedEditor.title")} className="fixed inset-0 flex flex-col bg-bg outline-none" data-testid="advanced-editor-overlay"
     onDragOver={(e) => { if (e.dataTransfer.types.includes(ASSET_DRAG_TYPE)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
     onDrop={(e) => {
       e.preventDefault();
+      if (busy || exporting || projectLoading) return;
       try {
         const raw = e.dataTransfer.getData(ASSET_DRAG_TYPE);
         if (!raw || raw.length > 32768) return;
@@ -260,16 +306,16 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         <button className={BUTTON} disabled={!history.past.length || busy || exporting} onClick={() => { endGesture(); dispatch({ type: "undo" }); }} title={t("editor.undo")} aria-label={t("editor.undo")}>↶</button>
         <button className={BUTTON} disabled={!history.future.length || busy || exporting} onClick={() => dispatch({ type: "redo" })} title={t("editor.redo")} aria-label={t("editor.redo")}>↷</button>
-        <button className={BUTTON} disabled={busy || unavailable} aria-pressed={compare} onClick={() => setCompare((v) => !v)}>{t("advancedEditor.compare")}</button>
+        <button className={BUTTON} disabled={busy || unavailable} aria-pressed={compare} title={t("advancedEditor.compareHold")} onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); setCompare(true); }} onPointerUp={() => setCompare(false)} onPointerCancel={() => setCompare(false)} onLostPointerCapture={() => setCompare(false)} onBlur={() => setCompare(false)} onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); setCompare(true); } }} onKeyUp={() => setCompare(false)}>{t("advancedEditor.compare")}</button>
         <button className={BUTTON} disabled={busy || unavailable} onClick={() => void saveProject()}>{t("advancedEditor.saveChanges")}</button>
         <button className="ui-primary rounded-xl px-4 py-2 text-xs disabled:opacity-40" disabled={busy || exporting || unavailable} onClick={() => void returnToLibrary(undefined, originSubgroup ?? null, true)}>{t("advancedEditor.saveReturn")}</button>
-        <button className={BUTTON} onClick={() => setDocked((v) => !v)}>{t(docked ? "advancedEditor.expand" : "advancedEditor.browse")}</button>
+
         <ActionPopover label={t("ui.more")} closeOnAction>
           <button className={BUTTON} disabled={busy || exporting || unavailable} onClick={() => void exportFolder()}>{t("editor.export")}</button>
           <button className={BUTTON} disabled={busy || exporting || unavailable} onClick={() => { albumCloseAfter.current = false; setAlbumPicker(true); }}>{t("editor.exportAlbum")}</button>
           <button className={BUTTON} disabled={busy || exporting} onClick={() => setConfirm("reset")}>{t("editor.reset")}</button>
         </ActionPopover>
-        <button className={BUTTON} disabled={busy} onClick={requestClose}>{t("editor.close")}</button>
+        <button className={BUTTON} disabled={busy || exporting} onClick={requestClose}>{t("editor.close")}</button>
       </div>
     </header>
     <div className="flex min-h-0 flex-1 gap-2 p-2">
@@ -278,7 +324,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       </nav>
       <main onPointerMove={wakeZoom} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
-          src={preview.session?.sourceUrl ?? null} adjustedSrc={compare ? preview.session?.sourceUrl : preview.url}
+          sampleMode={picker !== null && !compare} onSample={samplePhoto}
+          src={preview.session?.sourceUrl ?? null} adjustedSrc={preview.url} showOriginal={compare}
           sourceSize={sourceSize} backendAdjustments fallbackSize={sourceSize} zoom={zoom}
           onZoom={(factor) => setZoom((v) => Math.max(0.25, Math.min(4, v * factor)))}
           recipe={compare ? { ...recipe, textLayers: [], brushStrokes: [] } : recipe}
@@ -299,7 +346,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
         <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-5">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
-          <AdvancedToolPanel tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
+          <AdvancedToolPanel sampling={{ picker, setPicker, sample, sourceUrl: preview.session?.sourceUrl ?? null }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}
             brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportFolder={exportFolder} />
@@ -308,6 +355,6 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     </div>
     <footer className="flex h-8 shrink-0 items-center gap-3 px-4 text-[11px] text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? t("advancedEditor.projectHint")}</span></footer>
     {albumPicker && <ExportAlbumPicker albums={albums} onCancel={() => setAlbumPicker(false)} onConfirm={(albumId, subgroup) => { setAlbumPicker(false); void returnToLibrary(albumId, subgroup, albumCloseAfter.current); }} />}
-    {confirm && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50"><div role="alertdialog" aria-modal="true" aria-labelledby="advanced-confirm-title" className="ui-glass w-96 space-y-4 rounded-2xl p-5"><h3 id="advanced-confirm-title" className="text-sm font-semibold text-text-primary">{t(confirm === "reset" ? "editor.resetConfirmTitle" : "editor.unsavedTitle")}</h3><p className="text-xs text-text-secondary">{t(confirm === "reset" ? "editor.resetConfirmDesc" : "advancedEditor.unsaved")}</p><div className="flex justify-end gap-2"><button className={BUTTON} onClick={() => { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }}>{t("common.cancel")}</button>{confirm !== "reset" && <button className="ui-primary rounded-xl px-4 py-2 text-xs" disabled={busy || unavailable} onClick={() => { const action = confirm; void saveProject().then((ok) => { if (!ok || !mounted.current) return; setConfirm(null); if (action === "close") onClose(); else useAdvancedEditorStore.getState().accept(); }); }}>{t("advancedEditor.saveContinue")}</button>}<button className={BUTTON} disabled={busy} onClick={() => { const action = confirm; setConfirm(null); if (action === "close") onClose(); else if (action === "switch") useAdvancedEditorStore.getState().accept(); else { dispatch({ type: "reset" }); setProjectError(null); gesture.current = null; setCropDraft(null); setSelectedText(null); setTool("adjust"); } }}>{t(confirm === "reset" ? "editor.resetConfirmGo" : "editor.unsavedDiscard")}</button></div></div></div>}
+    {confirm && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50"><div role="alertdialog" aria-modal="true" aria-labelledby="advanced-confirm-title" className="ui-glass w-96 space-y-4 rounded-2xl p-5"><h3 id="advanced-confirm-title" className="text-sm font-semibold text-text-primary">{t(confirm === "reset" ? "editor.resetConfirmTitle" : "editor.unsavedTitle")}</h3><p className="text-xs text-text-secondary">{t(confirm === "reset" ? "editor.resetConfirmDesc" : "advancedEditor.unsaved")}</p><div className="flex justify-end gap-2"><button className={BUTTON} onClick={() => { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }}>{t("common.cancel")}</button>{confirm !== "reset" && <button className="ui-primary rounded-xl px-4 py-2 text-xs" disabled={busy || unavailable} onClick={() => { const action = confirm; void saveProject().then((ok) => { if (!ok || !mounted.current) return; setConfirm(null); if (action === "close") closeEditor(); else useAdvancedEditorStore.getState().accept(); }); }}>{t("advancedEditor.saveContinue")}</button>}<button className={BUTTON} disabled={busy} onClick={() => { const action = confirm; setConfirm(null); if (action === "close") closeEditor(); else if (action === "switch") useAdvancedEditorStore.getState().accept(); else { dispatch({ type: "reset" }); setProjectError(null); gesture.current = null; setCropDraft(null); setSelectedText(null); setTool("adjust"); } }}>{t(confirm === "reset" ? "editor.resetConfirmGo" : "editor.unsavedDiscard")}</button></div></div></div>}
   </div>;
 }

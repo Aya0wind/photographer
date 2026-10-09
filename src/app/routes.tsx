@@ -5,6 +5,7 @@ import {
   useSearchParams,
 } from "react-router";
 
+import { lazy, Suspense } from "react";
 import AppShell from "./shell/AppShell";
 import GalleryPage from "@/features/gallery/pages/GalleryPage";
 import RecentPage from "@/features/gallery/pages/RecentPage";
@@ -24,6 +25,8 @@ import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsP
 import SettingsPage from "@/features/settings/pages/SettingsPage";
 import TetheringWindowPage from "@/features/tethering/TetheringWindowPage";
 import { useSettingsStore } from "@/stores/settingsStore";
+
+const AdvancedEditorWindowPage = lazy(() => import("@/features/editor/components/AdvancedEditorWindowPage"));
 
 /**
  * 主壳守卫（达芬奇式启动流）：设置未加载完成时空白等待；本会话未选库
@@ -61,6 +64,7 @@ export const router = createBrowserRouter([
   { path: "/onboarding", element: <OnboardingPage /> },
   // 联机拍摄独立窗口（后端 tethering_start 创建的第二 webview 加载；独立于
   // 主壳守卫——该窗口的 store 是全新会话态，会话真值全部来自后端命令）
+  { path: "/advanced-editor", element: <Suspense fallback={null}><AdvancedEditorWindowPage /></Suspense> },
   { path: "/tethering", element: <TetheringWindowPage /> },
   {
     path: "/",

@@ -11,7 +11,6 @@ import ShortcutsModal from "./ShortcutsModal";
 import DeviceDialog from "@/features/import/DeviceDialog";
 import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
-import AdvancedEditorHost from "@/features/editor/components/AdvancedEditorHost";
 import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
 import { isMacPlatform } from "@/lib/platform";
 
@@ -112,7 +111,6 @@ export default function AppShell() {
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 导入完成总结弹窗（全局：任何页面弹出；此前在任务页） */}
       <SummaryModalHost />
-      <AdvancedEditorHost />
     </div>
   );
 }

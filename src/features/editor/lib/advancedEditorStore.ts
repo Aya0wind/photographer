@@ -34,5 +34,5 @@ export function photoContext(asset: AssetDto, origin?: EditorOrigin): EditorPhot
 
 export function openAdvancedEditor(asset: AssetDto, origin?: EditorOrigin) {
   const photo = photoContext(asset, origin);
-  if (photo) useAdvancedEditorStore.getState().request(photo);
+  if (photo) void import("./editorWindow").then(({ showEditorWindow }) => showEditorWindow(photo)).catch((error: unknown) => window.alert(String(error)));
 }

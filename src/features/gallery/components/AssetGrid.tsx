@@ -25,7 +25,7 @@ import {
   type AssetGroup,
 } from "../lib/assetGroups";
 import AssetThumb from "./AssetThumb";
-import { ASSET_DRAG_TYPE, openAdvancedEditor, photoContext, useAdvancedEditorStore, type EditorOrigin } from "@/features/editor/lib/advancedEditorStore";
+import { ASSET_DRAG_TYPE, photoContext, type EditorOrigin } from "@/features/editor/lib/advancedEditorStore";
 
 /**
  * 日期分组照片墙（画廊/搜索/人物页共用）：
@@ -570,10 +570,6 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       else onCtrlClick(asset);
       return;
     }
-    if (useAdvancedEditorStore.getState().current && !readOnly) {
-      openAdvancedEditor(asset, editorOrigin);
-      return;
-    }
     onOpenAsset?.(asset, group);
   }
 
@@ -807,7 +803,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         onDragStart={(e) => {
                           clearLongPress();
                           const photo = photoContext(asset, editorOrigin);
-                          if (!photo || !useAdvancedEditorStore.getState().current) { e.preventDefault(); return; }
+                          if (!photo || readOnly) { e.preventDefault(); return; }
                           e.dataTransfer.effectAllowed = "copy";
                           e.dataTransfer.setData(ASSET_DRAG_TYPE, JSON.stringify(photo));
                         }}

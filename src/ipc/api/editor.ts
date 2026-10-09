@@ -91,8 +91,10 @@ export async function editPreviewOpen(assetId: number, libraryId: string): Promi
   return ipc<EditorPreviewSession>("edit_preview_open", { assetId: String(assetId), libraryId });
 }
 
-export async function editPreviewRender(sessionId: string, recipe: EditRecipe): Promise<string> {
-  return ipc<string>("edit_preview_render", { sessionId, recipe });
+/** 返回二进制 JPEG；调用方拥有并负责释放 object URL。 */
+export async function editPreviewRender(sessionId: string, recipe: EditRecipe, interactive = false): Promise<string> {
+  const bytes = await ipc<ArrayBuffer | number[]>("edit_preview_render", { sessionId, recipe, interactive });
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/jpeg" }));
 }
 
 export async function editPreviewClose(sessionId: string): Promise<void> {

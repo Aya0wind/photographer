@@ -16,11 +16,11 @@ initAppLanguage();
 initAppTheme();
 void initSettings();
 // 订阅唯一事件通道 app://event：设备扫描 / 导入进度 / 总结等（内部静默容错）
-void initImportStore();
+if (window.location.pathname !== "/advanced-editor") void initImportStore();
 // 订阅 AI 模型下载 / 索引进度事件（M4，内部静默容错）
-void initAi();
+if (window.location.pathname !== "/advanced-editor") void initAi();
 // 语义索引收尾后自动重建智能相册标签索引（内部静默容错）
-void initSmartTagAutoIndex();
+if (window.location.pathname !== "/advanced-editor") void initSmartTagAutoIndex();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

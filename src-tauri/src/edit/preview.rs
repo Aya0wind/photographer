@@ -18,6 +18,7 @@ const IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
 struct Preview {
     document: Document,
+    interactive_document: Document,
     path: PathBuf,
     modified: Option<SystemTime>,
     length: u64,
@@ -79,6 +80,8 @@ pub async fn edit_preview_open(
         let proxy = render::resize_long_edge(upright, Some(PREVIEW_EDGE));
         let source_url = jpeg_url(&proxy)?;
         let document = photocraft::document(&proxy)?;
+        let interactive_document =
+            photocraft::document(&render::resize_long_edge(proxy, Some(800)))?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
         cache.retain(|_, value| {
@@ -95,6 +98,7 @@ pub async fn edit_preview_open(
             session_id.clone(),
             Arc::new(Mutex::new(Preview {
                 document,
+                interactive_document,
                 path,
                 modified: metadata.modified().ok(),
                 length: metadata.len(),
@@ -116,7 +120,8 @@ pub async fn edit_preview_render(
     state: State<'_, SharedState>,
     session_id: String,
     recipe: serde_json::Value,
-) -> Result<String, String> {
+    interactive: Option<bool>,
+) -> Result<tauri::ipc::Response, String> {
     // 在进入后台前只校验 JSON；源图和合成工作都在阻塞线程。
     let recipe = recipe::parse_recipe(&recipe)?;
     run_blocking(state.inner().clone(), move |_| {
@@ -136,11 +141,17 @@ pub async fn edit_preview_render(
                 return Err("源文件已改变，请重新打开编辑器".into());
             }
             p.touched = Instant::now();
-            p.document.clone()
+            if interactive.unwrap_or(false) {
+                p.interactive_document.clone()
+            } else {
+                p.document.clone()
+            }
         };
         // 几何和可交互标注由前端覆盖层显示；底图调整与导出共用同一上游算法。
         let doc = photocraft::adjusted_document(&base, &recipe)?;
-        jpeg_url(&photocraft::composite(&doc)?)
+        let image = photocraft::composite(&doc)?;
+        render::encode_jpeg(&image, if interactive.unwrap_or(false) { 80 } else { 90 })
+            .map(tauri::ipc::Response::new)
     })
     .await
 }

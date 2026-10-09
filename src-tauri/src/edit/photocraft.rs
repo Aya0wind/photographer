@@ -8,7 +8,7 @@ use photocraft_engine::{
 };
 use serde_json::json;
 
-use super::recipe::{Adjustments, EditRecipe};
+use super::recipe::{Adjustments, AdvancedAdjustments, EditRecipe};
 
 pub fn document(image: &RgbImage) -> Result<Document, String> {
     let (w, h) = image.dimensions();
@@ -90,13 +90,54 @@ fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String>
                 }),
             )?;
         }
-        if !a.curves.is_empty() {
-            execute(
-                session,
-                "layer.newAdjustmentLayer.curves",
-                json!({"points": a.curves}),
-            )?;
+        tonal_adjustments(session, a)?;
+    }
+    Ok(())
+}
+
+fn tonal_adjustments(session: &mut Session, a: &AdvancedAdjustments) -> Result<(), String> {
+    if let Some(levels) = &a.levels {
+        execute(
+            session,
+            "layer.newAdjustmentLayer.levels",
+            json!({
+                "inBlack": levels.black, "inWhite": levels.white, "gamma": levels.gamma
+            }),
+        )?;
+    }
+    if !a.hsl.is_empty() {
+        execute(
+            session,
+            "layer.newAdjustmentLayer.hueSaturation",
+            serde_json::to_value(&a.hsl).map_err(|e| e.to_string())?,
+        )?;
+    }
+    let channels = &a.channel_curves;
+    if !a.curves.is_empty()
+        || !channels.red.is_empty()
+        || !channels.green.is_empty()
+        || !channels.blue.is_empty()
+    {
+        let mut params = serde_json::Map::new();
+        for (key, curve) in [
+            ("points", &a.curves),
+            ("red", &channels.red),
+            ("green", &channels.green),
+            ("blue", &channels.blue),
+        ] {
+            if !curve.is_empty() {
+                params.insert(key.into(), json!(curve));
+            }
         }
+        execute(session, "layer.newAdjustmentLayer.curves", params.into())?;
+    }
+    if !channels.luminance.is_empty() {
+        execute(
+            session,
+            "layer.newAdjustmentLayer.curves",
+            json!({"points": channels.luminance}),
+        )?;
+        execute(session, "layer.setProps", json!({"blend": "Luminosity"}))?;
     }
     Ok(())
 }

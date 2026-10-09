@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { EditRecipe } from "@/ipc/api";
 import type { EditorTool } from "./EditorCanvas";
+import type { CurveSampling } from "./CurveEditor";
 import AdvancedAdjustmentPanel from "./AdvancedAdjustmentPanel";
 import { clampCrop, fitCropRect, isFullCrop } from "../lib/coords";
 import { rotatedSize, type RecipeContext } from "../lib/recipe";
@@ -8,6 +9,7 @@ import type { AdvancedAction } from "../lib/advancedRecipe";
 
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
 interface ToolPanelProps {
+  sampling: CurveSampling;
   tool: EditorTool;
   recipe: EditRecipe;
   dispatch: (action: AdvancedAction) => void;
@@ -29,13 +31,13 @@ interface ToolPanelProps {
   exportFolder: () => Promise<void>;
 }
 
-export default function AdvancedToolPanel({ tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({ sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
   selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder }: ToolPanelProps) {
   const { t } = useTranslation();
   const selectedLayer = recipe.textLayers.find((layer) => layer.id === selectedText);
   return <>
-          {tool === "adjust" && <AdvancedAdjustmentPanel recipe={recipe} begin={beginGesture} end={endGesture} onBasic={(patch) => dispatch({ type: "adjust", patch, record: false })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
+          {tool === "adjust" && <AdvancedAdjustmentPanel sampling={sampling} recipe={recipe} begin={beginGesture} end={endGesture} onBasic={(patch) => dispatch({ type: "adjust", patch, record: false })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
           {tool === "view" && <p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.viewHint")}</p>}
           {tool === "crop" && <div className="space-y-4">
             <div className="flex gap-2"><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: -1 }); setCropDraft(null); setTool("view"); }}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: 1 }); setCropDraft(null); setTool("view"); }}>{t("editor.rotateCw")}</button></div>

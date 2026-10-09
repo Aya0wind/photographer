@@ -1,3 +1,4 @@
+import { sourceSamplePosition } from "../lib/coords";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
@@ -85,6 +86,9 @@ function rotatedImageAttrs(
 }
 
 interface EditorCanvasProps {
+  showOriginal?: boolean;
+  sampleMode?: boolean;
+  onSample?: (x: number, y: number) => void;
   src: string | null;
   /** 后端提供未旋转底图的调整结果；禁止再次叠加浏览器滤镜。 */
   adjustedSrc?: string | null;
@@ -117,6 +121,9 @@ interface EditorCanvasProps {
 
 export default function EditorCanvas({
   src,
+  showOriginal = false,
+  sampleMode = false,
+  onSample,
   adjustedSrc = null,
   sourceSize = null,
   backendAdjustments = false,
@@ -168,6 +175,7 @@ export default function EditorCanvas({
   const image = useHtmlImage(src, onImageError);
   const backendImage = useHtmlImage(adjustedSrc, onImageError);
   const adjustedImage = useMemo(() => {
+    if (showOriginal) return image;
     if (backendAdjustments) return backendImage ?? image;
     if (!image || !recipe.adjustments) return image;
     const a = recipe.adjustments;
@@ -180,7 +188,7 @@ export default function EditorCanvas({
     ctx.filter = `brightness(${1 + a.brightness / 100}) contrast(${1 + a.contrast / 100}) saturate(${1 + a.saturation / 100})`;
     ctx.drawImage(image, 0, 0, preview.width, preview.height);
     return preview;
-  }, [image, backendImage, backendAdjustments, recipe.adjustments]);
+  }, [image, backendImage, backendAdjustments, recipe.adjustments, showOriginal]);
   const readyRef = useRef(onImageReady);
   readyRef.current = onImageReady;
 
@@ -279,6 +287,12 @@ export default function EditorCanvas({
   function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>): void {
     const stage = e.target.getStage();
     if (stage === null || stage === undefined) return;
+    if (sampleMode) {
+      const pos = pointerPos(stage);
+      const source = pos && sourceSamplePosition(pos, { width: frameW, height: frameH }, cropMode ? null : crop, quarter);
+      if (source) onSample?.(source[0], source[1]);
+      return;
+    }
     if (tool === "brush") {
       const pos = pointerPos(stage);
       if (pos === null) return;
@@ -332,14 +346,14 @@ export default function EditorCanvas({
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;
 
   const cursor =
-    tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
+    sampleMode || tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
     <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
       style={{ cursor, touchAction: tool === "view" ? "none" : undefined }}
       onPointerDown={(event) => {
         const viewport = event.currentTarget;
-        if (tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
+        if (sampleMode || tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
         event.preventDefault();
         panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
         viewport.setPointerCapture(event.pointerId);

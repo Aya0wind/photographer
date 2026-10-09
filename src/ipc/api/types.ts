@@ -698,6 +698,9 @@ export interface AdvancedAdjustments {
   tint: number;
   vibrance: number;
   curves: [number, number][];
+  channelCurves?: Partial<Record<"red" | "green" | "blue" | "luminance", [number, number][]>>;
+  levels?: { black: number; white: number; gamma: number };
+  hsl?: Partial<Record<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas", { hue: number; saturation: number; lightness: number }>>;
 }
 
 export interface EditRecipe {
