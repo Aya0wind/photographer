@@ -88,6 +88,9 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+# wgpu-hal 30 使用 windows 0.62；gpu-allocator 0.28 的 <=0.62 仅接受到 0.62.0。
+# 锁定 GPU SDK，并在 Cargo.lock 中让二者共享 0.62.0；应用 Win32 API 仍使用 0.61。
+windows-gpu = { package = "windows", version = "=0.62.0", default-features = false }
 wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan"] }
 ort = { version = "2.0.0-rc.13", features = ["directml"] }
 

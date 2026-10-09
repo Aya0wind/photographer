@@ -53,6 +53,7 @@ LTO 可优化不可达代码，但动态命令注册可能保留未展示的功�
 ## GPU 优先与 CPU 回退
 
 - 高级编辑预览、成片和外部导出共用 GPU 优先合成入口；简单编辑保持既有算法。macOS 启用 Metal，Windows 启用 DX12/Vulkan，Linux 启用 Vulkan/GLES，优先请求高性能硬件设备，拒绝软件 GPU。
+- Windows 依赖兼容：`wgpu-hal 30.0.1` 使用 `windows 0.62`，`gpu-allocator 0.28.0` 的版本上限 `<=0.62` 实际只接受到 `0.62.0`。通过 `windows-gpu = =0.62.0` 固定 GPU SDK，并在 Cargo.lock 中让两者共享 `windows 0.62.0`，避免 DX12 COM 接口来自不同 crate 版本。应用原有 `windows 0.61` 保留；更新依赖后应检查 `cargo tree --locked --target x86_64-pc-windows-msvc -p gpu-allocator --depth 1` 与 `-p wgpu-hal` 的 Windows 版本一致。
 - 首次合成时惰性创建独立工作线程，复用设备和合成器；同一基础文档的 raster tile 复用上传缓存。GPU 同时处理一个请求，忙时其他请求直接用 CPU，避免等待队列积压。
 - 合成缓存预算 256 MiB，最多保留四个文档（LRU 淘汰）；这是缓存预算，不是进程/驱动总显存硬上限。全尺寸成片按最多 256 行、约 16 MiB float 缓冲的行带读回。
 - 无硬件、初始化失败、合成/读回错误或可恢复 panic，均重新用 CPU 完成同一次操作，不返回半张 GPU 成品。文档不受支持仅回退本次；设备运行故障后本进程停用 GPU，重启再尝试。
