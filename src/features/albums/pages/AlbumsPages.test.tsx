@@ -433,6 +433,8 @@ function makeAlbum(id: number, name: string, itemCount: number): AlbumDto {
 
 /** 智能标签索引种子（smartTags.ts 的 localStorage 结构；hits 数=命中数）。
  *  相册页只显示确有命中的标签（2026-09-29 定案），标签墙用例需先种索引。
+ *  缓存作用域键随 2026-10-09 单库定案改为应用级 "app"（旧分库 "default"
+ *  已退役），与 smartTags.ts 的 libraryKey() 保持一致。
  *  不种 cover——封面留给 searchSemantic 预取路径（覆盖原封面用例语义）。 */
 function seedTagIndex(hitCounts: Record<string, number>): void {
   const scope: Record<string, { hits: { assetId: number }[] }> = {};
@@ -441,7 +443,7 @@ function seedTagIndex(hitCounts: Record<string, number>): void {
       hits: Array.from({ length: count }, (_, i) => ({ assetId: i + 1 })),
     };
   }
-  localStorage.setItem("smartphoto.albums.tagIndex.v2", JSON.stringify({ default: scope }));
+  localStorage.setItem("smartphoto.albums.tagIndex.v2", JSON.stringify({ app: scope }));
 }
 
 /** 默认全量命中（40 标签都可见）；空条目隐藏用例自行覆写/清除。 */

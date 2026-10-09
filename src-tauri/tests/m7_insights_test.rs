@@ -4,8 +4,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -49,6 +49,11 @@ fn asset(path: &str, captured_at: Option<&str>) -> AssetRow {
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 
@@ -186,14 +191,17 @@ fn sidebar_counts_semantics_and_tz_boundary() {
 }
 
 #[test]
-fn sidebar_counts_library_not_open_is_error() {
+fn sidebar_counts_before_any_library_returns_zeros() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    // 撤掉活动库（模拟引导向导前的侧栏拉取）
+    // 应用唯一数据库常在（§一）：尚未登记任何照片库（引导向导前）侧栏
+    // 拉取 = 全 0 优雅返回，不再有「库未开」错误态
     *state.settings.lock().unwrap() = settings::Settings::default();
-    let err = ipc::insights::fetch_sidebar_counts(&state).unwrap_err();
-    assert!(!err.is_empty(), "库未开必须明确报错而非全 0: {err}");
+    let counts = ipc::insights::fetch_sidebar_counts(&state).unwrap();
+    assert_eq!(counts.assets, 0);
+    assert_eq!(counts.albums, 0);
+    assert_eq!(counts.recent_viewed, 0);
 }
 
 // ---------------------------------------------------------------------------

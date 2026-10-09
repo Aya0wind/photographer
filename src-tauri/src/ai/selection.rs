@@ -90,8 +90,7 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
     };
     let mut evidence = super::selection_regions::evidence(&img, origin);
     evidence.models = vec!["regional-laplacian-sobel-v1-heuristic".into()];
-    evidence.parameters =
-        serde_json::json!({"sourceSize":super::selection_regions::ANALYSIS_SIZE,"parameterVersion":8,"softThreshold":soft_threshold});
+    evidence.parameters = serde_json::json!({"sourceSize":super::selection_regions::ANALYSIS_SIZE,"parameterVersion":8,"softThreshold":soft_threshold});
     let gray = image::imageops::grayscale(&img);
     let faces: Vec<(f64, f64, f64, f64)> = {
         let Ok(mut stmt) = db.0.prepare(
@@ -226,7 +225,7 @@ pub const EYES_INPUT_SIZE: u32 = 256;
 /// facemesh 输出点数（468 眼睑网格 + 10 虹膜；虹膜不可用，见模块注释）。
 pub const FACEMESH_POINTS: usize = 478;
 /// eyes 通道算法版本标签（落 ai_analysis.model_version）。
-pub const EYES_ALGO_VERSION: &str = "thumbnail-eye-1024-v8-candidate";
+pub const EYES_ALGO_VERSION: &str = "thumbnail-eye-1024-v9-binary";
 /// ROI 外扩系数（MediaPipe detection_to_roi：1 + 2×margin，margin=0.25）。
 const ROI_MARGIN_SCALE: f32 = 1.5;
 
@@ -537,72 +536,31 @@ impl FaceEyeStateClassifier for FacemeshEarClassifier<'_> {
         face: &super::face::DetectedFace,
         person: usize,
     ) -> Result<Vec<super::selection_regions::Region>, String> {
-        use super::selection_regions::{closed_score, eye_crop, eye_state, Region};
-        let unknown = |reason: &str| {
-            ["left", "right"]
-                .iter()
-                .map(|side| Region {
-                    kind: "eye".into(),
-                    person,
-                    side: Some((*side).into()),
-                    bounds: super::face::normalized_box(face, img.width(), img.height()),
-                    state: "unknown".into(),
-                    reason: Some(reason.into()),
-                    raw_score: None,
-                    auxiliary_ear: None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let eye_distance = dist(face.kps[0], face.kps[1]);
-        if face.box_w.min(face.box_h) < 48.0 || eye_distance < 18.0 {
-            return Ok(unknown("small_face"));
-        }
-        let dx = face.kps[1][0] - face.kps[0][0];
-        let dy = face.kps[1][1] - face.kps[0][1];
-        let nx = face.kps[2][0] - (face.kps[0][0] + face.kps[1][0]) / 2.0;
-        let ny = face.kps[2][1] - (face.kps[0][1] + face.kps[1][1]) / 2.0;
-        let nose_offset = (nx * dx + ny * dy).abs() / (eye_distance * eye_distance);
-        if !nose_offset.is_finite() || nose_offset > 0.35 {
-            return Ok(unknown("pose"));
-        }
+        use super::selection_regions::{binary_eye_state, detected_eye_bounds, Region};
         let lm = self.infer(img, face)?;
-        let ratio = dist(lm[33], lm[263]) / (ROI_MARGIN_SCALE * face.box_w.max(face.box_h));
-        if !ratio.is_finite() || !(IOD_ROI_RATIO_MIN..=IOD_ROI_RATIO_MAX).contains(&ratio) {
-            return Ok(unknown("localization"));
-        }
         let mut results = Vec::new();
         for (side, indices) in [("left", EYE_LEFT_EAR), ("right", EYE_RIGHT_EAR)] {
             let points: Vec<_> = indices.iter().map(|i| lm[*i]).collect();
-            let ear = eye_aspect_ratio(&lm, &indices);
-            let mut region = unknown("eye_pixels").remove(if side == "left" { 0 } else { 1 });
-            region.auxiliary_ear = ear.map(f64::from);
-            if let (Some((crop, box1)), Some((context, _))) =
-                (eye_crop(img, &points, 1.4), eye_crop(img, &points, 1.8))
-            {
-                region.bounds = box1;
-                if !super::selection_regions::eye_has_detail(&crop) {
-                    region.reason = Some("eye_low_contrast".into());
-                    results.push(region);
-                    continue;
+            let ear = eye_aspect_ratio(&lm, &indices).filter(|value| value.is_finite());
+            let bounds = detected_eye_bounds(img, &points);
+            let detected = bounds.is_some() && ear.is_some();
+            results.push(Region {
+                kind: "eye".into(),
+                person,
+                side: Some(side.into()),
+                bounds: bounds.unwrap_or_else(|| {
+                    super::face::normalized_box(face, img.width(), img.height())
+                }),
+                state: if detected {
+                    binary_eye_state(ear.unwrap(), eyes_ear_closed())
+                } else {
+                    "not_detected"
                 }
-                // Localization, pose, native pixels and texture have passed.
-                // Obvious opening does not depend on an IR classifier's RGB response.
-                if super::selection_regions::eye_is_clearly_open(ear, eyes_ear_maybe()) {
-                    region.state = "open".into();
-                    region.reason = None;
-                    results.push(region);
-                    continue;
-                }
-                let scores = [
-                    closed_score(self.manager, &crop)?,
-                    closed_score(self.manager, &context)?,
-                ];
-                let (state, reason) = eye_state(scores, ear, eyes_ear_closed(), eyes_ear_maybe());
-                region.state = state.into();
-                region.reason = reason.map(str::to_owned);
-                region.raw_score = Some((scores[0] + scores[1]) / 2.0);
-            }
-            results.push(region);
+                .into(),
+                reason: (!detected).then(|| "eye_not_detected".into()),
+                raw_score: None,
+                auxiliary_ear: ear.map(f64::from),
+            });
         }
         Ok(results)
     }
@@ -665,7 +623,6 @@ pub fn process_eyes_task(
     evidence.models = [
         super::face_detect_model_id(manager.ai_params().quality_tier),
         FACEMESH_MODEL_ID,
-        super::selection_regions::EYE_MODEL,
     ]
     .iter()
     .map(|id| {
@@ -676,9 +633,11 @@ pub fn process_eyes_task(
             .unwrap_or_else(|| id.to_string())
     })
     .collect();
-    evidence.parameters = serde_json::json!({"sourceSize":size,"parameterVersion":8,"earClosed":eyes_ear_closed(),
-        "earMaybe":eyes_ear_maybe(), "includeSingle":super::selection_regions::include_single(),
-        "faceDetectThreshold":manager.ai_params().face_detect_threshold,"minimumEyeWidth":12,"minimumFacePixels":48,"cropScales":[1.4,1.8]});
+    evidence.parameters = serde_json::json!({"sourceSize":size,"parameterVersion":9,
+        "decisionMode":"binary-ear","earClosed":eyes_ear_closed(),
+        "includeSingle":super::selection_regions::include_single(),
+        "faceDetectThreshold":manager.ai_params().face_detect_threshold,
+        "minimumEyeWidth":super::selection_regions::MIN_EYE_DETECTION_PIXELS});
     for (index, face) in faces.into_iter().enumerate() {
         match classifier.classify(&img, &face, index + 1) {
             Ok(regions) => evidence.regions.extend(regions),
@@ -689,14 +648,7 @@ pub fn process_eyes_task(
         &evidence.regions,
         super::selection_regions::include_single(),
     );
-    evidence.reason = (value == "maybe").then(|| {
-        if evidence.regions.iter().any(|r| r.state == "closed") {
-            "possible_closed"
-        } else {
-            "eye_state_review"
-        }
-        .into()
-    });
+    evidence.reason = (value == "no_eye").then(|| "eye_not_detected".into());
     db.set_ai_analysis_details(
         asset_id,
         "eyes",

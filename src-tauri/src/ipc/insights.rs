@@ -47,7 +47,7 @@ pub struct GearStatsDto {
 /// 那年今天核：本地时区今天的 month-day（含今年），历年同月日资产
 /// （年份 DESC、年内时间 ASC）。今天无历史 → 空表。
 pub fn fetch_on_this_day(state: &super::AppState) -> Result<Vec<super::assets::AssetDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let month_day = chrono::Local::now().format("%m-%d").to_string();
     let rows = db
         .assets_on_this_day(&month_day)
@@ -100,7 +100,7 @@ const SHUTTER_LABELS: [&str; 6] = [
 
 /// 器材统计核：相机/镜头聚合 + 四维分桶（单遍 SQL）。全空 → None。
 pub fn fetch_gear_stats(state: &super::AppState) -> Result<Option<GearStatsDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let cameras = db.camera_list().map_err(|e| e.to_string())?;
     let lenses = db.lens_list().map_err(|e| e.to_string())?;
     let counts = db.gear_bucket_counts()?;
@@ -213,9 +213,9 @@ pub struct SidebarCountsDto {
 }
 
 /// 侧栏计数核：四条 COUNT/常量，绝不拉资产行。库未开 → Err（与洞察命令
-/// 的 active_library_db 透传语义一致——前端侧栏在库开前后都有明确状态）。
+/// 的 app_database_db 透传语义一致——前端侧栏在库开前后都有明确状态）。
 pub fn fetch_sidebar_counts(state: &super::AppState) -> Result<SidebarCountsDto, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let assets = db.sidebar_assets_count().map_err(|e| e.to_string())?;
     let recent_viewed = db.sidebar_viewed_count().map_err(|e| e.to_string())?;
     let albums = db.sidebar_albums_count().map_err(|e| e.to_string())?;

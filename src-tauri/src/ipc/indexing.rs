@@ -44,7 +44,7 @@ const KINDS: [&str; 9] = [
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let counts = db.index_task_state_counts().map_err(|e| e.to_string())?;
     let (total_assets, thumb_done, ai_done, face_done) =
         db.0.query_row(
@@ -155,14 +155,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
     };
-    let library = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .cloned()
-        .ok_or("尚未创建库")?;
-    let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let db_dir = super::app_database_dir(state);
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
@@ -427,15 +420,9 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// 活动库 dbDir（重建后台任务用；无库明确报错）。
-pub fn active_db_dir(state: &super::AppState) -> Result<std::path::PathBuf, String> {
-    state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .map(|lib| std::path::PathBuf::from(&lib.db_dir))
-        .ok_or_else(|| "尚未创建库".to_string())
+/// 应用唯一数据库目录（重建后台任务用；§一「数据库位置」解析）。
+pub fn app_db_dir(state: &super::AppState) -> Result<std::path::PathBuf, String> {
+    Ok(super::app_database_dir(state))
 }
 
 /// 重建执行体（supervisor 线程 / 测试直调）：开库 → 清理+重排 → 事件 →
@@ -470,7 +457,7 @@ pub async fn index_rebuild(state: State<'_, SharedState>, kind: String) -> Resul
         rebuild_gates(state, &kind_for_gates)
     })
     .await?;
-    let db_dir = run_blocking(shared.clone(), active_db_dir).await?;
+    let db_dir = run_blocking(shared.clone(), app_db_dir).await?;
     // 清理+重排+kick 后台执行（删大目录/批量 UPDATE 不阻塞 IPC）
     let supervisor = std::sync::Arc::clone(&shared.supervisor);
     supervisor.spawn_unique(

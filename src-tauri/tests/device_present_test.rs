@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 

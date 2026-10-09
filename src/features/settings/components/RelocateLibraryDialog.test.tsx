@@ -5,26 +5,28 @@ import { I18nextProvider } from "react-i18next";
 
 import i18n from "@/i18n";
 import RelocateLibraryDialog from "./RelocateLibraryDialog";
-import { libraryRelocate } from "@/ipc/api";
-import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { photoLibraryRelocate } from "@/ipc/api";
+import type { PhotoLibrary } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
-  return { ...actual, libraryRelocate: vi.fn() };
+  return { ...actual, photoLibraryRelocate: vi.fn() };
 });
 
-const relocateMock = vi.mocked(libraryRelocate);
+const relocateMock = vi.mocked(photoLibraryRelocate);
 
-const LIB: Library = {
+// 照片库登记项（2026-10-09 单库多照片库：rootPath 替代 photoRoot，归属不变）
+const LIB: PhotoLibrary = {
   id: "lib-x",
-  name: "测试库",
-  dbDir: "I:\\SmartPhoto\\测试库",
-  photoRoot: "Y:\\Old",
-  streams: 4,
-  configured: true,
+  name: "测试照片库",
+  rootPath: "Y:\\Old",
+  createdAt: "2026-10-09T00:00:00Z",
+  status: "online",
+  assetCount: 15,
+  sizeBytes: 1024,
 };
 
-function renderDialog(lib: Library = LIB) {
+function renderDialog(lib: PhotoLibrary = LIB) {
   const onClose = vi.fn();
   render(
     <I18nextProvider i18n={i18n}>
@@ -36,11 +38,6 @@ function renderDialog(lib: Library = LIB) {
 
 beforeEach(() => {
   relocateMock.mockReset();
-  useSettingsStore.setState({
-    settings: { ...useSettingsStore.getState().settings, libraries: [LIB], activeLibraryId: LIB.id },
-    libraryChosen: true,
-  });
-  useSettingsStore.setState({ load: vi.fn().mockResolvedValue(undefined) } as never);
 });
 
 afterEach(() => {
@@ -77,7 +74,7 @@ describe("RelocateLibraryDialog 整体重定位", () => {
     expect(screen.getByTestId("relocate-confirm")).toBeDisabled();
   });
 
-  it("确认 → apply=true → 完成面板 + store 重拉", async () => {
+  it("确认 → apply=true → 完成面板（登记变更由 photoLibrariesChanged 事件驱动刷新）", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     relocateMock
       .mockResolvedValueOnce({ affected: 12, unaffected: 0, rootExists: true })
@@ -90,7 +87,6 @@ describe("RelocateLibraryDialog 整体重定位", () => {
     fireEvent.click(screen.getByTestId("relocate-confirm"));
     await waitFor(() => expect(screen.getByTestId("relocate-done")).toBeInTheDocument());
     expect(relocateMock).toHaveBeenLastCalledWith(LIB.id, "I:\\New", true);
-    expect(useSettingsStore.getState().load).toHaveBeenCalled();
     expect(screen.getByTestId("relocate-done").textContent).toContain("I:\\New");
   });
 });

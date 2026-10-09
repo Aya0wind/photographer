@@ -4,7 +4,7 @@
 //! （0017 photo_group）的组员 raw→sooc 序；子分组（0019）与派生件概念
 //! 已按用户定案移除（派生件走普通导入 + 相册子分组，不建组）。
 //!
-//! 全部走 active_library_db + run_blocking（铁律：DB 查询不上主线程）。
+//! 全部走 app_database_db + run_blocking（铁律：DB 查询不上主线程）。
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -89,7 +89,7 @@ pub async fn asset_versions(
 ) -> Result<AssetVersionsDto, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        let db = super::active_library_db(state)?;
+        let db = super::app_database_db(state)?;
         asset_versions_core(&db, asset_id)
     })
     .await

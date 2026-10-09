@@ -9,16 +9,16 @@ import i18n from "@/i18n";
 import AddToAlbumDialog from "./AddToAlbumDialog";
 import {
   albumAddAssets,
-  albumClaimAssets,
   albumCreate,
   albumList,
   type AssetDto,
 } from "@/ipc/api";
-import { DEFAULT_SETTINGS, clone, useSettingsStore, type Library } from "@/stores/settingsStore";
+import { DEFAULT_SETTINGS, clone, useSettingsStore } from "@/stores/settingsStore";
 
 /**
  * 「加入相册」选择弹窗（③ 全局入口）：已有相册单选 + 底部新建内联输入；
  * 确定后 album_add_assets，成功立即关闭；失败留在弹窗中提示。
+ * 「归入」（物理挪移）已随 2026-10-09 相册纯逻辑化定案退役——加入只建引用。
  */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -35,25 +35,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
 const albumListMock = vi.mocked(albumList);
 const albumCreateMock = vi.mocked(albumCreate);
 const addMock = vi.mocked(albumAddAssets);
-const claimMock = vi.mocked(albumClaimAssets);
-
-/** 带活动库（photoRoot=Y:\照片、收纳区 SmartPhoto）的库状态（claim 启发式基准） */
-const LIB: Library = {
-  id: "lib1",
-  name: "主库",
-  dbDir: "I:\\SmartPhoto\\主库",
-  photoRoot: "Y:\\照片",
-  configured: true,
-  streams: 4,
-};
-
-function seedLibrary(): void {
-  useSettingsStore.setState({
-    settings: { ...clone(DEFAULT_SETTINGS), activeLibraryId: "lib1", libraries: [LIB] },
-    loaded: true,
-    libraryChosen: true,
-  });
-}
 
 function makeAsset(id: number): AssetDto {
   return assetFixture(id, {
@@ -80,11 +61,9 @@ async function pickAlbumAndConfirm(user: ReturnType<typeof userEvent.setup>, alb
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // 还原无活动库的默认态（非 claim 用例不受启发式影响；claim 用例自行 seed）
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
-    libraryChosen: false,
   });
   albumListMock.mockResolvedValue([
     { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2026-09-01" },
@@ -181,105 +160,16 @@ describe("加入相册弹窗", () => {
   });
 });
 
-// --- 归入语义（规格修订：通用「归入=物理挪移改主相册」） ---------------------------------
+// --- 归入退役（2026-10-09 相册纯逻辑化：加入只建引用，不再有物理挪移） -------------------
 
-describe("加入相册弹窗：归入（claim）语义", () => {
-  /** 位于目标相册（青海湖 2026，createdAt 2026-09-01）主目录内的资产（固定布局公式） */
-  const inTarget = (id: number): AssetDto => ({
-    ...makeAsset(id),
-    path: "Y:\\照片\\2026\\09\\青海湖 2026\\IMG_" + id + ".JPG",
-  });
-  /** 位于别处（未在目标相册目录）的资产 */
-  const atDateRoot = (id: number): AssetDto => ({
-    ...makeAsset(id),
-    path: "Y:\\照片\\SmartPhoto\\2026\\09-18\\IMG_" + id + ".JPG",
-  });
-
-  it("无活动库（路径无法识别主相册）：归入仍可用（作用于全部）", async () => {
+describe("加入相册弹窗：归入（claim）已退役", () => {
+  it("不渲染归入按钮与归入语义说明（album_claim_assets 不再被触发）", async () => {
     const user = userEvent.setup();
     renderDialog([makeAsset(1)]);
     const options = await screen.findAllByTestId("add-to-album-option");
     await user.click(options[0]);
-    const claimBtn = screen.getByTestId("add-to-album-claim");
-    expect(claimBtn).toBeEnabled();
-    expect(claimBtn).toHaveTextContent("归入相册（移动文件）");
-    await user.click(claimBtn);
-    await waitFor(() => expect(claimMock).toHaveBeenCalledWith(3, [1]));
-  });
 
-  it("全部不在目标相册：归入为主按钮；成功 toast「已归入（文件已移动）」后自动关闭", async () => {
-    seedLibrary();
-    claimMock.mockResolvedValue(2);
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <I18nextProvider i18n={i18n}>
-        <AddToAlbumDialog assets={[atDateRoot(1), atDateRoot(2)]} onClose={onClose} />
-      </I18nextProvider>,
-    );
-
-    const options = await screen.findAllByTestId("add-to-album-option");
-    await user.click(options[0]);
-    const hint = screen.getByTestId("add-to-album-mode-hint");
-    expect(hint).toHaveTextContent("移动到相册目录并更新主相册");
-    expect(screen.getByTestId("add-to-album-claim")).toHaveTextContent("归入相册（移动文件）");
-
-    await user.click(screen.getByTestId("add-to-album-claim"));
-    await waitFor(() => expect(claimMock).toHaveBeenCalledWith(3, [1, 2]));
-    const toast = await screen.findByTestId("add-to-album-toast");
-    expect(toast).toHaveTextContent("已归入（文件已移动）2 张");
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1), { timeout: 3000 });
-  });
-
-  it("部分已在目标相册：仅归入其余；说明提示已在该相册数量", async () => {
-    seedLibrary();
-    const user = userEvent.setup();
-    renderDialog([inTarget(1), atDateRoot(2)]);
-
-    const options = await screen.findAllByTestId("add-to-album-option");
-    await user.click(options[0]);
-    expect(screen.getByTestId("add-to-album-mode-hint")).toHaveTextContent("1 张已在该相册");
-    expect(screen.getByTestId("add-to-album-claim")).toHaveTextContent("归入相册（移动 1 张）");
-
-    await user.click(screen.getByTestId("add-to-album-claim"));
-    await waitFor(() => expect(claimMock).toHaveBeenCalledWith(3, [2]));
-  });
-
-  it("全部已在目标相册：归入禁用（已在该相册）+ 提示；「加入（引用）」仍可用", async () => {
-    seedLibrary();
-    addMock.mockResolvedValue(2);
-    const user = userEvent.setup();
-    renderDialog([inTarget(1), inTarget(2)]);
-
-    const options = await screen.findAllByTestId("add-to-album-option");
-    await user.click(options[0]);
-    const claimBtn = screen.getByTestId("add-to-album-claim");
-    expect(claimBtn).toBeDisabled();
-    expect(claimBtn).toHaveTextContent("已在该相册");
-    expect(screen.getByTestId("add-to-album-mode-hint")).toHaveTextContent("青海湖 2026");
-
-    await user.click(screen.getByTestId("add-to-album-confirm"));
-    await waitFor(() => expect(addMock).toHaveBeenCalledWith(3, [1, 2]));
-  });
-
-  it("归入失败：透传后端 Err + 改用引用提示，弹窗不关", async () => {
-    seedLibrary();
-    claimMock.mockRejectedValue(new Error("挪移失败"));
-    const onClose = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <I18nextProvider i18n={i18n}>
-        <AddToAlbumDialog assets={[atDateRoot(1)]} onClose={onClose} />
-      </I18nextProvider>,
-    );
-
-    await user.click((await screen.findAllByTestId("add-to-album-option"))[0]);
-    await user.click(screen.getByTestId("add-to-album-claim"));
-
-    const error = await screen.findByTestId("add-to-album-claim-error");
-    expect(error).toHaveTextContent("挪移失败");
-    expect(error).toHaveTextContent("可改用「加入（引用）」");
-    expect(screen.getByTestId("add-to-album-dialog")).toBeInTheDocument();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("add-to-album-claim")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("add-to-album-mode-hint")).not.toBeInTheDocument();
   });
 });

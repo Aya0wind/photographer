@@ -1,14 +1,15 @@
-//! 选片补全（0016，阶段 B1）：颜色标签（批量 + 非法拒绝 + XMP 边车写回 +
-//! xmp:Label 清除）、接受/拒绝状态（筛选 + 默认查询不排除）、应用内回收站
-//! 全链路（移入 → 常规查询不可见 → 列表/还原 → 清空物理删除 + 引用级联）、
-//! 与 XMP 边车同步。
+//! 选片补全（0016，阶段 B1 + 2026-10-09 §五 M2c）：颜色标签（批量 + 非法
+//! 拒绝 + XMP 边车写回 + xmp:Label 清除）、接受/拒绝状态（筛选 + 默认查询
+//! 不排除）、应用内回收站全链路（移入 → 常规查询不可见 → 列表/还原 →
+//! 清空新语义：在线库真删本体 / 离线库原样保留 + 总结 / 缺失项仅删记录）、
+//! 与 XMP 边车同步（离线/缺失走 xmp_dirty 闭环）。
 
 mod common;
 
 use common::library_fixture as setup;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -60,6 +61,11 @@ fn ins(db: &db::Db, path: &str, captured: Option<&str>, kind: AssetKind) -> i64 
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()
@@ -270,6 +276,11 @@ fn color_label_syncs_xmp_sidecar_and_clear_removes_attribute() {
             flagged: 0,
             color_label: None,
             rejected: 0,
+            library_id: None,
+            missing: 0,
+            xmp_dirty: 0,
+            volume_serial: None,
+            file_id: None,
         };
         row.origin = "external".into();
         db.insert_asset(&row).unwrap();
@@ -507,6 +518,11 @@ fn trash_purge_deletes_rows_files_and_cascades_references() {
             flagged: 0,
             color_label: None,
             rejected: 0,
+            library_id: None,
+            missing: 0,
+            xmp_dirty: 0,
+            volume_serial: None,
+            file_id: None,
         };
         row.origin = "external".into();
         db.insert_asset(&row).unwrap();
@@ -519,8 +535,10 @@ fn trash_purge_deletes_rows_files_and_cascades_references() {
     fetch_asset_trash_move(&state, &[a, ext]).unwrap();
 
     // purge（delete_files=false）：库行 + 级联消失，物理文件保留
-    let deleted = fetch_trash_purge(&state, &[a, ext], false).unwrap();
-    assert_eq!(deleted, 2);
+    let result = fetch_trash_purge(&state, &[a, ext], false).unwrap();
+    assert_eq!(result.deleted_records, 2);
+    assert_eq!(result.deleted_files, 0, "delete_files=false 不动物理文件");
+    assert_eq!(result.offline_kept, 0);
     assert!(photo.is_file());
     assert!(ext_file.is_file());
     assert!(db.asset_albums(a).unwrap().is_empty(), "相册引用级联清");
@@ -539,18 +557,221 @@ fn trash_purge_deletes_rows_files_and_cascades_references() {
         .unwrap();
     assert_eq!(history, 0, "浏览历史级联清");
 
-    // 再走一遍带 delete_files=true 的完整流程
+    // 再走一遍带 delete_files=true 的完整流程（library_id=NULL 视同在线库）
     let p2 = photo_root.join("DSC_0003.jpg");
     std::fs::write(&p2, b"jpeg2").unwrap();
     let c = ins(&db, &p2.to_string_lossy(), None, AssetKind::Photo);
     fetch_asset_trash_move(&state, &[c]).unwrap();
-    let deleted = fetch_trash_purge(&state, &[c], true).unwrap();
-    assert_eq!(deleted, 1);
+    let result = fetch_trash_purge(&state, &[c], true).unwrap();
+    assert_eq!(result.deleted_records, 1);
+    assert_eq!(result.deleted_files, 1, "在线资产真删本体");
     assert!(!p2.exists(), "delete_files=true 应物理删除文件");
     // 幂等：再 purge 无剩余行
-    assert_eq!(fetch_trash_purge(&state, &[c], true).unwrap(), 0);
+    assert_eq!(fetch_trash_purge(&state, &[c], true).unwrap().deleted_records, 0);
     // 常规查询回到干净状态
     assert_eq!(db.sidebar_assets_count().unwrap(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 清空回收站新语义（§五 M2c）：离线库原样保留 + 缺失项仅删记录
+// ---------------------------------------------------------------------------
+
+/// 双库 fixture：A 在线（root 在盘）、B 标记离线（root 仍在盘——status 是
+/// purge 唯一 consulted 的真相，不信任离线卷上的任何文件操作）。
+fn two_libraries(
+    state: &ipc::AppState,
+) -> (tempfile::TempDir, String, std::path::PathBuf, String, std::path::PathBuf) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root_a = dir.path().join("lib-a");
+    let root_b = dir.path().join("lib-b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let db = open_db(&state.config_dir);
+    let a = db
+        .photos_library_register("在线库", &root_a.to_string_lossy(), &state.config_dir)
+        .unwrap();
+    let b = db
+        .photos_library_register("离线库", &root_b.to_string_lossy(), &state.config_dir)
+        .unwrap();
+    db.photos_library_set_status(&b.id, "offline").unwrap();
+    (dir, a.id, root_a, b.id, root_b)
+}
+
+/// 插入库内资产（真实文件可选；missing 可选），返回 (id, 文件路径)。
+#[allow(clippy::too_many_arguments)]
+fn ins_in_library(
+    db: &db::Db,
+    library_id: &str,
+    root: &std::path::Path,
+    name: &str,
+    with_file: bool,
+    missing: bool,
+) -> (i64, std::path::PathBuf) {
+    let path = root.join("2026").join("06").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    if with_file {
+        std::fs::write(&path, b"jpeg").unwrap();
+    }
+    db.insert_asset(&AssetRow {
+        path: path.to_string_lossy().into_owned(),
+        filename: name.to_string(),
+        size: 4,
+        mtime: "2026-09-01T00:00:00.000Z".to_string(),
+        xxhash: name.len() as u64,
+        kind: AssetKind::Photo,
+        captured_at: None,
+        camera: None,
+        source: "imported".to_string(),
+        created_at: "2026-09-01T00:00:00.000Z".to_string(),
+        origin: "imported".to_string(),
+        width: None,
+        height: None,
+        iso: None,
+        f_number: None,
+        exposure_time: None,
+        focal_length: None,
+        lens: None,
+        pair_asset_id: None,
+        thumb_state: 0,
+        orientation: None,
+        flash: None,
+        metering_mode: None,
+        white_balance: None,
+        exposure_program: None,
+        software: None,
+        artist: None,
+        gps_lat: None,
+        gps_lon: None,
+        rating: 0,
+        flagged: 0,
+        color_label: None,
+        rejected: 0,
+        library_id: Some(library_id.to_string()),
+        missing: i64::from(missing),
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
+    })
+    .unwrap();
+    let id = db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap();
+    (id, path)
+}
+
+#[test]
+fn trash_purge_keeps_offline_library_items_and_reports_summary() {
+    let (_dir, state, db) = setup();
+    let (dir, lib_a, root_a, lib_b, root_b) = two_libraries(&state);
+    let db = open_db(&state.config_dir);
+    let (a, file_a) = ins_in_library(&db, &lib_a, &root_a, "online.jpg", true, false);
+    let (b, file_b) = ins_in_library(&db, &lib_b, &root_b, "offline.jpg", true, false);
+    let (m, file_m) = ins_in_library(&db, &lib_a, &root_a, "missing.jpg", false, true);
+
+    fetch_asset_trash_move(&state, &[a, b, m]).unwrap();
+    let result = fetch_trash_purge(&state, &[a, b, m], true).unwrap();
+
+    // 在线库真删本体；缺失项仅删记录；离线库原样保留 + 总结提示。
+    assert_eq!(result.deleted_files, 1, "只有在线库的本体被真删");
+    assert!(!file_a.exists(), "在线库本体已删");
+    assert!(file_b.is_file(), "离线库回收站项原样保留（文件不动）");
+    assert_eq!(result.offline_kept, 1);
+    assert_eq!(result.offline_libraries, vec!["离线库".to_string()]);
+    assert_eq!(result.missing_records_only, 1, "缺失项仅删记录");
+    assert_eq!(result.deleted_records, 2, "删除 a + m 两行；离线项不计");
+    let _ = file_m;
+
+    // 离线库资产行仍在回收站（后续可恢复）；恢复在线后再清空即真删。
+    let trash = names(&fetch_trash_list(&state, 0, 10).unwrap());
+    assert_eq!(trash, vec!["offline.jpg".to_string()], "离线项仍在回收站");
+    db.photos_library_set_status(&lib_b, "online").unwrap();
+    let result = fetch_trash_purge(&state, &[b], true).unwrap();
+    assert_eq!(result.deleted_files, 1);
+    assert!(!file_b.exists(), "库恢复在线后真删本体");
+    assert_eq!(result.offline_kept, 0);
+    let _ = dir;
+}
+
+#[test]
+fn trash_purge_offline_library_never_record_deletes_even_without_files() {
+    let (_dir, state, _db) = setup();
+    let (_dir2, _lib_a, _root_a, lib_b, root_b) = two_libraries(&state);
+    let db = open_db(&state.config_dir);
+    let (b, file_b) = ins_in_library(&db, &lib_b, &root_b, "keep.jpg", true, false);
+
+    fetch_asset_trash_move(&state, &[b]).unwrap();
+    // delete_files=false 也不动离线库记录（§五 定案：不做「强制仅删记录」）。
+    let result = fetch_trash_purge(&state, &[b], false).unwrap();
+    assert_eq!(result.offline_kept, 1, "离线库项原样保留");
+    assert_eq!(result.deleted_records, 0);
+    assert!(file_b.is_file());
+    let kept: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1 AND in_trash = 1",
+            [b],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "回收站行保留");
+}
+
+// ---------------------------------------------------------------------------
+// xmp_dirty 写方向闭环（§五 M2c）：缺失/离线期间的改动进库置脏，不派边车
+// ---------------------------------------------------------------------------
+
+#[test]
+fn label_and_reject_on_offline_library_enter_db_dirty_without_sidecar() {
+    let (_dir, state, _db) = setup();
+    let (dir, _lib_a, _root_a, lib_b, root_b) = two_libraries(&state);
+    let db = open_db(&state.config_dir);
+    let (b, file_b) = ins_in_library(&db, &lib_b, &root_b, "dirty.nef", true, false);
+
+    // 离线库上打标签 + 拒绝：入库 + 置脏；边车绝不写（库不在盘语义）。
+    assert_eq!(fetch_asset_label_set(&state, &[b], Some("red")).unwrap(), 1);
+    assert_eq!(fetch_asset_reject_set(&state, &[b], true).unwrap(), 1);
+    let (label, rejected, dirty): (Option<String>, i64, i64) = db
+        .0
+        .query_row(
+            "SELECT color_label, rejected, xmp_dirty FROM assets WHERE id = ?1",
+            [b],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(label.as_deref(), Some("red"));
+    assert_eq!(rejected, 1);
+    assert_eq!(dirty, 1, "离线期间改动置脏");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !xmp::sidecar_path(&file_b).exists(),
+        "离线库不派边车任务"
+    );
+
+    // 库恢复在线 → 扫一轮 → 补写边车、清标志（与 rating_watch 读入方向对称）。
+    db.photos_library_set_status(&lib_b, "online").unwrap();
+    let library = db.photos_library_get(&lib_b).unwrap().unwrap();
+    let report = scan::scan_library_once(
+        &db,
+        &dir.path().join("db"),
+        &library,
+        &scan::ScanOptions {
+            cooldown: Duration::ZERO,
+            now: None,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.xmp_flushed, 1, "脏资产补写冲刷");
+    let sidecar = xmp::sidecar_path(&file_b);
+    let text = std::fs::read_to_string(&sidecar).unwrap();
+    assert_eq!(xmp::read_label(&text).as_deref(), Some("Red"));
+    assert!(text.contains(r#"xmp:Rating="-1""#), "拒绝投影 -1");
+    let dirty: i64 = db
+        .0
+        .query_row("SELECT xmp_dirty FROM assets WHERE id = ?1", [b], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(dirty, 0, "补写后清标志");
 }
 
 // ---------------------------------------------------------------------------

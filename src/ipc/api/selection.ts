@@ -1,6 +1,6 @@
 import { ipc } from "../index";
 import { ipcList } from "../read";
-import { type AssetDto } from "./types";
+import { type AssetDto, type TrashPurgeResult } from "./types";
 
 /** 批量设置颜色标签（asset_label_set；label=null 清除）。命令失败静默（乐观 UI 由调用方回滚/重拉） */
 export async function assetLabelSet(assetIds: number[], label: string | null): Promise<void> {
@@ -50,11 +50,15 @@ export async function trashRestore(assetIds: number[]): Promise<boolean> {
   }
 }
 
-/** 彻底删除（trash_purge；deleteFiles=true 连磁盘文件一并删除）。返回实际删除数；
- *  业务错误原样抛给调用方展示。 */
-export async function trashPurge(assetIds: number[], deleteFiles: boolean): Promise<number> {
-  const deleted = await ipc<number>("trash_purge", { assetIds, deleteFiles });
-  return typeof deleted === "number" && Number.isFinite(deleted) ? deleted : 0;
+/** 彻底删除（trash_purge，2026-10-09 §五 定案语义）：在线库真删本体
+ *  （deleteFiles=true 且非外部引用）；离线库回收站项原样保留（不删文件
+ *  不删记录）；缺失项仅删记录。返回总结（offlineKept/offlineLibraries
+ *  供「N 项因照片库离线保留」提示）；业务错误原样抛给调用方展示。 */
+export async function trashPurge(
+  assetIds: number[],
+  deleteFiles: boolean,
+): Promise<TrashPurgeResult> {
+  return ipc<TrashPurgeResult>("trash_purge", { assetIds, deleteFiles });
 }
 
 /** 清理所有源缺失照片（assets_purge_missing）：扫描库内活跃资产，源文件

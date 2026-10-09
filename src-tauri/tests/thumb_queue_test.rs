@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::path::{Path, PathBuf};
@@ -68,6 +68,11 @@ fn state_with_asset(db_dir: &Path, src: &Path) -> (ipc::AppState, i64) {
             artist: None,
             gps_lat: None,
             gps_lon: None,
+            library_id: None,
+            missing: 0,
+            xmp_dirty: 0,
+            volume_serial: None,
+            file_id: None,
         })
         .unwrap();
     let id = database

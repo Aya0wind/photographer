@@ -6,15 +6,15 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use common::{build_source, count_assets, expected_ungrouped_dir, open_db, run_engine};
+use common::{build_source, count_assets, expected_mtime_dir, open_db, run_engine};
 use events::EventBus;
 use image::DynamicImage;
 use import::engine::ImportMode;
@@ -48,7 +48,7 @@ fn same_volume_move_takes_fast_path_and_backfills_hash() {
             (
                 rel.clone(),
                 content.clone(),
-                expected_ungrouped_dir(db_dir.path(), target.path())
+                expected_mtime_dir(target.path(), &src.path().join(rel))
                     .join(rel.rsplit('/').next().unwrap()),
             )
         })

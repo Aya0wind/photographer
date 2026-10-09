@@ -3,6 +3,7 @@
 
 pub mod ai;
 pub mod album;
+pub mod album_export;
 pub mod assets;
 pub mod claim;
 pub mod culling;
@@ -13,8 +14,8 @@ pub mod import;
 pub mod indexing;
 pub mod insights;
 pub mod map;
-pub mod migrate;
 pub mod people;
+pub mod photo_library;
 pub mod rating;
 pub mod reconcile;
 pub mod selection;
@@ -26,7 +27,7 @@ pub mod thumb;
 pub mod versions;
 pub mod watch;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -79,8 +80,12 @@ pub struct ActiveImport {
     pub handle: Option<crate::tasks::TaskHandle>,
 }
 
-/// 全局应用状态：内存中的设置快照 + 配置目录 + 事件总线 +
+/// 全局应用状态：内存中的设置快照（应用级）+ 配置目录 + 事件总线 +
 /// 设备注册表 + 活跃导入。
+///
+/// 2026-10-09 单数据库多照片库：settings 只含应用级配置（库注册表/
+/// activeLibrary/migrations 守卫全部退役——照片库登记在应用唯一数据库
+/// photos_libraries 表，数据库目录由 settings.database_dir 解析）。
 pub struct AppState {
     pub settings: Mutex<Settings>,
     pub config_dir: PathBuf,
@@ -91,11 +96,17 @@ pub struct AppState {
     pub supervisor: std::sync::Arc<crate::tasks::TaskSupervisor>,
     /// 按需缩略图生成队列（asset_thumb_get(asset_id) 未命中路径）。
     pub thumb_queue: thumb::ThumbQueue,
-    /// 目录迁移守卫（库 id 集合）：迁移期间该库拒绝新导入/新迁移。
-    pub migrations: Mutex<HashSet<String>>,
     /// 导入让路闸（用户定案 2026-09-29）：导入任务在场为 true——一切索引
     /// 触发（手动/自动/跟随）拒绝，开场暂停 kind="index" 在跑任务。
     pub import_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// 登记单管道闸（§八-5，2026-10-09）：增量扫描发现与导入落盘产出的
+    /// 登记段（查重判定 + 写库原子段）互斥串行——防双写竞争与重复算哈希/
+    /// 缩略图。导入引擎（launch_import 注入）与库扫描（photo_library
+    /// worker）持同一把锁。
+    pub register_gate: std::sync::Arc<std::sync::Mutex<()>>,
+    /// 库扫描 worker 唤醒旗（M4b）：「从文件夹建立」落批量登记任务后置位，
+    /// 轮询线程秒级打断 60s 等待立即拾取（消费者 swap 复位）。
+    pub library_scan_kick: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// AI 模型下载管理器（models 目录固定在 app 配置目录下）。
     pub ai: crate::ai::ModelManager,
 }
@@ -110,28 +121,6 @@ pub fn ensure_no_import_running(state: &AppState) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-/// 活跃库迁移守卫检查：迁移中返回 Err（导入/迁移入口共用）。
-pub fn ensure_library_not_migrating(state: &AppState) -> Result<(), String> {
-    let library_id = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .map(|lib| lib.id.clone());
-    let Some(library_id) = library_id else {
-        return Ok(());
-    };
-    if state
-        .migrations
-        .lock()
-        .expect("migrations mutex poisoned")
-        .contains(&library_id)
-    {
-        return Err(format!("库 {library_id} 迁移中，拒绝导入"));
-    }
-    Ok(())
 }
 
 /// Stop an active import when reconciliation proves its source disappeared.
@@ -383,25 +372,26 @@ impl DeviceSource for ArcSource {
     }
 }
 
-/// 当前激活库的 Db 连接（打开 + migrate 幂等）。无库 → Err。
-pub fn active_library_db(state: &AppState) -> Result<Db, String> {
-    let settings = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .clone();
-    let library = settings.active_library().ok_or("尚未创建库")?;
-    let dir = PathBuf::from(&library.db_dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("库目录不可用: {e}"))?;
-    open_library_db(&dir)
+/// 应用唯一数据库目录（§一「数据库位置」设置项解析：None = 应用数据目录，
+/// Some = 自定义路径）。
+pub fn app_database_dir(state: &AppState) -> PathBuf {
+    let settings = state.settings.lock().expect("settings mutex poisoned");
+    settings.database_dir_path(&state.config_dir)
 }
 
-/// 打开指定 dbDir 的库连接（library.db + 迁移幂等；open 与迁移同锁串行，
-/// 新库并发首开不撞 DDL/WAL 转换，见 [`Db::open_migrated`]）。
+/// 应用唯一数据库连接（单数据库多照片库，2026-10-09 定案）：library.db +
+/// thumbs/ + 向量等一切数据件所在目录即 [`app_database_dir`]；照片库登记
+/// （photos_libraries）、资产、相册等一切表同居于此。打开即建 schema
+/// （单版本幂等）。
+pub fn app_database_db(state: &AppState) -> Result<Db, String> {
+    open_library_db(&app_database_dir(state))
+}
+
+/// 打开指定目录的数据库连接（library.db；打开即幂等执行单版本建表脚本，
+/// 新库并发首开由 IF NOT EXISTS + busy_timeout 收敛，无迁移锁）。
 pub fn open_library_db(db_dir: &Path) -> Result<Db, String> {
     std::fs::create_dir_all(db_dir).map_err(|e| format!("库目录不可用: {e}"))?;
-    let db = Db::open_migrated(&db_dir.join("library.db"))
-        .map_err(|e| format!("打开/迁移库失败: {e}"))?;
+    let db = Db::open(&db_dir.join("library.db")).map_err(|e| format!("打开数据库失败: {e}"))?;
     Ok(db)
 }
 
@@ -413,7 +403,7 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
         .expect("settings mutex poisoned")
         .import
         .skip_imported;
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     let key = crate::devices::normalize_device_id(id);
     let source = {
         let mut devices = state.devices.lock().expect("devices mutex poisoned");
@@ -505,13 +495,13 @@ pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, Strin
     }
 }
 
-/// 导入用源：注册表取出；FOLDER 源重建为“枚举排除 target_root 子树”的
-/// 实例（嵌套守卫已拒绝合法嵌套方案，此处是防御层——避免任何路径形态
+/// 导入用源：注册表取出；FOLDER 源重建为“枚举排除目标子树”的实例
+/// （嵌套守卫已拒绝合法嵌套方案，此处是防御层——避免任何路径形态
 /// 下把自己的产出再枚举进来）。文件夹已消失时回退注册表源（由引擎报错）。
 fn import_source(
     state: &AppState,
     device_id: &str,
-    target_root: &std::path::Path,
+    library_root: &std::path::Path,
 ) -> Result<ArcSource, String> {
     let registered = state
         .devices
@@ -521,7 +511,7 @@ fn import_source(
         .map(|entry| Arc::clone(&entry.source))
         .ok_or_else(|| format!("设备 {device_id} 不在线"))?;
     if let Some(root) = device_id.strip_prefix(FOLDER_ID_PREFIX) {
-        if let Ok(folder_source) = LocalFolderSource::with_exclude(root, Some(target_root)) {
+        if let Ok(folder_source) = LocalFolderSource::with_exclude(root, Some(library_root)) {
             return Ok(ArcSource(Arc::new(folder_source)));
         }
     }
@@ -540,16 +530,21 @@ fn reap_finished(active: &mut Option<ActiveImport>) {
 
 /// 启动、恢复和重试共用调度；索引在导入结束后按需一次性唤醒。
 fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImport {
+    // 登记单管道闸（§八-5）：引擎登记段与库扫描互斥（run 前 spawn 注入点）
+    engine.set_registration_gate(std::sync::Arc::clone(&state.register_gate));
     let controls = engine.controls();
     let source_id = engine.source_id();
     let (index_db_dir, geo_config_dir, ai_settings) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
+        // app_database_dir 内部会再锁 settings——此处持锁，直接同式解析。
         (
-            PathBuf::from(&settings.active_library().expect("库已在").db_dir),
+            settings.database_dir_path(&state.config_dir),
             state.config_dir.clone(),
             settings.ai.clone(),
         )
     };
+    // §八-1 导入侧重绑的缩略图缓存键迁移基准（应用数据库目录）
+    engine.set_db_dir(index_db_dir.clone());
     let index_supervisor = Arc::clone(&state.supervisor);
     let ai_manager = state.ai.clone();
     let ai_bus = state.bus.clone();
@@ -640,17 +635,18 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> ActiveImp
 }
 
 /// 启动导入（新任务）：Busy 检查 → 设备在线检查 → begin → 后台线程 run。
-/// 0018 修订（导入必落相册）：启动即确保默认相册「未分组」存在（按名幂等）；
-/// `album_id = None` 报错「必须选择相册」（引擎内另有同款防御，双保险）。
+/// 2026-10-09 §三：导入目标 = 照片库（plan.target_library_id → 库 root）；
+/// album_id 可选（纯逻辑引用，相册/子组不影响落盘布局）。
 pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
-    ensure_library_not_migrating(state)?;
+    if plan.target_library_id.trim().is_empty() {
+        return Err("导入计划缺少目标照片库（targetLibraryId）".into());
+    }
     {
-        let db = active_library_db(state)?;
-        // 系统级保底：默认相册「未分组」自动创建（幂等，先于校验——前端
-        // 拿它当缺省相册）
-        db.ensure_default_album().map_err(|e| e.to_string())?;
-        if plan.album_id.is_none() {
-            return Err("必须选择相册".into());
+        let db = app_database_db(state)?;
+        if let Some(album_id) = plan.album_id {
+            if !db.album_exists(album_id).map_err(|e| e.to_string())? {
+                return Err(format!("导入相册 {album_id} 不存在"));
+            }
         }
     }
     let mut active = state
@@ -662,17 +658,26 @@ pub fn start_import(state: &AppState, plan: ImportPlan) -> Result<i64, String> {
         return Err("已有导入任务进行中（Busy）".into());
     }
 
-    let source = import_source(state, &plan.source_id, &plan.target_root)?;
-    let db = active_library_db(state)?;
+    let source = import_source(state, &plan.source_id, &library_root_of(state, &plan)?)?;
+    let db = app_database_db(state)?;
     let mut engine = Engine::new(db, state.bus.clone(), Box::new(source), plan);
     let job_id = engine.begin().map_err(|e| format!("导入启动失败: {e}"))?;
     *active = Some(launch_import(state, engine, job_id));
     Ok(job_id)
 }
 
+/// 计划目标照片库的 root 解析（import_source 的排除子树基准）。
+fn library_root_of(state: &AppState, plan: &ImportPlan) -> Result<PathBuf, String> {
+    let db = app_database_db(state)?;
+    let library = db
+        .photos_library_get(&plan.target_library_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("目标照片库不存在：{}", plan.target_library_id))?;
+    Ok(PathBuf::from(library.root_path))
+}
+
 /// 从 journal 恢复导入（设备失联暂停后重连 / 显式恢复无活跃任务的任务）。
 pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
-    ensure_library_not_migrating(state)?;
     let mut active = state
         .active_import
         .lock()
@@ -692,9 +697,9 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
         return Err("任务 ID 与当前活跃导入不一致".into());
     }
 
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     let (device_id, plan) = load_job_plan(&db, job_id)?;
-    let source = import_source(state, &device_id, &plan.target_root)?;
+    let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     *active = Some(launch_import(state, engine, job_id));
@@ -760,7 +765,7 @@ pub fn cancel_import(state: &AppState, job_id: i64) -> Result<(), String> {
 
 /// 任务列表（keyset 分页）。
 pub fn jobs_page(state: &AppState, after: i64, limit: u32) -> Result<Vec<JobRow>, String> {
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     db.jobs_page(after, limit.clamp(1, 200))
         .map_err(|e| e.to_string())
 }
@@ -772,14 +777,13 @@ pub fn logs_page(
     after_id: i64,
     limit: u32,
 ) -> Result<Vec<LogRow>, String> {
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     db.logs_page(job_id, after_id, limit.clamp(1, 500))
         .map_err(|e| e.to_string())
 }
 
 /// 失败重试：失败行复制为 pending 新任务并立即执行。
 pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
-    ensure_library_not_migrating(state)?;
     let mut active = state
         .active_import
         .lock()
@@ -788,16 +792,16 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
     if active.is_some() {
         return Err("已有导入任务进行中（Busy）".into());
     }
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     let new_id = db
         .retry_failed_into_new_job(job_id)
         .map_err(|e| e.to_string())?
         .ok_or("该任务没有可重试的失败文件")?;
     drop(db);
 
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     let (device_id, plan) = load_job_plan(&db, new_id)?;
-    let source = import_source(state, &device_id, &plan.target_root)?;
+    let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     *active = Some(launch_import(state, engine, new_id));
@@ -810,7 +814,7 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
 
 /// 清卡任务的设备源（注册表直取；离线报错）。
 fn clean_source(state: &AppState, job_id: i64) -> Result<(Db, Arc<dyn DeviceSource>), String> {
-    let db = active_library_db(state)?;
+    let db = app_database_db(state)?;
     let (device_id, _) = db
         .job_device(job_id)
         .map_err(|e| e.to_string())?

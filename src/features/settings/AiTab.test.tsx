@@ -94,7 +94,6 @@ beforeEach(() => {
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
-    libraryChosen: false,
   });
   ipcMock.mockClear();
   aiModelsStatusMock.mockReset();

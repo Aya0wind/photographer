@@ -161,11 +161,19 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
     };
     let meta = crate::metadata::exif_lite::parse(&head);
     let deep_ok = db.update_asset_deep_exif(asset_id, &meta).is_ok();
-    // LR 存量评分/颜色标签回填：边车 xmp:Rating / xmp:Label → DB（只读边车
-    // 不回写，与应用内写入方向相反，无循环；DB 已有值不覆盖——应用内值优先）
-    let sidecar_text =
-        std::fs::read_to_string(crate::metadata::xmp::sidecar_path(Path::new(&path)))
-            .unwrap_or_default();
+    // LR 存量评分/颜色标签回填（与晚到边车补读同路径，见 backfill_sidecar_tags）
+    backfill_sidecar_tags(db, asset_id, &path);
+    deep_ok
+}
+
+/// 边车标签回填（读入方向，只读边车不回写，与应用内写入方向相反无循环）：
+/// xmp:Rating / xmp:Label → assets 快列；dc:subject 关键字 → asset_metadata
+/// （§三/§六「星级/颜色/关键字从 XMP 边车读入」，与导出方向对称）。
+/// DB 已有值不覆盖（应用内值优先）。exif 通道（存量回填）与库扫描的
+/// 晚到边车补读（§八-3）共用同一语义。
+pub fn backfill_sidecar_tags(db: &Db, asset_id: i64, path: &str) {
+    let sidecar_text = std::fs::read_to_string(crate::metadata::xmp::sidecar_path(Path::new(path)))
+        .unwrap_or_default();
     if let Some(stars) = crate::metadata::xmp::sidecar_rating(&sidecar_text) {
         if stars > 0
             && db
@@ -193,7 +201,31 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
             );
         }
     }
-    deep_ok
+    // 关键字（dc:subject → asset_metadata）：DB 已有非空关键字不覆盖
+    //（应用内值优先，与星级/颜色同规则）
+    let keywords = crate::metadata::xmp::sidecar_subject(&sidecar_text);
+    if !keywords.is_empty() && !asset_has_keywords(db, asset_id) {
+        let _ = db.merge_asset_keywords(asset_id, &keywords);
+    }
+}
+
+/// 资产是否已有非空关键字（asset_metadata.value JSON 的 keywords 数组；
+/// 无记录/损坏/全空白 → false）。
+fn asset_has_keywords(db: &Db, asset_id: i64) -> bool {
+    #[derive(serde::Deserialize)]
+    struct KeywordsOnly {
+        #[serde(default)]
+        keywords: Vec<String>,
+    }
+    db.0
+        .query_row(
+            "SELECT value FROM asset_metadata WHERE asset_id = ?1",
+            params![asset_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|text| serde_json::from_str::<KeywordsOnly>(&text).ok())
+        .is_some_and(|parsed| parsed.keywords.iter().any(|k| !k.trim().is_empty()))
 }
 
 /// 读文件头（≤1MB，与导入管线 HEAD_MAX 同口径）。

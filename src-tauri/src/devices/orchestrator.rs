@@ -77,12 +77,13 @@ pub fn scan_device_with_progress(
     Ok(snapshot)
 }
 
-/// 宽松键已导入判定（查询失败按“未导入”处理——宁可多弹不可漏弹）。
+/// 宽松键已导入判定（查询失败按“未导入”处理——宁可多弹不可漏弹；
+/// 全库口径的 UI 提示，导入查重闸门在引擎内按目标照片库范围执行）。
 fn loose_imported(db: &Db, entry: &super::FileEntry) -> bool {
     let filename = entry.rel_path.rsplit('/').next().unwrap_or(&entry.rel_path);
     let from = rfc3339(entry.mtime - MTIME_TOLERANCE);
     let to = rfc3339(entry.mtime + MTIME_TOLERANCE);
-    db.find_asset_loose(entry.size, filename, &from, &to)
+    db.find_asset_loose_any(entry.size, filename, &from, &to)
         .map(|hit| hit.is_some())
         .unwrap_or(false)
 }

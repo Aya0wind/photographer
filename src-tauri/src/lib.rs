@@ -9,8 +9,8 @@ mod import;
 mod index;
 mod ipc;
 mod metadata;
-mod migrate;
 mod platform;
+pub mod scan;
 pub mod settings;
 mod tasks;
 mod tethering;
@@ -45,9 +45,10 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 存储模型（达芬奇式，设计文档 §5.11）：全局配置固定在应用标准配置目录；
-            // 库（SQLite/缩略图/向量）在各自独立的 dbDir（如 I:\SmartPhoto\<库名>），
-            // 照片根（如 Y:\照片）与数据库目录分离，由引导向导写入库注册表。
+            // 存储模型（2026-10-09 单数据库多照片库，§一）：全局配置固定在
+            // 应用标准配置目录；应用级唯一数据库（SQLite/缩略图/向量）默认
+            // 同居配置目录（「数据库位置」设置项可改到数据盘）；照片库 =
+            // 照片文件夹的登记项（photos_libraries 表，N 个）。
             let config_dir = app
                 .path()
                 .app_config_dir()
@@ -87,10 +88,8 @@ pub fn run() {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
-            // 索引任务启动恢复目标（settings 交管 AppState 前先取）
-            let active_db_dir: Option<std::path::PathBuf> = settings
-                .active_library()
-                .map(|l| std::path::PathBuf::from(&l.db_dir));
+            // 应用唯一数据库目录（§一「数据库位置」解析；索引/自愈任务目标）
+            let active_db_dir = settings.database_dir_path(&config_dir);
             let bus = EventBus::new();
             // 托管 Arc<AppState>（SharedState）：async 慢命令壳需要 'static
             // clone 进 spawn_blocking 闭包（铁律：慢操作不上主线程）。
@@ -136,9 +135,10 @@ pub fn run() {
                 devices: Mutex::new(HashMap::new()),
                 active_import: Mutex::new(None),
                 import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                register_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+                library_scan_kick: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 supervisor,
                 thumb_queue: ipc::thumb::ThumbQueue::new(),
-                migrations: Mutex::new(std::collections::HashSet::new()),
                 ai,
             }));
 
@@ -147,7 +147,8 @@ pub fn run() {
             // 真机修复（2026-09-19）：AI 回填原只挂在「下载完成 watcher +
             // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
-            if let Some(db_dir) = active_db_dir {
+            {
+                let db_dir = active_db_dir;
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
                 // 拍摄地图：内置数据包首次启动解压一次（config_dir/geo 常驻）
                 // → 后台跑索引管线（加载/入库/回填），幂等
@@ -248,6 +249,13 @@ pub fn run() {
                 &bus,
                 &supervisor_handle,
             );
+            // 后台线程 6：照片库增量扫描（2026-10-09 §三 手动放文件自动
+            // 登记：目录 mtime 剪枝 + 冷却窗 + missing 重绑/晚到边车；导入
+            // 在场让路，登记段与导入共用单管道闸 §八-5）
+            ipc::photo_library::spawn_library_scan_worker(
+                app.state::<ipc::SharedState>().inner().clone(),
+                &supervisor_handle,
+            );
 
             // 主窗口关闭行为：close_to_tray=true 时隐藏到托盘，否则放行正常退出。
             if let Some(main_window) = app.get_webview_window("main") {
@@ -288,8 +296,18 @@ pub fn run() {
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
             ipc::settings::settings_set,
-            ipc::settings::library_delete,
-            ipc::settings::library_relocate,
+            // 照片库登记表（2026-10-09 单库多照片库；M2a 实装 CRUD；
+            // scan_status/scan_cancel 骨架待 M4 登记管道）
+            ipc::photo_library::photo_library_list,
+            ipc::photo_library::photo_library_create,
+            ipc::photo_library::photo_library_remove,
+            ipc::photo_library::photo_library_relocate,
+            ipc::photo_library::photo_library_scan_status,
+            ipc::photo_library::photo_library_scan_cancel,
+            // 相册导出为文件夹（M6；P0 骨架）
+            ipc::album_export::album_export_run,
+            ipc::album_export::album_export_status,
+            ipc::album_export::album_export_cancel,
             ipc::device::device_list,
             ipc::device::device_scan,
             ipc::device::device_files,
@@ -329,8 +347,6 @@ pub fn run() {
             ipc::system::open_with_system,
             ipc::system::clipboard_copy_files,
             ipc::system::reveal_in_explorer,
-            ipc::migrate::db_dir_migrate,
-            ipc::migrate::photo_root_switch,
             ipc::ai::ai_models_status,
             ipc::ai::ai_model_download,
             ipc::ai::ai_model_cancel,
@@ -351,7 +367,6 @@ pub fn run() {
             ipc::album::album_item_move_subgroup,
             ipc::album::album_assets_page,
             ipc::album::asset_albums,
-            ipc::album::album_dir_rename,
             ipc::claim::album_claim_assets,
             ipc::indexing::index_kick_now,
             ipc::indexing::index_task_pause,

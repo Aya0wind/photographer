@@ -422,6 +422,38 @@ fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBu
 /// 源缺失时的缓存**尽力恢复**（2026-09-28 边界修复）：源文件被第三方
 /// 移动/删除后 `cached()` 必返回 None（拿不到 mtime 算不出精确键），但已
 /// 生成的缓存缩略图仍在盘——在对应档位目录里按 `<xxh64 前缀>` 列举一次，
+/// 缩略图缓存键重绑（§八-1 missing 哈希重绑的「缩略图按内容复用」）：
+/// 源文件被移动/改名（内容不变、mtime 保留）后，把旧路径键 `<key>-<mtime>`
+/// 的各档位缓存条目 rename 到新路径键（同 mtime 段）。跨全部档位目录
+///（含 RAW 代际目录——扩展名随改名变化时档位目录也随之换）扫描，返回
+/// 迁移条目数。目标已存在（罕见：历史缓存同键）跳过不覆盖。
+pub fn rebind_cache_keys(db_dir: &Path, old: &Path, new: &Path) -> u64 {
+    let old_prefix = format!("{:016x}-", src_key(old));
+    let new_prefix = format!("{:016x}-", src_key(new));
+    let roots = fs::read_dir(db_dir.join("thumbs")).ok();
+    let mut moved = 0u64;
+    for tier in roots.into_iter().flatten().flatten() {
+        let Ok(entries) = fs::read_dir(tier.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(rest) = name.strip_prefix(&old_prefix) else {
+                continue;
+            };
+            if !rest.ends_with(".jpg") {
+                continue;
+            }
+            let target = tier.path().join(format!("{new_prefix}{rest}"));
+            if fs::rename(entry.path(), &target).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    moved
+}
+
 /// 命中（任意 mtime 代，取字典序最大 = 最新 mtime）即返回绝对路径。
 /// 目录内同前缀条目数 = 同一源的历史 mtime 代数，一次列举成本可忽略。
 /// 不可解码扩展名/目录不存在/无命中 → None。

@@ -93,29 +93,10 @@ import {
   DEFAULT_SETTINGS,
   clone,
   useSettingsStore,
-  type Library,
 } from "@/stores/settingsStore";
 
-const LIB_A: Library = {
-  id: "lib-1",
-  name: "主库",
-  dbDir: "D:\\SmartPhoto\\db",
-  photoRoot: "D:\\Photos",
-  configured: true,
-streams: 4,
-};
-const LIB_B: Library = {
-  id: "lib-2",
-  name: "工作库",
-  dbDir: "E:\\db2",
-  photoRoot: "E:\\照片",
-  configured: true,
-streams: 4,
-};
-
-function PickerProbe() {
-  return <div data-testid="picker-probe">PICKER</div>;
-}
+// 2026-10-09 单库多照片库定案：旧「库」选项卡退役（照片库管理改由 M3「存储」
+// 页承担），设置页只剩常规/外观/画廊/导入/AI。
 
 function renderSettingsPage() {
   return render(
@@ -123,7 +104,6 @@ function renderSettingsPage() {
       <MemoryRouter initialEntries={["/settings"]}>
         <Routes>
           <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/library-picker" element={<PickerProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -138,7 +118,6 @@ beforeEach(() => {
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
-    libraryChosen: false,
   });
   ipcMock.mockClear();
   // AiTab 索引状态区默认不可用（各用例按需覆写）
@@ -171,19 +150,20 @@ it("五种语言可选，切换立即更新界面并保存全局偏好", async (
 });
 
 describe("选项卡", () => {
-  it("四个选项卡；切换渲染对应分组", async () => {
+  it("五个选项卡（库选项卡已退役）；切换渲染对应分组", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
 
-    for (const label of ["常规", "导入", "库", "AI"] as const) {
+    for (const label of ["常规", "导入", "AI"] as const) {
       expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
     }
+    // 旧「库」选项卡退役：不再渲染入口
+    expect(screen.queryByTestId("settings-tab-libraries")).not.toBeInTheDocument();
 
     // 默认常规：关闭行为/开机自启/语言
     expect(screen.getByTestId("settings-row-close-behavior")).toBeInTheDocument();
     expect(screen.getByLabelText("开机自启")).toBeInTheDocument();
     expect(screen.getByTestId("settings-language")).toBeEnabled();
-    expect(screen.queryByTestId("settings-current-library")).not.toBeInTheDocument();
 
     // 导入
     await switchTab(user, "import");
@@ -192,11 +172,6 @@ describe("选项卡", () => {
     expect(screen.getByTestId("settings-duplicate-policy")).toBeInTheDocument();
     expect(screen.getByText("双目的地导入")).toBeInTheDocument();
     expect(screen.getByText("即将支持")).toBeInTheDocument();
-
-    // 库
-    await switchTab(user, "libraries");
-    expect(screen.getByTestId("settings-current-library")).toBeInTheDocument();
-    expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
 
     // AI：M4 实化——模型状态区（未接后端时显示未连接提示）+ 功能开关区
     await switchTab(user, "ai");
@@ -258,94 +233,7 @@ describe("选项卡", () => {
   });
 });
 
-describe("「库」选项卡（保留库管理能力）", () => {
-  async function openLibraryTab(user: ReturnType<typeof userEvent.setup>): Promise<void> {
-    await switchTab(user, "libraries");
-  }
-
-  it("无激活库时信息为空，仍有前往选择器入口", async () => {
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    expect(screen.getByText("设置")).toBeInTheDocument();
-    expect(screen.queryByText("主库")).not.toBeInTheDocument();
-    expect(screen.queryByText("D:\\Photos")).not.toBeInTheDocument();
-    expect(screen.getByTestId("settings-goto-picker")).toBeInTheDocument();
-  });
-
-  it("当前库信息只读：名称/照片目录/数据库目录（模板/收纳区行已退役）", async () => {
-    useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
-    }));
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    const current = screen.getByTestId("settings-current-library");
-    expect(within(current).getByText("主库")).toBeInTheDocument();
-    expect(within(current).getByText("D:\\Photos")).toBeInTheDocument();
-    expect(within(current).getByText("D:\\SmartPhoto\\db")).toBeInTheDocument();
-    // dirTemplate/importSubdir 配置退役：不再展示库模板与导入收纳区（后者=照片目录恒重复）
-    expect(within(current).queryByText("目录模板")).not.toBeInTheDocument();
-    expect(within(current).queryByText("导入收纳区")).not.toBeInTheDocument();
-  });
-
-  it("并发流数（库属性）：分段展示当前值，改即存并落盘", async () => {
-    useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, libraries: [LIB_A], activeLibraryId: "lib-1" },
-    }));
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    const group = screen.getByTestId("settings-library-streams");
-    // LIB_A.streams=4：默认选中 4，2 未选
-    expect(within(group).getByRole("radio", { name: "4" })).toHaveAttribute("aria-checked", "true");
-    expect(within(group).getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "false");
-
-    await user.click(within(group).getByRole("radio", { name: "2" }));
-
-    expect(useSettingsStore.getState().settings.libraries[0].streams).toBe(2);
-    expect(ipcMock).toHaveBeenLastCalledWith(
-      "settings_set",
-      expect.objectContaining({
-        settings: expect.objectContaining({
-          libraries: [expect.objectContaining({ id: "lib-1", streams: 2 })],
-        }),
-      }),
-    );
-    expect(within(group).getByRole("radio", { name: "2" })).toHaveAttribute("aria-checked", "true");
-  });
-
-  it("库列表渲染并高亮激活库（切换统一走选择器，不在原地切换）", async () => {
-    useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, libraries: [LIB_A, LIB_B], activeLibraryId: "lib-1" },
-    }));
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    const items = screen.getAllByTestId("settings-library-item");
-    expect(items).toHaveLength(2);
-    expect(items[0]).toHaveAttribute("data-active", "true");
-    expect(items[0]).toHaveTextContent("使用中");
-    expect(items[1]).toHaveAttribute("data-active", "false");
-    expect(items[1]).toHaveTextContent("E:\\db2");
-    // 非激活项仅展示（div），不可点击切换
-    expect(items[1].tagName).not.toBe("BUTTON");
-  });
-
-  it("「前往库选择器」跳转 /library-picker", async () => {
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    await user.click(screen.getByTestId("settings-goto-picker"));
-
-    expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
-  });
-
+describe("选项卡深链与旧库 UI 退役", () => {
   it("深链 ?tab=ai 直达 AI 选项卡（语义门禁「去设置」落点）；非法 tab 回常规", async () => {
     function renderSettings(entry: string) {
       return render(
@@ -366,21 +254,6 @@ describe("「库」选项卡（保留库管理能力）", () => {
     renderSettings("/settings?tab=nonsense");
     expect(screen.getByTestId("settings-row-close-behavior")).toBeInTheDocument();
     expect(screen.getByTestId("settings-tab-general")).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("「新建库」打开与菜单共用的对话框（同一 testid）", async () => {
-    const user = userEvent.setup();
-    renderSettingsPage();
-    await openLibraryTab(user);
-
-    await user.click(screen.getByTestId("settings-new-library"));
-
-    const dialog = await screen.findByTestId("new-library-dialog");
-    expect(within(dialog).getByLabelText("库名称")).toBeInTheDocument();
-    await user.click(within(dialog).getByTestId("new-library-cancel"));
-    await waitFor(() =>
-      expect(screen.queryByTestId("new-library-dialog")).not.toBeInTheDocument(),
-    );
   });
 });
 

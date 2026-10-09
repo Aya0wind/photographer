@@ -4,31 +4,18 @@ import { listen } from "@tauri-apps/api/event";
 import { ipc } from "@/ipc";
 import type { AiQualityTier } from "@/ipc/api";
 
-/** 库（达芬奇式独立数据单元，spec §5.11）：dbDir 自包含数据库/缓存，photoRoot 照片存储。
- *  目录布局已固定为时间/相册+平铺（importSubdir/dirTemplate 退役 2026-09-28）
- *  （dirTemplate 配置退役，2026-09-28 定案——旧 settings.json 里的 dirTemplate 字段
- *  容错保留：后端 serde 有默认值，前端类型已删不再写入）；
- *  并发流数同为库属性（streams，Rust 侧 serde 缺省 4；MTP 源受协议限制恒 1，由向导在组 plan 时钳制）；
- *  configured=配置链（位置/整理规则/AI）是否走完——旧库由后端迁移自动置 true，前端读取兜底 ?? true。
- *  旧配置由后端自动补默认值，前端读取时再以全局 ImportSettings 兜底。 */
-export interface Library {
-  id: string;
-  name: string;
-  dbDir: string;
-  photoRoot: string;
-  /** 库级导入并发流数（后端 serde 缺省 4；旧数据无字段时读取方 ?? 4 兜底） */
-  streams: number;
-  /** 配置链是否已完成（未完成的库打开时引导回向导补完） */
-  configured: boolean;
-  /** 独立照片库的 AI 档位；缺省仅用于旧配置迁移。 */
-  aiQualityTier?: AiQualityTier;
-}
-
+/**
+ * 应用级设置（settings.json，2026-10-09 单数据库多照片库定案）：
+ * 只留应用级配置——库注册表（libraries）/activeLibraryId/dbDir 模型整体退役，
+ * 照片库登记表由数据库 photos_libraries 承载（photo_library_list 等命令），
+ * 相册/子组为全局逻辑概念。旧 settings.json 残留键由后端 serde 忽略（不迁移）。
+ */
 export interface Settings {
   schemaVersion: number;
   onboardingCompleted: boolean;
-  libraries: Library[];
-  activeLibraryId: string | null;
+  /** 应用级唯一数据库位置（null=默认应用数据目录；「数据库位置」设置项，
+   *  Windows 数据盘需求。M1 后端落盘该字段，过渡期后端忽略不报错）。 */
+  databaseDir: string | null;
   import: {
     promptOnDevice: boolean;
     skipImported: boolean;
@@ -85,8 +72,7 @@ export type DeepPartial<T> = T extends object ? { [K in keyof T]?: DeepPartial<T
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: 1,
   onboardingCompleted: false,
-  libraries: [],
-  activeLibraryId: null,
+  databaseDir: null,
   import: {
     promptOnDevice: true,
     skipImported: true,
@@ -125,19 +111,12 @@ export const DEFAULT_SETTINGS: Settings = {
 interface SettingsState {
   settings: Settings;
   loaded: boolean;
-  /**
-   * 会话内是否已选定库（达芬奇式启动流：每次启动先 /library-picker，选完才进主壳）。
-   * 非持久化字段——重启应用后回到选择器。onboardingCompleted 保留兼容但不再作门禁。
-   */
-  libraryChosen: boolean;
   /** 从 Rust 侧读取设置；命令尚不存在或失败时静默落回默认值 */
   load: () => Promise<void>;
   /** 持久化设置；失败时恢复原状态并把原因交给操作界面 */
   save: (next: Settings) => Promise<void>;
   /** 本地局部更新（不落盘），由调用方决定何时 save */
   update: (partial: DeepPartial<Settings>) => void;
-  /** 标记本会话已选定库（选择器打开/向导完成时调用） */
-  setLibraryChosen: (chosen: boolean) => void;
 }
 
 type AnyRecord = Record<string, unknown>;
@@ -167,36 +146,16 @@ function mergeDeep<T>(base: T, patch: unknown): T {
 // 供引导向导等处复用（草稿编辑 → 局部 patch 合并）
 export { clone, mergeDeep };
 
-/** ai.qualityTier 仅是当前库的投影；切库时从目标库恢复，修改时只写当前库。 */
-export function normalizeLibraryQuality(next: Settings, previous?: Settings): Settings {
-  const result = clone(next);
-  for (const lib of result.libraries) {
-    const old = previous?.libraries.find((item) => item.id === lib.id);
-    const legacyTier = previous
-      ? old ? previous.ai.qualityTier : "normal"
-      : result.ai.qualityTier;
-    lib.aiQualityTier ??= old?.aiQualityTier ?? legacyTier;
-  }
-  const active = result.libraries.find((lib) => lib.id === result.activeLibraryId);
-  if (active) {
-    if (previous && result.activeLibraryId === previous.activeLibraryId && result.ai.qualityTier !== previous.ai.qualityTier) {
-      active.aiQualityTier = result.ai.qualityTier;
-    }
-    result.ai.qualityTier = active.aiQualityTier ?? "normal";
-  }
-  return result;
-}
-
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: clone(DEFAULT_SETTINGS),
   loaded: false,
-  libraryChosen: false,
 
   load: async () => {
     try {
       const remote = await ipc<Settings>("settings_get");
-      // 远端可能是旧 schema，用默认值兜底合并，避免字段缺失
-      set({ settings: normalizeLibraryQuality(mergeDeep(clone(DEFAULT_SETTINGS), remote)), loaded: true });
+      // 远端可能是旧 schema（残留 libraries 等退役键被后端 serde 忽略后不回传），
+      // 用默认值兜底合并，避免字段缺失
+      set({ settings: mergeDeep(clone(DEFAULT_SETTINGS), remote), loaded: true });
     } catch {
       // Rust 命令由并行任务实现，可能尚不存在；绝不能抛错
       set({ settings: clone(DEFAULT_SETTINGS), loaded: true });
@@ -205,24 +164,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   save: async (next: Settings) => {
     const previous = get().settings;
-    const normalized = normalizeLibraryQuality(next, previous);
-    set({ settings: normalized });
+    set({ settings: next });
     try {
-      await ipc("settings_set", { settings: normalized });
+      await ipc("settings_set", { settings: next });
     } catch (e) {
       // Only roll back this write if no subsequent operation has replaced it.
-      if (get().settings === normalized) set({ settings: previous });
+      if (get().settings === next) set({ settings: previous });
       console.error("settings_set failed:", e);
       throw e;
     }
   },
 
   update: (partial: DeepPartial<Settings>) => {
-    set({ settings: normalizeLibraryQuality(mergeDeep(clone(get().settings), partial), get().settings) });
-  },
-
-  setLibraryChosen: (chosen) => {
-    set({ libraryChosen: chosen });
+    set({ settings: mergeDeep(clone(get().settings), partial) });
   },
 }));
 
@@ -239,7 +193,7 @@ export async function initSettings(): Promise<void> {
   try {
     await listen<Settings>("settings://changed", (event) => {
       useSettingsStore.setState({
-        settings: normalizeLibraryQuality(mergeDeep(clone(DEFAULT_SETTINGS), event.payload)),
+        settings: mergeDeep(clone(DEFAULT_SETTINGS), event.payload),
       });
     });
   } catch {

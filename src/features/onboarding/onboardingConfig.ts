@@ -1,23 +1,27 @@
 /**
- * 首次引导默认值（达芬奇式库模型，spec §5.11）。只默认库名；目录一律
- * 留空由用户自选（用户定规 2026-09-28：开发机路径不适合做默认路径）。
+ * 首次引导默认值与落盘布局公式（2026-10-09 单库多照片库定案）。
  */
 import i18n from "@/i18n";
-import { trimDirectoryEnd } from "@/lib/filesystemPaths";
+import { directoryPreview, trimDirectoryEnd } from "@/lib/filesystemPaths";
 export const SUGGESTED_LIBRARY_NAME = "主库";
 export function suggestedLibraryName(): string {
   return i18n.t("library.defaultName", { defaultValue: SUGGESTED_LIBRARY_NAME });
 }
 
 /**
- * 固定目录布局公式（dirTemplate/importSubdir 配置退役，2026-09-28 定案）：
- * 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/，相册内平铺不按日期分层
- * （应用内按拍摄日分组）。导入目标根 = photoRoot 本身（不再有收纳子目录）。
- * 用于向导/引导的只读展示，落位由后端固定执行。
+ * 固定落盘布局公式（纯时间，物理层无相册/子组维度）：
+ * `{照片库}/{拍摄年}/{拍摄月}/{原文件名}`（EXIF 时间，缺失回退文件时间）；
+ * 重名走现有 rename 策略，边车与本体同名跟随。用于向导只读展示，
+ * 落位由后端固定执行。
  */
-export const FIXED_ALBUM_LAYOUT = "{相册创建年}\\{相册创建月}\\{相册目录}";
+export const FIXED_TIME_LAYOUT = "{拍摄年}\\{拍摄月}\\{原文件名}";
 
-/** 导入目标根 = photoRoot（尾部多余分隔符裁剪；布局固定后无子目录前缀）。 */
-export function importRootOf(photoRoot: string): string {
-  return trimDirectoryEnd(photoRoot);
+/** 导入目标根 = 照片库 root（尾部多余分隔符裁剪；布局固定后无子目录前缀）。 */
+export function importRootOf(rootPath: string): string {
+  return trimDirectoryEnd(rootPath);
+}
+
+/** 纯时间布局的目标路径预览（向导/双目的地第二路共用同一公式）。 */
+export function timeLayoutPreview(rootPath: string): string {
+  return directoryPreview(importRootOf(rootPath), "{拍摄年}", "{拍摄月}", "{原文件名}");
 }

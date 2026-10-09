@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{Manager, State};
 
 use crate::geo::{self, backfill, GeoPhase};
-use crate::ipc::{active_library_db, run_blocking, SharedState};
+use crate::ipc::{app_database_db, run_blocking, SharedState};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,17 +63,8 @@ pub fn map_geo_status(state: State<'_, SharedState>) -> GeoStatusDto {
 pub fn map_geo_install(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<SharedState>();
     let db_dir = {
-        let settings = state
-            .settings
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        settings
-            .active_library()
-            .map(|l| std::path::PathBuf::from(&l.db_dir))
-    };
-    let Some(db_dir) = db_dir else {
-        return Err("尚未创建库".into());
+        let settings = state.settings.lock().unwrap_or_else(|e| e.into_inner());
+        settings.database_dir_path(&state.config_dir)
     };
     let bus = std::sync::Arc::new(state.bus.clone());
     geo::install::ensure_installed(state.config_dir.clone(), db_dir, bus, &state.supervisor);
@@ -118,7 +109,7 @@ pub async fn map_clusters(
     parent_region_id: Option<i64>,
 ) -> Result<Vec<ClusterDto>, String> {
     run_blocking(state.inner().clone(), move |state| {
-        let db = active_library_db(state)?;
+        let db = app_database_db(state)?;
         clusters(&db, level, parent_region_id)
     })
     .await

@@ -1,318 +1,335 @@
-import { useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router";
-import { AnimatePresence, motion } from "motion/react";
+import { useState } from "react";
+import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import TitleBar from "@/app/shell/TitleBar";
-import {
-  clearDraftLibraryId,
-  readDraftLibraryId,
-} from "@/features/library/NewLibraryDialog";
-import AiStep from "../steps/AiStep";
-import DoneStep from "../steps/DoneStep";
-import ImportSchemeStep from "../steps/ImportSchemeStep";
-import LibraryStep from "../steps/LibraryStep";
-import { suggestedLibraryName } from "../onboardingConfig";
-import { AI_CHOICE_FLAGS, type OnboardingDraft } from "../types";
-import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useWindowReveal } from "@/lib/windowReveal";
 import { isMacPlatform } from "@/lib/platform";
-import { resetLibrarySession } from "@/lib/librarySession";
-import { useAiStore } from "@/stores/aiStore";
-import { gapsForIds } from "@/features/settings/lib/qualityTier";
-import { aiSetupPackages } from "../aiSetup";
-import ErrorModal from "@/shared/components/ErrorModal";
-
-const STEP_TITLES = [
-  "onboarding.step.library",
-  "onboarding.step.scheme",
-  "onboarding.step.ai",
-  "onboarding.step.done",
-] as const;
-
-function makeLibraryId(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `lib-${Date.now().toString(36)}`;
-}
-
-/** 新建库草稿：只默认库名；目录留空由用户自选（2026-09-28 用户定规） */
-function newLibraryDraft(): OnboardingDraft {
-  return {
-    libraryName: suggestedLibraryName(),
-    dbDir: "",
-    photoRoot: "",
-    duplicatePolicy: "skip",
-    aiChoice: "all",
-    qualityTier: "normal",
-  };
-}
-
-/** 补完未配置库的草稿：预填既有库字段（?library=<id> 进入） */
-function draftFromLibrary(library: Library): OnboardingDraft {
-  return {
-    libraryName: library.name,
-    dbDir: library.dbDir,
-    photoRoot: library.photoRoot,
-    duplicatePolicy: "skip",
-    aiChoice: "all",
-    qualityTier: library.aiQualityTier ?? "normal",
-  };
-}
-
-function canProceed(step: number, draft: OnboardingDraft): boolean {
-  switch (step) {
-    case 0:
-      return (
-        draft.libraryName.trim().length > 0 &&
-        draft.dbDir.trim().length > 0 &&
-        draft.photoRoot.trim().length > 0
-      );
-    // 步骤 2 只收集查重策略，无必填校验（目录布局已固定）
-    default:
-      return true;
-  }
-}
+import { photoLibraryCreate, type PhotoLibrary } from "@/ipc/api";
+import { suggestedLibraryName } from "../onboardingConfig";
 
 /**
- * 新建库配置链（达芬奇式启动流）：/library-picker「新建库」或未配置库补完（?library=<id>）
- * 进入。四步：库位置（含导入子目录）→ 库的整理规则 → AI → 确认。
- * 完成写 Library{...,configured:true} + activeLibraryId（onboardingCompleted 仅兼容保留）。
+ * 首次引导（M5 重构，2026-10-09 单库多照片库定案 §七）：
+ * 1. 欢迎与数据库就位——应用级唯一数据库（SQLite/缩略图/向量/人脸）默认在
+ *    应用数据目录，可展示 settings.databaseDir 自定义位置；「数据库位置」可
+ *    之后在设置中修改，引导不做地址配置。
+ * 2. 引导建立第一个照片库——「新建照片库」（登记空文件夹，之后导入落盘目标
+ *    = 该库 root）或「从已有文件夹建立」（reference 登记，只登记不搬文件，
+ *    登记即触发后台递归扫描——进度在「存储」页卡片上看）；也可「稍后再建」
+ *    直接进入应用（存储页随时可建）。
+ * 3. 完成——写 onboardingCompleted 兼容位并进画廊。
+ * 门禁在 GatedShell：尚无任何照片库且未完成引导 → /onboarding。
  */
+
+type OnboardingStep = "welcome" | "library" | "done";
+type LibraryMode = "new" | "reference";
+
+const FIELD_CLASS =
+  "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
+
+/** 从绝对路径取末段作为缺省库名（Windows/Unix 分隔符都认；取不到回退全路径） */
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]+/).filter((s) => s.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1] : path;
+}
+
 export default function OnboardingPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const loaded = useSettingsStore((s) => s.loaded);
+  const databaseDir = useSettingsStore((s) => s.settings.databaseDir);
   useWindowReveal(loaded);
-  const models = useAiStore((s) => s.models);
-  const [preparingAi, setPreparingAi] = useState(false);
-  const [saving, setSaving] = useState(false);
+
+  const [step, setStep] = useState<OnboardingStep>("welcome");
+  const [mode, setMode] = useState<LibraryMode>("new");
+  const [name, setName] = useState(() => suggestedLibraryName());
+  const [rootPath, setRootPath] = useState("");
+  /** 名称未被手改过时，选完文件夹自动带出末段作缺省名 */
+  const [nameTouched, setNameTouched] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const [created, setCreated] = useState<PhotoLibrary | null>(null);
+  const [finishing, setFinishing] = useState(false);
 
-  // 补完模式：URL ?library=<id> 指向既有库；无效/缺失时按新建处理
-  const editId = searchParams.get("library");
-  const [step, setStep] = useState(0);
-  const [draft, setDraft] = useState<OnboardingDraft>(() => {
-    if (!editId) return newLibraryDraft();
-    const library = useSettingsStore
-      .getState()
-      .settings.libraries.find((lib) => lib.id === editId);
-    return library ? draftFromLibrary(library) : newLibraryDraft();
-  });
-
-  // 设置未加载完成前等待（补完模式需要既有库数据；避免用默认值覆盖真实设置）
   if (!loaded) return null;
 
-  const requiredIds = aiSetupPackages(draft).flatMap((group) => group.ids);
-  const aiReady = requiredIds.length === 0 || gapsForIds(requiredIds, models).length === 0;
-  const patch = (p: Partial<OnboardingDraft>) => {
-    if (p.aiChoice !== undefined || p.qualityTier !== undefined) setPreparingAi(false);
-    setDraft((d) => ({ ...d, ...p }));
-  };
+  const ready = name.trim().length > 0 && rootPath.trim().length > 0 && !creating;
 
-  const commit = async () => {
-    if (saving) return;
-    if (!aiReady) { setPreparingAi(true); setStep(2); return; }
-    setSaving(true);
+  async function pickDirectory(): Promise<void> {
+    try {
+      const dir = await openDialog({
+        directory: true,
+        defaultPath: rootPath.trim() || undefined,
+      });
+      if (typeof dir === "string" && dir.length > 0) {
+        setRootPath(dir);
+        if (!nameTouched) setName(baseName(dir));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function createLibrary(): Promise<void> {
+    if (!ready) return;
+    setCreating(true);
+    setError(null);
+    const result = await photoLibraryCreate(
+      name.trim(),
+      rootPath.trim(),
+      mode === "reference",
+    );
+    setCreating(false);
+    if (result.ok) {
+      setCreated(result.library);
+      setStep("done");
+      return;
+    }
+    // null=invoke 不可用（后端未连接）；字符串=后端业务 Err 文案透传
+    setError(
+      result.error === null ? t("onboarding.library.unavailable") : result.error,
+    );
+  }
+
+  /** 完成引导（建库或稍后再建共用）：写兼容位 → 画廊 */
+  async function finish(): Promise<void> {
+    if (finishing) return;
+    setFinishing(true);
     try {
       const current = useSettingsStore.getState().settings;
-      // 并发流数是库属性：补完模式保留库既有值（NewLibraryDialog 新建的带过来），新建默认 4
-      const existing = editId
-        ? current.libraries.find((lib) => lib.id === editId) ?? undefined
-        : undefined;
-      const library: Library = {
-        id: editId ?? makeLibraryId(),
-        name: draft.libraryName.trim(),
-        dbDir: draft.dbDir.trim(),
-        photoRoot: draft.photoRoot.trim(),
-        streams: existing?.streams ?? 4,
-        configured: true,
-        aiQualityTier: draft.qualityTier,
-      };
-      const libraries = editId
-        ? current.libraries.map((lib) => (lib.id === editId ? library : lib))
-        : [...current.libraries, library];
-      await useSettingsStore.getState().save({
-        ...current,
-        // 兼容保留：后端旧迁移逻辑可能仍读该字段；不再作前端门禁
-        onboardingCompleted: true,
-        libraries,
-        activeLibraryId: library.id,
-        // 全局 ImportSettings 仅作后续新建库的默认值（目录布局固定，不再写模板）
-        import: {
-          ...current.import,
-          duplicatePolicy: draft.duplicatePolicy,
-        },
-        ai: { ...current.ai, ...AI_CHOICE_FLAGS[draft.aiChoice], qualityTier: draft.qualityTier },
-      });
-      useSettingsStore.getState().setLibraryChosen(true);
-      resetLibrarySession();
-      clearDraftLibraryId();
+      await useSettingsStore.getState().save({ ...current, onboardingCompleted: true });
       navigate("/gallery", { replace: true });
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));
-      setSaving(false);
+      setFinishing(false);
     }
-  };
+  }
 
-  /**
-   * 取消（退出新建库补完流）：
-   * - 本次会话新建（sessionStorage 标记匹配 ?library=<id>）且仍未配置 →
-   *   该空库无任何资产，直接从 libraries 移除并 save，激活回落到其他已配置库；
-   * - 存量未配置库（从选择器点进来的老库）→ 保留不动，仅退出。
-   * 导航：settings.activeLibraryId 指向某个已配置库 → /gallery；否则回 /library-picker。
-   */
-  const cancel = async () => {
-    const draftId = readDraftLibraryId();
-    const current = useSettingsStore.getState().settings;
-    if (editId !== null && draftId === editId) {
-      const target = current.libraries.find((lib) => lib.id === editId);
-      // 防呆：仅删「仍未配置完成」的本次新建空库；已完成配置的库不删
-      if (target && target.configured === false) {
-        const libraries = current.libraries.filter((lib) => lib.id !== editId);
-        const restore = libraries.find((lib) => lib.configured) ?? null;
-        await useSettingsStore.getState().save({
-          ...current,
-          libraries,
-          activeLibraryId: restore ? restore.id : null,
-        });
-      }
-      clearDraftLibraryId();
-    }
-    const after = useSettingsStore.getState().settings;
-    const activeConfigured =
-      after.activeLibraryId !== null &&
-      after.libraries.some((lib) => lib.id === after.activeLibraryId && lib.configured);
-    if (activeConfigured) {
-      navigate("/gallery", { replace: true });
-    } else {
-      // 没有可用的已配置激活库：回选择器重选（会话选库标志一并复位）
-      useSettingsStore.getState().setLibraryChosen(false);
-      navigate("/library-picker", { replace: true });
-    }
-  };
-
-  const isLast = step === STEP_TITLES.length - 1;
+  function patchMode(next: LibraryMode): void {
+    if (next === mode) return;
+    setMode(next);
+    // 切模式清路径；名称未手改时回缺省名（新建=「主库」，从文件夹=选完带出）
+    setRootPath("");
+    if (!nameTouched) setName(next === "new" ? suggestedLibraryName() : "");
+  }
 
   return (
     <div className={`flex h-full w-full flex-col bg-bg font-sans text-text-primary ${isMacPlatform() ? "mac-window-content" : ""}`}>
       {/* 无边框窗口：主壳外全屏页也要有自绘标题栏（拖动/最大化/关闭） */}
       <TitleBar />
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-6">
-        {/* 固定尺寸框架：不同步骤高度/标题位置一致；内容超高在卡内滚动 */}
-        <div className="flex h-[560px] w-full max-w-xl flex-col">
-        {/* 标题与步骤指示（钉在顶部，不随步骤内容移动） */}
-        <div className="flex shrink-0 flex-col gap-3 pb-4">
-          <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
-          <div className="flex items-center gap-2" role="tablist" aria-label="onboarding steps">
-            {STEP_TITLES.map((titleKey, i) => {
-              // 已完成的步骤可点击直接跳回（草稿保留在内存）；当前/未来步不可点
-              const reachable = i < step;
-              return (
-                <button
-                  key={titleKey}
-                  type="button"
-                  disabled={!reachable}
-                  onClick={() => reachable && setStep(i)}
-                  aria-current={i === step ? "step" : undefined}
-                  className={`flex items-center gap-2 rounded px-0.5 py-0.5 transition-colors ${
-                    reachable ? "cursor-pointer" : "cursor-default"
-                  }`}
-                  data-testid={`onboarding-step-${i}`}
-                >
-                  {/* 当前步=accent 实心；已完成=accent/60 弱化；未来=panel 底 */}
-                  <span
-                    className={`h-1.5 w-8 rounded-full transition-colors ${
-                      i === step ? "bg-accent" : i < step ? "bg-accent/60" : "bg-panel"
-                    }`}
-                  />
-                  <span
-                    className={`text-xs transition-colors ${
-                      i === step
-                        ? "text-accent"
-                        : reachable
-                          ? "text-text-secondary hover:text-accent"
-                          : "text-text-muted"
-                    }`}
-                  >
-                    {t(titleKey)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* 步骤内容：固定框架内的滚动区 */}
-        <div ref={contentRef} className="sp-scroll min-h-0 flex-1 overflow-y-auto rounded-xl border border-edge bg-surface p-6">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={step}
-              initial={{ opacity: 0, x: 12 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -12 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-            >
-              {step === 0 && <LibraryStep draft={draft} onChange={patch} onError={setError} />}
-              {step === 1 && <ImportSchemeStep draft={draft} onChange={patch} />}
-              {step === 2 && <AiStep draft={draft} onChange={patch} preparing={preparingAi} />}
-              {step === 3 && <DoneStep draft={draft} />}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-
-        {/* 底部操作条（钉在底部）：[取消] …… [上一步] [下一步/开始使用] */}
-        <div className="flex shrink-0 items-center justify-between pt-4">
-          <button
-            type="button"
-            onClick={() => void cancel()}
-            className="rounded-md px-4 py-2 text-sm text-text-muted transition-colors hover:text-text-primary"
-            data-testid="onboarding-cancel"
-          >
-            {t("common.cancel")}
-          </button>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setStep((s) => Math.max(0, s - 1))}
-              disabled={step === 0}
-              className="rounded-md px-4 py-2 text-sm text-text-secondary transition-colors hover:text-text-primary disabled:invisible"
-            >
-              {t("common.back")}
-            </button>
-            {isLast ? (
-              <button
-                type="button"
-                onClick={() => void commit()}
-                disabled={saving}
-                className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90"
-              >
-                {t("onboarding.done.start")}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  if (step === 2 && !aiReady) {
-                    setPreparingAi(true);
-                    if (contentRef.current) contentRef.current.scrollTop = 0;
-                    return;
+      <div className="sp-scroll flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-6">
+        <div
+          className="flex w-full max-w-xl flex-col gap-4 rounded-xl border border-edge bg-surface p-6"
+          data-testid="onboarding-card"
+          data-step={step}
+        >
+          {/* 步骤指示（欢迎 → 建立照片库 → 完成） */}
+          <div className="flex items-center gap-2 text-[11px] text-text-muted" data-testid="onboarding-steps">
+            {(["welcome", "library", "done"] as const).map((key, index) => (
+              <span key={key} className="flex items-center gap-2">
+                {index > 0 && <span aria-hidden="true">·</span>}
+                <span
+                  className={
+                    key === step ? "font-medium text-accent" : undefined
                   }
-                  setStep((s) => s + 1);
-                }}
-                disabled={!canProceed(step, draft) || (step === 2 && preparingAi && !aiReady)}
-                className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {t(step === 2 && !aiReady ? preparingAi ? "onboarding.ai.downloading" : "onboarding.ai.downloadAndContinue" : "common.next")}
-              </button>
-            )}
+                  data-testid="onboarding-step-label"
+                  data-step={key}
+                  data-active={key === step}
+                >
+                  {t(`onboarding.steps.${key}`)}
+                </span>
+              </span>
+            ))}
           </div>
-        </div>
+
+          {step === "welcome" && (
+            <>
+              <h1 className="text-xl font-semibold">{t("onboarding.title")}</h1>
+              <p className="text-sm leading-relaxed text-text-secondary">
+                {t("onboarding.dbReady.desc")}
+              </p>
+              <div
+                className="rounded-lg border border-edge bg-panel/30 p-3 text-xs"
+                data-testid="onboarding-db-location"
+              >
+                <p className="text-text-secondary">{t("onboarding.dbReady.locationLabel")}</p>
+                <p className="mt-1 break-all font-mono text-[11px] text-text-muted">
+                  {databaseDir ?? t("onboarding.dbReady.defaultDir")}
+                </p>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-text-muted">
+                  {t("onboarding.dbReady.changeHint")}
+                </p>
+              </div>
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setStep("library")}
+                  className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-black transition-opacity hover:opacity-90"
+                  data-testid="onboarding-next"
+                >
+                  {t("onboarding.dbReady.next")}
+                </button>
+              </div>
+            </>
+          )}
+
+          {step === "library" && (
+            <>
+              <h1 className="text-xl font-semibold">{t("onboarding.library.title")}</h1>
+              <p className="text-sm leading-relaxed text-text-secondary">
+                {t("onboarding.library.desc")}
+              </p>
+
+              {/* 模式二选一：新建空文件夹 / 从已有文件夹建立（reference） */}
+              <div className="grid grid-cols-2 gap-2" data-testid="onboarding-library-modes">
+                {(["new", "reference"] as const).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => patchMode(key)}
+                    aria-pressed={mode === key}
+                    className={`rounded-lg border p-3 text-left transition-colors ${
+                      mode === key
+                        ? "border-accent bg-accent/10"
+                        : "border-edge hover:border-text-muted"
+                    }`}
+                    data-testid={`onboarding-mode-${key}`}
+                    data-selected={mode === key}
+                  >
+                    <span
+                      className={`text-sm font-medium ${mode === key ? "text-accent" : "text-text-primary"}`}
+                    >
+                      {t(`onboarding.library.mode.${key}`)}
+                    </span>
+                    <p className="mt-1 text-xs leading-relaxed text-text-secondary">
+                      {t(`onboarding.library.mode.${key}Desc`)}
+                    </p>
+                  </button>
+                ))}
+              </div>
+
+              <label className="mt-1 flex flex-col gap-1 text-xs text-text-secondary">
+                {t("onboarding.library.name")}
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setNameTouched(true);
+                  }}
+                  className={FIELD_CLASS}
+                  data-testid="onboarding-library-name"
+                />
+              </label>
+
+              <label className="mt-2 flex flex-col gap-1 text-xs text-text-secondary">
+                {mode === "new"
+                  ? t("onboarding.library.rootNew")
+                  : t("onboarding.library.rootReference")}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={rootPath}
+                    onChange={(e) => setRootPath(e.target.value)}
+                    className={FIELD_CLASS}
+                    data-testid="onboarding-library-root"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void pickDirectory()}
+                    className="shrink-0 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+                    data-testid="onboarding-library-browse"
+                  >
+                    {t("onboarding.library.browse")}
+                  </button>
+                </div>
+                <span className="text-[11px] leading-relaxed text-text-muted">
+                  {mode === "new"
+                    ? t("onboarding.library.rootNewHint")
+                    : t("onboarding.library.rootReferenceHint")}
+                </span>
+              </label>
+
+              {error !== null && (
+                <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="onboarding-library-error">
+                  {error}
+                </p>
+              )}
+
+              <div className="mt-2 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => void finish()}
+                  disabled={finishing}
+                  className="text-xs text-text-muted underline-offset-2 transition-colors hover:text-text-primary hover:underline disabled:opacity-40"
+                  data-testid="onboarding-later"
+                >
+                  {t("onboarding.library.later")}
+                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setStep("welcome")}
+                    className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
+                    data-testid="onboarding-back"
+                  >
+                    {t("common.back")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!ready}
+                    onClick={() => void createLibrary()}
+                    className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                    data-testid="onboarding-library-create"
+                  >
+                    {creating ? t("onboarding.library.creating") : t("onboarding.library.create")}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {step === "done" && (
+            <>
+              <h1 className="text-xl font-semibold">{t("onboarding.finished.title")}</h1>
+              <p className="text-sm leading-relaxed text-text-secondary">
+                {created !== null
+                  ? t("onboarding.finished.created", { name: created.name })
+                  : t("onboarding.finished.desc")}
+              </p>
+              {created !== null && (
+                <p
+                  className="break-all rounded-lg border border-edge bg-panel/30 p-3 font-mono text-[11px] text-text-muted"
+                  data-testid="onboarding-finished-root"
+                >
+                  {created.rootPath}
+                </p>
+              )}
+              <p className="text-xs leading-relaxed text-text-muted">
+                {t("onboarding.finished.hint")}
+              </p>
+              {error !== null && (
+                <p className="text-[11px] text-red-400" role="alert" data-testid="onboarding-finish-error">
+                  {error}
+                </p>
+              )}
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void finish()}
+                  disabled={finishing}
+                  className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                  data-testid="onboarding-start"
+                >
+                  {t("onboarding.finished.start")}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
-      <ErrorModal message={error} onClose={() => setError(null)} />
     </div>
   );
 }

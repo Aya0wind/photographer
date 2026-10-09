@@ -14,10 +14,11 @@ import GearPage from "@/features/gear/pages/GearPage";
 import MapPage from "@/features/map/pages/MapPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import SimilarPage from "@/features/similar/pages/SimilarPage";
-import LibraryPickerPage from "@/features/library/pages/LibraryPickerPage";
+import StoragePage from "@/features/storage/pages/StoragePage";
 import SplashPage from "@/app/SplashPage";
 import { useWindowReveal } from "@/lib/windowReveal";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
+import { usePhotoLibraries } from "@/features/onboarding/lib/usePhotoLibraries";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import CullingPage from "@/features/culling/pages/CullingPage";
 import { AlbumsIndexPage, AlbumEntryPage } from "@/features/albums/pages/AlbumsPages";
@@ -26,22 +27,22 @@ import TetheringWindowPage from "@/features/tethering/TetheringWindowPage";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
- * 主壳守卫（达芬奇式启动流）：设置未加载完成时空白等待；本会话未选库
- * （libraryChosen 为会话级标志，非持久——每次启动都先 /library-picker）或
- * activeLibraryId 无效时重定向选择器；选完库才进主壳。
- * onboardingCompleted 保留兼容（提交时仍写 true），但不再作门禁。
+ * 主壳守卫（2026-10-09 单库多照片库定案，M5 收尾）：设置未加载完成时空白等待；
+ * 加载后**尚无任何照片库且未完成引导** → 送 /onboarding（数据库就位 → 引导
+ * 建立第一个照片库），替代旧达芬奇式「启动先选库」闸。已有照片库（或引导已
+ * 完成）直进主壳——多照片库并存、画廊全局跨库混排。后端不可用时登记表按空
+ * 处理：首启会进引导，引导可「稍后再建」跳过，不阻塞开发调试。
  */
 export function GatedShell() {
   const loaded = useSettingsStore((s) => s.loaded);
+  const onboardingCompleted = useSettingsStore((s) => s.settings.onboardingCompleted);
+  const libraries = usePhotoLibraries();
   useWindowReveal(loaded);
-  const libraryChosen = useSettingsStore((s) => s.libraryChosen);
-  const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
-  const libraries = useSettingsStore((s) => s.settings.libraries);
 
   if (!loaded) return null;
-  const hasActiveLibrary =
-    activeLibraryId !== null && libraries.some((lib) => lib.id === activeLibraryId);
-  if (!libraryChosen || !hasActiveLibrary) return <Navigate to="/library-picker" replace />;
+  if (libraries !== null && libraries.length === 0 && !onboardingCompleted) {
+    return <Navigate to="/onboarding" replace />;
+  }
   return <AppShell />;
 }
 
@@ -53,11 +54,9 @@ export function SearchRedirect() {
 }
 
 export const router = createBrowserRouter([
-  // 启动首屏：库选择器（达芬奇式，每次启动先选库）
   // 启动画面（splash 窗口加载；主窗口就绪后被关闭——见 lib/windowReveal）
   { path: "/splash", element: <SplashPage /> },
-  { path: "/library-picker", element: <LibraryPickerPage /> },
-  // 新建库配置链 / 未配置库补完（?library=<id>）：独立于主壳全屏展示
+  // 首次引导（M5：数据库就位 → 引导建立第一个照片库）
   { path: "/onboarding", element: <OnboardingPage /> },
   // 联机拍摄独立窗口（后端 tethering_start 创建的第二 webview 加载；独立于
   // 主壳守卫——该窗口的 store 是全新会话态，会话真值全部来自后端命令）
@@ -83,10 +82,12 @@ export const router = createBrowserRouter([
       // 手工相册详情（/albums/:id，纯数字参数）/ 智能标签语义结果共用一个槽位
       { path: "albums/:tag", element: <AlbumEntryPage /> },
       { path: "import", element: <ImportPage /> },
+      // 存储（M3）：照片库登记管理——新建/从文件夹建立/重定位/移除登记
+      { path: "storage", element: <StoragePage /> },
       { path: "settings", element: <SettingsPage /> },
     ],
   },
-  // 未知路径回落画廊（仍受主壳守卫保护，未选库会被送去选择器）
+  // 未知路径回落画廊（主壳守卫内：尚无照片库会被送去引导）
   { path: "*", element: <Navigate to="/gallery" replace /> },
 ]);
 

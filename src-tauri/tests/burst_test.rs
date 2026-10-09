@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -53,6 +53,11 @@ fn asset(path: &str, kind: AssetKind, captured_at: Option<&str>) -> AssetRow {
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 

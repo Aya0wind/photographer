@@ -6,14 +6,14 @@ mod common;
 use xxhash_rust::xxh64::xxh64;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::fs;
 
 use common::{
-    build_many, build_source, count_assets, expected_ungrouped_dir, find_part_files, open_db,
+    build_many, build_source, count_assets, expected_mtime_dir, find_part_files, open_db,
     plan_for,
     run_engine, shrink,
 };
@@ -43,7 +43,7 @@ fn copies_files_with_byte_and_hash_integrity() {
     // 字节级比对 + 目标路径按模板落位
     let db = open_db(db_dir.path());
     for (rel, content) in &files {
-        let dst = expected_ungrouped_dir(db_dir.path(), target.path())
+        let dst = expected_mtime_dir(target.path(), &src.path().join(rel))
             .join(rel.rsplit('/').next().unwrap());
         assert_eq!(fs::read(&dst).unwrap(), *content, "字节不一致: {rel}");
         // journal + assets 哈希一致
@@ -81,7 +81,7 @@ fn progress_events_are_throttled() {
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
     let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_for(&db, db_dir.path(), target.path());
     plan.album_id = Some(db.ensure_default_album().unwrap());
     let engine = Engine::new(db, bus, Box::new(VolumeSource::new(src.path())), plan);
     let stats = engine.run();
@@ -109,14 +109,13 @@ fn exifless_file_lands_flat_in_album_home() {
     fs::create_dir_all(src.path().join("DCIM")).unwrap();
     let nef = shrink(b"II*\0\x00\x00\x00\x08\x00\x00".to_vec(), 1024);
     fs::write(src.path().join("DCIM/DSC_0001.NEF"), &nef).unwrap();
-    // 先 ensure 兜底相册以固定创建时刻（run_engine 幂等复用同一条）
-    let home = expected_ungrouped_dir(db_dir.path(), target.path());
+    // 纯时间布局：无拍摄 EXIF 回退 mtime（期望目录按源文件推断）
+    let home = expected_mtime_dir(target.path(), &src.path().join("DCIM/DSC_0001.NEF"));
 
     let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
 
     assert_eq!(stats.done_files, 1);
-    // 布局固定（2026-09-28）：无拍摄 EXIF 也照常落相册主目录平铺
-    // （目录段为相册级字面量，与逐照片 EXIF 无关）
+    // 纯时间布局（2026-10-09 §三）：无 EXIF 回退 mtime 照常落年月目录
     let expected = home.join("DSC_0001.NEF");
     assert!(
         expected.exists(),
@@ -185,12 +184,15 @@ fn plan_mode_defaults_to_copy_and_round_trips() {
     let plan: ImportPlan = serde_json::from_str(json).unwrap();
     assert_eq!(plan.mode, ImportMode::Copy);
 
-    // 显式 move 序列化为 "move"；copy 序列化为 "copy"（小写）
+    // 显式 move 序列化为 "move"；copy 序列化为 "copy"（小写）；
+    // 旧 targetRoot/nameTemplate 键 serde 忽略（2026-10-09 退役，旧 journal 兼容读）
     let mut moved = plan.clone();
     moved.mode = ImportMode::Move;
     let value = serde_json::to_value(&moved).unwrap();
     assert_eq!(value["mode"], "move");
-    assert_eq!(value["targetRoot"], "C:\\vault", "字段保持 camelCase");
+    assert!(value.get("targetRoot").is_none(), "targetRoot 已退役");
+    assert!(value.get("nameTemplate").is_none(), "nameTemplate 已退役");
+    assert_eq!(value["targetLibraryId"], "", "照片库基准字段在位（缺省空串）");
     assert_eq!(serde_json::to_value(&plan).unwrap()["mode"], "copy");
     let back: ImportPlan = serde_json::from_value(value).unwrap();
     assert_eq!(back.mode, ImportMode::Move);
@@ -230,7 +232,7 @@ fn include_filters_queue_to_selected_files() {
     // assets 只有照片；视频与未勾选的 RAW 不落位。
     assert_eq!(count_assets(&db), 1);
     for (rel, content) in &files {
-        let dst = expected_ungrouped_dir(db_dir.path(), target.path())
+        let dst = expected_mtime_dir(target.path(), &src.path().join(rel))
             .join(rel.rsplit('/').next().unwrap());
         if !rel.ends_with("IMG_0001.jpg") {
             assert!(!dst.exists(), "未勾选文件不得导入: {rel}");
@@ -248,7 +250,7 @@ fn include_with_empty_intersection_is_invalid_plan() {
     build_source(src.path());
 
     let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_for(&db, db_dir.path(), target.path());
     plan.include = Some(vec!["DCIM/不存在.jpg".into()]);
     let mut engine = Engine::new(
         db,

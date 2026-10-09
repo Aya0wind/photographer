@@ -11,8 +11,8 @@ mod common;
 use common::library_fixture as setup;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -59,6 +59,11 @@ fn ins(db: &db::Db, path: &str, captured: Option<&str>) -> i64 {
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()
@@ -290,9 +295,8 @@ fn import_with_album_subgroup_and_resume_idempotent() {
     assert_eq!(job_status(&db, job_id), "done");
     assert_eq!(stats.done_files, 3);
 
-    // 0022 物理化：文件真实落 {target}/{创建YYYY}/{创建MM}/{dir_name}/{子组}/
-    let home = db.album_home_rel(album.id).unwrap().unwrap();
-    let sub_dir = target.path().join(format!("{home}/机内直出"));
+    // 逻辑化（2026-10-09 §一/§三）：文件落纯时间年月目录（mtime 回退口径），
+    // 子组只是 album_item.subgroup 引用——路径不含子组段
     let paths: Vec<String> = db
         .0
         .prepare("SELECT path FROM assets ORDER BY id")
@@ -302,13 +306,15 @@ fn import_with_album_subgroup_and_resume_idempotent() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(paths.len(), 3);
-    for path in &paths {
-        let p = std::path::PathBuf::from(path);
-        assert!(
-            p.starts_with(&sub_dir),
-            "导入件应落子组文件夹 {sub_dir:?}，实得 {path}"
+    for (rel, path) in [("DCIM/100CANON/IMG_0001.jpg", &paths[0]), ("DCIM/100CANON/IMG_0002.CR3", &paths[1]), ("DCIM/100CANON/IMG_0003.jpg", &paths[2])] {
+        let expected = common::expected_mtime_dir(target.path(), &src.path().join(rel))
+            .join(rel.rsplit('/').next().unwrap());
+        assert_eq!(
+            path.replace('\\', "/"),
+            expected.to_string_lossy().replace('\\', "/"),
+            "导入件落纯时间目录，子组不影响落位"
         );
-        assert!(p.is_file());
+        assert!(expected.is_file());
     }
     let subgroups: Vec<String> = db
         .0
@@ -328,8 +334,7 @@ fn import_with_album_subgroup_and_resume_idempotent() {
         Box::new(devices::volume::VolumeSource::new(src.path())),
         import::engine::ImportPlan {
             source_id: "test-src".into(),
-            target_root: target.path().to_path_buf(),
-            name_template: "{原文件名}".into(),
+            target_library_id: common::ensure_photo_library(&db, db_dir.path(), target.path()),
             duplicate_policy: settings::DuplicatePolicy::Skip,
             skip_imported: true,
             streams: 2,
@@ -367,7 +372,7 @@ fn job_status(db: &db::Db, job_id: i64) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn claim_with_subgroup_lands_named_layer() {
+fn claim_with_subgroup_writes_reference_only() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_dir = dir.path().join("db");
     let photo_root = dir.path().join("photos");
@@ -386,18 +391,12 @@ fn claim_with_subgroup_lands_named_layer() {
 
     let result = fetch_album_claim_assets(&state, album.id, &[id], Some("成片")).unwrap();
     assert_eq!(result.moved, 1, "{result:?}");
-    // 物理挪进相册子组文件夹（0022：唯一不平铺例外）+ 引用带子分组
-    assert!(!photo.exists());
+    // 逻辑化（2026-10-09 §一）：归册零文件操作——文件原位、路径不改写
+    assert!(photo.is_file(), "归册不得动物理文件");
     let moved_path: String =
         db.0.query_row("SELECT path FROM assets WHERE id = ?1", [id], |r| r.get(0))
             .unwrap();
-    let home = db.album_home_rel(album.id).unwrap().unwrap();
-    let expected = photo_root
-        .join(home.replace('/', std::path::MAIN_SEPARATOR_STR))
-        .join("成片")
-        .join("DSC_0001.jpg");
-    assert_eq!(moved_path.replace('/', std::path::MAIN_SEPARATOR_STR), expected.to_string_lossy());
-    assert!(expected.is_file());
+    assert_eq!(moved_path, photo.to_string_lossy());
     assert_eq!(subgroup_of(&db, album.id, id).as_deref(), Some("成片"));
 
     // 幂等重试：skipped 且子分组保持

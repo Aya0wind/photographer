@@ -40,8 +40,8 @@ fn image_kick_runs_available_components_without_selection_models() {
 }
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -86,6 +86,11 @@ fn asset_row(path: &str, kind: AssetKind) -> AssetRow {
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 

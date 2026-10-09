@@ -5,11 +5,10 @@ use crate::db::{AssetRow, Db};
 use crate::events::AppEvent;
 use crate::ipc::tethering::CameraDto;
 use crate::ipc::SharedState;
-use crate::settings::Library;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, MutexGuard, OnceLock,
@@ -49,9 +48,18 @@ pub struct SessionDto {
     pub receiving: bool,
     pub error: Option<String>,
 }
+/// 联拍落库归属（照片库基准）：目标照片库 id（photos_libraries.id，事件
+/// 载荷 TetheringPhotoAdded.libraryId 同源）+ 库 root（纯时间布局锚点）。
+#[derive(Debug, Clone)]
+pub struct TetherLibrary {
+    pub id: String,
+    pub root: PathBuf,
+}
+
 pub struct Session {
     pub id: String,
-    pub library: Library,
+    /// 落库归属照片库（2026-10-09 §三 联拍落库照片库基准）：id + root。
+    pub library: TetherLibrary,
     pub album_id: i64,
     pub album_name: String,
     pub camera: CameraDto,
@@ -249,15 +257,19 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     if guard.camera_in_use(camera_id) {
         return Err("该相机已在联机拍摄会话中，请先结束其窗口".into());
     }
-    crate::ipc::ensure_library_not_migrating(&state)?;
-    let library = state
-        .settings
-        .lock()
-        .unwrap()
-        .active_library()
-        .cloned()
-        .ok_or("尚未选择图库")?;
-    let db = crate::ipc::open_library_db(Path::new(&library.db_dir))?;
+    // 2026-10-09 §三：联拍落库切换照片库基准——目标 = 首个登记照片库
+    //（多库时 UI 细化归属前取主库；无库明确报错）。
+    let db = crate::ipc::app_database_db(&state)?;
+    let library = db
+        .photos_library_list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .ok_or("尚未建立照片库")?;
+    let library = TetherLibrary {
+        id: library.id,
+        root: PathBuf::from(library.root_path),
+    };
     let album_name: String =
         db.0.query_row("SELECT name FROM album WHERE id=?1", [album_id], |r| {
             r.get(0)
@@ -431,7 +443,7 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
     }
     session.receiving.store(true, Ordering::Release);
     let result = (|| {
-        let db = crate::ipc::open_library_db(Path::new(&session.library.db_dir))?;
+        let db = crate::ipc::app_database_db(state)?;
         let (photo, cleanup_error) = ingest_from_backend(
             &db,
             &session.library,
@@ -464,13 +476,14 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             asset_id: photo.id,
             name: photo.name,
         });
-        crate::index::kick(PathBuf::from(&session.library.db_dir), &state.supervisor);
-        let settings = state.settings.lock().unwrap().clone();
-        if settings.active_library_id.as_deref() == Some(&session.library.id) {
-            let dir = PathBuf::from(&session.library.db_dir);
+        let app_db_dir = crate::ipc::app_database_dir(state);
+        crate::index::kick(app_db_dir.clone(), &state.supervisor);
+        // 应用唯一数据库（§一）：AI 回填不再依赖库切换条件，直接触发。
+        {
+            let settings = state.settings.lock().unwrap().clone();
             if settings.ai.enable_clip {
                 crate::ai::semantic::kick_semantic_if_ready(
-                    dir.clone(),
+                    app_db_dir.clone(),
                     &state.ai,
                     &state.bus,
                     &state.supervisor,
@@ -478,13 +491,18 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             }
             if settings.ai.enable_face {
                 crate::ai::face::kick_face_if_ready(
-                    dir.clone(),
+                    app_db_dir.clone(),
                     &state.ai,
                     &state.bus,
                     &state.supervisor,
                 );
             }
-            crate::ai::selection::kick_eyes_if_ready(dir, &state.ai, &state.bus, &state.supervisor);
+            crate::ai::selection::kick_eyes_if_ready(
+                app_db_dir,
+                &state.ai,
+                &state.bus,
+                &state.supervisor,
+            );
         }
         Ok(())
     })();
@@ -494,7 +512,7 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
 
 fn ingest_from_backend(
     db: &Db,
-    library: &Library,
+    library: &TetherLibrary,
     album_id: i64,
     backend: &dyn CameraBackend,
     camera_id: &str,
@@ -520,9 +538,12 @@ fn ingest_from_backend(
 }
 
 /// Shared by the real camera download path and regression tests; no job/journal rows.
+/// 2026-10-09 §三：落盘布局 = 纯时间 `{库root}/{拍摄年}/{拍摄月}/{原文件名}`
+///（EXIF 拍摄时间，缺失回退当前时刻——联拍文件刚落盘，mtime≈now）；
+/// 相册只是逻辑引用（§一），不影响落位。
 pub fn ingest(
     db: &Db,
-    library: &Library,
+    library: &TetherLibrary,
     album_id: i64,
     name: &str,
     expected_size: u64,
@@ -540,14 +561,12 @@ pub fn ingest(
     ) {
         return Err("仅接收照片文件".into());
     }
-    let home = db
-        .album_item_home_rel(album_id, None)
-        .map_err(|e| e.to_string())?
-        .ok_or("拍摄相册已删除")?;
-    let dir = Path::new(&library.photo_root).join(home.replace('/', std::path::MAIN_SEPARATOR_STR));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let destination = crate::ipc::claim::resolve_conflict(&dir, filename);
-    let part = dir.join(format!(".tether-{}.part", uuid::Uuid::new_v4()));
+    // 先流式落 .part 到库根暂存（拍摄时间在读流后才能从 EXIF 解出，
+    // 最终目录随后渲染），再原子改名进纯时间目录。
+    std::fs::create_dir_all(&library.root).map_err(|e| e.to_string())?;
+    let part = library
+        .root
+        .join(format!(".tether-{}.part", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
@@ -574,8 +593,13 @@ pub fn ingest(
         }
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
-        std::fs::rename(&part, &destination).map_err(|e| e.to_string())?;
         let meta = crate::metadata::exif_lite::parse(&head);
+        let captured =
+            crate::import::templates::resolve_captured(meta.captured_at, chrono::Utc::now());
+        let dir = library.root.join(captured.format("%Y/%m").to_string());
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let destination = crate::ipc::claim::resolve_conflict(&dir, filename);
+        std::fs::rename(&part, &destination).map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
         let filename = destination
             .file_name()
@@ -620,6 +644,11 @@ pub fn ingest(
             flagged: 0,
             color_label: None,
             rejected: 0,
+            library_id: Some(library.id.clone()),
+            missing: 0,
+            xmp_dirty: 0,
+            volume_serial: None,
+            file_id: None,
         };
         // Check the album inside the transaction, so concurrent deletion cannot
         // silently register a photograph outside its selected destination.
@@ -724,14 +753,9 @@ mod tests {
     fn make_session(id: &str, camera_pnp: &str, album_id: i64) -> Arc<Session> {
         Arc::new(Session {
             id: id.to_string(),
-            library: crate::settings::Library {
+            library: TetherLibrary {
                 id: "lib".into(),
-                name: "测试库".into(),
-                db_dir: "unused".into(),
-                photo_root: "unused".into(),
-                configured: true,
-                streams: 0,
-                ai_quality_tier: None,
+                root: PathBuf::from("unused"),
             },
             album_id,
             album_name: format!("相册{album_id}"),
@@ -901,6 +925,7 @@ mod receipt_tests {
     use super::super::backend::{CameraInfo, Capabilities, TetherError};
     use super::super::staging;
     use super::*;
+    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
     struct ReceiptBackend {
@@ -963,11 +988,10 @@ mod receipt_tests {
         let incoming = root.path().join("incoming");
         std::fs::create_dir(&incoming).unwrap();
         let db = Db::open(&root.path().join("library.db")).unwrap();
-        db.migrate().unwrap();
         let album = db.album_create("Capture").unwrap();
-        let library = Library {
-            photo_root: root.path().join("photos").to_string_lossy().into_owned(),
-            ..Default::default()
+        let library = TetherLibrary {
+            id: "lib-test".into(),
+            root: root.path().join("photos"),
         };
         let backend = ReceiptBackend {
             root: incoming.clone(),

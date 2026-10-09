@@ -1,149 +1,131 @@
-//! library_delete（删除库）安全闸与物理删除测试。
+//! photo_library_remove（移除登记）语义测试（2026-10-09 §一/§七）：
+//! 永不删照片文件（用户红线）；delete_records=true 连库内资产记录一并删；
+//! 记录删除数如实返回；不存在的库明确报错。
 
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
-    settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, tethering, thumbs,
 };
 
 use std::path::Path;
 use std::time::Duration;
 
-use ipc::settings::fetch_library_delete;
+use ipc::photo_library::fetch_photo_library_remove;
 
-fn register_for_delete(state: &ipc::AppState, database: &Path, photos: &Path) {
-    let mut settings = state.settings.lock().unwrap();
-    settings.libraries.push(settings::Library {
-        id: database.to_string_lossy().into_owned(),
-        name: "Delete target".into(),
-        db_dir: database.to_string_lossy().into_owned(),
-        photo_root: photos.to_string_lossy().into_owned(),
-        ..settings::Library::default()
-    });
-}
-
-fn make_library_dir(root: &Path, name: &str) -> std::path::PathBuf {
-    let dir = root.join(name);
-    std::fs::create_dir_all(&dir).unwrap();
-    drop(db::Db::open_migrated(&dir.join("library.db")).unwrap());
-    std::fs::create_dir_all(dir.join("thumbs")).unwrap();
-    dir
-}
-
-#[test]
-fn refuses_dir_without_library_db() {
-    let src = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    // 空临时目录（无 library.db）拒绝
-    let target = tempfile::tempdir().unwrap();
-    let err = fetch_library_delete(&state, target.path().to_str().unwrap(), None).unwrap_err();
-    assert!(err.contains("library.db"), "{err}");
-}
-
-#[test]
-fn refuses_active_library() {
-    let src = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    std::fs::write(db_dir.path().join("library.db"), b"sqlite").unwrap();
-    let err = fetch_library_delete(&state, db_dir.path().to_str().unwrap(), None).unwrap_err();
-    assert!(err.contains("活跃库"), "{err}");
-}
-
-#[test]
-fn deletes_db_and_optional_photo_root() {
-    let src = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    let target = make_library_dir(db_dir.path(), "libdata-a");
-    let photos = tempfile::tempdir().unwrap();
-    register_for_delete(&state, &target, photos.path());
-    std::fs::write(photos.path().join("DSC_1.ARW"), b"x").unwrap();
-
-    // 只删库数据：照片目录保留
-    let r = fetch_library_delete(&state, target.to_str().unwrap(), None).unwrap();
-    assert!(r.db_deleted && !r.photo_root_deleted);
-    assert!(!target.exists());
-    assert!(
-        photos.path().join("DSC_1.ARW").is_file(),
-        "未勾选时照片目录不动"
-    );
-
-    // 勾选只删纳管文件；仅索引原件和用户自己的文件均保留。
-    let target2 = make_library_dir(db_dir.path(), "libdata-b");
-    let photos2 = tempfile::tempdir().unwrap();
-    register_for_delete(&state, &target2, photos2.path());
-    let managed = photos2.path().join("a.jpg");
-    let referenced = photos2.path().join("b.jpg");
-    let referenced_outside = src.path().join("outside.jpg");
-    let mislabeled_outside = src.path().join("wrongly-imported.jpg");
-    let unrelated = photos2.path().join("notes.txt");
-    std::fs::write(&managed, b"x").unwrap();
-    std::fs::write(&referenced, b"y").unwrap();
-    std::fs::write(&referenced_outside, b"outside").unwrap();
-    std::fs::write(&mislabeled_outside, b"outside too").unwrap();
-    std::fs::write(&unrelated, b"notes").unwrap();
-    let db = db::Db::open_migrated(&target2.join("library.db")).unwrap();
-    for (path, origin) in [
-        (&managed, "imported"),
-        (&referenced, "external"),
-        (&referenced_outside, "external"),
-        (&mislabeled_outside, "imported"),
-    ] {
-        db.0.execute(
-            "INSERT INTO assets (path,filename,size,mtime,xxhash,kind,source,created_at,origin) \
-             VALUES (?1,?2,1,'2026-01-01T00:00:00Z',1,'photo','imported','2026-01-01T00:00:00Z',?3)",
-            rusqlite::params![path.to_string_lossy().to_string(), path.file_name().unwrap().to_string_lossy().to_string(), origin],
-        ).unwrap();
+/// 登记一个照片库（root 已在盘）并放两张照片 + 两条资产记录。
+fn library_with_assets(
+    state: &ipc::AppState,
+    root: &Path,
+) -> (String, Vec<std::path::PathBuf>) {
+    std::fs::create_dir_all(root.join("2026/06")).unwrap();
+    let files = vec![root.join("2026/06/DSC_1.jpg"), root.join("2026/06/DSC_2.jpg")];
+    for file in &files {
+        std::fs::write(file, b"jpeg").unwrap();
     }
-    drop(db);
-    let r2 = fetch_library_delete(
-        &state,
-        target2.to_str().unwrap(),
-        Some(photos2.path().to_str().unwrap()),
-    )
-    .unwrap();
-    assert!(r2.db_deleted && !r2.photo_root_deleted);
-    assert_eq!(r2.managed_files_deleted, 1);
-    assert!(!target2.exists() && photos2.path().exists());
-    assert!(!managed.exists() && referenced.exists() && unrelated.exists());
-    assert!(referenced_outside.exists() && mislabeled_outside.exists());
+    let app_db = common::open_db(&state.config_dir);
+    let row = app_db
+        .photos_library_register("删除目标", &root.to_string_lossy(), &state.config_dir)
+        .unwrap();
+    for (i, file) in files.iter().enumerate() {
+        app_db
+            .0
+            .execute(
+                "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, source, \
+                 created_at, origin, library_id) \
+                 VALUES (?1, ?2, 1, '2026-01-01T00:00:00Z', ?3, 'photo', 'imported', \
+                 '2026-01-01T00:00:00Z', 'imported', ?4)",
+                rusqlite::params![
+                    file.to_string_lossy().to_string(),
+                    file.file_name().unwrap().to_string_lossy().to_string(),
+                    i as i64,
+                    row.id
+                ],
+            )
+            .unwrap();
+    }
+    (row.id, files)
 }
 
 #[test]
-fn unknown_file_in_database_directory_blocks_recursive_delete() {
+fn remove_never_deletes_photo_files() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    let target = make_library_dir(db_dir.path(), "libdata-extra");
-    std::fs::write(target.join("personal.txt"), b"keep").unwrap();
-    let err = fetch_library_delete(&state, target.to_str().unwrap(), None).unwrap_err();
-    assert!(err.contains("其他文件"), "{err}");
-    assert!(target.join("personal.txt").exists());
+    let photos = tempfile::tempdir().unwrap();
+    let (id, files) = library_with_assets(&state, photos.path());
+
+    let result = fetch_photo_library_remove(&state, &id, false).unwrap();
+    assert_eq!(result.records_deleted, 0, "不连记录删");
+    for file in &files {
+        assert!(file.is_file(), "移除登记永不删照片文件: {}", file.display());
+    }
+    // 登记行消失；记录保留（用户选「仅移除登记」）
+    let app_db = common::open_db(&state.config_dir);
+    assert!(app_db.photos_library_get(&id).unwrap().is_none());
+    let kept: i64 = app_db
+        .0
+        .query_row("SELECT COUNT(*) FROM assets WHERE library_id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, 2, "资产记录保留");
 }
 
 #[test]
-fn refuses_drive_root_and_same_dir_before_any_deletion() {
+fn remove_with_delete_records_drops_rows_but_not_files() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    let target = make_library_dir(db_dir.path(), "libdata-c");
-    register_for_delete(&state, &target, src.path());
+    let photos = tempfile::tempdir().unwrap();
+    let (id, files) = library_with_assets(&state, photos.path());
 
-    // 盘根拒绝（先校验后动手：目标库目录必须完好）
-    let err = fetch_library_delete(&state, target.to_str().unwrap(), Some("C:\\")).unwrap_err();
-    assert!(err.contains("盘根"), "{err}");
-    assert!(target.join("library.db").is_file(), "校验失败不得动手");
+    let result = fetch_photo_library_remove(&state, &id, true).unwrap();
+    assert_eq!(result.records_deleted, 2, "连带删除的记录数如实返回");
+    for file in &files {
+        assert!(file.is_file(), "连记录删也不动物理文件: {}", file.display());
+    }
+    let app_db = common::open_db(&state.config_dir);
+    let left: i64 = app_db
+        .0
+        .query_row("SELECT COUNT(*) FROM assets WHERE library_id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0, "资产记录已清");
+}
 
-    // 照片目录 == 库目录拒绝
-    let err2 = fetch_library_delete(
-        &state,
-        target.to_str().unwrap(),
-        Some(target.to_str().unwrap()),
-    )
-    .unwrap_err();
-    assert!(err2.contains("相同"), "{err2}");
-    assert!(target.join("library.db").is_file());
+#[test]
+fn unknown_library_is_an_error() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let err = fetch_photo_library_remove(&state, "no-such-library", false).unwrap_err();
+    assert!(err.contains("不存在"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// M2c（§五）：离线库（外置卷拔出）移除登记照常——remove 本就不碰任何
+// 文件，status 不构成障碍；连记录删也不需要库在线。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remove_offline_library_works_without_touching_files() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = common::state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let photos = tempfile::tempdir().unwrap();
+    let (id, files) = library_with_assets(&state, photos.path());
+    // 模拟外置卷拔出：整库 offline（root 仍在盘——status 是唯一真相）
+    let app_db = common::open_db(&state.config_dir);
+    app_db.photos_library_set_status(&id, "offline").unwrap();
+
+    // 连记录删：离线状态不构成障碍（纯 DB 操作），文件照旧永不删
+    let result = fetch_photo_library_remove(&state, &id, true).unwrap();
+    assert_eq!(result.records_deleted, 2);
+    for file in &files {
+        assert!(file.is_file(), "离线库移除同样永不删照片文件");
+    }
+    assert!(app_db.photos_library_get(&id).unwrap().is_none());
 }

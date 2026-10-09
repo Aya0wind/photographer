@@ -123,13 +123,12 @@ impl ModelManager {
             .all(|id| self.model_path(id).is_file())
     }
 
-    /// 闭眼检测依赖：当前档 SCRFD、FaceMesh 定位、专用睁闭眼候选分类器。
+    /// 闭眼检测依赖：当前档 SCRFD、FaceMesh 定位。
     /// 未安装 → eyes 通道跳过并计数，任务保持 pending（下载完成后
     /// eyes-postinstall watch 自然续跑）。
     pub fn selection_eyes_ready(&self) -> bool {
         [
             "facemesh",
-            super::selection_regions::EYE_MODEL,
             super::face_detect_model_id(self.ai_params().quality_tier),
         ]
         .iter()

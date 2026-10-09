@@ -31,7 +31,6 @@ function setAnimations(enabled: boolean): void {
   useSettingsStore.setState({
     settings: { ...DEFAULT_SETTINGS, appearance: { animations: enabled } },
     loaded: true,
-    libraryChosen: true,
   });
 }
 

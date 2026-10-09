@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -52,6 +52,11 @@ fn asset(path: &str, lat: Option<f64>, lon: Option<f64>) -> AssetRow {
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 

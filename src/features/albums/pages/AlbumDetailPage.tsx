@@ -47,6 +47,7 @@ import {
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { subscribeAppEvents } from "@/ipc/api";
 import TetherStartDialog from "@/features/tethering/TetherStartDialog";
+import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
 import { GALLERY_JUSTIFY_ROW_PX, useGalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
 
 /**
@@ -329,6 +330,14 @@ export default function AlbumDetailPage() {
   // --- 「联机拍摄」入口（阶段 E）：弹窗选相机，后端开独立拍摄窗口 -----------------------
   const [tetherOpen, setTetherOpen] = useState(false);
 
+  // --- 「导出为文件夹」入口（M6）：当前作用域（根/子组）整册导出 -----------------------
+  const [exportOpen, setExportOpen] = useState(false);
+  // 子组作用域成员数从子分组清单取（根作用域直接用相册计数）
+  const exportCount =
+    subgroup === null
+      ? itemCount
+      : subgroups.find((group) => group.name === subgroup)?.itemCount;
+
   // 联拍新片入册（独立拍摄窗口触发）→ 本相册列表与计数即时刷新
   useEffect(() => {
     let off: (() => void) | null = null;
@@ -449,6 +458,16 @@ export default function AlbumDetailPage() {
 
           <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           <ActionPopover label={t("ui.more")} onOpenChange={setToolsOpen} panelClassName="items-start">
+          {/* 导出为文件夹（M6，Photo Hub → LR）：当前作用域（根/子组）整册导出 */}
+          <button
+            type="button"
+            onClick={() => setExportOpen(true)}
+            title={subgroup === null ? t("albums.export.hint") : t("albums.export.hintSubgroup", { subgroup })}
+            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            data-testid="album-export-start"
+          >
+            {t("albums.export.action")}
+          </button>
           {/* 联机拍摄（阶段 E）：先选相册再开拍——独立窗口内调参/取景/按快门，新片直接入本相册 */}
           <button
             type="button"
@@ -734,6 +753,17 @@ export default function AlbumDetailPage() {
           albumId={albumId}
           albumName={albumName}
           onClose={() => setTetherOpen(false)}
+        />
+      )}
+
+      {/* 导出为文件夹（M6）：导出当前作用域（根=整册 / 子组视图=该子组） */}
+      {exportOpen && (
+        <ExportAlbumDialog
+          albumId={albumId}
+          albumName={albumName}
+          subgroup={subgroup}
+          itemCount={exportCount}
+          onClose={() => setExportOpen(false)}
         />
       )}
     </div>

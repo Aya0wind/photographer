@@ -214,14 +214,7 @@ pub fn fetch_asset_thumb(
     asset_id: i64,
     size: u16,
 ) -> Result<ThumbOutcome, String> {
-    let library = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .cloned()
-        .ok_or("尚未创建库")?;
-    let db_dir = PathBuf::from(&library.db_dir);
+    let db_dir = super::app_database_dir(state);
     let db = super::open_library_db(&db_dir)?;
     // 状态分流（thumb_state 列 O(1) 判断）：1=缓存命中直返（文件被清则
     // 落入兜底入队重生成）；2=永久占位（不可解码/三次失败）不排队；
@@ -231,7 +224,10 @@ pub fn fetch_asset_thumb(
         return Ok(ThumbOutcome::Unavailable); // 资产不存在：不入队
     };
     let src = PathBuf::from(path);
-    let src_exists = src.exists();
+    // 访问时惰性缺失检测（§五 M2c）：画廊瓦片是最高频访问点，stat 在盘性
+    // 顺手对账 missing 标记（两轮确认，与库扫描共用缺席账）。整库离线 /
+    // 资产不存在返回 None → 退回直接 stat 判定（不标缺失）。
+    let src_exists = super::assets::detect_missing_on_access(&db, asset_id).unwrap_or(src.exists());
     if let Some(hit) = crate::thumbs::cached(&db_dir, &src, size) {
         // 命中直返（零事件零入队）。state=2 也不再保留：源在盘 + 缓存在盘
         // = 一切正常，顺手治愈（2026-09-28 自愈修复：此前 state 2 命中
@@ -298,16 +294,8 @@ pub async fn thumb_get_by_path(
 ) -> Result<Option<String>, String> {
     let shared = state.inner().clone();
     let thumb = run_blocking(shared, move |state| {
-        let library = state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .cloned();
-        let thumb: Option<String> = library.and_then(|lib| {
-            let db_dir = PathBuf::from(lib.db_dir);
-            crate::thumbs::thumb_file(&db_dir, std::path::Path::new(&path), size)
-        });
+        let db_dir = super::app_database_dir(state);
+        let thumb = crate::thumbs::thumb_file(&db_dir, std::path::Path::new(&path), size);
         Ok::<Option<String>, String>(thumb)
     })
     .await
@@ -332,19 +320,14 @@ pub fn fetch_device_thumb(
         .get(&key)
         .map(|entry| Arc::clone(&entry.source))
         .ok_or("设备已断开")?;
-    let library = state
-        .settings
-        .lock()
-        .map_err(|_| "库状态不可用")?
-        .active_library()
-        .cloned()
-        .ok_or("请先打开照片库")?;
+    let db_dir = {
+        let settings = state.settings.lock().map_err(|_| "库状态不可用")?;
+        settings.database_dir_path(&state.config_dir)
+    };
     let size = crate::thumbs::snap_size(size);
     let cache_key =
         serde_json::to_vec(&(key, object_id, version, size)).map_err(|e| e.to_string())?;
-    let dir = PathBuf::from(library.db_dir)
-        .join("thumbs")
-        .join("import-device");
+    let dir = db_dir.join("thumbs").join("import-device");
     let target = dir.join(format!(
         "{:016x}.jpg",
         xxhash_rust::xxh64::xxh64(&cache_key, 0)

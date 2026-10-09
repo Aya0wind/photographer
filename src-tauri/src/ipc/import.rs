@@ -106,7 +106,7 @@ pub async fn clean_apply(
 /// 删除任务历史核：终态才可删（进行中明确拒绝）；jobs/job_files/logs 三清
 /// （job_files 经 FK 级联，logs 显式删——它不属于 journal 无 FK）。
 pub fn fetch_import_job_delete(state: &super::AppState, job_id: i64) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     match db.delete_job_history(job_id).map_err(|e| e.to_string())? {
         Ok(_) => Ok(()),
         Err(message) => Err(message),

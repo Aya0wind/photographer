@@ -1,6 +1,5 @@
 import { searchSemantic, type SemanticHit } from "@/ipc/api";
 import i18n from "@/i18n";
-import { useSettingsStore } from "@/stores/settingsStore";
 import { loadHiddenTags } from "./hiddenTags";
 
 export const DEFAULT_SMART_TAGS = [
@@ -22,8 +21,9 @@ const INDEX_KEY = "smartphoto.albums.tagIndex.v2";
 type TagRecord = { cover: number | null; hits?: SemanticHit[] };
 type TagIndex = Record<string, TagRecord>;
 
+/** 缓存作用域键：语义索引随应用级唯一数据库全局共享（2026-10-09 起不再分库）。 */
 function libraryKey(): string {
-  return useSettingsStore.getState().settings.activeLibraryId ?? "default";
+  return "app";
 }
 
 function loadIndex(): Record<string, TagIndex> {

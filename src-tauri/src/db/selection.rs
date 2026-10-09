@@ -15,7 +15,10 @@ impl Db {
     // —— 选片状态（0016：颜色标签 / 拒绝；批量）——
 
     /// 批量写颜色标签（token 已由 IPC 层校验；None = 清除）。
-    /// 返回实际更新行数（失效 id 自然不计）。XMP 写回由调用方派发。
+    /// 返回实际更新行数（失效 id 自然不计）。同语句置 `xmp_dirty=1`
+    /// （§五 M2c 写方向闭环：改动先落库并记账，边车写成功后由调用方清脏；
+    /// 离线/缺失期间边车写不出去 → 脏标志留待库扫描补写）。XMP 写回由
+    /// 调用方派发。
     pub fn assets_label_set(&self, ids: &[i64], label: Option<&str>) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -25,7 +28,7 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let n = self.0.execute(
-            &format!("UPDATE assets SET color_label = ?1 WHERE id IN ({slots})"),
+            &format!("UPDATE assets SET color_label = ?1, xmp_dirty = 1 WHERE id IN ({slots})"),
             rusqlite::params_from_iter(
                 std::iter::once(rusqlite::types::Value::from(label.map(str::to_string)))
                     .chain(ids.iter().map(|id| rusqlite::types::Value::from(*id))),
@@ -34,7 +37,8 @@ impl Db {
         Ok(n as u64)
     }
 
-    /// 批量写接受/拒绝状态（布尔语义 0/1）。返回实际更新行数。
+    /// 批量写接受/拒绝状态（布尔语义 0/1；同语句置 `xmp_dirty=1`，语义同
+    /// [`Db::assets_label_set`]）。返回实际更新行数。
     pub fn assets_reject_set(&self, ids: &[i64], rejected: bool) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -44,7 +48,7 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let n = self.0.execute(
-            &format!("UPDATE assets SET rejected = ?1 WHERE id IN ({slots})"),
+            &format!("UPDATE assets SET rejected = ?1, xmp_dirty = 1 WHERE id IN ({slots})"),
             rusqlite::params_from_iter(
                 std::iter::once(i64::from(rejected)).chain(ids.iter().copied()),
             ),
@@ -145,9 +149,25 @@ impl Db {
         Ok(n)
     }
 
-    /// 回收站内资产行（id → (path, origin)）：purge 物理删除前取清单，
-    /// 外部库（origin='external'，文件不在库内）绝不物理删。
-    pub fn trash_entries(&self, ids: &[i64]) -> Result<Vec<(i64, String, String)>> {
+    /// 回收站内资产行（purge 分类清单，§五 M2c 清空回收站语义）：
+    /// (id, path, origin, missing, library_id, library_status, library_name)。
+    /// library_* 三列 LEFT JOIN photos_libraries——library_id 为 NULL 的行
+    /// （历史/外部引用）status 视同 online。物理删除决策由调用方按
+    /// 在线/缺失/外部三态分类。
+    pub fn trash_entries(
+        &self,
+        ids: &[i64],
+    ) -> Result<
+        Vec<(
+            i64,
+            String,
+            String,
+            bool,
+            Option<String>,
+            bool,
+            Option<String>,
+        )>,
+    > {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -156,14 +176,20 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let mut stmt = self.0.prepare(&format!(
-            "SELECT id, path, origin FROM assets \
-             WHERE id IN ({slots}) AND in_trash = 1"
+            "SELECT a.id, a.path, a.origin, a.missing != 0, a.library_id, \
+             COALESCE(l.status, 'online') = 'online', l.name \
+             FROM assets a LEFT JOIN photos_libraries l ON l.id = a.library_id \
+             WHERE a.id IN ({slots}) AND a.in_trash = 1"
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, bool>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?;
         rows.collect()

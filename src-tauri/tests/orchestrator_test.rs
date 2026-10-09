@@ -3,8 +3,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -95,6 +95,11 @@ fn skip_imported_deducts_loose_matched_assets() {
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
 

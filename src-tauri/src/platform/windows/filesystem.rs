@@ -70,6 +70,35 @@ pub(crate) fn volume_label(root: &Path) -> Option<String> {
 pub(crate) fn filesystem_identity(
     path: &Path,
 ) -> std::io::Result<super::super::FilesystemIdentity> {
+    let info = file_id_info(path)?;
+    Ok(super::super::FilesystemIdentity(info.VolumeSerialNumber))
+}
+
+/// 资产登记指纹（§三 增量扫描两级识别）：卷序列号 + 卷内文件 id。
+/// 同卷同 file id = 同一物理文件（硬链接两侧相同、rename 不变）；NTFS 的
+/// 128-bit FILE_ID 落 16 字节小端，存小写十六进制串。exFAT/FAT 不支持
+/// FileIdInfo 查询 → Err（调用方按「指纹不可用」走哈希路径）。
+/// 生产消费点 = M2 登记管道（当前仅平台单测消费，故 allow）。
+#[allow(dead_code)]
+pub(crate) fn file_registration_id(
+    path: &Path,
+) -> std::io::Result<super::super::FileRegistrationId> {
+    let info = file_id_info(path)?;
+    let file_id = info
+        .FileId
+        .Identifier
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(super::super::FileRegistrationId {
+        volume_serial: info.VolumeSerialNumber,
+        file_id,
+    })
+}
+
+/// 打开句柄取 FILE_ID_INFO（存在路径直达；未来目的地沿最近存在祖先上溯，
+/// 与 filesystem_identity 同语义）。查询失败也关句柄。
+fn file_id_info(path: &Path) -> std::io::Result<windows::Win32::Storage::FileSystem::FILE_ID_INFO> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{HRESULT, PCWSTR};
     use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
@@ -136,7 +165,7 @@ pub(crate) fn filesystem_identity(
         let _ = CloseHandle(handle);
     }
     result.map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(super::super::FilesystemIdentity(info.VolumeSerialNumber))
+    Ok(info)
 }
 
 pub(crate) fn configure_sequential_read(opts: &mut std::fs::OpenOptions) {
@@ -174,5 +203,48 @@ mod tests {
     fn invalid_path_returns_error_instead_of_false_identity() {
         assert!(filesystem_identity(std::path::Path::new("path\0with-nul")).is_err());
         assert!(filesystem_identity(std::path::Path::new(r"\\?\NonexistentVolume\{:}\x")).is_err());
+    }
+
+    /// 登记指纹契约（§三 两级识别）：硬链接两侧同卷同 file id、rename 不变、
+    /// 不同文件不同 id。经 `crate::platform::file_registration_id` 统一入口
+    /// 调用（业务代码同款路径）。仅在支持 FileIdInfo 的卷（NTFS）上有
+    /// 意义——临时目录在 FAT/exFAT 时查询报错，跳过断言而非判失败。
+    #[test]
+    fn registration_id_is_stable_across_hardlinks_and_rename() {
+        let registration_id = crate::platform::file_registration_id;
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.jpg");
+        std::fs::write(&a, b"photo").unwrap();
+        let b = tmp.path().join("b.jpg");
+        match std::fs::hard_link(&a, &b) {
+            Ok(()) => {}
+            Err(error) => {
+                // 卷不支持硬链接（FAT 系）：本契约无从验证，跳过。
+                eprintln!("跳过：临时卷不支持硬链接（{error}）");
+                return;
+            }
+        }
+        let id_a = match registration_id(&a) {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!("跳过：临时卷不支持 FileIdInfo（{error}）");
+                return;
+            }
+        };
+        let id_b = registration_id(&b).unwrap();
+        assert_eq!(id_a, id_b, "硬链接两侧指纹必须相同");
+
+        let renamed = tmp.path().join("renamed.jpg");
+        std::fs::rename(&a, &renamed).unwrap();
+        assert_eq!(
+            registration_id(&renamed).unwrap(),
+            id_a,
+            "rename 不改变 file id"
+        );
+
+        std::fs::write(tmp.path().join("other.jpg"), b"other").unwrap();
+        let other = registration_id(&tmp.path().join("other.jpg")).unwrap();
+        assert_ne!(other.file_id, id_a.file_id, "不同文件 file id 不同");
+        assert_eq!(other.volume_serial, id_a.volume_serial, "同卷序列号一致");
     }
 }

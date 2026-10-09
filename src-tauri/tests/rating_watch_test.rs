@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
-    settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -51,6 +51,11 @@ fn asset(path: &str, created_at: &str) -> AssetRow {
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 
@@ -373,15 +378,11 @@ fn watch_state(
 ) -> ipc::AppState {
     use std::collections::HashMap;
     use std::sync::Mutex;
+    // 应用级设置（2026-10-09）：库注册表/activeLibrary 退役；「数据库位置」
+    // 指向 db_dir（settings.json 落 config_dir，数据库/照片库登记表在 db_dir）
+    let _ = photo_root;
     let settings = settings::Settings {
-        libraries: vec![settings::Library {
-            id: "lib-1".into(),
-            name: "主库".into(),
-            db_dir: db_dir.to_string_lossy().into_owned(),
-            photo_root: photo_root.to_string_lossy().into_owned(),
-            ..settings::Library::default()
-        }],
-        active_library_id: Some("lib-1".into()),
+        database_dir: Some(db_dir.to_string_lossy().into_owned()),
         watch_folders: Vec::new(),
         ..settings::Settings::default()
     };
@@ -393,6 +394,8 @@ fn watch_state(
         devices: Mutex::new(HashMap::new()),
         active_import: Mutex::new(None),
         import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        register_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+        library_scan_kick: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ai: ai::ModelManager::new(
             config_dir.join("models"),
             events::EventBus::new(),
@@ -400,7 +403,6 @@ fn watch_state(
         ),
         supervisor,
         thumb_queue: ipc::thumb::ThumbQueue::new(),
-        migrations: Mutex::new(Default::default()),
     }
 }
 
@@ -416,6 +418,9 @@ fn watch_folder_add_remove_and_poll_imports_new_files() {
     }
     let state = watch_state(&db_dir, &photo_root, &config_dir);
     let db = open_db(&db_dir);
+    // 监视自动入册的目标照片库（§三：导入目标 = 照片库 root）
+    db.photos_library_register("监视目标库", &photo_root.to_string_lossy(), &db_dir)
+        .unwrap();
 
     // add / remove 契约
     assert!(ipc::watch::fetch_watch_folder_add(&state, "X:/not/exist").is_err());
@@ -484,4 +489,195 @@ fn watch_folder_event_serializes() {
     assert_eq!(json["type"], "watchFolderImported");
     assert_eq!(json["folder"], r"D:\incoming");
     assert_eq!(json["files"], 3);
+}
+
+// ---------------------------------------------------------------------------
+// xmp_dirty 写方向闭环（2026-10-09 §五 M2c）：离线/缺失期间的评分改动
+// 照常进库并置脏；库恢复在线后库扫描补写边车、清标志（与 rating 读入
+// 方向对称）。
+// ---------------------------------------------------------------------------
+
+/// 库内资产 fixture：真实文件 + 登记行（library_id 归属 + 指纹与内容一致
+/// ——恢复校验走 §八-1 同哈希分支），返回 (id, 路径, 内容)。
+fn library_asset(
+    db: &db::Db,
+    library_id: &str,
+    root: &std::path::Path,
+    name: &str,
+) -> (i64, std::path::PathBuf, &'static [u8]) {
+    let content: &'static [u8] = b"fake-nef-unique-content-for-fingerprint";
+    let xxh = {
+        use xxhash_rust::xxh64::Xxh64;
+        let mut hasher = Xxh64::new(0);
+        hasher.update(content);
+        hasher.digest()
+    };
+    let path = root.join("2026").join("06").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    db.insert_asset(&asset(&path.to_string_lossy(), "2026-09-01T10:00:00.000Z"))
+        .unwrap();
+    let id = db
+        .asset_id_by_path(&path.to_string_lossy())
+        .unwrap()
+        .unwrap();
+    db.0.execute(
+        "UPDATE assets SET library_id = ?2, size = ?3, xxhash = ?4 WHERE id = ?1",
+        rusqlite::params![
+            id,
+            &library_id.to_string(),
+            content.len() as i64,
+            xxh as i64
+        ],
+    )
+    .unwrap();
+    (id, path, content)
+}
+
+#[test]
+fn rating_on_offline_library_enters_db_dirty_then_scan_flushes_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let root = dir.path().join("lib");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let state = common::state_with_library(&db_dir, &root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+    let library = db
+        .photos_library_register("外置卷库", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    // 外置卷拔出（整库 offline；root 仍在盘——status 是唯一真相）
+    db.photos_library_set_status(&library.id, "offline")
+        .unwrap();
+    let (id, path, _content) = library_asset(&db, &library.id, &root, "DSC_0100.NEF");
+
+    // 离线期间评分：照常进库 + 置脏；不派边车任务
+    ipc::rating::fetch_asset_rating_set(&state, id, 4).unwrap();
+    let (rating, dirty): (i64, i64) =
+        db.0.query_row(
+            "SELECT rating, xmp_dirty FROM assets WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rating, 4, "离线期间评分照常入库");
+    assert_eq!(dirty, 1, "置脏：待补写边车");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !xmp::sidecar_path(&path).exists(),
+        "离线库不派边车任务（补写归库扫描）"
+    );
+
+    // 卷插回（status 翻回 online 由库扫描/列表对账完成，这里直设）→
+    // 扫一轮 → 补写边车 + 清标志
+    db.photos_library_set_status(&library.id, "online").unwrap();
+    let report = scan::scan_library_once(
+        &db,
+        &db_dir,
+        &library,
+        &scan::ScanOptions {
+            cooldown: Duration::ZERO,
+            now: None,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.xmp_flushed, 1, "脏资产补写冲刷");
+    let sidecar = xmp::sidecar_path(&path);
+    assert_eq!(
+        xmp::sidecar_rating(&std::fs::read_to_string(&sidecar).unwrap()),
+        Some(4),
+        "边车补写 DB 真值投影"
+    );
+    let dirty: i64 =
+        db.0.query_row("SELECT xmp_dirty FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(dirty, 0, "补写后清标志");
+}
+
+#[test]
+fn rating_on_missing_asset_keeps_dirty_until_file_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let root = dir.path().join("lib");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let state = common::state_with_library(&db_dir, &root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+    let library = db
+        .photos_library_register("缺失库", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    let (id, path, content) = library_asset(&db, &library.id, &root, "DSC_0101.NEF");
+    std::fs::remove_file(&path).unwrap();
+    db.0.execute("UPDATE assets SET missing = 1 WHERE id = ?1", [id])
+        .unwrap();
+
+    // 缺失资产评分：进库置脏，无边车任务（本体不在盘）
+    ipc::rating::fetch_asset_rating_set(&state, id, 5).unwrap();
+    let (rating, dirty): (i64, i64) =
+        db.0.query_row(
+            "SELECT rating, xmp_dirty FROM assets WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((rating, dirty), (5, 1));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!xmp::sidecar_path(&path).exists(), "缺失资产不派边车任务");
+
+    // 缺失期间扫描不冲刷（在盘性复核不过）；文件回到原位（同内容）→
+    // 恢复路径补写边车 + 清标志（§八-1）
+    let options = scan::ScanOptions {
+        cooldown: Duration::ZERO,
+        now: None,
+    };
+    let report = scan::scan_library_once(&db, &db_dir, &library, &options, None, None).unwrap();
+    assert_eq!(report.xmp_flushed, 0, "缺失资产不进冲刷（归恢复路径）");
+    std::fs::write(&path, content).unwrap();
+    let report = scan::scan_library_once(&db, &db_dir, &library, &options, None, None).unwrap();
+    assert_eq!(report.restored, 1, "同哈希回到原位 → 恢复");
+    let sidecar = xmp::sidecar_path(&path);
+    assert_eq!(
+        xmp::sidecar_rating(&std::fs::read_to_string(&sidecar).unwrap()),
+        Some(5),
+        "恢复路径补写离线期间的评分"
+    );
+    let (missing, dirty): (i64, i64) =
+        db.0.query_row(
+            "SELECT missing, xmp_dirty FROM assets WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((missing, dirty), (0, 0), "恢复 + 清脏");
+}
+
+#[test]
+fn photo_library_list_reconciles_online_status_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let root = dir.path().join("lib");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let state = common::state_with_library(&db_dir, &root, Duration::from_millis(1));
+    let db = open_db(&db_dir);
+    let library = db
+        .photos_library_register("状态对账", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    // 人为把 status 掰成 offline（模拟拔盘瞬间的旧值）→ 列表按 root 在盘
+    // 性翻回 online（§五 M2c：外置卷拔插后不等下一轮扫描）
+    db.photos_library_set_status(&library.id, "offline")
+        .unwrap();
+    let list = ipc::photo_library::fetch_photo_library_list(&state).unwrap();
+    assert_eq!(list[0].status, "online", "root 在盘 → 翻回 online");
+    // 真离线（root 消失）→ 列表翻 offline；root 回来 → 再翻回
+    std::fs::remove_dir_all(&root).unwrap();
+    let list = ipc::photo_library::fetch_photo_library_list(&state).unwrap();
+    assert_eq!(list[0].status, "offline", "根不可达 → offline");
+    std::fs::create_dir_all(&root).unwrap();
+    let list = ipc::photo_library::fetch_photo_library_list(&state).unwrap();
+    assert_eq!(list[0].status, "online");
 }

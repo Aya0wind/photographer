@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -15,7 +15,7 @@ use common::{build_many, ipc_plan, state_with_library, wait_done};
 use devices::normalize_device_id;
 use events::FileState;
 use ipc::{
-    active_library_db, cancel_import, device_registered, files_by_id, jobs_page, logs_page,
+    cancel_import, device_registered, files_by_id, jobs_page, logs_page,
     retry_failed, set_import_paused, start_import,
 };
 
@@ -109,29 +109,34 @@ fn start_pause_resume_cancel_state_machine() {
 }
 
 #[test]
-fn no_active_library_rejected() {
+fn missing_target_library_rejected() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
     build_many(src.path(), 2);
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(5));
-    state.settings.lock().unwrap().active_library_id = None;
 
-    let err = match active_library_db(&state) {
-        Err(err) => err,
-        Ok(_) => panic!("无库时应报错"),
-    };
-    assert!(err.contains("尚未创建库"));
-    let err = start_import(&state, ipc_plan(&state, db_dir.path())).unwrap_err();
-    assert!(err.contains("尚未创建库"));
+    // 计划缺目标照片库（空 targetLibraryId）→ 明确拒绝（§三 照片库基准）
+    let mut plan = ipc_plan(&state, target.path());
+    plan.target_library_id = String::new();
+    let err = start_import(&state, plan).unwrap_err();
+    assert!(err.contains("目标照片库"), "{err}");
+
+    // 指向不存在的照片库 id → 登记处拒绝
+    let mut plan = ipc_plan(&state, target.path());
+    plan.target_library_id = "no-such-library".into();
+    let err = start_import(&state, plan).unwrap_err();
+    assert!(err.contains("照片库不存在"), "{err}");
 }
 
 #[test]
 fn offline_device_rejected() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
     build_many(src.path(), 2);
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(5));
-    let mut bad = ipc_plan(&state, db_dir.path());
+    let mut bad = ipc_plan(&state, target.path());
     bad.source_id = "Z:".into();
     let err = start_import(&state, bad).unwrap_err();
     assert!(err.contains("不在线"));
@@ -202,7 +207,7 @@ fn journal_reflects_final_states() {
     let job_id = start_import(&state, ipc_plan(&state, target.path())).unwrap();
     assert!(wait_done(&state, Duration::from_secs(10)));
 
-    let db = active_library_db(&state).unwrap();
+    let db = ipc::app_database_db(&state).unwrap();
     let states: Vec<FileState> = db
         .all_job_files(job_id)
         .unwrap()
@@ -235,7 +240,7 @@ fn index_waits_for_import_then_kicks_once() {
     // 导入进行中：索引一律不跑（让路闸，2026-09-29 用户定案）
     let started = std::time::Instant::now();
     loop {
-        let db = active_library_db(&state).unwrap();
+        let db = ipc::app_database_db(&state).unwrap();
         let assets = common::count_assets(&db);
         let indexed: i64 = db
             .0
@@ -261,7 +266,7 @@ fn index_waits_for_import_then_kicks_once() {
     // 导入完成：一次性触发把 4 张全部补齐（增量：只领 pending）
     let started = std::time::Instant::now();
     loop {
-        let db = active_library_db(&state).unwrap();
+        let db = ipc::app_database_db(&state).unwrap();
         let indexed: i64 = db
             .0
             .query_row(

@@ -1,6 +1,7 @@
 //! Db / journal 仓储行为测试（M1 Task 2，tempdir 真实文件库）。
 //!
-//! 覆盖：迁移幂等与 user_version 稳定、job 生命周期、job_files upsert 覆盖、
+//! 覆盖：单版本 schema 幂等、photos_libraries 登记表与 root 互斥校验、assets
+//! 多照片库新列、job 生命周期、job_files upsert 覆盖、
 //! pending 过滤、按状态分组计数、jobs/logs keyset 分页边界、(size, xxhash)
 //! 查重、路径存在性、WAL 两连接并发读写、FileState/AssetKind 存储格式 roundtrip。
 //!
@@ -34,15 +35,10 @@ use db::{AssetRow, Db, JobFileRow, JobRow};
 use events::{AssetKind, FileState};
 
 fn temp_db() -> (tempfile::TempDir, Db) {
+    // 单版本 schema（2026-10-09）：打开即幂等建表。
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let db = Db::open(&dir.path().join("library.db")).expect("failed to open db");
-    db.migrate().expect("failed to migrate");
     (dir, db)
-}
-
-fn user_version(db: &Db) -> i64 {
-    db.0.query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("failed to read user_version")
 }
 
 fn ids(rows: &[JobRow]) -> Vec<i64> {
@@ -101,6 +97,11 @@ fn asset(path: &str, size: u64, xxhash: u64, kind: AssetKind) -> AssetRow {
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 
@@ -114,31 +115,50 @@ fn asset_row_id(db: &Db, path: &str) -> i64 {
 }
 
 #[test]
-fn migration_is_idempotent_and_version_stable() {
+fn schema_is_single_version_and_idempotent_across_reopens() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let path = dir.path().join("library.db");
 
+    // 打开即建表：全部对象一份就位，不依赖 user_version/migrate
     {
         let db = Db::open(&path).expect("open");
-        db.migrate().expect("first migrate");
-        assert_eq!(user_version(&db), 27);
-        db.migrate().expect("second migrate");
-        assert_eq!(user_version(&db), 27, "重复迁移不得推进 user_version");
+        let tables: i64 = db
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
+                 ('photos_libraries', 'assets', 'jobs', 'job_files', 'logs')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count tables");
+        assert_eq!(tables, 5, "photos_libraries 随首开建立");
+        let indexes: i64 =
+            db.0.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count indexes");
+        assert_eq!(
+            indexes, 27,
+            "assets 7（captured_at/xxhash/size_filename/burst/trash + library/volume_file \
+             两新索引）+ job_files 1 + logs 1 + index_tasks 2 + faces 2 + album_dir_name 1 \
+             + album_item 3 + group_asset 1 + export_job 2 + album_export_job 1 + culling 3 \
+             + regions 2 + asset_regions 1"
+        );
     }
 
-    // 重开已迁移的库：仍是 no-op，且每张表/索引只存在一份
+    // 重开幂等：每张表/索引仍只存在一份
     let db = Db::open(&path).expect("reopen");
-    db.migrate().expect("migrate on reopen");
-    assert_eq!(user_version(&db), 27);
     let tables: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN \
-             ('assets', 'jobs', 'job_files', 'logs')",
+             ('photos_libraries', 'assets', 'jobs', 'job_files', 'logs')",
             [],
             |row| row.get(0),
         )
         .expect("count tables");
-    assert_eq!(tables, 4, "重复迁移不得重复建表");
+    assert_eq!(tables, 5, "重复打开不得重复建表");
     let indexes: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'",
@@ -146,117 +166,318 @@ fn migration_is_idempotent_and_version_stable() {
             |row| row.get(0),
         )
         .expect("count indexes");
+    assert_eq!(indexes, 27, "重复打开不得重复建索引");
+}
+
+/// assets 三新列 + 登记指纹列随 schema 就位且默认值正确（NOT NULL 列无
+/// NULL 态；可空列 NULL）——INSERT 未显式给值时走列默认。
+#[test]
+fn assets_multi_library_columns_default_values() {
+    let (_dir, db) = temp_db();
+    db.insert_asset(&asset("I:/p/a.jpg", 10, 1, AssetKind::Photo))
+        .expect("insert");
+    let (library_id, missing, xmp_dirty, volume_serial, file_id): (
+        Option<String>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+    ) = db
+        .0
+        .query_row(
+            "SELECT library_id, missing, xmp_dirty, volume_serial, file_id \
+             FROM assets WHERE path = 'I:/p/a.jpg'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .expect("select new columns");
+    assert_eq!(library_id, None);
+    assert_eq!(missing, 0);
+    assert_eq!(xmp_dirty, 0);
+    assert_eq!(volume_serial, None);
+    assert_eq!(file_id, None);
+}
+
+/// 新列经 AssetRow 写入/读回 roundtrip（insert_asset → asset_by_id）。
+#[test]
+fn assets_multi_library_fields_roundtrip() {
+    let (_dir, db) = temp_db();
+    let mut row = asset("I:/p/b.jpg", 20, 2, AssetKind::Photo);
+    row.library_id = Some("lib-uuid-1".into());
+    row.missing = 1;
+    row.xmp_dirty = 1;
+    row.volume_serial = Some(0x1234_5678);
+    row.file_id = Some("00ff...".into());
+    db.insert_asset(&row).expect("insert");
+    let id = db.asset_id_by_path("I:/p/b.jpg").unwrap().unwrap();
+    let read = db.asset_by_id(id).unwrap().unwrap();
+    assert_eq!(read.library_id.as_deref(), Some("lib-uuid-1"));
+    assert_eq!(read.missing, 1);
+    assert_eq!(read.xmp_dirty, 1);
+    assert_eq!(read.volume_serial, Some(0x1234_5678));
+    assert_eq!(read.file_id.as_deref(), Some("00ff..."));
+}
+
+/// 登记指纹查重（§三 两级识别第一级）：同卷同 file id 命中既有资产，
+/// 不同 file id / 不同卷不命中。
+#[test]
+fn find_asset_by_volume_file_id_hit_and_miss() {
+    let (_dir, db) = temp_db();
+    let mut a = asset("I:/p/hard.jpg", 30, 3, AssetKind::Photo);
+    a.volume_serial = Some(77);
+    a.file_id = Some("abcd".into());
+    db.insert_asset(&a).expect("insert");
+    let expected = asset_row_id(&db, "I:/p/hard.jpg");
+
     assert_eq!(
-        indexes, 24,
-        "assets 4（含 size+filename 宽松查重索引）+ job_files 1 + logs 1 + index_tasks 2 + faces 2（asset/cluster，0007）+ burst 1（0012）+ album_item 2（0015）+ export_job 2（0022）+ culling 3（快照 asset 反查 / 决定 session / 决定 asset，0024）+ regions 2 / asset_regions 1（0026）"
+        db.find_asset_by_volume_file_id(77, "abcd").expect("query"),
+        Some((expected, "I:/p/hard.jpg".to_string())),
+        "同卷同 file id = 同一物理文件（硬链接），命中"
+    );
+    assert_eq!(
+        db.find_asset_by_volume_file_id(77, "zzzz").expect("query"),
+        None,
+        "同卷不同 file id 不命中"
+    );
+    assert_eq!(
+        db.find_asset_by_volume_file_id(88, "abcd").expect("query"),
+        None,
+        "不同卷不命中"
     );
 }
 
+// ---------------------------------------------------------------------------
+// photos_libraries 登记表（单数据库多照片库 §二 / §八-6）
+// ---------------------------------------------------------------------------
+
+fn roots_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("failed to create temp dir")
+}
+
+/// 登记 → 列表 → 统计缓存刷新 → 状态翻转 → 移除的全链路。
 #[test]
-fn migration_0007_deduplicates_index_tasks_and_keeps_best_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("library.db");
-    {
-        let db = Db::open(&path).unwrap();
-        db.migrate().unwrap();
-        db.insert_asset(&asset("X:/dup.jpg", 10, 7, AssetKind::Photo))
-            .unwrap();
-        let asset_id = asset_row_id(&db, "X:/dup.jpg");
-        // 模拟升级前的重复脏数据：去掉 0007 唯一索引，给同一资产再插一条
-        // done；迁移应优先保留 done 而不是旧 pending。
-        db.0.execute("DROP INDEX idx_index_tasks_kind_asset", [])
-            .unwrap();
-        db.0.execute(
-            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
-             VALUES ('thumb', ?1, 'done', 0, '2026', '2026')",
-            [asset_id],
+fn photos_library_register_list_stats_and_remove() {
+    let dir = roots_dir();
+    let (_dir, db) = temp_db();
+    let database_dir = dir.path().join("appdata");
+    std::fs::create_dir_all(&database_dir).unwrap();
+    let root1 = dir.path().join("photos-2026");
+    std::fs::create_dir_all(&root1).unwrap();
+
+    let row = db
+        .photos_library_register("2026 主库", &root1.to_string_lossy(), &database_dir)
+        .expect("register");
+    assert!(!row.id.is_empty(), "登记时生成 uuid");
+    assert_eq!(row.status, "online");
+    assert_eq!(row.asset_count, 0);
+    assert_eq!(row.size_bytes, 0);
+
+    // 第二库登记在不同分支
+    let root2 = dir.path().join("photos-archive");
+    std::fs::create_dir_all(&root2).unwrap();
+    let row2 = db
+        .photos_library_register("归档库", &root2.to_string_lossy(), &database_dir)
+        .expect("register 2");
+    let list = db.photos_library_list().expect("list");
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id, row.id, "登记序（created_at, id）");
+
+    // 库内登记两资产 + 一回收站资产 + 一视频 → 统计口径只算 photo/raw 且不在回收站
+    let mut a = asset("I:/photos-2026/a.jpg", 100, 11, AssetKind::Photo);
+    a.library_id = Some(row.id.clone());
+    db.insert_asset(&a).unwrap();
+    let mut b = asset("I:/photos-2026/b.cr3", 50, 12, AssetKind::Raw);
+    b.library_id = Some(row.id.clone());
+    db.insert_asset(&b).unwrap();
+    let mut trashed = asset("I:/photos-2026/c.jpg", 70, 13, AssetKind::Photo);
+    trashed.library_id = Some(row.id.clone());
+    db.insert_asset(&trashed).unwrap();
+    let tid = asset_row_id(&db, "I:/photos-2026/c.jpg");
+    db.0
+        .execute("UPDATE assets SET in_trash = 1 WHERE id = ?1", [tid])
+        .unwrap();
+    let mut video = asset("I:/photos-2026/d.mp4", 500, 14, AssetKind::Video);
+    video.library_id = Some(row.id.clone());
+    db.insert_asset(&video).unwrap();
+    db.photos_library_refresh_stats(&row.id).expect("refresh");
+    let refreshed = db.photos_library_get(&row.id).unwrap().unwrap();
+    assert_eq!(refreshed.asset_count, 2, "photo/raw 各一，回收站与视频不计");
+    assert_eq!(refreshed.size_bytes, 150);
+
+    // 状态翻转（整库离线标记）
+    db.photos_library_set_status(&row.id, "offline").unwrap();
+    assert_eq!(db.photos_library_get(&row.id).unwrap().unwrap().status, "offline");
+
+    // 移除登记不连记录：资产行保留（归属 id 悬空，应用层决定语义）
+    let deleted = db
+        .photos_library_remove(&row.id, false)
+        .expect("remove keep records");
+    assert_eq!(deleted, 0);
+    assert!(db.photos_library_get(&row.id).unwrap().is_none());
+    let remaining: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM assets WHERE library_id = ?1", [&row.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 4, "不连记录删时资产行原样保留");
+
+    // 移除登记连记录删：库内资产行消失，他库不受影响
+    let deleted = db
+        .photos_library_remove(&row2.id, true)
+        .expect("remove with records");
+    assert_eq!(deleted, 0, "库 2 无资产");
+    assert!(db.photos_library_list().unwrap().is_empty());
+    assert!(
+        db.photos_library_remove("no-such-id", true).is_err(),
+        "移除不存在的库必须报错"
+    );
+}
+
+/// 移除登记连记录删的级联：库内资产行删除带走索引任务等关联行。
+#[test]
+fn photos_library_remove_with_records_cascades_asset_rows() {
+    let (_dir, db) = temp_db();
+    let dir = roots_dir();
+    let database_dir = dir.path().join("appdata");
+    std::fs::create_dir_all(&database_dir).unwrap();
+    let root = dir.path().join("lib-photos");
+    std::fs::create_dir_all(&root).unwrap();
+    let row = db
+        .photos_library_register("库", &root.to_string_lossy(), &database_dir)
+        .unwrap();
+    let mut a = asset("I:/lib-photos/x.jpg", 10, 21, AssetKind::Photo);
+    a.library_id = Some(row.id.clone());
+    db.insert_asset(&a).unwrap();
+    let id = asset_row_id(&db, "I:/lib-photos/x.jpg");
+    let tasks: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE asset_id = ?1",
+            [id],
+            |r| r.get(0),
         )
         .unwrap();
-        // 0008/0009 的 ALTER ADD COLUMN 不可重放：回卷版本前先摘掉这些列
-        //（迁移会原样补回，语义不变）；0010 的表同理（先 DROP 再重建）；
-        // 0011 会再删一遍 sha256 列/索引——先按 0001 形态补回
-        db.0.execute("DROP TABLE view_history", []).unwrap();
-        db.0.execute(
-            "ALTER TABLE assets ADD COLUMN sha256 BLOB NOT NULL DEFAULT x'00'",
-            [],
-        )
+    assert!(tasks > 0, "photo 入库自带 thumb/eyes/blur 任务");
+
+    let deleted = db.photos_library_remove(&row.id, true).unwrap();
+    assert_eq!(deleted, 1);
+    let assets: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(assets, 0);
+    let tasks: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM index_tasks", [], |r| r.get(0))
         .unwrap();
-        db.0.execute("CREATE INDEX idx_assets_sha256 ON assets (sha256)", [])
-            .unwrap();
-        db.0.execute("ALTER TABLE job_files ADD COLUMN sha256 BLOB", [])
-            .unwrap();
-        // 0012 同理：phash/burst_id/bursts 均不可重放，回卷前摘除
-        db.0.execute("DROP INDEX idx_assets_burst", []).unwrap();
-        db.0.execute("ALTER TABLE assets DROP COLUMN burst_id", [])
-            .unwrap();
-        db.0.execute("ALTER TABLE assets DROP COLUMN phash", [])
-            .unwrap();
-        db.0.execute("DROP TABLE bursts", []).unwrap();
-        // 0013：桶表 CREATE 不可重放
-        db.0.execute("DROP TABLE similar_bucket", []).unwrap();
-        // 0015：相册表 CREATE 不可重放（album_item 先于 album——FK 依赖；
-        // 0018 的 dir_name 唯一索引随表先摘）
-        db.0.execute("DROP INDEX idx_album_dir_name", []).unwrap();
-        db.0.execute("DROP TABLE album_item", []).unwrap();
-        db.0.execute("DROP TABLE album", []).unwrap();
-        // 0016：smart_view 表 CREATE 不可重放；assets 新列不可重放（索引随列摘除）
-        db.0.execute("DROP INDEX idx_assets_trash", []).unwrap();
-        db.0.execute("DROP TABLE smart_view", []).unwrap();
-        // 0017：分组表 CREATE 不可重放（group_asset 先于 photo_group——FK
-        // 依赖）；asset_relation 已随 0020 删除，无需回卷
-        db.0.execute("DROP TABLE group_asset", []).unwrap();
-        db.0.execute("DROP TABLE photo_group", []).unwrap();
-        // 0021：index_tasks 旧 CHECK（0012/0014 形态）不容 eyes/blur 行——
-        // 回卷前清掉（re-migrate 后由 insert_asset_on 重新登记）
-        db.0.execute("DELETE FROM index_tasks WHERE kind IN ('eyes', 'blur')", [])
-            .unwrap();
-        // ai_analysis 表 CREATE 不可重放（0021）
-        db.0.execute("DROP TABLE ai_analysis", []).unwrap();
-        // 0022：edit_recipe / export_job 表 CREATE 不可重放
-        db.0.execute("DROP TABLE edit_recipe", []).unwrap();
-        db.0.execute("DROP TABLE export_job", []).unwrap();
-        db.0.execute("DROP TABLE asset_metadata", []).unwrap();
-        // 0024：选片三表 CREATE 不可重放（0023 为空占位无对象）
-        db.0.execute("DROP TABLE cull_decision", []).unwrap();
-        db.0.execute("DROP TABLE cull_session_asset", []).unwrap();
-        db.0.execute("DROP TABLE cull_session", []).unwrap();
-        // 0026：地区树/挂接表 CREATE 不可重放（挂接先于树——FK 依赖）
-        db.0.execute("DROP TABLE asset_regions", []).unwrap();
-        db.0.execute("DROP TABLE regions", []).unwrap();
-        for col in [
-            "orientation",
-            "flash",
-            "metering_mode",
-            "white_balance",
-            "exposure_program",
-            "software",
-            "artist",
-            "gps_lat",
-            "gps_lon",
-            "rating",
-            "flagged",
-            "color_label",
-            "rejected",
-            "in_trash",
-            "trashed_at",
-        ] {
-            db.0.execute(&format!("ALTER TABLE assets DROP COLUMN {col}"), [])
-                .unwrap();
-        }
-        db.0.pragma_update(None, "user_version", 6).unwrap();
+    assert_eq!(tasks, 0, "资产行删除级联清索引任务");
+}
+
+/// root 互斥校验（§八-6）：库间互斥 + 与数据库目录互斥 + 盘根拒绝 +
+/// 大小写/斜杠不敏感 + 反向包含（父目录吞并既有库）。
+#[test]
+fn photos_library_root_validation_rejects_overlap() {
+    let dir = roots_dir();
+    let database_dir = dir.path().join("appdata");
+    std::fs::create_dir_all(&database_dir).unwrap();
+    // 既有库 root 独立分支（其父目录不含数据库目录，反向包含用例才能
+    // 命中「库间重叠」而非「数据库目录重叠」）
+    let photos_home = dir.path().join("photos-home");
+    let root = photos_home.join("main");
+    std::fs::create_dir_all(&root).unwrap();
+    let root_str = root.to_string_lossy().into_owned();
+
+    // 与数据库目录相同 / 互相包含
+    for bad in [
+        database_dir.clone(),
+        database_dir.join("thumbs"),
+        dir.path().to_path_buf(), // 数据库目录的父（包含数据库目录）
+    ] {
+        let err = db::libraries::validate_photos_library_root(&[], &database_dir, &bad)
+            .expect_err("与数据库目录重叠必须拒绝");
+        assert!(err.contains("数据库目录"), "{bad:?} 应拒：{err}");
     }
 
-    let db = Db::open(&path).unwrap();
-    db.migrate().unwrap();
-    assert_eq!(user_version(&db), 27);
-    let rows: Vec<(String, String)> =
-        db.0.prepare("SELECT kind, state FROM index_tasks")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-    assert_eq!(rows, vec![("thumb".into(), "done".into())]);
+    // 与已有库 root 相同 / 互相包含（大小写与斜杠形态不敏感）
+    let existing = vec![("主库".to_string(), root_str.replace('\\', "/"))];
+    for bad in [
+        std::path::PathBuf::from(root_str.clone()),
+        std::path::PathBuf::from(root_str.to_lowercase()),
+        root.join("sub"),
+    ] {
+        let err = db::libraries::validate_photos_library_root(&existing, &database_dir, &bad)
+            .expect_err("库间重叠必须拒绝");
+        assert!(err.contains("主库"), "{bad:?} 应拒：{err}");
+    }
+    // 反向包含（新 root 是已有库 root 的父目录，吞并既有库）同样拒绝
+    let err = db::libraries::validate_photos_library_root(
+        &existing,
+        &database_dir,
+        &photos_home,
+    )
+    .expect_err("新 root 包含已有库 root 必须拒绝");
+    assert!(err.contains("主库"), "{err}");
+
+    // 盘根拒绝（临时目录所在盘的根：ancestors 最后一个就是卷根）
+    {
+        let volume_root = root.ancestors().last().unwrap().to_path_buf();
+        let err = db::libraries::validate_photos_library_root(&[], &database_dir, &volume_root)
+            .expect_err("盘根必须拒绝");
+        assert!(
+            err.contains("根目录"),
+            "{} 应拒：{err}",
+            volume_root.display()
+        );
+    }
+
+    // 合法：不同分支、非数据库目录、非盘根
+    db::libraries::validate_photos_library_root(
+        &existing,
+        &database_dir,
+        &dir.path().join("other-photos"),
+    )
+    .expect("互不重叠的 root 应通过");
+}
+
+/// 登记闸门内置校验：register 拒绝重叠 root；set_root 重定位排除自身旧 root。
+#[test]
+fn photos_library_register_validates_and_set_root_allows_own_root() {
+    let dir = roots_dir();
+    let (_dir, db) = temp_db();
+    let database_dir = dir.path().join("appdata");
+    std::fs::create_dir_all(&database_dir).unwrap();
+    let root = dir.path().join("photos");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let row = db
+        .photos_library_register("主库", &root.to_string_lossy(), &database_dir)
+        .unwrap();
+    // 同 root 再登记（他库）被拒
+    let err = db
+        .photos_library_register("重复库", &root.to_string_lossy(), &database_dir)
+        .expect_err("同 root 重复登记必须拒绝");
+    assert!(err.contains("主库"), "{err}");
+    // 数据库目录内登记被拒（防把 thumbs/ 登记进库）
+    let err = db
+        .photos_library_register(
+            "数据库内库",
+            &database_dir.join("inside").to_string_lossy(),
+            &database_dir,
+        )
+        .expect_err("数据库目录内登记必须拒绝");
+    assert!(err.contains("数据库目录"), "{err}");
+
+    // 重定位到自身旧 root：排除自身后应通过（no-op 场景）
+    db.photos_library_set_root(&row.id, &root.to_string_lossy(), &database_dir)
+        .expect("重定位到自身旧 root（未变）应通过");
+    // 重定位到与其他库重叠的 root 被拒
+    let other = dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    db.photos_library_register("他库", &other.to_string_lossy(), &database_dir)
+        .unwrap();
+    let err = db
+        .photos_library_set_root(&row.id, &other.to_string_lossy(), &database_dir)
+        .expect_err("重定位到他库 root 必须拒绝");
+    assert!(err.contains("他库"), "{err}");
 }
 
 #[test]
@@ -414,33 +635,49 @@ fn jobs_page_keyset_boundaries() {
 }
 
 #[test]
-fn find_asset_by_size_xxh_hit_and_miss() {
-    let (_dir, db) = temp_db();
-    db.insert_asset(&asset(
-        "I:/SmartPhoto/2026/a.jpg",
-        123,
-        77,
-        AssetKind::Photo,
-    ))
-    .expect("insert a");
-    db.insert_asset(&asset("I:/SmartPhoto/2026/b.jpg", 123, 88, AssetKind::Raw))
-        .expect("insert b");
-    db.insert_asset(&asset(
-        "I:/SmartPhoto/2026/c.jpg",
-        456,
-        77,
-        AssetKind::Video,
-    ))
-    .expect("insert c");
+fn find_asset_by_size_xxh_scoped_to_library() {
+    let (dir, db) = temp_db();
+    // 两个照片库同内容指纹（跨库重复合法，§四）：查重只在同库内命中
+    //（root 必须在数据库目录之外——§八-6 互斥）
+    let photos_a = tempfile::tempdir().unwrap();
+    let photos_b = tempfile::tempdir().unwrap();
+    let root_a = photos_a.path().to_path_buf();
+    let root_b = photos_b.path().to_path_buf();
+    let lib_a = db
+        .photos_library_register("库A", &root_a.to_string_lossy(), dir.path())
+        .unwrap();
+    let lib_b = db
+        .photos_library_register("库B", &root_b.to_string_lossy(), dir.path())
+        .unwrap();
+    let mut in_a = asset("I:/PhotosA/2026/a.jpg", 123, 77, AssetKind::Photo);
+    in_a.library_id = Some(lib_a.id.clone());
+    let mut in_b = asset("I:/PhotosB/2026/a.jpg", 123, 77, AssetKind::Photo);
+    in_b.library_id = Some(lib_b.id.clone());
+    let mut other_fingerprint = asset("I:/PhotosA/2026/b.jpg", 123, 88, AssetKind::Raw);
+    other_fingerprint.library_id = Some(lib_a.id.clone());
+    db.insert_asset(&in_a).expect("insert a");
+    db.insert_asset(&in_b).expect("insert b");
+    db.insert_asset(&other_fingerprint).expect("insert b2");
 
-    // 命中：(size, xxhash) 联合定位到 a，不误中同 size 或同 xxhash 的其他行
-    let expected = asset_row_id(&db, "I:/SmartPhoto/2026/a.jpg");
+    // 库A 命中自身指纹；库B 同指纹也命中（各库独立）；错库/错指纹不命中
+    let expected_a = asset_row_id(&db, "I:/PhotosA/2026/a.jpg");
+    let expected_b = asset_row_id(&db, "I:/PhotosB/2026/a.jpg");
     assert_eq!(
-        db.find_asset_by_size_xxh(123, 77).expect("query"),
-        Some(expected)
+        db.find_asset_by_size_xxh(&lib_a.id, 123, 77).expect("query"),
+        Some(expected_a)
     );
-    assert_eq!(db.find_asset_by_size_xxh(123, 999).expect("query"), None);
-    assert_eq!(db.find_asset_by_size_xxh(999, 77).expect("query"), None);
+    assert_eq!(
+        db.find_asset_by_size_xxh(&lib_b.id, 123, 77).expect("query"),
+        Some(expected_b)
+    );
+    assert_eq!(
+        db.find_asset_by_size_xxh(&lib_a.id, 123, 999).expect("query"),
+        None
+    );
+    assert_eq!(
+        db.find_asset_by_size_xxh(&lib_a.id, 999, 77).expect("query"),
+        None
+    );
 }
 
 #[test]
@@ -535,7 +772,6 @@ fn wal_two_connections_concurrent_read_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("library.db");
     let writer = Db::open(&path).expect("open writer");
-    writer.migrate().expect("migrate");
     let job_id = writer
         .create_job("import", "E:", "dev", 1, 1)
         .expect("create");

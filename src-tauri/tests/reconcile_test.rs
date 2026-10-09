@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -50,8 +50,6 @@ fn removal_uses_pinned_folder_source_and_rejects_premature_resume() {
     // A sibling whose name shares a prefix is not the same mount.
     ipc::mark_import_device_unavailable(&state, &root.path().join("car").to_string_lossy());
     assert!(!controls.is_device_lost());
-    // The selected library may change while the original import is running.
-    state.settings.lock().unwrap().active_library_id = None;
     ipc::mark_import_device_unavailable(&state, &root.path().join("card").to_string_lossy());
     ipc::mark_import_device_unavailable(&state, &root.path().join("card").to_string_lossy());
     assert!(controls.is_device_lost());
@@ -350,7 +348,6 @@ fn discovery_without_library_still_scans_and_folder_sources_survive_poll() {
         Duration::ZERO,
     ));
     let folder = ipc::scan_folder(&state, &src.path().to_string_lossy()).unwrap();
-    state.settings.lock().unwrap().active_library_id = None;
     let id = devices::normalize_device_id(&src.path().to_string_lossy());
     ipc::reconcile::remove_device(&state, &id);
     reconcile_with_truth(

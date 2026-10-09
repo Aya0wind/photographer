@@ -4,8 +4,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, plan_with_album,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, plan_with_album,
     settings, tasks, thumbs,
 };
 
@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::{
-    build_source, count_assets, expected_ungrouped_dir, journal_states, open_db, plan_for,
+    build_source, count_assets, expected_mtime_dir, journal_states, open_db, plan_for,
     run_engine,
     DeleteFailSource,
 };
@@ -34,7 +34,7 @@ fn move_mode_deletes_source_and_cleans_empty_dirs() {
             (
                 rel.clone(),
                 content.clone(),
-                expected_ungrouped_dir(db_dir.path(), target.path())
+                expected_mtime_dir(target.path(), &src.path().join(rel))
                     .join(rel.rsplit('/').next().unwrap()),
             )
         })
@@ -77,7 +77,7 @@ fn move_delete_failure_is_warning_not_import_failure() {
     let files = build_source(src.path());
 
     let db = open_db(db_dir.path());
-    let mut plan = plan_with_album(&db, target.path());
+    let mut plan = plan_with_album(&db, db_dir.path(), target.path());
     plan.mode = ImportMode::Move;
     let mut engine = Engine::new(
         db,
@@ -150,17 +150,22 @@ fn copy_mode_leaves_source_untouched() {
 #[test]
 fn nesting_guard_rejects_overlapping_source_and_target() {
     let src = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
     let separate = tempfile::tempdir().unwrap();
     build_source(src.path());
+    // 各分支独立数据库（照片库 root 互斥闸门会拒绝 src 与 src/vault 同库
+    // 并存——嵌套守卫逐分支验证，互不污染登记表）
+    let db_a = tempfile::tempdir().unwrap();
+    let db_b = tempfile::tempdir().unwrap();
+    let db_c = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
 
     // ① 目标在源内（尚未存在——守卫须先建目录再 canonical 比较）
     let target_inside = src.path().join("vault");
     let mut engine = Engine::new(
-        open_db(db_dir.path()),
+        open_db(db_a.path()),
         EventBus::new(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(&target_inside),
+        plan_for(&open_db(db_a.path()), db_a.path(), &target_inside),
     );
     let err = engine.begin().expect_err("目标在源内应拒绝");
     assert!(
@@ -168,13 +173,17 @@ fn nesting_guard_rejects_overlapping_source_and_target() {
         "错误信息应说明嵌套: {err}"
     );
 
-    // ② 源在目标内（target 为源的父目录——temp 根）
-    let parent = src.path().parent().unwrap().to_path_buf();
+    // ② 源在目标内（target = 专用父目录，源是其一侧子目录；不得用 temp 根
+    //    ——那会把数据库目录一并包含，登记闸门先行拒绝）
+    let parent_dir = tempfile::tempdir().unwrap();
+    let src_nested = parent_dir.path().join("card");
+    std::fs::create_dir_all(&src_nested).unwrap();
+    build_source(&src_nested);
     let mut engine = Engine::new(
-        open_db(db_dir.path()),
+        open_db(db_b.path()),
         EventBus::new(),
-        Box::new(VolumeSource::new(src.path())),
-        plan_for(&parent),
+        Box::new(VolumeSource::new(&src_nested)),
+        plan_for(&open_db(db_b.path()), db_b.path(), parent_dir.path()),
     );
     let err = engine.begin().expect_err("源在目标内应拒绝");
     assert!(
@@ -184,16 +193,16 @@ fn nesting_guard_rejects_overlapping_source_and_target() {
 
     // ③ 目标与源相同 → 拒绝
     let mut engine = Engine::new(
-        open_db(db_dir.path()),
+        open_db(db_c.path()),
         EventBus::new(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(src.path()),
+        plan_for(&open_db(db_c.path()), db_c.path(), src.path()),
     );
     assert!(engine.begin().is_err(), "目标与源相同应拒绝");
 
     // ④ 相互独立的目录 → 放行
     let separate_db = open_db(db_dir.path());
-    let plan = plan_with_album(&separate_db, separate.path());
+    let plan = plan_with_album(&separate_db, db_dir.path(), separate.path());
     let mut engine = Engine::new(
         separate_db,
         EventBus::new(),
@@ -202,10 +211,17 @@ fn nesting_guard_rejects_overlapping_source_and_target() {
     );
     assert!(engine.begin().is_ok(), "独立目录不得误拒");
 
-    // 拒绝时不留任务（前三次 begin 失败未建 job）
-    let db = open_db(db_dir.path());
-    let jobs: i64 =
-        db.0.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
-            .unwrap();
+    // 拒绝时不留任务（前三次 begin 失败未建 job；④ 库仅 1 条）
+    for db_case in [db_a.path(), db_b.path(), db_c.path()] {
+        let db = open_db(db_case);
+        let jobs: i64 =
+            db.0.query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+                .unwrap();
+        assert_eq!(jobs, 0, "拒绝的 begin 不得建任务");
+    }
+    let jobs: i64 = open_db(db_dir.path())
+        .0
+        .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(jobs, 1, "仅第④次 begin 建任务");
 }

@@ -5,8 +5,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::fs;
@@ -25,10 +25,16 @@ fn second_for(target: &Path) -> SecondTarget {
     }
 }
 
-/// 第二目的地的期望路径：与主目的地同布局公式（album_home_rel），仅根
-/// 不同——`{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/`（2026-09-28 定案）。
-fn expected_second_dst(second_root: &Path, home_rel: &str, name: &str) -> PathBuf {
-    second_root.join(home_rel).join(name)
+/// 第二目的地的期望路径：与主目的地同**纯时间布局公式**（`{拍摄年}/
+/// {拍摄月}`，mtime 回退口径），仅根不同（2026-10-09 §三）。
+fn expected_second_dst(second_root: &Path, primary: &Path, name: &str) -> PathBuf {
+    let month_dir = primary.parent().expect("primary 必有年月父目录");
+    let root = month_dir
+        .parent()
+        .and_then(|y| y.parent())
+        .expect("年月目录必有库根祖先");
+    let rel = month_dir.strip_prefix(root).expect("主路径在库根下");
+    second_root.join(rel).join(name)
 }
 
 #[test]
@@ -38,10 +44,6 @@ fn dual_target_writes_both_destinations_with_integrity() {
     let target = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();
     let files = build_source(src.path());
-
-    // 先 ensure 兜底相册固定创建时刻（run_engine 幂等复用）；期望根 =
-    // 相册主目录相对段（双目的地共用同一公式）
-    let home_rel = common::expected_ungrouped_rel(db_dir.path());
 
     let (job_id, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
         plan.second_target = Some(second_for(second.path()));
@@ -53,11 +55,11 @@ fn dual_target_writes_both_destinations_with_integrity() {
     let db = open_db(db_dir.path());
     for (rel, content) in &files {
         let name = rel.rsplit('/').next().unwrap();
-        // 主目的地字节一致
-        let primary = target.path().join(&home_rel).join(name);
+        // 主目的地字节一致（纯时间年月目录，mtime 回退口径）
+        let primary = common::expected_mtime_dir(target.path(), &src.path().join(rel)).join(name);
         assert_eq!(fs::read(&primary).unwrap(), *content, "主目的地: {rel}");
         // 第二目的地字节一致（同公式仅根不同）
-        let secondary = expected_second_dst(second.path(), &home_rel, name);
+        let secondary = expected_second_dst(second.path(), &primary, name);
         assert_eq!(fs::read(&secondary).unwrap(), *content, "第二目的地: {rel}");
         // journal 双记录：dst + dst2 均落位
         let row = db
@@ -111,15 +113,17 @@ fn second_target_failure_fails_file_without_stray_primary() {
     let files = build_source(src.path());
 
     // 在第二目的地预置普通文件占据月份目录段 → 第二路落位建目录必然
-    // 失败（走"任一失败判单文件失败 + 主路回滚"路径）；布局段 =
-    // {创建YYYY}/{创建MM}/{dir_name}，占 {MM} 一处即可挡住全部文件
+    // 失败（走"任一失败判单文件失败 + 主路回滚"路径）；纯时间布局段 =
+    // {拍摄年}/{拍摄月}（源 mtime 口径），占 {月} 一处即可挡住全部文件
+    //（三张源文件同轮写入，年月一致）
     {
-        let home_rel = common::expected_ungrouped_rel(db_dir.path());
-        let mut segs = home_rel.split('/');
-        let year = segs.next().unwrap();
-        let month = segs.next().unwrap();
-        fs::create_dir_all(second.path().join(year)).unwrap();
-        let block = second.path().join(year).join(month);
+        let probe = src
+            .path()
+            .join("DCIM/100CANON/IMG_0001.jpg");
+        let month_dir = common::expected_mtime_dir(second.path(), &probe);
+        let year_dir = month_dir.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&year_dir).unwrap();
+        let block = month_dir.clone();
         assert!(
             fs::write(&block, b"block").is_ok(),
             "占位失败: {}",
@@ -170,7 +174,7 @@ fn move_plus_second_target_rejected_as_invalid_plan() {
     build_source(src.path());
 
     let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_for(&db, db_dir.path(), target.path());
     plan.mode = ImportMode::Move;
     plan.second_target = Some(second_for(second.path()));
     let mut engine = Engine::new(

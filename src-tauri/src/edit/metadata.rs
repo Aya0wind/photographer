@@ -152,7 +152,7 @@ pub async fn asset_metadata_get(
     asset_id: i64,
 ) -> Result<EditableMetadata, String> {
     run_blocking(state.inner().clone(), move |state| {
-        get(&crate::ipc::active_library_db(state)?, asset_id)
+        get(&crate::ipc::app_database_db(state)?, asset_id)
     })
     .await
 }
@@ -164,7 +164,7 @@ pub async fn asset_metadata_save(
     metadata: EditableMetadata,
 ) -> Result<EditableMetadata, String> {
     run_blocking(state.inner().clone(), move |state| {
-        let db = crate::ipc::active_library_db(state)?;
+        let db = crate::ipc::app_database_db(state)?;
         let saved = save(&db, asset_id, metadata)?;
         // 编辑联动重索引（2026-09-29 地图定案）：GPS 变化（含清除）即时迁移
         // 地区挂接；索引未就绪时静默跳过（下次管线增量补齐）

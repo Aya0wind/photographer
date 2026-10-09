@@ -2,36 +2,37 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { libraryRelocate, type LibraryRelocateResult } from "@/ipc/api";
-import { useSettingsStore, type Library } from "@/stores/settingsStore";
+import { photoLibraryRelocate, type PhotoLibrary, type PhotoLibraryRelocateResult } from "@/ipc/api";
 
 /**
- * 库照片存储目录整体重定位（用户定案 2026-09-28）：前提是用户已在文件
- * 管理器把整棵照片树搬到新根；应用改配置 + 重写库内路径前缀 + 重排缩略图。
- * 打开即预检（dry-run）显示受影响计数；新根不在盘时提示但不阻止
- * （可先改后挂载，缺失走 missing 终态提示）。
+ * 照片库整体重定位（2026-10-09 单库多照片库定案）：前提是用户已在文件
+ * 管理器把整棵照片树搬到新根；应用改 photos_libraries 登记 + 重写库内路径
+ * 前缀（assets.library_id 归属不变）。打开即预检（dry-run）显示受影响计数；
+ * 新根不在盘时提示但不阻止（可先改后挂载，缺失走库 offline）。
+ * 完成后由 photoLibrariesChanged 事件驱动列表刷新（库登记在数据库，不再拉
+ * settings）。TODO-M3：M3「存储」页可直接复用本对话框。
  */
 export default function RelocateLibraryDialog({
   library,
   onClose,
 }: {
-  library: Library;
+  library: PhotoLibrary;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const [root, setRoot] = useState(library.photoRoot);
-  const [preview, setPreview] = useState<LibraryRelocateResult | null>(null);
+  const [root, setRoot] = useState(library.rootPath);
+  const [preview, setPreview] = useState<PhotoLibraryRelocateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
-  const [done, setDone] = useState<LibraryRelocateResult | null>(null);
+  const [done, setDone] = useState<PhotoLibraryRelocateResult | null>(null);
 
-  const changed = root.trim().length > 0 && root.trim() !== library.photoRoot;
+  const changed = root.trim().length > 0 && root.trim() !== library.rootPath;
 
   // 预检（打开时对当前根一次；输入停顿 600ms 重查）
   useEffect(() => {
     if (!changed || applying || done) return;
     const timer = window.setTimeout(() => {
-      void libraryRelocate(library.id, root.trim(), false)
+      void photoLibraryRelocate(library.id, root.trim(), false)
         .then((r) => {
           setPreview(r);
           setError(null);
@@ -47,11 +48,8 @@ export default function RelocateLibraryDialog({
   async function apply(): Promise<void> {
     setApplying(true);
     try {
-      const r = await libraryRelocate(library.id, root.trim(), true);
+      const r = await photoLibraryRelocate(library.id, root.trim(), true);
       setDone(r);
-      // 后端已更新内存快照并落盘 + 发 settings://changed；这里再主动拉
-      // 一次，确保本会话 store 立即反映新根
-      await useSettingsStore.getState().load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -82,7 +80,7 @@ export default function RelocateLibraryDialog({
             <p className="mt-2 text-xs leading-relaxed text-text-secondary">
               {t("settings.relocate.hint")}
             </p>
-            <p className="mt-1 font-mono text-[11px] text-text-muted">{library.photoRoot}</p>
+            <p className="mt-1 font-mono text-[11px] text-text-muted">{library.rootPath}</p>
 
             <label className="mt-3 flex flex-col gap-1 text-xs text-text-secondary">
               {t("settings.relocate.newRoot")}

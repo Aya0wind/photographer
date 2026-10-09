@@ -1,6 +1,6 @@
 //! people 命令（M4 人物页数据）：人物簇列表 / 簇内资产 / 重命名 / 删除。
 //!
-//! 全部走 active_library_db + run_blocking（铁律：DB 查询不上主线程）；
+//! 全部走 app_database_db + run_blocking（铁律：DB 查询不上主线程）；
 //! 载荷 camelCase。人物数据由 face 通道在线聚类产出（crate::ai::face）。
 
 use tauri::State;
@@ -10,7 +10,7 @@ use crate::db::PersonRow;
 
 /// 人物簇列表（face_count 降序；名称 NULL = 未命名；空簇不返回）。
 pub fn fetch_people_list(state: &super::AppState) -> Result<Vec<PersonRow>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     db.people_list().map_err(|e| e.to_string())
 }
 
@@ -20,7 +20,7 @@ pub fn fetch_people_assets(
     cluster_id: i64,
     limit: u32,
 ) -> Result<Vec<super::assets::AssetDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db
         .assets_by_cluster(cluster_id, limit.clamp(1, 200))
         .map_err(|e| e.to_string())?;
@@ -49,6 +49,7 @@ pub fn fetch_people_assets(
             rating: r.rating,
             color_label: r.color_label,
             rejected: r.rejected,
+            missing: r.missing,
         })
         .collect())
 }
@@ -59,14 +60,14 @@ pub fn fetch_person_rename(
     cluster_id: i64,
     name: &str,
 ) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     db.rename_person(cluster_id, name)
         .map_err(|e| e.to_string())
 }
 
 /// 删除人物簇（只解除归属，faces 数据保留）。
 pub fn fetch_person_delete(state: &super::AppState, cluster_id: i64) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     db.delete_person(cluster_id).map_err(|e| e.to_string())
 }
 

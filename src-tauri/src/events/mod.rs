@@ -330,6 +330,45 @@ pub enum AppEvent {
     /// 地区索引有新真值：回填批次完成 / 单资产编辑联动重索引 / 数据包更新重刷。
     MapRegionsUpdated,
 
+    // 照片库登记表（2026-10-09 单数据库多照片库定案；命令骨架见
+    // ipc/photo_library.rs，实装 M1/M2）
+    /// photos_libraries 变更（新建/移除登记/重定位/在线状态翻转）：存储页与
+    /// 导入目标选择器重拉 photo_library_list。
+    PhotoLibrariesChanged,
+    /// 照片库扫描任务进度（从文件夹建立的批量登记 + 增量扫描共用；发布侧节流）。
+    LibraryScanProgress {
+        library_id: String,
+        registered: u64,
+        total: u64,
+    },
+    /// 照片库扫描收尾：registered=本轮登记数（含 missing 重绑），skipped=
+    /// 去重/冷却跳过数；cross_library_duplicates=§四 收尾总结「N 张与
+    /// 其他照片库内容相同」（跨库照常登记不去重，计数是 registered 子集；
+    /// 零/未核对不携带）。
+    LibraryScanFinished {
+        library_id: String,
+        registered: u64,
+        skipped: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cross_library_duplicates: Option<u64>,
+    },
+
+    // 相册导出为文件夹（M6，Photo Hub → LR 互操作；命令骨架见 ipc/album_export.rs）
+    /// 导出任务进度：done=已导出资产数，total=相册内待导出数。
+    AlbumExportProgress {
+        task_id: i64,
+        done: u64,
+        total: u64,
+    },
+    /// 导出收尾：ok=是否全部成功，exported=导出文件数，linked=其中硬链接数。
+    AlbumExportFinished {
+        task_id: i64,
+        ok: bool,
+        exported: u64,
+        linked: u64,
+        error: Option<String>,
+    },
+
     // 错误
     AppError {
         level: String,

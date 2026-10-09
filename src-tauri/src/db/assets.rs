@@ -192,7 +192,8 @@ impl Db {
              source, created_at, origin, width, height, iso, f_number, exposure_time, \
              focal_length, lens, pair_asset_id, thumb_state, orientation, flash, \
              metering_mode, white_balance, exposure_program, software, artist, \
-             gps_lat, gps_lon, rating, flagged, color_label, rejected FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
+             gps_lat, gps_lon, rating, flagged, color_label, rejected, library_id, \
+             missing, xmp_dirty, volume_serial, file_id FROM assets WHERE id = ?1 AND kind IN ('photo', 'raw')",
         )?;
         let mut rows = stmt.query(params![id])?;
         match rows.next()? {
@@ -366,9 +367,21 @@ impl Db {
 
     /// 评分写入（0-5 由 IPC 层校验；资产不存在返回 false）。
     /// 只动 DB——XMP 边车同步由调用方（ipc::rating）异步派发。
+    /// 读入方向（边车回填）专用：不置 xmp_dirty（DB 在向边车对齐，无待写）。
     pub fn set_asset_rating(&self, id: i64, rating: i64) -> Result<bool> {
         let n = self.0.execute(
             "UPDATE assets SET rating = ?2 WHERE id = ?1",
+            params![id, rating],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 评分写入 + 置脏（§五 M2c 写方向闭环）：用户改动先落库并记
+    /// `xmp_dirty=1`；边车写成功后由调用方清脏（[`Db::clear_asset_xmp_dirty`]），
+    /// 离线/缺失期间写不出去 → 脏标志留待库恢复在线后扫描补写。
+    pub fn set_asset_rating_mark_dirty(&self, id: i64, rating: i64) -> Result<bool> {
+        let n = self.0.execute(
+            "UPDATE assets SET rating = ?2, xmp_dirty = 1 WHERE id = ?1",
             params![id, rating],
         )?;
         Ok(n > 0)
@@ -526,21 +539,59 @@ impl Db {
         Ok(counts.to_vec())
     }
 
-    /// 查重索引：同 (size, xxhash) 的既有资产 id（导入前快速预判）。
-    pub fn find_asset_by_size_xxh(&self, size: u64, xxhash: u64) -> Result<Option<i64>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT id FROM assets WHERE size = ?1 AND xxhash = ?2 LIMIT 1")?;
-        let mut rows = stmt.query(params![size as i64, xxhash as i64])?;
+    /// 查重索引：同 (size, xxhash) 的既有**在线**资产 id（导入前快速预判；
+    /// **同库范围**——2026-10-09 §四 跨库重复合法，查重只在目标库内生效；
+    /// §八-1 定案：skip 仅当存在**在线**同哈希资产，missing 行不算命中——
+    /// 命中 missing 的重绑判定走 [`Db::find_asset_brief_by_size_xxh`]）。
+    pub fn find_asset_by_size_xxh(
+        &self,
+        library_id: &str,
+        size: u64,
+        xxhash: u64,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id FROM assets WHERE library_id = ?1 AND size = ?2 AND xxhash = ?3 \
+             AND missing = 0 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![library_id, size as i64, xxhash as i64])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
         }
     }
 
-    /// 宽松查重键（T7 §查重① / T8 new_files 预判）：size + filename + mtime ±2s。
-    /// RFC3339 定宽字符串按字典序比较即时间序。
+    /// 宽松查重键（T7 §查重① / T8 new_files 预判）：size + filename +
+    /// mtime ±2s，同库范围。RFC3339 定宽字符串按字典序比较即时间序。
+    /// §八-1：同库 skip 仅当存在**在线**同键资产——missing 行不算命中
+    ///（重新导入回归 missing 照片应放行到精确层重绑，不得在宽松层吞掉）。
     pub fn find_asset_loose(
+        &self,
+        library_id: &str,
+        size: u64,
+        filename: &str,
+        mtime_from: &str,
+        mtime_to: &str,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self.0.prepare(
+            "SELECT id FROM assets WHERE library_id = ?1 AND size = ?2 AND filename = ?3 \
+             AND mtime >= ?4 AND mtime <= ?5 AND missing = 0 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![
+            library_id,
+            size as i64,
+            filename,
+            mtime_from,
+            mtime_to
+        ])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 宽松查重键的全库形态（设备扫描 new_files 预检专用，UI 提示口径；
+    /// 导入查重闸门走 [`Db::find_asset_loose`] 的同库范围版本）。
+    pub fn find_asset_loose_any(
         &self,
         size: u64,
         filename: &str,
@@ -566,6 +617,36 @@ impl Db {
             .prepare("SELECT 1 FROM assets WHERE path = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![path])?;
         Ok(rows.next()?.is_some())
+    }
+
+    /// 边车关键字合并进 asset_metadata（§三/§六 读入方向「关键字从 XMP
+    /// 边车读入」）：只覆写 `keywords` 键，其余字段（用户编辑的标题/描述
+    /// 等显式库元数据）原样保留——与 album_export 导出方向读同一存储。
+    /// 空列表无事可做（不建空行）。
+    pub fn merge_asset_keywords(&self, asset_id: i64, keywords: &[String]) -> Result<()> {
+        if keywords.is_empty() {
+            return Ok(());
+        }
+        let existing: Option<String> = self
+            .0
+            .query_row(
+                "SELECT value FROM asset_metadata WHERE asset_id = ?1",
+                [asset_id],
+                |r| r.get(0),
+            )
+            .ok();
+        let mut value: serde_json::Value = existing
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        value["keywords"] = serde_json::json!(keywords);
+        let json = serde_json::to_string(&value)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+        self.0.execute(
+            "INSERT INTO asset_metadata(asset_id, value) VALUES(?1, ?2) \
+             ON CONFLICT(asset_id) DO UPDATE SET value = excluded.value",
+            params![asset_id, json],
+        )?;
+        Ok(())
     }
 
     /// 按路径取资产 id（F1 清卡：journal dst → 库内资产映射）；无则 None。

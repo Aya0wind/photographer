@@ -55,13 +55,14 @@ describe("语言包完整性", () => {
   });
 });
 
-/** 关键 key 清单：侧栏导航 + 各占位页 + 设置页 + 向导/通用按钮（防漏文案） */
+/** 关键 key 清单：侧栏导航 + 各占位页 + 设置页 + 存储/引导 + 通用按钮（防漏文案） */
 const CRITICAL_KEYS = [
   "nav.gallery",
   "nav.search",
   "nav.import",
   "nav.tasks",
   "nav.settings",
+  "nav.storage",
   "pages.gallery.title",
   "pages.gallery.desc",
   "pages.search.title",
@@ -72,10 +73,7 @@ const CRITICAL_KEYS = [
   "pages.tasks.desc",
   "pages.settings.title",
   "pages.settings.desc",
-  "pages.settings.currentLibrary",
-  "pages.settings.libraryRoot",
-  "pages.settings.dbDir",
-  "pages.settings.libraryRootUnset",
+  "storage.title",
   "onboarding.title",
   "common.back",
   "common.next",
@@ -92,7 +90,7 @@ describe("i18n 初始化", () => {
   it("关键 key 返回中文文案而非 key 本身", () => {
     // 抽查一个具体译文的精确值
     expect(i18n.t("nav.gallery")).toBe("图库");
-    expect(i18n.t("pages.settings.libraryRootUnset")).toBe("未设置");
+    expect(i18n.t("storage.title")).toBe("存储");
 
     for (const key of CRITICAL_KEYS) {
       const text = i18n.t(key);

@@ -118,4 +118,85 @@ impl Db {
             .filter(|id| !alive.contains(id))
             .collect())
     }
+
+    // —— 相册导出任务账（M6 album_export_job，§六 LR 互操作）——
+
+    /// 建相册导出任务（status=queued，total 预填成员数），返回任务 id。
+    pub fn album_export_job_create(
+        &self,
+        album_id: i64,
+        subgroup: Option<&str>,
+        output_dir: &str,
+        total: u64,
+    ) -> Result<i64> {
+        self.0.execute(
+            "INSERT INTO album_export_job (album_id, subgroup, output_dir, status, total, \
+             created_at) VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+            params![album_id, subgroup, output_dir, total as i64, now_rfc3339()],
+        )?;
+        Ok(self.0.last_insert_rowid())
+    }
+
+    /// 状态推进（queued→running；终态走 finish）。
+    pub fn album_export_job_set_status(&self, id: i64, status: &str) -> Result<()> {
+        self.0.execute(
+            "UPDATE album_export_job SET status = ?2 WHERE id = ?1",
+            params![id, status],
+        )?;
+        Ok(())
+    }
+
+    /// 进度落库（绝对值计数；upsert 形态不必——行已存在，仅更新计数列）。
+    pub fn album_export_job_progress(&self, id: i64, done: u64, linked: u64) -> Result<()> {
+        self.0.execute(
+            "UPDATE album_export_job SET done = ?2, linked = ?3 WHERE id = ?1",
+            params![id, done as i64, linked as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 收尾（done|cancelled|error + 终值计数；error 为 None 时清空）。
+    pub fn album_export_job_finish(
+        &self,
+        id: i64,
+        status: &str,
+        done: u64,
+        linked: u64,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.0.execute(
+            "UPDATE album_export_job SET status = ?2, done = ?3, linked = ?4, error = ?5, \
+             finished_at = ?6 WHERE id = ?1",
+            params![id, status, done as i64, linked as i64, error, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 最近一次任务行（album_export_status 数据源；无任务 None）。
+    pub fn album_export_job_latest(&self) -> Result<Option<AlbumExportJobRow>> {
+        self.0
+            .query_row(
+                "SELECT id, album_id, subgroup, output_dir, status, total, done, linked, error, \
+                 created_at, finished_at FROM album_export_job ORDER BY id DESC LIMIT 1",
+                [],
+                map_album_export_job,
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+    }
+
+    /// 相册导出版孤儿收尸清单（queued/running 且不在活跃集合）。
+    pub fn album_export_job_stale_ids(&self, alive: &[i64]) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id FROM album_export_job WHERE status IN ('queued', 'running')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows
+            .filter_map(Result::ok)
+            .filter(|id| !alive.contains(id))
+            .collect())
+    }
 }

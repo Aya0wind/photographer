@@ -89,6 +89,8 @@ pub const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// 单轮扫描 + 自动入册。返回 (文件夹, 新文件数) 列表（本轮真正发起导入的）。
 /// 任何单文件夹失败（目录消失/库不可用/Busy）记日志跳过，不影响其他文件夹。
+/// 2026-10-09 §三：目标 = 首个登记照片库（导入引擎照片库基准；M4 起按
+/// 库内监视配置细化）。
 pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
     let folders: Vec<String> = state
         .settings
@@ -127,66 +129,44 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
                     source: std::sync::Arc::clone(&source),
                 },
             );
-        // 新文件预检：0 新文件不建任务（防空任务刷屏）
-        let new_files = match super::active_library_db(state) {
-            Ok(db) => {
-                let skip_imported = state
-                    .settings
-                    .lock()
-                    .expect("settings mutex poisoned")
-                    .import
-                    .skip_imported;
-                crate::devices::orchestrator::scan_device(&*source, &db, skip_imported)
-                    .map(|s| s.new_files)
-                    .unwrap_or(0)
-            }
-            Err(error) => {
-                eprintln!("[watch] 库不可用，跳过本轮: {error}");
-                continue;
-            }
-        };
-        if new_files == 0 {
+        // 目标照片库：首个登记库（无库跳过本轮）
+        let Ok(db) = super::app_database_db(state) else {
+            eprintln!("[watch] 数据库不可用，跳过本轮");
             continue;
-        }
-        let Some(library) = state
+        };
+        let Ok(library) = db.photos_library_list() else {
+            eprintln!("[watch] 照片库登记表不可读，跳过本轮");
+            continue;
+        };
+        let Some(library) = library.into_iter().next() else {
+            eprintln!("[watch] 尚未建立照片库，跳过本轮");
+            continue;
+        };
+        // 新文件预检：0 新文件不建任务（防空任务刷屏）
+        let skip_imported = state
             .settings
             .lock()
             .expect("settings mutex poisoned")
-            .active_library()
-            .cloned()
-        else {
-            eprintln!("[watch] 无激活库，跳过");
+            .import
+            .skip_imported;
+        let new_files = crate::devices::orchestrator::scan_device(&*source, &db, skip_imported)
+            .map(|s| s.new_files)
+            .unwrap_or(0);
+        if new_files == 0 {
             continue;
-        };
-        let streams = library.streams.max(1);
-        // 0018 导入必落相册：监视入册自动归入默认相册「未分组」（按名幂等）
-        let default_db_dir = std::path::PathBuf::from(&library.db_dir);
-        let default_album = crate::ipc::open_library_db(&default_db_dir)
-            .and_then(|db| db.ensure_default_album().map_err(|e| e.to_string()));
-        let album_id = match default_album {
-            Ok(id) => Some(id),
-            Err(e) => {
-                state.bus.publish(AppEvent::AppError {
-                    level: "warn".into(),
-                    message: format!("监视入册失败（默认相册创建失败）: {e}"),
-                    recoverable: true,
-                });
-                continue;
-            }
-        };
+        }
+        // 0018 导入必落相册语义已退役（相册纯逻辑）：监视入册不挂相册，
+        // 画廊全局视图自然可见。
         let plan = ImportPlan {
             source_id: source.id(),
-            target_root: std::path::PathBuf::from(&library.photo_root),
-            // 布局固定（2026-09-28）：目录段无计划字段，引擎运行时按
-            // album_home_rel 公式落 `{创建YYYY}/{创建MM}/{dir_name}/`
-            name_template: "{原文件名}".into(),
+            target_library_id: library.id,
             duplicate_policy: DuplicatePolicy::Skip,
             skip_imported: true,
-            streams,
+            streams: 2,
             mode: ImportMode::Copy,
             second_target: None,
             include: None,
-            album_id,
+            album_id: None,
             album_subgroup: None,
         };
         match super::start_import(state, plan) {

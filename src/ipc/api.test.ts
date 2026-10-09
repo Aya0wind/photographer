@@ -81,9 +81,9 @@ it("导入预览调用已注册的路径命令，相机预览传持久对象 ID"
 
 const PLAN: ImportPlan = {
   sourceId: "E:",
-  targetRoot: "Y:\\照片",
-  dirTemplate: "{YYYY}/{MM-DD}",
-  nameTemplate: "{原文件名}",
+  // 2026-10-09 单库多照片库：目标 = 照片库 id（落盘布局固定纯时间，
+  // dirTemplate/nameTemplate 退役不再下发）
+  targetLibraryId: "lib-1",
   duplicatePolicy: "skip",
   skipImported: true,
   streams: 4,

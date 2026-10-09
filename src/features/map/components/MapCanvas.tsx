@@ -7,7 +7,8 @@
  * - maplibre-gl 样式与全局 .no-motion 契约兼容（气泡动画纯 CSS）
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import * as maplibregl from "maplibre-gl";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -19,11 +20,13 @@ import type { MapCluster } from "@/ipc/api/map";
 
 import { levelForZoom, type MapLevel } from "../lib/hierarchy";
 import { createBubbleElement } from "./PhotoBubble";
+import { fetchMapResource, MAP_STYLE_URL, mapProtocol, transformMapRequest, withLocalOutline } from "../lib/mapResources";
 
 // maplibre v6 的 worker 是独立文件，URL 由 import.meta.url 动态拼接——
 // vite 预打包探测不到（deps 目录里没有 worker 文件 → 404 → Worker failed to load →
 // 样式永不完成 → 黑底图）。?url 让 dev/build 都拿到真实资源地址（2026-09-29 真机黑图修复）。
 maplibregl.setWorkerUrl(workerUrl);
+maplibregl.addProtocol("phmap", mapProtocol);
 
 export interface FlyTarget {
   lat: number;
@@ -43,8 +46,6 @@ interface MapCanvasProps {
   animationsOn: boolean;
 }
 
-const STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
-
 export default function MapCanvas({
   clusters,
   level,
@@ -53,6 +54,9 @@ export default function MapCanvas({
   flyTarget,
   animationsOn,
 }: MapCanvasProps) {
+  const { t } = useTranslation();
+  const [background, setBackground] = useState<"loading" | "ready" | "offline">("loading");
+  const [retry, setRetry] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
@@ -68,7 +72,8 @@ export default function MapCanvas({
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: STYLE_URL,
+      style: withLocalOutline(),
+      transformRequest: transformMapRequest,
       center: [104, 35],
       zoom: 1.5,
       attributionControl: { compact: true },
@@ -97,6 +102,40 @@ export default function MapCanvas({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Draw bundled land immediately. Detailed online resources load independently
+  // of region preparation and can fail without losing the usable base map.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const controller = new AbortController();
+    let applied = false;
+    let resourceFailed = false;
+    const ready = () => { if (applied && !resourceFailed && !controller.signal.aborted) setBackground("ready"); };
+    const failed = () => {
+      if (applied && !controller.signal.aborted) {
+        resourceFailed = true;
+        setBackground("offline");
+      }
+    };
+    map.on("idle", ready);
+    map.on("error", failed);
+    setBackground("loading");
+    void fetchMapResource(MAP_STYLE_URL, controller.signal).then(async response => {
+      const style = await response.json() as maplibregl.StyleSpecification;
+      if (controller.signal.aborted) return;
+      if (style.version !== 8 || !style.sources || !Array.isArray(style.layers)) throw new Error("Invalid map style");
+      applied = true;
+      map.setStyle(withLocalOutline(style));
+    }).catch(() => {
+      if (!controller.signal.aborted) setBackground("offline");
+    });
+    // Slow tile/font connections should not leave a permanent spinning prompt.
+    const timer = setTimeout(() => {
+      if (!controller.signal.aborted) setBackground(state => state === "ready" ? state : "offline");
+    }, 15_000);
+    return () => { controller.abort(); clearTimeout(timer); map.off("idle", ready); map.off("error", failed); };
+  }, [retry]);
 
   // 气泡同步：全清重建（随机样本本来就要换；400 内重建 ~10ms）
   useEffect(() => {
@@ -147,5 +186,12 @@ export default function MapCanvas({
     });
   }, [flyTarget, animationsOn]);
 
-  return <div ref={containerRef} className="h-full w-full" data-testid="map-canvas" />;
+  return <div className="relative h-full w-full">
+    <div ref={containerRef} className="h-full w-full" data-testid="map-canvas" />
+    {background !== "ready" && <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2 rounded-md bg-panel/90 px-3 py-2 text-[11px] text-text-muted" role="status">
+      {background === "loading" && <span className="h-3 w-3 animate-spin rounded-full border-2 border-edge border-t-accent" />}
+      <span>{t(background === "loading" ? "map.backgroundLoading" : "map.backgroundBasic")}</span>
+      {background === "offline" && <button type="button" className="text-accent hover:underline" onClick={() => setRetry(value => value + 1)}>{t("map.retry")}</button>}
+    </div>}
+  </div>;
 }

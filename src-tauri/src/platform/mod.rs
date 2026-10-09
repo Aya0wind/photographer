@@ -57,6 +57,19 @@ impl InferencePlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FilesystemIdentity(pub(crate) u64);
 
+/// 资产登记指纹（单数据库多照片库 §三 增量扫描两级识别）：卷序列号 +
+/// 卷内文件 id——同卷同 id = 同一物理文件（硬链接），零哈希直跳去重。
+/// Windows = FILE_ID_INFO（NTFS 128-bit FILE_ID 十六进制；exFAT/FAT 查询
+/// 失败 → Err，调用方走哈希路径）；macOS = dev + inode。
+/// 生产消费点 = M2 登记管道（当前仅平台单测消费，同 [`same_filesystem`] 先例）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileRegistrationId {
+    pub(crate) volume_serial: u64,
+    /// 卷内文件 id（小写十六进制串；NTFS ≤128-bit / macOS inode 64-bit）。
+    pub(crate) file_id: String,
+}
+
 /// Borrowed reference: URI resources never pass through local filesystem validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResourceRef<'a> {
@@ -114,6 +127,13 @@ mod native;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
 mod unsupported;
+
+/// 资产登记指纹（§三 两级识别）：卷序列号 + 卷内文件 id——同卷同 id =
+/// 同一物理文件（硬链接）。生产消费点 = M2 导入/增量扫描登记管道（经
+/// `crate::platform::file_registration_id` 统一入口调用）；当前仅平台单测
+/// 经本入口验证接线，故 allow（同 [`same_filesystem`] 先例）。
+#[allow(unused_imports)]
+pub(crate) use native::file_registration_id;
 
 pub(crate) use native::{
     capabilities, clipboard_copy_files, configure_background_command, configure_sequential_read,

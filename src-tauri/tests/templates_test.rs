@@ -1,127 +1,68 @@
-//! 命名模板引擎测试（spec §5.2 / M1 T5）。
-//! 令牌白名单与前端 src/features/onboarding/onboardingConfig.ts 的 TEMPLATE_TOKENS
-//! 必须一致（含 MM-DD）。
+//! 导入命名工具（模板引擎退役后仅存三件，2026-10-09 §三定案）：拍摄
+//! 时间归一（EXIF 优先回退 mtime——纯时间布局年/月段的口径）、Windows
+//! 文件名段清理、冲突递增唯一路径。旧目录/文件名模板（render_dir/
+//! render_name/RenderCtx）随纯时间布局退役。
 //!
 //! lib.rs 中 `mod import;` 为私有模块（不可改），此处经 `#[path]` 将源文件
 //! 直接编译进测试 crate。
 
-use std::fs;
+mod common;
 
-use chrono::{TimeZone, Utc};
+pub use common::{
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, tethering, thumbs,
+};
 
 #[path = "../src/import/templates.rs"]
 mod templates;
 
-use templates::{
-    render_dir, render_name, resolve_captured, sanitize_component, unique_path, RenderCtx,
-    TemplateError,
-};
+use templates::{resolve_captured, sanitize_component, unique_path};
 
-fn ctx() -> RenderCtx {
-    RenderCtx {
-        captured_at: Utc.with_ymd_and_hms(2026, 9, 18, 14, 30, 5).unwrap(),
-        camera: Some("EOS R5".to_string()),
-        lens: Some("RF 24-70".to_string()),
-        original_stem: "IMG_0001".to_string(),
-        ext: "CR3".to_string(),
-    }
+/// EXIF 优先、mtime 回退（纯时间布局年/月段与 assets.captured_at 同口径）。
+#[test]
+fn resolve_captured_prefers_exif_then_mtime() {
+    let exif = common::utc(2026, 6, 28, 15, 30, 0);
+    let mtime = common::utc(2020, 1, 2, 3, 4, 5);
+    assert_eq!(resolve_captured(Some(exif), mtime), exif, "EXIF 优先");
+    assert_eq!(resolve_captured(None, mtime), mtime, "缺失回退 mtime");
 }
 
+/// Windows 非法字符与控制字符折叠为 `_`，合法字符（含中文/空格）保留。
 #[test]
-fn expands_all_tokens() {
-    let template = "{YYYY}/{YY}/{MM}/{MM-DD}/{DD}/{HH}/{mm}/{ss}/{相机}/{镜头}/{原文件名}";
-    assert_eq!(
-        render_dir(template, &ctx()).unwrap(),
-        "2026/26/09/09-18/18/14/30/05/EOS R5/RF 24-70/IMG_0001.CR3",
-    );
-}
-
-#[test]
-fn renders_date_with_literal_text() {
-    assert_eq!(
-        render_dir("照片-{YYYY}{MM}-{MM-DD}", &ctx()).unwrap(),
-        "照片-202609-09-18",
-    );
-}
-
-#[test]
-fn render_name_keeps_ext_case() {
-    let mut c = ctx();
-    c.ext = "JpG".to_string();
-    assert_eq!(render_name("{原文件名}", &c).unwrap(), "IMG_0001.JpG");
-}
-
-#[test]
-fn empty_template_renders_empty() {
-    assert_eq!(render_dir("", &ctx()).unwrap(), "");
-    assert_eq!(render_name("", &ctx()).unwrap(), "");
-}
-
-#[test]
-fn unknown_token_is_error() {
-    let err = render_dir("{YYYY}/{FFF}", &ctx()).unwrap_err();
-    assert!(matches!(err, TemplateError::UnknownToken(ref t) if t == "FFF"));
-    // 与前端一致：嵌套/未闭合大括号按字面量处理，只有规整的 {x} 才是令牌
-    assert_eq!(
-        render_dir("{YYYY}/(未闭合", &ctx()).unwrap(),
-        "2026/(未闭合"
-    );
-}
-
-#[test]
-fn camera_none_is_missing_context() {
-    let mut c = ctx();
-    c.camera = None;
-    let err = render_dir("{YYYY}/{相机}", &c).unwrap_err();
-    assert!(matches!(err, TemplateError::MissingContext(ref t) if t == "相机"));
-    // 镜头同理
-    let mut c = ctx();
-    c.lens = None;
-    let err = render_name("x-{镜头}", &c).unwrap_err();
-    assert!(matches!(err, TemplateError::MissingContext(ref t) if t == "镜头"));
-}
-
-#[test]
-fn sanitize_replaces_windows_illegal_chars() {
+fn sanitize_component_folds_illegal_chars() {
     assert_eq!(sanitize_component("a:b*c?d\"e<f>g|h"), "a_b_c_d_e_f_g_h");
-    assert_eq!(sanitize_component("a\u{0007}b\u{001f}c"), "a_b_c");
-    assert_eq!(sanitize_component("正常 name.JPEG"), "正常 name.JPEG");
+    assert_eq!(sanitize_component("春节 拍摄"), "春节 拍摄");
+    assert_eq!(
+        sanitize_component(&format!("ctrl{}x", char::from_u32(1).unwrap())),
+        "ctrl_x",
+        "控制字符折叠"
+    );
+    assert_eq!(sanitize_component(""), "");
 }
 
+/// 冲突递增：`a.txt` 被占 → `a_1.txt`、`a_2.txt`；无冲突直返；点开头
+/// 主名为空的文件不误切扩展名。
 #[test]
-fn render_sanitizes_values_per_segment() {
-    let mut c = ctx();
-    c.camera = Some("Ni\"kon:|X".to_string());
-    assert_eq!(render_dir("{YYYY}\\{相机}", &c).unwrap(), "2026\\Ni_kon__X");
-    // 分隔符本身保留，不参与清理
-    assert_eq!(render_dir("{YYYY}/{相机}", &c).unwrap(), "2026/Ni_kon__X");
-}
-
-#[test]
-fn unique_path_increments_on_triple_conflict() {
-    let dir = tempfile::tempdir().expect("failed to create temp dir");
-    let root = dir.path();
-    for name in ["a.txt", "a_1.txt", "a_2.txt"] {
-        fs::write(root.join(name), b"x").expect("failed to write fixture file");
-    }
-    // 三连冲突：a.txt、a_1.txt、a_2.txt 均被占用 → a_3.txt
-    assert_eq!(unique_path(root, "a.txt"), root.join("a_3.txt"));
-    // 无冲突：原样返回
-    assert_eq!(unique_path(root, "b.txt"), root.join("b.txt"));
-    // 双扩展名：按最后一个点切分（stem=a.tar，ext=.gz）
-    for name in ["a.tar.gz", "a.tar_1.gz"] {
-        fs::write(root.join(name), b"x").expect("failed to write fixture file");
-    }
-    assert_eq!(unique_path(root, "a.tar.gz"), root.join("a.tar_2.gz"));
-    // 目录不存在：纯计算，直接 join
-    let missing = root.join("no_such_dir");
-    assert_eq!(unique_path(&missing, "c.txt"), missing.join("c.txt"));
-}
-
-#[test]
-fn resolve_captured_prefers_exif_else_mtime() {
-    let exif_at = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
-    let mtime = Utc.with_ymd_and_hms(2026, 9, 18, 0, 0, 0).unwrap();
-    assert_eq!(resolve_captured(Some(exif_at), mtime), exif_at);
-    assert_eq!(resolve_captured(None, mtime), mtime);
+fn unique_path_appends_numeric_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"1").unwrap();
+    assert_eq!(
+        unique_path(dir.path(), "a.txt"),
+        dir.path().join("a_1.txt"),
+        "首个冲突追加 _1"
+    );
+    std::fs::write(dir.path().join("a_1.txt"), b"2").unwrap();
+    assert_eq!(
+        unique_path(dir.path(), "a.txt"),
+        dir.path().join("a_2.txt"),
+        "连环冲突递增"
+    );
+    // 无冲突直返；点开头（主名为空 → 整体视作主名，不误切扩展名）
+    assert_eq!(unique_path(dir.path(), "b.txt"), dir.path().join("b.txt"));
+    std::fs::write(dir.path().join(".hidden"), b"h").unwrap();
+    assert_eq!(
+        unique_path(dir.path(), ".hidden"),
+        dir.path().join(".hidden_1")
+    );
 }

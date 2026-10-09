@@ -44,6 +44,8 @@ vi.mock("maplibre-gl", () => {
       return this;
     }
     addControl() {}
+    setStyle() {}
+    off() {}
     getZoom() {
       return 1.5;
     }
@@ -54,8 +56,13 @@ vi.mock("maplibre-gl", () => {
       this.handlers[event]?.forEach((cb) => cb());
     }
   }
-  return { Map, Marker, NavigationControl: class {}, setWorkerUrl: vi.fn() };
+  return { Map, Marker, NavigationControl: class {}, setWorkerUrl: vi.fn(), addProtocol: vi.fn() };
 });
+
+vi.mock("../lib/mapResources", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/mapResources")>(),
+  fetchMapResource: vi.fn().mockRejectedValue(new Error("offline test")),
+}));
 
 vi.mock("@/ipc/api/map", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api/map")>();
@@ -146,6 +153,7 @@ describe("MapPage 数据管线状态机", () => {
     statusMock.mockResolvedValue(status({ installed: false, phase: "notInstalled" }));
     renderPage();
     expect(await screen.findByTestId("map-preparing")).toBeInTheDocument();
+    expect(screen.getByTestId("map-canvas")).toBeInTheDocument();
     await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1));
   });
 
@@ -163,6 +171,7 @@ describe("MapPage 数据管线状态机", () => {
     statusMock.mockResolvedValue(status({ phase: "loading" }));
     renderPage();
     expect(await screen.findByTestId("map-preparing")).toBeInTheDocument();
+    expect(screen.getByTestId("map-canvas")).toBeInTheDocument();
     expect(installMock).not.toHaveBeenCalled();
   });
 

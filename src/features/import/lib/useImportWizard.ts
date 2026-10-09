@@ -3,12 +3,11 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { deviceFiles, deviceCopyOnly, platformCapabilities, kindFromName, albumList, albumSubgroups, folderScan, albumCreate,
-  importStart, FIXED_PLAN_DIR_TEMPLATE, type AlbumDto, type ImportMode, type ImportPlan, type PlatformCapabilities } from "@/ipc/api";
+  importStart, photoLibraryList, type AlbumDto, type ImportMode, type ImportPlan, type PhotoLibrary, type PlatformCapabilities } from "@/ipc/api";
 import { useImportStore, seedDevicesFromBackend, type RecentSource } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { directoryPreview } from "@/lib/filesystemPaths";
-import { importRootOf } from "@/features/onboarding/onboardingConfig";
-import { isUngroupedAlbum, UNGROUPED_ALBUM_NAME } from "@/features/albums/lib/ungroupedAlbum";
+import { importRootOf, timeLayoutPreview } from "@/features/onboarding/onboardingConfig";
+import { isUngroupedAlbum } from "@/features/albums/lib/ungroupedAlbum";
 import { groupByDir, type DirGroup } from "../SourceFileViews";
 import { useImportLayout } from "./useImportLayout";
 
@@ -37,12 +36,19 @@ export function useImportWizard() {
   const recordRecentSource = useImportStore((s) => s.recordRecentSource);
 
   const importSettings = useSettingsStore((s) => s.settings.import);
-  // 激活库（达芬奇式：导入整理规则是库属性，向导只读展示）
-  const activeLibrary = useSettingsStore((s) =>
-    s.settings.activeLibraryId
-      ? s.settings.libraries.find((lib) => lib.id === s.settings.activeLibraryId) ?? null
-      : null,
-  );
+  // 目标照片库（2026-10-09 单库多照片库：导入目标 = 选照片库，替代旧 targetRoot）。
+  // TODO-M3：存储页就绪后向导加照片库选择器；当前默认取第一个在线库。
+  const [photoLibraries, setPhotoLibraries] = useState<PhotoLibrary[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void photoLibraryList().then((list) => {
+      if (!cancelled) setPhotoLibraries(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const targetLibrary = photoLibraries.find((lib) => lib.status === "online") ?? null;
 
   // 用户选择或设备深链指定来源；来源失效时不自动改选其他设备。
   // 显式 ID 优先于 URL，避免路径编码或更新批次影响当前选择。
@@ -123,11 +129,10 @@ export function useImportWizard() {
     seenFiles.current = { id: selectedId, paths: next };
   }, [selectedId, files]);
 
-  // 方案状态：目标根从激活库合成（只读；旧库缺字段时以全局设置兜底）。
-  // 目录布局已固定（时间/相册+平铺，dirTemplate 配置退役 2026-09-28）：
-  // 具体落位见相册区实时预览，此处不再展示库级模板。
-  const libraryPhotoRoot = activeLibrary?.photoRoot ?? "";
-  const targetRoot = libraryPhotoRoot ? importRootOf(libraryPhotoRoot) : "";
+  // 方案状态：目标根从目标照片库合成（只读）。落盘布局固定为纯时间
+  // `{库root}/{拍摄年}/{拍摄月}/{原文件名}`（2026-10-09 定案，物理层无相册
+  // 维度），预览展示公式；具体每文件的拍摄年/月由后端按 EXIF 落位。
+  const targetRoot = targetLibrary ? importRootOf(targetLibrary.rootPath) : "";
   const [platformCaps, setPlatformCaps] = useState<PlatformCapabilities | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -179,42 +184,14 @@ export function useImportWizard() {
       cancelled = true;
     };
   }, [albumChoice, albumId]);
-  // 相册主组织（必选，时间/相册布局 2026-09-28 定案）：导入落
-  // `照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/`，相册内平铺不按日期分层
-  //（应用内按拍摄日分组；相册导入下后端整体覆写 dir_template，预览不再拼库级模板）。
-  // 实时预览目标路径（相册目录名 dir_name 缺省回退显示名；未选出时按「未分组」兜底；
-  // 新建分支用输入名）。
-  const selectedAlbum = albumChoice === "existing" ? albums.find((a) => a.id === albumId) : undefined;
-  const ungroupedAlbum = albums.find((a) => isUngroupedAlbum(a));
-  const albumDirForPreview =
-    albumChoice === "existing"
-      ? (selectedAlbum?.dirName ?? selectedAlbum?.name ?? UNGROUPED_ALBUM_NAME)
-      : newAlbumName.trim() === ""
-        ? UNGROUPED_ALBUM_NAME
-        : newAlbumName.trim();
-  // 外层年月 = 相册创建时间（只到月）：existing 分支取所选相册 createdAt（未选出回退
-  // 「未分组」）；新建分支 = 导入当刻 YYYY/MM，空名回退「未分组」时若列表中已存在
-  // 同名保底相册则用其真实 createdAt（后端按名幂等复用），没有再用当前日期。
-  const nowForPreview = new Date();
-  const currentDateForPreview = `${nowForPreview.getFullYear()}-${String(nowForPreview.getMonth() + 1).padStart(2, "0")}-01`;
-  const albumCreatedAtForPreview =
-    albumChoice === "existing"
-      ? (selectedAlbum?.createdAt ?? ungroupedAlbum?.createdAt ?? currentDateForPreview)
-      : newAlbumName.trim() === ""
-        ? (ungroupedAlbum?.createdAt ?? currentDateForPreview)
-        : currentDateForPreview;
-  const albumYearForPreview = albumCreatedAtForPreview.slice(0, 4);
-  const albumMonthForPreview = albumCreatedAtForPreview.slice(5, 7);
-  const importTargetPreview = directoryPreview(
-    targetRoot, albumYearForPreview, albumMonthForPreview, albumDirForPreview,
-  );
+  // 目标路径预览（纯时间布局公式，2026-10-09 定案）：`{库root}/{拍摄年}/{拍摄月}/
+  // {原文件名}`——具体每文件的拍摄年/月由后端按 EXIF 落位，前端只展示公式。
+  const importTargetPreview = timeLayoutPreview(targetRoot);
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
-  // 双目的地第二份预览：第二根目录 + 同公式（后端 engine 覆写 dir_template 后随之对齐）
-  const secondImportTargetPreview = directoryPreview(
-    secondRoot.trim(), albumYearForPreview, albumMonthForPreview, albumDirForPreview,
-  );
+  // 双目的地第二份预览：第二根目录 + 同一纯时间公式
+  const secondImportTargetPreview = secondRoot.trim() ? timeLayoutPreview(secondRoot.trim()) : "";
   const [starting, setStarting] = useState(false);
   // 启动失败文案：优先透出后端 Err；invoke 不可用时为通用文案（null → 用 i18n 兜底）
   const [startError, setStartError] = useState<string | null>(null);
@@ -249,11 +226,12 @@ export function useImportWizard() {
   }, []);
 
   const isMtp = device?.kind === "mtp";
-  // 并发流数是库属性（设置页/新建库改）：向导只读合成；MTP 受协议限制恒 1
-  const effectiveStreams = isMtp ? 1 : activeLibrary?.streams ?? 4;
+  // 并发流数（应用级，2026-10-09 起不再是库属性）：默认 4；MTP 受协议限制恒 1。
+  // TODO-M2：应用级导入并发设置项实装后从设置合成。
+  const effectiveStreams = isMtp ? 1 : 4;
   // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
   const secondReady = !secondEnabled || secondRoot.trim().length > 0;
-  const canReview = Boolean(device && activeLibrary) && scanningFolder === null && !filesLoading && device?.scanStatus !== "scanning"
+  const canReview = Boolean(device && targetLibrary) && scanningFolder === null && !filesLoading && device?.scanStatus !== "scanning"
     && device?.scanStatus !== "failed" && !policyPending && selected.size > 0 && !starting;
   const albumReady = albumChoice === "existing" ? albumId !== null : newAlbumName.trim().length > 0;
   const canStart = canReview && Boolean(targetRoot) && !(mode !== "copy" && copyOnly) && secondReady && albumReady;
@@ -410,18 +388,16 @@ export function useImportWizard() {
       setAlbumError(null);
       const plan: ImportPlan = {
         sourceId: device.id,
-        targetRoot,
-        // 过渡期兼容占位（后端 ImportPlan.dir_template 必填）：相册导入下后端
-        // begin 阶段整体覆写为 {相册创建YYYY}/{MM}/{dir_name}，此值不影响落位
-        dirTemplate: FIXED_PLAN_DIR_TEMPLATE,
-        nameTemplate: "{原文件名}",
+        // 目标照片库（2026-10-09 定案）：落盘布局固定纯时间，由后端按库 root
+        // + EXIF 时间落位（dirTemplate/nameTemplate 退役不再下发）
+        targetLibraryId: targetLibrary?.id ?? "",
         duplicatePolicy,
         skipImported,
         streams: effectiveStreams,
         mode,
         secondTarget:
           mode === "copy" && secondEnabled && secondRoot.trim()
-            ? { targetRoot: secondRoot.trim(), dirTemplate: FIXED_PLAN_DIR_TEMPLATE }
+            ? { targetRoot: secondRoot.trim() }
             : undefined,
         // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
         include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
@@ -472,7 +448,7 @@ export function useImportWizard() {
     : filesLoading || device.scanStatus === "scanning" ? t("wizard.scanBeforeImport")
     : device.scanStatus === "failed" ? t("wizard.deviceScanFailed")
     : policyPending ? t("wizard.flow.checkingSource")
-    : !activeLibrary || !targetRoot ? t("wizard.location.noLibrary")
+    : !targetLibrary || !targetRoot ? t("wizard.location.noLibrary")
     : selectedCount === 0 ? t("wizard.selectPhotosHint")
     : !albumReady ? t(albumChoice === "new" ? "wizard.album.nameRequired" : "wizard.album.required")
     : !secondReady ? t("wizard.second.required") : null;
@@ -482,7 +458,7 @@ export function useImportWizard() {
     selectDevice, browseFolder, selectRecent, filesLoading, files, selected, selectedCount, selectedBytes,
     viewMode, setViewMode, tileSize, setTileSize, selectAll, clearSelection, invertSelection, refreshDevice,
     groups, collapsed, toggleFile, toggleGroup, toggleCollapse, canReview, blockedReason, canStart, starting,
-    startImport, activeLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName,
+    startImport, targetLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName,
     setNewAlbumName, albumError, setAlbumError, startError, setStartError, sourceError, setSourceError,
     copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview,
     albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy,

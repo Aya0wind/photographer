@@ -48,6 +48,8 @@ pub struct AssetDto {
     pub color_label: Option<String>,
     /// 接受/拒绝状态（0016；与星级分层的应用内选片状态）。
     pub rejected: bool,
+    /// 单文件缺失标记（§五 M2c；画廊缺失角标数据源，可筛选）。
+    pub missing: bool,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -199,6 +201,7 @@ pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
         rating: r.rating,
         color_label: r.color_label,
         rejected: r.rejected,
+        missing: r.missing,
     }
 }
 
@@ -264,7 +267,7 @@ pub fn fetch_assets_page(
     if let Some(before) = filters.captured_before.take() {
         filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db
         .assets_page(after_id, limit.clamp(1, 200), &filters)
         .map_err(|e| e.to_string())?;
@@ -281,7 +284,7 @@ pub fn fetch_assets_count(state: &super::AppState, filters: AssetFilters) -> Res
     if let Some(before) = filters.captured_before.take() {
         filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     db.assets_count(&filters).map_err(|e| e.to_string())
 }
 
@@ -300,7 +303,7 @@ pub fn fetch_asset_group_dates_filtered(
     if let Some(before) = filters.captured_before.take() {
         filters.captured_before = Some(normalize_date_filter(&before, "结束", true)?);
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db
         .asset_group_dates_filtered(&filters)
         .map_err(|e| e.to_string())?;
@@ -314,12 +317,64 @@ pub fn fetch_asset_group_dates_filtered(
         .collect())
 }
 
+/// 访问时惰性缺失检测（§五 M2c 单文件 missing 的第三通道：库上线校验 +
+/// 后台低频扫描之外的兜底）。缩略图与详情两处访问点共用。
+///
+/// - 整库离线 → None（根不可达 ≠ 文件缺失，两级语义不得互相冒充，§五）；
+/// - 文件在盘 → Some(true)：清缺席账即可——**不在此清 missing**（恢复走
+///   库扫描的哈希校验路径，§八-1 同名不同内容保护）；
+/// - 文件不在盘 → Some(false)：复用缺席账两轮确认（§八-7）——首次访问
+///   记账，第二次访问（或下一轮扫描）确认后才标 missing=1，防瞬时抖动
+///   （写入中/移动中）误标。
+///
+/// 资产不存在返回 None。检测是每访问一次 stat + 主键查询的轻量操作。
+pub fn detect_missing_on_access(db: &crate::db::Db, asset_id: i64) -> Option<bool> {
+    let row =
+        db.0.query_row(
+            "SELECT a.path, a.library_id, \
+             COALESCE((SELECT l.status = 'offline' FROM photos_libraries l \
+              WHERE l.id = a.library_id), 0) \
+             FROM assets a WHERE a.id = ?1",
+            [asset_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )
+        .ok()?;
+    let (path, library_id, library_offline) = row;
+    if library_offline {
+        return None;
+    }
+    if std::path::Path::new(&path).is_file() {
+        // 回到在位：结缺席账；missing 的清除留给库扫描恢复路径（带哈希校验）。
+        let _ = db.library_scan_clear_absent(asset_id);
+        Some(true)
+    } else {
+        // 两轮确认（§八-7）：与后台扫描共用同一本缺席账，跨通道一致。
+        let first_round = db
+            .library_scan_note_absent(asset_id, library_id.as_deref().unwrap_or(""))
+            .unwrap_or(true);
+        if !first_round {
+            let _ = db.library_scan_clear_absent(asset_id);
+            let _ =
+                db.0.execute("UPDATE assets SET missing = 1 WHERE id = ?1", [asset_id]);
+        }
+        Some(false)
+    }
+}
+
 /// 资产详情：全字段 + 同指纹重复计数 + 计算字段；不存在返回 None。
+/// 访问即触发惰性缺失检测（§五 M2c）——查看器打开是最可靠的「访问」时刻。
 pub fn fetch_asset_detail(
     state: &super::AppState,
     id: i64,
 ) -> Result<Option<AssetDetailDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
+    let _ = detect_missing_on_access(&db, id);
     let Some(asset) = db.asset_by_id(id).map_err(|e| e.to_string())? else {
         return Ok(None);
     };
@@ -415,7 +470,7 @@ pub async fn assets_seek(
         if let Some(end) = filters.captured_before.take() {
             filters.captured_before = Some(normalize_date_filter(&end, "结束", true)?);
         }
-        let db = super::active_library_db(state)?;
+        let db = super::app_database_db(state)?;
         let rows = db
             .assets_seek(
                 anchor_id,
@@ -451,7 +506,7 @@ pub struct CameraCountDto {
 
 /// 相机聚合（camera 非空分组计数，count 降序；搜索页勾选数据源）。
 pub fn fetch_camera_list(state: &super::AppState) -> Result<Vec<CameraCountDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db.camera_list().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
@@ -471,7 +526,7 @@ pub async fn camera_list(state: State<'_, SharedState>) -> Result<Vec<CameraCoun
 
 /// 镜头聚合（lens 非空分组计数降序；搜索页镜头勾选数据源）。
 pub fn fetch_lens_list(state: &super::AppState) -> Result<Vec<LensCountDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db.lens_list().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
@@ -510,7 +565,7 @@ pub async fn lens_list(state: State<'_, SharedState>) -> Result<Vec<LensCountDto
 /// 格式聚合（路径扩展名大写分组计数降序；搜索页格式勾选数据源）。
 /// `camera` 字段承载格式名（与 camera_list 同构载荷，前端复用同一组件）。
 pub fn fetch_format_list(state: &super::AppState) -> Result<Vec<FormatCountDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db.format_list().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
@@ -531,7 +586,7 @@ pub struct BurstStatsDto {
 
 /// 连拍统计核。
 pub fn fetch_burst_stats(state: &super::AppState) -> Result<BurstStatsDto, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let (groups, photos) = db.burst_stats().map_err(|e| e.to_string())?;
     Ok(BurstStatsDto {
         groups,
@@ -555,7 +610,7 @@ pub async fn format_list(state: State<'_, SharedState>) -> Result<Vec<FormatCoun
 
 /// 按 id 批量取资产（语义检索命中→画廊瓦片解析；保持入参顺序，失效 id 跳过）。
 pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<AssetDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids.iter().take(200) {
         if let Some(asset) = db.asset_by_id(*id).map_err(|e| e.to_string())? {
@@ -582,6 +637,7 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 rating: asset.rating,
                 color_label: asset.color_label,
                 rejected: asset.rejected != 0,
+                missing: asset.missing != 0,
             });
         }
     }

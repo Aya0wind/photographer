@@ -99,7 +99,7 @@ const CATALOG_JSON: &str = r#"[
     "sha256": "4daa100034482525a26c9afb9297c16580a531189e66e3d2b2ac7d32becfd593",
     "bytesTotal": 46164,
     "version": "omz-2022.1-candidate-v1",
-    "feature": "selection",
+    "feature": "evaluation",
     "tier": null
   },
   {

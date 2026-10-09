@@ -8,8 +8,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 use std::time::Duration;
@@ -63,6 +63,11 @@ fn ins(db: &db::Db, path: &str, captured: Option<&str>, kind: AssetKind) -> i64 
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()
@@ -78,14 +83,9 @@ fn album_item_count(db: &db::Db) -> i64 {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn migration_0015_creates_album_schema_with_fk_actions() {
+fn schema_creates_album_schema_with_fk_actions() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_db(dir.path());
-    let version: i64 =
-        db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
-            .unwrap();
-    // 与迁移表总长联动（此前两次滞后于新增迁移，改为派生断言）
-    assert_eq!(version as usize, db::migrations::MIGRATIONS.len());
 
     for object in [
         "album",
@@ -127,12 +127,13 @@ fn migration_0015_creates_album_schema_with_fk_actions() {
         .unwrap();
     assert_eq!(cover_fk.to_uppercase(), "SET NULL");
 
-    // 幂等：重复 migrate 版本不动
-    db.migrate().unwrap();
-    let version: i64 =
-        db.0.query_row("PRAGMA user_version", [], |r| r.get(0))
+    // 幂等：重开连接（单版本 schema）对象不重复
+    drop(db);
+    let db = open_db(dir.path());
+    let n: i64 =
+        db.0.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'album'", [], |r| r.get(0))
             .unwrap();
-    assert_eq!(version as usize, db::migrations::MIGRATIONS.len());
+    assert_eq!(n, 1, "重开不得重复建表");
 }
 
 // ---------------------------------------------------------------------------
@@ -369,23 +370,25 @@ fn album_assets_page_keyset_order_and_filter_intersection() {
     );
     fetch_album_add_assets(&state, album.id, &[a_null1, a_old, a_new, a_video], None).unwrap();
 
-    // 旧视频记录不出现在相册时间线。
+    // 旧视频记录不出现在相册时间线。排序 = captured 降序 + id 倒序
+    // tiebreak，NULL captured（未知时间）沉底（fdd827c 2026-10-07 起与
+    // 画廊分页/日期分组一致的「unknown 沉底」语义）。
     let page1: Vec<i64> = fetch_album_assets_page(&state, album.id, 0, 2, None)
         .unwrap()
         .iter()
         .map(|d: &AssetDto| d.id)
         .collect();
-    assert_eq!(page1, vec![a_null1, a_new]);
-    // 第二页：仅 a_old；a_out 不在册
-    let page2: Vec<i64> = fetch_album_assets_page(&state, album.id, a_new, 2, None)
+    assert_eq!(page1, vec![a_new, a_old]);
+    // 第二页：仅 a_null1（未知时间沉底）；a_out 不在册
+    let page2: Vec<i64> = fetch_album_assets_page(&state, album.id, a_old, 2, None)
         .unwrap()
         .iter()
         .map(|d: &AssetDto| d.id)
         .collect();
-    assert_eq!(page2, vec![a_old]);
+    assert_eq!(page2, vec![a_null1]);
     assert!(!page2.contains(&a_out), "相册外资产不进入相册时间线");
     // 尾页空
-    assert!(fetch_album_assets_page(&state, album.id, a_old, 2, None)
+    assert!(fetch_album_assets_page(&state, album.id, a_null1, 2, None)
         .unwrap()
         .is_empty());
 
@@ -480,7 +483,7 @@ fn import_cancelled_after_first(
     let db = open_db(db_dir);
     let bus = EventBus::new();
     let mut rx = bus.subscribe();
-    let mut plan = plan_for(target);
+    let mut plan = plan_for(&db, db_dir, target);
     plan.album_id = album_id;
     let mut engine = Engine::new(
         db,
@@ -561,23 +564,22 @@ fn import_without_album_keeps_behavior_unchanged() {
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let _state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    // 0018 修订（导入必落相册）：album_id = None 一律拒绝（引擎防御层；
-    // IPC 层另有同款校验，并在启动链上确保默认相册「未分组」存在）
+    // 2026-10-09 §一/§三：相册纯逻辑引用——album_id 可选（None = 不挂相册，
+    ///画廊全局视图自然可见）；带 album_id 时契约仍序列化 albumId（resume 依赖）
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
+    let plan = plan_for(&db, db_dir.path(), target.path());
     let mut engine = Engine::new(
         db,
         EventBus::new(),
         Box::new(VolumeSource::new(src.path())),
-        plan_for(target.path()),
+        plan,
     );
-    let err = engine.begin().expect_err("无 album_id 必须被拒绝");
-    assert!(err.to_string().contains("必须选择相册"), "{err}");
+    engine.begin().expect("无 album_id 应正常导入（相册可选）");
 
-    // 带 album_id 时 plan 契约仍序列化 albumId 字段（resume/retry 依赖）
     let state_db = open_db(db_dir.path());
     let album_id = state_db.ensure_default_album().unwrap();
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_for(&state_db, db_dir.path(), target.path());
     plan.album_id = Some(album_id);
     let plan_json = serde_json::to_string(&plan).unwrap();
     assert!(
@@ -600,7 +602,7 @@ fn import_into_deleted_album_degrades_gracefully() {
     fetch_album_delete(&state, album.id).unwrap();
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
-    let mut plan = plan_for(target.path());
+    let mut plan = plan_for(&db, db_dir.path(), target.path());
     plan.album_id = Some(album.id);
     let mut engine = Engine::new(
         db,

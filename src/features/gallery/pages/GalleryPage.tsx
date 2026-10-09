@@ -13,8 +13,14 @@ import {
   assetsPurgeMissing,
   assetTrashMove,
   cullSessionCreate,
+  duplicatesList,
   isIpcAvailable,
+  photoLibraryList,
+  subscribeAppEvents,
+  type AppEvent,
   type AssetDto,
+  type DuplicateGroupDto,
+  type PhotoLibrary,
 } from "@/ipc/api";
 import { collectAssetIdsByFilters } from "@/features/culling/lib/cullingCore";
 import { useCullingStore } from "@/features/culling/cullingStore";
@@ -34,6 +40,10 @@ import {
   useGalleryTileSize,
 } from "../lib/useGalleryTileSize";
 import { useAssetViewer } from "../lib/useAssetViewer";
+import {
+  collapseCrossLibraryDuplicates,
+  useHideCrossLibraryDuplicates,
+} from "../lib/crossLibraryDuplicates";
 import { useSemanticSearch, useSemanticGate, useAiIndexingProgress } from "@/features/ai/useSemanticSearch";
 import { recordSemanticQuery } from "@/features/ai/semanticHistory";
 import {
@@ -43,6 +53,7 @@ import {
 import { AssetContextMenu } from "../components/ContextMenu";
 import AssetGrid, { type AssetGridHandle, type ViewportInfo } from "../components/AssetGrid";
 import GalleryBrowseControls from "../components/GalleryBrowseControls";
+import DuplicateMembersDialog from "../components/DuplicateMembersDialog";
 import SelectionDock from "@/shared/components/SelectionDock";
 import ShortcutsHint from "../components/ShortcutsHint";
 import ViewerOverlay from "../components/ViewerOverlay";
@@ -218,6 +229,90 @@ export default function GalleryPage() {
   const resultKey=useRef<string|null>(null);
   const [resultsRevision,setResultsRevision]=useState(0);
 
+  // --- 跨库重复折叠（M5 §四：纯显示过滤，开关默认关） --------------------------------
+  const [hideDuplicates, setHideDuplicates] = useHideCrossLibraryDuplicates();
+  /** 照片库登记表（折叠在线判定 + 重复项列表展示库名；null=未拉到） */
+  const [libraries, setLibraries] = useState<PhotoLibrary[] | null>(null);
+  /** exact 重复组全量（开关开启才拉；null=未拉到不折叠）；导入/扫描收尾重拉跟上新副本 */
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroupDto[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    const pull = () => {
+      void photoLibraryList().then((list) => {
+        if (!cancelled) setLibraries(list);
+      });
+    };
+    pull();
+    void subscribeAppEvents((event: AppEvent) => {
+      if (event.type === "photoLibrariesChanged") pull();
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (!hideDuplicates) {
+      setDuplicateGroups(null);
+      return;
+    }
+    let cancelled = false;
+    /** 全量翻页拉 exact 重复组（组序按组大小降序；after=0 基组偏移，短页=到底） */
+    const pullAll = async (): Promise<void> => {
+      const collected: DuplicateGroupDto[] = [];
+      for (let after = 0; ; after += collected.length) {
+        const page = await duplicatesList("exact", after, 100);
+        if (cancelled) return;
+        collected.push(...page);
+        if (page.length < 100) break;
+      }
+      if (!cancelled) setDuplicateGroups(collected);
+    };
+    void pullAll();
+    let unlisten: (() => void) | null = null;
+    void subscribeAppEvents((event: AppEvent) => {
+      // 导入/扫描登记都会产生新副本——收尾后重拉（幂等）
+      if (event.type === "importSessionFinished" || event.type === "libraryScanFinished") {
+        void pullAll();
+      }
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [hideDuplicates, reloadNonce]);
+  const libraryById = useMemo(
+    () => (libraries === null ? null : new Map(libraries.map((l) => [l.id, l]))),
+    [libraries],
+  );
+  /** 折叠结果（null=开关关或语义态，原样透传）：可见资产 + ×N 徽标 + 组员全量 */
+  const collapse = useMemo(
+    () =>
+      hideDuplicates && !semanticMode
+        ? collapseCrossLibraryDuplicates(assets, duplicateGroups, libraryById)
+        : null,
+    [hideDuplicates, semanticMode, assets, duplicateGroups, libraryById],
+  );
+  /** 折叠后的可见资产（操作只作用于可见：卡片/分组/查看器/反选窗口全走它） */
+  const visibleAssets = collapse?.visible ?? assets;
+  /** 重复项列表目标（点瓦片 ×N 徽标打开；null=关） */
+  const [duplicatesShowFor, setDuplicatesShowFor] = useState<AssetDto | null>(null);
+
 
   useEffect(() => {
     if (semanticMode) return;
@@ -390,7 +485,8 @@ export default function GalleryPage() {
   const { selecting, selected, setSelected, toggleSelected, ctrlSelect, exitSelection, contextTargets } = useAssetSelection();
 
   // --- 展示分组与查看器 ---------------------------------------------------------------
-  const { cards, badges } = usePhotoCards(assets);
+  // 卡片/分组/查看器全部建立在折叠后的可见资产上（M5 §四：操作只作用于可见资产）
+  const { cards, badges } = usePhotoCards(visibleAssets);
   const semanticCards = usePhotoCards(semantic.assets);
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const semanticGroups = useMemo(() => groupAssetsByDate(semanticCards.cards), [semanticCards.cards]);
@@ -418,7 +514,7 @@ export default function GalleryPage() {
   const previousReadyGroups = useRef<typeof displayGroups | null>(null);
   useEffect(()=>{if(!resultsBusy)previousReadyGroups.current=currentGroups;},[resultsBusy,currentGroups]);
   const activeGroups = resultsBusy ? previousReadyGroups.current ?? currentGroups : currentGroups;
-  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups, semanticMode ? semantic.assets : assets);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups, semanticMode ? semantic.assets : visibleAssets);
   // 预览靠近已加载末尾时提前补页，让跨日期连续翻页也能越过分页边界。
   useEffect(() => {
     if (semanticMode || !viewer || !hasMoreRef.current) return;
@@ -500,10 +596,12 @@ export default function GalleryPage() {
     [patchAssetsByIds],
   );
 
-  /** 反选数据窗口：当前数据管线的全部已加载 id（语义态=语义结果；其余=画廊资产） */
+  /** 反选数据窗口：当前数据管线的全部已加载可见 id（语义态=语义结果；其余=
+   *  画廊可见资产——跨库重复折叠时隐藏副本不进窗口，操作只作用于可见资产） */
   const windowIds = useMemo(
-    () => (semanticMode ? semantic.assets.map((a) => a.id) : assets.map((a) => a.id)),
-    [semanticMode, semantic.assets, assets],
+    () =>
+      semanticMode ? semantic.assets.map((a) => a.id) : visibleAssets.map((a) => a.id),
+    [semanticMode, semantic.assets, visibleAssets],
   );
 
   /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
@@ -628,7 +726,11 @@ export default function GalleryPage() {
           tileSize={tileSize} onTileSize={setTileSize} onImport={() => navigate("/import")}
           onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}
           cullDisabled={resultsBusy || (semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
+          hideDuplicates={hideDuplicates}
+          onToggleDuplicates={() => setHideDuplicates(!hideDuplicates)}
+          duplicatesActive={!semanticMode && collapse !== null && duplicateGroups !== null && duplicateGroups.length > 0}
         />
+
 
         {/* 语义态状态头：查询词 + 结果数 + 退出（本地语义输入框已删，入口唯一=
             TitleBar 全局搜索框；本行保证语义态一眼可识别、可退出） */}
@@ -771,6 +873,8 @@ export default function GalleryPage() {
               badges={semanticMode ? semanticCards.badges : badges}
               scores={semanticMode ? semantic.scores : undefined}
               burstBadges={semanticMode ? undefined : burstBadges}
+              duplicateBadges={semanticMode ? undefined : collapse?.badges}
+              onShowDuplicates={semanticMode ? undefined : (asset) => setDuplicatesShowFor(asset)}
             />
           )}
           </FilterResultsTransition>
@@ -838,6 +942,18 @@ export default function GalleryPage() {
         <AddToAlbumDialog
           assets={addToAlbumTargets}
           onClose={() => setAddToAlbumTargets(null)}
+        />
+      )}
+
+      {/* 跨库重复项列表（点瓦片 ×N 徽标打开；组员全量来自 duplicates_list） */}
+      {duplicatesShowFor !== null && (
+        <DuplicateMembersDialog
+          members={
+            collapse?.membersByVisibleId.get(duplicatesShowFor.id) ?? [duplicatesShowFor]
+          }
+          visibleId={duplicatesShowFor.id}
+          libraries={libraries}
+          onClose={() => setDuplicatesShowFor(null)}
         />
       )}
 

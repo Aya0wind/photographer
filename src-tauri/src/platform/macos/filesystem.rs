@@ -57,6 +57,20 @@ pub(crate) fn filesystem_identity(
 
 pub(crate) fn configure_sequential_read(_: &mut std::fs::OpenOptions) {}
 
+/// 资产登记指纹（§三 增量扫描两级识别）：APFS/HFS+ 无独立卷序列号 +
+/// 文件 id 体系，dev（卷设备号）+ ino（inode 号）即等价物——硬链接共享
+/// inode，rename 不变。
+#[allow(dead_code)]
+pub(crate) fn file_registration_id(
+    path: &Path,
+) -> std::io::Result<super::super::FileRegistrationId> {
+    let metadata = std::fs::metadata(path)?;
+    Ok(super::super::FileRegistrationId {
+        volume_serial: metadata.dev(),
+        file_id: format!("{:016x}", metadata.ino()),
+    })
+}
+
 pub(crate) fn volume_root(id: &str) -> PathBuf {
     PathBuf::from(id)
 }

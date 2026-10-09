@@ -35,123 +35,6 @@ impl Db {
         rows.collect()
     }
 
-    /// 按相册 id 取目录名（相册改名 / 物理挪移用）。
-    pub fn album_dir_name(&self, id: i64) -> Result<Option<String>> {
-        self.0
-            .query_row("SELECT dir_name FROM album WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .map(Some)
-            .or_else(|e| match e {
-                Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-    }
-
-    /// 相册主目录相对段（photoRoot 下，含 dir_name，**无**头尾分隔符）：
-    /// `{创建YYYY}/{创建MM}/{dir_name}`——布局公式只此一处定义（用户定案
-    /// 2026-09-28：时间/相册 + 相册内平铺），导入引擎（dir_template 覆写）、
-    /// 归册挪移（claim）、album 模式导出三调用点共用，不得各自拼。
-    /// 外层两段 = 相册 created_at（UTC 口径，与列存储一致）的字面量段，
-    /// 相册级常量——相册内照片平铺，拍摄日分组在应用 UI（groupAssetsByDate）
-    /// 完成，不落存储层。created_at 解析失败（理论不可能，列 NOT NULL）
-    /// 兜底 dir_name 直挂 photoRoot。段间用 `/`（render_dir 渲染产物同形态，
-    /// Windows Path::join 兼容）。
-    ///
-    /// 子组物理化（0022）后「相册内平铺」的唯一例外 = 子组：条目级落位
-    /// 请用 [`Db::album_item_home_rel`]（本方法保留为相册主目录基段）。
-    pub fn album_home_rel(&self, id: i64) -> Result<Option<String>> {
-        self.0
-            .query_row(
-                "SELECT created_at, dir_name FROM album WHERE id = ?1",
-                [id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .map(|(created_at, dir_name)| album_home_rel_parts(&created_at, &dir_name))
-            .map(Some)
-            .or_else(|e| match e {
-                Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-    }
-
-    /// 全部相册的主目录相对段（claim 挪移的主相册前缀判定用，
-    /// [`Db::album_home_rel`] 的批量形态）。
-    pub fn album_home_rels(&self) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT id, created_at, dir_name FROM album ORDER BY id")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                album_home_rel_parts(&r.get::<_, String>(1)?, &r.get::<_, String>(2)?),
-            ))
-        })?;
-        rows.collect()
-    }
-
-    /// 相册内**条目**目录相对段（子组物理化 0022，存储布局唯一不平铺例外）：
-    /// `{创建YYYY}/{创建MM}/{dir_name}[/{子组}]`——subgroup=Some 时在相册
-    /// 主目录（[`Db::album_home_rel`]）之后追加净化子组段，None = 相册根
-    /// （平铺现状）。四调用点共用（导入引擎 dir_template 覆写、移组挪移
-    /// album_item_move_subgroup、album 模式导出、claim 归册），不得各自拼。
-    ///
-    /// 子组段口径：与 album dir_name 同一 [`sanitize_dir_name`]（非法字符/
-    /// 控制符折叠、尾点空格剥离、保留设备名前缀、80 字符截断、空兜底）——
-    /// DB subgroup 原值（UI datalist 输入）与物理段是**纯函数映射**，四个
-    /// 调用点对同一子组名永远解析出同一段，物理归位不漂移。子组嵌套不支持
-    /// （一层；`/` 等分隔符在 sanitize 中折叠为 `-`，天然拍平）。同名文件
-    /// 占位该目录名时物理 mkdir 失败由调用方按行报错（简化定案：sanitize
-    /// 后直接用，不做让位）。
-    pub fn album_item_home_rel(&self, id: i64, subgroup: Option<&str>) -> Result<Option<String>> {
-        match self.album_home_rel(id)? {
-            Some(home) => Ok(Some(match subgroup {
-                Some(sub) => format!("{}/{}", home, sanitize_dir_name(sub)),
-                None => home,
-            })),
-            None => Ok(None),
-        }
-    }
-
-    /// 批量改写资产路径前缀（0018 相册目录 rename / claim 挪移共用）：
-    /// `path` 以 `old_prefix`（含尾分隔符）开头的行改为 `new_prefix +`
-    /// 剩余部分，同事务内顺带更新 album.dir_name。前缀匹配**分隔符归一**
-    /// （`\` 与 `/` 视为等同——库内 path 存在两种形态：引擎 render_dir
-    /// 产物段内是 `/`、claim/迁移脚本产物是 `\`；替换只动前缀段，剩余
-    /// 部分保留原分隔符）。返回改写行数。filename 若在新路径下失效由
-    /// 调用方一并处理。
-    pub fn album_rewrite_paths(
-        &self,
-        album_id: i64,
-        new_dir_name: &str,
-        old_prefix: &str,
-        new_prefix: &str,
-    ) -> Result<u64> {
-        let norm_old = old_prefix.replace('\\', "/");
-        let prefix_chars = norm_old.chars().count() as i64;
-        let tx = self.0.unchecked_transaction()?;
-        let n = tx.execute(
-            "UPDATE assets SET path = ?2 || substr(path, ?4 + 1) \
-             WHERE substr(replace(path, char(92), '/'), 1, ?4) = ?3",
-            params![album_id, new_prefix, norm_old, prefix_chars],
-        )?;
-        tx.execute(
-            "UPDATE album SET dir_name = ?2 WHERE id = ?1",
-            params![album_id, new_dir_name],
-        )?;
-        tx.commit()?;
-        Ok(n as u64)
-    }
-
-    /// 单资产路径更新（claim 挪移落库；文件名可随冲突后缀变化）。
-    pub fn asset_update_path(&self, id: i64, new_path: &str, new_filename: &str) -> Result<()> {
-        self.0.execute(
-            "UPDATE assets SET path = ?2, filename = ?3 WHERE id = ?1",
-            params![id, new_path, new_filename],
-        )?;
-        Ok(())
-    }
-
     /// 系统级保底（0018 修订）：确保默认相册「未分组」存在（按名称幂等），
     /// 返回其 id。导入启动时调用；「未分组」禁删禁改名（用户定案），故
     /// 幂等保证永远命中同一条，不会重复创建。
@@ -305,12 +188,9 @@ impl Db {
         Ok(added)
     }
 
-    /// 相册内挪子分组的**账本半边**（0019；0022 物理化后由 IPC 层
-    /// `fetch_album_item_move_subgroup` 编排：先物理挪移（XMP 边车随行）再
-    /// 走本方法改 subgroup + `asset_update_path` 改写路径——先物理后账本，
-    /// 挪移失败的行不落账）。本方法只做引用层 UPDATE（subgroup 改写，
-    /// None = 挪回根），不动物理文件。不在该相册的 id 自然不命中（0 行）。
-    /// 返回实际改写行数；相册不存在报错。
+    /// 相册内挪子分组（0019；2026-10-09 逻辑化后即全部语义）：纯引用层
+    /// UPDATE（subgroup 改写，None = 挪回根），零文件操作（§一）。不在该
+    /// 相册的 id 自然不命中（0 行）。返回实际改写行数；相册不存在报错。
     pub fn album_item_move_subgroup(
         &self,
         album_id: i64,
@@ -387,5 +267,48 @@ impl Db {
             |r| r.get(0),
         )?;
         Ok(exists != 0)
+    }
+
+    /// 相册/子组「导出为文件夹」成员清单（M6，§六 LR 互操作）：album_item
+    /// 引用 JOIN 资产行——只取导出所需列（路径/缺失标记/星级/颜色/拒绝），
+    /// 回收站与 video/other 不导出；subgroup=None 导整个相册（含根与全部
+    /// 子组），Some(name) 只导该子组。added_at 升序（导入先后即稳定序，
+    /// 进度与冲突后缀可复现）。
+    pub fn album_export_members(
+        &self,
+        album_id: i64,
+        subgroup: Option<&str>,
+    ) -> Result<Vec<AlbumExportMember>> {
+        let sql = match subgroup {
+            Some(_) => {
+                "SELECT a.id, a.path, a.filename, a.missing, a.rating, a.color_label, \
+                 a.rejected FROM album_item i JOIN assets a ON a.id = i.asset_id \
+                 WHERE i.album_id = ?1 AND i.subgroup = ?2 AND a.in_trash = 0 \
+                 AND a.kind IN ('photo', 'raw') ORDER BY i.added_at, i.asset_id"
+            }
+            None => {
+                "SELECT a.id, a.path, a.filename, a.missing, a.rating, a.color_label, \
+                 a.rejected FROM album_item i JOIN assets a ON a.id = i.asset_id \
+                 WHERE i.album_id = ?1 AND a.in_trash = 0 \
+                 AND a.kind IN ('photo', 'raw') ORDER BY i.added_at, i.asset_id"
+            }
+        };
+        let map = |row: &rusqlite::Row<'_>| -> Result<AlbumExportMember> {
+            Ok(AlbumExportMember {
+                asset_id: row.get(0)?,
+                path: row.get(1)?,
+                filename: row.get(2)?,
+                missing: row.get::<_, i64>(3)? != 0,
+                rating: row.get(4)?,
+                color_label: row.get(5)?,
+                rejected: row.get::<_, i64>(6)? != 0,
+            })
+        };
+        let mut stmt = self.0.prepare(sql)?;
+        let rows = match subgroup {
+            Some(name) => stmt.query_map(params![album_id, name], map)?,
+            None => stmt.query_map(params![album_id], map)?,
+        };
+        rows.collect()
     }
 }

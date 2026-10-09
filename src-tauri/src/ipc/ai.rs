@@ -51,14 +51,7 @@ pub fn fetch_search_semantic(
             "语义检索模型未下载（{visual} / {text} / siglip2-tokenizer，             请先在设置页下载）"
         ));
     }
-    let library = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .cloned()
-        .ok_or("尚未创建库")?;
-    let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let db_dir = super::app_database_dir(state);
     let db = super::open_library_db(&db_dir)?;
     let (settings_value, tier) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
@@ -113,15 +106,15 @@ fn watch_model_install(
         .spawn("ai-postinstall", name.into(), move |_| {
             for _ in 0..600 {
                 if ready(&shared.ai) {
-                    let (library, ai_snapshot) = {
-                        let settings = shared.settings.lock().expect("settings mutex poisoned");
-                        (settings.active_library().cloned(), settings.ai.clone())
-                    };
-                    if let Some(library) = library {
-                        let db_dir = std::path::PathBuf::from(&library.db_dir);
-                        backfill(&shared, db_dir.clone(), &ai_snapshot);
-                        super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
-                    }
+                    let ai_snapshot = shared
+                        .settings
+                        .lock()
+                        .expect("settings mutex poisoned")
+                        .ai
+                        .clone();
+                    let db_dir = super::app_database_dir(&shared);
+                    backfill(&shared, db_dir.clone(), &ai_snapshot);
+                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -209,14 +202,7 @@ pub async fn ai_model_delete(state: State<'_, SharedState>, id: String) -> Resul
 /// 一键清除人脸数据核：faces + people 清空、face 通道任务清空、
 /// assets.face_indexed_at 复位（可重新回填）+ 簇心缓存失效。
 pub fn fetch_face_data_clear(state: &super::AppState) -> Result<bool, String> {
-    let library = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .active_library()
-        .cloned()
-        .ok_or("尚未创建库")?;
-    let db_dir = std::path::PathBuf::from(&library.db_dir);
+    let db_dir = super::app_database_dir(state);
     let db = super::open_library_db(&db_dir)?;
     db.clear_face_data().map_err(|e| e.to_string())?;
     crate::ai::face::invalidate_cluster_cache(&db_dir);

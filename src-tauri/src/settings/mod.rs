@@ -4,8 +4,13 @@
 //! - JSON 损坏 -> 把坏文件改名为 `settings.json.corrupt-{unix秒}` 后返回默认值，不视为错误。
 //! - 旧版本缺字段 -> 依赖 serde `#[serde(default)]` 容错填充，并视为已迁移。
 //! - 保存采用原子写：先写 `settings.json.tmp` 再 rename 覆盖。
+//!
+//! 2026-10-09 单数据库多照片库定案（§二）：settings.json 只留**应用级**设置。
+//! 旧「libraries 注册表 / activeLibraryId / dbDir 库模型」整体退役——照片库
+//! 登记表由数据库 `photos_libraries` 表承载（`crate::db::libraries`），旧
+//! settings.json 残留键 serde 反序列化自动忽略（不做迁移，版本未发布红线）。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -17,15 +22,17 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 const SETTINGS_FILE: &str = "settings.json";
 
-/// 应用配置根结构（camelCase JSON）。
+/// 应用配置根结构（camelCase JSON；只含应用级设置）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub schema_version: u32,
     pub onboarding_completed: bool,
-    /// 库注册表（达芬奇式：每个库是独立数据单元，见设计文档 §5.11）。
-    pub libraries: Vec<Library>,
-    pub active_library_id: Option<String>,
+    /// 应用级唯一数据库位置（2026-10-09 单数据库多照片库定案 §一）：
+    /// None = 默认应用数据目录；Some = 自定义绝对路径（Windows 数据盘
+    /// 需求，规范化形态）。library.db / thumbs / 向量等一切数据落在该
+    /// 目录；修改后重启生效（M5 设置 UI）。
+    pub database_dir: Option<String>,
     pub import: ImportSettings,
     pub gallery: GallerySettings,
     pub appearance: AppearanceSettings,
@@ -39,59 +46,15 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// 当前激活的库（按 id 在注册表中查找；未设置或找不到返回 None）。
-    pub fn active_library(&self) -> Option<&Library> {
-        let id = self.active_library_id.as_ref()?;
-        self.libraries.iter().find(|lib| &lib.id == id)
+    /// 数据库目录解析（§一）：自定义「数据库位置」优先，否则应用数据目录
+    ///（`app_config_dir` = Tauri app_config_dir，settings.json 所在处）。
+    /// 一切数据库件（library.db / thumbs / vectors.usearch 等）落该目录；
+    /// 与照片库 root 的互斥校验（§八-6）以此为基准。
+    pub fn database_dir_path(&self, app_config_dir: &Path) -> PathBuf {
+        self.database_dir
+            .as_deref()
+            .map_or_else(|| app_config_dir.to_path_buf(), PathBuf::from)
     }
-}
-
-/// 库 = 独立数据单元：`db_dir` 数据库目录自包含（SQLite/缩略图/向量/日志），
-/// `photo_root` 照片存储目录与之分离；两者均可迁移。
-///
-/// 布局属性**不再可配置**（用户定案 2026-09-28）：M2 时代的库级
-/// `dir_template` 目录模板与 `import_subdir` 导入子目录已退役——物理布局
-/// 固定为 `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`（相册内平铺，公式
-/// 唯一来源 [`crate::db::album_home_rel_parts`]）。旧 settings.json 里的
-/// `dirTemplate`/`importSubdir` 残留键 serde 反序列化自动忽略（不升 schema）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Library {
-    pub id: String,
-    pub name: String,
-    pub db_dir: String,
-    pub photo_root: String,
-    /// 配置链是否走完（达芬奇式启动流，用户规定 2026-09-18：每次启动先进
-    /// 库选择器）：新建库为 false，走完库配置链置 true；选择器据此决定
-    /// 是否继续进入配置向导。旧 settings.json 缺字段 → false，由 load 的
-    /// 一次性迁移平滑处理（见 `SettingsManager::load`）。
-    #[serde(default)]
-    pub configured: bool,
-    /// 导入并发流数（库属性，用户规定 2026-09-19：向导内不可改）。
-    /// MTP 源后端仍强制单流，此处值仅作用于卷/文件夹源。
-    #[serde(default = "default_streams")]
-    pub streams: u32,
-    /// 库级 AI 档位；None 仅用于迁移旧全局配置。
-    pub ai_quality_tier: Option<String>,
-}
-
-impl Default for Library {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            db_dir: String::new(),
-            photo_root: String::new(),
-            configured: false,
-            streams: default_streams(),
-            ai_quality_tier: None,
-        }
-    }
-}
-
-/// 库级并发流数默认值。
-fn default_streams() -> u32 {
-    4
 }
 
 impl Default for Settings {
@@ -99,8 +62,7 @@ impl Default for Settings {
         Self {
             schema_version: SCHEMA_VERSION,
             onboarding_completed: false,
-            libraries: Vec::new(),
-            active_library_id: None,
+            database_dir: None,
             import: ImportSettings::default(),
             gallery: GallerySettings::default(),
             appearance: AppearanceSettings::default(),
@@ -150,51 +112,6 @@ impl Default for GallerySettings {
     }
 }
 
-/// ai.qualityTier 是当前库的运行时投影；持久化真值属于每个 Library。
-pub fn normalize_library_quality_tiers(
-    settings: &mut Settings,
-    previous: &Settings,
-) -> Result<(), String> {
-    for lib in &mut settings.libraries {
-        if lib.ai_quality_tier.is_none() {
-            let existing = previous.libraries.iter().find(|old| old.id == lib.id);
-            lib.ai_quality_tier = Some(
-                existing
-                    .and_then(|old| old.ai_quality_tier.clone())
-                    .unwrap_or_else(|| {
-                        if existing.is_some() {
-                            previous.ai.quality_tier.clone()
-                        } else {
-                            default_quality_tier()
-                        }
-                    }),
-            );
-        }
-        if !matches!(
-            lib.ai_quality_tier.as_deref(),
-            Some("fast" | "normal" | "accurate")
-        ) {
-            return Err(format!("库 {} 的 AI 档位无效", lib.name));
-        }
-    }
-    let changed_here = settings.active_library_id == previous.active_library_id
-        && settings.ai.quality_tier != previous.ai.quality_tier;
-    if let Some(lib) = settings
-        .libraries
-        .iter_mut()
-        .find(|lib| Some(&lib.id) == settings.active_library_id.as_ref())
-    {
-        if changed_here {
-            lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
-        }
-        settings.ai.quality_tier = lib
-            .ai_quality_tier
-            .clone()
-            .unwrap_or_else(default_quality_tier);
-    }
-    Ok(())
-}
-
 /// 查重策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,9 +132,9 @@ pub enum IndexSchedule {
     Manual,
 }
 
-/// 设备与导入配置。目录布局不在其列——布局固定不可配置（2026-09-28
-/// 定案，见 [`Library`] 注释）；旧 settings.json 的 `import.dirTemplate` /
-/// `import.importSubdir` 残留键 serde 自动忽略。
+/// 设备与导入配置。目录布局不在其列——落盘布局固定为纯时间
+/// `{照片库}/{拍摄年}/{拍摄月}/{原文件名}`（2026-10-09 定案 §三，不可
+/// 配置）；旧 settings.json 的 `import.dirTemplate` 等残留键 serde 自动忽略。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ImportSettings {
@@ -236,7 +153,7 @@ impl Default for ImportSettings {
     }
 }
 
-/// AI 能力与资源限制配置。
+/// AI 能力与资源限制配置（应用级全局；旧库级 aiQualityTier 随库注册表退役）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettings {
@@ -346,13 +263,12 @@ pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// 库路径规范化（2026-09-28 边界修复）
+// 路径规范化（建库统一闸门）
 // ---------------------------------------------------------------------------
 
-/// 库路径规范化（onboarding/建库统一闸门）：前端提交的 photoRoot/dbDir
-/// 字符串曾放过盘符相对路径（真机实证 `I:SmartPhotoedge-photos`——用户
-/// 手输少打一个反斜杠），被按进程 CWD 解析后 DB 落到 src-tauri/ 下并触发
-/// dev watcher 风暴。规则：
+/// 照片库根目录规范化（photo_library_create / relocate 统一闸门）：
+/// 前端提交的 root 字符串曾放过盘符相对路径（真机实证 `I:SmartPhotoedge-photos`
+/// ——用户手输少打一个反斜杠），被按进程 CWD 解析后误落他处。规则：
 /// ① 必须是绝对路径（`Path::is_absolute()`——Windows 上 `I:xxx` 无根
 ///    分量因此为 false），否则拒绝；
 /// ② 组件级逻辑归一（始终）：正斜杠折成反斜杠、折叠 `.`/`..`，保持绝对
@@ -360,125 +276,46 @@ pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
 ///    映射盘 Y:\ 翻成 UNC 形态，导致库内盘符路径前缀匹配失效、且与用户
 ///    配置形态漂移；绝对性校验已由 ① 保证，canonical 不再必要）。
 pub fn normalize_library_path(input: &str) -> Result<String, String> {
+    normalize_absolute_path(input, "照片库根目录")
+}
+
+/// 「数据库位置」规范化（同一闸门，2026-10-09 单数据库多照片库 §一）：
+/// 拒绝相对路径（同 `I:xxx` 盘符相对陷阱）与盘根（数据库目录承载一切
+/// 数据件，不得与整盘混同——照片库 root 互斥校验以它为基准，盘根会与
+/// 任何同盘照片库互相包含）。
+pub fn normalize_database_path(input: &str) -> Result<String, String> {
+    let normalized = normalize_absolute_path(input, "数据库位置")?;
+    let path = Path::new(&normalized);
+    if path
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+    {
+        return Err(format!(
+            "数据库位置不能是磁盘或网络共享的根目录：{normalized}"
+        ));
+    }
+    Ok(normalized)
+}
+
+/// 绝对路径规范化闸门内核（照片库 root / 数据库位置共用，规则见
+/// [`normalize_library_path`]；`label` 进错误文案）。
+fn normalize_absolute_path(input: &str, label: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(format!("路径必须是绝对路径：{input}"));
+        return Err(format!("{label}必须是绝对路径：{input}"));
     }
     let path = Path::new(trimmed);
     if !path.is_absolute() {
-        return Err(format!("路径必须是绝对路径：{trimmed}"));
+        return Err(format!("{label}必须是绝对路径：{trimmed}"));
     }
     Ok(logical_normalize(path).to_string_lossy().into_owned())
 }
 
-/// 全部库的 db_dir / photo_root 逐一规范化（settings_set 前置；任一非法
-/// 拒绝整次写入，前端提示修正后重提）。既有库路径已是规范形态时幂等。
-pub fn normalize_library_paths(settings: &mut Settings) -> Result<(), String> {
-    for lib in &mut settings.libraries {
-        lib.db_dir = normalize_library_path(&lib.db_dir)?;
-        lib.photo_root = normalize_library_path(&lib.photo_root)?;
-    }
-    Ok(())
-}
-
-/// Only a dedicated directory may own a library. Existing database directories are
-/// accepted for recovery, but an arbitrary non-empty folder is never adopted.
-/// Run this only for newly registered or changed paths so older libraries can still
-/// be opened and migrated without retroactively rejecting their layout.
-pub fn validate_library_storage_paths(
-    settings: &Settings,
-    previous: &Settings,
-) -> Result<(), String> {
-    fn overlaps(a: &Path, b: &Path) -> bool {
-        let a = a.to_string_lossy().replace('/', "\\").to_lowercase();
-        let b = b.to_string_lossy().replace('/', "\\").to_lowercase();
-        a == b || a.starts_with(&(b.clone() + "\\")) || b.starts_with(&(a + "\\"))
-    }
-    fn disk_root(path: &Path) -> bool {
-        path.parent()
-            .is_none_or(|parent| parent.as_os_str().is_empty())
-    }
-    for lib in &settings.libraries {
-        let old = previous.libraries.iter().find(|item| item.id == lib.id);
-        let db = Path::new(&lib.db_dir);
-        let photos = Path::new(&lib.photo_root);
-        if old.is_some_and(|item| item.db_dir == lib.db_dir && item.photo_root == lib.photo_root) {
-            continue;
-        }
-        if disk_root(db) || disk_root(photos) {
-            return Err("库目录不能直接选择磁盘或网络共享的根目录".into());
-        }
-        if overlaps(db, photos) {
-            return Err("数据库目录与照片目录不能相同或互相包含".into());
-        }
-        let real_db = db.canonicalize().ok();
-        let real_photos = photos.canonicalize().ok();
-        if let (Some(real_db), Some(real_photos)) = (&real_db, &real_photos) {
-            if overlaps(&real_db, &real_photos) {
-                return Err("数据库目录与照片目录实际指向同一位置或互相包含".into());
-            }
-        }
-        for other in &settings.libraries {
-            if other.id == lib.id {
-                continue;
-            }
-            for path in [Path::new(&other.db_dir), Path::new(&other.photo_root)] {
-                if overlaps(db, path) || overlaps(photos, path) {
-                    return Err(format!("库目录与已有库「{}」的目录重叠", other.name));
-                }
-                let real_path = path.canonicalize().ok();
-                if let (Some(real_path), Some(real_db)) = (&real_path, &real_db) {
-                    if overlaps(&real_path, &real_db) {
-                        return Err(format!("库目录与已有库「{}」的实际位置重叠", other.name));
-                    }
-                }
-                if let (Some(real_path), Some(real_photos)) = (&real_path, &real_photos) {
-                    if overlaps(&real_path, &real_photos) {
-                        return Err(format!("库目录与已有库「{}」的实际位置重叠", other.name));
-                    }
-                }
-            }
-        }
-        for (path, label) in [(db, "数据库目录"), (photos, "照片目录")] {
-            if path.exists() && !path.is_dir() {
-                return Err(format!("{label}不是文件夹：{}", path.display()));
-            }
-        }
-        if old.is_none_or(|item| item.db_dir != lib.db_dir) && db.is_dir() {
-            let database = db.join("library.db");
-            if database.is_file() {
-                let conn = rusqlite::Connection::open_with_flags(
-                    &database,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                )
-                .map_err(|e| format!("无法恢复此数据库目录：{e}"))?;
-                let recognized: bool = conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='assets')",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| format!("无法验证已有数据库：{e}"))?;
-                if !recognized {
-                    return Err("所选目录中的 library.db 不是可识别的照片库".into());
-                }
-            } else if std::fs::read_dir(db)
-                .map_err(|e| format!("无法读取数据库目录：{e}"))?
-                .next()
-                .is_some()
-            {
-                return Err("数据库目录必须为空，或包含可恢复的 library.db".into());
-            }
-        }
-        if old.is_none_or(|item| item.photo_root != lib.photo_root)
-            && photos.is_dir()
-            && std::fs::read_dir(photos)
-                .map_err(|e| format!("无法读取照片目录：{e}"))?
-                .next()
-                .is_some()
-        {
-            return Err("照片目录必须是空目录，或选择尚未创建的新目录".into());
-        }
+/// database_dir 规范化（settings_set 前置）：Some → 绝对路径归一 + 盘根
+/// 拒绝（见 [`normalize_database_path`]）；None（默认应用数据目录）通过。
+pub fn normalize_settings_database_dir(settings: &mut Settings) -> Result<(), String> {
+    if let Some(dir) = settings.database_dir.as_deref() {
+        settings.database_dir = Some(normalize_database_path(dir)?);
     }
     Ok(())
 }
@@ -562,6 +399,7 @@ impl SettingsManager {
     /// 文件不存在返回默认值；JSON 损坏时把坏文件改名为
     /// `settings.json.corrupt-{unix秒}` 后返回默认值；旧版本缺字段由
     /// serde default 容错填充并升到当前 SCHEMA_VERSION（视为已迁移）。
+    /// 旧库注册表（libraries/activeLibraryId/dbDir）键自动忽略（§二 退役）。
     pub fn load(dir: &Path) -> Result<Settings, SettingsError> {
         let path = dir.join(SETTINGS_FILE);
         if !path.is_file() {
@@ -575,26 +413,7 @@ impl SettingsManager {
                 }
                 // 缺字段已被 serde(default) 填充，这里统一升版本号完成迁移。
                 settings.schema_version = SCHEMA_VERSION;
-                migrate_legacy_libraries(&mut settings);
                 migrate_legacy_ai_settings(&mut settings);
-                // 旧库首次迁移时各自记住旧档位，之后不再跟随全局投影。
-                for lib in &mut settings.libraries {
-                    if lib.ai_quality_tier.is_none() {
-                        lib.ai_quality_tier = Some(settings.ai.quality_tier.clone());
-                    }
-                    if !matches!(
-                        lib.ai_quality_tier.as_deref(),
-                        Some("fast" | "normal" | "accurate")
-                    ) {
-                        lib.ai_quality_tier = Some(default_quality_tier());
-                    }
-                }
-                if let Some(tier) = settings
-                    .active_library()
-                    .and_then(|lib| lib.ai_quality_tier.clone())
-                {
-                    settings.ai.quality_tier = tier;
-                }
                 Ok(settings)
             }
             Err(_parse_error) => {
@@ -622,22 +441,6 @@ fn unix_timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
-}
-
-/// 存量库一次性迁移（达芬奇式启动流，2026-09-18）：旧模型没有
-/// `configured` 标记——已完成引导且持有库的用户视为库配置早已走完：
-/// 若 `onboarding_completed` 且库列表非空且**所有库都未 configured**，
-/// 全部标 true（部分库已 configured 说明已是新模型写入，不再迁移，
-/// 避免波及用户新建未配置的库）。迁移结果在下次 save 时落盘。
-fn migrate_legacy_libraries(settings: &mut Settings) {
-    if settings.onboarding_completed
-        && !settings.libraries.is_empty()
-        && settings.libraries.iter().all(|lib| !lib.configured)
-    {
-        for lib in &mut settings.libraries {
-            lib.configured = true;
-        }
-    }
 }
 
 /// AI 节一次性迁移（2026-09-28 三档画质）：

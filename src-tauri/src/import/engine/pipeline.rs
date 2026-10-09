@@ -1,6 +1,11 @@
 //! 单文件单遍读取流水线（引擎工作线程侧）：读流 → xxh64 哈希 → `.part`
 //! 暂存（主/第二目的地双写）→ head 截存 → 类型识别/EXIF → 长度校验。
 //! 只做源读取/哈希/写盘，不碰 SQLite；收集端（mod.rs）串行结算。
+//!
+//! 2026-10-09 单数据库多照片库（§三）：落盘布局固定**纯时间**
+//! `{照片库root}/{拍摄年}/{拍摄月}/{原文件名}`——拍摄时间 = EXIF
+//! DateTimeOriginal，缺失回退文件修改时间（[`resolve_captured`]）；文件名
+//! 原样保留（重名由收集端 rename 策略处理）。第二目的地同公式仅根不同。
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -10,9 +15,7 @@ use xxhash_rust::xxh64::Xxh64;
 
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
 use crate::events::AssetKind;
-use crate::import::templates::{
-    render_dir, render_name, resolve_captured, RenderCtx, TemplateError,
-};
+use crate::import::templates::resolve_captured;
 use crate::metadata::exif_lite::{self, MetaLite};
 use crate::settings::DuplicatePolicy;
 
@@ -22,15 +25,12 @@ use super::PART_DIR;
 const CHUNK: usize = 8 * 1024 * 1024;
 /// 头部截存上限：EXIF-lite + 魔数识别只需文件头。
 const HEAD_MAX: usize = 1024 * 1024;
-/// {相机}/{镜头} 上下文缺失时的降级默认段。
-const FALLBACK_CAMERA: &str = "未知相机";
-const FALLBACK_LENS: &str = "未知镜头";
 
 /// 工作线程产出。
 pub(super) enum FileOutcome {
     Copied(Box<CopiedFile>),
     Referenced(Box<ReferenceFile>),
-    /// 免下载预跳：Skip/Ask 策略下目标路径已存在（与收集端 ③ 同判据提前），
+    /// 免下载预跳（Skip/Ask 策略下目标路径已存在，与收集端 ③ 同判据提前），
     /// 只读了头段（EXIF 渲染目标路径必需），无 .part/无哈希。
     Skipped {
         entry: FileEntry,
@@ -229,11 +229,22 @@ impl PartSink {
     }
 }
 
+/// 纯时间布局相对段（§三 唯一公式）：`{拍摄年}/{拍摄月}/{原文件名}`——
+/// 拍摄时间 = EXIF，缺失回退文件修改时间（与 `assets.captured_at` 落库
+/// 同一来源 [`resolve_captured`]）；原文件名原样保留（重名由收集端 rename
+/// 策略收口）。第二目的地同公式仅根不同。
+pub(crate) fn time_rel(captured_at: chrono::DateTime<chrono::Utc>, filename: &str) -> String {
+    format!("{}/{}", captured_at.format("%Y/%m"), filename)
+}
+
+/// 原文件名（清单 rel_path 的最后一段；`/` 分隔）。
+pub(super) fn original_filename(rel_path: &str) -> String {
+    rel_path.rsplit('/').next().unwrap_or(rel_path).to_string()
+}
+
 /// 单文件单遍复制：流式读 → 哈希/写盘/head 截存 → 长度校验。
-/// dst = target_root + 渲染结果；second=Some(根) 时同遍双写第二目的地
-/// （**同布局公式、同文件名模板**，仅根不同——2026-09-28 定案，第二份
-/// 落 `{secondRoot}/{创建YYYY}/{创建MM}/{dir_name}/[{子组}/]`，子组段随
-/// plan 传入的 dir_template 已含，0022）。
+/// dst = 照片库 root + 纯时间相对段；second=Some(根) 时同遍双写第二目的
+/// 地（同布局公式仅根不同）。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_one(
     source: &dyn DeviceSource,
@@ -243,8 +254,6 @@ pub(super) fn copy_one(
     duplicate_policy: DuplicatePolicy,
     entry: &FileEntry,
     target_root: &Path,
-    dir_template: &str,
-    name_template: &str,
     second: Option<&Path>,
 ) -> FileOutcome {
     let fail = |error: String| FileOutcome::Failed {
@@ -262,24 +271,6 @@ pub(super) fn copy_one(
             fail(format!("读取失败: {e}"))
         }
     };
-
-    // 零设备 IO 预跳（2026-09-29 二轮提速，用户实测头段预跳后仍 ~500ms/
-    // 张——MTP 小传输的会话建立固定开销就是大头）：目录公式是相册级
-    // 字面量、默认命名 {原文件名} 只用清单文件名，目标路径无需 EXIF
-    // 即可预测。预测路径已存在（Skip/Ask）→ 连流都不开。模板依赖
-    // EXIF（含 {拍摄日期}/{相机} 等）时预测返回 None，回退头段预跳。
-    if matches!(
-        duplicate_policy,
-        DuplicatePolicy::Skip | DuplicatePolicy::Ask
-    ) {
-        if let Some(dst) = predict_dst(target_root, dir_template, name_template, entry) {
-            if dst.exists() {
-                return FileOutcome::Skipped {
-                    entry: entry.clone(),
-                };
-            }
-        }
-    }
 
     let mut reader = match source.stream(&entry.id) {
         Ok(reader) => reader,
@@ -304,21 +295,10 @@ pub(super) fn copy_one(
     }
     let meta = exif_lite::parse(&head);
 
-    // 渲染目标相对路径（{相机}/{镜头} 缺失降级默认段；主/第二目的地同
-    // 布局公式同文件名模板——dir_template 为相册固定公式（字面量，可含
-    // 0022 子组段），逐照片令牌仅剩文件名段）
-    let (stem, ext) = split_stem_ext(&entry.rel_path);
-    let ctx = RenderCtx {
-        captured_at: resolve_captured(meta.captured_at, entry.mtime),
-        camera: meta.camera.clone(),
-        lens: None,
-        original_stem: stem,
-        ext,
-    };
-    let rel = match render_dst(&ctx, dir_template, name_template) {
-        Ok(rel) => rel,
-        Err(error) => return fail(error),
-    };
+    // 纯时间布局渲染（§三）：拍摄年/月段 + 原文件名。布局依赖 EXIF 时间，
+    // 目标路径预测必须先读头段（旧「零设备 IO 预跳」随布局改版退役）。
+    let filename = original_filename(&entry.rel_path);
+    let rel = time_rel(resolve_captured(meta.captured_at, entry.mtime), &filename);
     let dst = target_root.join(&rel);
     // 免下载预跳（2026-09-29 实测重建库全量重导：重复照片被完整拉回
     // ~600ms/张再丢弃）：Skip/Ask 策略下目标已存在与收集端 ③ 同判据
@@ -406,80 +386,4 @@ pub(super) fn copy_one(
         part2,
         dst2,
     }))
-}
-
-/// 渲染目录+文件名 → 完整目标路径；`{相机}`/`{镜头}` 缺失时用默认段重试。
-fn render_dst(ctx: &RenderCtx, dir_template: &str, name_template: &str) -> Result<PathBuf, String> {
-    let render = |ctx: &RenderCtx| -> Result<String, TemplateError> {
-        Ok(format!(
-            "{}/{}",
-            render_dir(dir_template, ctx)?,
-            render_name(name_template, ctx)?
-        ))
-    };
-    match render(ctx) {
-        Ok(path) => Ok(PathBuf::from(path)),
-        Err(TemplateError::MissingContext(_)) => {
-            // 无 EXIF 的文件（截图/转码/损坏头）：默认段降级重试
-            let fallback = RenderCtx {
-                captured_at: ctx.captured_at,
-                camera: Some(FALLBACK_CAMERA.to_string()),
-                lens: Some(FALLBACK_LENS.to_string()),
-                original_stem: ctx.original_stem.clone(),
-                ext: ctx.ext.clone(),
-            };
-            render(&fallback)
-                .map(PathBuf::from)
-                .map_err(|e| e.to_string())
-        }
-        Err(TemplateError::UnknownToken(token)) => {
-            Err(format!("命名模板含未知令牌「{token}」，请检查导入设置"))
-        }
-    }
-}
-
-/// 无设备 IO 的目标路径预测：用两组差异化的哨兵上下文各渲染一次，结果
-/// 相同 ⇔ 模板不含任何 EXIF 相关令牌（目录公式本就是相册级字面量，默认
-/// 命名 {原文件名} 只用清单文件名）——路径与文件内容无关，可放心按清单
-/// 预测。依赖 EXIF 的模板（两次结果不同或渲染报错）返回 None。
-fn predict_dst(
-    target_root: &Path,
-    dir_template: &str,
-    name_template: &str,
-    entry: &FileEntry,
-) -> Option<PathBuf> {
-    let sentinel_time = |year: i32| {
-        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, year, 1, 2, 3, 4, 5)
-            .single()
-            .expect("哨兵日期恒合法")
-    };
-    let render = |year: i32, mark: &str| -> Option<String> {
-        let (stem, ext) = split_stem_ext(&entry.rel_path);
-        let ctx = RenderCtx {
-            captured_at: sentinel_time(year),
-            camera: Some(format!("相机{mark}")),
-            lens: Some(format!("镜头{mark}")),
-            original_stem: stem,
-            ext,
-        };
-        Some(format!(
-            "{}/{}",
-            render_dir(dir_template, &ctx).ok()?,
-            render_name(name_template, &ctx).ok()?
-        ))
-    };
-    let a = render(1970, "A")?;
-    let b = render(2099, "乙")?;
-    if a != b {
-        return None;
-    }
-    Some(target_root.join(a))
-}
-
-fn split_stem_ext(rel_path: &str) -> (String, String) {
-    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), ext.to_string()),
-        _ => (name.to_string(), String::new()),
-    }
 }

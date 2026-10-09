@@ -8,8 +8,8 @@ mod common;
 use common::library_fixture as setup;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 
@@ -53,6 +53,11 @@ fn ins(db: &db::Db, path: &str, kind: AssetKind, captured: Option<&str>) -> i64 
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()

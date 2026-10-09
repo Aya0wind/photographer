@@ -5,7 +5,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -66,7 +66,7 @@ fn folder_scan_registers_source_then_files_and_move_import_work() {
         wait_done(&state, Duration::from_secs(15)),
         "move 导入应完成"
     );
-    let db = ipc::active_library_db(&state).unwrap();
+    let db = ipc::app_database_db(&state).unwrap();
     let states: Vec<FileState> = db
         .all_job_files(job_id)
         .unwrap()

@@ -143,7 +143,7 @@ pub fn fetch_cull_session_create(
     state: &super::AppState,
     scope: CullScope,
 ) -> Result<CullSessionDto, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let (asset_ids, source_desc) = match &scope {
         CullScope::Album { album_id, subgroup } => {
             let album_name: String =
@@ -226,7 +226,7 @@ pub fn fetch_cull_session_create(
 
 /// 会话列表核（updated_at DESC；进行中在前）。
 pub fn fetch_cull_session_list(state: &super::AppState) -> Result<Vec<CullSessionDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let rows = db.cull_session_list().map_err(|e| e.to_string())?;
     let mut dtos = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -244,7 +244,7 @@ pub fn fetch_cull_session_open(
     state: &super::AppState,
     session_id: i64,
 ) -> Result<CullSessionDetailDto, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let row = db
         .cull_session_get(session_id)
         .map_err(|e| e.to_string())?
@@ -287,7 +287,7 @@ pub fn fetch_cull_decision_apply(
             origin: parse_origin(&d.origin)?,
         });
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let row = db
         .cull_session_get(session_id)
         .map_err(|e| e.to_string())?
@@ -322,7 +322,7 @@ pub fn fetch_cull_session_rename(
     if name.is_empty() {
         return Err("会话名不能为空".into());
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let row = db
         .cull_session_get(session_id)
         .map_err(|e| e.to_string())?
@@ -347,7 +347,7 @@ pub fn fetch_cull_session_rename(
 
 /// 弃置会话核：删会话 + 快照/决定（FK 级联），主库标记/资产绝不动。
 pub fn fetch_cull_session_discard(state: &super::AppState, session_id: i64) -> Result<(), String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     db.cull_session_discard(session_id)
         .map_err(|e| e.to_string())?
         .then_some(())
@@ -371,7 +371,7 @@ pub fn fetch_cull_session_finish(
             return Err(format!("收尾星级必须在 1-5：{rating}"));
         }
     }
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let row = db
         .cull_session_get(session_id)
         .map_err(|e| e.to_string())?
@@ -403,7 +403,7 @@ pub fn fetch_cull_session_finish(
     }
 
     // —— 映射全成 → 收尾落库（0 行 = 并发重复收尾，拒绝）——
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     if !db
         .cull_session_finish_mark(session_id)
         .map_err(|e| e.to_string())?
@@ -622,7 +622,7 @@ pub fn fetch_cull_ai_prescan(
         group_exempt_faces: rules.group_exempt_faces,
         max_accepted: rules.max_accepted.map(|v| v as u64),
     };
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let row = db
         .cull_session_get(session_id)
         .map_err(|e| e.to_string())?

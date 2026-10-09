@@ -9,11 +9,13 @@ import {
   cameraList,
   formatList,
   lensList,
+  photoLibraryList,
   type AlbumDto,
   type AssetCameraCount,
   type AssetFilters,
   type AssetFormatCount,
   type AssetLensCount,
+  type PhotoLibrary,
 } from "@/ipc/api";
 import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
 
@@ -83,6 +85,9 @@ export interface SearchInputs {
   sizeMax: string;
   /** 所属相册（单选；name 随行携带供 chips 直接展示，序列化进防抖键） */
   album: { id: number; name: string } | null;
+  /** 所属照片库多选（OR，2026-10-09 单库多照片库：画廊默认全局跨库混排，
+   *  按需过滤；name 随行携带供 chips/下拉展示） */
+  libraries: { id: string; name: string }[];
   /** 颜色标签（B1，LR 五色单选；all=不限） */
   color: ColorFilter;
   /** 拒绝旗标三态（B1；all=不限） */
@@ -114,6 +119,7 @@ export const EMPTY_INPUTS: SearchInputs = {
   sizeMin: "",
   sizeMax: "",
   album: null,
+  libraries: [],
   color: "all",
   rejected: "all",
   aiEyes: "none",
@@ -213,6 +219,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   const sizeMax = mbToBytes(inputs.sizeMax);
   if (sizeMax !== undefined) filters.sizeMax = sizeMax;
   if (inputs.album !== null) filters.albumId = inputs.album.id;
+  if (inputs.libraries.length > 0) filters.libraryIds = inputs.libraries.map((l) => l.id);
   if (inputs.color !== "all") filters.colorLabel = inputs.color;
   if (inputs.rejected !== "all") filters.rejected = inputs.rejected === "yes";
   if (inputs.aiEyes !== "none") filters.eyes = inputs.aiEyes;
@@ -349,7 +356,8 @@ function ColorSegment({
   );
 }
 
-/** 勾选下拉（相机/镜头/格式共用；计数徽标 + 多选） */
+/** 勾选下拉（相机/镜头/格式/照片库共用；计数徽标 + 多选）。
+ *  值与展示名不同时传 labelOf（照片库 id → 名称）；缺省展示值本身。 */
 function FilterDropdown({
   label,
   allLabel,
@@ -359,6 +367,7 @@ function FilterDropdown({
   onToggle,
   onClear,
   testId,
+  labelOf,
 }: {
   label: string;
   allLabel: string;
@@ -368,6 +377,7 @@ function FilterDropdown({
   onToggle: (value: string) => void;
   onClear: () => void;
   testId: string;
+  labelOf?: (value: string) => string;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -403,7 +413,9 @@ function FilterDropdown({
           className="flex min-w-0 flex-1 items-center justify-between gap-1.5 px-2 text-[11px]"
           data-testid={`${testId}-button`}
         >
-          <span className="max-w-[116px] truncate">{selected.length > 0 ? selected[0] : allLabel}</span>
+          <span className="max-w-[116px] truncate">
+            {selected.length > 0 ? labelOf?.(selected[0]) ?? selected[0] : allLabel}
+          </span>
           {selected.length > 1 && <span className="rounded bg-accent/15 px-1 font-mono">+{selected.length - 1}</span>}
           <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M3.5 6l4.5 4.5L12.5 6" />
@@ -460,9 +472,9 @@ function FilterDropdown({
                 </span>
                 <span
                   className="min-w-0 flex-1 truncate text-[11px] text-text-secondary"
-                  title={option.value}
+                  title={labelOf?.(option.value) ?? option.value}
                 >
-                  {option.value}
+                  {labelOf?.(option.value) ?? option.value}
                 </span>
                 <span className="shrink-0 rounded bg-panel px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-text-muted">
                   {option.count}
@@ -667,6 +679,42 @@ function FormatFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (pat
     options={options.map((o) => ({ value: o.format, count: o.count }))} selected={inputs.formats}
     onToggle={(format) => onPatch({ formats: toggleIn(inputs.formats, format) })}
     onClear={() => onPatch({ formats: [] })} testId="search-format" />;
+}
+
+/** 按照片库筛选（多选 OR，2026-10-09 单库多照片库）：画廊默认全局跨库混排，
+ *  选中后 filters.libraryIds 收窄到所选库。清单 photo_library_list（失败回退
+ *  空态文案——后端未连接时自然降级）；名称展示 = 清单 ∪ inputs 随行名
+ *  （清单未就位时已选项也能显示库名而非裸 id）。 */
+function LibraryFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch: Partial<SearchInputs>) => void }) {
+  const { t } = useTranslation();
+  const [libraries, setLibraries] = useState<PhotoLibrary[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void photoLibraryList().then((list) => { if (!cancelled) setLibraries(list); });
+    return () => { cancelled = true; };
+  }, []);
+  const names = new Map<string, string>([
+    ...inputs.libraries.map((l) => [l.id, l.name] as const),
+    ...libraries.map((l) => [l.id, l.name] as const),
+  ]);
+  return <FilterDropdown
+    label={t("search.library")}
+    allLabel={t("search.libraryAll")}
+    emptyLabel={t("search.libraryEmpty")}
+    options={libraries.map((l) => ({ value: l.id, count: l.assetCount }))}
+    selected={inputs.libraries.map((l) => l.id)}
+    labelOf={(id) => names.get(id) ?? id}
+    onToggle={(id) => {
+      const has = inputs.libraries.some((l) => l.id === id);
+      onPatch({
+        libraries: has
+          ? inputs.libraries.filter((l) => l.id !== id)
+          : [...inputs.libraries, { id, name: names.get(id) ?? id }],
+      });
+    }}
+    onClear={() => onPatch({ libraries: [] })}
+    testId="search-library"
+  />;
 }
 
 function DateFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch: Partial<SearchInputs>) => void }) {
@@ -946,6 +994,9 @@ export function FilterPanel({
             />
           </FieldRow>
         )}
+        <FieldRow label={t("search.library")}>
+          <LibraryFilter inputs={inputs} onPatch={onPatch} />
+        </FieldRow>
         <FieldRow label={t("search.focal")}>
           <RangeField
             label={t("search.focal")}
@@ -1149,6 +1200,13 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
   }
   if (inputs.album !== null) {
     chips.push({ key: "album", label: inputs.album.name, patch: { ...inputs, album: null } });
+  }
+  for (const library of inputs.libraries) {
+    chips.push({
+      key: `library:${library.id}`,
+      label: library.name,
+      patch: { ...inputs, libraries: inputs.libraries.filter((l) => l.id !== library.id) },
+    });
   }
   return chips;
 }

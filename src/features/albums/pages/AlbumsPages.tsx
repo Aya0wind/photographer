@@ -28,6 +28,7 @@ import {
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
 import { isUngroupedAlbum } from "../lib/ungroupedAlbum";
 import { DEFAULT_SMART_TAGS, indexedTagHitCount, loadSmartTags, smartTagLabel } from "../lib/smartTags";
+import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
 import AlbumDetailPage from "./AlbumDetailPage";
 
 /**
@@ -396,6 +397,8 @@ export function AlbumsIndexPage() {
   const [dirRenameError, setDirRenameError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<AlbumDto | null>(null);
   const [coverPicking, setCoverPicking] = useState<AlbumDto | null>(null);
+  // 导出为文件夹（M6，Photo Hub → LR）：整册导出（subgroup=null）
+  const [exporting, setExporting] = useState<AlbumDto | null>(null);
 
   async function submitRename(): Promise<void> {
     if (!renaming) return;
@@ -467,6 +470,12 @@ export function AlbumsIndexPage() {
       key: "cover",
       label: t("albums.setCover"),
       onSelect: () => setCoverPicking(album),
+    });
+    // 导出为文件夹（M6）：同卷硬链接/跨卷拷贝 + 全量 XMP 边车（LR 引用导入）
+    entries.push({
+      key: "export",
+      label: t("albums.export.action"),
+      onSelect: () => setExporting(album),
     });
     entries.push({
       key: "delete",
@@ -822,6 +831,17 @@ export function AlbumsIndexPage() {
           album={coverPicking}
           onClose={() => setCoverPicking(null)}
           onPicked={(assetId) => void submitCover(coverPicking, assetId)}
+        />
+      )}
+
+      {/* 导出为文件夹（M6）：整册导出（subgroup=null） */}
+      {exporting && (
+        <ExportAlbumDialog
+          albumId={exporting.id}
+          albumName={exporting.name}
+          subgroup={null}
+          itemCount={exporting.itemCount}
+          onClose={() => setExporting(null)}
         />
       )}
     </div>

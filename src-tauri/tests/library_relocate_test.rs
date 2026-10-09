@@ -1,23 +1,23 @@
-//! 库照片存储目录整体重定位（2026-09-28 用户定案）：db 层前缀重写
-//! （大小写/斜杠不敏感、尾段原样、兄弟目录不误伤）+ thumb 任务重排 +
-//! ipc 层预检/执行/幂等重试/配置落盘语义。
+//! photo_library_relocate（照片库整体重定位，2026-10-09 §一「无移库」模型）：
+//! 改登记 root + 库内路径前缀批量重写（资产归属不变）；apply=false 只预检
+//! 返回计数；root 互斥校验（与既有库/数据库目录重叠拒绝）；新根可先登记
+//! 后挂载（root_exists 如实上报）。
 
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, tethering, thumbs,
 };
 
 use std::path::Path;
+use std::time::Duration;
 
 use common::state_with_library;
-use db::AssetRow;
-use events::AssetKind;
-use rusqlite::params;
+use ipc::photo_library::fetch_photo_library_relocate;
 
-fn row(path: &str) -> AssetRow {
-    AssetRow {
+fn row(path: &str, library_id: &str) -> db::AssetRow {
+    db::AssetRow {
         path: path.into(),
         filename: Path::new(path)
             .file_name()
@@ -25,13 +25,13 @@ fn row(path: &str) -> AssetRow {
             .to_string_lossy()
             .into_owned(),
         size: 1,
-        mtime: "2026-09-28T00:00:00.000Z".into(),
+        mtime: "2026-10-09T00:00:00.000Z".into(),
         xxhash: 1,
-        kind: AssetKind::Photo,
+        kind: events::AssetKind::Photo,
         captured_at: None,
         camera: None,
         source: "imported".into(),
-        created_at: "2026-09-28T00:00:00.000Z".into(),
+        created_at: "2026-10-09T00:00:00.000Z".into(),
         origin: "imported".into(),
         width: None,
         height: None,
@@ -55,173 +55,160 @@ fn row(path: &str) -> AssetRow {
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: Some(library_id.into()),
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 
-/// 按 path 查资产 id。
-fn id_of(database: &db::Db, path: &str) -> i64 {
-    database
-        .0
-        .query_row("SELECT id FROM assets WHERE path = ?1", params![path], |r| r.get(0))
-        .unwrap()
+/// 登记 photo root + 两条库内资产 + 一条库外资产（unaffected 判定用）。
+fn setup_library(state: &ipc::AppState, root: &Path, outside: &Path) -> String {
+    std::fs::create_dir_all(root.join("2026/06")).unwrap();
+    let app_db = common::open_db(&state.config_dir);
+    let lib = app_db
+        .photos_library_register("主库", &root.to_string_lossy(), &state.config_dir)
+        .unwrap();
+    app_db
+        .insert_asset(&row(
+            &root.join("2026/06/DSC_1.jpg").to_string_lossy(),
+            &lib.id,
+        ))
+        .unwrap();
+    app_db
+        .insert_asset(&row(
+            &root.join("2026/06/sub/DSC_2.jpg").to_string_lossy(),
+            &lib.id,
+        ))
+        .unwrap();
+    // 库外路径（历史遗留/外部登记）→ unaffected
+    app_db.insert_asset(&row(&outside.join("elsewhere.jpg").to_string_lossy(), &lib.id)).unwrap();
+    lib.id
 }
 
 #[test]
-fn strip_root_prefix_matches_case_and_slash_insensitive_but_not_siblings() {
-    use db::strip_root_prefix as strip;
-    // 大小写/斜杠方向不敏感
-    assert_eq!(strip(r"I:\Photos\2026\a.jpg", r"i:/photos"), Some(r"2026\a.jpg"));
-    // 兄弟目录不误伤（I:\x 不得匹配 I:\x2\...）
-    assert_eq!(strip(r"I:\x2\a.jpg", r"I:\x"), None);
-    // 尾分隔符归一
-    assert_eq!(strip(r"I:\x\a.jpg", r"I:\x\"), Some("a.jpg"));
-    // 恰好等于根（防御路径）
-    assert_eq!(strip(r"I:\x", r"I:\x"), Some(""));
-    // 前缀不同
-    assert_eq!(strip(r"J:\x\a.jpg", r"I:\x"), None);
-}
-
-#[test]
-fn dry_run_counts_without_writing() {
-    let root = tempfile::tempdir().unwrap();
+fn relocate_rewrites_prefix_and_keeps_ownership() {
+    let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let state = state_with_library(db_dir.path(), root.path(), std::time::Duration::ZERO);
-    let database = common::open_db(db_dir.path());
-    database
-        .insert_asset(&row(&root.path().join("a.jpg").to_string_lossy()))
-        .unwrap();
-    database
-        .insert_asset(&row(&format!(r"{}\sub\b.jpg", root.path().to_string_lossy())))
-        .unwrap();
-    database.insert_asset(&row(r"C:\elsewhere\c.jpg")).unwrap();
-    drop(database);
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let old_root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let id = setup_library(&state, old_root.path(), outside.path());
 
-    let new_root = db_dir.path().join("new-root");
-    let before = ipc::settings::fetch_library_relocate(
+    // 用户已在文件管理器把整个照片树搬到新根（模拟）
+    let new_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(new_root.path().join("2026/06/sub")).unwrap();
+
+    // 预检：affected=2（库内前缀命中），unaffected=1（库外）
+    let inspect = fetch_photo_library_relocate(
         &state,
-        "lib-1",
-        new_root.to_str().unwrap(),
+        &id,
+        &new_root.path().to_string_lossy(),
         false,
     )
     .unwrap();
-    assert_eq!(before.affected, 2, "旧根下 2 张");
-    assert_eq!(before.unaffected, 1, "外部根 1 张不动");
-    assert!(!before.root_exists, "新根未创建");
+    assert_eq!(inspect.affected, 2);
+    assert_eq!(inspect.unaffected, 1);
+    assert!(inspect.root_exists, "新根在盘");
 
-    // 预检零写入：外部路径原样
-    let database = common::open_db(db_dir.path());
-    let kept: i64 = database
-        .0
-        .query_row(
-            "SELECT COUNT(*) FROM assets WHERE path = 'C:\\elsewhere\\c.jpg'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    drop(database);
-    assert_eq!(kept, 1);
-}
-
-#[test]
-fn apply_rewrites_paths_resets_thumbs_and_updates_settings() {
-    let root = tempfile::tempdir().unwrap();
-    let db_dir = tempfile::tempdir().unwrap();
-    let state = state_with_library(db_dir.path(), root.path(), std::time::Duration::ZERO);
-    let old_root = root.path().to_string_lossy().into_owned();
-    let database = common::open_db(db_dir.path());
-    let path_a = format!(r"{}\a.jpg", old_root);
-    database.insert_asset(&row(&path_a)).unwrap();
-    // 正斜杠形态的库内路径（历史导入遗留）也必须命中
-    let path_b = format!("{}/2026/b.jpg", old_root.replace('\\', "/"));
-    database.insert_asset(&row(&path_b)).unwrap();
-    database.insert_asset(&row(r"C:\elsewhere\c.jpg")).unwrap();
-    let a = id_of(&database, &path_a);
-    let outside = id_of(&database, r"C:\elsewhere\c.jpg");
-    drop(database);
-
-    let new_root = db_dir.path().join("new-root");
-    std::fs::create_dir_all(&new_root).unwrap();
-    let dto = ipc::settings::fetch_library_relocate(&state, "lib-1", new_root.to_str().unwrap(), true)
-        .unwrap();
-    assert_eq!(dto.affected, 2);
-    assert_eq!(dto.unaffected, 1);
-    assert!(dto.root_exists);
-
-    let database = common::open_db(db_dir.path());
-    let (got_a, ts_a): (String, i32) = database
-        .0
-        .query_row("SELECT path, thumb_state FROM assets WHERE id = ?1", params![a], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
+    // 执行：root 改登记 + 路径前缀重写（归属 library_id 不变）
+    let applied = fetch_photo_library_relocate(
+        &state,
+        &id,
+        &new_root.path().to_string_lossy(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(applied.affected, 2);
+    let app_db = common::open_db(&state.config_dir);
+    let lib = app_db.photos_library_get(&id).unwrap().unwrap();
     assert_eq!(
-        got_a,
-        new_root.join("a.jpg").to_string_lossy().into_owned(),
-        "尾段原样保留，前缀换新根"
+        lib.root_path,
+        new_root.path().to_string_lossy().to_string(),
+        "登记 root 已更新"
     );
-    assert_eq!(ts_a, 0, "重写行缩略图状态复位待重建");
-    let pending: i64 = database
+    let paths: Vec<String> = app_db
         .0
-        .query_row(
-            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'thumb' AND asset_id = ?1",
-            params![a],
-            |r| r.get(0),
-        )
+        .prepare("SELECT path FROM assets WHERE library_id = ?1 ORDER BY path")
+        .unwrap()
+        .query_map([&id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(pending, 1, "重写行恰一条缩略图任务（apply 后台 worker 可能已消费，状态不限）");
-    let (path_out, ts_out): (String, i32) = database
-        .0
-        .query_row("SELECT path, thumb_state FROM assets WHERE id = ?1", params![outside], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
-    assert_eq!(path_out, r"C:\elsewhere\c.jpg");
-    assert_eq!(ts_out, 1, "外部行不动（含缩略图状态）");
-    drop(database);
-
-    // 配置已更新（内存 + 落盘）
-    let expected_new = new_root.to_string_lossy().into_owned();
-    {
-        let settings = state.settings.lock().unwrap();
-        assert_eq!(settings.libraries[0].photo_root, expected_new);
-    }
-    let saved = settings::SettingsManager::load(&state.config_dir).unwrap();
-    assert_eq!(saved.libraries[0].photo_root, expected_new);
-
-    // 同根再执行：计数照常（都在新根下）但零副作用（路径/任务不变）
-    let again =
-        ipc::settings::fetch_library_relocate(&state, "lib-1", new_root.to_str().unwrap(), true)
-            .unwrap();
-    assert_eq!(again.affected, 2, "同根重试只读计数");
-    let database = common::open_db(db_dir.path());
-    let (got_a2, _): (String, i32) = database
-        .0
-        .query_row("SELECT path FROM assets WHERE id = ?1", params![a], |r| {
-            Ok((r.get::<_, String>(0)?, 0))
-        })
-        .unwrap();
-    assert_eq!(got_a2, new_root.join("a.jpg").to_string_lossy().into_owned(), "路径未被再次改写");
-    let pending2: i64 = database
-        .0
-        .query_row(
-            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'thumb' AND asset_id = ?1",
-            params![a],
-            |r| r.get(0),
-        )
-        .unwrap();
-    drop(database);
-    assert_eq!(pending2, 1, "缩略图任务不重复入账（同根重试零写入）");
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().all(|p| !p.contains(&old_root.path().to_string_lossy().to_string())));
+    assert!(paths.iter().any(|p| *p == new_root.path().join("2026/06/DSC_1.jpg").to_string_lossy()));
+    assert!(paths
+        .iter()
+        .any(|p| *p == new_root.path().join("2026/06/sub/DSC_2.jpg").to_string_lossy()));
+    assert!(paths
+        .iter()
+        .any(|p| *p == outside.path().join("elsewhere.jpg").to_string_lossy()),
+        "库外路径不动（unaffected）");
 }
 
 #[test]
-fn rejects_relative_and_missing_library() {
-    let root = tempfile::tempdir().unwrap();
+fn relocate_to_overlapping_root_is_rejected() {
+    let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
-    let state = state_with_library(db_dir.path(), root.path(), std::time::Duration::ZERO);
-    let err =
-        ipc::settings::fetch_library_relocate(&state, "lib-1", "I:relative", false).unwrap_err();
-    assert!(err.contains("绝对路径"), "盘符相对路径拒绝：{err}");
-    let err =
-        ipc::settings::fetch_library_relocate(&state, "no-such-lib", r"I:\x", false).unwrap_err();
-    assert!(err.contains("库不存在"));
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let root_a = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let id = setup_library(&state, root_a.path(), outside.path());
+    let other_id = setup_library(&state, outside.path(), root_a.path());
+
+    // 新根与**另一库**互相包含 → 拒绝（§八-6 root 互斥；自身旧根不参与）
+    let inside_other = outside.path().join("nested");
+    let err = fetch_photo_library_relocate(&state, &id, &inside_other.to_string_lossy(), true).unwrap_err();
+    assert!(err.contains("互相包含") || err.contains("相同"), "{err}");
+    // 重定位到自身当前路径 = 幂等 no-op：apply 后 root 与资产路径原样
+    fetch_photo_library_relocate(
+        &state,
+        &other_id,
+        &outside.path().to_string_lossy(),
+        true,
+    )
+    .unwrap();
+    let app_db = common::open_db(&state.config_dir);
+    assert_eq!(
+        app_db.photos_library_get(&other_id).unwrap().unwrap().root_path,
+        outside.path().to_string_lossy().to_string(),
+        "同路径 apply 不改登记"
+    );
+
+    // 新根与数据库目录重叠 → 拒绝
+    let err2 =
+        fetch_photo_library_relocate(&state, &id, &db_dir.path().to_string_lossy(), true).unwrap_err();
+    assert!(err2.contains("数据库目录"), "{err2}");
+}
+
+#[test]
+fn relocate_reports_missing_root_without_failing() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let id = setup_library(&state, root.path(), outside.path());
+
+    // 可先改后挂载：新根不在盘 → apply 成功但 root_exists=false（缺失走 offline）
+    let mount_later = tempfile::tempdir().unwrap();
+    let missing = mount_later.path().join("photos");
+    std::fs::remove_dir(mount_later.path()).unwrap(); // 整个挂载点暂缺
+    let applied = fetch_photo_library_relocate(&state, &id, &missing.to_string_lossy(), true).unwrap();
+    assert!(!applied.root_exists, "新根尚未挂载");
+    let app_db = common::open_db(&state.config_dir);
+    let lib = app_db.photos_library_get(&id).unwrap().unwrap();
+    assert_eq!(lib.root_path, missing.to_string_lossy().to_string());
+}
+
+#[test]
+fn relocate_unknown_library_is_an_error() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let err = fetch_photo_library_relocate(&state, "no-such", src.path().to_str().unwrap(), false)
+        .unwrap_err();
+    assert!(err.contains("不存在"), "{err}");
 }

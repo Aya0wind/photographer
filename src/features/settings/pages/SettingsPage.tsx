@@ -1,32 +1,29 @@
 import { useState, type ReactNode } from "react";
-import { useNavigate, useSearchParams } from "react-router";
+import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
-import NewLibraryDialog from "@/features/library/NewLibraryDialog";
-import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
 import ThemePicker from "@/features/settings/components/ThemePicker";
 import AiTab from "@/features/settings/AiTab";
 import { indexNewTags, loadSmartTags, saveSmartTags, unindexedTags, smartTagLabel } from "@/features/albums/lib/smartTags";
-import { useSettingsStore, type DeepPartial, type Library, type Settings } from "@/stores/settingsStore";
+import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/settingsStore";
 
 /**
- * 设置页（经典工业风选项卡）：常规 / 导入 / 库 / AI 四个水平 tab
+ * 设置页（经典工业风选项卡）：常规 / 外观 / 画廊 / 导入 / AI 水平 tab
  * （下划线选中、紧凑行高）。每项行式布局——标签（左）+ 控件（右）+
  * 说明小字（下一行），分组用 uppercase 小节标题，不用卡片框。
  * 修改即存：settingsStore.update + save（IPC 失败本地仍生效）。
- * 「库」tab 保留库管理能力（只读信息 + 列表 + 激活标记 + 新建/打开入口），
- * 新建库走可复用 NewLibraryDialog（顶部菜单共用）。
+ * 旧「库」tab 已随 2026-10-09 单库多照片库定案退役：照片库管理（新建/
+ * 从文件夹建立/重定位/移除登记）由左侧导航「存储」页承担（M3 已实装）。
  */
 
-type SettingsTab = "general" | "appearance" | "gallery" | "import" | "libraries" | "ai";
+type SettingsTab = "general" | "appearance" | "gallery" | "import" | "ai";
 
 const TABS: { key: SettingsTab; labelKey: string }[] = [
   { key: "general", labelKey: "settings.tab.general" },
   { key: "appearance", labelKey: "settings.tab.appearance" },
   { key: "gallery", labelKey: "settings.tab.gallery" },
   { key: "import", labelKey: "settings.tab.import" },
-  { key: "libraries", labelKey: "settings.tab.libraries" },
   { key: "ai", labelKey: "settings.tab.ai" },
 ];
 
@@ -165,38 +162,15 @@ function AlbumTagsSetting() {
   );
 }
 
-function InfoRow({ label, value, mono = true }: { label: string; value: string | null; mono?: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-1.5 text-left">
-      <span className="shrink-0 text-xs text-text-secondary">{label}</span>
-      <span
-        className={`truncate text-xs ${mono ? "font-mono" : ""} ${
-          value ? "text-text-primary" : "text-text-muted"
-        }`}
-        title={value ?? ""}
-      >
-        {value ?? "—"}
-      </span>
-    </div>
-  );
-}
-
 export default function SettingsPage() {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const settings = useSettingsStore((s) => s.settings);
   // 深链 ?tab=ai（语义门禁/未就绪引导卡的「去设置」直达；非法值回常规）
   const [searchParams] = useSearchParams();
-  const [relocating, setRelocating] = useState<Library | null>(null);
   const urlTab = searchParams.get("tab");
   const [tab, setTab] = useState<SettingsTab>(
     TABS.some((item) => item.key === urlTab) ? (urlTab as SettingsTab) : "general",
   );
-  const [newLibOpen, setNewLibOpen] = useState(false);
-
-  const library = settings.activeLibraryId
-    ? settings.libraries.find((lib) => lib.id === settings.activeLibraryId) ?? null
-    : null;
 
   return (
     <div className="flex h-full flex-col">
@@ -379,142 +353,9 @@ export default function SettingsPage() {
             </>
           )}
 
-          {tab === "libraries" && (
-            <>
-              <SectionTitle>{t("settings.section.library")}</SectionTitle>
-
-              {/* 当前库信息（只读）：整理规则是库属性，在新建链/选择器修改 */}
-              <div className="flex flex-col" data-testid="settings-current-library">
-                <InfoRow
-                  label={t("pages.settings.currentLibrary")}
-                  value={library?.name ?? null}
-                  mono={false}
-                />
-                <div className="flex items-center justify-between gap-8">
-                  <div className="min-w-0 flex-1">
-                    <InfoRow label={t("pages.settings.libraryRoot")} value={library?.photoRoot ?? null} />
-                  </div>
-                  {library !== null && (
-                    <button
-                      type="button"
-                      onClick={() => setRelocating(library)}
-                      className="shrink-0 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                      data-testid="settings-library-relocate"
-                    >
-                      {t("settings.relocate.open")}
-                    </button>
-                  )}
-                </div>
-                <InfoRow label={t("pages.settings.dbDir")} value={library?.dbDir ?? null} />
-              </div>
-
-              {/* 并发流数（库属性）：1-4 分段，改即存；无激活库时占位 */}
-              <div className="flex items-center justify-between gap-8 py-2">
-                <span className="shrink-0 text-xs text-text-secondary">{t("wizard.streams")}</span>
-                {library ? (
-                  <div
-                    role="radiogroup"
-                    aria-label={t("wizard.streams")}
-                    className="flex rounded-md border border-edge bg-bg p-0.5"
-                    data-testid="settings-library-streams"
-                  >
-                    {[1, 2, 3, 4].map((value) => {
-                      const active = (library.streams ?? 4) === value;
-                      return (
-                        <button
-                          key={value}
-                          type="button"
-                          role="radio"
-                          aria-checked={active}
-                          onClick={() => {
-                            if (active) return;
-                            commit({
-                              libraries: settings.libraries.map((lib) =>
-                                lib.id === library.id ? { ...lib, streams: value } : lib,
-                              ),
-                            });
-                          }}
-                          className={`w-8 rounded px-1 py-1 text-center font-mono text-[11px] transition-colors ${
-                            active
-                              ? "bg-accent text-black"
-                              : "text-text-secondary hover:text-text-primary"
-                          }`}
-                        >
-                          {value}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <span className="text-xs text-text-muted">—</span>
-                )}
-              </div>
-
-              {/* 新建库（复用对话框）+ 打开其他库（选择器） */}
-              <div className="mt-3 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setNewLibOpen(true)}
-                  className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
-                  data-testid="settings-new-library"
-                >
-                  {t("picker.newLibrary")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigate("/library-picker")}
-                  className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                  data-testid="settings-goto-picker"
-                >
-                  {t("settings.libraries.goPicker")}
-                </button>
-              </div>
-
-              {/* 库列表：仅展示 + 激活高亮（切换走选择器，不在原地切换） */}
-              {settings.libraries.length > 0 && (
-                <div className="mt-3 flex flex-col gap-1.5" data-testid="settings-library-list">
-                  {settings.libraries.map((lib) => {
-                    const isActive = lib.id === settings.activeLibraryId;
-                    return (
-                      <div
-                        key={lib.id}
-                        className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left ${
-                          isActive ? "border-accent bg-accent/10" : "border-edge"
-                        }`}
-                        data-testid="settings-library-item"
-                        data-active={isActive}
-                      >
-                        <span className="truncate text-sm text-text-primary" title={lib.name}>
-                          {lib.name}
-                        </span>
-                        {isActive ? (
-                          <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">
-                            {t("settings.libraries.active")}
-                          </span>
-                        ) : (
-                          <span
-                            className="shrink-0 truncate font-mono text-[11px] text-text-muted"
-                            title={lib.dbDir}
-                          >
-                            {lib.dbDir}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )}
-
           {tab === "ai" && <AiTab />}
         </div>
       </div>
-
-      <NewLibraryDialog open={newLibOpen} onClose={() => setNewLibOpen(false)} />
-      {relocating !== null && (
-        <RelocateLibraryDialog library={relocating} onClose={() => setRelocating(null)} />
-      )}
     </div>
   );
 }

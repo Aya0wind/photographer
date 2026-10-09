@@ -1,16 +1,24 @@
 //! SQLite 基础 + journal（spec §5.4）：M1 T2 由核心 lane 实现。
 //!
-//! - [`Db::open`]：WAL + `foreign_keys=ON` + `busy_timeout=5s`（多连接并发）。
-//! - [`Db::migrate`]：`PRAGMA user_version` 驱动的内嵌迁移（SQL 在 [`migrations`]，只加不改）。
-//! - jobs / job_files（断点恢复 journal）/ assets / logs 的仓储方法。
+//! - [`Db::open`]：WAL + `foreign_keys=ON` + `busy_timeout=5s`（多连接并发）
+//!   + 幂等执行单版本建表脚本 [`schema::SCHEMA`]（2026-10-09 单数据库多
+//!   照片库定案：migrate 体系/user_version/并发首开迁移锁全部删除——
+//!   建表脚本即唯一版本，全部对象 IF NOT EXISTS，并发首开由 DDL 逐语句
+//!   原子性 + busy_timeout 收敛，无需进程级锁）。
+//! - photos_libraries / jobs / job_files（断点恢复 journal）/ assets / logs
+//!   的仓储方法。
 //!
 //! [`FileState`]/[`AssetKind`] 复用 events 模块的领域枚举，列存储格式与其
 //! serde camelCase 字符串严格一致（手写 rusqlite To/FromSql 映射，不引 derive 扩展 crate）。
 
-pub(crate) mod migrations;
+/// 单版本建表脚本（唯一 schema 真值）。
+pub(crate) mod schema;
 
 /// 选片会话仓储（0024 三表；独立子模块——并行 lane 常改本文件，缩小冲突面）。
 pub mod culling;
+
+/// photos_libraries 登记表仓储（单数据库多照片库）。
+pub mod libraries;
 
 mod albums;
 mod assets;
@@ -36,14 +44,12 @@ use crate::events::{AssetKind, FileState};
 /// 打开（必要时创建）库文件，并应用连接级 PRAGMA。
 pub struct Db(pub Connection);
 
-/// 迁移串行锁（进程级）：新库首开时多连接并发 migrate 会交错执行 DDL，
-/// 见 [`Db::migrate`]。const fn new 稳定后无需 OnceLock。
-static MIGRATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 impl Db {
-    /// WAL（读写不互斥）+ foreign_keys + 5s busy_timeout。
+    /// WAL（读写不互斥）+ foreign_keys + 5s busy_timeout + 单版本 schema。
     /// busy_timeout 必须最先设置：journal_mode 的 WAL 转换在无忙等时
-    /// 会瞬时返回 BUSY（并发首开的真实竞态，schema_migrate_race_test）。
+    /// 会瞬时返回 BUSY（多连接并发打开的真实竞态）。
+    /// schema 全对象 IF NOT EXISTS，重开/并发首开均幂等（每连接一次
+    /// execute_batch 的解析开销即可，无需迁移锁与 user_version）。
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -51,57 +57,8 @@ impl Db {
         // NORMAL 是与 WAL 配套的常规同步档位（断电最多丢最后事务，不损坏库）。
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
+        conn.execute_batch(schema::SCHEMA)?;
         Ok(Self(conn))
-    }
-
-    /// 打开并迁移，open 的 PRAGMA 串与迁移全程同持 [`MIGRATE_LOCK`]：
-    /// 新库首开时并发连接的 WAL 转换与 DDL 都不会再互相踩（生产入口，
-    /// ipc::open_library_db 专用；只读/测试场景可直接 [`Db::open`]）。
-    pub fn open_migrated(path: &Path) -> Result<Self> {
-        let _guard = MIGRATE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let db = Self::open(path)?;
-        db.migrate_locked()?;
-        Ok(db)
-    }
-
-    /// `PRAGMA user_version` 驱动的顺序迁移；每条迁移独立事务提交。
-    /// 全程持 [`MIGRATE_LOCK`]：后到连接锁内重读版本即 no-op；已迁移库
-    /// 只多付一次 PRAGMA 读（2026-09-29 实测并发首开撞
-    /// 「table already exists / duplicate column」后引入）。
-    pub fn migrate(&self) -> Result<()> {
-        let _guard = MIGRATE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.migrate_locked()
-    }
-
-    /// 锁内实现（调用方须已持 [`MIGRATE_LOCK`]，Mutex 非重入）。
-    fn migrate_locked(&self) -> Result<()> {
-        let current: i64 = self
-            .0
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        // 测试故障注入（同 SMARTPHOTO_DL_TEST_BASE 风格）：放大「读版本→
-        // 首个建表」窗口，让并发竞态在 schema_migrate_race_test 确定性复现。
-        if current < migrations::MIGRATIONS.len() as i64 {
-            if let Ok(ms) = std::env::var("SMARTPHOTO_MIGRATE_RACE_TEST_MS") {
-                if let Ok(ms) = ms.parse::<u64>() {
-                    std::thread::sleep(Duration::from_millis(ms));
-                }
-            }
-        }
-        for (index, sql) in migrations::MIGRATIONS.iter().enumerate() {
-            let version = (index + 1) as i64;
-            if version <= current {
-                continue;
-            }
-            let tx = self.0.unchecked_transaction()?;
-            tx.execute_batch(sql)?;
-            tx.pragma_update(None, "user_version", version)?;
-            tx.commit()?;
-        }
-        Ok(())
     }
 }
 
@@ -239,6 +196,26 @@ pub struct AssetRow {
     /// 接受/拒绝状态（0016，布尔语义 0/1；与星级分层的应用内选片状态）。
     #[serde(default)]
     pub rejected: i64,
+    // —— 单数据库多照片库（2026-10-09 定案，计划 §二/§三/§五）——
+    /// 归属照片库（photos_libraries.id；静态属性：仅整库重定位改库 root，
+    /// 归属不变。无外键——移除登记是否连记录删由应用层决定）。
+    #[serde(default)]
+    pub library_id: Option<String>,
+    /// 单文件缺失标记（布尔语义 0/1；整库离线走 photos_libraries.status）。
+    #[serde(default)]
+    pub missing: i64,
+    /// 离线期间元数据改动待补写边车（布尔语义 0/1；库恢复在线后
+    /// reconcile 补写 XMP 边车并清标志）。
+    #[serde(default)]
+    pub xmp_dirty: i64,
+    /// 登记指纹：卷序列号（增量扫描两级识别——同卷同 file id = 硬链接
+    /// 零哈希直跳；exFAT/FAT 无 file id 时指纹列为 NULL 走哈希路径）。
+    #[serde(default)]
+    pub volume_serial: Option<i64>,
+    /// 登记指纹：卷内文件 id（NTFS FILE_ID 128-bit 小写十六进制；
+    /// 硬链接两侧同 id，rename 不变）。
+    #[serde(default)]
+    pub file_id: Option<String>,
 }
 
 /// 索引任务行（index_tasks；导入/索引任务分离后的资产级待办）。
@@ -278,6 +255,29 @@ pub struct ExportJobRow {
     pub height: Option<u32>,
     pub bytes: Option<u64>,
     pub new_asset_id: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+}
+
+/// album_export_job 行（M6 相册导出为文件夹任务账，§六 LR 互操作）：
+/// queued→running→done|cancelled|error；total/done/linked 为进度计数
+///（源 missing 跳过不计 done——前端以 total-done 差值出「跳过」总结）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumExportJobRow {
+    pub id: i64,
+    pub album_id: i64,
+    /// 子分组名（None = 整个相册）。
+    pub subgroup: Option<String>,
+    pub output_dir: String,
+    /// "queued" | "running" | "done" | "cancelled" | "error"
+    pub status: String,
+    /// 相册内待导出成员数。
+    pub total: u64,
+    /// 已导出数。
+    pub done: u64,
+    /// 其中硬链接落盘数（其余为拷贝）。
+    pub linked: u64,
     pub error: Option<String>,
     pub created_at: String,
     pub finished_at: Option<String>,
@@ -463,6 +463,13 @@ pub struct AssetFilters {
     /// 失焦筛选（0021）："soft"——命中 ai_analysis('blur') 的 soft 判定。
     /// 其他值容错不过滤。
     pub blur: Option<String>,
+    /// 所属照片库多选（OR，§一「来自哪个库」可筛选不可操作）：画廊默认
+    /// 全局跨库混排，按需过滤。空 = 不过滤（2026-10-09 M2c）。
+    pub library_ids: Vec<String>,
+    /// 缺失三态（§五 M2c）：true → 仅 missing=1（缺失角标筛选）；
+    /// false → 仅在线；None = 不过滤。整库离线走 photos_libraries.status，
+    /// 不在本条件语义内。
+    pub missing: Option<bool>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -492,8 +499,10 @@ pub struct AssetPageRow {
     pub rating: i64,
     /// 颜色标签（0016；无标签 None）。
     pub color_label: Option<String>,
-    /// 接受/拒绝状态（0016；布尔语义）。
+    /// 拒绝状态：接受/拒绝状态（布尔语义）。
     pub rejected: bool,
+    /// 单文件缺失标记（§五 M2c；画廊缺失角标数据源）。
+    pub missing: bool,
 }
 
 /// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
@@ -522,11 +531,10 @@ pub struct PersonRow {
 }
 
 /// 相册行（album_list 数据源 / IPC 载荷 AlbumDto，camelCase）：纯引用照片组
-/// 的元数据面——name 全库唯一；dir_name 为物理主目录名（0018，布局
-/// `photoRoot/{创建YYYY}/{创建MM}/{dir_name}/`（2026-09-28 定案：外层=相册
-/// 创建时间年月、相册内平铺，见 [`album_home_rel_parts`]），由显示名净化生成，
-/// 改显示名不动）；cover_asset_id 只是封面引用（资产永久删除时 FK SET NULL
-/// 自动解除）；item_count 为引用数（相册为空合法）。
+/// 的元数据面——name 全库唯一；cover_asset_id 只是封面引用（资产永久删除
+/// 时 FK SET NULL 自动解除）；item_count 为引用数（相册为空合法）。
+/// dir_name 为历史物理目录名残留列（相册物理目录化已随 2026-10-09 纯时间
+/// 布局退役，见 schema.rs 注释；仅为显示名净化唯一性的载体保留）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlbumRow {
@@ -537,6 +545,22 @@ pub struct AlbumRow {
     pub created_at: String,
     /// 物理主目录名（0018；存量行 = `album-{id}` 回填）。
     pub dir_name: String,
+}
+
+/// 相册导出成员投影（album_export_members 行，M6 §六；仅导出所需列）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumExportMember {
+    pub asset_id: i64,
+    pub path: String,
+    pub filename: String,
+    /// 单文件缺失标记（§五：缺失成员跳过导出并在总结报告）。
+    pub missing: bool,
+    /// 评分 0-5（边车投影用）。
+    pub rating: i64,
+    /// 颜色标签（LR 五色小写 token；None=无）。
+    pub color_label: Option<String>,
+    /// 拒绝旗标（边车评分投影为 -1）。
+    pub rejected: bool,
 }
 
 /// 日期分组行（画廊吸顶 + 跳转）。
@@ -559,17 +583,18 @@ pub type AiAnalysisRow = (String, Option<String>, Option<f64>, String);
 /// 分页行投影列（[`map_asset_page`] 消费顺序；各查询共用，防列序漂移）。
 const ASSET_PAGE_COLS: &str = "id, path, filename, size, kind, captured_at, camera, \
      width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
-     thumb_state, burst_id, flagged, rating, color_label, rejected";
+     thumb_state, burst_id, flagged, rating, color_label, rejected, missing";
 /// 同 [`ASSET_PAGE_COLS`] 的 `a.` 别名前缀形态（内层子查询用）。
 const ASSET_PAGE_COLS_A: &str = "a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
      a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
-     a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, a.color_label, a.rejected";
+     a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, a.color_label, \
+     a.rejected, a.missing";
 
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -613,16 +638,6 @@ pub fn strip_root_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     }
 }
 
-/// 布局公式唯一实现（[`Db::album_home_rel`] / [`Db::album_home_rels`] 共用）：
-/// created_at（RFC3339，UTC 口径）+ dir_name → `{YYYY}/{MM}/{dir_name}`；
-/// 解析失败兜底 dir_name 直挂根。存量迁移脚本 scripts/migrate_album_layout.py
-/// 的 new_home_rel 与此同语义（改公式两处同步）。
-pub fn album_home_rel_parts(created_at: &str, dir_name: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(created_at)
-        .map(|t| format!("{}/{}", t.format("%Y/%m"), dir_name))
-        .unwrap_or_else(|_| dir_name.to_string())
-}
-
 /// 资产入库核（连接/事务通用）：同路径重复导入整行覆盖（REPLACE 换 id 时
 /// 自动重指 pair_asset_id 既有引用）→ 按目录/配对规则双向写 pair →
 /// 索引待办 → （可选）同事务挂相册。见 [`Db::insert_asset`] /
@@ -648,9 +663,11 @@ fn insert_asset_on(
          created_at, origin, width, height, iso, f_number, exposure_time, focal_length, \
          lens, pair_asset_id, thumb_state, orientation, flash, metering_mode, \
          white_balance, exposure_program, software, artist, gps_lat, gps_lon, \
-         rating, flagged, color_label, rejected) \
+         rating, flagged, color_label, rejected, library_id, missing, xmp_dirty, \
+         volume_serial, file_id) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)",
+         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, \
+         ?33, ?34, ?35, ?36, ?37, ?38)",
         params![
             a.path,
             a.filename,
@@ -685,6 +702,11 @@ fn insert_asset_on(
             a.flagged,
             a.color_label,
             a.rejected,
+            a.library_id,
+            a.missing,
+            a.xmp_dirty,
+            a.volume_serial,
+            a.file_id,
         ],
     )?;
     let id: i64 = conn
@@ -1186,6 +1208,32 @@ fn asset_filter_conditions(
         }
     }
 
+    // —— 照片库归属（§一 M2c：画廊默认全局跨库混排，按需过滤；上限 16）——
+    let library_ids: Vec<String> = filters
+        .library_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .take(16)
+        .cloned()
+        .collect();
+    if !library_ids.is_empty() {
+        let slots = library_ids
+            .iter()
+            .map(|id| slot(params_vec, V::from(id.clone())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        conds.push(format!("library_id IN ({slots})"));
+    }
+
+    // —— 缺失三态（§五 M2c）：缺失角标筛选 ——
+    if let Some(missing) = filters.missing {
+        conds.push(if missing {
+            "missing = 1".into()
+        } else {
+            "missing = 0".into()
+        });
+    }
+
     conds
 }
 
@@ -1216,6 +1264,7 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         rating: row.get(18)?,
         color_label: row.get(19)?,
         rejected: row.get::<_, i64>(20)? != 0,
+        missing: row.get::<_, Option<i64>>(21)?.unwrap_or(0) != 0,
     })
 }
 
@@ -1251,9 +1300,14 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
         gps_lat: row.get(27)?,
         gps_lon: row.get(28)?,
         rating: row.get(29)?,
-        flagged: row.get(30)?,
+        flagged: row.get::<_, i64>(30)?,
         color_label: row.get(31)?,
-        rejected: row.get(32)?,
+        rejected: row.get::<_, i64>(32)?,
+        library_id: row.get(33)?,
+        missing: row.get::<_, Option<i64>>(34)?.unwrap_or(0),
+        xmp_dirty: row.get::<_, Option<i64>>(35)?.unwrap_or(0),
+        volume_serial: row.get(36)?,
+        file_id: row.get(37)?,
     })
 }
 
@@ -1283,6 +1337,22 @@ fn map_export_job(row: &Row<'_>) -> Result<ExportJobRow> {
         error: row.get(9)?,
         created_at: row.get(10)?,
         finished_at: row.get(11)?,
+    })
+}
+
+fn map_album_export_job(row: &Row<'_>) -> Result<AlbumExportJobRow> {
+    Ok(AlbumExportJobRow {
+        id: row.get(0)?,
+        album_id: row.get(1)?,
+        subgroup: row.get(2)?,
+        output_dir: row.get(3)?,
+        status: row.get(4)?,
+        total: row.get::<_, i64>(5)? as u64,
+        done: row.get::<_, i64>(6)? as u64,
+        linked: row.get::<_, i64>(7)? as u64,
+        error: row.get(8)?,
+        created_at: row.get(9)?,
+        finished_at: row.get(10)?,
     })
 }
 

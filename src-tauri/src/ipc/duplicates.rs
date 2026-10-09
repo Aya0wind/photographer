@@ -30,7 +30,7 @@ pub fn fetch_duplicates_exact(
     after: usize,
     limit: usize,
 ) -> Result<Vec<DuplicateGroupDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let keys = db.exact_duplicate_keys().map_err(|e| e.to_string())?;
     let mut groups = Vec::new();
     for (size, xxhash) in keys.into_iter().skip(after).take(limit.min(100)) {
@@ -120,7 +120,7 @@ pub fn fetch_duplicates_similar(
     after: usize,
     limit: usize,
 ) -> Result<Vec<DuplicateGroupDto>, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let groups = fetch_duplicates_similar_core(&db, after, limit)?;
     let mut out = Vec::with_capacity(groups.len());
     for ids in groups {
@@ -161,7 +161,7 @@ pub fn fetch_duplicates_list(
 ///
 /// 返回实际删除数。
 pub fn fetch_duplicate_delete(state: &super::AppState, asset_ids: &[i64]) -> Result<u64, String> {
-    let db = super::active_library_db(state)?;
+    let db = super::app_database_db(state)?;
     let mut paths = Vec::with_capacity(asset_ids.len());
     for id in asset_ids.iter().copied() {
         // 不存在的 id：跳过（文件清单只为物理删除与日志服务）

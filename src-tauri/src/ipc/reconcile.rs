@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{active_library_db, DeviceEntry, DeviceScan, SharedState};
+use super::{app_database_db, DeviceEntry, DeviceScan, SharedState};
 use crate::devices::orchestrator::{scan_device_with_progress, DeviceSnapshot};
 use crate::devices::volume::VolumeSource;
 use crate::devices::wpd::WpdSource;
@@ -147,7 +147,7 @@ fn spawn_scan(state: &SharedState, id: String, source: Arc<dyn DeviceSource>, tr
                 .import
                 .skip_imported;
             // 没有可用的照片库仍能发现相机和扫描媒体；查重暂按全部未导入。
-            let db = active_library_db(&state)
+            let db = app_database_db(&state)
                 .map_err(|error| {
                     crate::devices::diagnostics::record(format!(
                         "scan library unavailable: {error}"

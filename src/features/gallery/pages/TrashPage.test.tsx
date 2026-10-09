@@ -14,6 +14,7 @@ import {
   trashPurge,
   trashRestore,
   type AssetDto,
+  type TrashPurgeResult,
 } from "@/ipc/api";
 
 /**
@@ -36,6 +37,10 @@ const listMock = vi.mocked(trashList);
 const restoreMock = vi.mocked(trashRestore);
 const purgeMock = vi.mocked(trashPurge);
 const thumbMock = vi.mocked(assetThumbGet);
+
+function purgeResult(deletedRecords: number): TrashPurgeResult {
+  return { deletedRecords, deletedFiles: 0, missingRecordsOnly: 0, offlineKept: 0, offlineLibraries: [] };
+}
 
 function makeAsset(id: number): AssetDto {
   return assetFixture(id, {
@@ -71,7 +76,7 @@ beforeAll(() => {
 beforeEach(() => {
   listMock.mockReset().mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
   restoreMock.mockReset().mockResolvedValue(true);
-  purgeMock.mockReset().mockResolvedValue(0);
+  purgeMock.mockReset().mockResolvedValue(purgeResult(0));
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   resetThumbPipelineForTests();
 });
@@ -139,7 +144,7 @@ describe("回收站页：多选与批量操作", () => {
 
   it("彻底删除：弹窗列出 N 项 + 不可恢复提示；「保留文件」→ trash_purge(ids,false)", async () => {
     const user = userEvent.setup();
-    purgeMock.mockResolvedValue(1);
+    purgeMock.mockResolvedValue(purgeResult(2));
     renderTrash();
     await screen.findAllByTestId("gallery-tile");
 
@@ -149,7 +154,7 @@ describe("回收站页：多选与批量操作", () => {
 
     const dialog = screen.getByTestId("trash-purge-dialog");
     expect(screen.getByTestId("trash-purge-title")).toHaveTextContent("彻底删除 2 项");
-    expect(dialog).toHaveTextContent("将从库记录中移除所选 2 项");
+    expect(dialog).toHaveTextContent("将从照片库记录中移除所选 2 项");
     expect(dialog).toHaveTextContent("彻底删除不可恢复");
 
     await user.click(screen.getByTestId("trash-purge-keep"));
@@ -157,7 +162,7 @@ describe("回收站页：多选与批量操作", () => {
     await waitFor(() => {
       expect(screen.getByTestId("gallery-tile")).toHaveAttribute("data-asset-id", "3");
     });
-    expect(screen.getByTestId("trash-toast")).toHaveTextContent("已从库中移除 2 项");
+    expect(screen.getByTestId("trash-toast")).toHaveTextContent("已从照片库移除 2 项");
     expect(screen.queryByTestId("trash-purge-dialog")).not.toBeInTheDocument();
   });
 

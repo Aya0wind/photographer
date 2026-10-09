@@ -5,9 +5,9 @@ import type { ImportWizardFlow } from "../lib/useImportWizard";
 
 export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }) {
   const { t } = useTranslation();
-  const { starting, device, activeLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName, setNewAlbumName, albumError, setAlbumError, startError, copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview, albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy, setDuplicatePolicy, skipImported, setSkipImported, secondRoot, setSecondRoot, browseSecondRoot, secondImportTargetPreview } = flow;
+  const { starting, device, targetLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName, setNewAlbumName, albumError, setAlbumError, startError, copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview, albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy, setDuplicatePolicy, skipImported, setSkipImported, secondRoot, setSecondRoot, browseSecondRoot, secondImportTargetPreview } = flow;
   return <>
-        <div className="mb-5 rounded-xl bg-panel/60 px-4 py-3 text-xs"><p className="truncate text-text-primary">{device?.name}</p><p className="mt-1 text-text-muted">{t("wizard.flow.library", { name: activeLibrary?.name ?? "—" })}</p></div>
+        <div className="mb-5 rounded-xl bg-panel/60 px-4 py-3 text-xs"><p className="truncate text-text-primary">{device?.name}</p><p className="mt-1 text-text-muted">{t("wizard.flow.library", { name: targetLibrary?.name ?? "—" })}</p></div>
         <fieldset disabled={starting} className="min-w-0 space-y-5">
           <label className="flex flex-col gap-2 text-xs text-text-secondary" data-testid="wizard-album-section">
             {t("wizard.album.label")}
@@ -47,7 +47,8 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
               </datalist>
             )}
 
-          {/* 导入位置（库属性，只读）：目标根/模板随库走，在设置中修改 */}
+          {/* 导入位置（照片库属性，只读）：目标 = 所选照片库 root，纯时间布局；
+              照片库登记管理在「存储」页（M5：设置页旧「库」tab 已退役） */}
           <div className="mt-5 flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-text-secondary">
@@ -55,7 +56,7 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
               </span>
               <button
                 type="button"
-                onClick={() => navigate("/settings")}
+                onClick={() => navigate("/storage")}
                 className="shrink-0 rounded bg-panel px-1.5 py-0.5 text-[11px] text-text-muted transition-colors hover:text-accent"
                 title={t("wizard.location.badge")}
                 data-testid="wizard-location-edit"
@@ -69,7 +70,7 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
             >
               {mode === "reference" ? (
                 <span className="text-xs leading-relaxed text-text-secondary">{t("wizard.mode.referenceDesc")}</span>
-              ) : activeLibrary ? (
+              ) : targetLibrary ? (
                 <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
                   {targetRoot}
                 </span>

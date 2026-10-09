@@ -7,8 +7,6 @@ import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import ImportWizard, {
-  COL_WIDTHS_KEY,
-  PANEL_COLLAPSE_KEY,
   TILE_SIZE_KEY,
   VIEW_MODE_STORAGE_KEY,
   resetThumbCacheForTests,
@@ -23,14 +21,22 @@ import {
   deviceFiles,
   deviceList,
   folderScan,
-  fsListDirs,
-  FIXED_PLAN_DIR_TEMPLATE,
   importStart,
+  photoLibraryList,
   platformCapabilities,
   thumbGet,
   deviceThumbGet,
   type ImportPlan,
+  type PhotoLibrary,
 } from "@/ipc/api";
+
+/**
+ * 导入向导测试（对齐 2026-10-09 之后的 UI 与契约）：
+ * - 三步流：来源（设备卡片/选择文件夹/最近使用）→ 挑选（列表/缩略图网格）
+ *   → 确认抽屉（原生 <dialog>，jsdom 需补 showModal 桩）。
+ * - 契约：导入目标 = 照片库（photo_library_list；ImportPlan.targetLibraryId），
+ *   落盘布局固定纯时间 `{库root}/{拍摄年}/{拍摄月}/{原文件名}`。
+ */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -41,6 +47,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     fsListDirs: vi.fn(),
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
+    photoLibraryList: vi.fn(),
     platformCapabilities: vi.fn(),
     thumbGet: vi.fn(),
     deviceThumbGet: vi.fn(),
@@ -62,7 +69,6 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 const startMock = vi.mocked(importStart);
 const scanMock = vi.mocked(folderScan);
-const listMock = vi.mocked(fsListDirs);
 const openMock = vi.mocked(openDialog);
 const deviceFilesMock = vi.mocked(deviceFiles);
 const deviceListMock = vi.mocked(deviceList);
@@ -73,6 +79,18 @@ const deviceThumbMock = vi.mocked(deviceThumbGet);
 const albumListMock = vi.mocked(albumList);
 const albumSubgroupsMock = vi.mocked(albumSubgroups);
 const albumCreateMock = vi.mocked(albumCreate);
+const photoLibraryListMock = vi.mocked(photoLibraryList);
+
+/** 目标照片库（2026-10-09 单库多照片库：导入目标 = 选照片库，替代旧 targetRoot） */
+const PHOTO_LIB: PhotoLibrary = {
+  id: "lib1",
+  name: "主照片库",
+  rootPath: "Y:\\照片",
+  createdAt: "2026-10-09T00:00:00Z",
+  status: "online",
+  assetCount: 0,
+  sizeBytes: 0,
+};
 
 function volumeDevice() {
   return {
@@ -128,22 +146,7 @@ function seedSession(): void {
     devices: [volumeDevice(), mtpDevice()],
     sourceFiles: { "E:": files() },
   });
-  useSettingsStore.setState((s) => ({
-    settings: {
-      ...s.settings,
-      libraries: [
-        {
-          id: "lib1",
-          name: "主库",
-          dbDir: "I:\\SmartPhoto\\主库",
-          photoRoot: "Y:\\照片",
-          configured: true,
-        streams: 4,
-        },
-      ],
-      activeLibraryId: "lib1",
-    },
-  }));
+  photoLibraryListMock.mockResolvedValue([PHOTO_LIB]);
 }
 
 function TasksProbe() {
@@ -158,6 +161,10 @@ function SettingsProbe() {
   return <div data-testid="settings-probe">SETTINGS_PAGE</div>;
 }
 
+function StorageProbe() {
+  return <div data-testid="storage-probe">STORAGE_PAGE</div>;
+}
+
 function renderWizard(query = "") {
   return render(
     <I18nextProvider i18n={i18n}>
@@ -167,14 +174,29 @@ function renderWizard(query = "") {
           <Route path="/tasks" element={<TasksProbe />} />
           <Route path="/gallery" element={<GalleryProbe />} />
           <Route path="/settings" element={<SettingsProbe />} />
+          <Route path="/storage" element={<StorageProbe />} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
   );
 }
 
+/** 渲染并走到确认抽屉（等待照片库/相册等异步初始值就绪）；返回 render 结果供卸载 */
+async function openReview(user: ReturnType<typeof userEvent.setup>, query = "?device=E:") {
+  const view = renderWizard(query);
+  await screen.findByTestId("wizard-table-stats");
+  const next = await screen.findByTestId("wizard-review-next");
+  await waitFor(() => expect(next).toBeEnabled());
+  await user.click(next);
+  await screen.findByTestId("wizard-review-drawer");
+  // 等默认相册「未分组」预选就位（相册必选契约）
+  await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
+  return view;
+}
+
 // jsdom 无布局：offsetWidth/offsetHeight 恒 0，react-virtual 视口为空会一行都不渲染。
 // 统一 mock 出非零视口（组件逻辑不依赖具体尺寸；真实布局由浏览器提供）。
+// 另：jsdom 未实现 <dialog>.showModal/close（确认抽屉用原生模态），测试内补桩。
 beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
     configurable: true,
@@ -184,19 +206,27 @@ beforeAll(() => {
     configurable: true,
     get: () => 800,
   });
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+    this.removeAttribute("open");
+  };
 });
 
 beforeEach(() => {
   resetImportStoreForTests();
   resetThumbCacheForTests();
+  localStorage.clear();
   localStorage.setItem(VIEW_MODE_STORAGE_KEY, "list");
   deviceThumbMock.mockReset().mockResolvedValue(null);
   startMock.mockReset().mockResolvedValue({ ok: false, error: null });
   scanMock.mockReset().mockResolvedValue(null);
-  listMock.mockReset().mockResolvedValue([]);
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
   deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
+  // 默认无照片库（「未选库」用例的默认态）；有用例经 seedSession 指定目标库
+  photoLibraryListMock.mockReset().mockResolvedValue([]);
   platformCapsMock.mockReset().mockResolvedValue({
     filesystemRoots: true,
     volumeDevices: true,
@@ -211,7 +241,6 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue(null);
   albumListMock.mockReset().mockResolvedValue([
     { id: 1, name: "未分组", coverAssetId: null, itemCount: 0, createdAt: "2026-09-01" },
-    // createdAt 与「未分组」不同年月：预览断言可验证外层年月取所选相册的创建时间
     { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2025-12-15" },
   ]);
   albumSubgroupsMock.mockReset().mockResolvedValue([]);
@@ -219,63 +248,17 @@ beforeEach(() => {
     ok: true,
     album: { id: 9, name: "新相册", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
   });
-  localStorage.setItem(VIEW_MODE_STORAGE_KEY, "list");
-  localStorage.removeItem(PANEL_COLLAPSE_KEY);
-  localStorage.removeItem(COL_WIDTHS_KEY);
-  localStorage.removeItem(TILE_SIZE_KEY);
 });
 
-describe("ImportWizard 布局与设备", () => {
-  it("首次打开默认展示缩略图，附加选项收起，未选照片不能启动导入", async () => {
-    seedSession();
-    localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
-    renderWizard("?device=E:");
-    expect(await screen.findByTestId("wizard-file-grid")).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-advanced")).not.toHaveAttribute("open");
-    expect(screen.getByTestId("wizard-import-summary")).toHaveTextContent("已选 4 张");
-    await userEvent.setup().click(screen.getByRole("button", { name: "反选" }));
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
-    expect(screen.getByTestId("wizard-import-summary")).toHaveTextContent("请至少选择一张照片");
-  });
+// --- 来源步（设备卡片 / 选择文件夹 / 最近使用） ---------------------------------------
 
-  it("MTP 清单保留持久对象 ID，扫描完成后读取相机缩略资源", async () => {
-    seedSession();
-    useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "scanning" }], sourceFiles: {
-      "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 42, kind: "raw", objectId: "persistent-42", mtime: "today" }],
-    } });
-    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
-    deviceThumbMock.mockResolvedValue("C:\\thumbCache\\mtp.jpg");
-    convertMock.mockImplementation((path) => `asset://${path}`);
-    renderWizard("?device=MTP:CAM");
-    expect(await screen.findByText("扫描后加载预览")).toBeInTheDocument();
-    expect(deviceThumbMock).not.toHaveBeenCalled();
-    act(() => useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "ready" }] }));
-    expect(await screen.findByRole("img", { name: "A.NEF" })).toHaveAttribute("src", "asset://C:\\thumbCache\\mtp.jpg");
-    expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:42", 256);
-    expect(thumbMock).not.toHaveBeenCalled();
-  });
-
-  it("临时失败后可重试，图片实际加载完成才结束加载动画", async () => {
-    seedSession();
-    useImportStore.setState({ sourceFiles: { "E:": [files()[2]] } });
-    thumbMock.mockResolvedValueOnce(null).mockResolvedValue("C:\\thumbCache\\retry.jpg");
-    convertMock.mockImplementation((path) => `asset://${path}`);
-    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "重试" }));
-    const image = await screen.findByRole("img", { name: "IMG_0003.JPG" });
-    expect(screen.getByText("加载预览…")).toBeInTheDocument();
-    fireEvent.load(image);
-    expect(image).toHaveClass("opacity-100");
-    expect(screen.queryByText("加载预览…")).not.toBeInTheDocument();
-    expect(thumbMock).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 1");
-  });
-  it("无设备时左栏显示空态", () => {
+describe("来源步", () => {
+  it("无设备时空态文案，选择文件夹入口仍在", async () => {
     renderWizard();
 
-    expect(screen.getByText(/未检测到设备/)).toBeInTheDocument();
+    expect(await screen.findByText(/未检测到设备/)).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-choose-folder")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-device-item")).not.toBeInTheDocument();
   });
 
   it("原生设备发现未适配时提示使用文件夹导入", async () => {
@@ -305,16 +288,36 @@ describe("ImportWizard 布局与设备", () => {
     expect(deviceListMock).toHaveBeenCalled();
   });
 
-  it("URL device 参数选中指定设备并展示信息卡", async () => {
-    seedSession();
+  it("设备卡片列表：名称与文件数徽标；点击进入挑选步；未插卡行禁用", async () => {
+    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
+    const user = userEvent.setup();
+    renderWizard();
 
+    const rows = await screen.findAllByTestId("wizard-device-item");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAttribute("data-device-id", "E:");
+    expect(rows[0]).toHaveTextContent("SanDisk 64G");
+    expect(rows[0]).toHaveTextContent("4 文件");
+    expect(rows[1]).toHaveTextContent("EOS R5");
+    expect(rows[1]).toHaveTextContent("2 文件");
+
+    // 点击进入挑选步：统计条出现且来源切换按钮显示设备名
+    await user.click(rows[0]);
+    expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-source-toggle")).toHaveTextContent("SanDisk 64G");
+    expect(screen.getByTestId("wizard-source-toggle")).toHaveTextContent("更换来源");
+  });
+
+  it("URL ?device= 直达挑选步；来源切换按钮回来源步", async () => {
+    seedSession();
+    const user = userEvent.setup();
     renderWizard("?device=E:");
 
-    expect((await screen.findAllByText("SanDisk 64G"))[0]).toBeInTheDocument();
-    const info = screen.getByTestId("wizard-device-info");
-    expect(info).toHaveTextContent("读卡器");
-    expect(info).toHaveTextContent("100 MB");
-    expect(info).toHaveTextContent("4");
+    expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-source-toggle")).toHaveTextContent("SanDisk 64G");
+
+    await user.click(screen.getByTestId("wizard-source-toggle"));
+    expect(await screen.findByTestId("wizard-source-picker")).toBeInTheDocument();
   });
 
   it("选中源后自动拉取 device_files 填充清单（无需手动 seed）", async () => {
@@ -334,530 +337,201 @@ describe("ImportWizard 布局与设备", () => {
     expect(deviceFilesMock).toHaveBeenCalledWith("E:");
   });
 
-  it("设备列表：多设备行可点切换，信息卡与中栏清单随选中切换", async () => {
+  it("多设备切换：经来源步换设备重新拉取清单；切回用缓存不重复拉", async () => {
     seedSession(); // E:(volume, 4 文件) + MTP:CAM(mtp, 2 文件)；sourceFiles 只 seed 了 E:
     deviceFilesMock.mockResolvedValue([
       { id: "0", relPath: "DCIM/B.JPG", size: 10, mtime: "2026-01-01T00:00:00Z" },
       { id: "1", relPath: "DCIM/C.JPG", size: 20, mtime: "2026-01-01T00:00:01Z" },
     ]);
     const user = userEvent.setup();
-    renderWizard();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-table-stats");
 
-    // 列表两行：E: 默认选中；徽标显示文件总数
-    const rows = await screen.findAllByTestId("wizard-device-item");
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toHaveAttribute("data-device-id", "E:");
-    expect(rows[0]).toHaveAttribute("data-selected", "true");
-    expect(rows[0]).toHaveTextContent("SanDisk 64G");
-    expect(rows[0]).toHaveTextContent("4 文件");
-    expect(rows[1]).toHaveAttribute("data-device-id", "MTP:CAM");
-    expect(rows[1]).toHaveAttribute("data-selected", "false");
-    expect(rows[1]).toHaveTextContent("2 文件");
-
-    // 点击 MTP 行：选中态切换、信息卡跟随（相机）、中栏随切换重新拉取（device_files(MTP:CAM)）
-    await user.click(rows[1]);
-    const mtpRow = screen
-      .getAllByTestId("wizard-device-item")
-      .find((el) => el.getAttribute("data-device-id") === "MTP:CAM");
-    expect(mtpRow).toHaveAttribute("data-selected", "true");
-    const info = await screen.findByTestId("wizard-device-info");
-    expect(info).toHaveTextContent("相机");
+    // 回来源步点 MTP 卡片：清单随切换重新拉取
+    await user.click(screen.getByTestId("wizard-source-toggle"));
+    await user.click(
+      (await screen.findAllByTestId("wizard-device-item")).find(
+        (el) => el.getAttribute("data-device-id") === "MTP:CAM",
+      )!,
+    );
     await waitFor(() => expect(deviceFilesMock).toHaveBeenCalledWith("MTP:CAM"));
     const list = await screen.findByTestId("wizard-file-list");
     expect(await within(list).findByText("B.JPG")).toBeInTheDocument();
 
     // 切回 E:（清单已缓存，不重复拉取）
-    await user.click(screen.getAllByTestId("wizard-device-item")[0]);
-    expect(await screen.findByTestId("wizard-device-info")).toHaveTextContent("读卡器");
-    await within(await screen.findByTestId("wizard-file-list")).findByText("IMG_0001.CR3");
+    await user.click(screen.getByTestId("wizard-source-toggle"));
+    await user.click(
+      (await screen.findAllByTestId("wizard-device-item")).find(
+        (el) => el.getAttribute("data-device-id") === "E:",
+      )!,
+    );
+    expect(await within(await screen.findByTestId("wizard-file-list")).findByText("IMG_0001.CR3")).toBeInTheDocument();
     expect(deviceFilesMock).toHaveBeenCalledTimes(1); // 仅 MTP:CAM 拉过一次
+  });
+
+  it("空读卡器显示未插卡：卡片禁用，不被请求扫描清单", async () => {
+    useImportStore.setState({ devices: [
+      { ...volumeDevice(), id: "G:", name: "读卡器 (G:)", mediaPresent: false, filesByKind: { photo: 0, raw: 0, other: 0 } },
+      volumeDevice(),
+    ] });
+    renderWizard();
+
+    const rows = await screen.findAllByTestId("wizard-device-item");
+    expect(rows[0]).toBeDisabled();
+    expect(rows[0]).toHaveTextContent("未插卡");
+    expect(rows[1]).toBeEnabled();
+    expect(deviceFilesMock).not.toHaveBeenCalledWith("G:");
   });
 });
 
-describe("源文件树与文件列表", () => {
-  it("按目录分组折叠展示；表头统计默认全选；默认列表视图不读缩略图", async () => {
+describe("选择文件夹与最近使用", () => {
+  it("选择文件夹：openDialog → folderScan 快照入册并自动选中进挑选步", async () => {
+    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(folderSnapshot());
+    deviceFilesMock.mockResolvedValue([
+      { id: "0", relPath: "DCIM/A.JPG", size: 10, mtime: "2026-01-01T00:00:00Z" },
+    ]);
+    const user = userEvent.setup();
+    renderWizard();
+
+    await user.click(await screen.findByTestId("wizard-choose-folder"));
+
+    expect(openMock).toHaveBeenCalledWith({ directory: true });
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
+    // 文件夹成为当前源（挑选步呈现其清单）；设备区不含 folder 条目（来源步才可见）
+    expect(useImportStore.getState().devices.some((d) => d.id === "FOLDER:D:\\老照片")).toBe(true);
+    expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 1");
+    expect(await within(await screen.findByTestId("wizard-file-list")).findByText("A.JPG")).toBeInTheDocument();
+  });
+
+  it("folderScan 失败（IPC 不可用等）：提示错误并停留来源步，不产生死条目", async () => {
+    useImportStore.setState({ devices: [volumeDevice()] });
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(null);
+    const user = userEvent.setup();
+    renderWizard();
+
+    await user.click(await screen.findByTestId("wizard-choose-folder"));
+
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
+    expect(useImportStore.getState().devices).toHaveLength(1);
+    // 停留来源步（设备卡片仍在），错误经 ErrorModal 呈现并带目录
+    expect(await screen.findByTestId("wizard-source-picker")).toBeInTheDocument();
+    const error = await screen.findByRole("alertdialog");
+    expect(error).toHaveTextContent("D:\\老照片");
+  });
+
+  it("选中文件夹计入最近使用；从最近使用可重选", async () => {
+    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(folderSnapshot());
+    const user = userEvent.setup();
+    renderWizard();
+
+    await user.click(await screen.findByTestId("wizard-choose-folder"));
+    expect(useImportStore.getState().recentSources[0]?.id).toBe("FOLDER:D:\\老照片");
+    const stored = JSON.parse(
+      localStorage.getItem("smartphoto.import.recentSources") ?? "[]",
+    ) as Array<{ id: string }>;
+    expect(stored[0]?.id).toBe("FOLDER:D:\\老照片");
+
+    // 回来源步：最近使用区可见该文件夹，点击重选（重新 folderScan）
+    await user.click(screen.getByTestId("wizard-source-toggle"));
+    const recent = await screen.findByTestId("wizard-recent");
+    expect(recent).toHaveTextContent("老照片");
+    await user.click(within(recent).getByTestId("wizard-recent-item"));
+    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
+  });
+});
+
+// --- 挑选步：列表 / 缩略图网格 ---------------------------------------------------------
+
+describe("挑选步：列表与网格", () => {
+  it("按目录分组折叠展示；表头统计默认全选；列表视图不读缩略图", async () => {
     seedSession();
     renderWizard("?device=E:");
 
-    const tree = await screen.findByTestId("wizard-tree");
-    expect(tree).toHaveTextContent("DCIM/100CANON");
-    expect(tree).toHaveTextContent("DCIM/101CANON");
+    const list = await screen.findByTestId("wizard-file-list");
     expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
-    // 中栏列表（默认视图）：分组行 + 文件行 + 虚拟化滚动容器；无 img
-    const list = screen.getByTestId("wizard-file-list");
     expect(screen.getByTestId("wizard-list-scroll")).toBeInTheDocument();
     expect(within(list).getAllByTestId("wizard-list-group")).toHaveLength(2);
+    expect(within(list).getByText("DCIM/100CANON")).toBeInTheDocument();
     expect(within(list).getByText("IMG_0001.CR3")).toBeInTheDocument();
     expect(within(list).getByText("IMG_0004.JPG")).toBeInTheDocument();
     expect(document.querySelector("img")).toBeNull();
   });
 
-  it("目录组复选框整组反选；全选/反选按钮生效", async () => {
+  it("目录组复选框整组反选；全选/反选按钮生效（反选在「更多操作」弹出内）", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
-
-    const stats = await screen.findByTestId("wizard-table-stats");
-    expect(stats).toHaveTextContent("已选 4 / 4");
-
-    // 取消整组 DCIM/100CANON
-    await user.click(within(screen.getByTestId("wizard-tree")).getByRole("checkbox", { name: '选择目录 DCIM/100CANON' }));
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
-
-    // 反选：另一组被取消，本组恢复
-    await user.click(screen.getByRole("button", { name: "反选" }));
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
-
-    // 全选恢复
-    await user.click(screen.getByRole("button", { name: "全选" }));
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
-  });
-
-  it("勾选即导入范围：只选 1 个文件时 plan.include 只含该文件（回归：反选后导入全量的真机 bug）", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 9 });
 
     expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
-    // 反选 → 全不选；再只勾 IMG_0003.JPG
+
+    // 取消整组 DCIM/100CANON
+    await user.click(within(screen.getByTestId("wizard-file-list")).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
+
+    // 反选（弹出菜单）：另一组被取消，本组恢复
+    await user.click(screen.getByTitle("更多操作"));
     await user.click(screen.getByRole("button", { name: "反选" }));
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 0 / 4");
-    await user.click(within(screen.getByTestId("wizard-file-list")).getByRole("checkbox", { name: "IMG_0003.JPG" }));
-    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 4");
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
 
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-
-    const plan = startMock.mock.calls[0][0];
-    expect(plan.include).toEqual(["E:/DCIM/101CANON/IMG_0003.JPG"]);
+    // 全选恢复（全选后按钮语义翻转为「取消全选」）
+    await user.click(screen.getByRole("button", { name: "全选" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+    expect(screen.getByRole("button", { name: "取消全选" })).toBeInTheDocument();
   });
 
-  it("折叠目录组隐藏组内文件（左树与中栏共享折叠态）", async () => {
+  it("折叠目录组隐藏组内文件", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
 
     const list = await screen.findByTestId("wizard-file-list");
     await within(list).findByText("IMG_0001.CR3");
-    // 点击中栏分组头折叠（按钮包含目录名）
     await user.click(within(list).getByRole("button", { name: /DCIM\/100CANON/ }));
     expect(screen.queryByText("IMG_0001.CR3")).not.toBeInTheDocument();
     expect(within(list).getByText("IMG_0003.JPG")).toBeInTheDocument();
   });
-});
 
-describe("方案面板", () => {
-  it("导入位置为只读库属性：信息卡展示目标根/固定目录布局，无输入框", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-
-    const card = await screen.findByTestId("wizard-location-card");
-    expect(card).toHaveTextContent("Y:\\照片");
-    expect(screen.queryByTestId("wizard-preview")).not.toBeInTheDocument();
-    expect(card).not.toHaveTextContent("目标根");
-    expect(card).not.toHaveTextContent("目录布局");
-    expect(card).not.toHaveTextContent("{YYYY}/{MM-DD}");
-    // 目标根/布局均不可编辑（原输入与下拉已移除）
-    expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("目录模板")).not.toBeInTheDocument();
-    expect(screen.getByTestId("wizard-location-edit")).toBeInTheDocument();
-  });
-
-  it("库属性徽标文案为「在设置中修改」，点击跳设置页", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    const badge = await screen.findByTestId("wizard-location-edit");
-    expect(badge).toHaveTextContent("库属性 · 在设置中修改");
-    expect(badge).not.toHaveTextContent("去选择器修改");
-
-    await user.click(badge);
-    expect(await screen.findByTestId("settings-probe")).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-location-card")).not.toBeInTheDocument();
-  });
-
-  it("无激活库时信息卡显示未选库提示，开始导入禁用", async () => {
-    useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
-    // 显式清空库（真实 store 跨用例共享，避免残留上一个 seed）
-    useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, libraries: [], activeLibraryId: null },
-    }));
-    renderWizard("?device=E:");
-
-    const card = await screen.findByTestId("wizard-location-card");
-    expect(card).toHaveTextContent("尚未选择库");
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
-  });
-
-  it("MTP 源强制单流（设备信息卡提示），向导不再有并发流数控件", async () => {
-    seedSession();
-    renderWizard("?device=MTP:CAM");
-
-    const info = await screen.findByTestId("wizard-device-info");
-    const mtpRow = within(info).getByTestId("wizard-mtp-streams");
-    expect(mtpRow).toHaveTextContent("并发流数");
-    expect(mtpRow).toHaveTextContent("1");
-    // 协议限制完整说明挂在 title 上
-    expect(mtpRow.querySelector("dd")).toHaveAttribute(
-      "title",
-      "相机（MTP）直连受协议限制，仅支持单流。",
-    );
-    // 并发流数是库属性：向导方案面板不再渲染该控件
-    expect(screen.queryByLabelText("并发流数")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-streams-value")).not.toBeInTheDocument();
-  });
-
-  it("plan.streams 从库属性合成：库值 3 → 3；MTP 恒 1", async () => {
-    useImportStore.setState({ devices: [volumeDevice(), mtpDevice()], sourceFiles: { "E:": files(), "MTP:CAM": [{ path: "A.JPG", dir: "", name: "A.JPG", kind: "photo", size: 10 }] } });
-    useSettingsStore.setState((s) => ({
-      settings: {
-        ...s.settings,
-        libraries: [
-          {
-            id: "lib1",
-            name: "主库",
-            dbDir: "I:\\SmartPhoto\\主库",
-            photoRoot: "Y:\\照片",
-            streams: 3,
-            configured: true,
-          },
-        ],
-        activeLibraryId: "lib1",
-      },
-    }));
-    const user = userEvent.setup();
-    startMock.mockResolvedValue({ ok: true, jobId: 21 });
-
-    renderWizard("?device=E:");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0].streams).toBe(3);
-
-    // MTP：设备协议限制恒单流（覆盖库值）
-    renderWizard("?device=MTP:CAM");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(startMock.mock.calls[1][0].streams).toBe(1);
-  });
-
-  it("开始导入：按库属性组装 plan、成功后回画廊（LR 式后台导入，不跳任务中心）", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 7 });
-
-    const startButton = await screen.findByRole("button", { name: "开始导入" });
-    await user.click(startButton);
-
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
-    expect(startMock).toHaveBeenCalledTimes(1);
-    const plan: ImportPlan = startMock.mock.calls[0][0];
-    expect(plan).toEqual({
-      sourceId: "E:",
-      targetRoot: "Y:\\照片",
-      // dirTemplate 配置退役：固定占位（后端相册导入整体覆写，值不影响落位）
-      dirTemplate: FIXED_PLAN_DIR_TEMPLATE,
-      // 相册必选（规格修订）：默认预选系统保底相册「未分组」
-      albumId: 1,
-          nameTemplate: "{原文件名}",
-      duplicatePolicy: "skip",
-      skipImported: true,
-      streams: 4,
-      mode: "copy",
-      include: [
-        "E:/DCIM/100CANON/IMG_0001.CR3",
-        "E:/DCIM/100CANON/IMG_0002.CR3",
-        "E:/DCIM/101CANON/IMG_0003.JPG",
-        "E:/DCIM/101CANON/IMG_0004.JPG",
-      ],
-    });
-    // 库属性不回写全局设置（dirTemplate/importSubdir 均已退役，import 配置保持默认）
-    expect("dirTemplate" in useSettingsStore.getState().settings.import).toBe(false);
-    expect("importSubdir" in useSettingsStore.getState().settings.import).toBe(false);
-  });
-
-  it("启动失败：透出后端 Err 原文；invoke 不可用时用通用文案", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    // 后端逻辑错误（嵌套守卫）：原文透出
-    startMock.mockResolvedValueOnce({ ok: false, error: "目标目录不能位于源目录内" });
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("目标目录不能位于源目录内");
-    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "确定" }));
-
-    // invoke 不可用（error=null）：通用文案
-    startMock.mockResolvedValueOnce({ ok: false, error: null });
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("启动失败");
-  });
-});
-
-describe("文件系统目录树（LR 式源面板）", () => {
-  it("渲染盘符根；hasSubdirs=false 无展开箭头", async () => {
-    seedSession();
-    listMock.mockResolvedValue([
-      { name: "C:", path: "C:\\", hasSubdirs: true },
-      { name: "D:", path: "D:\\", hasSubdirs: true },
-      { name: "E:", path: "E:\\", hasSubdirs: false },
-    ]);
-    renderWizard();
-
-    const fs = await screen.findByTestId("wizard-fs");
-    expect(fs).toHaveTextContent("C:");
-    expect(fs).toHaveTextContent("D:");
-    expect(fs).toHaveTextContent("E:");
-    expect(screen.getByRole("button", { name: "展开 C:\\" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "展开 E:\\" })).not.toBeInTheDocument();
-  });
-
-  it("展开懒加载子级；空目录显示（空）", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    listMock
-      .mockResolvedValueOnce([{ name: "C:", path: "C:\\", hasSubdirs: true }])
-      .mockResolvedValueOnce([]);
-
-    renderWizard();
-    await user.click(await screen.findByRole("button", { name: "展开 C:\\" }));
-
-    expect(await screen.findByText("（空）")).toBeInTheDocument();
-    expect(listMock).toHaveBeenCalledTimes(2);
-    expect(listMock).toHaveBeenLastCalledWith("C:\\");
-  });
-
-  it("大目录展开后只渲染可见行，且加载期间不会重复读取", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    let resolveChildren!: (value: Awaited<ReturnType<typeof fsListDirs>>) => void;
-    const pending = new Promise<Awaited<ReturnType<typeof fsListDirs>>>((resolve) => {
-      resolveChildren = resolve;
-    });
-    listMock
-      .mockResolvedValueOnce([{ name: "D:", path: "D:\\", hasSubdirs: true }])
-      .mockReturnValueOnce(pending);
-
-    renderWizard();
-    const expand = await screen.findByRole("button", { name: "展开 D:\\" });
-    await user.click(expand);
-    expect(await screen.findByText("正在读取…")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "折叠 D:\\" }));
-    await user.click(screen.getByRole("button", { name: "展开 D:\\" }));
-    expect(listMock).toHaveBeenCalledTimes(2);
-
-    await act(async () => {
-      resolveChildren(Array.from({ length: 2_000 }, (_, index) => ({
-        name: `目录 ${index}`,
-        path: `D:\\目录 ${index}`,
-        hasSubdirs: true,
-      })));
-      await pending;
-    });
-    await screen.findByText("目录 0");
-    const tree = screen.getByTestId("wizard-fs-tree");
-    expect(within(tree).getAllByTestId("wizard-fs-node").length).toBeLessThan(100);
-  });
-
-  it("点选文件夹：folderScan 入库并选中（树高亮），设备区不出现文件夹条目", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    listMock
-      .mockResolvedValueOnce([{ name: "D:", path: "D:\\", hasSubdirs: true }])
-      .mockResolvedValueOnce([{ name: "照片", path: "D:\\照片", hasSubdirs: false }]);
-    scanMock.mockResolvedValue(folderSnapshot("FOLDER:D:\\照片", "照片"));
-
-    renderWizard();
-    await user.click(await screen.findByRole("button", { name: "展开 D:\\" }));
-    await user.click(await screen.findByRole("button", { name: "照片" }));
-
-    expect(scanMock).toHaveBeenCalledWith("D:\\照片", true);
-    expect(useImportStore.getState().devices.some((d) => d.id === "FOLDER:D:\\照片")).toBe(true);
-    // 树节点高亮 = 文件夹选中态
-    const node = screen
-      .getAllByTestId("wizard-fs-node")
-      .find((el) => el.getAttribute("data-path") === "D:\\照片");
-    expect(node?.getAttribute("data-selected")).toBe("true");
-    // 设备区列表不含 folder 条目；无任何行高亮；信息卡隐藏（统计在中栏，不重复）
-    const rows = screen.getAllByTestId("wizard-device-item");
-    expect(rows).toHaveLength(2);
-    expect(rows.some((el) => el.getAttribute("data-device-id")?.startsWith("FOLDER:"))).toBe(false);
-    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
-    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
-  });
-
-  it("修复回归：设备在场 + URL device 值失效时点文件夹仍能选中（显式选中优先于回落）", async () => {
-    // 复现真机「设备在场时点文件系统文件夹无反应」：
-    // 根因是 selectedId 只认 URL——URL 读回值变形/写歪时 some() 匹配失败，
-    // 回落 devices[0]（在场旧设备），点文件夹表现为何都没发生。
-    // 此处用「无效 ?device= 值」模拟 URL 失效：显式选中必须优先生效。
-    seedSession();
-    const user = userEvent.setup();
-    listMock.mockResolvedValue([{ name: "照片", path: "D:\\照片", hasSubdirs: false }]);
-    scanMock.mockResolvedValue(folderSnapshot("FOLDER:D:\\照片", "照片"));
-
-    renderWizard("?device=BROKEN"); // URL 值不在设备表 → 无显式选中时回落 devices[0]=E:
-    await user.click(await screen.findByRole("button", { name: "照片" }));
-
-    // 文件夹被显式选中（而非回落 E:）：设备区无 folder 行、无任何行高亮、信息卡隐藏；
-    // 选中态由树节点高亮表达
-    const rows = screen.getAllByTestId("wizard-device-item");
-    expect(rows).toHaveLength(2);
-    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
-    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
-    const node = screen
-      .getAllByTestId("wizard-fs-node")
-      .find((el) => el.getAttribute("data-path") === "D:\\照片");
-    expect(node?.getAttribute("data-selected")).toBe("true");
-  });
-
-  it("浏览…选目录等价于选中该文件夹（openDialog→folderScan 链路）", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    openMock.mockResolvedValue("D:\\老照片");
-    scanMock.mockResolvedValue(folderSnapshot());
-
-    renderWizard("?device=E:");
-    await user.click(await screen.findByTestId("wizard-fs-browse"));
-
-    expect(openMock).toHaveBeenCalledWith({ directory: true });
-    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
-    // 选中源切到文件夹：设备区无高亮行、信息卡隐藏（folder 不是设备条目）
-    const rows = await screen.findAllByTestId("wizard-device-item");
-    expect(rows).toHaveLength(2); // E: + MTP:CAM，无 FOLDER 行
-    expect(rows.every((el) => el.getAttribute("data-selected") === "false")).toBe(true);
-    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
-    // 中栏统计条正常呈现文件夹清单（统计不重复放设备区）
-    expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
-  });
-
-  it("folderScan 失败时保持原源并弹出错误对话框", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    openMock.mockResolvedValue("D:\\老照片");
-    scanMock.mockResolvedValue(null);
-
-    renderWizard("?device=E:");
-    await user.click(await screen.findByTestId("wizard-fs-browse"));
-
-    expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
-    expect(useImportStore.getState().devices).toHaveLength(2);
-    const info = screen.getByTestId("wizard-device-info");
-    expect(info).toHaveTextContent("读卡器");
-    const error = screen.getByRole("alertdialog");
-    expect(error).toHaveTextContent("D:\\老照片");
-  });
-});
-
-describe("最近使用", () => {
-  it("手动选择设备后出现在最近使用，点击可重选并持久化 localStorage", async () => {
+  it("中间的目录勾选支持部分选中、整组取消，并同步两个视图", async () => {
     seedSession();
     const user = userEvent.setup();
     renderWizard("?device=E:");
-
-    // 设备列表点击 MTP 行 = 选中该设备
-    const mtpRow = (await screen.findAllByTestId("wizard-device-item")).find(
-      (el) => el.getAttribute("data-device-id") === "MTP:CAM",
-    );
-    await user.click(mtpRow!);
-
-    const recent = await screen.findByTestId("wizard-recent");
-    expect(recent).toHaveTextContent("EOS R5");
-    const stored = JSON.parse(
-      localStorage.getItem("smartphoto.import.recentSources") ?? "[]",
-    ) as Array<{ id: string }>;
-    expect(stored[0]?.id).toBe("MTP:CAM");
-
-    // 切回 E: 后，从最近使用重选相机
-    const eRow = screen
-      .getAllByTestId("wizard-device-item")
-      .find((el) => el.getAttribute("data-device-id") === "E:");
-    await user.click(eRow!);
-    await user.click(within(recent).getByText("EOS R5"));
-    expect(await screen.findByTestId("wizard-device-info")).toHaveTextContent("相机");
-  });
-
-  it("选中文件夹也计入最近使用", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    openMock.mockResolvedValue("D:\\老照片");
-    scanMock.mockResolvedValue(folderSnapshot());
-
-    renderWizard("?device=E:");
-    await user.click(await screen.findByTestId("wizard-fs-browse"));
-
-    const recent = await screen.findByTestId("wizard-recent");
-    expect(recent).toHaveTextContent("老照片");
-  });
-});
-
-describe("导入模式分段条（LR 式顶部切换）", () => {
-  it("仅导入提交引用模式且不设置复制目的地", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 12 });
-    renderWizard("?device=E:");
-
-    await user.click(await screen.findByTestId("wizard-mode-reference"));
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0]).toMatchObject({ mode: "reference", secondTarget: undefined });
-  });
-
-  it("MTP 相机不提供原地引用模式", async () => {
-    seedSession();
-    renderWizard("?device=MTP:CAM");
-    expect(await screen.findByTestId("wizard-mode-reference")).toBeDisabled();
-  });
-
-  it("默认复制：选中态与复制说明文案", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-
-    expect(await screen.findByTestId("wizard-mode-copy")).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByText("复制：源文件保持不动。")).toBeInTheDocument();
-  });
-
-  it("切移动：说明切换，plan.mode=move 并记录 jobMode", async () => {
-    seedSession();
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 11 });
-    renderWizard("?device=E:");
-
-    await user.click(await screen.findByRole("radio", { name: "移动 · 不保留" }));
-    expect(screen.getByTestId("wizard-mode-move")).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0].mode).toBe("move");
-    expect(useImportStore.getState().jobModes[11]).toBe("move");
-    // 竞态防护：模式已预挂（sessionStarted 事件先到也能归位）
-    expect(useImportStore.getState().pendingJobMode).toBe("move");
-    // 源类型同样随任务记录（清卡入口判定用；此处 E:=volume）
-    expect(useImportStore.getState().pendingJobSource).toBe("volume");
-  });
-});
-
-describe("查看方式：列表（默认）/ 缩略图网格", () => {
-  it("默认列表视图无 img；切到缩略图出现网格并持久化偏好", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-file-grid")).not.toBeInTheDocument();
-    expect(document.querySelector("img")).toBeNull();
-
+    const list = await screen.findByTestId("wizard-file-list");
+    const group = within(list).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
+    expect(group).toBeChecked();
+    await user.click(within(list).getByRole("checkbox", { name: "IMG_0001.CR3" }));
+    expect(group).toBePartiallyChecked();
+    await user.click(group);
+    expect(group).toBeChecked();
+    await user.click(group);
+    expect(group).not.toBeChecked();
+    expect(within(list).getByText("IMG_0001.CR3")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
     await user.click(screen.getByTestId("wizard-view-grid"));
-    expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-grid-scroll")).toBeInTheDocument();
+    const grid = screen.getByTestId("wizard-file-grid");
+    const gridGroup = within(grid).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
+    expect(gridGroup).not.toBeChecked();
+    await user.click(gridGroup);
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+  });
+
+  it("默认缩略图网格（无偏好时）；切列表持久化偏好", async () => {
+    seedSession();
+    localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    expect(await screen.findByTestId("wizard-file-grid")).toBeInTheDocument();
     expect(screen.queryByTestId("wizard-file-list")).not.toBeInTheDocument();
-    expect(localStorage.getItem(VIEW_MODE_STORAGE_KEY)).toBe("grid");
+
+    await user.click(screen.getByTestId("wizard-view-list"));
+    expect(screen.getByTestId("wizard-file-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-file-grid")).not.toBeInTheDocument();
+    expect(localStorage.getItem(VIEW_MODE_STORAGE_KEY)).toBe("list");
   });
 
   it("缩略图网格：占位块渲染、点击块切换勾选、统计变化、全选恢复", async () => {
@@ -941,8 +615,8 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     });
     convertMock.mockImplementation((p: string) => `asset://${p}`);
     thumbMock.mockResolvedValue("C:\\thumbCache\\a_256.jpg");
-    renderWizard();
     const user = userEvent.setup();
+    renderWizard(`?device=${encodeURIComponent("FOLDER:D:\\老照片")}`);
 
     await user.click(await screen.findByTestId("wizard-view-grid"));
     expect(thumbMock).toHaveBeenCalledWith("D:\\老照片/DCIM/A.JPG", 256);
@@ -950,6 +624,23 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
       "src",
       "asset://C:\\thumbCache\\a_256.jpg",
     );
+  });
+
+  it("MTP 清单保留持久对象 ID，扫描完成后读取相机缩略资源", async () => {
+    seedSession();
+    useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "scanning" }], sourceFiles: {
+      "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 42, kind: "raw", objectId: "persistent-42", mtime: "today" }],
+    } });
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
+    deviceThumbMock.mockResolvedValue("C:\\thumbCache\\mtp.jpg");
+    convertMock.mockImplementation((path) => `asset://${path}`);
+    renderWizard("?device=MTP:CAM");
+    expect(await screen.findByText("扫描后加载预览")).toBeInTheDocument();
+    expect(deviceThumbMock).not.toHaveBeenCalled();
+    act(() => useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "ready" }] }));
+    expect(await screen.findByRole("img", { name: "A.NEF" })).toHaveAttribute("src", "asset://C:\\thumbCache\\mtp.jpg");
+    expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:42", 256);
+    expect(thumbMock).not.toHaveBeenCalled();
   });
 
   it("没有对象 ID 的旧 MTP 清单保持明确占位，不错误请求本地路径", async () => {
@@ -1002,6 +693,27 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("临时失败后可重试，图片实际加载完成才结束加载动画", async () => {
+    seedSession();
+    let failFirst = true;
+    thumbMock.mockImplementation(async () => (failFirst ? null : "C:\\thumbCache\\ok.jpg"));
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderWizard("?device=E:");
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByTestId("wizard-view-grid"));
+    // 第一次 null → 占位 + 重试按钮（瓦片各自带重试入口；取 IMG_0003 的）
+    const grid = await screen.findByTestId("wizard-file-grid");
+    const tile = within(grid)
+      .getAllByTestId("wizard-tile")
+      .find((el) => el.getAttribute("data-path") === "E:/DCIM/101CANON/IMG_0003.JPG")!;
+    const retry = await within(tile).findByRole("button", { name: "重试" });
+    failFirst = false;
+    await user.click(retry);
+    const img = await screen.findByRole("img", { name: "IMG_0003.JPG" });
+    expect(img).toHaveAttribute("src", "asset://C:\\thumbCache\\ok.jpg");
+  });
+
   it("convertFileSrc 抛错时静默占位不崩溃", async () => {
     seedSession();
     thumbMock.mockResolvedValue("C:\\thumbCache\\bad.jpg");
@@ -1038,108 +750,8 @@ describe("查看方式：列表（默认）/ 缩略图网格", () => {
       within(screen.getByTestId("wizard-file-grid")).getAllByTestId("tile-photo")[0],
     ).toBeInTheDocument();
   });
-});
 
-describe("左栏分区折叠（LR 式）", () => {
-  it("点击标题行折叠/展开设备区并写入 localStorage", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    const toggle = await screen.findByTestId("wizard-section-toggle-devices");
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("wizard-device-info")).toBeInTheDocument();
-
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByTestId("wizard-device-info")).not.toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem(PANEL_COLLAPSE_KEY) ?? "{}")).toEqual({
-      devices: true,
-      fs: false,
-      recent: false,
-      source: false,
-    });
-
-    await user.click(toggle);
-    expect(await screen.findByTestId("wizard-device-info")).toBeInTheDocument();
-  });
-
-  it("折叠状态跨挂载恢复；其他分区不受影响", async () => {
-    seedSession();
-    localStorage.setItem(PANEL_COLLAPSE_KEY, JSON.stringify({ fs: true }));
-    renderWizard("?device=E:");
-
-    expect(screen.getByTestId("wizard-section-toggle-fs")).toHaveAttribute("aria-expanded", "false");
-    // 折叠时文件系统树内容不渲染（默认后端不可用文案也不出现）
-    expect(screen.queryByText(/目录树不可用/)).not.toBeInTheDocument();
-    expect(screen.getByTestId("wizard-section-toggle-devices")).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("wizard-device-info")).toBeInTheDocument();
-  });
-});
-
-describe("三栏列宽拖动", () => {
-  it("默认 270/320；拖左条加宽左栏并持久化，中列 1fr 自动补偿", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    await screen.findByTestId("wizard-file-list");
-
-    const cols = screen.getByTestId("wizard-columns");
-    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 320px");
-
-    const handle = screen.getByTestId("wizard-col-handle-left");
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 300 });
-    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 340 });
-    fireEvent.pointerUp(handle, { pointerId: 1 });
-
-    expect(cols.style.gridTemplateColumns).toBe("310px 6px minmax(0, 1fr) 6px 320px");
-    expect(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) ?? "{}")).toEqual({
-      left: 310,
-      right: 320,
-    });
-  });
-
-  it("拖右条右拖变窄并钳制 260；双击分隔条恢复默认", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    await screen.findByTestId("wizard-file-list");
-    const cols = screen.getByTestId("wizard-columns");
-
-    const handle = screen.getByTestId("wizard-col-handle-right");
-    // 右拖 200px：右栏 320-200=120 → 钳制到下限 260（中列自动变宽）
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 100 });
-    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 300 });
-    fireEvent.pointerUp(handle, { pointerId: 1 });
-    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 260px");
-
-    fireEvent.dblClick(handle);
-    expect(cols.style.gridTemplateColumns).toBe("270px 6px minmax(0, 1fr) 6px 320px");
-    expect(JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) ?? "{}")).toEqual({
-      left: 270,
-      right: 320,
-    });
-  });
-
-  it("左栏钳制 200–400", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    await screen.findByTestId("wizard-file-list");
-    const cols = screen.getByTestId("wizard-columns");
-
-    const handle = screen.getByTestId("wizard-col-handle-left");
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 0 });
-    fireEvent.pointerMove(handle, { pointerId: 1, clientX: -500 });
-    fireEvent.pointerUp(handle, { pointerId: 1 });
-    expect(cols.style.gridTemplateColumns).toBe("200px 6px minmax(0, 1fr) 6px 320px");
-
-    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 0 });
-    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 999 });
-    fireEvent.pointerUp(handle, { pointerId: 1 });
-    expect(cols.style.gridTemplateColumns).toBe("400px 6px minmax(0, 1fr) 6px 320px");
-  });
-});
-
-describe("缩略图档位", () => {
-  it("与其他页面统一为标准 120px、大档 150px 两档", async () => {
+  it("缩略图档位：标准 160px、大档 220px 两档并持久化", async () => {
     seedSession();
     renderWizard("?device=E:");
     const user = userEvent.setup();
@@ -1147,131 +759,43 @@ describe("缩略图档位", () => {
     await user.click(await screen.findByTestId("wizard-view-grid"));
     const grid = await screen.findByTestId("wizard-file-grid");
     const firstTile = within(grid).getAllByTestId("wizard-tile")[0];
-    expect(firstTile.style.width).toBe("120px");
-    expect(firstTile).toHaveTextContent("MB"); // 标准档信息条显示大小
+    expect(firstTile.style.width).toBe("160px");
 
     await user.click(screen.getByTestId("wizard-tile-size-large"));
-    expect(within(grid).getAllByTestId("wizard-tile")[0].style.width).toBe("150px");
+    expect(within(grid).getAllByTestId("wizard-tile")[0].style.width).toBe("220px");
     expect(localStorage.getItem(TILE_SIZE_KEY)).toBe("large");
     expect(within(screen.getByTestId("wizard-tile-size")).getAllByRole("radio")).toHaveLength(2);
-    expect(screen.queryByTestId("wizard-tile-size-compact")).not.toBeInTheDocument();
-  });
-});
-
-describe("双目的地（M2）", () => {
-  it("默认关；开启后显示第二目录输入+浏览+必填校验拦住开始；预览 = 第二根目录+同公式", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
-    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
-
-    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
-    await user.click(screen.getByTestId("wizard-second-toggle"));
-    const panel = await screen.findByTestId("wizard-second-panel");
-    expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
-    expect(panel).toHaveTextContent("第二目的地按相同的时间/相册布局写入。");
-    // 必填校验：第二目录为空 → 开始导入禁用 + 提示（此时无路径预览）
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
-    expect(panel).toHaveTextContent("请填写第二目标根目录");
-    expect(screen.queryByTestId("wizard-second-path-preview")).not.toBeInTheDocument();
-
-    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
-    expect(panel).not.toHaveTextContent("请填写第二目标根目录");
-    // 第二目的地预览对齐后端：第二根目录 + 相册创建年月/相册目录名（默认预选「未分组」2026-09）
-    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
-    expect(screen.getByTestId("wizard-second-path-preview")).toHaveTextContent(
-      "D:\\照片备份\\2026\\09\\未分组\\",
-    );
   });
 
-  it("浏览…选择第二目标根目录（openDialog 回填）", async () => {
+  it("扫描万张照片时列表只渲染可见行，仍能切换视图和勾选", async () => {
     seedSession();
-    openMock.mockResolvedValue("E:\\备份盘");
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
-    await user.click(screen.getByTestId("wizard-second-toggle"));
-    await user.click(await screen.findByTestId("wizard-second-browse"));
-
-    expect(openMock).toHaveBeenCalledWith({ directory: true });
-    expect(screen.getByTestId("wizard-second-root")).toHaveValue("E:\\备份盘");
-  });
-
-  it("开启并填写 → plan.secondTarget 携带主目录模板；默认关闭时 plan 无该字段", async () => {
-    seedSession();
-    startMock.mockResolvedValue({ ok: true, jobId: 31 });
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    if (!(await screen.findByTestId("wizard-advanced")).hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
-    await user.click(screen.getByTestId("wizard-second-toggle"));
-    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0].secondTarget).toEqual({
-      targetRoot: "D:\\照片备份",
-      dirTemplate: FIXED_PLAN_DIR_TEMPLATE, // 固定占位：与主目的地相同（后端覆写后两路一致）
+    useImportStore.setState({ devices: [], sourceFiles: {} });
+    useImportStore.getState().handleAppEvent({ type: "deviceArrived", id: "camera", kind: "mtp", name: "测试相机" });
+    renderWizard("?device=camera");
+    await act(async () => {
+      useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files:
+        Array.from({ length: 10000 }, (_, i) => ({ id: String(i), relPath: `DCIM/IMG_${String(i).padStart(5, "0")}.JPG`, size: 100, mtime: "2026-09-19T00:00:00Z" })),
+      });
     });
-  });
-
-  it("移动互斥：移动模式开关禁用+灰字；开启双目的地切移动自动关且 plan 无 secondTarget", async () => {
-    seedSession();
-    startMock.mockResolvedValue({ ok: true, jobId: 32 });
-    renderWizard("?device=E:");
+    const list = await screen.findByTestId("wizard-file-list");
+    expect(await within(list).findByText("IMG_00000.JPG")).toBeInTheDocument();
+    expect(list.querySelectorAll("[data-index]").length).toBeLessThan(100);
     const user = userEvent.setup();
-
-    // 复制态开启双目的地并填写
-    if (!(await screen.findByTestId("wizard-advanced")).hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
-    await user.click(screen.getByTestId("wizard-second-toggle"));
-    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
-    expect(screen.getByTestId("wizard-second-toggle")).toBeChecked();
-
-    // 切移动 → 开关自动关、面板消失、互斥提示出现
-    await user.click(screen.getByRole("radio", { name: "移动 · 不保留" }));
-    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
-    expect(screen.getByTestId("wizard-second-toggle")).toBeDisabled();
-    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
-    expect(screen.getByText("移动模式不支持双目的地。")).toBeInTheDocument();
-
-    // 切回复制：开关恢复可用（保持关闭，需手动重开），互斥提示消失
-    await user.click(screen.getByRole("radio", { name: "复制 · 保留原文件" }));
-    expect(screen.getByTestId("wizard-second-toggle")).toBeEnabled();
-    expect(screen.queryByText("移动模式不支持双目的地。")).not.toBeInTheDocument();
-
-    // 再切移动并在该模式下启动：plan 不带 secondTarget（后端拒 move+secondTarget，前端互斥保证）
-    await user.click(screen.getByRole("radio", { name: "移动 · 不保留" }));
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(startMock.mock.calls[0][0].mode).toBe("move");
-    expect(startMock.mock.calls[0][0].secondTarget).toBeUndefined();
+    await user.click(within(list).getByRole("checkbox", { name: "IMG_00000.JPG" }));
+    expect(within(list).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
+    await user.click(screen.getByTestId("wizard-view-grid"));
+    expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
+    await act(async () => {
+      useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files: [
+        { id: "next", relPath: "DCIM/NEXT.JPG", size: 100, mtime: "2026-09-19T00:00:00Z" },
+      ] });
+    });
+    expect(useImportStore.getState().sourceFiles.camera).toHaveLength(10001);
+    expect(within(list).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
+    expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+    expect(deviceFilesMock).not.toHaveBeenCalled();
   });
 });
-
-describe("全局滚动条主题", () => {
-  it("app.css 含 webkit 滚动条规则与 sp-scroll；滚动容器挂 sp-scroll", async () => {
-    // vitest 把 CSS import 转译为空模块，测试运行于 Node 直接读源文件断言规则存在
-    // @ts-ignore 项目未安装 @types/node，仅测试内使用
-    const { readFileSync } = await import("node:fs");
-    // @ts-ignore 同上
-    const { cwd } = await import("node:process");
-    const css = readFileSync(`${cwd()}/src/styles/app.css`, "utf-8") as string;
-    expect(css).toContain("::-webkit-scrollbar-thumb");
-    expect(css).toContain("::-webkit-scrollbar-thumb:hover");
-    expect(css).toContain("scrollbar-gutter: stable");
-
-    seedSession();
-    renderWizard("?device=E:");
-    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-list-scroll").className).toContain("sp-scroll");
-    expect(screen.getByTestId("wizard-tree").className).toContain("sp-scroll");
-  });
-});
-
 
 it("扫描尚未结束时立即展示增量文件，完成后不二次读取相机", async () => {
   seedSession();
@@ -1293,302 +817,6 @@ it("扫描尚未结束时立即展示增量文件，完成后不二次读取相�
   expect(deviceFilesMock).not.toHaveBeenCalled();
 });
 
-
-it("扫描万张照片时文件树只渲染可见行，仍能切换视图和勾选", async () => {
-  seedSession();
-  useImportStore.setState({ devices: [], sourceFiles: {} });
-  useImportStore.getState().handleAppEvent({ type: "deviceArrived", id: "camera", kind: "mtp", name: "测试相机" });
-  renderWizard("?device=camera");
-  await act(async () => {
-    useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files:
-      Array.from({ length: 10000 }, (_, i) => ({ id: String(i), relPath: `DCIM/IMG_${String(i).padStart(5, "0")}.JPG`, size: 100, mtime: "2026-09-19T00:00:00Z" })),
-    });
-  });
-  const tree = screen.getByTestId("wizard-tree");
-  expect(await within(tree).findByText("IMG_00000.JPG")).toBeInTheDocument();
-  expect(tree.querySelectorAll("[data-tree-row]").length).toBeLessThan(100);
-  expect(useImportStore.getState().sourceFiles.camera).toHaveLength(10000);
-  const user = userEvent.setup();
-  await user.click(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" }));
-  expect(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
-  await user.click(screen.getByTestId("wizard-view-grid"));
-  expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
-  await act(async () => {
-    useImportStore.getState().handleAppEvent({ type: "deviceFilesProgress", id: "camera", files: [
-      { id: "next", relPath: "DCIM/NEXT.JPG", size: 100, mtime: "2026-09-19T00:00:00Z" },
-    ] });
-  });
-  expect(useImportStore.getState().sourceFiles.camera).toHaveLength(10001);
-  expect(within(tree).getByRole("checkbox", { name: "IMG_00000.JPG" })).not.toBeChecked();
-  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
-  expect(deviceFilesMock).not.toHaveBeenCalled();
-});
-
-// --- 时间/相册布局（2026-09-28 定案）：导入位置实时预览 -------------------------------
-// 目标 = 照片根/{相册创建YYYY}/{相册创建MM}/{相册目录名}/，相册内平铺不按日期分层。
-
-describe("ImportWizard：导入位置实时预览（时间/相册布局）", () => {
-  it("默认预选「未分组」：预览 = 照片根/相册创建年月/未分组（Y:\\照片\\2026\\09\\未分组\\）", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    await screen.findByTestId("wizard-table-stats");
-    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
-
-    const preview = screen.getByTestId("wizard-album-path-preview");
-    expect(preview).toHaveTextContent("导入位置预览");
-    expect(preview).toHaveTextContent("Y:\\照片\\2026\\09\\未分组\\");
-    // 平铺说明：相册内不按日期分层，应用内按拍摄日分组
-    expect(screen.getByTestId("wizard-album-flat-note")).toHaveTextContent(
-      "相册内不按日期分层，应用内按拍摄日分组。",
-    );
-  });
-
-  it("存入已有相册：预览随相册目录与其创建年月更新（相册内平铺，不再拼库级日期模板）", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    await screen.findByTestId("wizard-table-stats");
-    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
-
-    // 默认已选未分组；改选青海湖 2026（createdAt 2025-12-15）→ 外层年月随相册创建时间切换
-    await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
-    const preview = screen.getByTestId("wizard-album-path-preview");
-    expect(preview).toHaveTextContent("Y:\\照片\\2025\\12\\青海湖 2026\\");
-    expect(preview).not.toHaveTextContent("09-18");
-  });
-
-  it("新建相册：预览随输入名实时更新，外层年月 = 导入当刻；空名兜底「未分组」复用其真实创建年月", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    await screen.findByTestId("wizard-table-stats");
-    await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
-
-    await user.click(screen.getByTestId("wizard-album-new"));
-    const input = screen.getByTestId("wizard-album-new-name");
-    const now = new Date();
-    const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
-    await user.type(input, "婚礼0927");
-    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      `Y:\\照片\\${currentYm}\\婚礼0927\\`,
-    );
-
-    // 空名兜底「未分组」：列表已有同名保底相册 → 用其真实 createdAt（2026-09-01 → 2026\09）
-    await user.clear(input);
-    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\2026\\09\\未分组\\",
-    );
-  });
-
-  it("新建相册空名兜底：列表无「未分组」时外层年月用导入当刻", async () => {
-    seedSession();
-    albumListMock.mockReset().mockResolvedValue([
-      { id: 3, name: "青海湖 2026", coverAssetId: null, itemCount: 12, createdAt: "2025-12-15" },
-    ]);
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    await screen.findByTestId("wizard-table-stats");
-
-    await user.click(screen.getByTestId("wizard-album-new"));
-    const now = new Date();
-    const currentYm = `${now.getFullYear()}\\${String(now.getMonth() + 1).padStart(2, "0")}`;
-    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      `Y:\\照片\\${currentYm}\\未分组\\`,
-    );
-  });
-});
-
-// --- 添加到相册（可选）：无 / 选择已有 / 新建；albumId 随导入启动负载 -----------------------
-
-describe("ImportWizard：添加到相册步骤", () => {
-  it("规格修订：相册必选，无「不添加」选项；默认预选「未分组」→ plan.albumId=未分组 id", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
-
-    await screen.findByTestId("wizard-table-stats");
-    // 「不添加」入口已删；默认预选系统保底相册「未分组」
-    expect(screen.queryByTestId("wizard-album-none")).not.toBeInTheDocument();
-    expect(screen.getByTestId("wizard-album-existing")).toBeChecked();
-    const select = await screen.findByTestId("wizard-album-select");
-    expect(select).toHaveValue("1");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-
-    const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumId).toBe(1);
-  });
-
-  it("子分组（可选，B4）：留空 = 相册根，plan.albumSubgroup 不携带", async () => {
-    seedSession();
-    albumSubgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 5 }]);
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 41 });
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(screen.getByTestId("wizard-album-existing"));
-    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
-    await waitFor(() => expect(albumSubgroupsMock).toHaveBeenCalledWith(3));
-
-    const input = screen.getByTestId("wizard-album-subgroup");
-    expect(input).toHaveValue("");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumId).toBe(3);
-    expect(plan.albumSubgroup).toBeUndefined();
-  });
-
-  it("子分组（可选，B4）：输入新名随 plan.albumSubgroup 下发（album_subgroups 供 datalist）", async () => {
-    seedSession();
-    albumSubgroupsMock.mockResolvedValue([
-      { name: "原片", itemCount: 5 },
-      { name: "成片", itemCount: 2 },
-    ]);
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 42 });
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(screen.getByTestId("wizard-album-existing"));
-    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
-    await waitFor(() => expect(albumSubgroupsMock).toHaveBeenCalledWith(3));
-
-    await user.type(screen.getByTestId("wizard-album-subgroup"), "精修");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumSubgroup).toBe("精修");
-  });
-
-  it("子分组 datalist 默认建议名（B4 修订）：「原片」「成片」前置、与已有去重", async () => {
-    seedSession();
-    albumSubgroupsMock.mockResolvedValue([{ name: "精选", itemCount: 0 }, { name: "成片", itemCount: 0 }]);
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(screen.getByTestId("wizard-album-existing"));
-    await user.selectOptions(await screen.findByTestId("wizard-album-select"), "3");
-
-    // datalist = [原片, 精选, 成片]：「成片」已被占用 → 不重复前置；「原片」缺位补前
-    const datalist = document.getElementById("wizard-subgroup-options") as HTMLDataListElement;
-    await waitFor(() => expect(datalist?.options).toHaveLength(3));
-    expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "精选", "成片"]);
-  });
-
-  it("未选相册（清单为空）：弹窗提示「请选择相册」且不启动", async () => {
-    seedSession();
-    albumListMock.mockReset().mockResolvedValue([]);
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 35 });
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("请选择相册");
-    expect(startMock).not.toHaveBeenCalled();
-  });
-
-  it("「选择已有」：下拉列 album_list，选中后 plan.albumId=该相册 id", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValueOnce({ ok: true, jobId: 32 });
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(screen.getByTestId("wizard-album-existing"));
-    const select = await screen.findByTestId("wizard-album-select");
-    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toContain(
-      "青海湖 2026（12）",
-    );
-    await user.selectOptions(select, "3");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-
-    const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumId).toBe(3);
-  });
-
-  it("「新建相册」：先建相册再启动，plan.albumId=新相册 id；错误弹窗提示", async () => {
-    seedSession();
-    renderWizard("?device=E:");
-    const user = userEvent.setup();
-    startMock.mockResolvedValue({ ok: true, jobId: 33 });
-    albumCreateMock
-      .mockResolvedValueOnce({ ok: false, error: "同名相册已存在" })
-      .mockResolvedValueOnce({
-        ok: true,
-        album: { id: 9, name: "旅行", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
-      });
-
-    await screen.findByTestId("wizard-table-stats");
-    await user.click(screen.getByTestId("wizard-album-new"));
-
-    // 空名拦截
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("请填写新相册名称");
-    expect(startMock).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "确定" }));
-
-    // 重名错误透传
-    const input = screen.getByTestId("wizard-album-new-name");
-    await user.type(input, "旅行");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("同名相册已存在");
-    expect(albumCreateMock).toHaveBeenCalledWith("旅行");
-    expect(startMock).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "确定" }));
-
-    // 修正后成功：album_create → import_start(albumId=9)
-    await user.clear(input);
-    await user.type(input, "旅行 2");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
-    expect(albumCreateMock).toHaveBeenLastCalledWith("旅行 2");
-    const plan = startMock.mock.calls[0][0] as ImportPlan;
-    expect(plan.albumId).toBe(9);
-  });
-});
-
-
-it("中间的目录勾选支持部分选中、整组取消，并同步两个视图", async () => {
-  seedSession();
-  const user = userEvent.setup();
-  renderWizard("?device=E:");
-  const list = await screen.findByTestId("wizard-file-list");
-  const group = within(list).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
-  expect(group).toBeChecked();
-  await user.click(within(list).getByRole("checkbox", { name: "IMG_0001.CR3" }));
-  expect(group).toBePartiallyChecked();
-  await user.click(group);
-  expect(group).toBeChecked();
-  await user.click(group);
-  expect(group).not.toBeChecked();
-  expect(within(list).getByText("IMG_0001.CR3")).toBeVisible();
-  expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 4");
-  await user.click(screen.getByTestId("wizard-view-grid"));
-  const grid = screen.getByTestId("wizard-file-grid");
-  const gridGroup = within(grid).getByRole("checkbox", { name: "选择目录 DCIM/100CANON" });
-  expect(gridGroup).not.toBeChecked();
-  await user.click(gridGroup);
-  expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
-});
-
-it("空读卡器显示未插卡，不会被默认选中或请求扫描清单", async () => {
-  seedSession();
-  useImportStore.setState({ devices: [
-    { ...volumeDevice(), id: "G:", name: "读卡器 (G:)", mediaPresent: false, filesByKind: { photo: 0, raw: 0, other: 0 } },
-    volumeDevice(),
-  ] });
-  renderWizard("?device=G:");
-  const rows = await screen.findAllByTestId("wizard-device-item");
-  expect(rows[0]).toBeDisabled();
-  expect(rows[0]).toHaveTextContent("未插卡");
-  expect(rows[1]).toHaveAttribute("data-selected", "true");
-  expect(deviceFilesMock).not.toHaveBeenCalledWith("G:");
-});
-
-
 it("快速滚动时跳过已离开预加载区域且尚未开始的预览请求", async () => {
   const releases: Array<() => void> = [];
   thumbMock.mockImplementation(() => new Promise((resolve) => releases.push(() => resolve(null))));
@@ -1602,4 +830,442 @@ it("快速滚动时跳过已离开预加载区域且尚未开始的预览请求"
   expect(thumbMock).not.toHaveBeenCalledWith("offscreen.ARW", 256);
   releases.slice(1).forEach((release) => release());
   await Promise.all(busy);
+});
+
+// --- 确认抽屉与导入方案（目标照片库 + 纯时间布局契约） ---------------------------------
+
+describe("确认抽屉与导入方案", () => {
+  it("无照片库：状态行提示「尚未选择照片库」，继续按钮禁用", async () => {
+    useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
+    renderWizard("?device=E:");
+
+    await screen.findByTestId("wizard-table-stats");
+    expect(screen.getByTestId("wizard-review-next")).toBeDisabled();
+    expect(await screen.findByText(/尚未选择照片库/)).toBeInTheDocument();
+  });
+
+  it("进入抽屉与返回；成功启动后回画廊（LR 式后台导入，不跳任务中心）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 7 });
+    await openReview(user);
+
+    // 抽屉在档：返回按钮回挑选步
+    expect(screen.getByTestId("wizard-review-drawer")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    expect(await screen.findByTestId("wizard-table-stats")).toBeInTheDocument();
+
+    // 再进抽屉启动：回画廊、不跳任务中心
+    await user.click(screen.getByTestId("wizard-review-next"));
+    await screen.findByTestId("wizard-review-drawer");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
+  });
+
+  it("开始导入：按目标照片库组装 plan（targetLibraryId，纯时间布局无模板字段）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 7 });
+    await openReview(user);
+
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock).toHaveBeenCalledTimes(1);
+    const plan: ImportPlan = startMock.mock.calls[0][0];
+    expect(plan).toEqual({
+      sourceId: "E:",
+      // 2026-10-09 单库多照片库：目标 = 照片库 id（dirTemplate/nameTemplate 退役）
+      targetLibraryId: "lib1",
+      // 相册必选：默认预选系统保底相册「未分组」（纯逻辑引用）
+      albumId: 1,
+      duplicatePolicy: "skip",
+      skipImported: true,
+      streams: 4,
+      mode: "copy",
+      include: [
+        "E:/DCIM/100CANON/IMG_0001.CR3",
+        "E:/DCIM/100CANON/IMG_0002.CR3",
+        "E:/DCIM/101CANON/IMG_0003.JPG",
+        "E:/DCIM/101CANON/IMG_0004.JPG",
+      ],
+    });
+  });
+
+  it("勾选即导入范围：只选 1 个文件时 plan.include 只含该文件", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 9 });
+    renderWizard("?device=E:");
+
+    expect(await screen.findByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
+    // 全不选；再只勾 IMG_0003.JPG
+    await user.click(screen.getByTitle("更多操作"));
+    await user.click(screen.getByRole("button", { name: "反选" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 0 / 4");
+    await user.click(within(screen.getByTestId("wizard-file-list")).getByRole("checkbox", { name: "IMG_0003.JPG" }));
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 1 / 4");
+
+    await user.click(screen.getByTestId("wizard-review-next"));
+    await screen.findByTestId("wizard-review-drawer");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+
+    const plan = startMock.mock.calls[0][0];
+    expect(plan.include).toEqual(["E:/DCIM/101CANON/IMG_0003.JPG"]);
+  });
+
+  it("plan.streams 应用级合成：默认 4", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 21 });
+
+    await openReview(user);
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].streams).toBe(4);
+  });
+
+  it("MTP 源 plan.streams 恒 1（协议限制）", async () => {
+    useImportStore.setState({
+      devices: [volumeDevice(), mtpDevice()],
+      sourceFiles: {
+        "E:": files(),
+        "MTP:CAM": [{ path: "A.JPG", dir: "", name: "A.JPG", kind: "photo", size: 10 }],
+      },
+    });
+    photoLibraryListMock.mockResolvedValue([PHOTO_LIB]);
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 22 });
+
+    await openReview(user, "?device=MTP:CAM");
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].streams).toBe(1);
+  });
+
+  it("导入位置卡：目标照片库 root 只读展示 + 纯时间公式预览；徽标跳存储页（M5）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    await openReview(user);
+
+    const card = screen.getByTestId("wizard-location-card");
+    expect(card).toHaveTextContent("Y:\\照片");
+    // 纯时间布局公式（物理层无相册/子组维度）
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "导入位置预览",
+    );
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+    );
+    // 目标根/布局均不可编辑
+    expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("目录模板")).not.toBeInTheDocument();
+
+    // 徽标「照片库属性 · 点击修改」→ 照片库登记管理在存储页（旧设置页库 tab 已退役）
+    const badge = screen.getByTestId("wizard-location-edit");
+    expect(badge).toHaveTextContent("照片库属性 · 点击修改");
+    await user.click(badge);
+    expect(await screen.findByTestId("storage-probe")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-location-card")).not.toBeInTheDocument();
+  });
+
+  it("切换/新建相册不改路径预览（相册只是逻辑引用，不参与落位）", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    await openReview(user);
+
+    // 改选青海湖 2026（createdAt 2025-12-15）→ 预览仍是纯时间公式
+    await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+    );
+
+    // 新建相册输入名 → 预览同样不变
+    await user.selectOptions(screen.getByTestId("wizard-album-select"), "new");
+    await user.type(screen.getByTestId("wizard-album-new-name"), "婚礼0927");
+    expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
+      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+    );
+  });
+
+  it("「选择已有」：下拉列 album_list 带张数，选中后 plan.albumId=该相册 id", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 32 });
+    await openReview(user);
+
+    const select = screen.getByTestId("wizard-album-select");
+    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toContain(
+      "青海湖 2026（12）",
+    );
+    await user.selectOptions(select, "3");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBe(3);
+  });
+
+  it("「新建相册」：空名拦住开始；重名错误行内提示；修正后建册再启动 plan.albumId=新册 id", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 33 });
+    albumCreateMock
+      .mockResolvedValueOnce({ ok: false, error: "同名相册已存在" })
+      .mockResolvedValueOnce({
+        ok: true,
+        album: { id: 9, name: "旅行", coverAssetId: null, itemCount: 0, createdAt: "2026-09-03" },
+      });
+    await openReview(user);
+
+    await user.selectOptions(screen.getByTestId("wizard-album-select"), "new");
+    const input = screen.getByTestId("wizard-album-new-name");
+
+    // 空名：开始按钮禁用 + 底部状态行提示（相册必选契约）
+    const start = screen.getByRole("button", { name: "开始导入" });
+    expect(start).toBeDisabled();
+    expect(screen.getByText("请填写新相册名称")).toBeInTheDocument();
+
+    // 重名错误透传（行内 alert，不关抽屉、不启动）
+    await user.type(input, "旅行");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("同名相册已存在");
+    expect(albumCreateMock).toHaveBeenCalledWith("旅行");
+    expect(startMock).not.toHaveBeenCalled();
+
+    // 修正后成功：album_create → import_start(albumId=9)
+    await user.clear(input);
+    await user.type(input, "旅行 2");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
+    expect(albumCreateMock).toHaveBeenLastCalledWith("旅行 2");
+    const plan = startMock.mock.calls[0][0] as ImportPlan;
+    expect(plan.albumId).toBe(9);
+  });
+
+  it("未选相册（清单为空）：开始禁用并提示「请选择相册」，不启动", async () => {
+    seedSession();
+    albumListMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 35 });
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-table-stats");
+    await user.click((await screen.findAllByTestId("wizard-review-next"))[0]);
+    await screen.findByTestId("wizard-review-drawer");
+
+    const start = await screen.findByRole("button", { name: "开始导入" });
+    expect(start).toBeDisabled();
+    expect(screen.getByText("请选择相册")).toBeInTheDocument();
+    expect(startMock).not.toHaveBeenCalled();
+  });
+
+  it("子分组（可选）：留空 = 相册根不带 albumSubgroup", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 36 });
+    await openReview(user);
+
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    expect(screen.getByTestId("wizard-album-subgroup")).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+    expect((startMock.mock.calls[0][0] as ImportPlan).albumSubgroup).toBeUndefined();
+  });
+
+  it("子分组：datalist 建议名前置去重；输入新名随 plan.albumSubgroup 下发", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 37 });
+    await openReview(user);
+
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    // 改选相册 3 → album_subgroups 供 datalist：建议 = [原片, 精选, 成片]（「原片」缺位前置，与既有去重）
+    albumSubgroupsMock.mockResolvedValue([
+      { name: "精选", itemCount: 2 },
+      { name: "成片", itemCount: 1 },
+    ]);
+    await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
+    const datalist = document.getElementById("wizard-subgroup-options") as HTMLDataListElement;
+    await waitFor(() => expect(datalist?.options).toHaveLength(3));
+    expect(Array.from(datalist.options).map((o) => o.value)).toEqual(["原片", "精选", "成片"]);
+
+    // 输入新名随 plan 下发
+    fireEvent.change(screen.getByTestId("wizard-album-subgroup"), { target: { value: "机内直出" } });
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
+    expect((startMock.mock.calls[0][0] as ImportPlan).albumSubgroup).toBe("机内直出");
+  });
+
+  it("导入模式：默认复制；切移动 plan.mode=move 并记录 jobMode；引用模式不设第二目的地", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 11 });
+    const view = await openReview(user);
+
+    const mode = screen.getByLabelText("导入模式");
+    expect(mode).toHaveValue("copy");
+    expect(screen.getByText("复制：源文件保持不动。")).toBeInTheDocument();
+
+    // 切移动：说明切换 + plan.mode=move + jobMode 预挂（sessionStarted 先到也能归位）
+    await user.selectOptions(mode, "move");
+    expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].mode).toBe("move");
+    expect(useImportStore.getState().jobModes[11]).toBe("move");
+    expect(useImportStore.getState().pendingJobMode).toBe("move");
+    expect(useImportStore.getState().pendingJobSource).toBe("volume");
+    view.unmount();
+
+    // 引用模式：仅登记，不设复制目的地
+    await openReview(user);
+    await user.selectOptions(screen.getByLabelText("导入模式"), "reference");
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+    expect(startMock.mock.calls[1][0]).toMatchObject({ mode: "reference", secondTarget: undefined });
+  });
+
+  it("MTP 相机不提供引用/移动（copyOnly：模式下拉禁用且恒复制）", async () => {
+    useImportStore.setState({
+      devices: [mtpDevice()],
+      sourceFiles: { "MTP:CAM": [{ path: "A.JPG", dir: "", name: "A.JPG", kind: "photo", size: 10 }] },
+    });
+    photoLibraryListMock.mockResolvedValue([PHOTO_LIB]);
+    const user = userEvent.setup();
+    renderWizard("?device=MTP:CAM");
+    await screen.findByTestId("wizard-table-stats");
+    await waitFor(() => expect(screen.getByTestId("wizard-review-next")).toBeEnabled());
+    await user.click(screen.getByTestId("wizard-review-next"));
+    await screen.findByTestId("wizard-review-drawer");
+
+    // copyOnly：模式下拉禁用且值恒 copy
+    const mode = await screen.findByLabelText("导入模式");
+    expect(mode).toBeDisabled();
+    expect(mode).toHaveValue("copy");
+  });
+
+  it("查重策略与跳过已导入：可调且成功启动后回写全局设置", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 40 });
+    await openReview(user);
+
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    await user.click(screen.getByRole("radio", { name: "重命名导入（追加 _1 后缀）" }));
+    await user.click(screen.getByLabelText("跳过已导入文件（按内容指纹）"));
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+
+    expect(startMock.mock.calls[0][0]).toMatchObject({ duplicatePolicy: "rename", skipImported: false });
+    expect(useSettingsStore.getState().settings.import.duplicatePolicy).toBe("rename");
+    expect(useSettingsStore.getState().settings.import.skipImported).toBe(false);
+  });
+
+  it("双目的地：默认关；开启后必填拦住开始；填写后 plan.secondTarget={targetRoot}；预览同公式", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-review-next"));
+    await screen.findByTestId("wizard-review-drawer");
+
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
+    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("wizard-second-toggle"));
+    const panel = await screen.findByTestId("wizard-second-panel");
+    expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
+    // 必填校验：第二目录为空 → 开始禁用 + 提示（无路径预览）
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
+    expect(panel).toHaveTextContent("请填写第二目标根目录");
+    expect(screen.queryByTestId("wizard-second-path-preview")).not.toBeInTheDocument();
+
+    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
+    expect(panel).not.toHaveTextContent("请填写第二目标根目录");
+    // 第二目的地预览 = 第二根目录 + 同一纯时间公式
+    expect(screen.getByTestId("wizard-second-path-preview")).toHaveTextContent(
+      "D:\\照片备份\\{拍摄年}\\{拍摄月}\\{原文件名}",
+    );
+
+    startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await screen.findByTestId("gallery-probe");
+    expect(startMock.mock.calls[0][0].secondTarget).toEqual({
+      targetRoot: "D:\\照片备份",
+    });
+  });
+
+  it("移动互斥：移动模式下双目的地开关禁用；该模式下启动 plan 无 secondTarget", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    startMock.mockResolvedValue({ ok: true, jobId: 32 });
+    renderWizard("?device=E:");
+    await screen.findByTestId("wizard-table-stats");
+    await user.click(screen.getByTestId("wizard-review-next"));
+    await screen.findByTestId("wizard-review-drawer");
+
+    // 复制态开启双目的地并填写
+    if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
+    await user.click(screen.getByTestId("wizard-second-toggle"));
+    await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
+    expect(screen.getByTestId("wizard-second-toggle")).toBeChecked();
+
+    // 切移动 → 开关自动关、面板消失、互斥提示出现
+    await user.selectOptions(screen.getByLabelText("导入模式"), "move");
+    expect(screen.getByTestId("wizard-second-toggle")).not.toBeChecked();
+    expect(screen.getByTestId("wizard-second-toggle")).toBeDisabled();
+    expect(screen.queryByTestId("wizard-second-panel")).not.toBeInTheDocument();
+    expect(screen.getByText("移动模式不支持双目的地。")).toBeInTheDocument();
+
+    // 移动模式启动：plan 不带 secondTarget（后端拒 move+secondTarget，前端互斥保证）
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(startMock.mock.calls[0][0].mode).toBe("move");
+    expect(startMock.mock.calls[0][0].secondTarget).toBeUndefined();
+  });
+
+  it("启动失败：透出后端 Err 原文；invoke 不可用时用通用文案", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    await openReview(user);
+
+    // 后端逻辑错误：原文透出（行内 alert）
+    startMock.mockResolvedValueOnce({ ok: false, error: "目标目录不能位于源目录内" });
+    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("目标目录不能位于源目录内");
+    expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
+    // 失败留在抽屉可重试
+    expect(screen.getByTestId("wizard-review-drawer")).toBeInTheDocument();
+
+    // invoke 不可用（error=null）→ 通用文案
+    startMock.mockResolvedValueOnce({ ok: false, error: null });
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+  });
+});
+
+describe("全局滚动条主题", () => {
+  it("app.css 含 webkit 滚动条规则与 sp-scroll；滚动容器挂 sp-scroll", async () => {
+    // vitest 把 CSS import 转译为空模块，测试运行于 Node 直接读源文件断言规则存在
+    // @ts-ignore 项目未安装 @types/node，仅测试内使用
+    const { readFileSync } = await import("node:fs");
+    // @ts-ignore 同上
+    const { cwd } = await import("node:process");
+    const css = readFileSync(`${cwd()}/src/styles/app.css`, "utf-8") as string;
+    expect(css).toContain("::-webkit-scrollbar-thumb");
+    expect(css).toContain("::-webkit-scrollbar-thumb:hover");
+    expect(css).toContain("scrollbar-gutter: stable");
+
+    seedSession();
+    renderWizard("?device=E:");
+    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-list-scroll").className).toContain("sp-scroll");
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("wizard-view-grid"));
+    expect(screen.getByTestId("wizard-grid-scroll").className).toContain("sp-scroll");
+  });
 });

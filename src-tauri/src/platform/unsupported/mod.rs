@@ -19,6 +19,13 @@ pub(crate) fn filesystem_identity(_: &Path) -> std::io::Result<super::Filesystem
         "当前平台尚未实现文件系统识别",
     ))
 }
+#[allow(dead_code)]
+pub(crate) fn file_registration_id(_: &Path) -> std::io::Result<super::FileRegistrationId> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "当前平台尚未实现文件登记指纹",
+    ))
+}
 pub(crate) fn configure_sequential_read(_: &mut std::fs::OpenOptions) {}
 pub(crate) fn configure_background_command(_: &mut std::process::Command) {}
 pub(crate) fn capabilities() -> super::PlatformCapabilities {

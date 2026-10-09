@@ -9,19 +9,15 @@ import {
   type AlbumDto,
   type AssetDto,
 } from "@/ipc/api";
-import { useSettingsStore } from "@/stores/settingsStore";
-import { importRootOf } from "@/features/onboarding/onboardingConfig";
 
 /**
  * 「加入相册」选择弹窗（③ 全局入口共用：多选操作条 / 瓦片右键菜单）：
  * - 已有相册列表（单选，radio 语义）；底部「新建相册」内联输入（重名错误行内提示，
  *   创建成功自动选中并刷新列表）
- * - 归入语义（规格修订，通用「归入=物理挪移改主相册」）：每张照片都有主相册
- *   （「未分组」= 未真正归类），「归入相册」对所有选择可用——后端支持从未分组/
- *   日期根/任意相册挪到目标相册；所选主相册已是目标相册时归入按钮禁用并提示
- *   「已在该相册」（部分在目标时仅归入其余）；「加入（引用）」不变。
- *   识别口径：照片路径位于 `导入收纳区/相册目录/` 之下即认为主相册为该相册。
- * - 结果 toast：「已归入（文件已移动）」/「已加入（引用）」，随后自动关闭
+ * - 「归入相册」（物理挪移改主相册）已随 2026-10-09 单库多照片库定案退役：
+ *   相册/子组为纯逻辑概念，加入只建数据库引用；归入 UI 由 canClaim=false
+ *   隐藏（TODO-M5 相册纯逻辑化收尾时删除全部 claim 代码路径）。
+ * - 结果 toast：「已加入（引用）」，随后自动关闭弹窗
  */
 
 /** 路径归一（小写 + 统一 "\"），供目录前缀比对 */
@@ -64,11 +60,11 @@ export default function AddToAlbumDialog({
   const [claimError, setClaimError] = useState<string | null>(null);
   const [result, setResult] = useState<AddResult | null>(null);
 
-  // 活动库导入收纳区（claim 启发式基准：日期根 = importRoot/日期模板）
-  const importRoot = useSettingsStore((s) => {
-    const lib = s.settings.libraries.find((l) => l.id === s.settings.activeLibraryId);
-    return lib ? importRootOf(lib.photoRoot) : "";
-  });
+  // 「归入」启发式基准（照片根）已随 2026-10-09 单库多照片库定案退役：相册/
+  // 子组为纯逻辑概念（无物理足迹），“按路径归入相册主目录”不再成立。
+  // TODO-M5：相册纯逻辑化收尾时删除 claim 相关 UI 与 album_claim_assets 调用。
+  const importRoot = "";
+  const canClaim = importRoot !== "";
 
   // 挂载拉相册清单（后端不可用 → 空列表 + 只能新建）
   useEffect(() => {
@@ -293,8 +289,8 @@ export default function AddToAlbumDialog({
           )}
         </div>
 
-        {/* 归入 vs 引用语义说明（选中目标相册后显示） */}
-        {targetAlbum !== null && (
+        {/* 归入 vs 引用语义说明（选中目标相册后显示；归入退役后不展示） */}
+        {canClaim && targetAlbum !== null && (
           <p
             className="shrink-0 border-t border-edge/60 bg-panel/30 px-4 py-2 text-[11px] leading-relaxed text-text-muted"
             data-testid="add-to-album-mode-hint"
@@ -328,7 +324,7 @@ export default function AddToAlbumDialog({
           >
             {t("common.cancel")}
           </button>
-          {targetAlbum !== null && (
+          {canClaim && targetAlbum !== null && (
             <button
               type="button"
               onClick={() => void claim()}

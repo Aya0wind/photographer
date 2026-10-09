@@ -8,8 +8,8 @@
 mod common;
 
 pub use common::{
-    platform,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, migrate, settings, tasks, thumbs,
+    platform, scan,
+    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
 };
 
 #[path = "../src/edit/mod.rs"]
@@ -160,6 +160,11 @@ fn ins_photo(db: &db::Db, dir: &Path, name: &str, bytes: &[u8], captured: Option
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap()
@@ -218,7 +223,7 @@ fn run_job(
         asset: database.asset_by_id(asset_id).unwrap().unwrap(),
         recipe: recipe.clone(),
         options: validated,
-        photo_root: photo_root.to_path_buf(),
+        library_root: photo_root.to_path_buf(),
     };
     let bus = EventBus::new();
     edit::export::run_export_job(database, &bus, request);
@@ -411,7 +416,7 @@ fn folder_export_target_exists_errors_without_overwrite() {
         asset: database.asset_by_id(id).unwrap().unwrap(),
         recipe: plain_recipe(),
         options: validated,
-        photo_root: fixture.photo_root.clone(),
+        library_root: fixture.photo_root.clone(),
     };
     edit::export::run_export_job(database, &EventBus::new(), request);
     let row = common::open_db(&db_dir).export_job_get(job_id).unwrap().unwrap();
@@ -468,15 +473,6 @@ fn rotate_quarter_then_crop_maps_source_region() {
 fn album_export_placement_subgroup_and_conflict_suffix() {
     let fixture = setup();
     let album = fixture.db.album_create("交付册").unwrap();
-    // 固定创建时间 2026-04-12 → 主目录 2026/04/交付册（与拍摄日 06-01 无关）
-    fixture
-        .db
-        .0
-        .execute(
-            "UPDATE album SET created_at = '2026-04-12T03:00:00.000Z' WHERE id = ?1",
-            [album.id],
-        )
-        .unwrap();
     let id = ins_photo(
         &fixture.db,
         &fixture.photo_root,
@@ -489,18 +485,15 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
     let options = album_options(album.id, Some("成片"));
     let row = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
 
-    // 落位：{root}/{创建YYYY}/{创建MM}/{dir_name}/{子组}/{stem}_edit.jpg
-    // （0022 子组物理化：相册内平铺的唯一例外 = 子组段——与导入/claim/移组
-    // 同公式 album_item_home_rel；外层=相册创建年月 UTC）
+    // 落位（2026-10-09 §三）：{库root}/{拍摄年}/{拍摄月}/{stem}_edit.jpg
+    //（拍摄时间 2026-06-01 → 2026/06；相册/子组只是逻辑引用，不影响落位）
     let dst = PathBuf::from(row.output_path.clone().unwrap());
     let expected = fixture
         .photo_root
         .join("2026")
-        .join("04")
-        .join(album.dir_name.clone())
-        .join("成片")
+        .join("06")
         .join("DSC_0004_edit.jpg");
-    assert_eq!(dst, expected, "album 落位路径（含子组段）");
+    assert_eq!(dst, expected, "album 落位路径（纯时间，子组不落盘）");
     assert!(dst.is_file());
 
     // 登记：新资产 + album_item 子分组 + 拍摄时间/相机沿用
@@ -563,17 +556,16 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
         dst2.display()
     );
     assert!(dst2.is_file());
-    // 相册根（subgroup=None）→ 平铺主目录（无子组段；根目录首件无后缀）
+    // 相册根（subgroup=None）→ 同纯时间目录（首件无后缀）
     let options = album_options(album.id, None);
     let row3 = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
     let dst3 = PathBuf::from(row3.output_path.clone().unwrap());
     let expected3 = fixture
         .photo_root
         .join("2026")
-        .join("04")
-        .join(&album.dir_name)
-        .join("DSC_0004_edit.jpg");
-    assert_eq!(dst3, expected3, "subgroup 可空 = 相册根平铺");
+        .join("06")
+        .join("DSC_0004_edit_2.jpg");
+    assert_eq!(dst3, expected3, "subgroup 可空 = 同纯时间目录（递增 _2）");
     assert!(dst3.is_file());
     let subgroup3: Option<String> = fixture
         .db
@@ -799,4 +791,67 @@ fn adjustments_render_black_and_white_and_clamp_invalid_ranges() {
     let mut image = image::RgbImage::from_pixel(1, 1, image::Rgb([40, 80, 120]));
     edit::render::apply_adjustments(&mut image, edit::recipe::Adjustments { brightness: 100.0, ..Default::default() });
     assert_eq!(image.get_pixel(0, 0).0, [80, 160, 240]);
+}
+
+// ---------------------------------------------------------------------------
+// 本体写回原子替换铁律（§八-4，M2c 审计回归）
+// ---------------------------------------------------------------------------
+
+/// 导出（含 img-parts 元数据段改写 + album 模式库内落位）绝不改写库内
+/// 照片本体：源文件字节逐一不变。非破坏编辑 + 「临时文件 + rename」铁律
+/// 的行为面断言——若未来出现任何原地 patch 本体的路径（JPEG 段改写等），
+/// 此处立即失败。硬链接导出物快照语义由 rename 天然保证（旧 inode 不动）。
+#[test]
+fn export_never_rewrites_library_originals() {
+    let fixture = setup();
+    let bytes = build_source_jpeg(320, 200);
+    let id = ins_photo(
+        &fixture.db,
+        &fixture.photo_root,
+        "iron-rule.jpg",
+        &bytes,
+        Some("2026-06-01T10:00:00.000Z"),
+    );
+    let src_path = fixture.photo_root.join("iron-rule.jpg");
+    let src_mtime = std::fs::metadata(&src_path).unwrap().modified().unwrap();
+
+    // folder 模式 + 全量元数据动作（removeGps/版权/作者/关键词 → img-parts
+    // 段级改写路径全激活）：产物是内存缓冲，本体必须原样。
+    let out_dir = fixture._dir.path().join("exports");
+    let mut options = folder_options(&out_dir, "snap.jpg");
+    options.remove_gps = true;
+    options.copyright = Some("© 2026".into());
+    options.author = Some("作者".into());
+    options.keywords = vec!["快照".into()];
+    let row = run_job(
+        &fixture._dir.path().join("db"),
+        id,
+        &plain_recipe(),
+        &options,
+        &fixture.photo_root,
+    );
+    let exported = std::fs::read(row.output_path.clone().unwrap()).unwrap();
+    assert_ne!(exported, bytes, "导出产物应是新文件");
+    assert_eq!(
+        std::fs::read(&src_path).unwrap(),
+        bytes,
+        "本体字节必须原样（铁律：禁止原地改写）"
+    );
+
+    // album 模式（导出件落库内）同样不触源。
+    let album = fixture.db.album_create("铁律相册").unwrap();
+    let album_opts = album_options(album.id, None);
+    run_job(
+        &fixture._dir.path().join("db"),
+        id,
+        &plain_recipe(),
+        &album_opts,
+        &fixture.photo_root,
+    );
+    assert_eq!(std::fs::read(&src_path).unwrap(), bytes, "album 模式同样不动本体");
+    assert_eq!(
+        std::fs::metadata(&src_path).unwrap().modified().unwrap(),
+        src_mtime,
+        "本体 mtime 不变（未被打开写入）"
+    );
 }

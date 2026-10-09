@@ -126,6 +126,47 @@ type GridRow =
   | { type: "header"; group: AssetGroup; collapsed: boolean }
   | { type: "tiles"; group: AssetGroup; assets: AssetDto[]; height: number; widths: number[] };
 
+/** 跨库重复角标（M5 §四）：×N = 组内副本总数（含可见项）。点击打开重复项
+ *  列表；span 而非 button——瓦片本身是 <button>，嵌套交互元素用 role 承担。 */
+function DuplicateBadge({
+  asset,
+  count,
+  onShow,
+}: {
+  asset: AssetDto;
+  count: number;
+  onShow: (asset: AssetDto) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-label={t("gallery.duplicates.badge", { count })}
+      title={t("gallery.duplicates.badgeHint")}
+      onClick={(e) => {
+        e.stopPropagation();
+        onShow(asset);
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          onShow(asset);
+        }
+      }}
+      className="absolute bottom-14 right-1 z-20 cursor-pointer rounded bg-accent/85 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-black transition-colors hover:bg-accent"
+      data-testid="gallery-duplicate-badge"
+      data-count={count}
+      data-asset-id={asset.id}
+    >
+      ×{count}
+    </span>
+  );
+}
+
 export interface AssetGridHandle {
   /** 滚动到指定组（组头对齐吸顶条下缘）；组不存在时静默 */
   scrollToGroup: (key: string) => void;
@@ -176,6 +217,11 @@ interface AssetGridProps {
   scores?: Map<number, number>;
   /** 连拍堆叠角标（M6）：封面 assetId → 连拍张数 N（含封面） */
   burstBadges?: Map<number, number>;
+  /** 跨库重复角标（M5 §四）：可见资产 id → 组内副本总数 N（含可见项）；
+   *  点击徽标打开重复项列表（onShowDuplicates） */
+  duplicateBadges?: Map<number, number>;
+  /** 跨库重复徽标点击（打开组内全部副本列表） */
+  onShowDuplicates?: (asset: AssetDto) => void;
   /** 只读态（B1 回收站页）：隐藏收藏星钮等写操作入口，仅保留多选/浏览 */
   readOnly?: boolean;
   scrollTestId?: string;
@@ -204,6 +250,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     badges,
     scores,
     burstBadges,
+    duplicateBadges,
+    onShowDuplicates,
     readOnly = false,
     scrollTestId = "gallery-grid-scroll",
     timelineDates,
@@ -783,6 +831,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     );
                     const itemWidth = row.widths[itemIndex];
                     const burstCount = burstBadges?.get(asset.id);
+                    const duplicateCount = duplicateBadges?.get(asset.id);
                     const selectionClass = isSelected
                       ? "outline outline-2 -outline-offset-2 outline-accent"
                       : selection?.active
@@ -815,6 +864,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-selected={isSelected}
                         data-rejected={isRejected || undefined}
                         data-burst={burstCount !== undefined ? burstCount : undefined}
+                        data-duplicates={duplicateCount !== undefined ? duplicateCount : undefined}
                       >
                         {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
                         {burstCount !== undefined && (
@@ -831,6 +881,9 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                           </>
                         )}
                         {inner}
+                        {duplicateCount !== undefined && onShowDuplicates !== undefined && (
+                          <DuplicateBadge asset={asset} count={duplicateCount} onShow={onShowDuplicates} />
+                        )}
                         {burstCount !== undefined && (
                           <span
                             className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
@@ -855,6 +908,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         data-selected={isSelected}
                         data-rejected={isRejected || undefined}
                         data-burst={burstCount !== undefined ? burstCount : undefined}
+                        data-duplicates={duplicateCount !== undefined ? duplicateCount : undefined}
                       >
                         {/* 连拍堆叠底片层（纯 CSS 偏移，不动画；绘制在封面之下） */}
                         {burstCount !== undefined && (
@@ -871,9 +925,12 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                           </>
                         )}
                         {inner}
+                        {duplicateCount !== undefined && onShowDuplicates !== undefined && (
+                          <DuplicateBadge asset={asset} count={duplicateCount} onShow={onShowDuplicates} />
+                        )}
                         {burstCount !== undefined && (
                           <span
-                          className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}

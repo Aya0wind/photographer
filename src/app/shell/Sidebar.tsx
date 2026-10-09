@@ -9,7 +9,6 @@ import type { ReactElement } from "react";
 
 import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
 import { useCullingStore } from "@/features/culling/cullingStore";
-import { useSettingsStore } from "@/stores/settingsStore";
 
 /**
  * 侧栏（M4.5 A3 信息架构重排，飞牛式分组）：浏览 / 组织 / 工具 / 系统四组。
@@ -18,7 +17,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
  * - 组织：相册（/albums，含手工相册和智能相册）、人物、器材统计（/gear，M7 F9）
  * - 工具：导入（任务并入右侧抽屉，M4.5）、相似照片（/similar，M7 F8 两级
  *   去重：完全重复 + pHash 近似，组内勾选清理）
- * - 系统：设置
+ * - 系统：存储（/storage，M3 照片库登记管理）、设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
  * 计数徽标：图库/最近浏览/那年今天/相册走 sidebar_counts（一次性纯
  * COUNT，挂载拉一次 + 导入会话完成事件后重拉——最小事件集，不上轮询；
@@ -144,6 +143,15 @@ const ICONS = {
     </>,
     "trash",
   ),
+  storage: icon(
+    <>
+      <rect x="1.5" y="2.5" width="13" height="4.5" rx="1.2" />
+      <rect x="1.5" y="9" width="13" height="4.5" rx="1.2" />
+      <path d="M4 11.2h3" />
+      <circle cx="11.8" cy="11.2" r="0.9" />
+    </>,
+    "storage",
+  ),
   settings: icon(
     <>
       <path d="M1.5 4.5h13M1.5 8h13M1.5 11.5h13" />
@@ -185,21 +193,23 @@ const SECTIONS: NavSection[] = [
   },
   {
     titleKey: "nav.section.system",
-    items: [{ to: "/settings", labelKey: "nav.settings", icon: ICONS.settings }],
+    items: [
+      // 存储（M3 单库多照片库定案）：照片库登记管理（新建/从文件夹建立/重定位/移除登记）
+      { to: "/storage", labelKey: "nav.storage", icon: ICONS.storage },
+      { to: "/settings", labelKey: "nav.settings", icon: ICONS.settings },
+    ],
   },
 ];
 
 export default function Sidebar() {
   const motionOn = useMotionOn();
   const { t } = useTranslation();
-  // 计数/人脸徽标按库私有：切库时以 activeLibraryId 为依赖重拉
-  const activeLibraryId = useSettingsStore((s) => s.settings.activeLibraryId);
   // 选片徽标：进行中会话数（cullingStore 集中维护，各入口建会话/收尾后刷新）
   const cullingActive = useCullingStore((s) => s.activeCount);
   const refreshCullingCount = useCullingStore((s) => s.refreshActiveCount);
   useEffect(() => {
     void refreshCullingCount();
-  }, [refreshCullingCount, activeLibraryId]);
+  }, [refreshCullingCount]);
   // 人物入口徽标：人物数量（聚类的 person 条目数；进 app 拉一次；
   // 失败静默 0——后端未就绪不显示）
   const [peopleCount, setPeopleCount] = useState(0);
@@ -212,7 +222,7 @@ export default function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, [activeLibraryId]);
+  }, []);
 
   // 计数徽标（sidebar_counts 一次性纯 COUNT）：挂载拉一次；导入会话完成后
   // 重拉（资产/标签/相册/最近浏览都可能变——最小事件集，不上轮询）。
@@ -241,7 +251,7 @@ export default function Sidebar() {
       cancelled = true;
       unlisten?.();
     };
-  }, [activeLibraryId]);
+  }, []);
 
   /** 行徽标值（people 走人物数量；culling 走进行中会话数；其余走 sidebar_counts；
    *  0/缺数据=不显示） */

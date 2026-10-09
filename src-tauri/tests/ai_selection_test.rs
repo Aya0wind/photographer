@@ -80,23 +80,26 @@ fn eye_candidates_are_separate_from_calibrated_verdicts() {
         auxiliary_ear: None,
     };
     assert_eq!(photo_eyes(&[eye("open"), eye("open")], false), "open");
-    assert_eq!(photo_eyes(&[eye("unknown"), eye("open")], false), "unknown");
+    assert_eq!(
+        photo_eyes(&[eye("not_detected"), eye("open")], false),
+        "open"
+    );
     assert_eq!(
         photo_eyes(&[eye("closed"), eye("open")], false),
         "single_closed"
     );
-    assert_eq!(photo_eyes(&[eye("closed"), eye("open")], true), "maybe");
+    assert_eq!(photo_eyes(&[eye("closed"), eye("open")], true), "closed");
     assert_eq!(
         photo_eyes(&[eye("closed"), eye("closed")], false),
-        "maybe",
-        "unvalidated candidate must not become a definitive verdict"
+        "closed",
+        "two detected closed eyes yield a binary result"
     );
     assert_eq!(photo_eyes(&[], false), "no_face");
     let mut small = eye("unknown");
     small.person = 2;
     assert_eq!(
         photo_eyes(&[eye("open"), eye("open"), small], false),
-        "partial_open"
+        "open"
     );
 }
 
@@ -358,7 +361,7 @@ fn defocus_onnx_contract_smoke() {
 }
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -408,6 +411,11 @@ fn ins(db: &db::Db, dir: &std::path::Path, name: &str, img: &image::RgbImage) ->
         flagged: 0,
         color_label: None,
         rejected: 0,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(&path.to_string_lossy())
@@ -992,19 +1000,22 @@ fn catalog_selection_entry_is_pinned_facemesh() {
     );
     assert_eq!(entry.bytes_total, 4_864_717);
     assert!(entry.url.starts_with("https://github.com/yakhyo/"));
-    // Localization + dedicated candidate classifier.
+    // Production localization; the dedicated candidate is evaluation-only.
     assert_eq!(
         ai::catalog()
             .iter()
             .filter(|e| e.feature == "selection")
             .count(),
-        2
+        1
     );
     // 全量 feature 集合：semantic + face + selection
     let mut features: Vec<&str> = ai::catalog().iter().map(|e| e.feature.as_str()).collect();
     features.sort_unstable();
     features.dedup();
-    assert_eq!(features, vec!["face", "selection", "semantic"]);
+    assert_eq!(
+        features,
+        vec!["evaluation", "face", "selection", "semantic"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,4 +1285,39 @@ fn regional_focus_distinguishes_edges_from_defocus_and_plain_gradients() {
     assert_eq!(unknown.state, "unknown");
     assert_eq!(unknown.reason, Some("low_texture"));
     assert!(unknown.score.is_none());
+}
+
+#[test]
+fn binary_eyes_have_no_quality_or_ambiguous_band_after_detection() {
+    use ai::selection_regions::{binary_eye_state, detected_eye_bounds, photo_eyes, Region};
+    let image = image::RgbImage::new(64, 64); // No texture: no separate quality gate.
+    let points = |width: f32| {
+        [
+            [10.0, 10.0],
+            [11.0, 10.2],
+            [12.0, 10.2],
+            [10.0 + width, 10.0],
+            [12.0, 10.1],
+            [11.0, 10.1],
+        ]
+    };
+    assert!(detected_eye_bounds(&image, &points(4.0)).is_some());
+    assert!(detected_eye_bounds(&image, &points(3.9)).is_none());
+    for ear in [0.0, 0.1, 0.129, 0.13, 0.15, 0.2, 0.3, 0.9] {
+        assert_eq!(
+            binary_eye_state(ear, 0.13),
+            if ear < 0.13 { "closed" } else { "open" }
+        );
+    }
+    let missing = Region {
+        kind: "eye".into(),
+        person: 1,
+        side: None,
+        bounds: [0.0; 4],
+        state: "not_detected".into(),
+        reason: Some("eye_not_detected".into()),
+        raw_score: None,
+        auxiliary_ear: None,
+    };
+    assert_eq!(photo_eyes(&[missing], false), "no_eye");
 }

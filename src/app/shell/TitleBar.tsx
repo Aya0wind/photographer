@@ -7,8 +7,8 @@ import { isMacPlatform } from "@/lib/platform";
  * 自绘标题栏（无边框窗口，tauri.conf decorations=false）：整窗最顶部 40px 条
  * （surface 底 + 底边 edge），左侧应用标识，右侧动作位（全局搜索框/任务抽屉
  * 开关）与窗口控制三钮（最小化 / 最大化↔还原 / 关闭）。顶部菜单栏已按用户
- * 要求移除——原菜单功能入口全部有替代：导航走侧栏、新建/打开库走 设置→库
- * 与库选择器、退出走窗口关闭钮（Ctrl+1..5 导航快捷键保留在 AppShell）。
+ * 要求移除——原菜单功能入口全部有替代：导航走侧栏、照片库登记管理走「存储」
+ * 页、退出走窗口关闭钮（Ctrl+1..5 导航快捷键保留在 AppShell）。
  *
  * - 拖拽：背景层带 data-tauri-drag-region；Tauri 注入脚本（window/scripts/drag.js）
  *   处理拖动与双击最大化（internal_toggle_maximize）——前端不再绑 onDoubleClick，

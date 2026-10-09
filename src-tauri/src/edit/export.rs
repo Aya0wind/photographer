@@ -9,17 +9,15 @@
 //! **folder 模式**：写 `outputDir/fileName.part` → 校验目标不存在 → 原子
 //! rename；目标已存在报错（绝不覆盖）。
 //!
-//! **album 模式**：复用**导入引擎**的相册落位与登记路径，不平行造轮子——
-//! 目录段走 [`crate::db::Db::album_item_home_rel`] 统一公式
-//! （`{创建YYYY}/{创建MM}/{dir_name}[/{子组}]`，外层=相册创建时间年月
-//! （UTC 口径）、相册内平铺——唯一例外 = 子组段（0022 物理化）——
-//! 2026-09-28 布局定案；拍摄日分组在应用 UI），整体过
-//! [`crate::import::templates::render_dir`] 净化；文件名 `{源stem}_edit.jpg`，
-//! 冲突走导入引擎的
+//! **album 模式**：复用**导入引擎**的落位与登记路径，不平行造轮子——
+//! 2026-10-09 纯时间布局定案（§三）：导出件落**源资产所属照片库**
+//! `{库root}/{拍摄年}/{拍摄月}/{源stem}_edit.jpg`（拍摄时间与导入引擎同
+//! 口径：EXIF 缺失回退 mtime）；冲突走导入引擎的
 //! [`crate::import::templates::unique_path`]（`_1`/`_2` 可追踪后缀）；登记
 //! 用 [`crate::db::Db::insert_asset_with_album`]（与导入引擎同一函数：资产
-//! 行 + 缩略图/分析任务 + album_item（含 subgroup）同事务）。导出件就是
-//! 普通资产进相册——无原片/成片关系语义（用户定案已移除该概念）。
+//! 行 + 缩略图/分析任务 + album_item（含 subgroup）同事务；library_id 随
+//! 源资产）。导出件就是普通资产——无原片/成片关系语义（用户定案已移除
+//! 该概念）；album/subgroup 只是逻辑引用，不影响落位（§一）。
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -36,7 +34,7 @@ use super::recipe::EditRecipe;
 use super::render;
 use crate::db::{AssetRow, Db, ExportJobRow};
 use crate::events::{AppEvent, AssetKind, EventBus};
-use crate::import::templates::{render_dir, sanitize_component, unique_path, RenderCtx};
+use crate::import::templates::{sanitize_component, unique_path};
 
 /// 导出落位模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,8 +279,9 @@ pub struct ExportJobRequest {
     pub asset: AssetRow,
     pub recipe: EditRecipe,
     pub options: ValidatedOptions,
-    /// 照片根（album 模式落位锚点）。
-    pub photo_root: PathBuf,
+    /// 源资产所属照片库 root（album 模式纯时间布局落位锚点；folder 模式
+    /// 不用）。
+    pub library_root: PathBuf,
 }
 
 /// 执行一个导出任务至终态（running → done|error + 事件）。阻塞；调用方
@@ -392,7 +391,7 @@ fn execute(
                 &jpeg,
                 asset,
                 &request.options,
-                &request.photo_root,
+                &request.library_root,
                 width,
                 height,
                 album_id,
@@ -438,36 +437,22 @@ fn place_in_album(
     jpeg: &[u8],
     source: &AssetRow,
     options: &ValidatedOptions,
-    photo_root: &Path,
+    library_root: &Path,
     width: u32,
     height: u32,
     album_id: i64,
     subgroup: Option<String>,
 ) -> Result<(PathBuf, i64), String> {
-    let home_rel = db
-        .album_item_home_rel(album_id, subgroup.as_deref())
-        .map_err(|e| e.to_string())?
-        .ok_or("相册不存在")?;
     let stem = source
         .filename
         .rsplit_once('.')
         .map(|(s, _)| s.to_string())
         .unwrap_or_else(|| source.filename.clone());
     let captured_at = captured_or_fallback(source);
-    // 与导入引擎同一布局公式（album_item_home_rel：`{创建YYYY}/{创建MM}/
-    // {dir_name}[/{子组}]`——相册内平铺，唯一例外 = 子组段（0022 物理化），
-    // subgroup Some 时导出件落进对应子文件夹）+ 同一渲染器过 sanitize——
-    // 同一相册的导出件与导入件落进同一个相册目录（同子组同文件夹）。
-    // 模板为纯字面量（无逐照片令牌），captured_at 上下文仅形态沿用。
-    let ctx = RenderCtx {
-        captured_at,
-        camera: None,
-        lens: None,
-        original_stem: stem.clone(),
-        ext: "jpg".to_string(),
-    };
-    let rel = render_dir(&home_rel, &ctx).map_err(|e| format!("导出目录渲染失败: {e}"))?;
-    let dir = photo_root.join(rel);
+    // 与导入引擎同一纯时间布局公式（§三：`{拍摄年}/{拍摄月}/`，EXIF 缺失
+    // 回退 mtime——captured_or_fallback 同口径）；相册/子组只是逻辑引用
+    //（§一），不影响落位。同一资产的导出件与导入件同月份目录平铺。
+    let dir = library_root.join(captured_at.format("%Y/%m").to_string());
     let name = format!("{}_edit.jpg", sanitize_component(&stem));
     let dst = unique_path(&dir, &name); // 导入引擎命名冲突规则（_1/_2）
     atomic_write(&dst.with_extension("part"), &dst, jpeg)?;
@@ -527,6 +512,12 @@ fn place_in_album(
         flagged: 0,
         color_label: None,
         rejected: 0,
+        // 导出件随源资产归属同一照片库（§一：library_id 静态归属属性）
+        library_id: source.library_id.clone(),
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     };
     db.insert_asset_with_album(&row, Some(album_id), subgroup.as_deref())
         .map_err(|e| format!("导出件登记失败: {e}"))?;

@@ -421,4 +421,40 @@ describe("相册详情页：子分组", () => {
   });
 });
 
+describe("相册详情页：导出为文件夹入口（M6）", () => {
+  it("更多操作内「导出为文件夹」→ 打开对话框（根作用域 subgroup=null，带相册名与张数）", async () => {
+    assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+
+    // ActionPopover（details/summary）先展开再点导出入口（summary 非 button 角色，按 title 查）
+    await user.click(screen.getByTitle("更多操作"));
+    await user.click(screen.getByTestId("album-export-start"));
+
+    const dialog = await screen.findByTestId("album-export-dialog");
+    expect(dialog).toHaveAttribute("data-phase", "config");
+    expect(screen.getByTestId("album-export-scope")).toHaveTextContent("青海湖 2026");
+    expect(screen.getByTestId("album-export-scope")).toHaveTextContent("共 3 张");
+  });
+
+  it("子分组视图：入口导出当前子分组（作用域行带子分组名）", async () => {
+    subgroupsMock.mockResolvedValue([{ name: "原片", itemCount: 2 }]);
+    assetsPageMock.mockResolvedValue([makeAsset(1)]);
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+    await user.click((await screen.findAllByTestId("album-subgroup-card"))[0]);
+    await waitFor(() =>
+      expect(
+        assetsPageMock.mock.calls.some(([, , , filters]) => (filters as AssetFilters)?.subgroup === "原片"),
+      ).toBe(true),
+    );
+
+    await user.click(screen.getByTitle("更多操作"));
+    await user.click(screen.getByTestId("album-export-start"));
+    expect(await screen.findByTestId("album-export-scope")).toHaveTextContent("青海湖 2026 ‹ 原片");
+  });
+});
+
 async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("album-asset-context-menu-item-" + key); }

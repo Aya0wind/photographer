@@ -407,15 +407,16 @@ pub async fn tethering_photo_preview(
     asset_id: i64,
     size: u16,
 ) -> Result<Option<String>, String> {
-    run_blocking(state.inner().clone(), move |_| {
-        let session = super::super::tethering::session::get(&session_id)?;
-        let db = super::open_library_db(std::path::Path::new(&session.library.db_dir))?;
+    run_blocking(state.inner().clone(), move |state| {
+        // 会话校验（照片确属该会话由前端胶片条保证；库数据全局唯一）
+        super::super::tethering::session::get(&session_id)?;
+        let db = super::app_database_db(state)?;
         let row = db
             .asset_by_id(asset_id)
             .map_err(|e| e.to_string())?
             .ok_or("照片不存在")?;
         let path = crate::thumbs::thumb_file(
-            std::path::Path::new(&session.library.db_dir),
+            &super::app_database_dir(state),
             std::path::Path::new(&row.path),
             if size > 512 { 2048 } else { 256 },
         );

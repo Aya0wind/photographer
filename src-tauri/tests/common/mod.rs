@@ -28,10 +28,10 @@ pub mod index;
 pub mod ipc;
 #[path = "../../src/metadata/mod.rs"]
 pub mod metadata;
-#[path = "../../src/migrate/mod.rs"]
-pub mod migrate;
 #[path = "../../src/platform/mod.rs"]
 pub mod platform;
+#[path = "../../src/scan/mod.rs"]
+pub mod scan;
 #[path = "../../src/settings/mod.rs"]
 pub mod settings;
 #[path = "../../src/tasks/mod.rs"]
@@ -54,7 +54,7 @@ use devices::{DeviceResult, DeviceSource, FileEntry, SourceKind};
 use events::{AppEvent, EventBus, FileState, JobStats};
 use import::engine::{Engine, ImportMode, ImportPlan};
 use ipc::{AppState, DeviceEntry};
-use settings::{DuplicatePolicy, Library, Settings};
+use settings::{DuplicatePolicy, Settings};
 use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
@@ -137,17 +137,35 @@ pub fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
 // ---------------------------------------------------------------------------
 
 pub fn open_db(dir: &Path) -> Db {
-    let db = Db::open(&dir.join("library.db")).unwrap();
-    db.migrate().unwrap();
-    db
+    // 单版本 schema(2026-10-09):打开即幂等建表,无 migrate 步骤。
+    Db::open(&dir.join("library.db")).unwrap()
 }
 
-pub fn plan_for(target: &Path) -> ImportPlan {
+/// 幂等登记目标照片库（root 已登记 → 复用同一条）。root 互斥校验的
+/// 数据库目录基准给一个恒不与测试 root 重叠的锚目录（应用侧传真实数据
+/// 库目录；引擎级测试不验证互斥本身）。
+pub fn ensure_photo_library(db: &Db, database_dir: &Path, root: &Path) -> String {
+    let root_str = root.to_string_lossy().into_owned();
+    if let Ok(rows) = db.photos_library_list() {
+        if let Some(row) = rows
+            .into_iter()
+            .find(|r| r.root_path.eq_ignore_ascii_case(&root_str))
+        {
+            return row.id;
+        }
+    }
+    db.photos_library_register("测试照片库", &root_str, database_dir)
+        .unwrap()
+        .id
+}
+
+/// 引擎级导入计划：目标照片库 = target root 登记条目（2026-10-09 §三
+/// 照片库基准）；布局固定纯时间（无模板字段）。album_id 缺省 None（相册
+/// 为纯逻辑引用，可选）。
+pub fn plan_for(db: &Db, db_dir: &Path, target: &Path) -> ImportPlan {
     ImportPlan {
         source_id: "test-src".into(),
-        target_root: target.to_path_buf(),
-        // 布局固定（2026-09-28）：无目录模板字段，引擎按 album_home_rel 落位
-        name_template: "{原文件名}".into(),
+        target_library_id: ensure_photo_library(db, db_dir, target),
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,
@@ -160,7 +178,6 @@ pub fn plan_for(target: &Path) -> ImportPlan {
 }
 
 /// 跑一个引擎会话（Volume 源），返回 (job_id, stats)。
-/// 0018 起导入必落相册：plan 未指定 album_id 时兜底创建/复用「未分组」。
 pub fn run_engine(
     source_dir: &Path,
     db_dir: &Path,
@@ -170,36 +187,35 @@ pub fn run_engine(
     let db = open_db(db_dir);
     let bus = EventBus::new();
     let source = Box::new(VolumeSource::new(source_dir));
-    let mut plan = plan_for(target_dir);
+    let mut plan = plan_for(&db, db_dir, target_dir);
     plan_override(&mut plan);
-    if plan.album_id.is_none() {
-        plan.album_id = Some(db.ensure_default_album().unwrap());
-    }
     let mut engine = Engine::new(db, bus, source, plan);
     let job_id = engine.begin().unwrap();
     let stats = engine.run();
     (job_id, stats)
 }
 
-/// 兜底相册「未分组」的导入期望目录：`target/{创建YYYY}/{创建MM}/{dir_name}`
-/// （布局固定公式，从库读 album_home_rel——与引擎同一来源；先
-/// ensure_default_album 固定创建时刻，run_engine 幂等复用同一条）。
-/// 相册内平铺：期望文件 = 该目录直接 join 文件名（无拍摄日内层）。
-pub fn expected_ungrouped_dir(db_dir: &Path, target: &Path) -> PathBuf {
-    target.join(expected_ungrouped_rel(db_dir))
+/// 纯时间布局期望目录（§三 唯一公式）：`target/{拍摄年}/{拍摄月}`。
+/// captured 传 EXIF 时间；无 EXIF 文件用 [`expected_mtime_dir`]（mtime
+/// 回退口径与引擎一致）。
+pub fn expected_time_dir(target: &Path, captured: DateTime<Utc>) -> PathBuf {
+    target.join(captured.format("%Y/%m").to_string())
 }
 
-/// 同 [`expected_ungrouped_dir`]，但只返回相对段（`{创建YYYY}/{创建MM}/
-/// {dir_name}`——第二目的地同公式仅根不同时用）。
-pub fn expected_ungrouped_rel(db_dir: &Path) -> String {
-    let db = open_db(db_dir);
-    let id = db.ensure_default_album().unwrap();
-    db.album_home_rel(id).unwrap().unwrap()
+/// 无 EXIF 源文件的期望目录：以源文件 mtime 推断（引擎 resolve_captured
+/// 读同一 metadata，两次读取对未变动文件恒同值）。
+pub fn expected_mtime_dir(target: &Path, source_file: &Path) -> PathBuf {
+    let mtime: DateTime<Utc> = fs::metadata(source_file)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .into();
+    expected_time_dir(target, mtime)
 }
 
-/// plan_for + ensure_default_album（0018 导入必落相册；直接建引擎的测试用）。
-pub fn plan_with_album(db: &Db, target: &Path) -> ImportPlan {
-    let mut plan = plan_for(target);
+/// plan_for + ensure_default_album（挂「未分组」引用的直接引擎测试用）。
+pub fn plan_with_album(db: &Db, db_dir: &Path, target: &Path) -> ImportPlan {
+    let mut plan = plan_for(db, db_dir, target);
     plan.album_id = Some(db.ensure_default_album().unwrap());
     plan
 }
@@ -325,20 +341,10 @@ impl DeviceSource for DeleteFailSource {
 // IPC / AppState 脚手架
 // ---------------------------------------------------------------------------
 
-/// 构造带激活库 + 慢速卷源注册表的 AppState（IPC 编排测试用）。
+/// 构造带慢速卷源注册表的 AppState（IPC 编排测试用）。应用唯一数据库 =
+/// config_dir（= db_dir，tests 的 open_db(db_dir) 与 AppState 解析同库）；
+/// settings 只含应用级配置（2026-10-09：库注册表/activeLibrary 退役）。
 pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> AppState {
-    let settings = Settings {
-        libraries: vec![Library {
-            id: "lib-1".into(),
-            name: "主库".into(),
-            db_dir: db_dir.to_string_lossy().into_owned(),
-            photo_root: source_dir.to_string_lossy().into_owned(),
-            ..Library::default()
-        }],
-        active_library_id: Some("lib-1".into()),
-        ..Settings::default()
-    };
-
     let source: Arc<dyn DeviceSource> = Arc::new(SlowSource {
         inner: VolumeSource::new(source_dir),
         delay,
@@ -355,16 +361,17 @@ pub fn state_with_library(db_dir: &Path, source_dir: &Path, delay: Duration) -> 
     devices_map.insert(source.id(), DeviceEntry::ready(source, snapshot));
     let supervisor = tasks::TaskSupervisor::new(EventBus::new());
     AppState {
-        settings: Mutex::new(settings),
-        config_dir: db_dir.join("config"),
+        settings: Mutex::new(Settings::default()),
+        config_dir: db_dir.to_path_buf(),
         bus: EventBus::new(),
         devices: Mutex::new(devices_map),
         active_import: Mutex::new(None),
         import_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        register_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+        library_scan_kick: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ai: ai::ModelManager::new(db_dir.join("models"), EventBus::new(), supervisor.clone()),
         supervisor,
         thumb_queue: ipc::thumb::ThumbQueue::new(),
-        migrations: Mutex::new(Default::default()),
     }
 }
 
@@ -380,8 +387,9 @@ pub fn library_fixture() -> (tempfile::TempDir, AppState, Db) {
     (dir, state, db)
 }
 
-/// IPC 导入计划：source_id 取注册表首个设备。0018 导入必落相册：
-/// album_id 兜底到「未分组」（不存在则自动创建）。
+/// IPC 导入计划：source_id 取注册表首个设备；目标照片库按 target root
+/// 在应用唯一数据库（state.config_dir）登记（root 互斥校验走真实基准——
+/// target 与数据库目录重叠会在登记处报错）。
 pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
     let device_id = state
         .devices
@@ -391,24 +399,32 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
         .next()
         .cloned()
         .unwrap();
-    // 无激活库时 album_id 置 None（start_import 会先报「尚未创建库」）
-    let album_id = state
-        .settings
-        .lock()
+    let db = open_db(&state.config_dir);
+    let root_str = target.to_string_lossy().into_owned();
+    let existing = db
+        .photos_library_list()
         .unwrap()
-        .active_library()
-        .and_then(|lib| open_db(Path::new(&lib.db_dir)).ensure_default_album().ok());
+        .into_iter()
+        .find(|r| r.root_path.eq_ignore_ascii_case(&root_str))
+        .map(|r| r.id);
+    let target_library_id = match existing {
+        Some(id) => id,
+        None => {
+            db.photos_library_register("测试照片库", &root_str, &state.config_dir)
+                .unwrap()
+                .id
+        }
+    };
     ImportPlan {
         source_id: device_id,
-        target_root: target.to_path_buf(),
-        name_template: "{原文件名}".into(),
+        target_library_id,
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,
         mode: ImportMode::Copy,
         second_target: None,
         include: None,
-        album_id,
+        album_id: None,
         album_subgroup: None,
     }
 }

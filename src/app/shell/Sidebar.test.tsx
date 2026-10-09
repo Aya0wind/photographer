@@ -39,7 +39,7 @@ const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: str
   { section: "浏览", links: ["图库", "最近浏览"], disabled: [] },
   { section: "组织", links: ["相册", "那年今天", "人物", "器材统计"], disabled: [] },
   { section: "工具", links: ["导入", "相似照片", "回收站"], disabled: [] },
-  { section: "系统", links: ["设置"], disabled: [] },
+  { section: "系统", links: ["存储", "设置"], disabled: [] },
 ];
 
 function renderSidebar(initialPath: string) {
@@ -59,6 +59,7 @@ function renderSidebar(initialPath: string) {
           <Route path="/people" element={<div>PEOPLE_CONTENT</div>} />
           <Route path="/import" element={<div>IMPORT_CONTENT</div>} />
           <Route path="/tasks" element={<div>TASKS_CONTENT</div>} />
+          <Route path="/storage" element={<div>STORAGE_CONTENT</div>} />
           <Route path="/settings" element={<div>SETTINGS_CONTENT</div>} />
         </Routes>
       </MemoryRouter>
@@ -172,6 +173,19 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
 
     await user.click(similar);
     expect(screen.getByText("SIMILAR_CONTENT")).toBeInTheDocument();
+  });
+
+  it("M3 存储入口（系统组，指 /storage，照片库登记管理）", async () => {
+    renderSidebar("/gallery");
+    const user = userEvent.setup();
+
+    const storage = screen.getByRole("link", { name: /存储/ });
+    const system = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("系统"));
+    expect(system).toContain(storage);
+    expect(storage).toHaveAttribute("href", "/storage");
+
+    await user.click(storage);
+    expect(screen.getByText("STORAGE_CONTENT")).toBeInTheDocument();
   });
 
   it("品牌区让位顶部标题栏：侧栏不再展示应用标识", () => {

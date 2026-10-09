@@ -6,7 +6,7 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, migrate, platform,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan,
     settings, tasks, thumbs,
 };
 
@@ -128,6 +128,11 @@ fn ins(
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     })
     .unwrap();
     db.asset_id_by_path(path).unwrap().unwrap()
@@ -551,6 +556,7 @@ fn dtos_serialize_camel_case() {
         rating: 0,
         color_label: None,
         rejected: false,
+        missing: false,
     };
     let json = serde_json::to_value(&dto).unwrap();
     assert_eq!(json["capturedAt"], "2026-01-01T00:00:00.000Z");
@@ -559,6 +565,7 @@ fn dtos_serialize_camel_case() {
     assert_eq!(json["pairId"], serde_json::Value::Null);
     assert_eq!(json["colorLabel"], serde_json::Value::Null);
     assert_eq!(json["rejected"], false);
+    assert_eq!(json["missing"], false, "缺失标记随 DTO（camelCase）");
 
     let filters: AssetFilters = serde_json::from_str(
         r#"{"kinds":["raw","photo"],"capturedAfter":"2026-01-01T00:00:00Z","cameras":["c"]}"#,
@@ -691,6 +698,11 @@ fn base_row() -> AssetRow {
         artist: None,
         gps_lat: None,
         gps_lon: None,
+        library_id: None,
+        missing: 0,
+        xmp_dirty: 0,
+        volume_serial: None,
+        file_id: None,
     }
 }
 
@@ -978,81 +990,6 @@ fn raw_jpg_pairing_bidirectional_and_replace_remap() {
 }
 
 #[test]
-fn legacy_v3_library_migrates_to_v4_and_stays_readable() {
-    let dir = tempfile::tempdir().unwrap();
-    // 手工建 user_version=3 的旧库（0001..0003 形态）+ 一行存量资产
-    let conn = rusqlite::Connection::open(dir.path().join("library.db")).unwrap();
-    conn.execute_batch(
-        r#"
-        CREATE TABLE assets (
-            id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, filename TEXT NOT NULL,
-            size INTEGER NOT NULL, mtime TEXT NOT NULL, xxhash INTEGER NOT NULL,
-            sha256 BLOB NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('photo','raw','video','other')),
-            captured_at TEXT, camera TEXT, source TEXT NOT NULL, created_at TEXT NOT NULL
-        );
-        CREATE INDEX idx_assets_sha256 ON assets (sha256);
-        CREATE INDEX idx_assets_captured_at ON assets (captured_at);
-        CREATE INDEX idx_assets_xxhash ON assets (xxhash);
-        CREATE TABLE jobs (
-            id INTEGER PRIMARY KEY, kind TEXT NOT NULL, device_id TEXT NOT NULL,
-            device_name TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('running','paused','done','cancelled','failed')),
-            total_files INTEGER NOT NULL, total_bytes INTEGER NOT NULL, stats_json TEXT,
-            started_at TEXT NOT NULL, finished_at TEXT
-        );
-        CREATE TABLE job_files (
-            job_id INTEGER NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
-            src TEXT NOT NULL, dst TEXT NOT NULL, size INTEGER NOT NULL,
-            state TEXT NOT NULL CHECK (state IN ('pending','copying','verified','skipped','failed')),
-            error TEXT, xxhash INTEGER, sha256 BLOB, PRIMARY KEY (job_id, src)
-        );
-        CREATE INDEX idx_job_files_state ON job_files (job_id, state);
-        CREATE TABLE logs (
-            id INTEGER PRIMARY KEY, ts TEXT NOT NULL, level TEXT NOT NULL,
-            job_id INTEGER, message TEXT NOT NULL
-        );
-        CREATE INDEX idx_logs_job_id ON logs (job_id, id);
-        ALTER TABLE jobs ADD COLUMN plan_json TEXT;
-        CREATE INDEX idx_assets_size_filename ON assets (size, filename);
-        ALTER TABLE assets ADD COLUMN origin TEXT NOT NULL DEFAULT 'imported';
-        ALTER TABLE job_files ADD COLUMN dst2 TEXT NOT NULL DEFAULT '';
-        PRAGMA user_version = 3;
-        INSERT INTO assets (path, filename, size, mtime, xxhash, sha256, kind, captured_at, camera, source, created_at)
-        VALUES ('X:\old\a.jpg', 'a.jpg', 5, '2026', 1,
-                x'0101010101010101010101010101010101010101010101010101010101010101',
-                'photo', NULL, NULL, 'imported', '2026');
-        "#,
-    )
-    .unwrap();
-    drop(conn);
-
-    // 开库自动迁移到 v4：旧行可读（新列全 None）、新行可写（拍摄参数+配对）
-    let database = common::open_db(dir.path());
-    let version: i64 = database
-        .0
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap();
-    assert!(version >= 4, "迁移应推进到 0004+");
-
-    let old_id = database.asset_id_by_path(r"X:\old\a.jpg").unwrap().unwrap();
-    let old_row = database.asset_by_id(old_id).unwrap().unwrap();
-    assert_eq!(old_row.iso, None);
-    assert_eq!(old_row.width, None);
-    assert_eq!(old_row.pair_asset_id, None);
-    assert_eq!(old_row.kind, AssetKind::Photo);
-
-    let mut rich = base_row();
-    rich.iso = Some(800);
-    let _ = ins_full(&database, r"X:\old\a.jpg", rich); // 同路径覆盖（REPLACE 换 id）
-    let replaced = database.asset_by_id(old_id).unwrap();
-    assert!(replaced.is_none(), "REPLACE 换 id 后旧 id 失效");
-    let new_id = database.asset_id_by_path(r"X:\old\a.jpg").unwrap().unwrap();
-    assert_eq!(
-        database.asset_by_id(new_id).unwrap().unwrap().iso,
-        Some(800)
-    );
-}
-
-#[test]
 fn assets_by_ids_preserves_order_and_skips_missing() {
     let db_dir = tempfile::tempdir().unwrap();
     let database = common::open_db(db_dir.path());
@@ -1065,4 +1002,236 @@ fn assets_by_ids_preserves_order_and_skips_missing() {
     assert_eq!(ids, vec![b, a], "保持入参顺序、失效 id 跳过");
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].thumb_state, 0);
+}
+
+// ---------------------------------------------------------------------------
+// M2c（§五 缺失处理 + §一 库归属筛选）：missing 三态 / libraryIds 过滤 /
+// 访问时惰性缺失检测（两轮确认）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_filter_three_states_and_library_filter() {
+    // 库根与数据库目录必须互斥（§八-6）——各自独立 tempdir（兄弟目录）。
+    let db_dir = tempfile::tempdir().unwrap();
+    let database = common::open_db(db_dir.path());
+    let libs = tempfile::tempdir().unwrap();
+    let root_a = libs.path().join("lib-a");
+    let root_b = libs.path().join("lib-b");
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    let lib_a = database
+        .photos_library_register("库甲", &root_a.to_string_lossy(), db_dir.path())
+        .unwrap()
+        .id;
+    let lib_b = database
+        .photos_library_register("库乙", &root_b.to_string_lossy(), db_dir.path())
+        .unwrap()
+        .id;
+    let a = ins(&database, "a.jpg", None, AssetKind::Photo, None, 10, 1);
+    let b = ins(&database, "b.jpg", None, AssetKind::Photo, None, 10, 2);
+    let c = ins(&database, "c.jpg", None, AssetKind::Photo, None, 10, 3);
+    database
+        .0
+        .execute(
+            "UPDATE assets SET library_id = ?2 WHERE id = ?1",
+            rusqlite::params![a, lib_a],
+        )
+        .unwrap();
+    database
+        .0
+        .execute(
+            "UPDATE assets SET library_id = ?2 WHERE id IN (?1, ?3)",
+            rusqlite::params![b, lib_b, c],
+        )
+        .unwrap();
+    database
+        .0
+        .execute("UPDATE assets SET missing = 1 WHERE id = ?1", [b])
+        .unwrap();
+    let state = query_state(db_dir.path());
+
+    // 缺失三态：true → 仅 b；false → a/c；缺省 → 全部
+    let names_of = |filters: AssetFilters| {
+        let mut v: Vec<String> = page(&state, 0, 100, filters)
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        names_of(AssetFilters {
+            missing: Some(true),
+            ..Default::default()
+        }),
+        vec!["b.jpg".to_string()]
+    );
+    assert_eq!(
+        names_of(AssetFilters {
+            missing: Some(false),
+            ..Default::default()
+        }),
+        vec!["a.jpg".to_string(), "c.jpg".to_string()]
+    );
+    assert_eq!(names_of(AssetFilters::default()).len(), 3);
+    // DTO 带缺失角标数据
+    let page_items = page(&state, 0, 100, AssetFilters::default());
+    assert!(page_items.iter().find(|d| d.id == b).unwrap().missing);
+    assert!(!page_items.iter().find(|d| d.id == a).unwrap().missing);
+
+    // 库归属多选（OR）：甲 + 乙 = 全部；仅甲 = a；仅乙 = b/c
+    assert_eq!(
+        names_of(AssetFilters {
+            library_ids: vec![lib_a.clone(), lib_b.clone()],
+            ..Default::default()
+        })
+        .len(),
+        3
+    );
+    assert_eq!(
+        names_of(AssetFilters {
+            library_ids: vec![lib_a],
+            ..Default::default()
+        }),
+        vec!["a.jpg".to_string()]
+    );
+    assert_eq!(
+        names_of(AssetFilters {
+            library_ids: vec![lib_b.clone()],
+            ..Default::default()
+        }),
+        vec!["b.jpg".to_string(), "c.jpg".to_string()]
+    );
+
+    // 计数与分页同口径（assets_count 复用条件构造）
+    assert_eq!(
+        database
+            .assets_count(&AssetFilters {
+                missing: Some(true),
+                library_ids: vec![lib_b],
+                ..Default::default()
+            })
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn detail_access_lazily_detects_missing_with_two_round_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let root = dir.path().join("lib");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let database = common::open_db(&db_dir);
+    let library = database
+        .photos_library_register("惰性检测", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    // 资产指向从未存在的路径（库在线）；指纹按「之后放回的同内容」预记，
+    // 恢复校验（§八-1 同哈希）才能走单纯恢复分支。
+    let gone = root.join("2026").join("06").join("gone.jpg");
+    let content = common::shrink(vec![0xFF, 0xD8, 0xFF, 0xE0], 4096);
+    let xxh = {
+        use xxhash_rust::xxh64::Xxh64;
+        let mut hasher = Xxh64::new(0);
+        hasher.update(&content);
+        hasher.digest()
+    };
+    let id = ins(
+        &database,
+        &gone.to_string_lossy(),
+        None,
+        AssetKind::Photo,
+        None,
+        content.len() as u64,
+        xxh,
+    );
+    database
+        .0
+        .execute(
+            "UPDATE assets SET library_id = ?2 WHERE id = ?1",
+            rusqlite::params![id, library.id],
+        )
+        .unwrap();
+    let state = state_with_library(&db_dir, &root, Duration::from_millis(1));
+
+    let missing_flag = || -> i64 {
+        database
+            .0
+            .query_row("SELECT missing FROM assets WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    // 首次访问：缺席记账，尚未标（§八-7 两轮确认）
+    let _ = ipc::assets::fetch_asset_detail(&state, id).unwrap().unwrap();
+    assert_eq!(missing_flag(), 0, "首轮只记账");
+    // 第二次访问：确认 → 标 missing；详情 DTO 如实携带
+    let detail = ipc::assets::fetch_asset_detail(&state, id).unwrap().unwrap();
+    let json = serde_json::to_value(&detail).unwrap();
+    assert_eq!(json["missing"], 1);
+    assert_eq!(missing_flag(), 1, "两轮确认后标缺失");
+
+    // 文件回到在位：访问清缺席账但**不**清 missing（恢复走库扫描的哈希
+    // 校验路径，§八-1 同名不同内容保护）；库扫描确认后清除。
+    std::fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    std::fs::write(&gone, &content).unwrap();
+    let _ = ipc::assets::fetch_asset_detail(&state, id).unwrap().unwrap();
+    assert_eq!(missing_flag(), 1, "惰性检测不越权恢复（留给扫描校验）");
+    let report = scan::scan_library_once(
+        &database,
+        &db_dir,
+        &library,
+        &scan::ScanOptions {
+            cooldown: Duration::ZERO,
+            now: None,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(report.restored, 1, "库扫描恢复（同哈希）");
+    assert_eq!(missing_flag(), 0);
+}
+
+#[test]
+fn detail_access_skips_detection_for_offline_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = dir.path().join("db");
+    let root = dir.path().join("lib");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let database = common::open_db(&db_dir);
+    let library = database
+        .photos_library_register("离线库", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    let gone = root.join("vanish.jpg");
+    database
+        .0
+        .execute(
+            "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, source, created_at, \
+             origin, library_id) VALUES (?1, 'vanish.jpg', 4, '2026-01-01T00:00:00Z', 2, 'photo', \
+             'imported', '2026-01-01T00:00:00Z', 'imported', ?2)",
+            rusqlite::params![gone.to_string_lossy().to_string(), library.id],
+        )
+        .unwrap();
+    let id = database
+        .asset_id_by_path(&gone.to_string_lossy())
+        .unwrap()
+        .unwrap();
+    // 整库离线（外置卷拔出）：文件在盘性不可信 → 不标单文件缺失
+    database
+        .photos_library_set_status(&library.id, "offline")
+        .unwrap();
+    let state = state_with_library(&db_dir, &root, Duration::from_millis(1));
+    for _ in 0..3 {
+        let _ = ipc::assets::fetch_asset_detail(&state, id).unwrap().unwrap();
+    }
+    let missing_flag: i64 = database
+        .0
+        .query_row("SELECT missing FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(missing_flag, 0, "整库离线不判单文件缺失（§五 两级语义）");
 }

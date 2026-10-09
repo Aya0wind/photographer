@@ -3,6 +3,8 @@ import { ipcList } from "../read";
 import {
   type AlbumCreateResult,
   type AlbumDto,
+  type AlbumExportStartResult,
+  type AlbumExportTask,
   type AlbumOpResult,
   type AlbumSubgroupDto,
   type AssetDto,
@@ -89,17 +91,11 @@ export async function albumAddAssets(
 }
 
 
-/** 更改相册文件夹名（album_dir_rename，B1 追加包契约）：只改磁盘相册主目录名，
- *  显示名不动。重名/非法名等业务错误透传，调用方行内提示。 */
-export async function albumDirRename(id: number, dirName: string): Promise<AlbumOpResult> {
-  try {
-    await ipc<void>("album_dir_rename", { id, dirName });
-    return { ok: true };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
-    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) return { ok: false, error: null };
-    return { ok: false, error: message };
-  }
+/** 已退役（2026-10-09 单数据库多照片库 §一）：相册纯逻辑化后无物理目录可改，
+ *  album_dir_rename 命令已从后端移除。保留封装维持旧调用点编译，恒定返回
+ *  退役文案；M5 前端收尾时连同相册页入口一并移除。 */
+export async function albumDirRename(_id: number, _dirName: string): Promise<AlbumOpResult> {
+  return { ok: false, error: "相册已逻辑化，不再有物理目录（该功能已移除）" };
 }
 
 /**
@@ -180,5 +176,61 @@ export async function assetAlbums(assetId: number): Promise<AlbumDto[]> {
       : [];
   } catch {
     return [];
+  }
+}
+
+// --- 相册导出为文件夹（M6，Photo Hub → LR 互操作） ------------------------------------
+// 后端 P0 骨架已注册命令（album_export_run 返回未实现错误），M6 填实；
+// 前端线按本封装开发导出对话框（默认建议库外路径，记住上次位置）。
+
+/** 启动相册/子组导出为文件夹（album_export_run）：同卷硬链接/跨卷拷贝 + 全量
+ *  XMP 边车；进度走 albumExportProgress/albumExportFinished 事件。业务错误
+ *  （目标不可写等）透传原始 Err 文案；invoke 不可用 error=null。 */
+export async function albumExportRun(
+  albumId: number,
+  subgroup: string | null,
+  outputDir: string,
+): Promise<AlbumExportStartResult> {
+  try {
+    const task = await ipc<AlbumExportTask>("album_export_run", {
+      albumId,
+      subgroup,
+      outputDir,
+    });
+    if (
+      task === null || typeof task !== "object" ||
+      typeof task.id !== "number" || !Number.isFinite(task.id)
+    ) {
+      return { ok: false, error: null };
+    }
+    return { ok: true, task };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    if (!message || INVOKE_UNAVAILABLE_PATTERN.test(message)) {
+      return { ok: false, error: null };
+    }
+    return { ok: false, error: message };
+  }
+}
+
+/** 当前/最近一次导出任务状态（album_export_status；无任务为 null，失败静默 null） */
+export async function albumExportStatus(): Promise<AlbumExportTask | null> {
+  try {
+    const task = await ipc<AlbumExportTask | null>("album_export_status");
+    return task !== null && typeof task === "object" && typeof task.id === "number"
+      ? task
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 取消在跑的导出任务（album_export_cancel；软信号，当前文件写完即停）。
+ *  命令失败静默 */
+export async function albumExportCancel(): Promise<void> {
+  try {
+    await ipc<void>("album_export_cancel");
+  } catch {
+    // 静默
   }
 }

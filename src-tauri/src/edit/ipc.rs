@@ -105,7 +105,7 @@ pub fn fetch_export_run(
     value: &serde_json::Value,
     options: &ExportOptions,
 ) -> Result<ExportTaskDto, String> {
-    let db = crate::ipc::active_library_db(state)?;
+    let db = crate::ipc::app_database_db(state)?;
     export::reap_orphan_jobs(&db);
     let asset = db
         .asset_by_id(asset_id)
@@ -117,19 +117,19 @@ pub fn fetch_export_run(
         .export_job_create(asset_id, validated.mode.as_str())
         .map_err(|e| e.to_string())?;
 
-    // worker 自带库连接 + 事件总线（后台任务资源所有权规则：线程内获取释放）
-    let (db_dir, photo_root) = {
-        let library = state
-            .settings
-            .lock()
-            .expect("settings mutex poisoned")
-            .active_library()
-            .cloned()
-            .ok_or("尚未创建库")?;
-        (
-            std::path::PathBuf::from(&library.db_dir),
-            std::path::PathBuf::from(&library.photo_root),
-        )
+    // worker 自带库连接 + 事件总线（后台任务资源所有权规则：线程内获取释放）。
+    // album 模式落位锚点 = 源资产所属照片库 root（§一 静态归属；无归属的
+    // 历史行拒绝 album 模式）。
+    let db_dir = crate::ipc::app_database_dir(state);
+    let library_root = match asset.library_id.as_deref() {
+        Some(library_id) => {
+            let row = db
+                .photos_library_get(library_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("资产所属照片库不存在：{library_id}"))?;
+            std::path::PathBuf::from(row.root_path)
+        }
+        None => std::path::PathBuf::new(),
     };
     let bus = state.bus.clone();
     let request = ExportJobRequest {
@@ -138,7 +138,7 @@ pub fn fetch_export_run(
         asset,
         recipe,
         options: validated,
-        photo_root,
+        library_root,
     };
     state
         .supervisor
@@ -169,7 +169,7 @@ pub async fn edit_recipe_get(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
-        let db = crate::ipc::active_library_db(state)?;
+        let db = crate::ipc::app_database_db(state)?;
         fetch_edit_recipe(&db, id)
     })
     .await
@@ -185,7 +185,7 @@ pub async fn edit_recipe_save(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
-        let db = crate::ipc::active_library_db(state)?;
+        let db = crate::ipc::app_database_db(state)?;
         fetch_edit_recipe_save(&db, id, &recipe)
     })
     .await
@@ -200,7 +200,7 @@ pub async fn edit_recipe_delete(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
-        let db = crate::ipc::active_library_db(state)?;
+        let db = crate::ipc::app_database_db(state)?;
         fetch_edit_recipe_delete(&db, id)
     })
     .await

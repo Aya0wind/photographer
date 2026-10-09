@@ -35,36 +35,94 @@ export type DuplicatePolicy = "skip" | "rename" | "ask";
 /** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
 export type ImportMode = "copy" | "move" | "reference";
 
-/**
- * plan.dirTemplate 的固定占位值（dirTemplate 配置退役，2026-09-28 定案）：
- * 目录布局写死为时间/相册+平铺，不再可配置。Rust ImportPlan.dir_template 过渡期
- * 仍为必填（无 serde default），前端固定发送此占位；相册导入下后端 begin 阶段会把
- * dir_template 整体覆写为 `{相册创建YYYY}/{MM}/{dir_name}`，secondTarget 随之同公式。
- */
-export const FIXED_PLAN_DIR_TEMPLATE = "{YYYY}/{MM-DD}";
+// --- 单数据库多照片库（2026-10-09 定案，docs/plans/2026-10-09-...） ------------------
+// 应用级唯一数据库（SQLite+缩略图+向量+人脸，默认应用数据目录，设置「数据库
+// 位置」可改）；照片库 = 一个文件夹的登记项（photos_libraries 表，N 个，纯
+// 物理概念）；相册/子组是数据库全局逻辑概念，不分库、无物理足迹。旧
+// libraries 注册表 / activeLibrary / dbDir 模型整体退役（不做兼容不迁移）。
 
+/** 照片库在线状态：整库离线标记（reconcile 按照片库粒度判定；单文件缺失走 assets.missing） */
+export type PhotoLibraryStatus = "online" | "offline";
+
+/** 照片库登记项（photo_library_list 返回；photos_libraries 行投影） */
+export interface PhotoLibrary {
+  /** uuid（登记时生成） */
+  id: string;
+  name: string;
+  /** 库根目录绝对路径（登记不搬文件；整库重定位只改它，资产归属不变） */
+  rootPath: string;
+  /** 登记时间（ISO 8601） */
+  createdAt: string;
+  status: PhotoLibraryStatus;
+  /** 库内照片数缓存 */
+  assetCount: number;
+  /** 库内照片容量缓存（字节） */
+  sizeBytes: number;
+}
+
+/** photo_library_create 结果：ok=false 时 error 为后端 Err 文案；null=invoke 不可用。
+ *  reference=true 从已有文件夹建立（只登记不搬文件，触发递归扫描批量登记）；
+ *  false 新建照片库（登记空文件夹，copy/move 导入落盘目标 = 该库 root）。 */
+export type PhotoLibraryCreateResult =
+  | { ok: true; library: PhotoLibrary }
+  | { ok: false; error: string | null };
+
+/** photo_library_remove 结果：移除登记永不删照片文件（用户红线）；
+ *  deleteRecords=true 连库内资产记录一并删（问过用户后）。 */
+export interface PhotoLibraryRemoveResult {
+  /** 连带删除的资产记录数（deleteRecords=false 时为 0） */
+  recordsDeleted: number;
+}
+
+/** photo_library_relocate 结果（预检 apply=false / 应用 apply=true 同形）：
+ *  affected=旧根前缀重写数；unaffected=不在旧根下保持原样数；
+ *  rootExists=新根当前是否在盘（可先改后挂载，缺失走库 offline）。 */
+export interface PhotoLibraryRelocateResult {
+  affected: number;
+  unaffected: number;
+  rootExists: boolean;
+}
+
+/** 照片库扫描任务状态（photo_library_scan_status 返回）：从文件夹建立的
+ *  批量登记与手动放文件的增量扫描共用一条登记管道（单管道串行，防双写竞争）。 */
+export interface LibraryScanStatus {
+  libraryId: string;
+  /** idle=无任务（首启/空闲）；paused=让路暂停（导入在场）；failed=本轮失败可重扫 */
+  status: "idle" | "running" | "paused" | "done" | "failed";
+  /** 本轮发现待登记文件数（目录 mtime 剪枝后估算；进度分母） */
+  total: number;
+  /** 已登记数 */
+  registered: number;
+  /** 跳过数（同库哈希去重/硬链接 file-id 直跳/冷却窗未过/非图片扩展名等） */
+  skipped: number;
+  error: string | null;
+}
+
+/**
+ * 导入计划（2026-10-09 单库多照片库定案）：目标 = 照片库 id（替代旧
+ * targetRoot）。落盘布局固定为纯时间 `{库root}/{拍摄年}/{拍摄月}/{原文件名}`
+ * （EXIF 时间，缺失回退文件时间），dirTemplate/nameTemplate 配置退役；
+ * 重名走现有 rename 策略，边车与本体同名跟随；物理层无相册/子组维度
+ * （albumId/albumSubgroup 只建数据库引用，不影响落位）。
+ */
 export interface ImportPlan {
   sourceId: string;
-  targetRoot: string;
-  /** 过渡期兼容占位：恒为 FIXED_PLAN_DIR_TEMPLATE（相册导入下后端整体覆写，值不影响落位） */
-  dirTemplate: string;
-  nameTemplate: string;
+  /** 目标照片库 id（photo_library_list 返回的 PhotoLibrary.id） */
+  targetLibraryId: string;
   duplicatePolicy: DuplicatePolicy;
   skipImported: boolean;
   streams: number;
   /** 缺省 copy（Rust 侧默认）；move 时入库后删除源文件 */
   mode: ImportMode;
-  /** 双目的地（可选）：一次读取同时复制到第二位置；落位与主目的地相同
-   *  （第二根目录 + 同一时间/相册公式；dirTemplate 过渡期必填，恒为
-   *  FIXED_PLAN_DIR_TEMPLATE，后端 engine 覆写后两路一致）。
+  /** 双目的地（可选）：第二根目录 + 同一纯时间布局。
    *  后端约束：move + secondTarget 会被拒绝（前端互斥保证不发出）。 */
-  secondTarget?: { targetRoot: string; dirTemplate: string };
+  secondTarget?: { targetRoot: string };
   /** 本次导入的文件清单（rel_path 列表）——向导勾选结果，引擎只导入集合内的文件；
    *  省略 = 全部（历史计划兼容）。 */
   include?: string[];
-  /** 导入完成后把新入库照片加入该相册（向导「添加到相册」步骤；省略 = 不加入） */
+  /** 导入完成后把新入库照片加入该相册（向导「添加到相册」步骤；纯引用，省略 = 不加入） */
   albumId?: number;
-  /** 相册子分组名（B4 子分组模型；省略 = 相册根；后端按名幂等建层） */
+  /** 相册子分组名（B4 子分组模型；纯逻辑引用，省略 = 相册根；后端按名幂等建层） */
   albumSubgroup?: string;
 }
 
@@ -168,6 +226,33 @@ export type AppEvent =
   | { type: "tetheringSettingsChanged"; sessionId: string }
   | { type: "mapGeoProgress"; stage: string; done: number; total: number; message: string | null }
   | { type: "mapRegionsUpdated" }
+  /** photos_libraries 登记表变更（新建/移除登记/重定位/在线状态翻转）：
+   *  存储页与导入目标选择器重拉 photo_library_list */
+  | { type: "photoLibrariesChanged" }
+  /** 照片库扫描任务进度（批量登记/增量扫描共用；发布侧节流 ≥100ms） */
+  | { type: "libraryScanProgress"; libraryId: string; registered: number; total: number }
+  /** 照片库扫描收尾：registered=本轮登记数（含 missing 重绑）；skipped=
+   *  去重/冷却跳过数；crossLibraryDuplicates=§四 收尾总结「N 张与其他
+   *  照片库内容相同」（跨库照常登记不去重，计数是 registered 子集；
+   *  后端零值/未核对不携带 → undefined） */
+  | {
+      type: "libraryScanFinished";
+      libraryId: string;
+      registered: number;
+      skipped: number;
+      crossLibraryDuplicates?: number;
+    }
+  /** 相册导出为文件夹任务进度（M6；同卷硬链接/跨卷拷贝 + 全量 XMP 边车） */
+  | { type: "albumExportProgress"; taskId: number; done: number; total: number }
+  /** 相册导出收尾：ok=是否全部成功；exported=导出文件数；linked=其中硬链接数 */
+  | {
+      type: "albumExportFinished";
+      taskId: number;
+      ok: boolean;
+      exported: number;
+      linked: number;
+      error?: string | null;
+    }
   | { type: "appError"; level: string; message: string; recoverable: boolean };
 
 // --- M3 画廊/搜索/查看器契约 ------------------------------------------------------
@@ -208,6 +293,12 @@ export interface AssetDto {
   rejected?: boolean;
   /** 是否在回收站（trash_list 返回 true；常规查询不携带/为 false） */
   inTrash?: boolean;
+  /** 所属照片库 id（assets.library_id；静态归属属性——「来自哪个库」可筛选
+   *  不可操作。过渡期旧后端未返回时缺省） */
+  libraryId?: string | null;
+  /** 单文件缺失标记（画廊缺失角标可筛选；整库离线走 PhotoLibrary.status=
+   *  offline。M2c 起后端已实现） */
+  missing?: boolean;
 }
 
 /** 相机型号计数（cameras_list 返回，搜索页相机勾选数据源；按 count 降序） */
@@ -282,6 +373,28 @@ export interface AssetFilters {
   subgroup?: string;
   /** true = 只看相册根散照片（album_item.subgroup 为 NULL；仅 album_assets_page 消费） */
   subgroupIsNull?: boolean;
+  /** 所属照片库多选（OR）——画廊默认全局跨库混排，按需过滤；省略 = 全部。
+   *  M2c 起后端已实现（library_id IN）。 */
+  libraryIds?: string[];
+  /** 缺失三态过滤（true=仅缺失 / false=仅在线；省略 = 不过滤。缺失角标筛选）。
+   *  M2c 起后端已实现（assets.missing）。 */
+  missing?: boolean;
+}
+
+/** 彻底删除回收站项的结果总结（trash_purge 返回；2026-10-09 §五 定案）：
+ *  在线库真删本体；离线库回收站项原样保留（offlineKept/offlineLibraries
+ *  供「N 项因照片库离线保留」总结提示）；缺失项仅删记录。 */
+export interface TrashPurgeResult {
+  /** 删除的资产记录数（离线保留项不计） */
+  deletedRecords: number;
+  /** 物理删除的本体文件数（仅在线库 + deleteFiles=true + 非外部引用） */
+  deletedFiles: number;
+  /** 缺失项仅删记录数（本体已不在盘） */
+  missingRecordsOnly: number;
+  /** 离线库原样保留项数（不删文件不删记录） */
+  offlineKept: number;
+  /** 涉及的离线库名称（去重；总结提示用） */
+  offlineLibraries: string[];
 }
 
 /** 日期目录（asset_group_dates 返回；未知日期为 null 或 "unknown"，在末尾）。 */
@@ -559,23 +672,6 @@ export interface IndexStatus {
 /** 重建索引的通道（index_rebuild；语义通道在重建命令里叫 semantic，与 IndexKind 的 ai 区分） */
 export type RebuildKind = "image" | "thumb" | "exif" | "semantic" | "face";
 
-/** 删除库（library_delete）：库数据目录必删；photoRoot 给定时连照片目录
- *  一起删（后端三道闸：library.db 存在性/非活跃库/照片目录非盘根）。
- *  不 catch：失败文案透传给删除对话框。 */
-export interface LibraryDeleteResult {
-  dbDeleted: boolean;
-  photoRootDeleted: boolean;
-}
-
-/** 库照片存储目录整体重定位（library_relocate）：改配置 + 重写库内路径
- *  前缀（前提：用户已在文件管理器把整树搬到新根）。apply=false 只预检。
- *  不 catch：失败文案（相对路径拒绝/库不存在）透传给调用方。 */
-export interface LibraryRelocateResult {
-  affected: number;
-  unaffected: number;
-  rootExists: boolean;
-}
-
 /** 侧栏导航计数（sidebar_counts：一次性纯 COUNT；后端在途契约——
  *  命令未注册/失败/形状异常静默 null，侧栏不显示徽标） */
 export interface SidebarCounts {
@@ -599,7 +695,8 @@ export interface SidebarCounts {
 export interface AlbumDto {
   id: number;
   name: string;
-  /** 相册物理主目录名（目录化，B1 追加包契约）：显示名改名不动它；缺省回退 name */
+  /** 历史残留列（相册物理目录化已随 2026-10-09 纯时间布局退役；仅为显示名
+   *  净化唯一性载体保留，不再映射任何磁盘目录）：缺省回退 name */
   dirName?: string | null;
   /** 封面资产 id（album_cover_set 指定；null=未指定，前端回退相册第一张） */
   coverAssetId: number | null;
@@ -748,6 +845,40 @@ export type ExportRunResult =
   | { ok: true; task: ExportTask }
   | { ok: false; error: string | null };
 
+// --- 相册导出为文件夹（M6，Photo Hub → LR 互操作） ------------------------------------
+// 契约：同卷硬链接（秒级、零拷贝）/跨卷拷贝 + 写全量 XMP 边车 → LR 引用导入；
+// 导出物为快照，双向修改互不影响（硬链接 inode 语义天然保证）。目标选在任一
+// 照片库内不禁止，后端提示「该文件夹会被扫描忽略，建议选择照片库外」。
+// 导出对话框默认建议库外路径（记住上次位置）。
+
+/** 相册/子组导出为文件夹的后台任务（album_export_run 返回 / album_export_status
+ *  查询；进度走 albumExportProgress/albumExportFinished 事件） */
+export interface AlbumExportTask {
+  id: number;
+  albumId: number;
+  /** 子分组名（null=整个相册） */
+  subgroup: string | null;
+  outputDir: string;
+  status: "queued" | "running" | "done" | "cancelled" | "error";
+  /** 相册内待导出资产数 */
+  total: number;
+  /** 已导出数（源缺失跳过不计入——skipped = total - done） */
+  done: number;
+  /** 其中硬链接落盘数（其余为拷贝） */
+  linked: number;
+  error: string | null;
+  /** 目标校验提示：目标落在任一照片库内时不禁止、携带后端提示文案
+   *  （「该文件夹会被扫描忽略…建议选择照片库外」）。M6b 起后端返回；
+   *  对话框自身的前端库内判定提示照旧，两路同文案不冲突。 */
+  warning?: string | null;
+}
+
+/** album_export_run 结果：ok=false 时 error 为后端 Err 文案（如目标不可写）；
+ *  null=invoke 不可用 */
+export type AlbumExportStartResult =
+  | { ok: true; task: AlbumExportTask }
+  | { ok: false; error: string | null };
+
 // --- 阶段 E-1：WPD 零驱动联拍（相机能力探测 / 触发拍摄） ----------------------------
 // 契约（与后端 lane 共同遵守）：pnpId = WPD PnP 设备 id，与设备列表 device.id 同源。
 // 注意：清点命令叫 tethering_camera_list——gallery 的 camera_list（库内相机型号
@@ -814,6 +945,8 @@ export interface TetherPhoto {
 /** 联拍会话（tethering_session/start 返回；多相机可并行多会话，同相机互斥）。 */
 export interface TetherSessionDto {
   id: string;
+  /** 落库归属照片库 id（photos_libraries.id；M2a 起联拍落库 = 照片库基准，
+   *  会话锚定首库 root，落盘同纯时间布局 {库root}/{拍摄年}/{拍摄月}/） */
   libraryId: string;
   albumId: number;
   albumName: string;

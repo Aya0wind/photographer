@@ -456,7 +456,7 @@ describe("查看器：左右切换与关闭", () => {
     expect(screen.getByTestId("viewer-titlebar")).toHaveClass("absolute");
     expect(screen.getByTestId("viewer-filmstrip")).toHaveClass("absolute");
   });
-  it("顶部标题和功能按钮默认收回，靠近顶部展开，移开后收回", async () => {
+  it("顶部标题和功能按钮默认收回，靠近顶部展开，移开后宽限 3s 自动收回", async () => {
     convertMock.mockImplementation((path: string) => `asset://${path}`);
     renderViewer();
     const viewer = await screen.findByTestId("viewer");
@@ -466,16 +466,30 @@ describe("查看器：左右切换与关闭", () => {
     expect(title).toHaveAttribute("data-visible", "false");
     expect(controls).toHaveAttribute("inert");
     expect(title).toHaveClass("absolute");
-    fireEvent.mouseEnter(screen.getByTestId("viewer-top-edge"));
-    expect(title).toHaveAttribute("data-visible", "true");
-    fireEvent.mouseMove(viewer, { clientY: 20 });
-    expect(title).toHaveAttribute("data-visible", "true");
-    expect(controls).not.toHaveAttribute("inert");
-    fireEvent(viewer, new MouseEvent("pointerout", { bubbles: true, clientX: 300, clientY: 0, relatedTarget: null }));
-    expect(title).toHaveAttribute("data-visible", "true");
-    fireEvent.mouseMove(viewer, { clientY: 200 });
-    expect(title).toHaveAttribute("data-visible", "false");
-    expect(controls).toHaveAttribute("inert");
+    // 整个展开→移开流程都在 fake 时钟下：pointerout 就会把 topHovered 置
+    // false 并排上 3s 自动收回定时器，须保证它排在 fake 时钟（否则真实
+    // 时钟上的定时器 advance 不到）
+    vi.useFakeTimers();
+    try {
+      fireEvent.mouseEnter(screen.getByTestId("viewer-top-edge"));
+      expect(title).toHaveAttribute("data-visible", "true");
+      fireEvent.mouseMove(viewer, { clientY: 20 });
+      expect(title).toHaveAttribute("data-visible", "true");
+      expect(controls).not.toHaveAttribute("inert");
+      fireEvent(viewer, new MouseEvent("pointerout", { bubbles: true, clientX: 300, clientY: 0, relatedTarget: null }));
+      expect(title).toHaveAttribute("data-visible", "true");
+      // 移开 = 离开顶部悬停区：不立即收回（3s 宽限给鼠标移向按钮的时间），
+      // 宽限期到自动收回（useEffect 3000ms 定时器）
+      fireEvent.mouseMove(viewer, { clientY: 200 });
+      expect(title).toHaveAttribute("data-visible", "true");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3100);
+      });
+      expect(title).toHaveAttribute("data-visible", "false");
+      expect(controls).toHaveAttribute("inert");
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("图片缩放后点击左右箭头仍能切图，不被拖拽捕获拦截", async () => {
     convertMock.mockImplementation((p: string) => `asset://${p}`);
@@ -954,7 +968,7 @@ describe("查看器：原子切图与胶片条", () => {
 // --- EXIF 面板（M4 二轮：LR 式分组 文件/图像/拍摄/位置） ------------------------------
 
 describe("查看器：EXIF 面板", () => {
-  it("展示核心元数据与库内重复；EXIF 扩展无值行整行隐藏；可收起/展开", async () => {
+  it("展示核心元数据与重复副本；EXIF 扩展无值行整行隐藏；可收起/展开", async () => {
     const user = userEvent.setup();
     renderViewer();
 
@@ -966,7 +980,8 @@ describe("查看器：EXIF 面板", () => {
     expect(rows).toHaveTextContent("5.0 MB");
     expect(rows).not.toHaveTextContent(GROUP_ASSETS[0].path);
     expect(rows).toHaveTextContent("2026-09-19 08:00:00");
-    const dup = within(rows).getByText("库内重复");
+    // M5 文案定案：「库内重复」→「重复副本」（跨库同内容副本）
+    const dup = within(rows).getByText("重复副本");
     expect(dup.nextSibling).toHaveTextContent("2 张");
 
     // 无 EXIF 扩展数据：位置组不渲染；图像组保留 AI 选片行（未分析态，C 阶段）
@@ -1471,6 +1486,18 @@ describe("查看器：AI 选片行（C）", () => {
     expect(eyes).toHaveTextContent("睁眼");
     expect(eyes).not.toHaveTextContent("复核");
     expect(screen.getByTestId("selection-evidence")).not.toHaveTextContent("尚未");
+  });
+
+  it("未定位眼睛与闭眼分开显示，不显示通用复核说明", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, aiAnalysis: {
+      eyes: {value:"no_eye",score:null,details:{source:"thumbnail",width:1024,height:683,
+        calibrated:false,reason:"eye_not_detected",regions:[]}},
+    }});
+    renderViewer();
+    const eyes=await screen.findByTestId("viewer-ai-eyes");
+    expect(eyes).toHaveTextContent("未识别到眼睛");
+    expect(eyes).not.toHaveTextContent("复核");
+    expect(eyes).not.toHaveTextContent("闭眼");
   });
 
   it("可能闭眼：maybe 文案", async () => {

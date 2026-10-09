@@ -299,38 +299,73 @@ pub fn eye_state(
     ("maybe", Some("ambiguous"))
 }
 
+/// Only this native-pixel gate decides whether an eye was located. Input quality
+/// never adds an abstention state after a detected eye has finite landmarks.
+pub const MIN_EYE_DETECTION_PIXELS: f32 = 4.0;
+pub fn detected_eye_bounds(img: &image::RgbImage, points: &[[f32; 2]]) -> Option<[f64; 4]> {
+    if points.len() != 6 || points.iter().flatten().any(|p| !p.is_finite()) {
+        return None;
+    }
+    if points.iter().any(|p| {
+        p[0] < 0.0 || p[1] < 0.0 || p[0] >= img.width() as f32 || p[1] >= img.height() as f32
+    }) {
+        return None;
+    }
+    let width =
+        ((points[3][0] - points[0][0]).powi(2) + (points[3][1] - points[0][1]).powi(2)).sqrt();
+    if width < MIN_EYE_DETECTION_PIXELS {
+        return None;
+    }
+    let x = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+    let y = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+    let right = points
+        .iter()
+        .map(|p| p[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let bottom = points
+        .iter()
+        .map(|p| p[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    Some([
+        x as f64 / img.width() as f64,
+        y as f64 / img.height() as f64,
+        (right - x) as f64 / img.width() as f64,
+        (bottom - y).max(1.0) as f64 / img.height() as f64,
+    ])
+}
+
+pub fn binary_eye_state(ear: f32, closed_threshold: f32) -> &'static str {
+    if ear < closed_threshold {
+        "closed"
+    } else {
+        "open"
+    }
+}
+
+/// Missing detections are separate from the binary states of detected eyes.
 pub fn photo_eyes(regions: &[Region], include_single: bool) -> &'static str {
     if regions.is_empty() {
         return "no_face";
     }
-    let mut any_unknown = false;
-    let mut any_maybe = false;
+    let mut detected = false;
     let mut single = false;
-    let mut has_open_face = false;
     let people: std::collections::BTreeSet<_> = regions.iter().map(|r| r.person).collect();
     for person in people {
         let eyes: Vec<_> = regions
             .iter()
-            .filter(|r| r.person == person && r.kind == "eye")
+            .filter(|r| {
+                r.person == person && r.kind == "eye" && (r.state == "open" || r.state == "closed")
+            })
             .collect();
+        detected |= !eyes.is_empty();
         let closed = eyes.iter().filter(|r| r.state == "closed").count();
-        has_open_face |= eyes.len() == 2 && eyes.iter().all(|r| r.state == "open");
-        // No formal production switch until labeled photography evaluation.
         if closed == 2 || (include_single && closed > 0) {
-            any_maybe = true;
+            return "closed";
         }
-        single |= closed == 1;
-        any_maybe |= eyes.iter().any(|r| r.state == "maybe");
-        any_unknown |= eyes.iter().any(|r| r.state == "unknown") || eyes.len() != 2;
+        single |= closed > 0;
     }
-    if any_maybe {
-        "maybe"
-    } else if any_unknown {
-        if has_open_face {
-            "partial_open"
-        } else {
-            "unknown"
-        }
+    if !detected {
+        "no_eye"
     } else if single {
         "single_closed"
     } else {

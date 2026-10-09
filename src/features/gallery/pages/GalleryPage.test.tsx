@@ -398,7 +398,8 @@ describe("画廊：空态与降级", () => {
     renderGallery();
 
     const empty = await screen.findByTestId("gallery-empty");
-    expect(empty).toHaveTextContent("库里还没有照片");
+    // M5 文案定案：「库」→「照片库」
+    expect(empty).toHaveTextContent("照片库还没有照片");
     await user.click(screen.getByTestId("gallery-empty-import"));
     expect(await screen.findByTestId("import-probe")).toBeInTheDocument();
   });

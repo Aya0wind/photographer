@@ -124,66 +124,33 @@ export default function MapPage() {
     setFly({ lat: crumb.lat, lon: crumb.lon, zoom: zoomForLevel(next), nonce: Date.now() });
   }, []);
 
-  if (!status) {
-    return (
-      <div className="h-full" data-testid="map-page">
-        <div className="flex h-full items-center justify-center text-xs text-text-muted" data-testid="map-loading">
-          {t("common.loading")}
-        </div>
+  const preparing = !status || !status.installed || status.phase === "loading";
+  const preparationPct = status && status.total > 0
+    ? Math.min(100, Math.round(status.done / status.total * 100)) : 0;
+  const preparation = !status ? (
+    <div data-testid="map-loading">{t("common.loading")}</div>
+  ) : preparing ? (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2" data-testid="map-preparing">
+        <span className="h-3 w-3 animate-spin rounded-full border-2 border-edge border-t-accent" />
+        {t("map.loading")}
       </div>
-    );
-  }
-
-  if (!status.installed || status.phase === "loading") {
-    // 未安装 → 挂载即自动解压安装（内置包，无用户动作）；loading → 建树。
-    // 回填阶段的进度事件会带 done/total，此时已进地图分支（顶部进度条）。
-    const pct = status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
-    return (
-      <div className="h-full" data-testid="map-page">
-        <div className="flex h-full flex-col items-center justify-center gap-3">
-          <div className="animate-pulse text-sm font-semibold" data-testid="map-preparing">
-            {t("map.loading")}
-          </div>
-          {status.total > 0 && (
-            <>
-              <div className="h-1.5 w-64 overflow-hidden rounded-full bg-surface">
-                <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${pct}%` }} />
-              </div>
-              <div className="text-[11px] text-text-muted">{pct}%</div>
-            </>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  if (status.phase === "failed") {
-    return (
-      <div className="h-full" data-testid="map-page">
-        <div className="flex h-full flex-col items-center justify-center gap-3">
-          <div className="text-sm text-red-400" data-testid="map-failed">
-            {t("map.failed")}
-          </div>
-          {status.message && <div className="max-w-md text-center text-[11px] text-text-muted">{status.message}</div>}
-          <button
-            type="button"
-            onClick={() => {
-              installRequestedRef.current = false;
-              install();
-            }}
-            className="rounded-md border border-edge px-4 py-1.5 text-xs text-text-muted transition-colors hover:border-accent hover:text-accent"
-            data-testid="map-retry"
-          >
-            {t("map.retry")}
-          </button>
-        </div>
-      </div>
-    );
-  }
+      {status.total > 0 && <div className="h-1 w-48 overflow-hidden rounded-full bg-surface">
+        <div className="h-full bg-accent transition-[width] duration-300" style={{width:`${preparationPct}%`}} />
+      </div>}
+    </div>
+  ) : status.phase === "failed" ? (
+    <div className="space-y-2">
+      <div data-testid="map-failed">{t("map.failed")}</div>
+      {status.message && <p className="max-w-md">{status.message}</p>}
+      <button type="button" className="text-accent hover:underline" data-testid="map-retry"
+        onClick={() => {installRequestedRef.current=false; install();}}>{t("map.retry")}</button>
+    </div>
+  ) : null;
 
   // 回填中/就绪：地图视图
-  const backfilling = status.phase === "backfilling";
-  const backfillPct = backfilling && status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
+  const backfilling = status?.phase === "backfilling";
+  const backfillPct = backfilling && status && status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
 
   return (
     <div className="flex h-full flex-col" data-testid="map-page">
@@ -191,7 +158,7 @@ export default function MapPage() {
         <h1 className="text-sm font-semibold text-text-primary">{t("map.title")}</h1>
         {/* 面包屑：全球 > 国家 > 省 …（点击回退） */}
         <nav className="flex min-w-0 items-center gap-1 text-[11px] text-text-muted" data-testid="map-breadcrumb">
-          <button type="button" className="rounded px-1 hover:text-accent" onClick={() => { setCrumbs([]); setLevel(0); setFly({ lat: 104, lon: 35, zoom: 1.5, nonce: Date.now() }); }}>
+          <button type="button" className="rounded px-1 hover:text-accent" onClick={() => { setCrumbs([]); setLevel(0); setFly({ lat: 35, lon: 104, zoom: 1.5, nonce: Date.now() }); }}>
             {t("map.level.world")}
           </button>
           {crumbs.map((crumb, i) => (
@@ -240,7 +207,7 @@ export default function MapPage() {
       <div className="relative min-h-0 flex-1 overflow-hidden px-4 pb-4 pt-2">
         <div className="h-full w-full overflow-hidden rounded-xl border border-edge" style={{ background: "#0E0F12" }}>
           <MapCanvas
-            clusters={clusters}
+            clusters={preparation ? [] : clusters}
             level={level}
             onLevelChange={onLevelChange}
             onDrill={onDrill}
@@ -248,7 +215,8 @@ export default function MapPage() {
             animationsOn={motionOn}
           />
         </div>
-        {!loading && clusters.length === 0 && (
+        {preparation && <div className="absolute left-7 top-5 z-10 rounded-lg border border-edge bg-panel/95 p-3 text-xs text-text-muted">{preparation}</div>}
+        {!preparation && !loading && clusters.length === 0 && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="rounded-lg border border-edge bg-panel/90 px-6 py-4 text-center text-xs text-text-muted backdrop-blur" data-testid="map-empty">
               {t("map.empty")}

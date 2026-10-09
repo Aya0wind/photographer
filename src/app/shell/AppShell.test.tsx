@@ -15,7 +15,6 @@ function resetSettingsForShell(): void {
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
-    libraryChosen: false,
   });
 }
 

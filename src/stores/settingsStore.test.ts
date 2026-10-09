@@ -2,49 +2,51 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/ipc", () => ({ ipc: vi.fn(async () => undefined) }));
 import { ipc } from "@/ipc";
-import { clone, DEFAULT_SETTINGS, normalizeLibraryQuality, useSettingsStore, type Library } from "./settingsStore";
+import { clone, DEFAULT_SETTINGS, useSettingsStore } from "./settingsStore";
 
-const main: Library = { id: "main", name: "主库", dbDir: "I:/main", photoRoot: "Y:/main", streams: 4, configured: true, aiQualityTier: "normal" };
-const fresh: Library = { ...main, id: "new", name: "新库", aiQualityTier: "fast" };
+// 2026-10-09 单库多照片库定案：设置只剩应用级——库注册表/activeLibraryId/
+// 库级 AI 档位投影（normalizeLibraryQuality）退役；AI 档位为全局设置。
 
-describe("库级 AI 方案", () => {
+describe("应用级设置", () => {
   beforeEach(() => {
-    const settings = clone(DEFAULT_SETTINGS);
-    settings.libraries = [main, fresh];
-    settings.activeLibraryId = main.id;
-    useSettingsStore.setState({ settings, loaded: true });
+    useSettingsStore.setState({ settings: clone(DEFAULT_SETTINGS), loaded: true });
     vi.mocked(ipc).mockClear();
   });
 
-  it("切库恢复各自档位，修改与保存只影响当前库", async () => {
-    const store = useSettingsStore.getState();
-    await store.save({ ...store.settings, activeLibraryId: "new" });
-    expect(useSettingsStore.getState().settings.ai.qualityTier).toBe("fast");
+  it("默认设置为应用数据库目录缺省（跟随应用数据目录）", () => {
+    expect(DEFAULT_SETTINGS.databaseDir).toBeNull();
+    expect("libraries" in DEFAULT_SETTINGS).toBe(false);
+    expect("activeLibraryId" in DEFAULT_SETTINGS).toBe(false);
+  });
+
+  it("update 局部合并 AI 档位并 save 落盘（全局单值，不再按库投影）", async () => {
     useSettingsStore.getState().update({ ai: { qualityTier: "accurate" } });
-    await useSettingsStore.getState().save(useSettingsStore.getState().settings);
-    const edited = useSettingsStore.getState().settings;
-    expect(edited.libraries.map((lib) => lib.aiQualityTier)).toEqual(["normal", "accurate"]);
-    await useSettingsStore.getState().save({ ...edited, activeLibraryId: "main" });
-    expect(useSettingsStore.getState().settings.ai.qualityTier).toBe("normal");
+    const settings = useSettingsStore.getState().settings;
+    expect(settings.ai.qualityTier).toBe("accurate");
+    await useSettingsStore.getState().save(settings);
     const calls = vi.mocked(ipc).mock.calls;
-    expect(calls[calls.length - 1]?.[1]).toMatchObject({ settings: { ai: { qualityTier: "normal" } } });
+    expect(calls[calls.length - 1]?.[1]).toMatchObject({ settings: { ai: { qualityTier: "accurate" } } });
   });
 
-  it("建新库选择快速不会把旧库的普通档改掉", () => {
-    const previous = useSettingsStore.getState().settings;
-    const result = normalizeLibraryQuality({ ...previous, activeLibraryId: "new", ai: { ...previous.ai, qualityTier: "fast" } }, previous);
-    expect(result.libraries[0].aiQualityTier).toBe("normal");
-    expect(result.ai.qualityTier).toBe("fast");
+  it("load 兜底合并远端缺省字段（后端未实装 databaseDir 时补 null）", async () => {
+    vi.mocked(ipc).mockResolvedValueOnce({
+      schemaVersion: 1,
+      onboardingCompleted: true,
+      import: DEFAULT_SETTINGS.import,
+    });
+    await useSettingsStore.getState().load();
+    const settings = useSettingsStore.getState().settings;
+    expect(settings.databaseDir).toBeNull();
+    expect(settings.onboardingCompleted).toBe(true);
+    expect(settings.gallery.mergeRawJpg).toBe(true);
   });
 
-  it("旧全局档位迁移后固定到库，不再随其他库变化", () => {
-    const legacy = clone(DEFAULT_SETTINGS);
-    legacy.libraries = [{ ...main, aiQualityTier: undefined }];
-    legacy.activeLibraryId = main.id;
-    legacy.ai.qualityTier = "accurate";
-    const migrated = normalizeLibraryQuality(legacy);
-    expect(migrated.libraries[0].aiQualityTier).toBe("accurate");
-    const next = normalizeLibraryQuality({ ...migrated, libraries: [...migrated.libraries, fresh], activeLibraryId: fresh.id }, migrated);
-    expect(next.libraries.map((lib) => lib.aiQualityTier)).toEqual(["accurate", "fast"]);
+  it("save 失败回滚到修改前快照", async () => {
+    const before = useSettingsStore.getState().settings;
+    vi.mocked(ipc).mockRejectedValueOnce(new Error("boom"));
+    await expect(
+      useSettingsStore.getState().save({ ...before, databaseDir: "D:\\SmartPhotoDB" }),
+    ).rejects.toThrow("boom");
+    expect(useSettingsStore.getState().settings).toBe(before);
   });
 });
