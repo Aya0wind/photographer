@@ -26,31 +26,7 @@ pub fn fetch_people_assets(
         .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|r| super::assets::AssetDto {
-            id: r.id,
-            path: r.path,
-            name: r.filename,
-            kind: r.kind,
-            captured_at: r.captured_at,
-            camera: r.camera,
-            size_bytes: r.size,
-            width: r.width,
-            height: r.height,
-            iso: r.iso,
-            f_number: r.f_number,
-            exposure_time: r.exposure_time,
-            focal_length: r.focal_length,
-            lens: r.lens,
-            pair_id: r.pair_id,
-            thumb_state: r.thumb_state,
-            burst_id: r.burst_id,
-            burst_count: None,
-            flagged: r.flagged,
-            rating: r.rating,
-            color_label: r.color_label,
-            rejected: r.rejected,
-            missing: r.missing,
-        })
+        .map(super::assets::page_row_to_dto)
         .collect())
 }
 

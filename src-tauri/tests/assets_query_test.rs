@@ -557,8 +557,10 @@ fn dtos_serialize_camel_case() {
         color_label: None,
         rejected: false,
         missing: false,
+        library_id: Some("photo-library".into()),
     };
     let json = serde_json::to_value(&dto).unwrap();
+    assert_eq!(json["libraryId"], "photo-library");
     assert_eq!(json["capturedAt"], "2026-01-01T00:00:00.000Z");
     assert_eq!(json["sizeBytes"], 123);
     assert_eq!(json["kind"], "video");
@@ -1234,4 +1236,19 @@ fn detail_access_skips_detection_for_offline_library() {
         })
         .unwrap();
     assert_eq!(missing_flag, 0, "整库离线不判单文件缺失（§五 两级语义）");
+}
+
+#[test]
+fn editor_ownership_is_preserved_by_gallery_and_direct_asset_queries() {
+    let dir=tempfile::tempdir().unwrap();
+    let database=common::open_db(dir.path());
+    let id=ins(&database,"editor.jpg",None,AssetKind::Photo,None,10,1);
+    database.0.execute("UPDATE assets SET library_id='photo-library' WHERE id=?1",[id]).unwrap();
+    let state=query_state(dir.path());
+    let page=database.assets_page(0,10,&AssetFilters::default()).unwrap();
+    assert_eq!(page[0].library_id.as_deref(),Some("photo-library"));
+    let dto=ipc::assets::page_row_to_dto(page[0].clone());
+    assert_eq!(serde_json::to_value(dto).unwrap()["libraryId"],"photo-library");
+    let by_id=ipc::assets::fetch_assets_by_ids(&state,&[id]).unwrap();
+    assert_eq!(by_id[0].library_id.as_deref(),Some("photo-library"));
 }

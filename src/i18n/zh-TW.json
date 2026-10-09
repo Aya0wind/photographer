@@ -1486,5 +1486,7 @@
   "advancedEditor.ranges.greens": "綠色",
   "advancedEditor.ranges.cyans": "青色",
   "advancedEditor.ranges.blues": "藍色",
-  "advancedEditor.ranges.magentas": "洋紅"
+  "advancedEditor.ranges.magentas": "洋紅",
+  "advancedEditor.preparingOriginal": "正在準備原片，可繼續編輯",
+  "advancedEditor.originalFailed": "原片準備失敗，目前仍可使用快取預覽"
 }

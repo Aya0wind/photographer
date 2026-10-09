@@ -503,6 +503,7 @@ pub struct AssetPageRow {
     pub rejected: bool,
     /// 单文件缺失标记（§五 M2c；画廊缺失角标数据源）。
     pub missing: bool,
+    pub library_id: Option<String>,
 }
 
 /// 连拍扫描行（分组引擎输入：id/phash/captured_at/kind/pair）。
@@ -583,12 +584,12 @@ pub type AiAnalysisRow = (String, Option<String>, Option<f64>, String);
 /// 分页行投影列（[`map_asset_page`] 消费顺序；各查询共用，防列序漂移）。
 const ASSET_PAGE_COLS: &str = "id, path, filename, size, kind, captured_at, camera, \
      width, height, iso, f_number, exposure_time, focal_length, lens, pair_asset_id, \
-     thumb_state, burst_id, flagged, rating, color_label, rejected, missing";
+     thumb_state, burst_id, flagged, rating, color_label, rejected, missing, library_id";
 /// 同 [`ASSET_PAGE_COLS`] 的 `a.` 别名前缀形态（内层子查询用）。
 const ASSET_PAGE_COLS_A: &str = "a.id, a.path, a.filename, a.size, a.kind, a.captured_at, \
      a.camera, a.width, a.height, a.iso, a.f_number, a.exposure_time, a.focal_length, a.lens, \
      a.pair_asset_id, a.thumb_state, a.burst_id, a.flagged, a.rating, a.color_label, \
-     a.rejected, a.missing";
+     a.rejected, a.missing, a.library_id";
 
 // ---------------------------------------------------------------------------
 // 内部工具
@@ -1265,6 +1266,7 @@ fn map_asset_page(row: &Row<'_>) -> Result<AssetPageRow> {
         color_label: row.get(19)?,
         rejected: row.get::<_, i64>(20)? != 0,
         missing: row.get::<_, Option<i64>>(21)?.unwrap_or(0) != 0,
+        library_id: row.get(22)?,
     })
 }
 

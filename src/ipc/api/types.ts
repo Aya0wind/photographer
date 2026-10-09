@@ -278,6 +278,10 @@ export type AppEvent =
       skipped: number;
       crossLibraryDuplicates?: number;
     }
+  /** 库扫描 presence 精准事件（changed-media）：assetIds 内的资产本轮判回
+   *  在线（missing 重绑/恢复/重算落定、缺席账结清或整库回线）——画廊瓦片
+   *  级刷新缺失角标（缩略图管线的 missing 终态随之失效重查），不全量重拉 */
+  | { type: "assetsPresenceChanged"; libraryId: string; assetIds: number[] }
   /** 相册导出为文件夹任务进度（M6；同卷硬链接/跨卷拷贝 + 全量 XMP 边车） */
   | { type: "albumExportProgress"; taskId: number; done: number; total: number }
   /** 相册导出收尾：ok=是否全部成功；exported=导出文件数；linked=其中硬链接数 */

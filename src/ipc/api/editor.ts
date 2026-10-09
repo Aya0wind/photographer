@@ -81,6 +81,7 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
 }
 
 export interface EditorPreviewSession {
+  nativeReady?: boolean;
   histogram: number[][];
   sensorRaw: boolean;
   bitDepth: string;
@@ -93,6 +94,10 @@ export interface EditorPreviewSession {
 
 export async function editPreviewOpen(assetId: number, libraryId: string): Promise<EditorPreviewSession> {
   return ipc<EditorPreviewSession>("edit_preview_open", { assetId: String(assetId), libraryId });
+}
+
+export function editPreviewPrepare(sessionId:string):Promise<EditorPreviewSession> {
+  return ipc<EditorPreviewSession>("edit_preview_prepare",{sessionId});
 }
 
 /** 返回二进制 JPEG；调用方拥有并负责释放 object URL。 */

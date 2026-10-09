@@ -357,6 +357,14 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         cross_library_duplicates: Option<u64>,
     },
+    /// 库扫描 presence 精准事件（AfterFrame changed-media 借鉴）：本轮判回
+    /// 在线的资产集合——missing 重绑/恢复/重算落定、缺席账结清（文件回位）
+    /// 与整库 offline→online 翻转。前端画廊按瓦片精准刷新缺失角标（缩略图
+    /// 管线的 missing 终态随之失效重查），不做全量重拉。
+    AssetsPresenceChanged {
+        library_id: String,
+        asset_ids: Vec<i64>,
+    },
 
     // 相册导出为文件夹（M6，Photo Hub → LR 互操作；命令骨架见 ipc/album_export.rs）
     /// 导出任务进度：done=已导出资产数，total=相册内待导出数。
@@ -587,5 +595,17 @@ mod tests {
             serde_json::to_value(FileState::Verified).unwrap(),
             "verified"
         );
+    }
+
+    #[test]
+    fn assets_presence_changed_serializes_camel_case() {
+        let ev = AppEvent::AssetsPresenceChanged {
+            library_id: "lib-1".into(),
+            asset_ids: vec![7, 12],
+        };
+        let json = serde_json::to_value(&ev).expect("serialize");
+        assert_eq!(json["type"], "assetsPresenceChanged");
+        assert_eq!(json["libraryId"], "lib-1");
+        assert_eq!(json["assetIds"], serde_json::json!([7, 12]));
     }
 }

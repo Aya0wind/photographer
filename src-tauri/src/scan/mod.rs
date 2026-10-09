@@ -173,6 +173,8 @@ pub struct BatchRun {
 struct AssetBrief {
     id: i64,
     size: u64,
+    /// 登记时的源 mtime（RFC3339；文件级 (size, mtime) 零哈希比对基准）。
+    mtime: String,
     xxhash: u64,
     missing: bool,
     xmp_dirty: bool,
@@ -292,6 +294,26 @@ fn run_scan<'a>(
         if let Some(bus) = bus {
             bus.publish(AppEvent::PhotoLibrariesChanged);
         }
+        // 整库回线（AfterFrame changed-media 借鉴）：库内仍标 missing 的资产
+        // 即将由本轮 walk 恢复/重绑；离线期间前端缩略图管线曾按在盘性把
+        // 瓦片判成 missing 终态（缓存不再重查）——提前按集合发 presence
+        // 事件使这些瓦片失效重查，恢复结果随后由精准事件二次对账（幂等）。
+        let missing_ids: Vec<i64> = db
+            .0
+            .prepare("SELECT id FROM assets WHERE library_id = ?1 AND missing = 1")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([library.id.as_str()], |r| r.get::<_, i64>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default();
+        if !missing_ids.is_empty() {
+            if let Some(bus) = bus {
+                bus.publish(AppEvent::AssetsPresenceChanged {
+                    library_id: library.id.clone(),
+                    asset_ids: missing_ids,
+                });
+            }
+        }
     }
 
     let mut scanner = Scanner::new(
@@ -299,8 +321,22 @@ fn run_scan<'a>(
     );
     scanner.walk(&root);
     let stopped = scanner.stopped.take();
+    let mut presence = std::mem::take(&mut scanner.presence_restored);
     let mut report = scanner.report;
     report.online = true;
+    // presence 精准事件（轮末合并发布，去重）：本轮回在线的资产集合——前端
+    // 画廊瓦片级刷新缺失角标，不做全量重拉。批量让路/取消也发（已发生的
+    // 恢复必须通知到 UI）。
+    presence.sort_unstable();
+    presence.dedup();
+    if !presence.is_empty() {
+        if let Some(bus) = bus {
+            bus.publish(AppEvent::AssetsPresenceChanged {
+                library_id: library.id.clone(),
+                asset_ids: presence,
+            });
+        }
+    }
     // xmp_dirty 闭环（§五）：库在线 → 对脏资产补写边车、清标志（与
     // rating_watch 读入方向对称）。离线期间无从写起（本轮已在上面提前
     // 返回）；写失败保持脏，下轮重试自愈。missing 资产不冲刷——补写归
@@ -418,6 +454,12 @@ struct Scanner<'a> {
     by_dir: HashMap<String, Vec<String>>,
     /// 已在缺席账上的资产 id（两轮确认的第二轮判定）。
     absent_ids: HashSet<i64>,
+    /// missing 资产登记指纹索引：(size, mtime RFC3339) → asset_id
+    ///（AfterFrame changed-media 借鉴：文件移动/改名不改 size/mtime，
+    /// 新路径枚举到此零哈希直接重绑，省整文件读取）。
+    by_missing_fingerprint: HashMap<(u64, String), i64>,
+    /// 本轮判回在线的资产 id（presence 精准事件收集；轮末去重发布）。
+    presence_restored: Vec<i64>,
     report: LibraryScanReport,
     progress: Throttle,
     /// 批量模式控制（M4b；增量模式全 None）。
@@ -462,8 +504,9 @@ impl<'a> Scanner<'a> {
         // 库内资产快照（排除回收站——回收站资产的文件语义不归扫描管）
         let mut by_path = HashMap::new();
         let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
+        let mut by_missing_fingerprint = HashMap::new();
         if let Ok(mut stmt) = db.0.prepare(
-            "SELECT id, path, size, xxhash, missing, xmp_dirty, rating, color_label, \
+            "SELECT id, path, size, mtime, xxhash, missing, xmp_dirty, rating, color_label, \
              rejected, created_at, volume_serial FROM assets \
              WHERE library_id = ?1 AND in_trash = 0",
         ) {
@@ -472,14 +515,15 @@ impl<'a> Scanner<'a> {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)? as u64,
-                    row.get::<_, i64>(3)? as u64,
-                    row.get::<_, i64>(4)? != 0,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)? as u64,
                     row.get::<_, i64>(5)? != 0,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8)? != 0,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, i64>(6)? != 0,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)? != 0,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
                 ))
             });
             if let Ok(rows) = rows {
@@ -488,6 +532,7 @@ impl<'a> Scanner<'a> {
                         id,
                         path,
                         size,
+                        mtime,
                         xxhash,
                         missing,
                         xmp_dirty,
@@ -503,11 +548,15 @@ impl<'a> Scanner<'a> {
                             .or_default()
                             .push(path.clone());
                     }
+                    if missing {
+                        by_missing_fingerprint.insert((size, mtime.clone()), id);
+                    }
                     by_path.insert(
                         path,
                         AssetBrief {
                             id,
                             size,
+                            mtime,
                             xxhash,
                             missing,
                             xmp_dirty,
@@ -540,6 +589,8 @@ impl<'a> Scanner<'a> {
             by_path,
             by_dir,
             absent_ids,
+            by_missing_fingerprint,
+            presence_restored: Vec::new(),
             report: LibraryScanReport::default(),
             progress: Throttle::new(PROGRESS_INTERVAL),
             signals,
@@ -707,6 +758,10 @@ impl<'a> Scanner<'a> {
             if present.contains(&asset_path.to_ascii_lowercase()) {
                 if self.absent_ids.contains(&brief.id) {
                     let _ = self.db.library_scan_clear_absent(brief.id);
+                    // 两轮延迟确认落定（未确认为失踪）：缺席期间该资产可能被
+                    // 前端缩略图管线按在盘性判成 missing 终态（缓存不再重查），
+                    // 收入 presence 事件让受影响瓦片失效重查。
+                    self.presence_restored.push(brief.id);
                 }
                 continue;
             }
@@ -763,6 +818,17 @@ impl<'a> Scanner<'a> {
                 self.recover_missing_asset(&brief, path, meta);
             } else {
                 self.check_late_sidecar(&brief, path);
+                // 文件级零哈希比对（AfterFrame changed-media 借鉴）：
+                // (size, mtime) 与登记指纹一致 → 文件未变，本轮零动作直过
+                //（不进任何计数——不算新文件也不算消失）。边车检查保留在闸前：
+                // §八-3 LR 原地覆盖写边车不动图片指纹，不能被此闸饿死；
+                // 被跳过的只有登记指纹补录（exFAT 无 file-id 资产避免每轮
+                // 重试 UPDATE）。
+                if brief.size == meta.len()
+                    && meta.modified().map(rfc3339).unwrap_or_default() == brief.mtime
+                {
+                    return;
+                }
                 self.backfill_registration_id(&brief, path);
             }
             return;
@@ -771,6 +837,21 @@ impl<'a> Scanner<'a> {
         if self.in_cooldown(meta) {
             self.report.cooled += 1;
             return;
+        }
+        // 文件级零哈希快速闸（两级识别之前的便宜检查）：(size, mtime) 命中
+        // missing 资产登记指纹 → 移动/改名（两者均不随改名变化）零整读直接
+        // 重绑；未命中/并发已被处理才继续 file-id/哈希识别。
+        let fingerprint = (
+            meta.len(),
+            meta.modified().ok().map(rfc3339).unwrap_or_default(),
+        );
+        if let Some(&asset_id) = self.by_missing_fingerprint.get(&fingerprint) {
+            self.by_missing_fingerprint.remove(&fingerprint); // 同轮不重复尝试
+            let reg_id = file_registration_id(path).ok();
+            if self.rebind_asset(asset_id, path, meta, None, reg_id) {
+                return;
+            }
+            // 锁内重查发现资产已非 missing（并发恢复）→ 本文件走两级识别
         }
         // 两级识别第一级：file-id（同卷同 id = 硬链接，零哈希直跳）
         if let Ok(reg) = file_registration_id(path) {
@@ -908,6 +989,8 @@ impl<'a> Scanner<'a> {
 
     /// missing 资产重绑（§八-1）：更新路径 + 清 missing + 记录新位置登记
     /// 指纹 + 缩略图按内容复用 + 边车补写新位置（xmp_dirty/有逻辑元数据时）。
+    /// 返回是否重绑成功（并发已处理/写库失败为 false——文件级指纹闸的
+    /// 调用方据此回退两级识别）。
     fn rebind_asset(
         &mut self,
         asset_id: i64,
@@ -915,7 +998,7 @@ impl<'a> Scanner<'a> {
         meta: &fs::Metadata,
         fingerprint: Option<(u64, u64)>,
         reg_id: Option<crate::platform::FileRegistrationId>,
-    ) {
+    ) -> bool {
         // 锁内重查（防并发轮次/导入同时重绑）
         let db = self.db;
         let row = self.registered(move || {
@@ -939,7 +1022,7 @@ impl<'a> Scanner<'a> {
         });
         let Some((old_path, _was_missing, xmp_dirty, rating, color_label, rejected)) = row else {
             // 已被并发处理（重绑/删除/恢复）：本轮不再计
-            return;
+            return false;
         };
         let path_str = new_path.to_string_lossy().into_owned();
         let filename = new_path
@@ -972,9 +1055,11 @@ impl<'a> Scanner<'a> {
             .is_ok()
         });
         if !updated {
-            return;
+            return false;
         }
         self.report.rebound += 1;
+        // presence 精准事件收集：missing → 在线（前端瓦片级刷新缺失角标）
+        self.presence_restored.push(asset_id);
         // 缩略图按内容复用：旧路径键的缓存条目改名到新路径键（mtime 段保留）
         crate::thumbs::rebind_cache_keys(self.db_dir, Path::new(&old_path), new_path);
         // 边车补写新位置（与 rating 写入方向同路径）：离线期间改动待补写，
@@ -987,6 +1072,7 @@ impl<'a> Scanner<'a> {
             rejected,
             xmp_dirty,
         );
+        true
     }
 
     /// DB 真值 → 边车投影落盘（rating/label；失败保 xmp_dirty 待下轮兜底）。
@@ -1071,6 +1157,8 @@ impl<'a> Scanner<'a> {
                 return;
             }
             self.report.restored += 1;
+            // presence 精准事件收集：missing → 在线（前端瓦片级刷新缺失角标）
+            self.presence_restored.push(brief.id);
             if brief.xmp_dirty {
                 self.write_sidecar_projection(
                     brief.id,
@@ -1118,6 +1206,8 @@ impl<'a> Scanner<'a> {
             return;
         }
         self.report.recomputed += 1;
+        // presence 精准事件收集：同名不同内容重算后同样回到在线
+        self.presence_restored.push(brief.id);
         // 索引重排：CPU 通道复位 pending + 无行补建（exif/phash 平时非登记
         // 即建——只有 thumb/eyes/blur 随入库建行；AI 通道由 ai_indexed_at=
         // NULL + 下次 kick 的 create_*_for_unindexed 补建）；近重复桶旧

@@ -598,6 +598,31 @@ export default function GalleryPage() {
     [patchAssetsByIds],
   );
 
+  // --- presence 精准事件（changed-media 借鉴）：扫描轮把资产判回在线（missing
+  // 重绑/恢复/缺席账结清/整库回线）→ 按瓦片乐观置回 missing=false，不做全量
+  // 重拉；瓦片上的「源缺失」角标与历史缓存图由 thumbPipeline 侧对同事件按
+  // 资产失效缓存并自动重查（AssetThumb 内部驱动），此处只维护资产字段。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void subscribeAppEvents((event: AppEvent) => {
+      if (event.type === "assetsPresenceChanged") {
+        patchAssetsByIds(event.assetIds, () => ({ missing: false }));
+      }
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [patchAssetsByIds]);
+
   /** 反选数据窗口：当前数据管线的全部已加载可见 id（语义态=语义结果；其余=
    *  画廊可见资产——跨库重复折叠时隐藏副本不进窗口，操作只作用于可见资产） */
   const windowIds = useMemo(

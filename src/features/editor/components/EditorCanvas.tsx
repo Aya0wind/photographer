@@ -89,6 +89,7 @@ function rotatedImageAttrs(
 }
 
 interface EditorCanvasProps {
+  nativeVisible?: boolean;
   showOriginal?: boolean;
   sampleMode?: boolean;
   onSample?: (x: number, y: number) => void;
@@ -125,6 +126,7 @@ interface EditorCanvasProps {
 }
 
 export default function EditorCanvas({
+  nativeVisible=false,
   src,
   showOriginal = false,
   sampleMode = false,
@@ -387,8 +389,9 @@ export default function EditorCanvas({
         >
           {/* 底图（裁剪模式下显示整图，其余模式平移到裁剪窗口并裁剪） */}
           <Layer clip={cropMode ? undefined : { x: 0, y: 0, width: dispW, height: dispH }}>
-            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
+            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage opacity={nativeVisible ? 0 : 1} image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
               <KonvaImage
+                opacity={nativeVisible ? 0 : 1}
                 image={adjustedImage ?? image}
                 {...rotatedImageAttrs(baseW, baseH, quarter, scale)}
                 listening={false}

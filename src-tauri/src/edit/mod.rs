@@ -41,6 +41,9 @@
 
 pub mod export;
 mod gpu;
+pub mod native_canvas;
+#[cfg(windows)]
+mod native_presenter;
 pub mod ipc;
 pub mod meta;
 pub mod metadata;

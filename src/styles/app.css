@@ -379,3 +379,11 @@ body {
 .ui-switch:checked { background: #F0A83C; }
 .ui-switch:checked::before { transform: translateX(14px); }
 .no-motion .ui-switch::before { transition: none; }
+
+/* Native GPU canvas paints behind the WebView; DOM controls stay on top. */
+html.native-editor-canvas, html.native-editor-canvas body, html.native-editor-canvas #root,
+.native-editor-canvas [data-testid="advanced-editor-overlay"],
+.native-editor-canvas [data-native-canvas-host] { background: transparent !important; }
+.native-editor-canvas [data-testid="advanced-editor-overlay"] > header,
+.native-editor-canvas [data-testid="advanced-editor-overlay"] > footer,
+.native-editor-canvas [data-testid="advanced-editor-overlay"] aside { background: var(--color-bg) !important; }

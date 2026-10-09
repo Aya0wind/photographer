@@ -50,6 +50,9 @@ pub struct AssetDto {
     pub rejected: bool,
     /// 单文件缺失标记（§五 M2c；画廊缺失角标数据源，可筛选）。
     pub missing: bool,
+    /// Stable photo-library ownership needed by independent editor windows.
+    #[serde(default)]
+    pub library_id: Option<String>,
 }
 
 /// 日期分组 DTO（画廊吸顶 + 跳转；date 为本地时区 `YYYY-MM-DD`，NULL 归
@@ -202,6 +205,7 @@ pub fn page_row_to_dto(r: crate::db::AssetPageRow) -> AssetDto {
         color_label: r.color_label,
         rejected: r.rejected,
         missing: r.missing,
+        library_id: r.library_id,
     }
 }
 
@@ -638,6 +642,7 @@ pub fn fetch_assets_by_ids(state: &super::AppState, ids: &[i64]) -> Result<Vec<A
                 color_label: asset.color_label,
                 rejected: asset.rejected != 0,
                 missing: asset.missing != 0,
+                library_id: asset.library_id,
             });
         }
     }

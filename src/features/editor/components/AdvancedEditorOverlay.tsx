@@ -15,6 +15,7 @@ import AdvancedToolPanel from "./AdvancedToolPanel";
 import { advancedRecipe, advancedReducer } from "../lib/advancedRecipe";
 import { newLayerId, recipeEquals, recipeForPersist, type RecipeContext } from "../lib/recipe";
 import { clampCrop, isFullCrop, type Size } from "../lib/coords";
+import { useNativeEditorCanvas } from "../lib/useNativeEditorCanvas";
 import { useEditorPreview } from "../lib/useEditorPreview";
 import { ASSET_DRAG_TYPE, useAdvancedEditorStore, type EditorPhoto } from "../lib/advancedEditorStore";
 
@@ -39,7 +40,9 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   );
   const recipe = history.present;
   const [tool, setTool] = useState<EditorTool>("adjust");
-  const preview = useEditorPreview(asset.id, tool === "crop" ? { ...recipe, crop: null, textLayers: [], brushStrokes: [] } : recipe, libraryId);
+  const [nativeActive,setNativeActive]=useState(false);
+  const nativeHost=useRef<HTMLElement|null>(null);
+  const preview = useEditorPreview(asset.id, tool === "crop" ? { ...recipe, crop: null, textLayers: [], brushStrokes: [] } : recipe, libraryId, nativeActive);
   const sourceSize = useMemo<Size | null>(() => preview.session ? { width: preview.session.width, height: preview.session.height } : null, [preview.session]);
   context.current = sourceSize ?? { width: 0, height: 0 };
   const [zoom, setZoom] = useState(1);
@@ -60,6 +63,10 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   }, []);
   const [compare, setCompare] = useState(false);
   const [picker, setPicker] = useState<CurvePicker | null>(null);
+  const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,recipe,nativeHost,
+    (tool==="adjust" || tool==="view" || tool==="output") && !picker && !recipe.crop && recipe.rotateQuarter===0,
+    compare,preview.session?.sourceUrl);
+  useEffect(() => {setNativeActive(nativeCanvas);},[nativeCanvas]);
   const [sample, setSample] = useState<[number, number, number] | null>(null);
   const [samplingError, setSamplingError] = useState<string | null>(null);
   const pickSequence = useRef(0);
@@ -317,9 +324,10 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       <nav role="tablist" aria-orientation="vertical" aria-label={t("editor.tools")} className="ui-glass flex w-14 shrink-0 flex-col items-center gap-1 rounded-2xl py-2">
         {TOOLS.map(({ id, label, icon }) => <button key={id} role="tab" aria-selected={tool === id} aria-label={t(label)} title={t(label)} disabled={busy || exporting || unavailable} onClick={() => chooseTool(id)} className={`flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${tool === id ? "bg-accent/15 text-accent" : "text-text-secondary hover:bg-panel"}`}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg></button>)}
       </nav>
-      <main onPointerMove={wakeZoom} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
+      <main ref={nativeHost} data-native-canvas-host onPointerMove={wakeZoom} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
           sampleMode={picker !== null && !compare} onSample={samplePhoto}
+          nativeVisible={nativeCanvas}
           src={preview.session?.sourceUrl ?? null} adjustedSrc={preview.url} showOriginal={compare}
           sourceSize={sourceSize} nativeGeometry nativeAnnotations backendAdjustments fallbackSize={sourceSize} zoom={zoom}
           onZoom={(factor) => setZoom((v) => Math.max(0.25, Math.min(4, v * factor)))}
@@ -335,12 +343,14 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomOut")} onClick={() => setZoom((v) => Math.max(0.25, v / 1.25))}>−</button>
           <button className="h-8 min-w-16 rounded-lg text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
           <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomIn")} onClick={() => setZoom((v) => Math.min(4, v * 1.25))}>+</button>
+          {preview.preparingSource && <span className="text-[11px] text-text-muted">{t("advancedEditor.preparingOriginal")}</span>}
           {preview.pending && <span role="status" aria-label={t("advancedEditor.previewUpdating")} className="mx-2 h-4 w-4 animate-spin rounded-full border border-white/20 border-t-accent" />}
         </div>
       </main>
       <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
         {samplingError && <p role="alert" className="mb-2 text-xs text-amber-500">{samplingError}</p>}
         {preview.session && <p className="mb-2 text-[11px] text-text-muted">{preview.session.sensorRaw ? "RAW · " : ""}{preview.session.bitDepth}</p>}
+        {preview.sourceError && <p role="status" className="mb-2 text-xs text-amber-500">{t("advancedEditor.originalFailed")}</p>}
         {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>

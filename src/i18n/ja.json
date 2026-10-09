@@ -1486,5 +1486,7 @@
   "advancedEditor.ranges.greens": "緑",
   "advancedEditor.ranges.cyans": "シアン",
   "advancedEditor.ranges.blues": "青",
-  "advancedEditor.ranges.magentas": "マゼンタ"
+  "advancedEditor.ranges.magentas": "マゼンタ",
+  "advancedEditor.preparingOriginal": "元画像を準備中。編集は続けられます",
+  "advancedEditor.originalFailed": "元画像を準備できませんでした。キャッシュのプレビューは利用できます"
 }

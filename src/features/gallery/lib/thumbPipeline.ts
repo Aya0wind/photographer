@@ -170,14 +170,24 @@ function dispatchAssetEvent(event: AppEvent): void {
   if (event.type === "thumbnailReady") {
     // 该资产缩略图已补齐：丢弃全部档位的缓存记录（成功+失败），让视口内
     // tile 重试取到新结果（档位对齐由后端 snap，按资产整体失效最稳）
-    for (const key of [...thumbCache.keys()]) {
-      if (key.startsWith(`${event.assetId}:`)) thumbCache.delete(key);
-    }
-    for (const key of [...failedCache.keys()]) {
-      if (key.startsWith(`${event.assetId}:`)) failedCache.delete(key);
-    }
+    invalidateAssetCaches(event.assetId);
+  } else if (event.type === "assetsPresenceChanged") {
+    // 源文件回到在线（missing 重绑/恢复/缺席账结清/整库回线）：missing 是
+    // 管线终态缓存（防风暴不重试），唯有事件能复活——按资产失效让在视瓦片
+    // 重查（重查会命中新位置的按内容复用缓存或重新生成）。
+    for (const assetId of event.assetIds) invalidateAssetCaches(assetId);
   }
   for (const listener of listeners) listener(event);
+}
+
+/** 按资产整体丢弃缓存记录（成功 URL + 失败/missing 终态；全部档位） */
+function invalidateAssetCaches(assetId: number): void {
+  for (const key of [...thumbCache.keys()]) {
+    if (key.startsWith(`${assetId}:`)) thumbCache.delete(key);
+  }
+  for (const key of [...failedCache.keys()]) {
+    if (key.startsWith(`${assetId}:`)) failedCache.delete(key);
+  }
 }
 
 function ensureSubscribed(): void {
@@ -258,9 +268,12 @@ export function useAssetThumbUrl(
     };
     retry();
     const off = onAssetEvent((event) => {
-      if (event.type !== "thumbnailReady" || event.assetId !== assetId) return;
-      // 同资产任一档位就绪：立即重查（多数情况此处即命中缓存）；
-      // 若仍 pending（如事件属于另一档位/被在途去重吞并），周期兜底接管。
+      // 缩略图就绪 或 资产判回在线（源文件移回/库回线——missing 终态的唯一
+      // 复活通道）：立即重查（多数情况此处即命中缓存）。
+      const relevant =
+        (event.type === "thumbnailReady" && event.assetId === assetId) ||
+        (event.type === "assetsPresenceChanged" && event.assetIds.includes(assetId));
+      if (!relevant) return;
       if (retryTimer !== null) {
         clearTimeout(retryTimer);
         retryTimer = null;

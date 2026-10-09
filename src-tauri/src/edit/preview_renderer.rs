@@ -30,6 +30,55 @@ pub struct Timings {
     pub total_ms: f64,
 }
 
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    #[test]
+    fn camera_preview_curves_match_upstream_filter_and_preserve_source_tiles() {
+        let image = photocraft_codecs::Image::from_u8(
+            32,
+            16,
+            photocraft_codecs::ChannelLayout::Rgb,
+            (0..32 * 16 * 3)
+                .map(|i| ((i * 73 + 17) % 256) as u8)
+                .collect(),
+        )
+        .unwrap();
+        let base = crate::edit::source::from_image("Parity", &image).unwrap();
+        let mut recipe = super::super::recipe::parse_recipe(
+            &serde_json::json!({"version":1,"renderer":"photocraft"}),
+        )
+        .unwrap();
+        recipe.advanced = Some(
+            serde_json::from_value(
+                serde_json::json!({"exposure":1.2,"temperature":24.0,"tint":-15.0}),
+            )
+            .unwrap(),
+        );
+        let expected = photocraft::render_document(&base, &recipe).unwrap();
+        let mut renderer = Renderer::new(&base);
+        let native = renderer.canvas_document(&base, &recipe).unwrap();
+        assert_eq!(native.layers[0].id, base.layers[0].id);
+        let expected = photocraft_compose::flatten(&expected);
+        let actual = photocraft_compose::flatten(&native);
+        let maximum = actual
+            .px
+            .iter()
+            .zip(expected.px.iter())
+            .flat_map(|(a, b)| (0..3).map(move |ch| (a[ch] - b[ch]).abs()))
+            .fold(0.0f32, f32::max);
+        assert!(maximum < 0.02, "channel LUT parity error: {maximum}");
+        let id = native.layers[1].id;
+        recipe.advanced.as_mut().unwrap().exposure = 0.5;
+        let next = renderer.canvas_document(&base, &recipe).unwrap();
+        assert_eq!(
+            next.layers[1].id, id,
+            "adjustment identity must remain stable for GPU caching"
+        );
+        assert_eq!(next.layers[0].id, base.layers[0].id);
+    }
+}
+
 struct AdjustmentLayer {
     key: &'static str,
     params: Value,
@@ -44,6 +93,7 @@ struct AnnotationCache {
 pub struct Renderer {
     session: Session,
     camera: Option<(DocId, [f64; 3], Document)>,
+    canvas_camera: Option<([f64; 3], Layer)>,
     adjustments: Vec<AdjustmentLayer>,
     geometry: Option<Document>,
     annotations: Option<AnnotationCache>,
@@ -59,6 +109,7 @@ impl Renderer {
         Self {
             session,
             camera: None,
+            canvas_camera: None,
             adjustments: Vec::new(),
             geometry: None,
             annotations: None,
@@ -211,6 +262,70 @@ impl Renderer {
             layers: layers.clone(),
         });
         Ok(layers)
+    }
+
+    /// Metadata-only preparation for a direct GPU canvas; never flatten or JPEG.
+    pub(super) fn canvas_document(
+        &mut self,
+        base: &Document,
+        recipe: &EditRecipe,
+    ) -> Result<Document, String> {
+        use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
+        use photocraft_engine::doc::{Adjustment, SampleType};
+        if base.mode != photocraft_engine::doc::ColorMode::Rgb || base.depth == SampleType::F32 {
+            return Err("原生画布暂不支持此色彩模式或 HDR 文档".into());
+        }
+        let tuning = photocraft::camera_tuning(recipe);
+        let mut camera = base.clone();
+        if tuning != [0.0; 3] {
+            if !self
+                .canvas_camera
+                .as_ref()
+                .is_some_and(|(key, _)| *key == tuning)
+            {
+                // The exposed camera controls are channel-separable. Sample the
+                // upstream algorithm at all 256 display levels, not a custom look.
+                let mut pixels: Vec<[f32; 4]> = (0..256)
+                    .map(|i| [i as f32 / 255.0, i as f32 / 255.0, i as f32 / 255.0, 1.0])
+                    .collect();
+                let params = photocraft_algo::camera_raw::CameraRaw {
+                    exposure: tuning[0] as f32,
+                    temperature: tuning[1] as f32,
+                    tint: tuning[2] as f32,
+                    ..Default::default()
+                };
+                photocraft_algo::camera_raw::develop(&mut pixels, 256, 1, &params, false);
+                let curves = std::array::from_fn(|ch| {
+                    (0..256)
+                        .map(|i| CurvePoint {
+                            input: i as f32 / 255.0,
+                            output: pixels[i][ch],
+                        })
+                        .collect()
+                });
+                let content = LayerContent::Adjustment(Adjustment::Curves {
+                    master: Vec::new(),
+                    per_channel: curves,
+                    space: ToneSpace::Rgb,
+                    black: Vec::new(),
+                });
+                let mut layer = self
+                    .canvas_camera
+                    .as_ref()
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| Layer::new("Camera preview", content.clone()));
+                layer.content = content;
+                self.canvas_camera = Some((tuning, layer));
+            }
+            camera
+                .layers
+                .push(self.canvas_camera.as_ref().unwrap().1.clone());
+        }
+        self.update_adjustments(camera, recipe)?;
+        let mut doc = self.geometry_document(recipe)?;
+        doc.layers.extend(self.annotation_layers(&doc, recipe)?);
+        self.previous = Some((base.id, recipe.clone()));
+        Ok(doc)
     }
 
     pub fn render(

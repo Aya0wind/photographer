@@ -545,6 +545,162 @@ fn offline_root_flips_status_and_recovers_when_back() {
 }
 
 // ---------------------------------------------------------------------------
+// 文件级零哈希预跳过（AfterFrame changed-media 借鉴）：(size, mtime) 与登记
+// 指纹一致 → 零动作直过；命中 missing 指纹 → 零整读重绑
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unchanged_file_fingerprint_skips_when_dir_reenumerated() {
+    let (dir, database, library, db_dir) = setup("指纹未变");
+    let root = dir.path().join("photos");
+    write(&root.join("a.jpg"), 1);
+    run(&database, &db_dir, &library.id);
+
+    // 目录 mtime 变化（新文件落入）触发重枚举：未变文件 (size, mtime) 与登记
+    // 指纹一致 → 零动作（不进任何计数，不算新文件也不算消失）
+    write(&root.join("b.jpg"), 2);
+    let report = run(&database, &db_dir, &library.id);
+    assert_eq!(report.registered, 1, "仅新文件登记");
+    assert_eq!(report.skipped, 0, "未变文件零动作直过（不计 skip）");
+    assert_eq!(report.cooled, 0);
+    assert_eq!(report.rebound, 0);
+
+    // 边车语义保留（§八-3）：预跳过不饿死晚到边车——未变文件旁出现晚于
+    // 登记时间的边车仍被读入
+    let id = asset_id_by_path(&database, &root.join("a.jpg").to_string_lossy());
+    std::thread::sleep(Duration::from_millis(30));
+    fs::write(
+        root.join("a.xmp"),
+        r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3"></rdf:Description></rdf:RDF></x:xmpmeta>"#,
+    )
+    .unwrap();
+    let with_sidecar = run(&database, &db_dir, &library.id);
+    assert_eq!(with_sidecar.sidecar_read, 1, "晚到边车不被预跳过饿死");
+    assert_eq!(asset_row(&database, id).2, 3);
+}
+
+#[test]
+fn missing_fingerprint_hit_rebinds_without_reading_content() {
+    let (dir, database, library, db_dir) = setup("指纹重绑");
+    let root = dir.path().join("photos");
+    let a = root.join("a.jpg");
+    write(&a, 1);
+    let registered_mtime = fs::metadata(&a).unwrap().modified().unwrap();
+    run(&database, &db_dir, &library.id);
+    let id = asset_id_by_path(&database, &a.to_string_lossy());
+    let registered_hash: i64 = database
+        .0
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap();
+
+    // 删原件 → 两轮 missing；出现同 (size, mtime) 的复制件（内容不同字节、
+    // 同长度，mtime 对齐登记值）→ 指纹命中零整读重绑（AfterFrame 语义：
+    // size+mtime 未变即视为同一文件；哈希沿用登记值不重算）
+    fs::remove_file(&a).unwrap();
+    run(&database, &db_dir, &library.id);
+    run(&database, &db_dir, &library.id);
+    assert_eq!(asset_row(&database, id).1, true);
+
+    let copy = root.join("moved.jpg");
+    // 内容不同（tag=9 vs 1，仅 [10..14] 差异）但长度相同（jpg() 固定 4096）
+    fs::write(&copy, jpg(9)).unwrap();
+    // 对齐 mtime 与 size：jpg() 固定 4096 字节 → size 相同；mtime 显式设置
+    fs::File::options()
+        .write(true)
+        .open(&copy)
+        .unwrap()
+        .set_modified(registered_mtime)
+        .unwrap();
+
+    let report = run(&database, &db_dir, &library.id);
+    assert_eq!(report.rebound, 1, "指纹命中 → 零哈希直接重绑");
+    let (path, missing, _, _) = asset_row(&database, id);
+    assert_eq!(path, copy.to_string_lossy());
+    assert_eq!(missing, false);
+    assert_eq!(count_assets(&database), 1, "不产生第二行（未走哈希查重登记）");
+    let hash: i64 = database
+        .0
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(hash, registered_hash, "内容指纹沿用登记值（零整读）");
+}
+
+// ---------------------------------------------------------------------------
+// presence 精准事件（AfterFrame changed-media 借鉴）：missing 判回在线按
+// asset_id 集合广播，前端瓦片级刷新缺失角标
+// ---------------------------------------------------------------------------
+
+#[test]
+fn presence_changed_event_fires_on_restore_and_rebind() {
+    let (dir, database, library, db_dir) = setup("presence");
+    let root = dir.path().join("photos");
+    let a = root.join("a.jpg");
+    write(&a, 1);
+    run(&database, &db_dir, &library.id);
+    let id = asset_id_by_path(&database, &a.to_string_lossy());
+
+    // 删原件 → 两轮 missing → 放回同内容：恢复轮发 presence 事件
+    fs::remove_file(&a).unwrap();
+    run(&database, &db_dir, &library.id);
+    run(&database, &db_dir, &library.id);
+    assert_eq!(asset_row(&database, id).1, true);
+
+    let bus = events::EventBus::new();
+    let mut rx = bus.subscribe();
+    let library_row = database.photos_library_get(&library.id).unwrap().unwrap();
+    write(&a, 1);
+    let report = scan::scan_library_once(
+        &database,
+        &db_dir,
+        &library_row,
+        &relaxed(),
+        None,
+        Some(&bus),
+    )
+    .unwrap();
+    assert_eq!(report.restored, 1);
+    let mut presence_ids: Option<Vec<i64>> = None;
+    while let Ok(event) = rx.try_recv() {
+        if let events::AppEvent::AssetsPresenceChanged { library_id, asset_ids } = event {
+            assert_eq!(library_id, library.id);
+            presence_ids = Some(asset_ids);
+        }
+    }
+    assert_eq!(presence_ids, Some(vec![id]), "恢复轮按集合发 presence 事件");
+
+    // 改名场景（两轮 missing 后新名回到指纹/file-id 命中）：重绑同样发事件
+    let bus2 = events::EventBus::new();
+    let mut rx2 = bus2.subscribe();
+    fs::rename(&a, root.join("renamed.jpg")).unwrap();
+    // rename 保留 mtime 与 size → 指纹闸直接命中（新 inode 场景同款）
+    run(&database, &db_dir, &library.id); // 原路径缺席记账
+    let library_row = database.photos_library_get(&library.id).unwrap().unwrap();
+    // 先把原路径推到 missing（缺席确认），新名下轮重绑
+    database
+        .0
+        .execute("UPDATE assets SET missing = 1 WHERE id = ?1", [id])
+        .unwrap();
+    let report = scan::scan_library_once(
+        &database,
+        &db_dir,
+        &library_row,
+        &relaxed(),
+        None,
+        Some(&bus2),
+    )
+    .unwrap();
+    assert_eq!(report.rebound, 1, "新名指纹/file-id 命中 → 重绑");
+    let mut presence_ids: Option<Vec<i64>> = None;
+    while let Ok(event) = rx2.try_recv() {
+        if let events::AppEvent::AssetsPresenceChanged { asset_ids, .. } = event {
+            presence_ids = Some(asset_ids);
+        }
+    }
+    assert_eq!(presence_ids, Some(vec![id]), "重绑轮按集合发 presence 事件");
+    assert_eq!(asset_row(&database, id).1, false);
+}
+
+// ---------------------------------------------------------------------------
 // 登记单管道（§八-5）：并发扫描同一文件只登记一次
 // ---------------------------------------------------------------------------
 

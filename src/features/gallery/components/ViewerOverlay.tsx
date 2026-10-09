@@ -666,7 +666,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
               <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10.6 2.2a1.6 1.6 0 0 1 2.3 2.3l-7.5 7.5-3.2.9.9-3.2zM9.4 3.4l2.3 2.3" /></svg>
               {editRecipe !== null && <span className="absolute right-0 top-0 h-1.5 w-1.5 rounded-full bg-accent" data-testid="viewer-edit-badge" aria-hidden="true"><span className="sr-only">{t("viewer.editBadge")}</span></span>}
             </button>
-            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => { openAdvancedEditor(asset, editorOrigin); onClose(); }} aria-label={t("advancedEditor.title")} title={t("advancedEditor.title")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-advanced-edit">
+            <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => { void openAdvancedEditor(asset, editorOrigin).then(opened => { if (opened) onClose(); }); }} aria-label={t("advancedEditor.title")} title={t("advancedEditor.title")} className={VIEWER_BUTTON_CLASS} data-testid="viewer-advanced-edit">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6" /></svg>
             </button>
             <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={() => setExifOpen((open) => !open)} aria-label={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} title={exifOpen ? t("viewer.detailsHide") : t("viewer.detailsShow")} aria-pressed={exifOpen} className={VIEWER_BUTTON_CLASS} data-testid="viewer-exif-toggle">
@@ -1112,7 +1112,7 @@ export default function ViewerOverlay({ asset, group, index, onNavigate, onClose
       {ctxAt !== null && (
         <AssetContextMenu
           editorOrigin={editorOrigin}
-          onAdvancedEdit={(photo) => { openAdvancedEditor(photo, editorOrigin); onClose(); }}
+          onAdvancedEdit={(photo) => { void openAdvancedEditor(photo, editorOrigin).then(opened => { if (opened) onClose(); }); }}
           at={ctxAt}
           assets={[{ ...asset, rating: currentRating, flagged: currentFlagged, colorLabel: currentColor, rejected: currentRejected }]}
           onClose={() => setCtxAt(null)}

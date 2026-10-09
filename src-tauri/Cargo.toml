@@ -49,7 +49,7 @@ geo-types = { version = "0.7", features = ["serde"] }
 bincode = "1"
 rstar = "0.12"
 
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"

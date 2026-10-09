@@ -64,13 +64,23 @@ fn developed_document(developed: &Developed) -> Result<Document, String> {
 }
 
 pub fn open(path: &Path) -> Result<Opened, String> {
+    open_if_current(path, || true)
+}
+
+pub fn open_if_current(path: &Path, current: impl Fn() -> bool) -> Result<Opened, String> {
+    if !current() {
+        return Err("预览请求已被更新或关闭".into());
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("读取照片失败: {e}"))?;
+    if !current() {
+        return Err("预览请求已被更新或关闭".into());
+    }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Photo");
     if photocraft_raw::is_raw(&bytes) {
         match photocraft_raw::decode(&bytes, &photocraft_raw::Limits::default()) {
             Ok(sensor) => {
-                let developed =
-                    develop(&sensor, &DevelopOptions::default()).map_err(|e| e.to_string())?;
+                let developed = develop_when(&sensor, &DevelopOptions::default(), &current)
+                    .map_err(|e| e.to_string())?;
                 let doc = developed_document(&developed)?;
                 return Ok(Opened {
                     document: doc,
@@ -88,6 +98,9 @@ pub fn open(path: &Path) -> Result<Opened, String> {
     }
     let imported = photocraft_io::import(name, &bytes)
         .map_err(|e| format!("PhotoCraft 无法导入此格式: {e}"))?;
+    if !current() {
+        return Err("预览请求已被更新或关闭".into());
+    }
     Ok(Opened {
         document: imported.document,
         raw: None,

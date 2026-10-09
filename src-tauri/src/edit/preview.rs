@@ -27,11 +27,13 @@ struct Preview {
     interactive_renderer: Arc<Mutex<preview_renderer::Renderer>>,
     refined_renderer: Arc<Mutex<preview_renderer::Renderer>>,
     open_ms: f64,
+    native_ready: bool,
     generation: Arc<Generation>,
     path: PathBuf,
     modified: Option<SystemTime>,
     length: u64,
     touched: Instant,
+    source_checked: Instant,
 }
 
 #[derive(Default)]
@@ -153,6 +155,7 @@ pub struct PreviewOpened {
     bit_depth: String,
     warnings: Vec<String>,
     histogram: Vec<Vec<u64>>,
+    native_ready: bool,
 }
 
 struct PreparedSource {
@@ -163,11 +166,18 @@ struct PreparedSource {
 }
 
 fn prepare_source(path: &std::path::Path) -> Result<PreparedSource, String> {
+    prepare_source_if_current(path, || true)
+}
+
+fn prepare_source_if_current(
+    path: &std::path::Path,
+    current: impl Fn() -> bool,
+) -> Result<PreparedSource, String> {
     let source::Opened {
         document: full,
         raw,
         warnings,
-    } = source::open(path)?;
+    } = source::open_if_current(path, &current)?;
     let (width, height) = (full.size.width, full.size.height);
     let bit_depth = match full.depth {
         photocraft_engine::doc::SampleType::U8 => "8 bit",
@@ -176,9 +186,12 @@ fn prepare_source(path: &std::path::Path) -> Result<PreparedSource, String> {
     }
     .to_string();
     let sensor_raw = raw.is_some();
+    if !current() {
+        return Err("预览会话已关闭".into());
+    }
     let document = photocraft::resize(&full, Some(PREVIEW_EDGE))?;
     drop(full);
-    let interactive_document = photocraft::resize(&document, Some(800))?;
+    let interactive_document = document.clone();
     let source_url = jpeg_url(&document)?;
     let histogram = source_histogram(&interactive_document)?;
     let details = PreviewOpened {
@@ -190,11 +203,88 @@ fn prepare_source(path: &std::path::Path) -> Result<PreparedSource, String> {
         bit_depth,
         warnings,
         histogram,
+        native_ready: true,
     };
     Ok(PreparedSource {
         document,
         interactive_document,
         raw,
+        details,
+    })
+}
+
+fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Option<PreparedSource> {
+    let path = std::path::Path::new(&asset.path);
+    let cache =
+        crate::thumbs::cached_for_asset(db_dir, path, 2048, &asset.mtime).or_else(|| {
+            crate::thumbs::thumb_file(
+                db_dir,
+                path,
+                if asset.kind == crate::events::AssetKind::Raw {
+                    3072
+                } else {
+                    2048
+                },
+            )
+        })?;
+    let pixels = image::open(cache)
+        .ok()?
+        .thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
+        .to_rgb8();
+    let image = photocraft_codecs::Image::from_u8(
+        pixels.width(),
+        pixels.height(),
+        photocraft_codecs::ChannelLayout::Rgb,
+        pixels.as_raw().clone(),
+    )
+    .ok()?
+    .with_icc(Some(
+        photocraft_cms::Builtin::Srgb.profile().to_bytes().to_vec(),
+    ));
+    let document = source::from_image("Preview", &image).ok()?;
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode(
+            pixels.as_raw(),
+            pixels.width(),
+            pixels.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    let mut histogram = vec![vec![0u64; 256]; 4];
+    for pixel in pixels.pixels() {
+        for ch in 0..3 {
+            histogram[ch][pixel[ch] as usize] += 1;
+        }
+        let lum =
+            (u32::from(pixel[0]) * 54 + u32::from(pixel[1]) * 183 + u32::from(pixel[2]) * 19) / 256;
+        histogram[3][lum as usize] += 1;
+    }
+    let (mut width, mut height) = (
+        asset.width.unwrap_or(pixels.width()),
+        asset.height.unwrap_or(pixels.height()),
+    );
+    if (width > height) != (pixels.width() > pixels.height()) {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let details = PreviewOpened {
+        session_id: uuid::Uuid::new_v4().to_string(),
+        source_url: format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(jpeg)
+        ),
+        width,
+        height,
+        sensor_raw: asset.kind == crate::events::AssetKind::Raw,
+        bit_depth: "8 bit preview".into(),
+        warnings: Vec::new(),
+        histogram,
+        native_ready: false,
+    };
+    Some(PreparedSource {
+        interactive_document: document.clone(),
+        document,
+        raw: None,
         details,
     })
 }
@@ -208,14 +298,16 @@ pub async fn edit_preview_open(
     run_blocking(state.inner().clone(), move |state| {
         let opened_at = Instant::now();
         let (_, asset) = super::project::resolve(state, &library_id, &asset_id)?;
-        let path = PathBuf::from(asset.path);
+        let path = PathBuf::from(&asset.path);
         let metadata = std::fs::metadata(&path).map_err(|e| format!("源文件不可用: {e}"))?;
         let PreparedSource {
             document,
             interactive_document,
             raw,
             details,
-        } = prepare_source(&path)?;
+        } = prepare_proxy(&crate::ipc::app_database_dir(state)?, &asset)
+            .map(Ok)
+            .unwrap_or_else(|| prepare_source(&path))?;
         let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
         cache.retain(|_, value| {
             value
@@ -231,6 +323,7 @@ pub async fn edit_preview_open(
                 interactive_renderer: new_renderer(&interactive_document),
                 refined_renderer: new_renderer(&document),
                 open_ms: opened_at.elapsed().as_secs_f64() * 1000.0,
+                native_ready: details.native_ready,
                 generation: Arc::new(Generation::default()),
                 document,
                 raw,
@@ -240,8 +333,73 @@ pub async fn edit_preview_open(
                 modified: metadata.modified().ok(),
                 length: metadata.len(),
                 touched: Instant::now(),
+                source_checked: Instant::now(),
             })),
         );
+        Ok(details)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn edit_preview_prepare(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> Result<PreviewOpened, String> {
+    run_blocking(state.inner().clone(), move |_| {
+        let preview = sessions()
+            .lock()
+            .map_err(|_| "预览会话锁不可用")?
+            .get(&session_id)
+            .cloned()
+            .ok_or("预览会话已关闭")?;
+        let (path, generation, modified, length) = {
+            let p = preview.lock().map_err(|_| "预览会话锁不可用")?;
+            if p.native_ready {
+                return Err("原片已准备完成".into());
+            }
+            (p.path.clone(), p.generation.clone(), p.modified, p.length)
+        };
+        if generation.closed.load(Ordering::Acquire) {
+            return Err("预览会话已关闭".into());
+        }
+        let PreparedSource {
+            document,
+            interactive_document,
+            raw,
+            mut details,
+        } = prepare_source_if_current(&path, || !generation.closed.load(Ordering::Acquire))?;
+        let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if metadata.modified().ok() != modified || metadata.len() != length {
+            return Err("源文件已改变，请重新打开编辑器".into());
+        }
+        // Preserve the existing aggregate RAW sensor budget for staged sessions.
+        if let Some(next) = &raw {
+            let cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
+            let bytes: usize = cache
+                .values()
+                .filter_map(|value| {
+                    value
+                        .lock()
+                        .ok()
+                        .and_then(|p| p.raw.as_ref().map(|raw| raw.bytes()))
+                })
+                .sum();
+            if bytes.saturating_add(next.bytes()) > 512 * 1024 * 1024 {
+                return Err("RAW 预览缓存预算不足，请关闭其他编辑会话".into());
+            }
+        }
+        let mut p = preview.lock().map_err(|_| "预览会话锁不可用")?;
+        if generation.closed.load(Ordering::Acquire) {
+            return Err("预览会话已关闭".into());
+        }
+        p.interactive_renderer = new_renderer(&interactive_document);
+        p.refined_renderer = new_renderer(&document);
+        p.document = document;
+        p.interactive_document = interactive_document;
+        p.raw = raw;
+        p.native_ready = true;
+        details.session_id = session_id;
         Ok(details)
     })
     .await
@@ -304,9 +462,14 @@ fn preview_input(
     if p.touched.elapsed() >= IDLE_TTL {
         return Err("预览会话已过期，请重新打开编辑器".into());
     }
-    let meta = std::fs::metadata(&p.path).map_err(|e| format!("源文件不可用: {e}"))?;
-    if meta.len() != p.length || meta.modified().ok() != p.modified {
-        return Err("源文件已改变，请重新打开编辑器".into());
+    // SMB metadata requests must not run on every slider frame. Export still
+    // performs an unconditional source identity check before producing a file.
+    if p.source_checked.elapsed() >= Duration::from_secs(1) {
+        let meta = std::fs::metadata(&p.path).map_err(|e| format!("源文件不可用: {e}"))?;
+        if meta.len() != p.length || meta.modified().ok() != p.modified {
+            return Err("源文件已改变，请重新打开编辑器".into());
+        }
+        p.source_checked = Instant::now();
     }
     p.touched = Instant::now();
     let base = if interactive {
@@ -369,11 +532,7 @@ pub async fn edit_preview_render(
         request.check()?;
         let mut renderer = renderer.lock().map_err(|_| "预览渲染锁不可用")?;
         request.check()?;
-        let jpeg = renderer.render(
-            &base,
-            &values,
-            if interactive.unwrap_or(false) { 80 } else { 90 },
-        )?;
+        let jpeg = renderer.render(&base, &values, 90)?;
         renderer.timings.raw_ms = raw_ms;
         renderer.timings.total_ms += raw_ms;
         request.check()?;
@@ -509,4 +668,56 @@ pub async fn edit_preview_stats(
         })
     })
     .await
+}
+
+/// CPU metadata snapshot for the direct canvas. Image pixels remain in stable
+/// native tiles; the compositor uploads them once and keeps them on the GPU.
+pub(super) fn canvas_source(session_id:&str)->Result<Document,String> {
+    let value=sessions().lock().map_err(|_|"预览锁不可用")?.get(session_id).cloned().ok_or("预览会话已关闭")?;
+    let mut p=value.lock().map_err(|_|"预览锁不可用")?;
+    if p.generation.closed.load(Ordering::Acquire) {return Err("预览会话已关闭".into());}
+    p.touched=Instant::now();Ok(p.document.clone())
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn cached_proxy_opens_without_decoding_the_original_and_keeps_one_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original.jpg");
+        image::RgbImage::from_pixel(2400, 1600, image::Rgb([80, 120, 160]))
+            .save(&path)
+            .unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let modified: chrono::DateTime<chrono::Utc> = metadata.modified().unwrap().into();
+        let asset: crate::db::AssetRow = serde_json::from_value(serde_json::json!({
+            "path":path.to_string_lossy(),"filename":"original.jpg","size":metadata.len(),
+            "mtime":modified.to_rfc3339(),"xxhash":0,"kind":"photo","source":"test",
+            "createdAt":modified.to_rfc3339(),"width":2400,"height":1600
+        }))
+        .unwrap();
+        crate::thumbs::thumb_file(dir.path(), &path, 2048).unwrap();
+        // Proves startup consumes the cached pixels, not the original file.
+        std::fs::remove_file(path).unwrap();
+        let prepared = prepare_proxy(dir.path(), &asset).unwrap();
+        assert!(!prepared.details.native_ready);
+        assert_eq!(prepared.details.width, 2400);
+        assert_eq!(prepared.details.height, 1600);
+        assert_eq!(prepared.document.size, prepared.interactive_document.size);
+        assert_eq!(
+            prepared
+                .document
+                .size
+                .width
+                .max(prepared.document.size.height),
+            PREVIEW_EDGE
+        );
+        assert!(prepared.raw.is_none());
+        assert!(prepared
+            .details
+            .source_url
+            .starts_with("data:image/jpeg;base64,"));
+    }
 }

@@ -907,3 +907,69 @@ fn raw_embed_orientation_uses_lossless_transform_when_perfect() {
     assert!(h > w, "Orientation=8 转正后应为竖图: {w}x{h}");
     assert_eq!((w, h), (1600, 2400), "尺寸应精确互换（无损无裁剪）");
 }
+
+// ---------------------------------------------------------------------------
+// 零字节/损坏缓存自愈（AfterFrame 借鉴）：命中判定从 exists 升级为
+// 「在盘且长度 > 0」，零字节残留视为 miss 走重生成（write_atomic 保证
+// 新文件完整；LRU touch 只对有效命中执行）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_byte_cache_regenerates_on_next_request() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("IMG_zb.jpg");
+    write_jpg(&src, 800, 600);
+    let db = db_dir();
+
+    let first = thumbs::thumb_file(&db, &src, 256).expect("应生成缩略图");
+    let cache = PathBuf::from(&first);
+    assert!(fs::metadata(&cache).unwrap().len() > 0, "正常缓存非空");
+
+    // 缓存被截断为 0 字节（第三方清空/历史残留）：命中路径按 miss 处理，
+    // 重新生成并覆盖残留（write_atomic 的 rename 覆盖既有文件）
+    fs::write(&cache, b"").unwrap();
+    let second = thumbs::thumb_file(&db, &src, 256).expect("零字节缓存应自愈重生成");
+    assert_eq!(PathBuf::from(&second), cache, "重生成覆盖原缓存键");
+    assert!(
+        fs::metadata(&cache).unwrap().len() > 0,
+        "自愈后缓存非空（不再是零字节）"
+    );
+    let (w, h) = image::image_dimensions(&cache).unwrap();
+    assert!(w.max(h) <= 256, "重生成内容有效: {w}x{h}");
+
+    // cached()（按需管线快路径）对零字节同样视为 miss
+    fs::write(&cache, b"").unwrap();
+    assert!(
+        thumbs::cached(&db, &src, 256).is_none(),
+        "cached() 零字节视为 miss"
+    );
+    // 恢复非零后再查命中
+    let third = thumbs::thumb_file(&db, &src, 256).expect("再次自愈");
+    assert_eq!(thumbs::cached(&db, &src, 256).as_deref(), Some(third.as_str()));
+}
+
+#[test]
+fn cached_without_source_skips_zero_byte_generation() {
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("IMG_gen.jpg");
+    write_jpg(&src, 640, 480);
+    let db = db_dir();
+    let older = PathBuf::from(thumbs::thumb_file(&db, &src, 256).expect("第一代缓存"));
+
+    // 源变化（mtime 推进）→ 新一代缓存；把新一代截断为 0 字节
+    std::thread::sleep(Duration::from_millis(1100)); // ç¼å­é® mtime ç²åº¦æ¯ç§
+    write_jpg(&src, 480, 360);
+    let newer = PathBuf::from(thumbs::thumb_file(&db, &src, 256).expect("第二代缓存"));
+    assert_ne!(older, newer, "两代缓存键不同（mtime 段）");
+    fs::write(&newer, b"").unwrap();
+
+    // 源消失后按内容恢复（前缀扫档位目录）：零字节的新代被跳过，
+    // 回退到仍有效的旧代——而不是把零字节当命中返回
+    fs::remove_file(&src).unwrap();
+    let recovered = thumbs::cached_without_source(&db, &src, 256);
+    assert_eq!(
+        recovered.as_deref(),
+        Some(older.to_string_lossy().as_ref()),
+        "跳过零字节代，取有效旧代"
+    );
+}

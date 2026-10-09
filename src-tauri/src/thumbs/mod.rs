@@ -140,6 +140,14 @@ fn is_raw_embed_request(ext: &str, size: u16) -> bool {
     size > 2048 && is_raw_ext(ext)
 }
 
+/// 缓存条目有效性：在盘、是文件且长度 > 0。零字节文件（历史残留/第三方
+/// 清空/截断损坏）视为 miss 走重生成自愈——write_atomic 的 tmp+rename 已
+/// 保证落盘文件完整，长度 > 0 即可信（JPEG 编码器不会产出空载荷）。
+fn is_valid_cache_entry(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+
 /// 取（或生成）缩略图缓存文件路径。无法生成返回 None。
 /// `db_dir` = 库 dbDir（缓存根）；源文件只读不动。
 pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
@@ -159,10 +167,11 @@ pub fn thumb_file(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     }
     let mtime = meta.modified().ok()?;
     let cache = cache_path(db_dir, src, size, mtime);
-    if cache.exists() {
-        touch_lru(&cache); // 命中续命（LRU：mtime 即热度账）
+    if is_valid_cache_entry(&cache) {
+        touch_lru(&cache); // 命中续命（LRU：mtime 即热度账；仅有效命中才续命）
         return Some(cache.to_string_lossy().into_owned()); // 命中，不重解码
     }
+    // 零字节/损坏缓存：视为 miss 走重生成（write_atomic rename 覆盖残留）
 
     // 同 key 并发合并：首个调用者生成，其余阻塞共享结果
     let svc = service();
@@ -333,7 +342,7 @@ pub fn cached(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     }
     let mtime = meta.modified().ok()?;
     let cache = cache_path(db_dir, src, size, mtime);
-    cache.exists().then(|| cache.to_string_lossy().into_owned())
+    is_valid_cache_entry(&cache).then(|| cache.to_string_lossy().into_owned())
 }
 
 /// Windows retains its historical case-insensitive cache key. Unix preserves
@@ -454,9 +463,9 @@ pub fn rebind_cache_keys(db_dir: &Path, old: &Path, new: &Path) -> u64 {
     moved
 }
 
-/// 命中（任意 mtime 代，取字典序最大 = 最新 mtime）即返回绝对路径。
-/// 目录内同前缀条目数 = 同一源的历史 mtime 代数，一次列举成本可忽略。
-/// 不可解码扩展名/目录不存在/无命中 → None。
+/// 命中（任意 mtime 代，取字典序最大 = 最新 mtime；零字节代视为无效跳过）
+/// 即返回绝对路径。目录内同前缀条目数 = 同一源的历史 mtime 代数，一次列举
+/// 成本可忽略。不可解码扩展名/目录不存在/无命中 → None。
 pub fn cached_without_source(db_dir: &Path, src: &Path, size: u16) -> Option<String> {
     let ext = src
         .extension()
@@ -475,6 +484,7 @@ pub fn cached_without_source(db_dir: &Path, src: &Path, size: u16) -> Option<Str
     let mut hits: Vec<_> = fs::read_dir(&dir)
         .ok()?
         .flatten()
+        .filter(|entry| is_valid_cache_entry(&entry.path())) // 零字节/损坏代跳过
         .map(|e| e.file_name())
         .filter(|name| {
             let name = name.to_string_lossy();
@@ -503,9 +513,7 @@ pub fn cached_for_asset(db_dir: &Path, src: &Path, size: u16, mtime: &str) -> Op
         if size == 1024 { 1024 } else { snap_size(size) },
         time,
     );
-    cache
-        .is_file()
-        .then(|| cache.to_string_lossy().into_owned())
+    is_valid_cache_entry(&cache).then(|| cache.to_string_lossy().into_owned())
 }
 
 /// 生成一枚缩略图：并发许可 + 解码线程 + 超时放弃。
@@ -515,6 +523,7 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
 
     let (tx, rx) = mpsc::channel();
     let src_display = src.display().to_string();
+    let src_display_for_log = src_display.clone();
     // 仅 2048 显影档走重管护（单飞锁 + 60s 超时）；内嵌直出档是纯 IO
     // （orientation=1 零重编码）或一次常规解码转正，普通超时即可
     let full_raw = src
@@ -530,6 +539,16 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
     let cache = cache.to_path_buf();
     // 解码线程持有许可：超时放弃后它自行收尾并释放许可（不占死名额）。
     // 61MP 解码 1-2s；超时=异常文件/挂死，绝不留半份缓存。
+    //
+    // panic 隔离（2026-10-09 核实修复）：解码器（image/turbojpeg FFI/rawler）
+    // panic 时栈展开会 drop 许可守卫与 tx → recv_timeout 收到 Disconnected
+    // 被当作失败处理，调用方本就不会挂死；但有两个缺口在此补齐——
+    // ① 单飞锁毒化连锁：panic 发生在持 RAW_FULL_LOCK 期间会毒化该锁，
+    //   后续所有 2048 显影任务在 lock().expect 处连环 panic（该档位永久
+    //   瘫痪）→ 改为毒化时直接接管锁（Mutex<()> 无数据，毒化无语义）；
+    // ② catch_unwind 把 panic 就地转为失败结果：不向 stderr 喷解码器
+    //   panic 栈、行为不依赖「线程死亡关闭 channel」这一隐式路径，且
+    //   tx.send 必然执行。半成品缓存不受影响——落盘走 tmp+rename 原子写。
     let decoder = std::thread::Builder::new()
         .name("thumb-decode".into())
         .spawn(move || {
@@ -541,11 +560,26 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
                 RAW_FULL_LOCK
                     .get_or_init(|| Mutex::new(()))
                     .lock()
-                    .expect("raw full decode mutex poisoned")
+                    // 毒化 = 上一次持锁解码 panic 时锁已在 unwind 中释放；
+                    // 锁内无数据可污染，接管继续，防连环 panic 瘫痪显影档。
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
             });
-            let out = decode_and_encode(&src, size).and_then(|jpeg| {
-                write_atomic(&cache, &jpeg).ok()?;
-                Some(cache.clone())
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decode_and_encode(&src, size).and_then(|jpeg| {
+                    write_atomic(&cache, &jpeg).ok()?;
+                    Some(cache.clone())
+                })
+            }))
+            .unwrap_or_else(|payload| {
+                let detail = if let Some(s) = payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "未知 panic 载荷".to_string()
+                };
+                eprintln!("缩略图解码 panic（已隔离为失败）: {src_display_for_log} / {detail}");
+                None
             });
             let _ = tx.send(out.clone());
             out
@@ -556,6 +590,8 @@ fn generate(cache: &Path, src: &Path, size: u16) -> Option<PathBuf> {
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(_) => {
+            // 超时/通道关闭（catch_unwind 后理论上不再发生，防御保留）：
+            // 均按放弃处理——解码线程自行收尾并释放许可。
             eprintln!("缩略图解码超时（>{timeout:?}），放弃: {src_display}");
             None
         }

@@ -1,5 +1,7 @@
 import { create } from "zustand";
-import type { AssetDto } from "@/ipc/api";
+import { assetsByIds, type AssetDto } from "@/ipc/api";
+import { message } from "@tauri-apps/plugin-dialog";
+import i18n from "@/i18n";
 
 export const ASSET_DRAG_TYPE = "application/x-photographer-asset";
 export interface EditorOrigin { albumId?: number; subgroup?: string | null; }
@@ -33,7 +35,21 @@ export function photoContext(asset: AssetDto, origin?: EditorOrigin): EditorPhot
   return { asset, libraryId, ...(match ? { albumId: Number(match[1]) } : {}), ...origin };
 }
 
-export function openAdvancedEditor(asset: AssetDto, origin?: EditorOrigin) {
-  const photo = photoContext(asset, origin);
-  if (photo) void import("./editorWindow").then(({ showEditorWindow }) => showEditorWindow(photo)).catch((error: unknown) => window.alert(String(error)));
+export async function openAdvancedEditor(asset: AssetDto, origin?: EditorOrigin): Promise<boolean> {
+  try {
+    let photo = photoContext(asset, origin);
+    if (!photo) {
+      const [current] = await assetsByIds([asset.id]);
+      photo = current?.path === asset.path ? photoContext(current, origin) : null;
+    }
+    if (!photo) throw new Error(i18n.t("advancedEditor.invalidPhoto"));
+    const { showEditorWindow } = await import("./editorWindow");
+    await showEditorWindow(photo);
+    return true;
+  } catch (error) {
+    console.error("[advanced-editor] Could not open photo", { assetId: asset.id, error });
+    await message(String(error), { title: i18n.t("advancedEditor.title"), kind: "error" })
+      .catch(dialogError => console.error("[advanced-editor] Could not display error", dialogError));
+    return false;
+  }
 }

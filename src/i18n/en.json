@@ -1500,5 +1500,7 @@
   "advancedEditor.ranges.greens": "Greens",
   "advancedEditor.ranges.cyans": "Cyans",
   "advancedEditor.ranges.blues": "Blues",
-  "advancedEditor.ranges.magentas": "Magentas"
+  "advancedEditor.ranges.magentas": "Magentas",
+  "advancedEditor.preparingOriginal": "Preparing original; editing is available",
+  "advancedEditor.originalFailed": "Original preparation failed; the cached preview is still available"
 }

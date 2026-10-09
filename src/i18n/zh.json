@@ -1486,5 +1486,7 @@
   "advancedEditor.ranges.greens": "绿色",
   "advancedEditor.ranges.cyans": "青色",
   "advancedEditor.ranges.blues": "蓝色",
-  "advancedEditor.ranges.magentas": "洋红"
+  "advancedEditor.ranges.magentas": "洋红",
+  "advancedEditor.preparingOriginal": "正在准备原片，可继续编辑",
+  "advancedEditor.originalFailed": "原片准备失败，当前仍可使用缓存预览"
 }
