@@ -299,6 +299,7 @@ pub fn run() {
             ipc::map::map_geo_install,
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
+            ipc::map::map_basemap,
             ipc::settings::settings_set,
             // 数据库注册表（2026-10-09 多数据库修正：应用可登记多个数据库
             // 并切换激活库，为多用户协作预埋；照片库全部作用于激活库内部）

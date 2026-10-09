@@ -1,6 +1,6 @@
 /**
  * maplibre 画布封装（MapPage 专用，Phase 3/4）：
- * - 初始化 OpenFreeMap 暗色矢量底图（免费无 key；WebGL 本地渲染）
+ * - 初始化内置行政区离线底图（无网络依赖；WebGL 本地渲染）
  * - zoom 防抖 250ms → onLevelChange（飞行途中不抖动切层）
  * - clusters 变化全量重建 marker（气泡 DOM 命令式构造，PhotoBubble 工厂）
  * - flyTarget 变化 → flyTo 丝滑飞行（1.2s，曲线 1.42）
@@ -20,13 +20,12 @@ import type { MapCluster } from "@/ipc/api/map";
 
 import { levelForZoom, type MapLevel } from "../lib/hierarchy";
 import { createBubbleElement } from "./PhotoBubble";
-import { fetchMapResource, MAP_STYLE_URL, mapProtocol, transformMapRequest, withLocalOutline } from "../lib/mapResources";
+import { attachOfflineBasemap, offlineMapStyle } from "../lib/offlineBasemap";
 
 // maplibre v6 的 worker 是独立文件，URL 由 import.meta.url 动态拼接——
 // vite 预打包探测不到（deps 目录里没有 worker 文件 → 404 → Worker failed to load →
 // 样式永不完成 → 黑底图）。?url 让 dev/build 都拿到真实资源地址（2026-09-29 真机黑图修复）。
 maplibregl.setWorkerUrl(workerUrl);
-maplibregl.addProtocol("phmap", mapProtocol);
 
 export interface FlyTarget {
   lat: number;
@@ -44,6 +43,8 @@ interface MapCanvasProps {
   flyTarget: FlyTarget | null;
   /** 全局动画开关（settings.appearance.animations）：关闭时 flyTo 瞬时 */
   animationsOn: boolean;
+  /** 索引就绪后再加载详细行政区；准备期间仍显示本地世界轮廓。 */
+  basemapReady?: boolean;
 }
 
 export default function MapCanvas({
@@ -53,10 +54,14 @@ export default function MapCanvas({
   onDrill,
   flyTarget,
   animationsOn,
+  basemapReady = true,
 }: MapCanvasProps) {
   const { t } = useTranslation();
-  const [background, setBackground] = useState<"loading" | "ready" | "offline">("loading");
-  const [retry, setRetry] = useState(0);
+  const [basemapFailed, setBasemapFailed] = useState(false);
+  const reloadBasemapRef = useRef<(() => void) | null>(null);
+  const basemapControllerRef = useRef<ReturnType<typeof attachOfflineBasemap> | null>(null);
+  const basemapReadyRef = useRef(basemapReady);
+  basemapReadyRef.current = basemapReady;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
@@ -72,13 +77,16 @@ export default function MapCanvas({
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: withLocalOutline(),
-      transformRequest: transformMapRequest,
+      style: offlineMapStyle(),
+      localIdeographFontFamily: "sans-serif",
       center: [104, 35],
       zoom: 1.5,
       attributionControl: { compact: true },
     });
     mapRef.current = map;
+    const basemap = attachOfflineBasemap(map, setBasemapFailed, basemapReadyRef.current);
+    basemapControllerRef.current = basemap;
+    reloadBasemapRef.current = basemap.reload;
     if (import.meta.env.DEV) {
       // DEV 探针：CDP 验收用（真机黑帧排查），生产不打包
       (window as unknown as { __map?: maplibregl.Map }).__map = map;
@@ -97,45 +105,18 @@ export default function MapCanvas({
       if (timer) clearTimeout(timer);
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
+      basemap.dispose();
+      basemapControllerRef.current = null;
+      reloadBasemapRef.current = null;
       map.remove();
       mapRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Draw bundled land immediately. Detailed online resources load independently
-  // of region preparation and can fail without losing the usable base map.
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    const controller = new AbortController();
-    let applied = false;
-    let resourceFailed = false;
-    const ready = () => { if (applied && !resourceFailed && !controller.signal.aborted) setBackground("ready"); };
-    const failed = () => {
-      if (applied && !controller.signal.aborted) {
-        resourceFailed = true;
-        setBackground("offline");
-      }
-    };
-    map.on("idle", ready);
-    map.on("error", failed);
-    setBackground("loading");
-    void fetchMapResource(MAP_STYLE_URL, controller.signal).then(async response => {
-      const style = await response.json() as maplibregl.StyleSpecification;
-      if (controller.signal.aborted) return;
-      if (style.version !== 8 || !style.sources || !Array.isArray(style.layers)) throw new Error("Invalid map style");
-      applied = true;
-      map.setStyle(withLocalOutline(style));
-    }).catch(() => {
-      if (!controller.signal.aborted) setBackground("offline");
-    });
-    // Slow tile/font connections should not leave a permanent spinning prompt.
-    const timer = setTimeout(() => {
-      if (!controller.signal.aborted) setBackground(state => state === "ready" ? state : "offline");
-    }, 15_000);
-    return () => { controller.abort(); clearTimeout(timer); map.off("idle", ready); map.off("error", failed); };
-  }, [retry]);
+    basemapControllerRef.current?.setReady(basemapReady);
+  }, [basemapReady]);
 
   // 气泡同步：全清重建（随机样本本来就要换；400 内重建 ~10ms）
   useEffect(() => {
@@ -186,12 +167,15 @@ export default function MapCanvas({
     });
   }, [flyTarget, animationsOn]);
 
-  return <div className="relative h-full w-full">
-    <div ref={containerRef} className="h-full w-full" data-testid="map-canvas" />
-    {background !== "ready" && <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2 rounded-md bg-panel/90 px-3 py-2 text-[11px] text-text-muted" role="status">
-      {background === "loading" && <span className="h-3 w-3 animate-spin rounded-full border-2 border-edge border-t-accent" />}
-      <span>{t(background === "loading" ? "map.backgroundLoading" : "map.backgroundBasic")}</span>
-      {background === "offline" && <button type="button" className="text-accent hover:underline" onClick={() => setRetry(value => value + 1)}>{t("map.retry")}</button>}
-    </div>}
-  </div>;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" data-testid="map-canvas" />
+      {basemapFailed && (
+        <div className="ui-glass absolute bottom-4 left-4 flex items-center gap-3 rounded-xl border px-3 py-2 text-xs text-text-secondary" role="alert">
+          <span>{t("map.failed")}</span>
+          <button type="button" className="text-accent" onClick={() => reloadBasemapRef.current?.()}>{t("map.retry")}</button>
+        </div>
+      )}
+    </div>
+  );
 }

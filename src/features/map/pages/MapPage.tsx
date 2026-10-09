@@ -213,6 +213,7 @@ export default function MapPage() {
             onDrill={onDrill}
             flyTarget={fly}
             animationsOn={motionOn}
+            basemapReady={status?.phase === "ready" || status?.phase === "backfilling"}
           />
         </div>
         {preparation && <div className="absolute left-7 top-5 z-10 rounded-lg border border-edge bg-panel/95 p-3 text-xs text-text-muted">{preparation}</div>}
