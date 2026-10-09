@@ -40,7 +40,7 @@ pub(super) fn resolve(
     {
         return Err("照片库正在迁移，请稍后继续编辑".into());
     }
-    let id = asset_id.parse::<i64>().map_err(|_| "资产 id 非法")?;
+    let id = super::ipc::parse_asset_id(asset_id)?;
     let db = crate::ipc::open_library_db(std::path::Path::new(&library.db_dir))?;
     let asset = db
         .asset_by_id(id)
@@ -71,13 +71,14 @@ pub async fn edit_project_save(
     recipe: serde_json::Value,
 ) -> Result<(), String> {
     run_blocking(state.inner().clone(), move |state| {
-        let (library, asset) = resolve(state, &library_id, &asset_id)?;
+        let id = super::ipc::parse_asset_id(&asset_id)?;
+        let (library, _) = resolve(state, &library_id, &asset_id)?;
         let recipe = validate_recipe(&recipe)?;
-        let path = project_path(&library, asset.id);
+        let path = project_path(&library, id);
         let project = Project {
             version: 1,
             library_id,
-            asset_id: asset.id,
+            asset_id: id,
             recipe: serde_json::to_value(recipe).map_err(|e| e.to_string())?,
         };
         let bytes = serde_json::to_vec(&project).map_err(|e| e.to_string())?;
@@ -103,8 +104,9 @@ pub async fn edit_project_open(
     asset_id: String,
 ) -> Result<Option<EditRecipe>, String> {
     run_blocking(state.inner().clone(), move |state| {
-        let (library, asset) = resolve(state, &library_id, &asset_id)?;
-        let path = project_path(&library, asset.id);
+        let id = super::ipc::parse_asset_id(&asset_id)?;
+        let (library, _) = resolve(state, &library_id, &asset_id)?;
+        let path = project_path(&library, id);
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -119,8 +121,7 @@ pub async fn edit_project_open(
         }
         let project: Project =
             serde_json::from_slice(&bytes).map_err(|e| format!("编辑状态无效: {e}"))?;
-        if project.version != 1 || project.library_id != library_id || project.asset_id != asset.id
-        {
+        if project.version != 1 || project.library_id != library_id || project.asset_id != id {
             return Err("编辑状态与照片不匹配".into());
         }
         validate_recipe(&project.recipe).map(Some)

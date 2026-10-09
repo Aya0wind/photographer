@@ -37,7 +37,7 @@ pub struct EditRecipeStateDto {
 }
 
 /// 字符串 asset_id → i64（契约：前端传字符串 id）。
-fn parse_asset_id(asset_id: &str) -> Result<i64, String> {
+pub(super) fn parse_asset_id(asset_id: &str) -> Result<i64, String> {
     asset_id
         .trim()
         .parse::<i64>()
@@ -253,11 +253,12 @@ pub async fn edit_advanced_export_folder(
         if request.options.mode != super::export::ExportMode::Folder {
             return Err("导出目标无效".into());
         }
+        let id = parse_asset_id(&request.asset_id)?;
         let (_, asset) = super::project::resolve(state, &request.library_id, &request.asset_id)?;
         super::preview::validate_source(&request.session_id, std::path::Path::new(&asset.path))?;
         fetch_export_in_library(
             state,
-            asset.id,
+            id,
             &request.recipe,
             &request.options,
             Some(&request.library_id),
@@ -278,6 +279,7 @@ pub async fn edit_advanced_export(
     session_id: String,
 ) -> Result<ExportTaskDto, String> {
     run_blocking(state.inner().clone(), move |state| {
+        let id = parse_asset_id(&asset_id)?;
         let (library, asset) = super::project::resolve(state, &library_id, &asset_id)?;
         super::preview::validate_source(&session_id, std::path::Path::new(&asset.path))?;
         let db = crate::ipc::open_library_db(std::path::Path::new(&library.db_dir))?;
@@ -302,7 +304,7 @@ pub async fn edit_advanced_export(
             author: None,
             keywords: Vec::new(),
         };
-        fetch_export_in_library(state, asset.id, &recipe, &options, Some(&library_id))
+        fetch_export_in_library(state, id, &recipe, &options, Some(&library_id))
     })
     .await
 }
@@ -316,13 +318,14 @@ pub async fn edit_export_status(
     job_id: i64,
 ) -> Result<ExportTaskDto, String> {
     run_blocking(state.inner().clone(), move |state| {
-        let (library, asset) = super::project::resolve(state, &library_id, &asset_id)?;
+        let id = parse_asset_id(&asset_id)?;
+        let (library, _) = super::project::resolve(state, &library_id, &asset_id)?;
         let db = crate::ipc::open_library_db(std::path::Path::new(&library.db_dir))?;
         let job = db
             .export_job_get(job_id)
             .map_err(|e| e.to_string())?
             .ok_or("导出任务不存在")?;
-        if job.asset_id != asset.id {
+        if job.asset_id != id {
             return Err("导出任务与照片不匹配".into());
         }
         Ok(ExportTaskDto::from(job))
