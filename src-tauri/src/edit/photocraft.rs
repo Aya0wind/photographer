@@ -112,6 +112,9 @@ pub fn adjusted_document(base: &Document, recipe: &EditRecipe) -> Result<Documen
 }
 
 pub fn composite(doc: &Document) -> Result<RgbImage, String> {
+    if let Some(image) = super::gpu::composite(doc) {
+        return Ok(image);
+    }
     // 按行带合成，避免全尺寸 float RGBA 缓冲与成品 RGB 同时占用大量内存。
     let mut output = RgbImage::new(doc.size.width, doc.size.height);
     photocraft_compose::render_bands(doc, doc.bounds(), 64, |band| {

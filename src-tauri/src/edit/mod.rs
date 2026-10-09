@@ -29,6 +29,7 @@
 //! 归一避免笔迹随画布纵横比变形）；文字锚点=文本框左上角，左对齐。
 
 pub mod export;
+mod gpu;
 pub mod ipc;
 pub mod meta;
 pub mod metadata;

@@ -25,6 +25,9 @@ image = "0.25"
 # 编辑引擎：直接依赖上游公开 API；全部 crate 固定同一提交，不引入 egui/app。
 photocraft-engine = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
 photocraft-compose = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+photocraft-gpu = { git = "https://github.com/storytold/photocraft.git", rev = "3955bf4f1911a69ea08947634b3e2b459feece2f" }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "parking_lot"] }
+pollster = "1"
 # 扩展图片格式解码（2026-09-29 格式支持批次）：全部纯 Rust/无 C 构建负担
 heif-oxide = "0.1"
 jxl-oxide = { version = "0.12", features = ["image"] }
@@ -85,6 +88,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["dx12", "vulkan"] }
 ort = { version = "2.0.0-rc.13", features = ["directml"] }
 
 windows = { version = "0.61", features = [
@@ -114,7 +118,11 @@ windows = { version = "0.61", features = [
 windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
 ort = { version = "2.0.0-rc.13", features = ["coreml"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -126,5 +134,6 @@ tempfile = "3"
 codegen-units = 16
 lto = false
 opt-level = 2
-panic = "abort"
+# GPU 驱动/合成器 panic 可隔离并回退 CPU，不能使用 abort。
+panic = "unwind"
 strip = true
