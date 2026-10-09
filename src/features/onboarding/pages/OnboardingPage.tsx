@@ -26,7 +26,8 @@ import { suggestedLibraryName } from "../onboardingConfig";
  *    登记即触发后台递归扫描——进度在「存储」页卡片上看）；也可「稍后再建」
  *    直接进入应用（存储页随时可建）。
  * 3. 完成——写 onboardingCompleted 兼容位并进画廊。
- * 门禁在 GatedShell：无数据库，或无照片库且未完成引导 → /onboarding。
+ * 门禁在 GatedShell（老语义恢复）：本会话未选数据库或激活数据库无效 →
+ * /database-picker（选择页）；首启无数据库由选择页直送本引导。
  */
 
 type OnboardingStep = "welcome" | "library" | "done";
@@ -244,13 +245,16 @@ export default function OnboardingPage() {
     );
   }
 
-  /** 完成引导（建库或稍后再建共用）：写兼容位 → 画廊 */
+  /** 完成引导（建库或稍后再建共用）：写兼容位 + 会话选库标志 → 画廊 */
   async function finish(): Promise<void> {
     if (finishing) return;
     setFinishing(true);
     try {
       const current = useSettingsStore.getState().settings;
       await useSettingsStore.getState().save({ ...current, onboardingCompleted: true });
+      // 引导内必已创建/拥有数据库（首个库创建即激活）：置会话选库标志
+      // 直进主壳，否则 GatedShell 会弹回 /database-picker
+      useSettingsStore.getState().setDatabaseChosen(true);
       navigate("/gallery", { replace: true });
     } catch (e) {
       setError(String(e).replace(/^Error:\s*/, ""));

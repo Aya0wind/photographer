@@ -115,6 +115,11 @@ export const DEFAULT_SETTINGS: Settings = {
 interface SettingsState {
   settings: Settings;
   loaded: boolean;
+  /** 会话级「已选数据库」标志（达芬奇式启动流，非持久——每次启动都先过
+   *  /database-picker 选库）：选择页/引导打开数据库后置 true；GatedShell
+   *  据此放行主壳（老模型 libraryChosen 的新名） */
+  databaseChosen: boolean;
+  setDatabaseChosen: (chosen: boolean) => void;
   /** 从 Rust 侧读取设置；命令尚不存在或失败时静默落回默认值 */
   load: () => Promise<void>;
   /** 持久化设置；失败时恢复原状态并把原因交给操作界面 */
@@ -153,6 +158,8 @@ export { clone, mergeDeep };
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   settings: clone(DEFAULT_SETTINGS),
   loaded: false,
+  databaseChosen: false,
+  setDatabaseChosen: (chosen) => set({ databaseChosen: chosen }),
 
   load: async () => {
     try {

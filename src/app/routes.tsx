@@ -19,7 +19,7 @@ import StoragePage from "@/features/storage/pages/StoragePage";
 import SplashPage from "@/app/SplashPage";
 import { useWindowReveal } from "@/lib/windowReveal";
 import OnboardingPage from "@/features/onboarding/pages/OnboardingPage";
-import { usePhotoLibraries } from "@/features/onboarding/lib/usePhotoLibraries";
+import DatabasePickerPage from "@/features/database/pages/DatabasePickerPage";
 import { useDatabases } from "@/lib/useDatabases";
 import PeoplePage from "@/features/people/pages/PeoplePage";
 import CullingPage from "@/features/culling/pages/CullingPage";
@@ -31,25 +31,25 @@ import { useSettingsStore } from "@/stores/settingsStore";
 const AdvancedEditorWindowPage = lazy(() => import("@/features/editor/components/AdvancedEditorWindowPage"));
 
 /**
- * 主壳守卫（2026-10-09 多数据库修正）：设置未加载完成/注册表未拉到时空白
- * 等待；加载后**尚无数据库，或无任何照片库且未完成引导** → 送 /onboarding
- *（创建数据库 → 引导建立第一个照片库）。已有数据库且引导已完成（或有照片
- * 库）直进主壳——照片库/画廊等一切库内操作作用于激活数据库。后端不可用
- * 时注册表按空处理：首启会进引导，引导可「稍后再建」跳过，不阻塞开发调试。
+ * 主壳守卫（达芬奇式启动流，老语义恢复）：设置未加载完成/数据库注册表
+ * 未拉到时空白等待；本会话未选数据库（databaseChosen 为会话级标志，非
+ * 持久——每次启动都先 /database-picker）或激活数据库无效时重定向选择器；
+ * 选完数据库（选择页/引导打开，databaseSwitch 成功）才进主壳。
+ * onboardingCompleted 保留兼容（引导完成仍写 true），但不再作门禁；首启
+ * 无数据库由选择页直送 /onboarding 承担。
  */
 export function GatedShell() {
   const loaded = useSettingsStore((s) => s.loaded);
-  const onboardingCompleted = useSettingsStore((s) => s.settings.onboardingCompleted);
+  const databaseChosen = useSettingsStore((s) => s.databaseChosen);
   const databases = useDatabases();
-  const libraries = usePhotoLibraries();
   useWindowReveal(loaded);
 
   if (!loaded || databases === null) return null;
-  const hasDatabase = databases.databases.length > 0;
-  const needsOnboarding =
-    !hasDatabase || (libraries !== null && libraries.length === 0);
-  if (needsOnboarding && !onboardingCompleted) {
-    return <Navigate to="/onboarding" replace />;
+  const hasActiveDatabase =
+    databases.activeId !== null &&
+    databases.databases.some((db) => db.id === databases.activeId);
+  if (!databaseChosen || !hasActiveDatabase) {
+    return <Navigate to="/database-picker" replace />;
   }
   return <AppShell />;
 }
@@ -64,7 +64,9 @@ export function SearchRedirect() {
 export const router = createBrowserRouter([
   // 启动画面（splash 窗口加载；主窗口就绪后被关闭——见 lib/windowReveal）
   { path: "/splash", element: <SplashPage /> },
-  // 首次引导（2026-10-09 多数据库修正：创建数据库 → 引导建立第一个照片库）
+  // 启动首屏：数据库选择器（达芬奇式，每次启动先选数据库）
+  { path: "/database-picker", element: <DatabasePickerPage /> },
+  // 新建数据库配置链（/onboarding）：独立于主壳全屏展示
   { path: "/onboarding", element: <OnboardingPage /> },
   // 联机拍摄独立窗口（后端 tethering_start 创建的第二 webview 加载；独立于
   // 主壳守卫——该窗口的 store 是全新会话态，会话真值全部来自后端命令）
@@ -96,7 +98,7 @@ export const router = createBrowserRouter([
       { path: "settings", element: <SettingsPage /> },
     ],
   },
-  // 未知路径回落画廊（主壳守卫内：尚无照片库会被送去引导）
+  // 未知路径回落画廊（仍受主壳守卫保护，未选数据库会被送去选择器）
   { path: "*", element: <Navigate to="/gallery" replace /> },
 ]);
 

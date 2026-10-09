@@ -103,7 +103,22 @@ fn validate_name(raw: &str) -> Result<String, String> {
 /// 全量登记（登记序）+ **在线状态即时对账**（§五 M2c 整库 offline 维护：
 /// 逐库 stat root 在盘性——外置卷拔插后不等下一轮扫描（60s）即翻
 /// status，存储页永远看到真值；有翻转时发 PhotoLibrariesChanged）。
+
+/// 引导期宽容(2026-10-09 多数据库修正):尚无激活数据库时读侧照片库
+/// 命令不报错——列表/状态视为空(idle),首次启动 onboarding 轮询不打
+/// 错误日志;写侧命令仍走 app_database_db 的显式报错。
+fn no_active_database(state: &super::AppState) -> bool {
+    state
+        .settings
+        .lock()
+        .map(|s| s.active_database_id.is_none())
+        .unwrap_or(true)
+}
+
 pub fn fetch_photo_library_list(state: &super::AppState) -> Result<Vec<PhotoLibraryDto>, String> {
+    if no_active_database(state) {
+        return Ok(Vec::new());
+    }
     let db = super::app_database_db(state)?;
     let mut rows = db.photos_library_list().map_err(|e| e.to_string())?;
     let mut changed = false;
@@ -295,6 +310,9 @@ pub async fn photo_library_relocate(
 pub fn fetch_photo_library_scan_status(
     state: &super::AppState,
 ) -> Result<Vec<LibraryScanStatusDto>, String> {
+    if no_active_database(state) {
+        return Ok(Vec::new());
+    }
     let db = super::app_database_db(state)?;
     let import_running = state
         .import_running

@@ -226,6 +226,8 @@ describe("OnboardingPage（多数据库修正：创建数据库 → 建立第一
 
     await waitFor(() => expect(screen.getByTestId("gallery-probe")).toBeInTheDocument());
     expect(useSettingsStore.getState().settings.onboardingCompleted).toBe(true);
+    // 完成即置会话选库标志（GatedShell 老语义：不再弹回 /database-picker）
+    expect(useSettingsStore.getState().databaseChosen).toBe(true);
     expect(createMock).not.toHaveBeenCalled();
   });
 });

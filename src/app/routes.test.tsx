@@ -11,27 +11,26 @@ import {
   useSettingsStore,
 } from "@/stores/settingsStore";
 
-// 门禁要拉数据库注册表与照片库登记表：按契约 mock（内容由各用例给定）
+// 门禁要拉数据库注册表：按契约 mock（内容由各用例给定）
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
   return {
     ...actual,
     databaseList: vi.fn(),
-    photoLibraryList: vi.fn(),
     subscribeAppEvents: vi.fn(async () => () => {}),
   };
 });
 
-import { databaseList, photoLibraryList } from "@/ipc/api";
-import type { DatabaseList, PhotoLibrary } from "@/ipc/api";
+import { databaseList } from "@/ipc/api";
+import type { DatabaseList } from "@/ipc/api";
 
 const dbListMock = vi.mocked(databaseList);
-const listMock = vi.mocked(photoLibraryList);
 
 /**
- * 主壳守卫（2026-10-09 多数据库修正）：设置未加载完成/注册表未拉到时空白等待；
- * 加载后**尚无数据库，或无任何照片库且未完成引导** → /onboarding（创建数据
- * 库 → 引导建立第一个照片库）；已有数据库且引导已完成（或有照片库）直进主壳。
+ * 主壳守卫（达芬奇式启动流，老语义恢复）：设置未加载完成/注册表未拉到时
+ * 空白等待；本会话未选数据库（databaseChosen 会话级标志，非持久——每次
+ * 启动都先 /database-picker）或激活数据库无效 → 送 /database-picker；
+ * 选完数据库才进主壳。首启无数据库由选择页直送 /onboarding（不在本守卫）。
  */
 
 function databases(count = 1): DatabaseList {
@@ -39,26 +38,18 @@ function databases(count = 1): DatabaseList {
     databases: Array.from({ length: count }, (_, i) => ({
       id: `db-${i + 1}`,
       name: `数据库 ${i + 1}`,
-      dbDir: `D:\db-${i + 1}`,
+      dbDir: `D:\\db-${i + 1}`,
     })),
     activeId: "db-1",
   };
 }
 
-function library(id = "lib-1"): PhotoLibrary {
-  return {
-    id,
-    name: "主照片库",
-    rootPath: "D:\\照片",
-    createdAt: "2026-10-09T00:00:00Z",
-    status: "online",
-    assetCount: 10,
-    sizeBytes: 1024,
-  };
-}
-
 function GalleryProbe() {
   return <div data-testid="gallery-probe">GALLERY</div>;
+}
+
+function PickerProbe() {
+  return <div data-testid="picker-probe">PICKER</div>;
 }
 
 function OnboardingProbe() {
@@ -73,6 +64,7 @@ function renderAtGallery() {
           <Route path="/" element={<GatedShell />}>
             <Route path="gallery" element={<GalleryProbe />} />
           </Route>
+          <Route path="/database-picker" element={<PickerProbe />} />
           <Route path="/onboarding" element={<OnboardingProbe />} />
         </Routes>
       </MemoryRouter>
@@ -82,21 +74,20 @@ function renderAtGallery() {
 
 beforeEach(() => {
   dbListMock.mockReset().mockResolvedValue(databases());
-  listMock.mockReset().mockResolvedValue([]);
   useSettingsStore.setState({
     settings: clone(DEFAULT_SETTINGS),
     loaded: true,
+    databaseChosen: false,
   });
 });
 
-describe("GatedShell（无数据库或无照片库 → 引导；否则直进主壳）", () => {
+describe("GatedShell（未选数据库或激活库无效 → 选择页；否则直进主壳）", () => {
   it("设置未加载完成时空白等待", () => {
-    listMock.mockResolvedValue([library()]);
     useSettingsStore.setState({ loaded: false });
     renderAtGallery();
 
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("onboarding-probe")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
   });
 
   it("注册表未拉到（首帧）时空白等待", () => {
@@ -104,41 +95,30 @@ describe("GatedShell（无数据库或无照片库 → 引导；否则直进主�
     renderAtGallery();
 
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("onboarding-probe")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
   });
 
-  it("尚无数据库（即使引导未完成）→ 送 /onboarding", async () => {
-    dbListMock.mockResolvedValue({ databases: [], activeId: null });
-    listMock.mockResolvedValue([library()]);
+  it("每次启动（会话未选数据库）都先送 /database-picker", async () => {
     renderAtGallery();
 
-    expect(await screen.findByTestId("onboarding-probe")).toBeInTheDocument();
+    expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
   });
 
-  it("有数据库但尚无照片库且未完成引导 → 送 /onboarding", async () => {
-    listMock.mockResolvedValue([]);
+  it("激活数据库无效（activeId=null 或不在注册表）→ 送 /database-picker", async () => {
+    useSettingsStore.setState({ databaseChosen: true });
+    dbListMock.mockResolvedValue({ databases: databases().databases, activeId: null });
     renderAtGallery();
 
-    expect(await screen.findByTestId("onboarding-probe")).toBeInTheDocument();
+    expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
   });
 
-  it("已有照片库 → 直进主壳（不再有选库门禁）", async () => {
-    listMock.mockResolvedValue([library()]);
+  it("本会话已选数据库且激活库有效 → 直进主壳", async () => {
+    useSettingsStore.setState({ databaseChosen: true });
     renderAtGallery();
 
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-  });
-
-  it("引导已完成（即使登记表为空/后端不可用）→ 直进主壳，不回引导页", async () => {
-    listMock.mockResolvedValue([]);
-    useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, onboardingCompleted: true },
-    }));
-    renderAtGallery();
-
-    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(screen.queryByTestId("onboarding-probe")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
   });
 });

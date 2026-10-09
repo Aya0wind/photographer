@@ -44,6 +44,16 @@ const KINDS: [&str; 9] = [
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
 pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, String> {
+    // 引导期宽容(2026-10-09 多数据库修正):尚无激活数据库返回全空闲——
+    // TaskDrawer 的 1.5s 轮询在 onboarding 期间不打错误日志。
+    let no_database = state
+        .settings
+        .lock()
+        .map(|s| s.active_database_id.is_none())
+        .unwrap_or(true);
+    if no_database {
+        return Ok(IndexStatusDto::default());
+    }
     let db = super::app_database_db(state)?;
     let counts = db.index_task_state_counts().map_err(|e| e.to_string())?;
     let (total_assets, thumb_done, ai_done, face_done) =
