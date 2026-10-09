@@ -295,6 +295,7 @@ pub fn run() {
             ipc::map::map_geo_install,
             ipc::map::map_geo_cache_url,
             ipc::map::map_clusters,
+            ipc::map::map_basemap,
             ipc::settings::settings_set,
             // 照片库登记表（2026-10-09 单库多照片库；M2a 实装 CRUD；
             // scan_status/scan_cancel 骨架待 M4 登记管道）

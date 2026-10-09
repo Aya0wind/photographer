@@ -190,3 +190,17 @@ pub fn clusters(
     }
     Ok(out)
 }
+
+/// Purely local basemap geometry; preparation and serialization stay off the UI thread.
+#[tauri::command]
+pub async fn map_basemap(
+    state: State<'_, SharedState>,
+    level: u8,
+    bounds: [f64; 4],
+) -> Result<serde_json::Value, String> {
+    run_blocking(state.inner().clone(), move |_state| {
+        let index = geo::index_snapshot().ok_or_else(|| "地理数据尚未就绪".to_string())?;
+        geo::basemap::viewport(index, level, bounds)
+    })
+    .await
+}

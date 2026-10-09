@@ -44,7 +44,6 @@ vi.mock("maplibre-gl", () => {
       return this;
     }
     addControl() {}
-    setStyle() {}
     off() {}
     getZoom() {
       return 1.5;
@@ -59,9 +58,9 @@ vi.mock("maplibre-gl", () => {
   return { Map, Marker, NavigationControl: class {}, setWorkerUrl: vi.fn(), addProtocol: vi.fn() };
 });
 
-vi.mock("../lib/mapResources", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../lib/mapResources")>(),
-  fetchMapResource: vi.fn().mockRejectedValue(new Error("offline test")),
+vi.mock("../lib/offlineBasemap", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/offlineBasemap")>(),
+  attachOfflineBasemap: vi.fn(() => ({ reload: vi.fn(), setReady: vi.fn(), dispose: vi.fn() })),
 }));
 
 vi.mock("@/ipc/api/map", async (importOriginal) => {

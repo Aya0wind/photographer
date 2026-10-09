@@ -1,3 +1,5 @@
+import type { GeoJSONSourceSpecification } from "maplibre-gl";
+
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { ipc } from "../index";
@@ -80,4 +82,16 @@ export async function mapClusters(
     level,
     parentRegionId: parentRegionId ?? undefined,
   });
+}
+
+/** Offline geometry and label anchors. Coordinates are [west, south, east, north]. */
+export type BasemapCollection = Extract<GeoJSONSourceSpecification["data"], { type: "FeatureCollection" }>;
+
+export interface BasemapData {
+  areas: BasemapCollection;
+  labels: BasemapCollection;
+}
+
+export function mapBasemap(level: number, bounds: [number, number, number, number]): Promise<BasemapData> {
+  return ipc<BasemapData>("map_basemap", { level, bounds });
 }

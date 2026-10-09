@@ -3,7 +3,7 @@
 //! 设计定案（2026-09-29，docs/plans/map-module.md）：
 //! - **树形独立索引**：`regions`（库内树表，元数据单份存储）+ `asset_regions`
 //!   （每资产每层一行挂接）——地图功能只消费索引，`assets.gps_*` 是源头。
-//! - **数据包**（不进安装包，按需下载到 `dbDir/geo/`）：
+//! - **数据包**（内置压缩包，自动解压到 `config_dir/geo/`，完全离线）：
 //!   世界国界/省界 = Natural Earth 50m（public domain，全球单文件）；
 //!   中国省市县 = 阿里 DataV（中文名 + 自带 center，精度最好）。
 //!   层级最深到县（level 3），无更深开关，街道明确不做。
@@ -13,6 +13,7 @@
 //!   不走 IPC 递归查询）；指纹 = 数据包文件指纹，不符即重建。
 
 pub mod backfill;
+pub mod basemap;
 pub mod install;
 
 use std::collections::HashMap;
