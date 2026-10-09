@@ -55,7 +55,8 @@ jobs:
           set -euo pipefail
           ort_lib_dir="$(python3 scripts/prepare-ort-macos.py "$RUNNER_TEMP/photographer-ort")"
           test -s "$ort_lib_dir/libonnxruntime.a"
-          lipo -verify_arch arm64 "$ort_lib_dir/libonnxruntime.a"
+          # -verify_arch treats every following argument as an architecture name.
+          lipo "$ort_lib_dir/libonnxruntime.a" -verify_arch arm64
           echo "ORT_LIB_PATH=$ort_lib_dir" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=0" >> "$GITHUB_ENV"
 
