@@ -195,6 +195,8 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
 /// faces 归一化框 `(x, y, w)` ∈ 0..1 → 缩略图像素裁剪窗 `(x, y, w, h)`
 /// （外扩 20%、h=w 方窗；起点夹图内、宽不越右/下边界，最小 8px 但绝不清过
 /// 可用边界——极小图/贴边框退化为可用窗，不 panic）。纯函数可测。
+// 闭眼检测链路已建未接线（等 Culling IPC 接入）；接线后移除标注。
+#[allow(dead_code)]
 pub fn face_crop_window_px(
     bx: f64,
     by: f64,
@@ -269,6 +271,7 @@ pub fn eyes_ear_closed() -> f32 {
 }
 
 /// worker 侧读取：maybe 阈（closed ≤ EAR < 此值判疑似）。
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eyes_ear_maybe() -> f32 {
     EYES_EAR_MAYBE_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
 }
@@ -301,6 +304,7 @@ fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
 /// 但全不可判定）→ unknown 保守三态。score = 闭眼置信 0..1
 /// （`(maybe − ear) / maybe` 截断，越闭越高；unknown 记 0.0——前端契约
 /// 要求 score 为有限数值，null 会被整通道剔除）。
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn aggregate_eyes_ear(
     face_ears: &[Option<f32>],
     closed_threshold: f32,
@@ -387,8 +391,10 @@ pub fn map_similarity_inv(m: &[[f32; 3]; 2], x: f32, y: f32) -> Option<(f32, f32
 /// 几何自洽带：IOD（‖lm33 − lm263‖ 源像素）/ ROI 边长。MediaPipe 规范
 /// 人脸该比值稳定（真库 497 张标定：335 张检出脸中仅 5 张落带外 →
 /// unknown，见模块注释）；带外 = 网格未对齐/侧脸挤压 → 该脸 unknown。
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub const IOD_ROI_RATIO_MIN: f32 = 0.15;
 /// 几何自洽带上界。
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub const IOD_ROI_RATIO_MAX: f32 = 0.70;
 
 // ---------------------------------------------------------------------------
@@ -568,6 +574,7 @@ impl FaceEyeStateClassifier for FacemeshEarClassifier<'_> {
 
 impl FacemeshEarClassifier<'_> {
     /// Legacy comparison only; the production classifier contract is per-eye.
+    #[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
     pub fn face_min_ear(
         &self,
         img: &image::RgbImage,
@@ -662,6 +669,8 @@ pub fn process_eyes_task(
 
 /// Bounded parallel eye analysis; CPU/cache preparation overlaps shared ONNX
 /// sessions. Missing models leave tasks pending; failures retain capped retries.
+// index 层 eyes 通道的并发消费入口（见 index/mod.rs 注释）；IPC 接线后移除。
+#[allow(dead_code)]
 pub fn run_eyes_backfill(
     db_dir: &Path,
     manager: &super::ModelManager,

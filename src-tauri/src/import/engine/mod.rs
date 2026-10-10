@@ -289,7 +289,6 @@ pub struct Engine {
     plan: ImportPlan,
     controls: EngineControls,
     prepared: Option<Prepared>,
-    on_asset_imported: Option<Box<dyn FnMut() + Send>>,
     /// 登记单管道闸（§八-5）：增量扫描发现与导入落盘产出串行处理，防双写
     /// 竞争与重复算哈希/缩略图。IPC 层 launch_import 注入；引擎级测试不设。
     registration_gate: Option<Arc<Mutex<()>>>,
@@ -367,7 +366,6 @@ impl Engine {
                 done: Arc::new(AtomicBool::new(false)),
             },
             prepared,
-            on_asset_imported: None,
             registration_gate: None,
             db_dir: None,
         }
@@ -388,25 +386,10 @@ impl Engine {
         self.db_dir = Some(db_dir);
     }
 
-    /// 登记段互斥执行（§八-5）：查重判定 + 落位 + 入库原子段与库扫描的
-    /// 登记串行。闸未注入（引擎级测试）直通。
-    fn registered<T>(&self, work: impl FnOnce() -> T) -> T {
-        match &self.registration_gate {
-            Some(gate) => {
-                let _guard = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                work()
-            }
-            None => work(),
-        }
-    }
-
+    /// 登记段互斥执行（§八-5）的闸在 finish_copy/finish_reference 内直接
+    /// 持有（见 registration_gate 字段注释）。
     pub fn source_id(&self) -> String {
         self.source.id()
-    }
-
-    /// 仅在文件落位并成功入库后通知后台索引；复制中的文件不可索引。
-    pub fn set_on_asset_imported(&mut self, callback: impl FnMut() + Send + 'static) {
-        self.on_asset_imported = Some(Box::new(callback));
     }
 
     /// 建新任务：计划校验 → 照片库解析 → 自我嵌套守卫 → 枚举源 →
@@ -682,9 +665,6 @@ impl Engine {
                     let entry = &reference.entry;
                     match self.finish_reference(job_id, &reference) {
                         Ok((FileState::Verified, dst)) => {
-                            if let Some(callback) = self.on_asset_imported.as_mut() {
-                                callback();
-                            }
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
@@ -728,9 +708,6 @@ impl Engine {
                     let entry = &copied.entry;
                     match self.finish_copy(job_id, &copied) {
                         Ok((FileState::Verified, dst)) => {
-                            if let Some(callback) = self.on_asset_imported.as_mut() {
-                                callback();
-                            }
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
@@ -1519,7 +1496,7 @@ impl Engine {
         state: FileState,
         copied: &CopiedFile,
     ) {
-        self.db.upsert_job_file(&JobFileRow {
+        let _ = self.db.upsert_job_file(&JobFileRow {
             job_id,
             src: entry.id.clone(),
             dst: dst.to_string(),

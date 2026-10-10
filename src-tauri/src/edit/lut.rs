@@ -12,6 +12,8 @@ static ROOT: OnceLock<PathBuf> = OnceLock::new();
 static STORE: Mutex<()> = Mutex::new(());
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+// lib.rs 装配调用；edit_export_test 经 #[path] 直含 edit 模块时无调用方。
+#[allow(dead_code)]
 pub(crate) fn init(config: &Path) {
     let _ = ROOT.set(config.join("luts"));
 }

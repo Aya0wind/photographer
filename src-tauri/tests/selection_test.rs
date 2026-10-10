@@ -659,7 +659,7 @@ fn ins_in_library(
 
 #[test]
 fn trash_purge_keeps_offline_library_items_and_reports_summary() {
-    let (_dir, state, db) = setup();
+    let (_dir, state, _db) = setup();
     let (dir, lib_a, root_a, lib_b, root_b) = two_libraries(&state);
     let db = open_db(&state.config_dir);
     let (a, file_a) = ins_in_library(&db, &lib_a, &root_a, "online.jpg", true, false);

@@ -1041,8 +1041,6 @@ fn catalog_selection_entry_is_pinned_facemesh() {
 fn eyes_ear_calibration_and_throughput() {
     use std::time::Instant;
 
-    use ai::selection::FaceEyeStateClassifier;
-
     let models = std::env::var("SMARTPHOTO_EYES_MODELS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {

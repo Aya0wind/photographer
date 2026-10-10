@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+// 闭眼检测链路已建未接线（等 Culling IPC 接入）；接线后移除标注。
+#[allow(dead_code)]
 pub const EYE_MODEL: &str = "open-closed-eye";
 pub const PREPROCESS_VERSION: &str = "thumbnail-1024-eye-bgr-127-255-v8";
 pub const ANALYSIS_SIZE: u16 = 1024;
@@ -17,6 +19,7 @@ pub fn include_single() -> bool {
     INCLUDE_SINGLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn analysis_lock() -> &'static Mutex<()> {
     static LOCK: Mutex<()> = Mutex::new(());
     &LOCK
@@ -84,6 +87,7 @@ fn source_cache() -> &'static Mutex<Option<CachedSource>> {
 }
 /// One retained source, decoded serially. No unbounded high-resolution cache and
 /// no browsing-thumbnail permits held while an ONNX session is running.
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn source(path: &Path, size: u16) -> Option<Source> {
     let metadata = std::fs::metadata(path).ok()?;
     let mtime = metadata.modified().ok()?;
@@ -118,6 +122,7 @@ pub fn evidence(img: &image::RgbImage, origin: &str) -> Evidence {
 
 /// Rotate a high-resolution eye directly into model input; no padded pixels or
 /// intermediate face upsampling. The evidence box encloses the rotated crop.
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eye_crop(
     img: &image::RgbImage,
     points: &[[f32; 2]],
@@ -165,6 +170,7 @@ pub fn eye_crop(
 
 /// A textureless or almost entirely clipped eye crop contains no usable eyelid
 /// evidence. This is an input quality gate, not a focus/occlusion classifier.
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eye_has_detail(img: &image::RgbImage) -> bool {
     let gray = image::imageops::grayscale(img);
     let mut histogram = [0usize; 256];
@@ -200,6 +206,7 @@ pub fn release() {
 }
 
 /// Original OMZ ONNX (not IR): mean/scale happen here, not inside the graph.
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn closed_score(manager: &super::ModelManager, crop: &image::RgbImage) -> Result<f64, String> {
     let crop = image::imageops::resize(crop, 32, 32, image::imageops::FilterType::Triangle);
     let mut data = Vec::with_capacity(3 * 32 * 32);
@@ -258,10 +265,12 @@ pub fn closed_score(manager: &super::ModelManager, crop: &image::RgbImage) -> Re
 /// Strong geometric opening is usable after upstream localization/pixel/pose
 /// gates. The infrared-trained candidate is supporting evidence, not a veto on
 /// obvious opening in RGB photos. Closure still requires both model crops and EAR.
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eye_is_clearly_open(ear: Option<f32>, maybe: f32) -> bool {
     ear.is_some_and(|value| value.is_finite() && value >= (maybe + 0.02).max(0.22))
 }
 
+#[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eye_state(
     scores: [f64; 2],
     ear: Option<f32>,

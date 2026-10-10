@@ -25,6 +25,9 @@ pub(super) fn mapping(recipe:&EditRecipe,size:Size)->[f32;8] {
     [(horizontal[0]-zero[0]) as f32,(vertical[0]-zero[0]) as f32,zero[0] as f32,0.0,
      (horizontal[1]-zero[1]) as f32,(vertical[1]-zero[1]) as f32,zero[1] as f32,0.0]
 }
+// lib 内由 native_presenter 消费；native_canvas_probe 示例单独 #[path]
+// 编译本模块时未消费。
+#[allow(dead_code)]
 pub(super) fn canvas_size(recipe:&EditRecipe,size:Size)->Size {
     let base=if recipe.rotate_quarter%2==1 {Size::new(size.height,size.width)}else{size};
     let plane=photocraft_engine::mode_cmds::rotated_size(base,recipe.geometry.as_ref().map(|g|g.angle).unwrap_or(0.0));

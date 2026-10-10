@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use geo::{Centroid, Contains, Coord, EuclideanDistance, MultiPolygon, Point, Polygon};
+use geo::{Centroid, Contains, Coord, Distance as _, Euclidean, MultiPolygon, Point, Polygon};
 use rstar::{RTree, RTreeObject, AABB};
 
 /// 地理数据目录（应用配置目录下，与 models 同级——静态数据全库共享；
@@ -29,27 +29,18 @@ pub fn geo_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("geo")
 }
 
-/// 数据包清单：世界（Natural Earth 50m，public domain）+ 中国（DataV 递归）。
-/// NE 的 NAME_ZH 带 中文名（缺省回退 ADMIN/NAME）；LABEL_X/LABEL_Y 是现成的
-/// 标签锚点（比多边形 centroid 更贴近「视觉中心」，海岸国家不落海里）。
+/// 数据包清单：世界（Natural Earth 50m，public domain）+ 中国（DataV）。
+/// 下载体系已删（2026-09-30 内置分发），此处只剩包内文件名。
 pub struct PackageSpec {
-    pub id: &'static str,
-    pub url: &'static str,
     pub file: &'static str,
 }
 
 pub const PACKAGE_WORLD_ADM0: PackageSpec = PackageSpec {
-    id: "world-adm0",
-    url: "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson",
     file: "world-adm0.geojson",
 };
 pub const PACKAGE_WORLD_ADM1: PackageSpec = PackageSpec {
-    id: "world-adm1",
-    url: "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_1_states_provinces.geojson",
     file: "world-adm1.geojson",
 };
-/// DataV 根（中国省级全量；市/县由下载器按 adcode 递归拉取）。
-pub const DATAV_BASE: &str = "https://geo.datav.aliyun.com/areas_v3/bound";
 pub const DATAV_CHINA_CODE: &str = "100000";
 /// NE 中国节点 code（DataV 子树挂接锚点）。
 pub const CHINA_ISO3: &str = "CHN";
@@ -203,7 +194,7 @@ fn polygons_contain(shape: &[Polygon<f64>], point: &Point) -> bool {
 fn min_polygon_distance(shape: &[Polygon<f64>], point: &Point) -> f64 {
     shape
         .iter()
-        .map(|poly| point.euclidean_distance(poly))
+        .map(|poly| Euclidean::distance(point, poly))
         .fold(f64::INFINITY, f64::min)
 }
 
@@ -414,8 +405,9 @@ impl GeoIndex {
         }
     }
 
-    /// 从 geo 目录加载全部就绪的数据包。世界两包必须齐；中国包可选
-    /// （未装则中国照片下钻到 NE 英文省名，属可接受降级）。
+    /// 从 geo 目录加载全部就绪的数据包（无进度回调版；世界两包必须齐，
+    /// 中国包可选——未装则中国照片下钻到 NE 英文省名，属可接受降级）。
+    #[cfg(test)]
     pub fn load(dir: &Path) -> Result<GeoIndex, String> {
         Self::load_reporting(dir, &|_, _| {})
     }
@@ -683,6 +675,9 @@ pub enum GeoPhase {
     NotInstalled,
     Loading,
     Ready,
+    /// 存量打点回填（前端 MapPage 已认 "backfilling" 契约；当前打点在导入时
+    /// 即时完成，此态休眠——保留契约位，触发链路重接时删本标注）。
+    #[allow(dead_code)]
     Backfilling {
         done: u64,
         total: u64,

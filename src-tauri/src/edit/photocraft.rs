@@ -405,6 +405,8 @@ fn pre_resize_long_edge(base: &Document, recipe: &EditRecipe, long_edge: Option<
     Some((f64::from(w.max(h)) * scale).round().max(1.0) as u32)
 }
 
+/// 无进度回调便捷版：lib 内仅测试使用（导出任务走 with_progress）。
+#[cfg(test)]
 pub fn export_native(
     path: &std::path::Path,
     recipe: &EditRecipe,
@@ -426,7 +428,7 @@ pub fn export_native_with_progress(
     progress("decode");
     let source = super::source::open(path)?;
     let mut values = recipe.clone();
-    let mut base = if let Some(raw) = source.raw {
+    let base = if let Some(raw) = source.raw {
         let a = recipe.advanced.clone().unwrap_or_default();
         // RAW 显影(曝光/白平衡)必须全分辨率烘焙(rawler 内部并行,这是地板);
         // 显影之外的一切逐像素算子都在缩放后的小图上跑。

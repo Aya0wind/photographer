@@ -417,6 +417,8 @@ fn nms(faces: Vec<DetectedFace>, iou_threshold: f32) -> Vec<DetectedFace> {
 
 /// Selection-only tiled detection. Overlapping tiles retain small faces at the
 /// detector's native resolution; NMS merges duplicates in source coordinates.
+// 闭眼检测链路已建未接线（等 Culling IPC 接入）；接线后移除标注。
+#[allow(dead_code)]
 pub fn detect_selection_faces(
     manager: &ModelManager,
     img: &RgbImage,

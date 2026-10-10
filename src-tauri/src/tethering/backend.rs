@@ -324,6 +324,7 @@ impl CameraBackendRegistry {
     }
 
     /// Legacy default backend for callers without a camera id.
+    #[allow(dead_code)]
     pub fn primary(&self) -> &std::sync::Arc<dyn CameraBackend> {
         &self.backends[0]
     }

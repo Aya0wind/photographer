@@ -34,6 +34,8 @@ pub(crate) enum AccelerationPreference {
 pub(crate) enum InferenceBackend {
     Cpu,
     DirectMl,
+    /// macOS CoreML EP（macOS 移植线预留；Windows 构建下不可构造）。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     CoreMl,
 }
 
@@ -135,6 +137,8 @@ mod unsupported;
 #[allow(unused_imports)]
 pub(crate) use native::file_registration_id;
 
+// lib 全量消费；测试经 #[path] 单独编译时消费面不全（同上先例）。
+#[allow(unused_imports)]
 pub(crate) use native::{
     capabilities, clipboard_copy_files, configure_background_command, configure_sequential_read,
     crt_putenv, development_library_paths, drive_roots, execution_providers, filesystem_identity,
@@ -145,6 +149,7 @@ pub(crate) use native::{
 };
 
 #[cfg(all(test, windows))]
+#[allow(unused_imports)] // 仅个别测试二进制消费
 pub(crate) use native::{child_pidls, ShellApartment};
 
 /// 保留 Windows 的目录分组规则；该规则仅供 Windows Shell 实现及原有测试使用。

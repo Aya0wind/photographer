@@ -717,7 +717,7 @@ fn avif_decode_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
             )?)
         }
         avif_decode::Image::Gray8(img) => {
-            let buf: Vec<u8> = img.buf().iter().map(|p| p.0).collect();
+            let buf: Vec<u8> = img.buf().iter().map(|p| p.value()).collect();
             image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(
                 img.width() as u32,
                 img.height() as u32,
@@ -758,7 +758,7 @@ fn avif_decode_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
             let buf: Vec<u16> = img
                 .buf()
                 .iter()
-                .flat_map(|p| [p.0, p.0, p.0, u16::MAX])
+                .flat_map(|p| [p.value(), p.value(), p.value(), u16::MAX])
                 .collect();
             image::DynamicImage::ImageRgba16(
                 image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(
@@ -786,6 +786,8 @@ fn develop_raw_resize(src: &Path, size: u16) -> Option<image::RgbImage> {
 /// Selection analysis uses decoded source pixels, never the lossy browsing cache.
 /// The caller bounds concurrent analyses; embedded RAW previews are accepted only
 /// when they contain enough detail, otherwise the RAW is developed.
+// 闭眼检测链路（ai::selection）已建未接线——IPC 接入 Culling 页后移除本标注。
+#[allow(dead_code)]
 pub fn selection_source(src: &Path, size: u16) -> Option<(image::RgbImage, &'static str)> {
     if size == 0 {
         return None;

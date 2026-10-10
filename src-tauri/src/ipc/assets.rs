@@ -293,6 +293,8 @@ pub fn fetch_assets_count(state: &super::AppState, filters: AssetFilters) -> Res
 }
 
 /// 本地时区日期分组（降序；unknown 组沉底）。
+// 无过滤版无 IPC 命令消费（前端恒带筛选走 asset_group_dates）；assets_query_test 直接调用。
+#[allow(dead_code)]
 pub fn fetch_asset_group_dates(state: &super::AppState) -> Result<Vec<DateGroupDto>, String> {
     fetch_asset_group_dates_filtered(state, AssetFilters::default())
 }

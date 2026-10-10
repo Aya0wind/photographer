@@ -156,7 +156,6 @@ pub(crate) struct RunningTask {
     pub kind: String,
     pub name: String,
     pub paused: Arc<AtomicBool>,
-    pub cancelled: Arc<AtomicBool>,
 }
 
 struct CoalescedGuard {
@@ -287,7 +286,6 @@ impl TaskSupervisor {
                     kind: kind.to_string(),
                     name: name.clone(),
                     paused: Arc::clone(&controls.paused),
-                    cancelled: Arc::clone(&controls.cancelled),
                 },
             );
         }

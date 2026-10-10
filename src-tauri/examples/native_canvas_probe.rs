@@ -6,6 +6,8 @@ mod native_canvas {
         pub rect: [i32; 4],
         pub uv: [f32; 4],
         pub image: [f32; 4],
+        // 探针只写不读（presenter 输出对账用）；WIP。
+        #[allow(dead_code)]
         pub overlays:Vec<[i32;5]>,
         pub mapping:[f32;8],
         pub crop_guide:Option<[f32;4]>,

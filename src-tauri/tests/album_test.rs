@@ -565,7 +565,7 @@ fn import_without_album_keeps_behavior_unchanged() {
     let target = tempfile::tempdir().unwrap();
     let _state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
     // 2026-10-09 §一/§三：相册纯逻辑引用——album_id 可选（None = 不挂相册，
-    ///画廊全局视图自然可见）；带 album_id 时契约仍序列化 albumId（resume 依赖）
+    // 画廊全局视图自然可见）；带 album_id 时契约仍序列化 albumId（resume 依赖）
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
     let plan = plan_for(&db, db_dir.path(), target.path());

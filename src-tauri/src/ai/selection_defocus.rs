@@ -9,6 +9,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+// 评估适配器（D-DFFNet 权重无再分发许可，不入下载目录）——保留待重评估。
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Manifest {
@@ -30,6 +32,7 @@ pub fn release() {
 /// Evaluation only. Returns uncalibrated regional evidence, never changes a
 /// production verdict or user rating. RGB, ImageNet normalization, 320 square;
 /// ONNX wrapper outputs sigmoid blur map [1,1,320,320] named `blur_map`.
+#[allow(dead_code)] // 评估适配器（见 Manifest 注释）；重评估接入后移除。
 pub fn evaluate(
     manager: &super::ModelManager,
     img: &image::RgbImage,

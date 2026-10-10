@@ -18,13 +18,6 @@ use events::FileState;
 use import::engine::ImportMode;
 use ipc::{files_by_id, list_dirs, scan_folder, start_import};
 
-/// 与 `\\?\` 前缀无关的 canonical 路径字符串（期望 id 用）。
-fn plain_canonical(path: &Path) -> String {
-    path.to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .to_string()
-}
-
 #[test]
 fn folder_scan_registers_source_then_files_and_move_import_work() {
     let folder = tempfile::tempdir().unwrap();

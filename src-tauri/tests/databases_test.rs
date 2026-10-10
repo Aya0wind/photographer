@@ -70,7 +70,7 @@ fn database_create_activates_first_and_defaults_to_convention_dir() {
     assert_eq!(resolved, expect);
 
     // 无激活数据库时明确报错（新会话/删光后）
-    let mut bare = settings::Settings::default();
+    let bare = settings::Settings::default();
     assert_eq!(
         bare.active_database_dir(&config).unwrap_err(),
         "尚未创建数据库"
@@ -119,7 +119,7 @@ fn database_switch_changes_active_scope() {
     std::fs::create_dir_all(&config).unwrap();
     let state = state_at(&config);
 
-    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let _first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
     let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
 
     // 不存在的 id 拒绝切换
