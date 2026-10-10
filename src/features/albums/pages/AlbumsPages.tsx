@@ -41,7 +41,7 @@ import AlbumDetailPage from "./AlbumDetailPage";
  *   该标签的语义结果视图（/albums/:tag，行为照旧）。卡片样式与手工区统一。
  * - 分区样式参考图库「按年分块」写法（区标题 + 内容块）。
  * - /albums/:tag 参数为纯数字 → 手工相册详情页（AlbumDetailPage）。
- * 标签可见性：设置页画廊 tab 多选（localStorage smartphoto.albums.hiddenTags）。
+ * 标签可见性：设置页画廊 tab 多选（localStorage photographer.albums.hiddenTags）。
  */
 
 /** v1 预置标签（40 个；M4.5 扩到飞牛词表，含原 11 个；后续可由索引统计生成） */
@@ -397,7 +397,7 @@ export function AlbumsIndexPage() {
   const [dirRenameError, setDirRenameError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<AlbumDto | null>(null);
   const [coverPicking, setCoverPicking] = useState<AlbumDto | null>(null);
-  // 导出为文件夹（M6，Photo Hub → LR）：整册导出（subgroup=null）
+  // 导出为文件夹（M6，Photographer → LR）：整册导出（subgroup=null）
   const [exporting, setExporting] = useState<AlbumDto | null>(null);
 
   async function submitRename(): Promise<void> {
@@ -493,12 +493,12 @@ export function AlbumsIndexPage() {
   const [smartExpanded, setSmartExpanded] = useState(true);
   useEffect(() => {
     const refresh = () => setVisibleTags(smartTagsWithPhotos(loadSmartTags()));
-    window.addEventListener("smartphoto:tags-changed", refresh);
+    window.addEventListener("photographer:tags-changed", refresh);
     // 标签语义索引推进时重算（未索引→已索引/空命中的可见性会变）
-    window.addEventListener("smartphoto:tags-indexed", refresh);
+    window.addEventListener("photographer:tags-indexed", refresh);
     return () => {
-      window.removeEventListener("smartphoto:tags-changed", refresh);
-      window.removeEventListener("smartphoto:tags-indexed", refresh);
+      window.removeEventListener("photographer:tags-changed", refresh);
+      window.removeEventListener("photographer:tags-indexed", refresh);
     };
   }, []);
   const tagCoverAssetIds = useAlbumCoverAssetIds(visibleTags);

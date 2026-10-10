@@ -452,16 +452,16 @@ mod driver_tests {
     #[test]
     fn module_paths_remove_extended_windows_prefix() {
         assert_eq!(
-            driver_path_string(Path::new(r"\\?\I:\Photo Hub\gphoto\camlibs")),
-            r"I:\Photo Hub\gphoto\camlibs"
+            driver_path_string(Path::new(r"\\?\I:\Photographer\gphoto\camlibs")),
+            r"I:\Photographer\gphoto\camlibs"
         );
         assert_eq!(
             driver_path_string(Path::new(r"\\?\UNC\server\share\camlibs")),
             r"\\server\share\camlibs"
         );
         assert_eq!(
-            driver_path_string(Path::new(r"I:\Photo Hub\gphoto\camlibs")),
-            r"I:\Photo Hub\gphoto\camlibs"
+            driver_path_string(Path::new(r"I:\Photographer\gphoto\camlibs")),
+            r"I:\Photographer\gphoto\camlibs"
         );
     }
 
@@ -1054,7 +1054,7 @@ impl CameraBackend for GphotoBackend {
                             port.clone()
                         };
                         let incoming = std::env::temp_dir()
-                            .join("PhotoHub-gphoto")
+                            .join("Photographer-gphoto")
                             .join(uuid::Uuid::new_v4().to_string());
                         if let Err(error) = std::fs::create_dir_all(&incoming) {
                             let _ = (s.gp_camera_exit)(camera, ctx);

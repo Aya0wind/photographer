@@ -1,5 +1,5 @@
 [package]
-name = "smart-photo"
+name = "photographer"
 version = "0.1.0-alpha"
 license = "GPL-3.0-or-later"
 description = "A Tauri App"
@@ -12,7 +12,7 @@ rust-version = "1.98"
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary to make the lib name unique and wouldn't conflict with the bin name.
 # This only seems to be an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "smart_photo_lib"
+name = "photographer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

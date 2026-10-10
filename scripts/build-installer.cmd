@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Smart Photo Windows installer build script
+REM  Photographer Windows installer build script
 REM  Output: two NSIS exe variants (both currentUser, no admin):
 REM   <product>_<ver>_x64-setup.exe                  - online: webviewInstallMode=downloadBootstrapper,
 REM                                                   auto-downloads WebView2 during install if missing

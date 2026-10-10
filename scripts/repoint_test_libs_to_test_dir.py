@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-SETTINGS = Path(r"C:\Users\12003\AppData\Roaming\photohub\settings.json")
+SETTINGS = Path(r"C:\Users\12003\AppData\Roaming\photographer.settings.json")
 MAP = {  # (library id 前缀, 旧根, 新根)
     "lib-main": (r"Y:\照片", r"Y:\Test\main"),
     "eba4020c": (r"Y:\照片", r"Y:\Test\test"),

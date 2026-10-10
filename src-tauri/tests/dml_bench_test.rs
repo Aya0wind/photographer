@@ -4,10 +4,10 @@
 //!
 //! 用法（EP 由生产覆盖 env 控制，每次进程一种 EP）：
 //! ```text
-//! SMARTPHOTO_AI_EP=cpu  cargo test --test dml_bench_test -- --ignored --nocapture
-//! SMARTPHOTO_AI_EP=dml  cargo test --test dml_bench_test -- --ignored --nocapture
-//! # 可调：SMARTPHOTO_BENCH_N（默认 64）/ SMARTPHOTO_BENCH_BATCH（默认 16）
-//! #      / SMARTPHOTO_BENCH_WORKERS（默认 1，>1 = 并发 worker 各自组批，
+//! PHOTOGRAPHER_AI_EP=cpu  cargo test --test dml_bench_test -- --ignored --nocapture
+//! PHOTOGRAPHER_AI_EP=dml  cargo test --test dml_bench_test -- --ignored --nocapture
+//! # 可调：PHOTOGRAPHER_BENCH_N（默认 64）/ PHOTOGRAPHER_BENCH_BATCH（默认 16）
+//! #      / PHOTOGRAPHER_BENCH_WORKERS（默认 1，>1 = 并发 worker 各自组批，
 //! #      推理经全局会话互斥串行——评估互斥是否瓶颈）
 //! ```
 //! 数据定策（结论见 ai/mod.rs execution_providers 与 semantic.rs AI_BATCH）：
@@ -35,7 +35,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// 计时区绝不混入缩略图生成/解码原图时间——warmup 全量预生成缓存。
 fn bench_inputs() -> Option<Vec<PathBuf>> {
     let thumbs_dir = PathBuf::from(env_or(
-        "SMARTPHOTO_BENCH_THUMBS",
+        "PHOTOGRAPHER_BENCH_THUMBS",
         r"I:\SmartPhoto\主库\thumbs\256",
     ));
     if !thumbs_dir.is_dir() {
@@ -58,8 +58,8 @@ fn bench_inputs() -> Option<Vec<PathBuf>> {
 
 fn setup_manager() -> Option<ModelManager> {
     let models = PathBuf::from(env_or(
-        "SMARTPHOTO_BENCH_MODELS",
-        r"C:\Users\12003\AppData\Roaming\photohub\models",
+        "PHOTOGRAPHER_BENCH_MODELS",
+        r"C:\Users\12003\AppData\Roaming\photographer\models",
     ));
     let manager = ModelManager::new(
         models.clone(),
@@ -71,7 +71,7 @@ fn setup_manager() -> Option<ModelManager> {
         return None;
     }
     manager.set_ai_params(ai::AiIndexParams {
-        use_gpu: true, // 实际 EP 由 SMARTPHOTO_AI_EP 覆盖决定
+        use_gpu: true, // 实际 EP 由 PHOTOGRAPHER_AI_EP 覆盖决定
         ..ai::AiIndexParams::default()
     });
     Some(manager)
@@ -106,14 +106,14 @@ fn embed_throughput_cpu_vs_dml() {
     // 缓存隔离：tempdir 作 db_dir（thumb_file 的缓存根），不污染真库
     let cache_dir = tempfile::tempdir().unwrap();
     let db_dir = cache_dir.path().to_path_buf();
-    let n_total: usize = env_or("SMARTPHOTO_BENCH_N", "64").parse().unwrap_or(64);
-    let batch: usize = env_or("SMARTPHOTO_BENCH_BATCH", "16").parse().unwrap_or(16);
-    let workers: usize = env_or("SMARTPHOTO_BENCH_WORKERS", "1").parse().unwrap_or(1);
+    let n_total: usize = env_or("PHOTOGRAPHER_BENCH_N", "64").parse().unwrap_or(64);
+    let batch: usize = env_or("PHOTOGRAPHER_BENCH_BATCH", "16").parse().unwrap_or(16);
+    let workers: usize = env_or("PHOTOGRAPHER_BENCH_WORKERS", "1").parse().unwrap_or(1);
     // 输入循环取用（同一文件可重复，模拟真实 256 JPEG 输入）
     let inputs: Vec<PathBuf> = (0..n_total)
         .map(|i| files[i % files.len()].clone())
         .collect();
-    let ep = env_or("SMARTPHOTO_AI_EP", "auto");
+    let ep = env_or("PHOTOGRAPHER_AI_EP", "auto");
     eprintln!(
         "== 基准启动：ep={ep} n={n_total} batch={batch} workers={workers} thumbs={} cores={:?} ==",
         files.len(),
@@ -290,18 +290,18 @@ fn embed_throughput_cpu_vs_dml() {
 ///   复位 + 任务重排（旧 v1 像素坐标数据由此重建为 v2 归一化，幂等）
 /// ② run_face_backfill 全管线计时（认领→取图[缓存档优先]→SCRFD→对齐
 ///   →ArcFace→在线聚类→归一化落库→记账）。
-/// env：SMARTPHOTO_BENCH_LIB（默认 I:\SmartPhoto\主库）、
-/// SMARTPHOTO_BENCH_MODELS、SMARTPHOTO_BENCH_N（默认 0=全部 pending；
+/// env：PHOTOGRAPHER_BENCH_LIB（默认 I:\SmartPhoto\主库）、
+/// PHOTOGRAPHER_BENCH_MODELS、PHOTOGRAPHER_BENCH_N（默认 0=全部 pending；
 /// 大于 0 时只保留按 id 升序的前 N 个资产的任务，其余删行——下次 kick
-/// 自动补种，无损）、SMARTPHOTO_AI_EP（cpu|dml 覆盖）。
+/// 自动补种，无损）、PHOTOGRAPHER_AI_EP（cpu|dml 覆盖）。
 /// 手动：cargo test --test dml_bench_test face_pipeline -- --ignored --nocapture
 #[test]
 #[ignore = "真机验收基准：重建并计时真库人脸索引，手动 --ignored 运行"]
 fn face_pipeline_throughput_real_library() {
-    let lib = PathBuf::from(env_or("SMARTPHOTO_BENCH_LIB", r"I:\SmartPhoto\主库"));
+    let lib = PathBuf::from(env_or("PHOTOGRAPHER_BENCH_LIB", r"I:\SmartPhoto\主库"));
     let models = PathBuf::from(env_or(
-        "SMARTPHOTO_BENCH_MODELS",
-        r"C:\Users\12003\AppData\Roaming\photohub\models",
+        "PHOTOGRAPHER_BENCH_MODELS",
+        r"C:\Users\12003\AppData\Roaming\photographer\models",
     ));
     if !lib.is_dir() {
         eprintln!("skip: 真库不存在 {}", lib.display());
@@ -317,10 +317,10 @@ fn face_pipeline_throughput_real_library() {
         return;
     }
     manager.set_ai_params(ai::AiIndexParams {
-        use_gpu: true, // 实际 EP 由 SMARTPHOTO_AI_EP 覆盖决定
+        use_gpu: true, // 实际 EP 由 PHOTOGRAPHER_AI_EP 覆盖决定
         ..ai::AiIndexParams::default()
     });
-    let n_cap: usize = env_or("SMARTPHOTO_BENCH_N", "0").parse().unwrap_or(0);
+    let n_cap: usize = env_or("PHOTOGRAPHER_BENCH_N", "0").parse().unwrap_or(0);
 
     // ① 重建（幂等；与 index_rebuild(face) 同核：清产物+重排，不 kick UI 侧）
     let db = ipc::open_library_db(&lib).expect("打开真库");
@@ -334,7 +334,7 @@ fn face_pipeline_throughput_real_library() {
         .expect("截断基准任务集");
     }
     let total = db.pending_index_task_count("face").unwrap_or(0);
-    let ep = env_or("SMARTPHOTO_AI_EP", "auto");
+    let ep = env_or("PHOTOGRAPHER_AI_EP", "auto");
     eprintln!(
         "== face 全管线基准：lib={} ep={} pending={total}（重建后，v2 归一化坐标）==",
         lib.display(),

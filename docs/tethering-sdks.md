@@ -19,7 +19,7 @@
 scripts\build-sony-bridge.cmd <RemoteCli 目录路径>
 ```
 
-产物落 `%LOCALAPPDATA%\PhotoHub\sony-sdk\bridge-build\Release\photo-hub-sony.exe`
+产物落 `%LOCALAPPDATA%\Photographer\sony-sdk\bridge-build\Release\photographer-sony.exe`
 （含随构建拷贝的 crsdk 运行时 DLL）。后端每次连接时按路径探测，**应用无需重启**。
 SDK 也可解压到仓库 `vendor/sony-sdk/`（已 gitignore）或任意位置，路径传给脚本即可。
 

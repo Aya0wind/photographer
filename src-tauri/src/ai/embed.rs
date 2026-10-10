@@ -5,7 +5,7 @@
 //! - `ort` 2.0.0-rc.13 + `directml` feature（构建期下载含 DML 的 ms 预编译
 //!   库）。EP 序列见 [`super::build_session`]：`use_gpu=true`（默认）
 //!   → `[DirectML, CPU]`，DML 注册/初始化失败 ort 自动回落 CPU EP；
-//!   `use_gpu=false` → 纯 CPU；env `SMARTPHOTO_AI_EP=dml|cpu` 强制覆盖
+//!   `use_gpu=false` → 纯 CPU；env `PHOTOGRAPHER_AI_EP=dml|cpu` 强制覆盖
 //!   （基准 A/B / 现场诊断）。
 //! - 会话全局唯一、互斥串行推理——ort rc.13 的 `Session::run` 收 `&mut
 //!   self`（Rust 侧独占借用），共享会话的并发 Run 必须串行化。索引吞吐

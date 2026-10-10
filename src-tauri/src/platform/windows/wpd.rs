@@ -532,7 +532,7 @@ pub(crate) mod com {
         // 客户端信息尽力而为：部分设备要求非空客户端名/版本才允许 Open
         // SAFETY: key 为静态常量
         let _ = unsafe {
-            client_info.SetStringValue(&WPD_CLIENT_NAME, windows::core::w!("Smart Photo"))
+            client_info.SetStringValue(&WPD_CLIENT_NAME, windows::core::w!("Photographer"))
         };
         // SAFETY: key 为静态常量
         let _ = unsafe { client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1) };

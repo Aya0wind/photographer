@@ -14,7 +14,7 @@ export default function SplashPage() {
           <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
         </svg>
       </div>
-      <div className="text-sm font-semibold tracking-wide">Photo Hub</div>
+      <div className="text-sm font-semibold tracking-wide">Photographer</div>
       <div className="animate-pulse text-[11px] text-text-muted">{t("splash.loading")}</div>
     </div>
   );

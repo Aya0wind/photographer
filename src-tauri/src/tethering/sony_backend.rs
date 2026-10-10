@@ -48,7 +48,7 @@ struct Connection {
 impl Connection {
     fn spawn() -> Result<Self, TetherError> {
         let incoming = std::env::temp_dir()
-            .join("PhotoHub-tethering")
+            .join("Photographer-tethering")
             .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&incoming).map_err(|e| TetherError::Other(e.to_string()))?;
         let mut child = command()?

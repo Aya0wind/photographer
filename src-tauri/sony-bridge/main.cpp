@@ -1,4 +1,4 @@
-// Photo Hub's original adapter. SDK headers and binaries stay outside the repository.
+// Photographer's original adapter. SDK headers and binaries stay outside the repository.
 #include <windows.h>
 #include <filesystem>
 #include <fstream>

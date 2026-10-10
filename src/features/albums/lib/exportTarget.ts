@@ -10,7 +10,7 @@
 
 import type { PhotoLibrary } from "@/ipc/api";
 
-export const LAST_EXPORT_DIR_KEY = "smartphoto.albums.exportDir";
+export const LAST_EXPORT_DIR_KEY = "photographer.albums.exportDir";
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 

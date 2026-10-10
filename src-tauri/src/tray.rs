@@ -13,13 +13,13 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-    TrayIconBuilder::with_id("smart-photo")
+    TrayIconBuilder::with_id("photographer")
         .icon(
             app.default_window_icon()
                 .expect("default window icon missing")
                 .clone(),
         )
-        .tooltip("Smart Photo")
+        .tooltip("Photographer")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

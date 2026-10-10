@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
  * localStorage 标记（一个库会话生命周期只提示一次）；× 立即关闭。
  */
 
-export const SHORTCUTS_HINT_KEY = "smartphoto.shortcuts.hintSeen";
+export const SHORTCUTS_HINT_KEY = "photographer.shortcuts.hintSeen";
 
 export function loadHintSeen(storage: Pick<Storage, "getItem"> = localStorage): boolean {
   try {

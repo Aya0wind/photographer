@@ -149,7 +149,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: photo-hub-windows-x64-${{ steps.metadata.outputs.version }}
+          name: photographer-windows-x64-${{ steps.metadata.outputs.version }}
           path: installer-output/*
           if-no-files-found: error
           retention-days: ${{ github.ref == 'refs/heads/dev' && 3 || 14 }}

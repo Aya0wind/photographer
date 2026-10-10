@@ -227,7 +227,7 @@ pub fn sidecar_label(xmp_text: &str) -> Option<&'static str> {
 }
 
 /// 读取边车关键字（`dc:subject` 的 `rdf:Bag` 列表，LR 原生形态）——读入
-/// 方向（LR → Photo Hub，§三/§六「关键字从 XMP 边车读入」），与写方向
+/// 方向（LR → Photographer，§三/§六「关键字从 XMP 边车读入」），与写方向
 /// [`write_keywords`] 对称。按结构捕获（同 read_rating_element 手法，按
 /// local name 捕获，命名空间声明可在任意祖先上）：进入 `subject` 子树后
 /// 收集 `li` 元素文本（Bag/Seq/Alt 容器不敏感），实体反转义、trim、去空、
@@ -286,7 +286,7 @@ pub fn sidecar_subject(xmp_text: &str) -> Vec<String> {
 fn minimal_template(rating: i8) -> String {
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Smart Photo">
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Photographer">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:xmp="{XMP_NS}"
@@ -398,7 +398,7 @@ fn replace_span(text: &str, from: usize, to: usize, replacement: &str) -> String
 fn minimal_template_label(label: &str) -> String {
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Smart Photo">
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Photographer">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:xmp="{XMP_NS}"
@@ -422,7 +422,7 @@ pub fn sync_label_to_sidecar(asset_path: &Path, label: Option<&str>) -> Result<(
 }
 
 // ---------------------------------------------------------------------------
-// 关键字（dc:subject）与导出边车（M6 §六，Photo Hub → LR 互操作）
+// 关键字（dc:subject）与导出边车（M6 §六，Photographer → LR 互操作）
 // ---------------------------------------------------------------------------
 
 /// `dc:` 命名空间（关键字容器）。
@@ -456,7 +456,7 @@ fn keywords_block(keywords: &[String]) -> Option<String> {
 fn minimal_template_keywords(keywords: &[String]) -> String {
     format!(
         r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Smart Photo">
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Photographer">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description rdf:about=""
     xmlns:xmp="{XMP_NS}"
@@ -828,7 +828,7 @@ mod tests {
         assert!(text.contains("<rdf:li>keep</rdf:li>"));
     }
 
-    // —— 关键字读入（dc:subject，LR → Photo Hub 方向，§三/§六）——
+    // —— 关键字读入（dc:subject，LR → Photographer 方向，§三/§六）——
 
     /// LR 原生形态：转义反转义、trim/去空、去重（保序首见）；subject 外
     /// 的同级 Bag（crs:Look 等）不串扰。

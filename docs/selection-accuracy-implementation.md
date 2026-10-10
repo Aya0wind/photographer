@@ -44,7 +44,7 @@ D-DFFNet 仓库目前没有查到明确的权重分发许可，因此不加入�
 
 不需要先训练新模型。准备几百张有明确人工标签的真实照片，再运行同批输入的比较：
 
-1. 设置 `SMARTPHOTO_SELECTION_PHOTOS`（照片目录）、`SMARTPHOTO_SELECTION_MODELS`（已下载模型目录）、`SMARTPHOTO_SELECTION_OUTPUT`（新的 JSONL 文件）。
+1. 设置 `PHOTOGRAPHER_SELECTION_PHOTOS`（照片目录）、`PHOTOGRAPHER_SELECTION_MODELS`（已下载模型目录）、`PHOTOGRAPHER_SELECTION_OUTPUT`（新的 JSONL 文件）。
 2. 运行 `cargo test --manifest-path src-tauri/Cargo.toml --test ai_selection_test export_selection_candidate_samples -- --ignored --nocapture`。只读取目录直属照片并写新的评估文件，不修改照片或应用数据库。当前目录导出支持闭眼新旧比较；失焦旧值为全图诊断基线，不能冒充完整旧版有人脸的最小值聚合。新失焦输出保持不确定，真实地图以 `defocusEvidence` 保存。
 3. 标签 CSV 列为 `path,channel,expected,group,split`。eyes 标签 `open/closed`，blur 标签 `sharp/soft`；同一人物/连拍组使用同一 group，同组不能跨 train/val/test。
 4. 运行 `python scripts/evaluate-selection-results.py --labels labels.csv --results results.jsonl`，分别报告误报、漏报、未判定、缺失结果和仅已判定样本的准确率。没有判定的候选不伪造准确率。

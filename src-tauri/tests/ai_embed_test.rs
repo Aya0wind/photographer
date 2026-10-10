@@ -598,14 +598,14 @@ fn real_backfill_chinese_dbdir_diagnosis() {
 
 // ---------------------------------------------------------------------------
 // 真 smoke（#[ignore]）：需先通过设置页/ai_model_download 下载三件套到
-// %APPDATA%\photohub\models\。手动跑：
+// %APPDATA%\photographer\models\。手动跑：
 // cargo test --test ai_embed_test real -- --ignored --nocapture
 // ---------------------------------------------------------------------------
 
 fn models_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var("APPDATA").ok()?;
     let dir = std::path::PathBuf::from(base)
-        .join("photohub")
+        .join("photographer")
         .join("models");
     dir.is_dir().then_some(dir)
 }
@@ -890,7 +890,7 @@ fn semantic_display_calibration_anchors() {
 
 /// env 覆盖（基准/诊断）会改写 dml_intended 真值——被覆盖的进程跳过真值表。
 fn ep_overridden() -> bool {
-    std::env::var("SMARTPHOTO_AI_EP").is_ok()
+    std::env::var("PHOTOGRAPHER_AI_EP").is_ok()
 }
 
 // Both cases mutate the same process-wide poison map; use one shared lock.
@@ -921,7 +921,7 @@ fn cpu_failure_is_not_retried_or_reset() {
 #[test]
 fn dml_poison_isolated_per_model() {
     if ep_overridden() {
-        eprintln!("skip: SMARTPHOTO_AI_EP 已设置，真值表仅在无覆盖时成立");
+        eprintln!("skip: PHOTOGRAPHER_AI_EP 已设置，真值表仅在无覆盖时成立");
         return;
     }
     // 毒化位是进程级全局——与 fallback 用例并发会互相改写彼此的断言
@@ -960,7 +960,7 @@ fn dml_poison_isolated_per_model() {
 #[test]
 fn dml_fallback_poisons_only_failing_model_and_recovers_once() {
     if ep_overridden() {
-        eprintln!("skip: SMARTPHOTO_AI_EP 已设置");
+        eprintln!("skip: PHOTOGRAPHER_AI_EP 已设置");
         return;
     }
     let _guard = AI_EP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

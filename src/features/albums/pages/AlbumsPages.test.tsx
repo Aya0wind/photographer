@@ -342,7 +342,7 @@ describe("智能相册：空条目直接隐藏", () => {
   });
 
   it("新库未建索引（全部未索引）→ 空态文案，不出标签墙", async () => {
-    localStorage.removeItem("smartphoto.albums.tagIndex.v2");
+    localStorage.removeItem("photographer.albums.tagIndex.v2");
     renderRoutes("/albums");
 
     expect(await screen.findByTestId("albums-all-hidden")).toBeInTheDocument();
@@ -443,7 +443,7 @@ function seedTagIndex(hitCounts: Record<string, number>): void {
       hits: Array.from({ length: count }, (_, i) => ({ assetId: i + 1 })),
     };
   }
-  localStorage.setItem("smartphoto.albums.tagIndex.v2", JSON.stringify({ app: scope }));
+  localStorage.setItem("photographer.albums.tagIndex.v2", JSON.stringify({ app: scope }));
 }
 
 /** 默认全量命中（40 标签都可见）；空条目隐藏用例自行覆写/清除。 */

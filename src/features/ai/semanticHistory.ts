@@ -5,7 +5,7 @@
  * 简化项：不走 settingsStore（纯 UI 偏好，localStorage 即可）。
  */
 
-export const SEMANTIC_HISTORY_KEY = "smartphoto.semantic.history";
+export const SEMANTIC_HISTORY_KEY = "photographer.semantic.history";
 export const SEMANTIC_HISTORY_LIMIT = 5;
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;

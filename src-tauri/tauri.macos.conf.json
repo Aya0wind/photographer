@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "com.smartphoto.photohub",
+  "identifier": "com.photographer.app",
   "build": {
     "beforeBuildCommand": "python3 scripts/macos_runtime.py audit src-tauri/resources/gphoto && npm run build"
   },
@@ -8,7 +8,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Photo Hub",
+        "title": "Photographer",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -23,7 +23,7 @@
       },
       {
         "label": "splash",
-        "title": "Photo Hub",
+        "title": "Photographer",
         "url": "splash",
         "width": 460,
         "height": 300,

@@ -268,7 +268,7 @@ pub async fn tethering_start(
         format!("tethering-{id}"),
         tauri::WebviewUrl::App(format!("tethering?session={id}").into()),
     )
-    .title("Photo Hub · Tethered Capture")
+    .title("Photographer · Tethered Capture")
     .inner_size(1100.0, 760.0)
     .min_inner_size(860.0, 600.0);
     #[cfg(target_os = "macos")]

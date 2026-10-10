@@ -6,11 +6,11 @@
 mod common;
 
 #[test]
-#[ignore = "read-only stage timing; set SMARTPHOTO_BENCH_DB_DIR, SMARTPHOTO_BENCH_ASSET and SMARTPHOTO_SELECTION_MODELS"]
+#[ignore = "read-only stage timing; set PHOTOGRAPHER_BENCH_DB_DIR, PHOTOGRAPHER_BENCH_ASSET and PHOTOGRAPHER_SELECTION_MODELS"]
 fn selection_stage_timing() {
     use ai::selection::FaceEyeStateClassifier;
-    let directory = std::path::PathBuf::from(std::env::var("SMARTPHOTO_BENCH_DB_DIR").unwrap());
-    let asset_id = std::env::var("SMARTPHOTO_BENCH_ASSET")
+    let directory = std::path::PathBuf::from(std::env::var("PHOTOGRAPHER_BENCH_DB_DIR").unwrap());
+    let asset_id = std::env::var("PHOTOGRAPHER_BENCH_ASSET")
         .unwrap()
         .parse::<i64>()
         .unwrap();
@@ -21,7 +21,7 @@ fn selection_stage_timing() {
         )
         .unwrap(),
     );
-    let models = std::path::PathBuf::from(std::env::var("SMARTPHOTO_SELECTION_MODELS").unwrap());
+    let models = std::path::PathBuf::from(std::env::var("PHOTOGRAPHER_SELECTION_MODELS").unwrap());
     let bus = events::EventBus::new();
     let manager = ai::ModelManager::new(models, bus.clone(), tasks::TaskSupervisor::new(bus));
     manager.set_ai_params(ai::AiIndexParams {
@@ -232,13 +232,13 @@ fn export_selection_candidate_samples() {
     use ai::selection::FaceEyeStateClassifier;
     use std::io::Write;
     let input = std::path::PathBuf::from(
-        std::env::var("SMARTPHOTO_SELECTION_PHOTOS").expect("photo directory"),
+        std::env::var("PHOTOGRAPHER_SELECTION_PHOTOS").expect("photo directory"),
     );
     let models = std::path::PathBuf::from(
-        std::env::var("SMARTPHOTO_SELECTION_MODELS").expect("global models directory"),
+        std::env::var("PHOTOGRAPHER_SELECTION_MODELS").expect("global models directory"),
     );
     let output = std::path::PathBuf::from(
-        std::env::var("SMARTPHOTO_SELECTION_OUTPUT").expect("new JSONL output file"),
+        std::env::var("PHOTOGRAPHER_SELECTION_OUTPUT").expect("new JSONL output file"),
     );
     let bus = events::EventBus::new();
     let manager = ai::ModelManager::new(models, bus.clone(), tasks::TaskSupervisor::new(bus));
@@ -314,9 +314,9 @@ fn export_selection_candidate_samples() {
 }
 
 #[test]
-#[ignore = "requires downloaded pinned ONNX; set SMARTPHOTO_EYE_ONNX"]
+#[ignore = "requires downloaded pinned ONNX; set PHOTOGRAPHER_EYE_ONNX"]
 fn eye_onnx_contract_smoke() {
-    let path = std::env::var("SMARTPHOTO_EYE_ONNX").expect("set SMARTPHOTO_EYE_ONNX");
+    let path = std::env::var("PHOTOGRAPHER_EYE_ONNX").expect("set PHOTOGRAPHER_EYE_ONNX");
     let dir = tempfile::tempdir().unwrap();
     let bus = events::EventBus::new();
     let manager = ai::ModelManager::new(
@@ -336,9 +336,9 @@ fn eye_onnx_contract_smoke() {
 }
 
 #[test]
-#[ignore = "adapter contract test; set SMARTPHOTO_DEFOCUS_TEST_MODELS to generated test model directory"]
+#[ignore = "adapter contract test; set PHOTOGRAPHER_DEFOCUS_TEST_MODELS to generated test model directory"]
 fn defocus_onnx_contract_smoke() {
-    let root = std::path::PathBuf::from(std::env::var("SMARTPHOTO_DEFOCUS_TEST_MODELS").unwrap());
+    let root = std::path::PathBuf::from(std::env::var("PHOTOGRAPHER_DEFOCUS_TEST_MODELS").unwrap());
     let bus = events::EventBus::new();
     let manager = ai::ModelManager::new(root, bus.clone(), tasks::TaskSupervisor::new(bus));
     manager.set_ai_params(ai::AiIndexParams {
@@ -1022,33 +1022,33 @@ fn catalog_selection_entry_is_pinned_facemesh() {
 // 真机标定 + 验收（方法同语义阈值轮 fp16_semantic_calibration_and_throughput）
 // ---------------------------------------------------------------------------
 //
-// - 模型根 = 应用真实 models 目录（%APPDATA%\photohub\models，
-//   SMARTPHOTO_EYES_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
-//   （SMARTPHOTO_EYES_LIBRARY 可覆盖）。
+// - 模型根 = 应用真实 models 目录（%APPDATA%\photographer\models，
+//   PHOTOGRAPHER_EYES_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
+//   （PHOTOGRAPHER_EYES_LIBRARY 可覆盖）。
 // - 标定（默认，只读不写库）：全库逐张 SCRFD 检测 → facemesh EAR →
 //   双眼 min EAR 分布直方图 + 最低/最高各 8 张路径（人工肉眼核验睁/闭
 //   真值）+ 吞吐。工作点取「睁眼主体带下沿（maybe）/闭眼长尾上沿
 //   （closed）」分隔带，写回 settings 默认值 + selection.rs 快照初值。
-// - 全量落库（SMARTPHOTO_EYES_APPLY=1）：走生产入口 run_eyes_backfill
+// - 全量落库（PHOTOGRAPHER_EYES_APPLY=1）：走生产入口 run_eyes_backfill
 //   消费真库 eyes 任务账，closed/maybe/unknown 分布落 ai_analysis，
 //   供人物页/UI 抽查。
 //
 // 跑法：
 //   cargo test --test ai_selection_test eyes_ear_calibration -- --ignored --nocapture
-//   SMARTPHOTO_EYES_APPLY=1 cargo test --test ai_selection_test eyes_ear_calibration -- --ignored --nocapture
+//   PHOTOGRAPHER_EYES_APPLY=1 cargo test --test ai_selection_test eyes_ear_calibration -- --ignored --nocapture
 #[test]
 #[ignore = "真机标定：需 facemesh + scrfd 已下载到应用 models 目录 + 真实主库"]
 fn eyes_ear_calibration_and_throughput() {
     use std::time::Instant;
 
-    let models = std::env::var("SMARTPHOTO_EYES_MODELS")
+    let models = std::env::var("PHOTOGRAPHER_EYES_MODELS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("APPDATA")
-                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photohub\models"))
+                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photographer\models"))
                 .expect("APPDATA")
         });
-    let db_dir = std::env::var("SMARTPHOTO_EYES_LIBRARY")
+    let db_dir = std::env::var("PHOTOGRAPHER_EYES_LIBRARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(r"I:\SmartPhoto\主库"));
     for id in ["facemesh", "scrfd"] {
@@ -1064,7 +1064,7 @@ fn eyes_ear_calibration_and_throughput() {
         db_dir.display()
     );
 
-    let use_gpu = !matches!(std::env::var("SMARTPHOTO_AI_EP").as_deref(), Ok("cpu"));
+    let use_gpu = !matches!(std::env::var("PHOTOGRAPHER_AI_EP").as_deref(), Ok("cpu"));
     let bus = events::EventBus::new();
     let supervisor = tasks::TaskSupervisor::new(bus.clone());
     let manager = ai::ModelManager::new(models, bus, supervisor);
@@ -1182,8 +1182,8 @@ fn eyes_ear_calibration_and_throughput() {
         eprintln!("  {v:.3}  asset={id}  {}", p);
     }
     eprintln!("工作点建议：闭眼长尾上沿 = closed 阈；睁眼主体带下沿 = maybe 阈");
-    // 逐资产 EAR dump（分隔带取样核验用；SMARTPHOTO_EYES_DUMP=1 开启）
-    if std::env::var("SMARTPHOTO_EYES_DUMP").as_deref() == Ok("1") {
+    // 逐资产 EAR dump（分隔带取样核验用；PHOTOGRAPHER_EYES_DUMP=1 开启）
+    if std::env::var("PHOTOGRAPHER_EYES_DUMP").as_deref() == Ok("1") {
         let tsv = std::env::temp_dir().join("smartphoto_ears.tsv");
         let mut body = String::new();
         for (id, path, ear) in &results {
@@ -1197,15 +1197,15 @@ fn eyes_ear_calibration_and_throughput() {
     }
 
     // —— 全量落库（生产入口，写 ai_analysis + 消费 eyes 任务账）——
-    if std::env::var("SMARTPHOTO_EYES_APPLY").as_deref() == Ok("1") {
+    if std::env::var("PHOTOGRAPHER_EYES_APPLY").as_deref() == Ok("1") {
         let bus = events::EventBus::new();
         let supervisor = tasks::TaskSupervisor::new(bus.clone());
         let manager = ai::ModelManager::new(
-            std::env::var("SMARTPHOTO_EYES_MODELS")
+            std::env::var("PHOTOGRAPHER_EYES_MODELS")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
                     std::env::var("APPDATA")
-                        .map(|a| std::path::PathBuf::from(a).join(r"photohub\models"))
+                        .map(|a| std::path::PathBuf::from(a).join(r"photographer\models"))
                         .expect("APPDATA")
                 }),
             bus.clone(),

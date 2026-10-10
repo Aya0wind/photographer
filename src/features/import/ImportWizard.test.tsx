@@ -432,7 +432,7 @@ describe("选择文件夹与最近使用", () => {
     await user.click(await screen.findByTestId("wizard-choose-folder"));
     expect(useImportStore.getState().recentSources[0]?.id).toBe("FOLDER:D:\\老照片");
     const stored = JSON.parse(
-      localStorage.getItem("smartphoto.import.recentSources") ?? "[]",
+      localStorage.getItem("photographer.import.recentSources") ?? "[]",
     ) as Array<{ id: string }>;
     expect(stored[0]?.id).toBe("FOLDER:D:\\老照片");
 

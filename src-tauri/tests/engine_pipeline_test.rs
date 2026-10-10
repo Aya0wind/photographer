@@ -134,7 +134,7 @@ fn no_part_residue_after_success() {
 
     run_engine(src.path(), db_dir.path(), target.path(), |_| {});
 
-    assert!(!target.path().join(".smartphoto-part").exists());
+    assert!(!target.path().join(".photographer-part").exists());
     assert!(find_part_files(target.path()).is_empty());
 }
 
@@ -144,7 +144,7 @@ fn parallel_import_reuses_existing_staging_directory() {
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     build_many(src.path(), 32);
-    fs::create_dir_all(target.path().join(".smartphoto-part")).unwrap();
+    fs::create_dir_all(target.path().join(".photographer-part")).unwrap();
     let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |plan| {
         plan.streams = 4;
     });
@@ -160,7 +160,7 @@ fn staging_path_occupied_by_file_is_reported_without_overwriting_it() {
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     build_source(src.path());
-    let blocker = target.path().join(".smartphoto-part");
+    let blocker = target.path().join(".photographer-part");
     fs::write(&blocker, b"keep me").unwrap();
     let (_, stats) = run_engine(src.path(), db_dir.path(), target.path(), |_| {});
     assert_eq!(stats.done_files, 0);

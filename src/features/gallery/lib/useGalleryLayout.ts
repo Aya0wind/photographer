@@ -5,13 +5,13 @@ import type { GridLayout } from "@/features/gallery/components/AssetGrid";
 /**
  * 画廊布局模式（四档循环）：square 方格 / tiles 瓦片 / justify 对齐行 / masonry 瀑布流。
  * union 归 AssetGrid 引擎侧拥有（LayoutSwitch 只管循环序与持久化，不渲染布局本身）。
- * localStorage `smartphoto.gallery.layout` 全局记忆；非法/缺失回落 justify——
+ * localStorage `photographer.gallery.layout` 全局记忆；非法/缺失回落 justify——
  * justify 是引入本开关前画廊的固定布局，老用户升级后视觉不变。
  */
 
 export type GalleryLayout = GridLayout;
 
-export const GALLERY_LAYOUT_KEY = "smartphoto.gallery.layout";
+export const GALLERY_LAYOUT_KEY = "photographer.gallery.layout";
 
 /** 四档循环序（LayoutSwitch 点击按此推进；数组序即切换序） */
 export const GALLERY_LAYOUT_ORDER: readonly GalleryLayout[] = [

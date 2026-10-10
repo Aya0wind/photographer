@@ -124,7 +124,7 @@ fn resume_after_interruption_redoes_pending_only() {
     assert!(partial.done_files < 12);
 
     // 模拟崩溃残留：暂存目录里塞一个孤儿 .part
-    let part_dir = target.path().join(".smartphoto-part");
+    let part_dir = target.path().join(".photographer-part");
     fs::create_dir_all(&part_dir).unwrap();
     fs::write(part_dir.join("999.part"), b"half-written").unwrap();
 

@@ -196,7 +196,7 @@ fn open_device(pnp_id: &str) -> windows::core::Result<IPortableDevice> {
     }?;
     // SAFETY: key 为静态常量；部分设备要求非空客户端信息才允许 Open
     unsafe {
-        client_info.SetStringValue(&WPD_CLIENT_NAME, windows::core::w!("Photo Hub Probe"))?;
+        client_info.SetStringValue(&WPD_CLIENT_NAME, windows::core::w!("Photographer Probe"))?;
         client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1)?;
     }
     // SAFETY: CLSID 为静态常量；无外部聚合

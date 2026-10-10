@@ -18,7 +18,7 @@ class NotarizationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.dmg = self.root / "Photo Hub 1.2.3.dmg"
+        self.dmg = self.root / "Photographer 1.2.3.dmg"
         self.dmg.write_bytes(b"test artifact")
         self.evidence = self.root / "evidence"
         self.env = {"APPLE_ID": "test@example.invalid",

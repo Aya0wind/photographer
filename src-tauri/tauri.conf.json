@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Photo Hub",
+  "productName": "Photographer",
   "version": "0.1.0-alpha",
-  "identifier": "photohub",
+  "identifier": "photographer",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:2420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Photo Hub",
+        "title": "Photographer",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -24,7 +24,7 @@
       },
       {
         "label": "splash",
-        "title": "Photo Hub",
+        "title": "Photographer",
         "url": "splash",
         "width": 460,
         "height": 300,

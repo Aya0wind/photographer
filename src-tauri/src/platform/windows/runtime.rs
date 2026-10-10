@@ -58,12 +58,12 @@ pub(crate) fn sony_helper_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("sony/photo-hub-sony.exe"));
+            candidates.push(dir.join("sony/photographer-sony.exe"));
         }
     }
     if let Some(root) = std::env::var_os("LOCALAPPDATA") {
         candidates.push(
-            PathBuf::from(root).join("PhotoHub/sony-sdk/bridge-build/Release/photo-hub-sony.exe"),
+            PathBuf::from(root).join("Photographer/sony-sdk/bridge-build/Release/photographer-sony.exe"),
         );
     }
     candidates

@@ -190,7 +190,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
 
   it("品牌区让位顶部标题栏：侧栏不再展示应用标识", () => {
     renderSidebar("/gallery");
-    expect(screen.queryByText("Photo Hub")).not.toBeInTheDocument();
+    expect(screen.queryByText("Photographer")).not.toBeInTheDocument();
   });
 
   // --- 人物入口徽标（保留） ----------------------------------------------------------

@@ -2,7 +2,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-APP_PATH="${1:-src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Photo Hub.app}"
+APP_PATH="${1:-src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Photographer.app}"
 if [[ $# -ge 2 ]]; then
   DMG_PATH="$2"
 else
@@ -16,7 +16,7 @@ else
   DMG_PATH="$(find "$DMG_DIR" -maxdepth 1 -type f -name '*.dmg' -print)"
 fi
 
-BIN_PATH="$APP_PATH/Contents/MacOS/smart-photo"
+BIN_PATH="$APP_PATH/Contents/MacOS/photographer"
 GPHOTO_ROOT="$APP_PATH/Contents/Resources/gphoto"
 
 [[ -d "$APP_PATH" ]] || { echo "app 不存在: $APP_PATH" >&2; exit 1; }

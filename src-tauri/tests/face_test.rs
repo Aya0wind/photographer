@@ -877,14 +877,14 @@ fn two_stage_backfill_fake_embeddings_order_and_panic_recovery() {
 
 // ---------------------------------------------------------------------------
 // 真 smoke（#[ignore]）：需先在设置页/ai_model_download 下载 scrfd + arcface
-// 到 %APPDATA%\photohub\models\。手动跑：
+// 到 %APPDATA%\photographer\models\。手动跑：
 // cargo test --test face_test real -- --ignored --nocapture
 // ---------------------------------------------------------------------------
 
 fn models_dir() -> Option<std::path::PathBuf> {
     std::env::var("APPDATA")
         .ok()
-        .map(|base| Path::new(&base).join("photohub").join("models"))
+        .map(|base| Path::new(&base).join("photographer").join("models"))
         .filter(|dir| dir.is_dir())
 }
 

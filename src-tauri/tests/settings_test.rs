@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use smart_photo_lib::settings::{
+use photographer_lib::settings::{
     normalize_database_path, normalize_library_path, validate_ai_settings,
     validate_database_dir_overlap, AiSettings, DatabaseEntry, DuplicatePolicy, ImportSettings,
     IndexSchedule, Settings, SettingsError, SettingsManager, SystemSettings, SCHEMA_VERSION,

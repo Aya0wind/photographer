@@ -179,7 +179,7 @@ export async function assetAlbums(assetId: number): Promise<AlbumDto[]> {
   }
 }
 
-// --- 相册导出为文件夹（M6，Photo Hub → LR 互操作） ------------------------------------
+// --- 相册导出为文件夹（M6，Photographer → LR 互操作） ------------------------------------
 // 后端 P0 骨架已注册命令（album_export_run 返回未实现错误），M6 填实；
 // 前端线按本封装开发导出对话框（默认建议库外路径，记住上次位置）。
 

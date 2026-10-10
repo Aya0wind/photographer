@@ -176,7 +176,7 @@ export default function TitleBar({
       {/* 应用标识（pointer-events-none：点击落到拖拽层） */}
       <div className="pointer-events-none relative flex items-center gap-2.5 pl-4">
         <span className="h-2.5 w-2.5 rounded-full bg-accent" aria-hidden="true" />
-        <span className="text-[13px] font-semibold tracking-wide text-text-primary">Photo Hub</span>
+        <span className="text-[13px] font-semibold tracking-wide text-text-primary">Photographer</span>
       </div>
 
       {/* 弹性空区：透传拖拽 */}

@@ -59,7 +59,7 @@ fn runtime_vectors_path(db_dir: &Path) -> Result<PathBuf, String> {
     }
     let mut hasher = DefaultHasher::new();
     pool_key(db_dir).hash(&mut hasher);
-    let runtime_dir = std::env::temp_dir().join("smart-photo-vectors");
+    let runtime_dir = std::env::temp_dir().join("photographer-vectors");
     std::fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
     Ok(runtime_dir.join(format!("{:016x}.usearch", hasher.finish())))
 }

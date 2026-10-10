@@ -842,16 +842,16 @@ describe("AI tab：索引参数与重建", () => {
     expect(screen.getByTestId("ai-schedule")).toBeInTheDocument();
     expect(screen.getByLabelText("GPU 加速")).toBeEnabled();
     // 开关状态持久化 localStorage
-    expect(localStorage.getItem("smartphoto.settings.ai.advanced")).toBe("1");
+    expect(localStorage.getItem("photographer.settings.ai.advanced")).toBe("1");
 
     // 取消勾选即收起
     await user.click(screen.getByTestId("ai-advanced-toggle"));
     expect(screen.queryByTestId("ai-advanced-params")).not.toBeInTheDocument();
-    expect(localStorage.getItem("smartphoto.settings.ai.advanced")).toBe("0");
+    expect(localStorage.getItem("photographer.settings.ai.advanced")).toBe("0");
   });
 
   it("「开发人员配置」开关跨会话记忆：localStorage 预置 1 → 进 tab 直接展开", async () => {
-    localStorage.setItem("smartphoto.settings.ai.advanced", "1");
+    localStorage.setItem("photographer.settings.ai.advanced", "1");
     const user = userEvent.setup();
     renderSettingsPage();
     await switchTab(user, "ai");

@@ -863,7 +863,7 @@ function IndexStatusSection() {
 // --- 高级调参折叠分组（④） -------------------------------------------------------------
 
 /** 「开发人员配置」开关持久化 key（localStorage，与智能相册标签同款简化存储） */
-const AI_ADVANCED_KEY = "smartphoto.settings.ai.advanced";
+const AI_ADVANCED_KEY = "photographer.settings.ai.advanced";
 
 function loadAiAdvanced(): boolean {
   try {

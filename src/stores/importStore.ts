@@ -101,7 +101,7 @@ export interface RecentSource {
 }
 
 export const RECENT_SOURCES_MAX = 5;
-const RECENT_SOURCES_KEY = "smartphoto.import.recentSources";
+const RECENT_SOURCES_KEY = "photographer.import.recentSources";
 
 /** importFileCompleted 的 state 字段中表示失败的取值 */
 const FAILURE_STATES = new Set(["failed", "error"]);

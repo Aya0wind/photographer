@@ -47,7 +47,7 @@ fn main() {
                 .skip_taskbar(true)
                 .build()?;
             let window = tauri::WindowBuilder::new(app, "native-canvas-probe")
-                .title("Photo Hub GPU validation")
+                .title("Photographer GPU validation")
                 .inner_size(640.0, 400.0)
                 .visible(false)
                 .skip_taskbar(true)

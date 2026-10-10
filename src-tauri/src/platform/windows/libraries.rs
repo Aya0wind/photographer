@@ -67,7 +67,7 @@ pub(crate) fn development_library_paths() -> Vec<PathBuf> {
     if let Some(root) = std::env::var_os("LOCALAPPDATA") {
         out.push(
             PathBuf::from(root)
-                .join("PhotoHub")
+                .join("Photographer")
                 .join("gphoto")
                 .join(gphoto_library_name()),
         );

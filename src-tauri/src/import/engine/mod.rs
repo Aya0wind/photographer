@@ -63,7 +63,7 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 /// 暂停时工作线程的轮询间隔。
 const PAUSE_POLL: Duration = Duration::from_millis(10);
 /// `.part` 集中暂存目录名（各目标根下，点前缀）。
-const PART_DIR: &str = ".smartphoto-part";
+const PART_DIR: &str = ".photographer-part";
 
 /// 导入模式（M2“保留原文件”开关，spec §5.11）：
 /// copy=复制（默认，源不动）；move=移动（校验入册后删源，删源失败仅告警）。
@@ -1687,7 +1687,7 @@ fn resolve_library_root(db: &Db, plan: &ImportPlan) -> Result<PathBuf, EngineErr
 }
 
 /// reference 登记时读原文件旁的 XMP 边车（§三「星级/颜色/关键字从 XMP
-/// 边车读入」，LR → Photo Hub 方向）：星级/颜色由调用方进 assets 快列，
+/// 边车读入」，LR → Photographer 方向）：星级/颜色由调用方进 assets 快列，
 /// 关键字落 asset_metadata。边车不存在/损坏 → 空值。
 fn read_sidecar_tags(body: &Path) -> (i64, Option<String>, Vec<String>) {
     let sidecar = crate::metadata::xmp::sidecar_path(body);

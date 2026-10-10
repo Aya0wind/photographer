@@ -366,7 +366,7 @@ pub enum AppEvent {
         asset_ids: Vec<i64>,
     },
 
-    // 相册导出为文件夹（M6，Photo Hub → LR 互操作；命令骨架见 ipc/album_export.rs）
+    // 相册导出为文件夹（M6，Photographer → LR 互操作；命令骨架见 ipc/album_export.rs）
     /// 导出任务进度：done=已导出资产数，total=相册内待导出数。
     AlbumExportProgress {
         task_id: i64,

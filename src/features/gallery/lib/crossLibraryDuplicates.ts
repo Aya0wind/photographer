@@ -22,7 +22,7 @@ import type { AssetDto, DuplicateGroupDto, PhotoLibrary } from "@/ipc/api";
  */
 
 /** localStorage 键：隐藏跨库重复开关（默认关，计划定案） */
-export const HIDE_CROSS_LIBRARY_DUPLICATES_KEY = "smartphoto.gallery.hideCrossLibraryDuplicates";
+export const HIDE_CROSS_LIBRARY_DUPLICATES_KEY = "photographer.gallery.hideCrossLibraryDuplicates";
 
 export function loadHideCrossLibraryDuplicates(): boolean {
   try {

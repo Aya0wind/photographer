@@ -58,7 +58,7 @@ mod win {
         static BUS: RefCell<Option<EventBus>> = const { RefCell::new(None) };
     }
 
-    const CLASS_NAME: &str = "SmartPhotoHotplugWnd";
+    const CLASS_NAME: &str = "PhotographerHotplugWnd";
 
     pub fn spawn_hotplug_thread(bus: EventBus) -> std::io::Result<HotplugHandle> {
         let control = Arc::new(Control {
@@ -143,7 +143,7 @@ mod win {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 PCWSTR(class_name.as_ptr()),
-                w!("smart-photo-hotplug"),
+                w!("photographer-hotplug"),
                 WINDOW_STYLE(0),
                 0,
                 0,

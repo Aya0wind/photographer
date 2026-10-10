@@ -542,18 +542,18 @@ describe("画廊工具条：居中与尺寸", () => {
     await user.click(screen.getByTestId("gallery-tile-size"));
     expect(screen.getAllByTestId("gallery-tile")[0].style.height).toBe("160px");
     expect(screen.getAllByTestId("gallery-tile")[0].style.width).toBe("213px");
-    expect(localStorage.getItem("smartphoto.gallery.tileSize")).toBe("small");
+    expect(localStorage.getItem("photographer.gallery.tileSize")).toBe("small");
     // 历史三档的 large 已删：切换器只有两档
     expect(screen.queryByTestId("gallery-tile-size-large")).not.toBeInTheDocument();
   });
 
   it("旧存值 large 归并到大档（不因历史值崩）", () => {
-    localStorage.setItem("smartphoto.gallery.tileSize", "large");
+    localStorage.setItem("photographer.gallery.tileSize", "large");
     expect(loadGalleryTileSize()).toBe("medium");
   });
 
   it("localStorage 预设小档 → 首渲染 160px 行高（画廊/搜索跨页共享）", async () => {
-    localStorage.setItem("smartphoto.gallery.tileSize", "small");
+    localStorage.setItem("photographer.gallery.tileSize", "small");
     assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
     renderGallery();
 

@@ -3,7 +3,7 @@
  * 记录「已隐藏标签」数组；智能相册页过滤后渲染。
  */
 
-export const HIDDEN_ALBUM_TAGS_KEY = "smartphoto.albums.hiddenTags";
+export const HIDDEN_ALBUM_TAGS_KEY = "photographer.albums.hiddenTags";
 
 type StorageLike = Pick<Storage, "getItem" | "setItem">;
 

@@ -15,8 +15,8 @@ export function smartTagLabel(tag: string): string {
   return index < 0 ? tag : i18n.t(`albums.smartTag.${index}`, { defaultValue: tag });
 }
 
-const TAGS_KEY = "smartphoto.albums.tags.v2";
-const INDEX_KEY = "smartphoto.albums.tagIndex.v2";
+const TAGS_KEY = "photographer.albums.tags.v2";
+const INDEX_KEY = "photographer.albums.tagIndex.v2";
 
 type TagRecord = { cover: number | null; hits?: SemanticHit[] };
 type TagIndex = Record<string, TagRecord>;
@@ -50,7 +50,7 @@ export function loadSmartTags(): string[] {
 
 export function saveSmartTags(tags: string[]): void {
   localStorage.setItem(TAGS_KEY, JSON.stringify(tags));
-  window.dispatchEvent(new Event("smartphoto:tags-changed"));
+  window.dispatchEvent(new Event("photographer:tags-changed"));
 }
 
 export function indexedTagCover(tag: string): number | null | undefined {
@@ -92,7 +92,7 @@ export async function indexNewTags(tags: readonly string[], onProgress?: (done: 
     await indexTag(tag);
     onProgress?.(++done, pending.length);
   }
-  window.dispatchEvent(new Event("smartphoto:tags-indexed"));
+  window.dispatchEvent(new Event("photographer:tags-indexed"));
 }
 
 /** 全量重建（force）：所有标签重跑语义查询并覆盖缓存。
@@ -107,5 +107,5 @@ export async function reindexAllTags(
     await indexTag(tag);
     onProgress?.(++done, tags.length);
   }
-  window.dispatchEvent(new Event("smartphoto:tags-indexed"));
+  window.dispatchEvent(new Event("photographer:tags-indexed"));
 }

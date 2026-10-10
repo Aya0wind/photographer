@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""模型下载边界联调服务器（配合 SMARTPHOTO_DL_TEST_BASE 重写钩子，仅 debug 构建）。
+"""模型下载边界联调服务器（配合 PHOTOGRAPHER_DL_TEST_BASE 重写钩子，仅 debug 构建）。
 
 用法:
   python scripts/test_dl_server.py --root <模型目录> --port 8787

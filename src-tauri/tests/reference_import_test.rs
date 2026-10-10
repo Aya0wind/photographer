@@ -138,7 +138,7 @@ fn reference_reimport_after_folder_rename_rebinds_and_reads_keywords() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    // 关键字已随登记落 asset_metadata（读入方向，LR → Photo Hub）
+    // 关键字已随登记落 asset_metadata（读入方向，LR → Photographer）
     let keywords = asset_keywords(&db, id);
     assert_eq!(keywords, vec!["旅行".to_string(), "wedding".to_string()]);
 

@@ -231,7 +231,7 @@ pub struct ModelStatusDto {
 
 /// 内置模型清单（OnceLock 单次解析）。
 ///
-/// debug 构建支持 `SMARTPHOTO_DL_TEST_BASE`（如 `http://127.0.0.1:8787`）：
+/// debug 构建支持 `PHOTOGRAPHER_DL_TEST_BASE`（如 `http://127.0.0.1:8787`）：
 /// 全部 url/mirrorUrl 重写到本地测试服务器（保留文件名），配合
 /// `scripts/test_dl_server.py` 确定性复现 下载失败/断流续传/SHA 不匹配。
 /// release 构建无此行为；正常开发不带该变量也不受影响。
@@ -242,7 +242,7 @@ pub fn catalog() -> &'static [ModelEntry] {
             serde_json::from_str(CATALOG_JSON).expect("内置清单必须合法");
         #[cfg(debug_assertions)]
         {
-            if let Ok(base) = std::env::var("SMARTPHOTO_DL_TEST_BASE") {
+            if let Ok(base) = std::env::var("PHOTOGRAPHER_DL_TEST_BASE") {
                 let base = base.trim_end_matches('/');
                 // 按 id 重写（URL 原名可能撞名：scrfd 与 scrfd-10g 的原 URL
                 // 文件名同为 model.onnx）；测试服务器按 <id> / <id>.onnx /
@@ -378,7 +378,7 @@ fn poison_backend(model: &str, backend: crate::platform::InferenceBackend) {
 
 fn inference_plan(use_gpu: bool, model: &str) -> crate::platform::InferencePlan {
     use crate::platform::{AccelerationPreference, InferenceBackend, InferencePlan};
-    let preference = match std::env::var("SMARTPHOTO_AI_EP").as_deref() {
+    let preference = match std::env::var("PHOTOGRAPHER_AI_EP").as_deref() {
         Ok("cpu") => AccelerationPreference::Cpu,
         Ok("dml") => AccelerationPreference::DirectMl,
         Ok("coreml") => AccelerationPreference::CoreMl,
@@ -475,7 +475,7 @@ pub fn run_with_dml_fallback_for_test<T>(
 /// 图优化档位：**DML 会话自动 Level1**——Level3 的 LayerNormFusion 在
 /// DML 上执行即炸（E_INVALIDARG，真机 2026-09-21），Level1 绕开融合后
 /// SigLIP2 vision 可全跑 DML；CPU 会话保持 Level3（SCRFD 实测 Level1
-/// 比 Level3 慢 ~36%）。env `SMARTPHOTO_AI_OPT=level1|disable` 可强制
+/// 比 Level3 慢 ~36%）。env `PHOTOGRAPHER_AI_OPT=level1|disable` 可强制
 /// 覆盖（诊断用）。
 pub(crate) fn build_session(
     path: &std::path::Path,
@@ -520,7 +520,7 @@ fn build_session_with_plan(
     plan: crate::platform::InferencePlan,
 ) -> Result<ort::session::Session, String> {
     use ort::session::builder::GraphOptimizationLevel;
-    let opt_level = match std::env::var("SMARTPHOTO_AI_OPT").as_deref() {
+    let opt_level = match std::env::var("PHOTOGRAPHER_AI_OPT").as_deref() {
         Ok("level1") => GraphOptimizationLevel::Level1,
         Ok("disable") => GraphOptimizationLevel::Disable,
         _ => plan.optimization,
@@ -637,7 +637,7 @@ mod initialization_fallback_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn coreml_runtime_failure_falls_back_once_for_that_model() {
-        if std::env::var_os("SMARTPHOTO_AI_EP").is_some() {
+        if std::env::var_os("PHOTOGRAPHER_AI_EP").is_some() {
             return;
         }
         let model = "test-coreml-runtime-isolation";

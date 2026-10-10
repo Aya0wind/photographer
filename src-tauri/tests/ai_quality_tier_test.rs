@@ -554,9 +554,9 @@ fn model_dtos_serialize_tier_field() {
 // ---------------------------------------------------------------------------
 
 /// fp16 双塔真机标定 + 吞吐（方法同 2026-09-21 int8 标定轮）：
-/// - 模型根 = 应用真实 models 目录（%APPDATA%\photohub\models，
-///   SMARTPHOTO_FP16_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
-///   （SMARTPHOTO_FP16_LIBRARY 可覆盖）。
+/// - 模型根 = 应用真实 models 目录（%APPDATA%\photographer\models，
+///   PHOTOGRAPHER_FP16_MODELS 可覆盖）；库 = 真实主库 `I:\SmartPhoto\主库`
+///   （PHOTOGRAPHER_FP16_LIBRARY 可覆盖）。
 /// - 吞吐：全库 256 档缩略图按批 16 嵌入计时，前两批预热不计时（对比
 ///   int8 基线 ≈24 img/s，DML 批 16 / RTX 5070 Ti）。
 /// - 分数带：荒谬词（库内无对应内容）×5 与内容词 ×5 的 top-1 / top-5 /
@@ -572,14 +572,14 @@ fn fp16_semantic_calibration_and_throughput() {
     use ai::embed::SemanticEmbedder;
     use std::time::Instant;
 
-    let models = std::env::var("SMARTPHOTO_FP16_MODELS")
+    let models = std::env::var("PHOTOGRAPHER_FP16_MODELS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             std::env::var("APPDATA")
-                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photohub\models"))
+                .map(|appdata| std::path::PathBuf::from(appdata).join(r"photographer\models"))
                 .expect("APPDATA")
         });
-    let db_dir = std::env::var("SMARTPHOTO_FP16_LIBRARY")
+    let db_dir = std::env::var("PHOTOGRAPHER_FP16_LIBRARY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(r"I:\SmartPhoto\主库"));
 
@@ -600,12 +600,12 @@ fn fp16_semantic_calibration_and_throughput() {
         db_dir.display()
     );
 
-    let use_gpu = !matches!(std::env::var("SMARTPHOTO_AI_EP").as_deref(), Ok("cpu"));
+    let use_gpu = !matches!(std::env::var("PHOTOGRAPHER_AI_EP").as_deref(), Ok("cpu"));
     let bus = events::EventBus::new();
     let supervisor = tasks::TaskSupervisor::new(bus.clone());
     let manager = ai::ModelManager::new(models, bus, supervisor);
-    // SMARTPHOTO_CALIB_TIER=normal 可跑 int8 对照轮（同库同查询）
-    let tier = match std::env::var("SMARTPHOTO_CALIB_TIER").as_deref() {
+    // PHOTOGRAPHER_CALIB_TIER=normal 可跑 int8 对照轮（同库同查询）
+    let tier = match std::env::var("PHOTOGRAPHER_CALIB_TIER").as_deref() {
         Ok("normal") => QualityTier::Normal,
         _ => QualityTier::Accurate,
     };

@@ -460,7 +460,7 @@ export default function AlbumDetailPage() {
 
           <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           <ActionPopover label={t("ui.more")} onOpenChange={setToolsOpen} panelClassName="items-start">
-          {/* 导出为文件夹（M6，Photo Hub → LR）：当前作用域（根/子组）整册导出 */}
+          {/* 导出为文件夹（M6，Photographer → LR）：当前作用域（根/子组）整册导出 */}
           <button
             type="button"
             onClick={() => setExportOpen(true)}

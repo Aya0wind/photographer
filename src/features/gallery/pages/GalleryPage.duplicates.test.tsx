@@ -103,7 +103,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  localStorage.removeItem("smartphoto.gallery.hideCrossLibraryDuplicates");
+  localStorage.removeItem("photographer.gallery.hideCrossLibraryDuplicates");
   duplicatesMock.mockReset().mockResolvedValue([]);
   listLibrariesMock.mockReset().mockResolvedValue([]);
   assetsPageMock.mockReset();

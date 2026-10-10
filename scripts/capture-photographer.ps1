@@ -1,8 +1,8 @@
 # 真实 Tauri 窗口截图（视觉验收备份手段；主手段是 WebView2 CDP 远程调试）
-# 用法: powershell -ExecutionPolicy Bypass -File scripts/capture-smartphoto.ps1 <输出.png> [smart-photo]
+# 用法: powershell -ExecutionPolicy Bypass -File scripts/capture-photographer.ps1 <输出.png> [photographer]
 param(
     [Parameter(Mandatory = $true)][string]$OutPath,
-    [string]$ProcessName = "smart-photo"
+    [string]$ProcessName = "photographer"
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -23,7 +23,7 @@ $proc = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
     Where-Object { $_.MainWindowHandle -ne 0 } |
     Select-Object -First 1
 if (-not $proc) {
-    Write-Error "未找到窗口进程 '$ProcessName'（dev 构建进程名为 smart-photo）"
+    Write-Error "未找到窗口进程 '$ProcessName'（dev 构建进程名为 photographer）"
     exit 1
 }
 

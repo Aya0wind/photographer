@@ -4995,6 +4995,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "photographer"
+version = "0.1.0-alpha"
+dependencies = [
+ "ab_glyph",
+ "avif-decode",
+ "base64 0.22.1",
+ "bincode",
+ "chrono",
+ "geo",
+ "geo-types",
+ "heif-oxide",
+ "image",
+ "img-parts",
+ "jxl-oxide",
+ "kamadak-exif",
+ "libloading 0.8.9",
+ "num_cpus",
+ "ort",
+ "photocraft-algo",
+ "photocraft-cms",
+ "photocraft-codecs",
+ "photocraft-compose",
+ "photocraft-engine",
+ "photocraft-gpu",
+ "photocraft-io",
+ "photocraft-raw",
+ "pollster",
+ "quick-xml",
+ "rawler",
+ "rstar 0.12.2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokenizers",
+ "tokio",
+ "turbojpeg",
+ "ureq 2.12.1",
+ "usearch",
+ "uuid",
+ "walkdir",
+ "wgpu",
+ "windows 0.61.3",
+ "windows 0.62.0",
+ "windows-core 0.61.2",
+ "xxhash-rust",
+ "zip",
+]
+
+[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6298,64 +6356,6 @@ name = "smallvec"
 version = "1.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
-
-[[package]]
-name = "smart-photo"
-version = "0.1.0-alpha"
-dependencies = [
- "ab_glyph",
- "avif-decode",
- "base64 0.22.1",
- "bincode",
- "chrono",
- "geo",
- "geo-types",
- "heif-oxide",
- "image",
- "img-parts",
- "jxl-oxide",
- "kamadak-exif",
- "libloading 0.8.9",
- "num_cpus",
- "ort",
- "photocraft-algo",
- "photocraft-cms",
- "photocraft-codecs",
- "photocraft-compose",
- "photocraft-engine",
- "photocraft-gpu",
- "photocraft-io",
- "photocraft-raw",
- "pollster",
- "quick-xml",
- "rawler",
- "rstar 0.12.2",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tempfile",
- "thiserror 2.0.20",
- "tokenizers",
- "tokio",
- "turbojpeg",
- "ureq 2.12.1",
- "usearch",
- "uuid",
- "walkdir",
- "wgpu",
- "windows 0.61.3",
- "windows 0.62.0",
- "windows-core 0.61.2",
- "xxhash-rust",
- "zip",
-]
 
 [[package]]
 name = "socket2"

@@ -101,7 +101,7 @@ Windows：
 
 macOS：`npm run tauri:build:macos -- --target aarch64-apple-darwin` 构建 Apple Silicon 应用和 DMG；相机运行时组装见 `scripts/assemble-gphoto-bundle-macos.sh`，CI 已包含组装步骤。
 
-macOS CI 构建前通过 `scripts/prepare-ort-macos.py` 准备与 `ort-sys` 对应的 CoreML 静态库，校验 SHA-256 和 arm64 架构，并设置 `ORT_LIB_PATH`，避免缺失 ONNX Runtime 链接库。本地构建也可先执行 `export ORT_LIB_PATH="$(python3 scripts/prepare-ort-macos.py "$HOME/Library/Caches/photo-hub/ort")"` 和 `export ORT_PREFER_DYNAMIC_LINK=0`，再运行构建命令；无需另装 ONNX Runtime 动态库。
+macOS CI 构建前通过 `scripts/prepare-ort-macos.py` 准备与 `ort-sys` 对应的 CoreML 静态库，校验 SHA-256 和 arm64 架构，并设置 `ORT_LIB_PATH`，避免缺失 ONNX Runtime 链接库。本地构建也可先执行 `export ORT_LIB_PATH="$(python3 scripts/prepare-ort-macos.py "$HOME/Library/Caches/photographer/ort")"` 和 `export ORT_PREFER_DYNAMIC_LINK=0`，再运行构建命令；无需另装 ONNX Runtime 动态库。
 
 GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows build and release / macOS build and release → Run workflow**，选择运行模式：
 
@@ -119,6 +119,6 @@ GitHub 也可以手动构建和发布：进入仓库的 **Actions → Windows bu
 
 ## 数据目录
 
-- 默认应用数据目录：`%APPDATA%\photohub`；模型与照片库目录以应用设置为准
+- 默认应用数据目录：`%APPDATA%\photographer`；模型与照片库目录以应用设置为准
 - 建库时自行选择照片存储目录；支持在设置中迁移库目录，不要求使用特定盘符
 - 卸载前确认安装器的数据清理选项，并备份需要保留的照片与库数据

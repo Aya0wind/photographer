@@ -4,7 +4,7 @@ import { useState } from "react";
 
 export type WizardViewMode = "list" | "grid";
 
-export const VIEW_MODE_STORAGE_KEY = "smartphoto.import.viewMode";
+export const VIEW_MODE_STORAGE_KEY = "photographer.import.viewMode";
 
 function loadViewMode(): WizardViewMode {
   try {
@@ -24,9 +24,9 @@ function saveViewMode(mode: WizardViewMode): void {
 
 // --- 展示尺寸；旧三栏存储键仅保留导出，不再读取旧布局 ---------------------
 
-export const PANEL_COLLAPSE_KEY = "smartphoto.import.panelCollapse";
-export const COL_WIDTHS_KEY = "smartphoto.import.colWidths";
-export const TILE_SIZE_KEY = "smartphoto.import.tileSize";
+export const PANEL_COLLAPSE_KEY = "photographer.import.panelCollapse";
+export const COL_WIDTHS_KEY = "photographer.import.colWidths";
+export const TILE_SIZE_KEY = "photographer.import.tileSize";
 
 // --- 缩略图档位：标准 160（默认）/ 大 220，适配全宽挑选页面 -------
 

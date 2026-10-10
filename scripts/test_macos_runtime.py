@@ -14,7 +14,7 @@ from macos_runtime import assemble, audit, dependencies, rpaths, run, validate_r
 class ReleaseSignatureTests(unittest.TestCase):
     def test_release_identity_team_and_timestamp_are_all_required(self):
         valid = "\n".join([
-            "Authority=Developer ID Application: Photo Hub (ABCDE12345)",
+            "Authority=Developer ID Application: Photographer (ABCDE12345)",
             "TeamIdentifier=ABCDE12345",
             "Timestamp=Sep 30, 2026 at 00:00:00",
         ])
@@ -145,7 +145,7 @@ class RuntimeTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(subprocess.CalledProcessError):
                     assemble(self.prefix, self.output,
-                             "Developer ID Application: Photo Hub (ABCDE12345)", "ABCDE12345")
+                             "Developer ID Application: Photographer (ABCDE12345)", "ABCDE12345")
         self.assertEqual((self.output / "libgphoto2.6.dylib").read_bytes(), before)
         self.assertEqual(audit(self.output), 6)
 
