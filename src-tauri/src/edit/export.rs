@@ -354,8 +354,9 @@ fn execute(
         .clamp(1, 100);
     let (jpeg, width, height) =
         if request.recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
-            progress("encode");
-            super::photocraft::export_native(&src, &request.recipe, long_edge, quality)?
+            super::photocraft::export_native_with_progress(
+                &src, &request.recipe, long_edge, quality, progress,
+            )?
         } else {
             let rendered = render::render_recipe(&src, &request.recipe, long_edge)?;
             progress("encode");
