@@ -5,12 +5,12 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { photoLibraryCreate, type PhotoLibrary } from "@/ipc/api";
 
 /**
- * 新建/登记照片库对话框（M3 存储页，2026-10-09 单库多照片库定案）：
- * - mode="new"：新建照片库——登记空文件夹，之后 copy/move 导入落盘目标 = 该库
- *   root（纯时间布局由后端导入引擎负责）。
- * - mode="reference"：从已有文件夹建立——只登记不搬文件；登记即触发后端递归
- *   扫描批量登记，进度/取消/完成通知由存储页卡片扫描状态行呈现（M4f 闭环，
- *   本对话框只做登记入口，成功即关闭）。
+ * 新建照片库对话框（M3 存储页，2026-10-10 单一入口定案）：
+ * 对话框内模式二选一（不再由外部两个按钮分别进入）：
+ * - 「新建」：登记空文件夹，之后 copy/move 导入落盘目标 = 该库 root
+ *   （纯时间布局由后端导入引擎负责）。
+ * - 「从已有文件夹建立」（reference）：只登记不搬文件；登记即触发后端递归
+ *   扫描批量登记，进度/取消/完成通知由存储页卡片扫描状态行呈现（M4f 闭环）。
  * 业务错误（路径非法/与其他库或数据库目录重叠等）透传后端 Err 文案内联展示；
  * invoke 不可用（error=null）提示后端未连接。
  */
@@ -25,16 +25,15 @@ function baseName(path: string): string {
 }
 
 export default function CreateLibraryDialog({
-  mode,
   onClose,
   onCreated,
 }: {
-  mode: "new" | "reference";
   onClose: () => void;
-  /** 登记成功回调（存储页刷新列表 + 提示） */
-  onCreated: (library: PhotoLibrary) => void;
+  /** 登记成功回调（mode = 实际使用的模式；存储页据此区分 toast 文案） */
+  onCreated: (library: PhotoLibrary, mode: "new" | "reference") => void;
 }) {
   const { t } = useTranslation();
+  const [mode, setMode] = useState<"new" | "reference">("new");
   const [name, setName] = useState("");
   const [rootPath, setRootPath] = useState("");
   /** 名称未被手改过时，选完文件夹自动带出末段作缺省名 */
@@ -43,6 +42,14 @@ export default function CreateLibraryDialog({
   const [error, setError] = useState<string | null>(null);
 
   const ready = name.trim().length > 0 && rootPath.trim().length > 0 && !creating;
+
+  function patchMode(next: "new" | "reference"): void {
+    if (next === mode) return;
+    setMode(next);
+    // 切模式清路径；名称未手改时回空（选完文件夹自动带出）
+    setRootPath("");
+    if (!nameTouched) setName("");
+  }
 
   async function pickDirectory(): Promise<void> {
     try {
@@ -70,7 +77,7 @@ export default function CreateLibraryDialog({
     );
     setCreating(false);
     if (result.ok) {
-      onCreated(result.library);
+      onCreated(result.library, mode);
       return;
     }
     // null=invoke 不可用（后端未连接）；字符串=后端业务 Err 文案透传
@@ -93,8 +100,37 @@ export default function CreateLibraryDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-sm font-semibold text-text-primary">
-          {t(mode === "new" ? "storage.createDialog.new.title" : "storage.createDialog.reference.title")}
+          {t("storage.createDialog.title")}
         </h2>
+
+        {/* 模式二选一：新建空文件夹 / 从已有文件夹建立（reference） */}
+        <div className="mt-2 grid grid-cols-2 gap-2" data-testid="storage-create-modes">
+          {(["new", "reference"] as const).map((key) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => patchMode(key)}
+              aria-pressed={mode === key}
+              className={`rounded-lg border p-2.5 text-left transition-colors ${
+                mode === key
+                  ? "border-accent bg-accent/10"
+                  : "border-edge hover:border-text-muted"
+              }`}
+              data-testid={`storage-create-mode-${key}`}
+              data-selected={mode === key}
+            >
+              <span
+                className={`text-xs font-medium ${mode === key ? "text-accent" : "text-text-primary"}`}
+              >
+                {t(`storage.createDialog.mode.${key}`)}
+              </span>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-text-secondary">
+                {t(`storage.createDialog.mode.${key}Desc`)}
+              </p>
+            </button>
+          ))}
+        </div>
+
         <p className="mt-2 text-xs leading-relaxed text-text-secondary">
           {t(mode === "new" ? "storage.createDialog.new.hint" : "storage.createDialog.reference.hint")}
         </p>

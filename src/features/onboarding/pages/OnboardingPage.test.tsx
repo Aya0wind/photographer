@@ -1,10 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// ipc mock：store 依赖 settings_set；@/ipc/api 的 databaseCreate /
-// photoLibraryCreate 按契约 mock
+// ipc mock：store 依赖 settings_set；@/ipc/api 的 databaseCreate 按契约 mock
 vi.mock("@/ipc", () => ({ ipc: vi.fn(async () => undefined) }));
 vi.mock("@/ipc/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/ipc/api")>();
@@ -12,7 +11,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     databaseCreate: vi.fn(),
     databaseList: vi.fn(async () => ({ databases: [], activeId: null })),
-    photoLibraryCreate: vi.fn(),
     photoLibraryList: vi.fn(async () => []),
     subscribeAppEvents: vi.fn(async () => () => {}),
   };
@@ -22,16 +20,15 @@ import OnboardingPage from "./OnboardingPage";
 import { I18nextProvider } from "react-i18next";
 import i18n from "@/i18n";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { databaseCreate, databaseList, photoLibraryCreate } from "@/ipc/api";
+import { databaseCreate, databaseList } from "@/ipc/api";
 
 /**
- * 首次引导（2026-10-09 多数据库修正）：
+ * 首次引导（2026-10-10 定案：创建数据库 → AI 功能开关 → 完成）：
  * 创建数据库（名称必填 + 位置可选，databaseCreate；已有数据库时只读展示直进）
- * → 引导建立第一个照片库（新建 / 从已有文件夹建立，photoLibraryCreate）→
- * 完成写 onboardingCompleted 进画廊；可「稍后再建」跳过。
+ * → AI 功能开关（两卡选择写入 settings.ai 三开关，模型不在引导中下载）→
+ * 完成写 onboardingCompleted 进画廊。照片库不在引导中建立（存储页自建）。
  */
 
-const createMock = vi.mocked(photoLibraryCreate);
 const dbCreateMock = vi.mocked(databaseCreate);
 const dbListMock = vi.mocked(databaseList);
 
@@ -61,7 +58,6 @@ function renderOnboarding() {
 }
 
 beforeEach(() => {
-  createMock.mockReset();
   dbCreateMock.mockReset();
   dbListMock.mockReset().mockResolvedValue({ databases: [], activeId: null });
   useSettingsStore.setState({
@@ -73,14 +69,24 @@ beforeEach(() => {
   });
 });
 
-describe("OnboardingPage（多数据库修正：创建数据库 → 建立第一个照片库）", () => {
+/** 走到 AI 步（创建数据库或重入直进共用） */
+async function reachAiStep(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  mockDbCreateOk();
+  await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
+  await user.click(screen.getByTestId("onboarding-db-create"));
+  await waitFor(() =>
+    expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai"),
+  );
+}
+
+describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", () => {
   it("设置未加载完成前不渲染", () => {
     useSettingsStore.setState({ loaded: false });
     renderOnboarding();
     expect(screen.queryByTestId("onboarding-card")).not.toBeInTheDocument();
   });
 
-  it("步骤 1 创建数据库：名称必填、位置可空（默认约定路径）→ 成功进照片库步", async () => {
+  it("步骤 1 创建数据库：名称必填、位置可空（默认约定路径）→ 成功进 AI 步", async () => {
     mockDbCreateOk();
     const user = userEvent.setup();
     renderOnboarding();
@@ -95,7 +101,7 @@ describe("OnboardingPage（多数据库修正：创建数据库 → 建立第一
     // 位置留空 → dbDir 传 undefined（后端走默认约定路径）
     expect(dbCreateMock).toHaveBeenCalledWith("主数据库", undefined);
     await waitFor(() =>
-      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "library"),
+      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai"),
     );
   });
 
@@ -124,110 +130,74 @@ describe("OnboardingPage（多数据库修正：创建数据库 → 建立第一
     expect(await screen.findByTestId("onboarding-db-error")).toHaveTextContent("后端未连接");
   });
 
-  it("已有数据库（引导重入）：只读展示当前库名 + 直接进下一步", async () => {
+  it("已有数据库（引导重入）：只读展示当前库名 + 直接进 AI 步", async () => {
     dbListMock.mockResolvedValue({
       databases: [{ id: "db-1", name: "现有数据库", dbDir: "D:\\db" }],
       activeId: "db-1",
     });
+    const user = userEvent.setup();
     renderOnboarding();
     // 注册表异步拉取：等待只读展示态出现（null 首帧短暂渲染创建表单）
     expect(await screen.findByTestId("onboarding-db-current")).toHaveTextContent("现有数据库");
     expect(screen.queryByTestId("onboarding-db-create")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId("onboarding-next"));
+    await user.click(screen.getByTestId("onboarding-next"));
     await waitFor(() =>
-      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "library"),
+      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai"),
     );
     expect(dbCreateMock).not.toHaveBeenCalled();
   });
 
-  it("建立照片库：新建模式 photoLibraryCreate(reference=false) → 完成步 → 开始使用", async () => {
-    mockDbCreateOk();
-    createMock.mockResolvedValue({
-      ok: true,
-      library: {
-        id: "lib-1",
-        name: "主照片库",
-        rootPath: "D:\\照片",
-        createdAt: "2026-10-09T00:00:00Z",
-        status: "online",
-        assetCount: 0,
-        sizeBytes: 0,
-      },
-    });
+  it("AI 步默认「启用」选中：点选写入三开关全开 → 完成步 → 开始使用", async () => {
     const user = userEvent.setup();
     renderOnboarding();
+    await reachAiStep(user);
 
-    // 第一步：创建数据库（名称必填）→ 自动进照片库步；新建模式为默认
-    await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
-    await user.click(screen.getByTestId("onboarding-db-create"));
-    expect(screen.getByTestId("onboarding-mode-new")).toHaveAttribute("data-selected", "true");
-    // 未填路径不能建
-    expect(screen.getByTestId("onboarding-library-create")).toBeDisabled();
+    expect(screen.getByTestId("onboarding-ai-enable")).toHaveAttribute("data-selected", "true");
+    await user.click(screen.getByTestId("onboarding-ai-enable"));
 
-    await user.type(screen.getByTestId("onboarding-library-root"), "D:\\照片");
-    await user.click(screen.getByTestId("onboarding-library-create"));
-
-    expect(createMock).toHaveBeenCalledWith("主库", "D:\\照片", false);
-    const card = await screen.findByTestId("onboarding-card");
-    expect(card).toHaveAttribute("data-step", "done");
-    expect(screen.getByTestId("onboarding-finished-root")).toHaveTextContent("D:\\照片");
+    await waitFor(() =>
+      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "done"),
+    );
+    const ai = useSettingsStore.getState().settings.ai;
+    expect(ai.enableClip).toBe(true);
+    expect(ai.enableFace).toBe(true);
+    expect(ai.enableSceneTags).toBe(true);
 
     await user.click(screen.getByTestId("onboarding-start"));
     await waitFor(() => expect(screen.getByTestId("gallery-probe")).toBeInTheDocument());
     expect(useSettingsStore.getState().settings.onboardingCompleted).toBe(true);
   });
 
-  it("从已有文件夹建立：reference=true 下发；后端业务错误内联展示", async () => {
-    mockDbCreateOk();
-    createMock.mockResolvedValue({ ok: false, error: "路径与其他照片库重叠" });
+  it("AI 步「暂不启用」：写入三开关全关 → 完成步", async () => {
     const user = userEvent.setup();
     renderOnboarding();
+    await reachAiStep(user);
 
-    await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
-    await user.click(screen.getByTestId("onboarding-db-create"));
-    await user.click(screen.getByTestId("onboarding-mode-reference"));
-    await user.clear(screen.getByTestId("onboarding-library-name"));
-    await user.type(screen.getByTestId("onboarding-library-name"), "备份库");
-    await user.type(screen.getByTestId("onboarding-library-root"), "E:\\备份");
-    await user.click(screen.getByTestId("onboarding-library-create"));
+    await user.click(screen.getByTestId("onboarding-ai-disable"));
 
-    expect(createMock).toHaveBeenCalledWith("备份库", "E:\\备份", true);
-    expect(await screen.findByTestId("onboarding-library-error")).toHaveTextContent(
-      "路径与其他照片库重叠",
+    await waitFor(() =>
+      expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "done"),
     );
-    expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "library");
+    const ai = useSettingsStore.getState().settings.ai;
+    expect(ai.enableClip).toBe(false);
+    expect(ai.enableFace).toBe(false);
+    expect(ai.enableSceneTags).toBe(false);
   });
 
-  it("照片库 invoke 不可用（error=null）：内联提示后端未连接", async () => {
-    mockDbCreateOk();
-    createMock.mockResolvedValue({ ok: false, error: null });
+  it("AI 步保存失败：错误内联展示且不前进", async () => {
     const user = userEvent.setup();
     renderOnboarding();
+    await reachAiStep(user);
 
-    await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
-    await user.click(screen.getByTestId("onboarding-db-create"));
-    await user.type(screen.getByTestId("onboarding-library-root"), "D:\\照片");
-    await user.click(screen.getByTestId("onboarding-library-create"));
+    const store = useSettingsStore.getState();
+    useSettingsStore.setState({
+      save: vi.fn().mockRejectedValue(new Error("settings_set 失败")),
+    });
+    await user.click(screen.getByTestId("onboarding-ai-disable"));
 
-    expect(await screen.findByTestId("onboarding-library-error")).toHaveTextContent(
-      "后端未连接",
-    );
-  });
-
-  it("稍后再建：跳过建库直接完成引导进画廊（数据库已建）", async () => {
-    mockDbCreateOk();
-    const user = userEvent.setup();
-    renderOnboarding();
-
-    await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
-    await user.click(screen.getByTestId("onboarding-db-create"));
-    await user.click(screen.getByTestId("onboarding-later"));
-
-    await waitFor(() => expect(screen.getByTestId("gallery-probe")).toBeInTheDocument());
-    expect(useSettingsStore.getState().settings.onboardingCompleted).toBe(true);
-    // 完成即置会话选库标志（GatedShell 老语义：不再弹回 /database-picker）
-    expect(useSettingsStore.getState().databaseChosen).toBe(true);
-    expect(createMock).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("onboarding-ai-error")).toHaveTextContent("settings_set 失败");
+    expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai");
+    useSettingsStore.setState({ save: store.save });
   });
 });

@@ -110,8 +110,8 @@ export default function StoragePage() {
   const { t } = useTranslation();
   const [libraries, setLibraries] = useState<PhotoLibrary[]>([]);
   const [status, setStatus] = useState<"loading" | "ready">("loading");
-  /** 登记对话框打开模式（null=关闭） */
-  const [createMode, setCreateMode] = useState<"new" | "reference" | null>(null);
+  /** 新建照片库对话框（true=打开；模式在对话框内二选一） */
+  const [createOpen, setCreateOpen] = useState(false);
   const [openError,setOpenError]=useState<string|null>(null);
   const [removeTarget, setRemoveTarget] = useState<PhotoLibrary | null>(null);
   /** 操作/扫描完成反馈（hint=跨库重复提示等第二行；自动消失） */
@@ -199,15 +199,7 @@ export default function StoragePage() {
           <div className="ml-auto flex shrink-0 gap-2">
             <button
               type="button"
-              onClick={() => setCreateMode("reference")}
-              className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-              data-testid="storage-create-from-folder"
-            >
-              {t("storage.createFromFolder")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setCreateMode("new")}
+              onClick={() => setCreateOpen(true)}
               className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
               data-testid="storage-create-library"
             >
@@ -216,9 +208,9 @@ export default function StoragePage() {
           </div>
         </header>
 
-        {/* 卡片列表 / 空态 */}
+        {/* 卡片列表 / 空态（卡片顶满内容宽，仅留页边距——与其他页面一致） */}
         <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-5 py-5">
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
+          <div className="flex w-full flex-col gap-3">
             {status === "loading" ? (
               <div
                 className="flex h-40 items-center justify-center text-xs text-text-muted"
@@ -252,15 +244,7 @@ export default function StoragePage() {
                 <div className="mt-3 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCreateMode("reference")}
-                    className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                    data-testid="storage-empty-from-folder"
-                  >
-                    {t("storage.createFromFolder")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCreateMode("new")}
+                    onClick={() => setCreateOpen(true)}
                     className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
                     data-testid="storage-empty-create"
                   >
@@ -348,20 +332,19 @@ export default function StoragePage() {
         </div>
       </div>
 
-      {/* 登记对话框（新建 / 从文件夹建立） */}
-      {createMode !== null && (
+      {/* 新建照片库对话框（模式在对话框内二选一：新建 / 从已有文件夹建立） */}
+      {createOpen && (
         <CreateLibraryDialog
-          mode={createMode}
-          onClose={() => setCreateMode(null)}
-          onCreated={(library) => {
+          onClose={() => setCreateOpen(false)}
+          onCreated={(library, mode) => {
             // reference 模式登记即触发后台递归扫描——toast 直接说明扫描已开始，
             // 进度/取消/完成通知由卡片扫描状态行接手（M4f 闭环）。
             flash(
-              createMode === "reference"
+              mode === "reference"
                 ? t("storage.createdScanning", { name: library.name })
                 : t("storage.created", { name: library.name }),
             );
-            setCreateMode(null);
+            setCreateOpen(false);
             // 后端登记完成会发 photoLibrariesChanged 事件驱动重拉；事件未到
             // （后端未实装）时本地立即补拉一次，保证对话框关闭即见新卡。
             void pull();

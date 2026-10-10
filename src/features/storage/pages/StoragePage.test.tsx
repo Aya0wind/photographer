@@ -114,11 +114,11 @@ describe("StoragePage 渲染（M3 存储页）", () => {
     const first = within(cards[0]);
     expect(first.getByText("主照片库")).toBeInTheDocument();
     expect(first.getByTestId("storage-library-path")).toHaveTextContent("I:\\Photos");
-    expect(first.getByTestId("storage-library-status")).toHaveTextContent("在线");
+    expect(first.getByTestId("storage-library-status")).toHaveTextContent("正常");
     expect(first.getByTestId("storage-library-stats")).toHaveTextContent("120 张照片");
     expect(first.getByTestId("storage-library-stats")).toHaveTextContent("1.0 GB");
 
-    expect(within(cards[1]).getByTestId("storage-library-status")).toHaveTextContent("离线");
+    expect(within(cards[1]).getByTestId("storage-library-status")).toHaveTextContent("异常");
   });
 
   it("无照片库 → 空态引导（新建 / 从文件夹建立入口）", async () => {
@@ -127,12 +127,12 @@ describe("StoragePage 渲染（M3 存储页）", () => {
     expect(await screen.findByTestId("storage-empty")).toBeInTheDocument();
     expect(screen.queryByTestId("storage-library-card")).not.toBeInTheDocument();
     expect(screen.getByTestId("storage-empty-create")).toBeInTheDocument();
-    expect(screen.getByTestId("storage-empty-from-folder")).toBeInTheDocument();
+    expect(screen.queryByTestId("storage-empty-from-folder")).not.toBeInTheDocument();
   });
 });
 
-describe("StoragePage 登记入口（photo_library_create）", () => {
-  it("新建照片库：填名称+路径 → photoLibraryCreate(name, root, false) → 刷新列表", async () => {
+describe("StoragePage 登记入口（photo_library_create，单一按钮 + 对话框内模式二选一）", () => {
+  it("新建照片库：默认新建模式 → photoLibraryCreate(name, root, false) → 刷新列表", async () => {
     const created = lib();
     listMock
       .mockResolvedValueOnce([])
@@ -145,6 +145,7 @@ describe("StoragePage 登记入口（photo_library_create）", () => {
     await user.click(screen.getByTestId("storage-create-library"));
     const dialog = screen.getByTestId("storage-create-dialog");
     expect(dialog).toHaveAttribute("data-mode", "new");
+    expect(screen.getByTestId("storage-create-mode-new")).toHaveAttribute("data-selected", "true");
 
     await user.type(screen.getByTestId("storage-create-name"), "主照片库");
     await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos");
@@ -157,14 +158,16 @@ describe("StoragePage 登记入口（photo_library_create）", () => {
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("主照片库");
   });
 
-  it("从文件夹建立：reference=true 登记（只登记不搬文件）", async () => {
+  it("对话框内切「从已有文件夹建立」：reference=true 登记（只登记不搬文件）", async () => {
     listMock.mockResolvedValue([]);
     createMock.mockResolvedValue({ ok: true, library: lib() });
     const user = userEvent.setup();
     renderPage();
     await screen.findByTestId("storage-empty");
 
-    await user.click(screen.getByTestId("storage-create-from-folder"));
+    // 单一「新建照片库」入口；模式在对话框内切换
+    await user.click(screen.getByTestId("storage-create-library"));
+    await user.click(screen.getByTestId("storage-create-mode-reference"));
     expect(screen.getByTestId("storage-create-dialog")).toHaveAttribute("data-mode", "reference");
 
     await user.type(screen.getByTestId("storage-create-name"), "LR 目录");
@@ -263,7 +266,8 @@ describe("StoragePage 扫描闭环（M4f 从文件夹建立）", () => {
     renderPage();
     await screen.findByTestId("storage-empty");
 
-    await user.click(screen.getByTestId("storage-create-from-folder"));
+    await user.click(screen.getByTestId("storage-create-library"));
+    await user.click(screen.getByTestId("storage-create-mode-reference"));
     await user.type(screen.getByTestId("storage-create-name"), "主照片库");
     await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos");
     await user.click(screen.getByTestId("storage-create-confirm"));
