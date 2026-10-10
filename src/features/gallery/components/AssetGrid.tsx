@@ -30,11 +30,17 @@ import { ASSET_DRAG_TYPE, photoContext, type EditorOrigin } from "@/features/edi
 /**
  * 日期分组照片墙（画廊/搜索/人物页共用）：
  *
- * 布局双模式（M4.5 A4）：
+ * 布局四模式（M4.5 A4 + tiles/masonry）：
  * - square（默认，兼容视图）：等宽方格（tile×tile），搜索/人物页等继续使用
+ * - tiles：与 square 完全同构的等宽方格（同样按列切片成行），唯一区别=
+ *   缩略图完整显示不裁切（AssetThumb fit=contain 的 letterbox）
  * - justify（画廊默认）：统一行高的 justify 网格——行内按 width/height 宽高比
  *   分配宽度（经典贪心算法：逐项累加，行高跌破目标即封行；组尾行不足整行按
  *   目标行高左对齐），无尺寸资产按 4:3 兜底；tile 语义变为「目标行高」
+ * - masonry（瀑布）：等宽多列、按宽高比定高，贪心塞进当前最矮列（每个日期组
+ *   独立从零重排；aspect 仅布局计算夹取 [1/2.75, 2.75]，图片照常 cover 整格）。
+ *   虚拟化用 96px 定高带切片塞进 GridRow rows：item 绝对定位（组内 y 减带起点），
+ *   天然溢出到下方带由 overscan 覆盖；追加只在列尾续放=天然 append-only，不参与 seals
  *
  * 组头折叠（M4.5）：chevron 点击折叠为一行 36px 头（再点展开）；状态存组件本地。
  *
@@ -63,7 +69,12 @@ export const GRID_THUMB_SIZE = 240;
 /** 长按进入多选的阈值 */
 export const LONG_PRESS_MS = 500;
 
-export type GridLayout = "square" | "justify";
+export type GridLayout = "square" | "tiles" | "justify" | "masonry";
+
+/** masonry 定高带高（虚拟化切片粒度；item 跨带溢出靠行容器不裁切 + overscan 覆盖） */
+const MASONRY_BAND = 96;
+/** masonry 布局用宽高比夹取上限（仅计算 item 高度用，图片照常 cover 整格） */
+const MASONRY_ASPECT_MAX = 2.75;
 
 /** 资产宽高比（width/height）；缺失/非法 → 4:3 兜底 */
 function aspectOf(asset: AssetDto): number {
@@ -125,7 +136,69 @@ export function justifyItems(
 
 type GridRow =
   | { type: "header"; group: AssetGroup; collapsed: boolean }
-  | { type: "tiles"; group: AssetGroup; assets: AssetDto[]; height: number; widths: number[] };
+  | { type: "tiles"; group: AssetGroup; assets: AssetDto[]; height: number; widths: number[] }
+  | { type: "masonry"; group: AssetGroup; band: number; assets: AssetDto[]; items: MasonryPlacement[]; height: number };
+
+/** masonry 单项定位（组内绝对坐标；band = top 落入的定高带索引，跨界也归 top 所在带） */
+export interface MasonryPlacement {
+  asset: AssetDto;
+  /** 列 x 偏移（列号 × (列宽+GAP)） */
+  x: number;
+  /** 组内绝对 y（组头下方从零起） */
+  y: number;
+  /** 列宽 */
+  w: number;
+  /** 本项高度 = round(列宽 / 夹取后 aspect) */
+  h: number;
+  band: number;
+}
+
+/** masonry 布局结果：items 按输入 flat 顺序；contentHeight = 内容底缘（最高列去尾 GAP） */
+export interface MasonryLayoutResult {
+  items: MasonryPlacement[];
+  contentHeight: number;
+}
+
+/** masonry 列数（可用宽/列宽步进取整，至少 1 列）。导出供测试。 */
+export function masonryColumns(usableWidth: number, tile: number, gap = GAP): number {
+  return Math.max(1, Math.floor(usableWidth / (tile + gap)));
+}
+
+/**
+ * masonry 贪心分列（导出供测试）：组内资产按 flat 顺序塞进当前最矮列（平列取
+ * 最左），高 = round(列宽 / 夹取后 aspect)，列高推进 h+GAP。追加只在列尾续放、
+ * 旧项 y 不动（天然 append-only）。带数由调用方 ceil(contentHeight / 96)——
+ * 用内容底缘而非末项 top，否则末项会溢出带区压到下一组头。
+ */
+export function masonryPlace(
+  assets: AssetDto[],
+  columns: number,
+  columnWidth: number,
+  gap = GAP,
+): MasonryLayoutResult {
+  const items: MasonryPlacement[] = [];
+  const heights = new Array<number>(columns).fill(0);
+  for (const asset of assets) {
+    let col = 0;
+    for (let i = 1; i < columns; i++) {
+      if (heights[i] < heights[col]) col = i;
+    }
+    const aspect = Math.min(MASONRY_ASPECT_MAX, Math.max(1 / MASONRY_ASPECT_MAX, aspectOf(asset)));
+    const h = Math.round(columnWidth / aspect);
+    const y = heights[col];
+    items.push({ asset, x: col * (columnWidth + gap), y, w: columnWidth, h, band: Math.floor(y / MASONRY_BAND) });
+    heights[col] = y + h + gap;
+  }
+  const contentHeight = items.length > 0 ? Math.max(...heights) - gap : 0;
+  return { items, contentHeight };
+}
+
+/** 行在偏移累计/estimateSize 中的占位：header=头高；tiles=行高+GAP；masonry=恒
+ *  带高不能再加 GAP（item 的 y 已含列内间距，多加会让带起点逐带漂移） */
+function rowExtent(row: GridRow): number {
+  if (row.type === "header") return row.collapsed ? COLLAPSED_HEADER_H : HEADER_H;
+  return row.type === "masonry" ? row.height : row.height + GAP;
+}
 
 /** 跨库重复角标（M5 §四）：×N = 组内副本总数（含可见项）。点击打开重复项
  *  列表；span 而非 button——瓦片本身是 <button>，嵌套交互元素用 role 承担。 */
@@ -209,9 +282,9 @@ interface AssetGridProps {
   sentinelRef?: Ref<HTMLDivElement>;
   /** 视口变化上报（吸顶组头/滚动状态用；仅组键或 scrollTop 显著变化时触发） */
   onViewportChange?: (info: ViewportInfo) => void;
-  /** square=方格边长；justify=目标行高（三档切换见调用方） */
+  /** square/tiles/masonry=方格边长（masonry 即列宽）；justify=目标行高（三档切换见调用方） */
   tile?: number;
-  /** 布局模式（默认 square 兼容旧视图；画廊用 justify） */
+  /** 布局模式（默认 square 兼容旧视图） */
   layout?: GridLayout;
   /** 合并卡角标（RAW+JPG）：代表资产 id → 文案；无合并时不传 */
   badges?: Map<number, string>;
@@ -303,16 +376,19 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     return () => ro.disconnect();
   }, []);
 
-  // 键盘导航的近似列数：square=按方格宽；justify=按目标行高的 4:3 均值估
+  // 键盘导航列数：square/tiles=按方格宽；justify=按目标行高的 4:3 均值估；
+  // masonry=瀑布实际列数（ArrowUp/Down 按列走）
   const usableWidth = Math.max(0, width - H_PADDING);
-  const columns = Math.max(
-    1,
-    Math.floor(
-      layout === "justify"
-        ? usableWidth / (tile * ASPECT_FALLBACK + GAP)
-        : (width + GAP) / (tile + GAP),
-    ),
-  );
+  const columns = layout === "masonry"
+    ? masonryColumns(usableWidth, tile)
+    : Math.max(
+        1,
+        Math.floor(
+          layout === "justify"
+            ? usableWidth / (tile * ASPECT_FALLBACK + GAP)
+            : (width + GAP) / (tile + GAP),
+        ),
+      );
 
   // 视图完整有序 id（Shift 区间选择的 order 来源：组序=展示序）
   const orderedIds = useMemo(() => groups.flatMap((group) => group.assets.map((a) => a.id)), [groups]);
@@ -323,7 +399,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const streamLayout = useRef<{ signature: string; groups: AssetGroup[]; seals: Set<number> }>({ signature: "", groups: [], seals: new Set() });
   const rowSeals = useMemo(() => {
     const previous = streamLayout.current;
-    if (!sentinelRef || previous.signature !== layoutSignature) return new Set<number>();
+    // masonry 不参与 seals：追加只在列尾续放（旧项 y 不动），无需冻结旧切片
+    if (!sentinelRef || layout === "masonry" || previous.signature !== layoutSignature) return new Set<number>();
     const byKey = new Map(groups.map((group) => [group.key, group]));
     const seals = new Set(previous.seals);
     for (const old of previous.groups) {
@@ -332,7 +409,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       if (next.assets.length > old.assets.length && old.assets.length) seals.add(old.assets[old.assets.length - 1].id);
     }
     return seals;
-  }, [groups, layoutSignature, sentinelRef]);
+  }, [groups, layoutSignature, sentinelRef, layout]);
   useLayoutEffect(() => {
     streamLayout.current = { signature: layoutSignature, groups, seals: rowSeals };
   }, [groups, layoutSignature, rowSeals]);
@@ -344,6 +421,19 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       const collapsed = collapsedKeys.has(group.key);
       out.push({ type: "header", group, collapsed });
       if (collapsed || group.assets.length === 0) continue;
+      if (layout === "masonry") {
+        // masonry：整组一次贪心分列（append-only，不走 seals 切片）；每 96px 定高带
+        // emit 一条虚拟行，带内 items 按列排序。末尾可能出现无 item 的空带——
+        // 必须保留（占住 96px 偏移），否则后续带起点漂移、绝对定位失准
+        const placed = masonryPlace(group.assets, columns, tile);
+        const bandCount = Math.max(1, Math.ceil(placed.contentHeight / MASONRY_BAND));
+        for (let band = 0; band < bandCount; band++) {
+          const inBand = placed.items.filter((item) => item.band === band);
+          inBand.sort((a, b) => a.x - b.x);
+          out.push({ type: "masonry", group, band, height: MASONRY_BAND, assets: inBand.map((item) => item.asset), items: inBand });
+        }
+        continue;
+      }
       let start = 0;
       for (let end = 0; end < group.assets.length; end++) {
         if (end !== group.assets.length - 1 && !rowSeals.has(group.assets[end].id)) continue;
@@ -367,7 +457,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
     let offset = 0;
     for (const row of rows) {
       if (row.type === "header") result.set(row.group.key, { start: offset, end: offset });
-      offset += row.type === "header" ? (row.collapsed ? COLLAPSED_HEADER_H : HEADER_H) : row.height + GAP;
+      offset += rowExtent(row);
       const group = result.get(row.group.key);
       if (group) group.end = offset;
     }
@@ -377,15 +467,17 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    getItemKey: (i) => rows[i].type === "header"
-      ? `header:${rows[i].group.key}`
-      : `tiles:${rows[i].group.key}:${rows[i].assets.map((asset) => asset.id).join(",")}`,
-    estimateSize: (i) =>
-      rows[i].type === "header"
-        ? rows[i].collapsed
-          ? COLLAPSED_HEADER_H
-          : HEADER_H
-        : rows[i].height + GAP,
+    getItemKey: (i) => {
+      const row = rows[i];
+      if (row.type === "header") return `header:${row.group.key}`;
+      if (row.type === "masonry") {
+        // 带行 key：组+带号+带内首项 id。尾部追加只会新增带/往带尾续项（首项
+        // 是最矮列已放项、列序不变），旧带 key 稳定 → 不 remount 缩略图
+        return `band:${row.group.key}:b${row.band}:${row.assets[0]?.id ?? ""}`;
+      }
+      return `tiles:${row.group.key}:${row.assets.map((asset) => asset.id).join(",")}`;
+    },
+    estimateSize: (i) => rowExtent(rows[i]),
     overscan: 6,
   });
 
@@ -393,7 +485,11 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   // 数字下标复用到新行。绘制前清缓存，避免标题/照片相互覆盖。
   const measuredRows = useRef<string[]>([]);
   useLayoutEffect(() => {
-    const keys = rows.map((row) => row.type === "header" ? `header:${row.group.key}:${row.collapsed}` : `tiles:${row.height}:${row.assets.map((asset) => asset.id).join(",")}`);
+    const keys = rows.map((row) => row.type === "header"
+      ? `header:${row.group.key}:${row.collapsed}`
+      : row.type === "masonry"
+        ? `masonry:${row.group.key}:b${row.band}` // 带行恒 96，内容变化不影响测量
+        : `tiles:${row.height}:${row.assets.map((asset) => asset.id).join(",")}`);
     const previous = measuredRows.current;
     const appendOnly = previous.length <= keys.length && previous.every((key, index) => keys[index] === key);
     if (!appendOnly) virtualizer.measure();
@@ -409,8 +505,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       const offsetOf = (items: GridRow[]) => {
         let offset = 0;
         for (const row of items) {
-          if (row.type === "tiles" && row.assets.some((asset) => asset.id === oldId)) return offset;
-          offset += row.type === "header" ? (row.collapsed ? COLLAPSED_HEADER_H : HEADER_H) : row.height + GAP;
+          if (row.type !== "header" && row.assets.some((asset) => asset.id === oldId)) return offset;
+          offset += rowExtent(row);
         }
         return null;
       };
@@ -634,6 +730,21 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
       <div className="px-3 pb-6" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((vi) => {
           const row = rows[vi.index];
+          // 行定位参数归一：masonry 带行 item 绝对定位（组内 y - 带起点，列偏移=left，
+          // 跨带溢出靠容器默认不裁切）；square/tiles/justify 仍是 flex 等高行
+          const masonryItems = row.type === "masonry" ? row.items : null;
+          const masonryBase = row.type === "masonry" ? row.band * MASONRY_BAND : 0;
+          const tileRow = row.type === "tiles" ? row : null; // header 无瓦片样式
+          const tileStyleOf = (itemIndex: number): React.CSSProperties =>
+            masonryItems
+              ? {
+                  position: "absolute",
+                  left: masonryItems[itemIndex].x,
+                  top: masonryItems[itemIndex].y - masonryBase,
+                  width: masonryItems[itemIndex].w,
+                  height: masonryItems[itemIndex].h,
+                }
+              : { width: tileRow?.widths[itemIndex], height: tileRow?.height };
           return (
             <div
               key={vi.key}
@@ -698,9 +809,10 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                 </div>
               ) : (
                 <div
-                  className="flex flex-nowrap gap-1 pb-1"
+                  className={masonryItems ? "relative" : "flex flex-nowrap gap-1 pb-1"}
                   style={{ height: row.height }}
                   data-testid="gallery-row"
+                  data-masonry-band={row.type === "masonry" ? row.band : undefined}
                 >
                   {row.assets.map((asset, itemIndex) => {
                     const badge = badges?.get(asset.id) ?? null;
@@ -715,7 +827,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isRejected = asset.rejected === true;
                     const inner = (
                       <>
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} className={`h-full w-full [&_.asset-missing-badge]:bottom-14 ${!readOnly ? "[&_.asset-raw-badge]:top-8" : ""}`} />
+                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} fit={layout === "tiles" ? "contain" : "cover"} className={`h-full w-full [&_.asset-missing-badge]:bottom-14 ${!readOnly ? "[&_.asset-raw-badge]:top-8" : ""}`} />
                         <span className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-1.5 px-3 pb-1.5 pt-5 font-mono text-[10px] leading-4 tabular-nums text-white/90" style={{ background: "linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0))" }} data-testid="tile-resolution">
                           <span className="whitespace-nowrap">{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
                           <span className="whitespace-nowrap"><span aria-hidden="true">· </span><span data-testid="tile-file-size">{formatBytes(asset.sizeBytes)}</span></span>
@@ -832,7 +944,6 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                       </>
                     );
-                    const itemWidth = row.widths[itemIndex];
                     const burstCount = burstBadges?.get(asset.id);
                     const duplicateCount = duplicateBadges?.get(asset.id);
                     const selectionClass = isSelected
@@ -865,7 +976,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         className={`group relative isolate touch-none overflow-hidden rounded-md bg-panel/40 outline-none transition-[transform,outline-color] duration-100 focus-visible:outline-2 focus-visible:outline-accent ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         } ${selectionClass} ${isRejected ? "opacity-50" : ""}`}
-                        style={{ width: itemWidth, height: row.height }}
+                        style={tileStyleOf(itemIndex)}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}
@@ -909,7 +1020,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         className={`relative overflow-hidden rounded-md bg-panel/40 ${
                           isCursor ? "outline outline-2 -outline-offset-2 outline-accent" : ""
                         } ${selectionClass} ${isRejected ? "opacity-50" : ""}`}
-                        style={{ width: itemWidth, height: row.height }}
+                        style={tileStyleOf(itemIndex)}
                         title={asset.name}
                         data-testid="gallery-tile"
                         data-asset-id={asset.id}

@@ -5,12 +5,14 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
+import type { ComponentProps } from "react";
 
 import i18n from "@/i18n";
 import GalleryPage from "./GalleryPage";
 import { resetThumbPipelineForTests, emitAssetEventForTests } from "../lib/thumbPipeline";
 import { clearGallerySnapshotForTests } from "../lib/galleryCache";
-import { loadGalleryTileSize } from "../lib/useGalleryTileSize";
+import { GALLERY_TILE_SIZE_KEY, loadGalleryTileSize } from "../lib/useGalleryTileSize";
+import { GALLERY_LAYOUT_KEY, loadGalleryLayout } from "../lib/useGalleryLayout";
 import {
   assetGroupDates,
   assetThumbGet,
@@ -39,6 +41,23 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(undefined),
   convertFileSrc: vi.fn(),
 }));
+
+// AssetGrid 透传记录 mock：渲染仍走真实组件（上方既有 DOM 断言全部保留），
+// 仅把每次渲染收到的 layout/tile 落进数组——布局用例只断言页面传参，
+// 四模式的引擎行为归 AssetGrid.test.tsx
+const { gridPropsLog } = vi.hoisted(() => ({
+  gridPropsLog: [] as Array<{ layout?: unknown; tile?: unknown }>,
+}));
+
+vi.mock("../components/AssetGrid", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/AssetGrid")>();
+  const RealAssetGrid = actual.default;
+  const RecordingAssetGrid = (props: ComponentProps<typeof RealAssetGrid>) => {
+    gridPropsLog.push({ layout: props.layout, tile: props.tile });
+    return <RealAssetGrid {...props} />;
+  };
+  return { ...actual, default: RecordingAssetGrid };
+});
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -568,5 +587,90 @@ describe("画廊工具条：居中与尺寸", () => {
     fireEvent.keyDown(scroll, { key: "Home" });
     const cursor2 = tiles().find((t) => t.getAttribute("data-cursor") === "true");
     expect(cursor2).toHaveAttribute("data-asset-id", "3");
+  });
+});
+
+// --- 布局四档循环 -------------------------------------------------------------------
+
+describe("画廊工具条：布局模式", () => {
+  /** 最近一次 AssetGrid 渲染捕获的 layout/tile（mock 透传记录） */
+  const lastGridProps = () => gridPropsLog[gridPropsLog.length - 1];
+
+  beforeEach(() => {
+    // localStorage 全文件共享：布局键清空回默认；尺寸档钉死 medium（前面的
+    // 用例可能写入 small），保证下方 tile 数值断言确定
+    localStorage.removeItem(GALLERY_LAYOUT_KEY);
+    localStorage.setItem(GALLERY_TILE_SIZE_KEY, "medium");
+    gridPropsLog.length = 0;
+  });
+
+  it("无存值默认 justify（保持既有画廊视觉），AssetGrid 收到行高 220", async () => {
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    renderGallery();
+
+    await screen.findAllByTestId("gallery-tile");
+    expect(screen.getByTestId("gallery-layout")).toHaveAttribute("data-layout", "justify");
+    expect(lastGridProps()).toMatchObject({ layout: "justify", tile: 220 });
+  });
+
+  it("点击循环四档：square→tiles→justify→masonry→square（从 masonry 起步验证整圈）", async () => {
+    localStorage.setItem(GALLERY_LAYOUT_KEY, "masonry");
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    const user = userEvent.setup();
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    const sequence = ["square", "tiles", "justify", "masonry", "square"];
+    for (const expected of sequence) {
+      await user.click(screen.getByTestId("gallery-layout"));
+      expect(screen.getByTestId("gallery-layout")).toHaveAttribute("data-layout", expected);
+    }
+  });
+
+  it("tile 随模式映射：justify=行高档（220/160），square/tiles/masonry=方格档（200/120）", async () => {
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    const user = userEvent.setup();
+    const { unmount } = renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    // 大档（medium）：justify 220 / 其余 200（循环序 justify→masonry→square→tiles→justify）
+    expect(lastGridProps()).toMatchObject({ layout: "justify", tile: 220 });
+    await user.click(screen.getByTestId("gallery-layout")); // → masonry
+    expect(lastGridProps()).toMatchObject({ layout: "masonry", tile: 200 });
+    await user.click(screen.getByTestId("gallery-layout")); // → square
+    expect(lastGridProps()).toMatchObject({ layout: "square", tile: 200 });
+    await user.click(screen.getByTestId("gallery-layout")); // → tiles
+    expect(lastGridProps()).toMatchObject({ layout: "tiles", tile: 200 });
+    await user.click(screen.getByTestId("gallery-layout")); // → justify
+    expect(lastGridProps()).toMatchObject({ layout: "justify", tile: 220 });
+
+    // 小档（small）：justify 160 / 其余 120（当前 justify 档上重挂载）
+    unmount();
+    localStorage.setItem(GALLERY_TILE_SIZE_KEY, "small");
+    renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+    expect(lastGridProps()).toMatchObject({ layout: "justify", tile: 160 });
+    await user.click(screen.getByTestId("gallery-layout")); // justify → masonry
+    expect(lastGridProps()).toMatchObject({ layout: "masonry", tile: 120 });
+    await user.click(screen.getByTestId("gallery-layout")); // masonry → square
+    expect(lastGridProps()).toMatchObject({ layout: "square", tile: 120 });
+  });
+
+  it("切档写入 localStorage；坏值读入回落 justify 不崩", async () => {
+    assetsPageMock.mockResolvedValue(makePage(2, "2026-09-18", 2));
+    const user = userEvent.setup();
+    const { unmount } = renderGallery();
+    await screen.findAllByTestId("gallery-tile");
+
+    await user.click(screen.getByTestId("gallery-layout")); // justify → masonry
+    expect(localStorage.getItem(GALLERY_LAYOUT_KEY)).toBe("masonry");
+
+    // 手改/旧版本残留的坏值：读取回落 justify，重挂载也回到默认档
+    unmount();
+    localStorage.setItem(GALLERY_LAYOUT_KEY, "garbage");
+    expect(loadGalleryLayout()).toBe("justify");
+    renderGallery();
+    expect(await screen.findByTestId("gallery-layout")).toHaveAttribute("data-layout", "justify");
+    expect(lastGridProps()).toMatchObject({ layout: "justify", tile: 220 });
   });
 });

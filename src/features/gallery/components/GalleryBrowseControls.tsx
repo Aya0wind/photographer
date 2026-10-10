@@ -1,7 +1,9 @@
 import { useTranslation } from "react-i18next";
 import FloatingToolbar from "@/shared/components/FloatingToolbar";
 import TileSizeSwitch from "./TileSizeSwitch";
+import LayoutSwitch from "./LayoutSwitch";
 import type { GalleryTileSize } from "../lib/useGalleryTileSize";
+import type { GalleryLayout } from "../lib/useGalleryLayout";
 
 /** 跨库重复折叠开关图标：两张叠起的同内容卡片（显示过滤语义） */
 function GlyphDuplicates() {
@@ -13,12 +15,15 @@ function GlyphDuplicates() {
   );
 }
 
-export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, onImport, onCull, cullBusy, cullDisabled, hideDuplicates, onToggleDuplicates, duplicatesActive, inactive = false }: {
+export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, layout, onLayout, onImport, onCull, cullBusy, cullDisabled, hideDuplicates, onToggleDuplicates, duplicatesActive, inactive = false }: {
   filterOpen: boolean;
   filterCount: number;
   onToggleFilter: () => void;
   tileSize: GalleryTileSize;
   onTileSize: (size: GalleryTileSize) => void;
+  /** 布局模式（四档循环切换，与尺寸开关相邻同组） */
+  layout: GalleryLayout;
+  onLayout: (next: GalleryLayout) => void;
   onImport: () => void;
   onCull: () => void;
   cullBusy: boolean;
@@ -38,6 +43,7 @@ export default function GalleryBrowseControls({ filterOpen, filterCount, onToggl
         {filterCount > 0 && <span className="absolute -right-1 -top-1 rounded-full bg-accent px-1 text-[10px] text-black" data-testid="search-filter-count">{filterCount}</span>}
       </button>
       <TileSizeSwitch value={tileSize} onChange={onTileSize} />
+      <LayoutSwitch value={layout} onChange={onLayout} />
       <button
         type="button"
         onClick={onToggleDuplicates}

@@ -38,8 +38,10 @@ import {
 } from "../lib/galleryCache";
 import {
   GALLERY_JUSTIFY_ROW_PX,
+  GALLERY_TILE_PX,
   useGalleryTileSize,
 } from "../lib/useGalleryTileSize";
+import { useGalleryLayout } from "../lib/useGalleryLayout";
 import { useAssetViewer } from "../lib/useAssetViewer";
 import {
   collapseCrossLibraryDuplicates,
@@ -679,6 +681,8 @@ export default function GalleryPage() {
   }
   // 三档尺寸（justify 行高）
   const [tileSize, setTileSize] = useGalleryTileSize();
+  // 布局模式（四档循环；默认 justify 保持老画廊视觉）
+  const [layout, setLayout] = useGalleryLayout();
 
   const currentGroup = viewport.group;
   const showSticky =
@@ -750,7 +754,7 @@ export default function GalleryPage() {
         <GalleryBrowseControls
           inactive={viewer !== null}
           filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen((open) => !open)}
-          tileSize={tileSize} onTileSize={setTileSize} onImport={() => navigate("/import")}
+          tileSize={tileSize} onTileSize={setTileSize} layout={layout} onLayout={setLayout} onImport={() => navigate("/import")}
           onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}
           cullDisabled={resultsBusy || (semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
           hideDuplicates={hideDuplicates}
@@ -895,8 +899,9 @@ export default function GalleryPage() {
               loadingMore={!semanticMode && loadingMore}
               hasMore={!semanticMode && hasMoreRef.current}
               onViewportChange={handleViewportChange}
-              layout="justify"
-              tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
+              layout={layout}
+              /* tile 语义随模式变：justify=目标行高；square/tiles=方格边长；masonry=列宽 */
+              tile={layout === "justify" ? GALLERY_JUSTIFY_ROW_PX[tileSize] : GALLERY_TILE_PX[tileSize]}
               badges={semanticMode ? semanticCards.badges : badges}
               scores={semanticMode ? semantic.scores : undefined}
               burstBadges={semanticMode ? undefined : burstBadges}

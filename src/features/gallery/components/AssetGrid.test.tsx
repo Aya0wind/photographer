@@ -7,15 +7,26 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 
 import i18n from "@/i18n";
-import AssetGrid, { ASPECT_FALLBACK, justifyItems } from "./AssetGrid";
+import AssetGrid, { ASPECT_FALLBACK, justifyItems, masonryColumns, masonryPlace } from "./AssetGrid";
 import { groupAssetsByDate, type AssetGroup } from "../lib/assetGroups";
 import type { AssetDto } from "@/ipc/api";
 
 /**
- * AssetGrid 布局双模式（M4.5 A4）：justify（统一行高按宽高比分配宽，4:3 兜底，
- * 按行虚拟化）与 square（等宽方格，默认兼容视图）。
- * jsdom 无布局：offsetWidth mock 1200 → justify 可用宽 1176（扣 px-3 两侧 24）。
+ * AssetGrid 布局四模式：square/tiles（等宽方格，后者 letterbox 不裁切）、
+ * justify（统一行高按宽高比分配宽，4:3 兜底，按行虚拟化）、masonry（瀑布：
+ * 贪心最矮列 + 96px 定高带虚拟化，aspect 布局计算夹取 [1/2.75, 2.75]）。
+ * jsdom 无布局：offsetWidth mock 1200 → justify/masonry 可用宽 1176（扣 px-3 两侧 24）。
  */
+
+// tiles 断言 img 的 object-contain/object-cover：全局 Tauri mock 下缩略图管线
+// 恒 failed（无 img 元素），此处仅覆写 useAssetThumbUrl 直接给 ready URL
+vi.mock("../lib/thumbPipeline", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/thumbPipeline")>();
+  return {
+    ...actual,
+    useAssetThumbUrl: () => ({ url: "https://example.test/thumb.jpg", status: "ready" as const }),
+  };
+});
 
 beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, get: () => 1200 });
@@ -157,6 +168,163 @@ describe("AssetGrid justify 渲染", () => {
     const tile = screen.getByTestId("gallery-tile");
     expect(tile.style.width).toBe("200px");
     expect(tile.style.height).toBe("200px");
+    // 缩略图仍裁切填满（cover）
+    expect(tile.querySelector("img")?.className).toContain("object-cover");
+  });
+
+  it("tiles：行结构与 square 同构（等宽等高），缩略图 letterbox 不裁切", () => {
+    // 宽高比不同的资产混排：格子仍是 tile×tile，不因宽高比变形
+    renderGrid({ groups: groupsOf([asset(1, { w: 6000, h: 4000 }), asset(2, { w: 1000, h: 3000 })]), layout: "tiles", tile: 200 });
+
+    const scroll = screen.getByTestId("gallery-grid-scroll");
+    expect(scroll).toHaveAttribute("data-layout", "tiles");
+    const tiles = screen.getAllByTestId("gallery-tile");
+    expect(tiles).toHaveLength(2);
+    for (const tile of tiles) {
+      expect(tile.style.width).toBe("200px");
+      expect(tile.style.height).toBe("200px");
+    }
+    // 完整显示不裁切：img 换 object-contain
+    for (const tile of tiles) expect(tile.querySelector("img")?.className).toContain("object-contain");
+  });
+});
+
+// --- masonry 算法（纯函数） -------------------------------------------------------------
+
+describe("masonryColumns 列数", () => {
+  it("可用宽/列宽步进取整，至少 1 列", () => {
+    expect(masonryColumns(1176, 200)).toBe(5); // floor(1176/204)
+    expect(masonryColumns(204, 200)).toBe(1); // 恰好一列
+    expect(masonryColumns(100, 200)).toBe(1); // 不足一列也保底 1
+    expect(masonryColumns(0, 200)).toBe(1);
+  });
+});
+
+describe("masonryPlace 贪心分列", () => {
+  it("逐项塞当前最矮列（平列取最左）：每列内 y 单调递增且间隔=前项高+GAP", () => {
+    // 3 列、列宽 100、6 张 1:1（高 100）：进列 0/1/2 后回到并列最矮的列 0
+    const { items } = masonryPlace(Array.from({ length: 6 }, (_, i) => asset(i + 1, { w: 100, h: 100 })), 3, 100);
+    const byCol = new Map<number, typeof items>();
+    for (const item of items) {
+      const list = byCol.get(item.x) ?? [];
+      list.push(item);
+      byCol.set(item.x, list);
+    }
+    expect([...byCol.keys()].sort((a, b) => a - b)).toEqual([0, 104, 208]); // 3 列等距
+    for (const list of byCol.values()) {
+      for (let i = 1; i < list.length; i++) {
+        expect(list[i].y).toBeGreaterThan(list[i - 1].y);
+        expect(list[i].y).toBe(list[i - 1].y + list[i - 1].h + 4); // GAP=4
+      }
+    }
+  });
+
+  it("真·最矮列（非轮转）：第 4 项跳过首列进矮列", () => {
+    // 1:1(高100)→列0；2:1(高50)→列1；1:1(高100)→列2；2:1(高50)→最矮的列1
+    const { items } = masonryPlace(
+      [asset(1, { w: 100, h: 100 }), asset(2, { w: 200, h: 100 }), asset(3, { w: 100, h: 100 }), asset(4, { w: 200, h: 100 })],
+      3,
+      100,
+    );
+    expect(items[3].x).toBe(104); // 列 1
+    expect(items[3].y).toBe(54); // 列 1 当前高 50+GAP
+  });
+
+  it("aspect 夹取 [1/2.75, 2.75]：极端宽高比高度被钳制", () => {
+    const pano = masonryPlace([asset(1, { w: 10000, h: 1000 })], 1, 200); // 10:1
+    expect(pano.items[0].h).toBe(Math.round(200 / 2.75)); // 73，而非 20
+    const vertical = masonryPlace([asset(2, { w: 1000, h: 10000 })], 1, 200); // 1:10
+    expect(vertical.items[0].h).toBe(Math.round(200 * 2.75)); // 550，而非 2000
+  });
+
+  it("带划分：item 属于 top 所在带（跨带溢出也归 top 的带）；边界 top=96 归带 1", () => {
+    // 单列列宽 96：首项 aspect 0.48 → 高 200（视觉跨 3 带），仍属带 0
+    const tall = masonryPlace([asset(1, { w: 48, h: 100 }), asset(2, { w: 96, h: 96 })], 1, 96);
+    expect(tall.items[0]).toMatchObject({ y: 0, h: 200, band: 0 });
+    expect(tall.items[1]).toMatchObject({ y: 204, band: 2 }); // 200+GAP 后 top 落带 2
+    expect(tall.contentHeight).toBe(300); // 204+96
+    // 恰好落在边界：首项高 92 → 次项 top=96 → 属带 1
+    const boundary = masonryPlace([asset(3, { w: 96, h: 92 }), asset(4, { w: 96, h: 96 })], 1, 96);
+    expect(boundary.items[1]).toMatchObject({ y: 96, band: 1 });
+    expect(boundary.contentHeight).toBe(192);
+  });
+});
+
+// --- masonry 渲染（jsdom 宽度 mock 1200 → 可用宽 1176、tile 200 时 5 列） ------------------
+
+describe("AssetGrid masonry 渲染", () => {
+  it("瓦片绝对定位（列偏移/自身高度）、data-layout=masonry，行带 data-masonry-band", () => {
+    renderGrid({
+      groups: groupsOf([asset(1, { w: 48, h: 100 }), asset(2), asset(3, { w: 3000, h: 1000 })]),
+      layout: "masonry",
+      tile: 200,
+    });
+
+    const scroll = screen.getByTestId("gallery-grid-scroll");
+    expect(scroll).toHaveAttribute("data-layout", "masonry");
+    const row = screen.getAllByTestId("gallery-row")[0];
+    expect(row).toHaveAttribute("data-masonry-band", "0");
+    expect(row.className).not.toContain("flex"); // 带行不用 flex，靠绝对定位
+
+    const tile = (id: number) =>
+      screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === String(id)) as HTMLElement;
+    // 竖图 0.48 → 高 417；无尺寸 4:3 → 高 150 进列 1；3:1 全景钳 2.75 → 高 73 进列 2
+    expect(tile(1).style.top).toBe("0px");
+    expect(tile(1).style.left).toBe("0px");
+    expect(tile(1).style.width).toBe("200px");
+    expect(tile(1).style.height).toBe("417px");
+    expect(tile(2).style.left).toBe("204px");
+    expect(tile(2).style.height).toBe("150px");
+    expect(tile(3).style.left).toBe("408px");
+    expect(tile(3).style.height).toBe("73px");
+  });
+
+  it("新组从 y=0 重排：第二组首项 top=0（组头下从零开始）", () => {
+    const groups: AssetGroup[] = [
+      { key: "2026-09-18", date: "2026-09-18", assets: [asset(1, { w: 48, h: 100 })] },
+      { key: "2026-09-17", date: "2026-09-17", assets: [asset(2)] },
+    ];
+    renderGrid({ groups, layout: "masonry", tile: 96 });
+
+    const tile = (id: number) =>
+      screen.getAllByTestId("gallery-tile").find((t) => t.getAttribute("data-asset-id") === String(id)) as HTMLElement;
+    expect(tile(1).style.height).toBe("200px"); // 96/0.48
+    expect(tile(2).style.top).toBe("0px"); // 新组重排，不受上组列高影响
+    expect(tile(2).style.height).toBe("72px"); // 96/(4/3)
+  });
+
+  it("尾部追加不 remount 旧带：首瓦片 DOM 节点保留（append-only 带行 key 稳定）", () => {
+    const first = groupsOf([asset(1, { w: 48, h: 100 })]);
+    const { rerender } = renderGrid({ groups: first, layout: "masonry", tile: 96 });
+    const original = screen.getAllByTestId("gallery-tile")[0];
+    expect(original.getAttribute("data-asset-id")).toBe("1");
+
+    const appended = groupsOf([asset(1, { w: 48, h: 100 }), asset(2), asset(3), asset(4), asset(5)]);
+    rerender(<I18nextProvider i18n={i18n}><AssetGrid groups={appended} layout="masonry" tile={96} /></I18nextProvider>);
+
+    expect(screen.getAllByTestId("gallery-tile")[0]).toBe(original);
+    expect(original.style.height).toBe("200px"); // 旧项 y/高不动
+  });
+
+  it("多选语义照旧：selection.active 时点击瓦片=切换选中（不触发 onOpenAsset）", async () => {
+    const onOpenAsset = vi.fn();
+    const onToggle = vi.fn((a: AssetDto) => void a);
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const user = userEvent.setup();
+    renderGrid({
+      groups: groupsOf([asset(1), asset(2)]),
+      layout: "masonry",
+      tile: 96,
+      onOpenAsset,
+      selection: { active: true, selected: [2], onToggle },
+    });
+
+    const tiles = screen.getAllByTestId("gallery-tile");
+    expect(tiles.find((t) => t.getAttribute("data-asset-id") === "2")).toHaveAttribute("data-selected", "true");
+    await user.click(tiles.find((t) => t.getAttribute("data-asset-id") === "1") as HTMLElement);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(onToggle).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+    expect(onOpenAsset).not.toHaveBeenCalled();
   });
 });
 

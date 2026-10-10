@@ -74,6 +74,8 @@ export interface AssetThumbProps {
   miniLabel?: string;
   /** 请求优先级：查看器主图用 high（插队），网格/胶片条默认 low */
   priority?: "high" | "low";
+  /** 图片填充：cover=裁切填满（默认）；contain=完整显示留 letterbox（tiles 布局） */
+  fit?: "cover" | "contain";
   testId?: string;
 }
 
@@ -85,6 +87,7 @@ export default function AssetThumb({
   skeleton = true,
   miniLabel,
   priority = "low",
+  fit = "cover",
   testId,
 }: AssetThumbProps) {
   const { t } = useTranslation();
@@ -145,7 +148,7 @@ export default function AssetThumb({
           onError={() => setFailedKey(imageKey)}
           data-testid={testId ? `${testId}-img` : undefined}
           draggable={false}
-          className={`h-full w-full object-cover transition-opacity duration-150 ${
+          className={`h-full w-full ${fit === "contain" ? "object-contain" : "object-cover"} transition-opacity duration-150 ${
             loaded ? "opacity-100" : "opacity-0"
           }`}
         />
