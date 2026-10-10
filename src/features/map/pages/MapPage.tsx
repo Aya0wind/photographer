@@ -4,9 +4,12 @@
  *   自动解压安装（loading）；加载/回填 → 进度；就绪 → 地图；失败 → 重试
  * - 分层气泡：zoom 驱动切层（全局聚合），点击气泡 flyTo 下钻（parent 限定）
  * - 面包屑（全球 > 中国 > 京省…）+ 换一批（随机样本重拉）+ 回填中提示
+ * - 嵌套子路由 /map/photos（气泡「N 张 →」/样图点击进入）：不透明层覆盖
+ *   内容区，地图保持挂载不卸载
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate, useOutlet } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { subscribeAppEvents } from "@/ipc/api/events";
@@ -27,7 +30,11 @@ interface Crumb {
 
 export default function MapPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const motionOn = useMotionOn();
+  // 嵌套子路由（/map/photos）：非空 = 子页激活，以不透明层覆盖内容区——
+  // 地图保持挂载不卸载（层级/下钻链/聚合缓存零成本保留），返回即原样恢复
+  const outlet = useOutlet();
   const [status, setStatus] = useState<GeoStatus | null>(null);
   const [level, setLevel] = useState<MapLevel>(0);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]); // 下钻链（空 = 全球）
@@ -92,6 +99,14 @@ export default function MapPage() {
     if (!status.installed || status.phase === "failed") install();
   }, [status, install]);
 
+  /** 气泡「N 张 →」角标 / 样图点击 → 该地区照片子页（?region= 地区 id） */
+  const onOpenPhotos = useCallback(
+    (regionId: number) => {
+      navigate(`/map/photos?region=${regionId}`);
+    },
+    [navigate],
+  );
+
   // zoom 驱动切层：回到全局聚合（drill 链清空）
   const onLevelChange = useCallback((next: MapLevel) => {
     setLevel(next);
@@ -153,7 +168,7 @@ export default function MapPage() {
   const backfillPct = backfilling && status && status.total > 0 ? Math.min(100, Math.round((status.done / status.total) * 100)) : 0;
 
   return (
-    <div className="flex h-full flex-col" data-testid="map-page">
+    <div className="relative flex h-full flex-col" data-testid="map-page">
       <div className="flex shrink-0 items-center gap-2 px-4 pt-3">
         <h1 className="text-sm font-semibold text-text-primary">{t("map.title")}</h1>
         {/* 面包屑：全球 > 国家 > 省 …（点击回退） */}
@@ -211,6 +226,7 @@ export default function MapPage() {
             level={level}
             onLevelChange={onLevelChange}
             onDrill={onDrill}
+            onOpenPhotos={onOpenPhotos}
             flyTarget={fly}
             animationsOn={motionOn}
             basemapReady={status?.phase === "ready" || status?.phase === "backfilling"}
@@ -225,6 +241,13 @@ export default function MapPage() {
           </div>
         )}
       </div>
+
+      {/* 嵌套子页（/map/photos）：不透明层覆盖整个内容区（地图不卸载） */}
+      {outlet !== null && (
+        <div className="absolute inset-0 z-30 overflow-hidden bg-bg" data-testid="map-photos-layer">
+          {outlet}
+        </div>
+      )}
     </div>
   );
 }

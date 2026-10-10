@@ -40,6 +40,8 @@ interface MapCanvasProps {
   level: MapLevel;
   onLevelChange: (level: MapLevel) => void;
   onDrill: (cluster: MapCluster) => void;
+  /** 气泡「N 张 →」角标 / 样图点击 → 打开该地区照片子页（MapPage 导航） */
+  onOpenPhotos?: (regionId: number) => void;
   flyTarget: FlyTarget | null;
   /** 全局动画开关（settings.appearance.animations）：关闭时 flyTo 瞬时 */
   animationsOn: boolean;
@@ -52,6 +54,7 @@ export default function MapCanvas({
   level,
   onLevelChange,
   onDrill,
+  onOpenPhotos,
   flyTarget,
   animationsOn,
   basemapReady = true,
@@ -68,9 +71,11 @@ export default function MapCanvas({
   const levelRef = useRef(level);
   const onLevelChangeRef = useRef(onLevelChange);
   const onDrillRef = useRef(onDrill);
+  const onOpenPhotosRef = useRef(onOpenPhotos);
   levelRef.current = level;
   onLevelChangeRef.current = onLevelChange;
   onDrillRef.current = onDrill;
+  onOpenPhotosRef.current = onOpenPhotos;
 
   // 初始化（一次）：底图 + zoom 防抖切层
   useEffect(() => {
@@ -124,13 +129,17 @@ export default function MapCanvas({
     if (!map) return;
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = clusters.map((cluster, index) => {
-      const element = createBubbleElement(cluster, index, () => onDrillRef.current(cluster));
+      const element = createBubbleElement(cluster, index, () => onDrillRef.current(cluster), {
+        onOpenPhotos: (regionId) => onOpenPhotosRef.current?.(regionId),
+        photosLabel: t("map.badge.photos", { count: cluster.count }),
+      });
       const marker = new maplibregl.Marker({ element })
         .setLngLat([cluster.lon, cluster.lat])
         .addTo(map);
       return marker;
     });
-  }, [clusters]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusters, t]);
 
   // 代表图懒加载（marker 挂载后异步补 src；失败保持占位底色）
   useEffect(() => {

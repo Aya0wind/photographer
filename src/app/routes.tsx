@@ -13,6 +13,7 @@ import TrashPage from "@/features/gallery/pages/TrashPage";
 import MemoriesPage from "@/features/memories/pages/MemoriesPage";
 import GearPage from "@/features/gear/pages/GearPage";
 import MapPage from "@/features/map/pages/MapPage";
+import MapPhotosPage from "@/features/map/pages/MapPhotosPage";
 import ImportPage from "@/features/import/pages/ImportPage";
 import SimilarPage from "@/features/similar/pages/SimilarPage";
 import StoragePage from "@/features/storage/pages/StoragePage";
@@ -98,7 +99,13 @@ export const router = createBrowserRouter([
       { path: "trash", element: <TrashPage /> },
       { path: "memories", element: <MemoriesPage /> },
       { path: "gear", element: <GearPage /> },
-      { path: "map", element: <MapPage /> },
+      // 拍摄地图（嵌套子路由 photos：气泡角标/样图点击进入 ?region=<id>）——
+      // MapPage 渲染 <Outlet/>，子页以不透明层覆盖、地图保持挂载不卸载
+      {
+        path: "map",
+        element: <MapPage />,
+        children: [{ path: "photos", element: <MapPhotosPage /> }],
+      },
       { path: "search", element: <SearchRedirect /> },
       { path: "similar", element: <SimilarPage /> },
       // 选片会话（Culling V1）：会话列表 + 全屏过片层（浮层内挂载）

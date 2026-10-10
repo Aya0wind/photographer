@@ -140,13 +140,18 @@ export default function AppShell() {
 function PageTransition({ children }: { children: React.ReactNode }) {
   const motionOn = useMotionOn();
   const location = useLocation();
+  // 键取主壳直属子页的路径，而非完整 pathname：嵌套子页（/map/photos）归并到
+  // 父页（/map）——子页进出不重挂父页，拍摄地图在照片子页打开时保持挂载
+  // （WebGL 上下文与下钻状态零成本保留）。其余路径键不变（各页行为零变化）；
+  // 子页自身的入场动画由子页内 motion 承担（同样仅入场）。
+  const pageKey = location.pathname.startsWith("/map/") ? "/map" : location.pathname;
   if (!motionOn) return <>{children}</>;
   // 仅入场动画、无退场：Outlet 是活组件，退场层会渲染新路由内容（双层同
   // 内容），且 wait/popLayout 都有空窗或克隆问题——入场 y 位移不透明度不
   // 归零，首帧即有内容（无闪烁），切页仍有轻量动效。
   return (
     <motion.div
-      key={location.pathname}
+      key={pageKey}
       className="h-full"
       initial={motionInitial(motionOn, { y: 8 })}
       animate={{ y: 0 }}

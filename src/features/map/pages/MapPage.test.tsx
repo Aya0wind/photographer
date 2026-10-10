@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import i18n from "@/i18n";
 import { subscribeAppEvents } from "@/ipc/api/events";
@@ -286,5 +286,74 @@ describe("MapPage 地图交互", () => {
     renderPage();
     expect(await screen.findByTestId("map-canvas")).toBeInTheDocument();
     expect(await screen.findByTestId("map-backfill-hint")).toBeInTheDocument();
+  });
+});
+
+// --- 气泡打开照片子页（/map/photos?region=<id>） ----------------------------------------
+
+/** 路由位置探针（断言导航后的路径 + 查询串） */
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
+describe("MapPage：气泡 → 照片子页导航", () => {
+  function renderWithChildRoutes() {
+    return render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={["/map"]}>
+          <Routes>
+            <Route
+              path="/map"
+              element={
+                <>
+                  <MapPage />
+                  <LocationProbe />
+                </>
+              }
+            >
+              <Route path="photos" element={<div data-testid="mapphotos-probe">PHOTOS</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+  }
+
+  it("「N 张 →」角标点击 → navigate /map/photos?region=<id>；子页层覆盖、地图页保持挂载", async () => {
+    statusMock.mockResolvedValue(status());
+    clustersMock.mockResolvedValue([cluster()]);
+    renderWithChildRoutes();
+    await screen.findByTestId("map-canvas");
+
+    const badge = await screen.findAllByRole("button", { name: "12 张 →" });
+    fireEvent.click(badge[0]);
+    expect(await screen.findByTestId("mapphotos-probe")).toBeInTheDocument();
+    expect(screen.getByTestId("location-probe")).toHaveTextContent("/map/photos?region=10");
+    // 子页以不透明层覆盖内容区；地图本体保持挂载未卸载
+    expect(screen.getByTestId("map-photos-layer")).toBeInTheDocument();
+    expect(screen.getByTestId("map-page")).toBeInTheDocument();
+    expect(screen.getByTestId("map-canvas")).toBeInTheDocument();
+  });
+
+  it("样图缩略图点击同样导航；气泡本体点击仍是下钻（不导航）", async () => {
+    statusMock.mockResolvedValue(status());
+    clustersMock.mockResolvedValue([cluster({ regionId: 11, name: "浙江省" })]);
+    renderWithChildRoutes();
+    await screen.findByTestId("map-canvas");
+
+    // 先点气泡本体：下钻（parent 限定聚合），不进照片子页
+    const bubble = await screen.findAllByRole("button", { name: /^浙江省/ });
+    fireEvent.click(bubble[0]);
+    await waitFor(() => expect(clustersMock).toHaveBeenCalledWith(1, 11));
+    expect(screen.queryByTestId("mapphotos-probe")).not.toBeInTheDocument();
+    expect(screen.getByTestId("location-probe")).toHaveTextContent("/map");
+
+    // 再点样图主图：打开该地区照片子页
+    const main = document.querySelector<HTMLElement>(".map-bubble-main");
+    expect(main).not.toBeNull();
+    fireEvent.click(main!);
+    expect(await screen.findByTestId("mapphotos-probe")).toBeInTheDocument();
+    expect(screen.getByTestId("location-probe")).toHaveTextContent("/map/photos?region=11");
   });
 });

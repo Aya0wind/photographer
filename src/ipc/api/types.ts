@@ -410,6 +410,9 @@ export interface AssetFilters {
   /** 缺失三态过滤（true=仅缺失 / false=仅在线；省略 = 不过滤。缺失角标筛选）。
    *  M2c 起后端已实现（assets.missing）。 */
   missing?: boolean;
+  /** 拍摄地区（拍摄地图 regions 树节点 id，单选；含子树。省略 = 不过滤）。
+   *  消费方：assets_page / assets_count / asset_group_dates / assets_seek。 */
+  regionId?: number;
 }
 
 /** 彻底删除回收站项的结果总结（trash_purge 返回；2026-10-09 §五 定案）：

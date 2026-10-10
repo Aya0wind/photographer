@@ -469,6 +469,12 @@ pub struct AssetFilters {
     /// false → 仅在线；None = 不过滤。整库离线走 photos_libraries.status，
     /// 不在本条件语义内。
     pub missing: Option<bool>,
+    /// 地区树节点单选（地图子页与画廊筛选共用）：Some(id) → 仅挂在该
+    /// region 节点的照片。树语义靠 asset_regions 的挂账形态天然成立——
+    /// 每资产按国家/省/市/县四层各挂一行，祖先节点 id 同步在挂，故选
+    /// 任意节点（如 0 级「中国」）即该层挂账集合 = 含全部子孙照片，
+    /// 无需递归展开树。无 GPS（零挂接）的照片被排除；None 不过滤。
+    pub region_id: Option<i64>,
 }
 
 /// 分页行（画廊网格数据源）。
@@ -1232,6 +1238,18 @@ fn asset_filter_conditions(
         } else {
             "missing = 0".into()
         });
+    }
+
+    // —— 地区树节点（地图子页与画廊共用）：命中该节点挂账的照片。
+    //    不递归树——asset_regions 每资产每层一行、祖先 id 同挂，
+    //    父节点（0 级国家级）的挂账集合天然覆盖全部子孙；子查询走
+    //    idx_asset_regions_region(region_id, level) 前缀。无 GPS 资产
+    //    无挂接行 → 天然被排除（「无地区」不是任何节点的成员）。
+    if let Some(region) = filters.region_id {
+        let s = slot(params_vec, V::from(region));
+        conds.push(format!(
+            "a.id IN (SELECT asset_id FROM asset_regions WHERE region_id = {s})"
+        ));
     }
 
     conds

@@ -312,6 +312,43 @@ body {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
+/* 「N 张 →」角标按钮：hover / 焦点露出（打开该地区照片子页）。
+   隐藏态 pointer-events:none，避免挡住样图点击。 */
+.map-bubble-photos {
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(10, 11, 14, 0.88);
+  border: 1px solid rgba(216, 105, 63, 0.75);
+  color: #f2906c;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  backdrop-filter: blur(2px);
+}
+
+.map-bubble:hover .map-bubble-photos,
+.map-bubble:focus-within .map-bubble-photos {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.map-bubble-photos:hover,
+.map-bubble-photos:focus-visible {
+  background: #d8693f;
+  border-color: #d8693f;
+  color: #fff;
+}
+
 .map-bubble-name {
   max-width: 92px;
   overflow: hidden;

@@ -17,6 +17,8 @@ import {
   type AssetLensCount,
   type PhotoLibrary,
 } from "@/ipc/api";
+import { mapRegionTree, type RegionCacheRow } from "@/ipc/api/map";
+import { regionPathOf } from "@/features/map/lib/regionPath";
 import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "./lib/colorLabels";
 
 /**
@@ -24,7 +26,7 @@ import { COLOR_DOT_CLASS, COLOR_DOT_RING, COLOR_LABELS, type ColorLabel } from "
  * - 状态：SearchInputs 单对象（数字区间为原始字符串，构建时校验）；序列化键即防抖键
  * - UI：网格——相机/镜头/格式（勾选下拉）、方向/闪光灯/GPS（分段）、
  *   焦段/ISO/光圈/快门/文件大小（min-max）、日期范围+快捷段、相册（单选下拉）、
- *   颜色标签（B1 五色点单选）/已拒绝（B1 三态）
+ *   颜色标签（B1 五色点单选）/已拒绝（B1 三态）、拍摄位置（三级级联，地图地区树）
  * - 清单：cameraList/lensList/albumList 面板展开时读取；格式在常用栏或面板挂载时读取
  * - chips：激活条件清单（每个可单独移除 + 一键清空），由 FilterChipsRow 渲染
  */
@@ -96,6 +98,9 @@ export interface SearchInputs {
   aiEyes: AiEyesFilter;
   /** 疑似失焦（C；false=不限） */
   aiBlur: boolean;
+  /** 拍摄位置（拍摄地图地区树单选；path 随行携带完整路径供 chips/按钮展示，
+   *  序列化进防抖键——树缓存未就绪时也能稳定显示） */
+  region: { id: number; path: string } | null;
 }
 
 export const EMPTY_INPUTS: SearchInputs = {
@@ -124,6 +129,7 @@ export const EMPTY_INPUTS: SearchInputs = {
   rejected: "all",
   aiEyes: "none",
   aiBlur: false,
+  region: null,
 };
 
 type QuickRangeKey = "recent7" | "recent30" | "thisYear" | "lastYear";
@@ -224,6 +230,7 @@ export function buildFilters(inputs: SearchInputs): AssetFilters {
   if (inputs.rejected !== "all") filters.rejected = inputs.rejected === "yes";
   if (inputs.aiEyes !== "none") filters.eyes = inputs.aiEyes;
   if (inputs.aiBlur) filters.blur = "soft";
+  if (inputs.region !== null) filters.regionId = inputs.region.id;
   return filters;
 }
 
@@ -725,6 +732,254 @@ function DateFilter({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch
   return <DateRangePicker from={inputs.from} to={inputs.to} onApply={onPatch} ranges={ranges}/>;
 }
 
+/** 级联单级下拉（位置级联专用；AlbumDropdown 同款单选语义，点选即收起，
+ *  首项固定「不限」；indent 项用于县级缩进展示） */
+function RegionLevelDropdown({
+  label,
+  allLabel,
+  emptyLabel,
+  options,
+  selectedId,
+  onSelect,
+  disabled = false,
+  testId,
+}: {
+  label: string;
+  allLabel: string;
+  emptyLabel: string;
+  options: Array<{ id: number; name: string; indent?: boolean }>;
+  selectedId: number | null;
+  onSelect: (id: number | null) => void;
+  disabled?: boolean;
+  testId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+  const selected = options.find((option) => option.id === selectedId) ?? null;
+  return (
+    <div ref={rootRef} className={`relative min-w-0 ${disabled ? "pointer-events-none opacity-40" : ""}`}>
+      <div
+        className={`inline-flex h-7 min-w-28 items-stretch overflow-hidden rounded-md border bg-panel/55 transition-colors ${
+          selected !== null || open
+            ? "border-accent bg-accent/10 text-accent"
+            : "border-edge text-text-secondary hover:border-text-muted hover:text-text-primary"
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={label}
+          className="flex min-w-0 flex-1 items-center justify-between gap-1.5 px-2 text-[11px]"
+          data-testid={`${testId}-button`}
+        >
+          <span className="max-w-[104px] truncate">{selected ? selected.name : allLabel}</span>
+          <svg viewBox="0 0 16 16" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3.5 6l4.5 4.5L12.5 6" />
+          </svg>
+        </button>
+      </div>
+      {open && (
+        <div
+          className="sp-scroll absolute left-0 top-8 z-20 max-h-72 w-56 overflow-y-auto rounded-xl border border-edge bg-surface p-1.5 shadow-2xl shadow-black/40"
+          data-testid={`${testId}-menu`}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              onSelect(null);
+              setOpen(false);
+            }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[11px] text-text-muted transition-colors hover:bg-panel/40"
+            data-testid={`${testId}-all`}
+          >
+            {allLabel}
+          </button>
+          {options.length === 0 ? (
+            <p className="px-2 py-2 text-[11px] leading-relaxed text-text-muted">{emptyLabel}</p>
+          ) : (
+            options.map((option) => {
+              const active = option.id === selectedId;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    onSelect(option.id);
+                    setOpen(false);
+                  }}
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-panel/40 ${option.indent ? "pl-5" : ""}`}
+                  data-testid={`${testId}-option`}
+                  data-region-id={option.id}
+                  data-selected={active}
+                >
+                  <span
+                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                      active ? "border-accent bg-accent" : "border-text-muted/70"
+                    }`}
+                    aria-hidden="true"
+                  >
+                    {active && <span className="h-1.5 w-1.5 rounded-full bg-black" />}
+                  </span>
+                  <span
+                    className={`min-w-0 flex-1 truncate ${option.indent ? "text-[10px] text-text-muted" : "text-[11px] text-text-secondary"}`}
+                    title={option.name}
+                  >
+                    {option.name}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 拍摄位置三级级联（国家 → 省 → 市县）：选项来自地图地区树缓存
+ *  （mapRegionTree，按 level/parent 过滤），上一级选定才出下一级；任一级
+ *  点选即生效（region = 该节点，「不限」回退到上一级），× 一键清空=去筛选。
+ *  树缓存未就绪（null）：下拉禁用，仅回显已选完整路径（id 兜底）。 */
+function RegionCascade({ inputs, onPatch }: { inputs: SearchInputs; onPatch: (patch: Partial<SearchInputs>) => void }) {
+  const { t } = useTranslation();
+  const [rows, setRows] = useState<RegionCacheRow[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void mapRegionTree().then((list) => {
+      if (!cancelled) setRows(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const list = rows ?? [];
+  const byId = useMemo(() => new Map(list.map((r) => [r.id, r])), [list]);
+
+  // 已选节点 → 根的上溯链（首元素=国家；末元素=已选节点本身）
+  const chain = useMemo(() => {
+    if (inputs.region === null) return [];
+    const path: RegionCacheRow[] = [];
+    const seen = new Set<number>();
+    let current: RegionCacheRow | undefined = byId.get(inputs.region.id);
+    while (current !== undefined && !seen.has(current.id)) {
+      seen.add(current.id);
+      path.unshift(current);
+      current = current.parent !== null ? byId.get(current.parent) : undefined;
+    }
+    return path;
+  }, [byId, inputs.region]);
+
+  const selectedRow = chain.length > 0 ? chain[chain.length - 1] : null;
+  const country = chain.find((r) => r.level === 0) ?? null;
+  const province = chain.find((r) => r.level === 1) ?? null;
+
+  const countries = useMemo(() => list.filter((r) => r.level === 0).map((r) => ({ id: r.id, name: r.name })), [list]);
+  const provinces = useMemo(
+    () =>
+      country === null
+        ? []
+        : list.filter((r) => r.level === 1 && r.parent === country.id).map((r) => ({ id: r.id, name: r.name })),
+    [list, country],
+  );
+  // 市县合并一级：省直属市（level 2）+ 各市直属县（level 3，缩进展示）
+  const citiesAndCounties = useMemo(() => {
+    if (province === null) return [];
+    const out: Array<{ id: number; name: string; indent?: boolean }> = [];
+    for (const city of list) {
+      if (city.level !== 2 || city.parent !== province.id) continue;
+      out.push({ id: city.id, name: city.name });
+      for (const county of list) {
+        if (county.level === 3 && county.parent === city.id) out.push({ id: county.id, name: county.name, indent: true });
+      }
+    }
+    return out;
+  }, [list, province]);
+
+  /** 点选节点 → region 生效（path 全路径随行；不在树内回退 #id） */
+  const apply = useCallback(
+    (id: number | null) => {
+      const row = id !== null ? byId.get(id) : undefined;
+      onPatch({
+        region:
+          row === undefined
+            ? null
+            : { id: row.id, path: regionPathOf(list, row.id) ?? `#${row.id}` },
+      });
+    },
+    [byId, list, onPatch],
+  );
+
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="search-region-cascade">
+      <RegionLevelDropdown
+        label={t("map.level.country")}
+        allLabel={t("search.regionAll")}
+        emptyLabel={t("search.regionEmpty")}
+        options={countries}
+        selectedId={country?.id ?? null}
+        onSelect={apply}
+        disabled={rows === null}
+        testId="search-region-country"
+      />
+      <RegionLevelDropdown
+        label={t("map.level.province")}
+        allLabel={t("search.regionAll")}
+        emptyLabel={t("search.regionEmpty")}
+        options={provinces}
+        selectedId={province?.id ?? null}
+        onSelect={(id) => apply(id ?? country?.id ?? null)}
+        disabled={country === null}
+        testId="search-region-province"
+      />
+      <RegionLevelDropdown
+        label={t("search.regionCityCounty")}
+        allLabel={t("search.regionAll")}
+        emptyLabel={t("search.regionEmpty")}
+        options={citiesAndCounties}
+        selectedId={selectedRow !== null && selectedRow.level >= 2 ? selectedRow.id : null}
+        onSelect={(id) => apply(id ?? province?.id ?? null)}
+        disabled={province === null}
+        testId="search-region-city"
+      />
+      {/* 树缓存未就绪：下拉不可用，仅回显已选路径 */}
+      {rows === null && inputs.region !== null && (
+        <span className="max-w-[160px] shrink-0 truncate text-[11px] text-accent" title={inputs.region.path}>
+          {inputs.region.path}
+        </span>
+      )}
+      {inputs.region !== null && (
+        <button
+          type="button"
+          onClick={() => onPatch({ region: null })}
+          aria-label={`${t("search.region")} ×`}
+          title={`${t("search.region")} ×`}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-accent/25 text-sm text-text-muted transition-colors hover:bg-accent/15 hover:text-accent"
+          data-testid="search-region-clear"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ClearFiltersButton({ onClear, disabled=false, testId="search-reset-filters" }: {
   onClear: () => void; disabled?: boolean; testId?: string;
 }) {
@@ -997,6 +1252,9 @@ export function FilterPanel({
         <FieldRow label={t("search.library")}>
           <LibraryFilter inputs={inputs} onPatch={onPatch} />
         </FieldRow>
+        <FieldRow label={t("search.region")}>
+          <RegionCascade inputs={inputs} onPatch={onPatch} />
+        </FieldRow>
         <FieldRow label={t("search.focal")}>
           <RangeField
             label={t("search.focal")}
@@ -1200,6 +1458,14 @@ export function buildChips(inputs: SearchInputs, t: (key: string) => string): Ac
   }
   if (inputs.album !== null) {
     chips.push({ key: "album", label: inputs.album.name, patch: { ...inputs, album: null } });
+  }
+  if (inputs.region !== null) {
+    // 位置 chip 文案 = 完整路径（中国 / 浙江省 / 杭州市），模板键带 {{path}} 占位
+    chips.push({
+      key: "region",
+      label: t("search.regionChip").replace("{{path}}", inputs.region.path),
+      patch: { ...inputs, region: null },
+    });
   }
   for (const library of inputs.libraries) {
     chips.push({

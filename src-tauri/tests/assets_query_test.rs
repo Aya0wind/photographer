@@ -1252,3 +1252,156 @@ fn editor_ownership_is_preserved_by_gallery_and_direct_asset_queries() {
     let by_id=ipc::assets::fetch_assets_by_ids(&state,&[id]).unwrap();
     assert_eq!(by_id[0].library_id.as_deref(),Some("photo-library"));
 }
+
+// ---------------------------------------------------------------------------
+// 地区维度筛选（AssetFilters.region_id：地图子页与画廊共用）
+// ---------------------------------------------------------------------------
+
+/// 直插 region 树节点（绕过 geo 数据包回填——筛选只认 asset_regions 的
+/// 挂账形态，不依赖经纬度反查，直接按表结构造树）。
+fn ins_region(db: &db::Db, id: i64, parent: Option<i64>, level: i64, name: &str) {
+    db.0.execute(
+        "INSERT INTO regions (id, parent_id, level, name, lat, lon, source) \
+         VALUES (?1, ?2, ?3, ?4, 0, 0, 'test')",
+        rusqlite::params![id, parent, level, name],
+    )
+    .unwrap();
+}
+
+/// 挂账一行（geo 回填后的形态：每资产每层一行 PK(asset_id, level)、
+/// 祖先节点 id 同步在挂）。
+fn attach_region(db: &db::Db, asset: i64, region: i64, level: i64) {
+    db.0.execute(
+        "INSERT INTO asset_regions (asset_id, region_id, level) VALUES (?1, ?2, ?3)",
+        rusqlite::params![asset, region, level],
+    )
+    .unwrap();
+}
+
+#[test]
+fn region_filter_hits_node_covers_subtree_and_excludes_unattached() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let database = common::open_db(db_dir.path());
+    // 树：中国(0) > 京省(1) > 州市(2) > 甲区(3)；测试国(0) > 北省(1)
+    ins_region(&database, 100, None, 0, "中国");
+    ins_region(&database, 110, Some(100), 1, "京省");
+    ins_region(&database, 120, Some(110), 2, "州市");
+    ins_region(&database, 130, Some(120), 3, "甲区");
+    ins_region(&database, 200, None, 0, "测试国");
+    ins_region(&database, 210, Some(200), 1, "北省");
+    let jia = ins(
+        &database,
+        "jia.jpg",
+        Some("2026-01-01T10:00:00.000Z"),
+        AssetKind::Photo,
+        None,
+        10,
+        1,
+    );
+    let bei = ins(
+        &database,
+        "bei.jpg",
+        Some("2026-01-02T10:00:00.000Z"),
+        AssetKind::Photo,
+        None,
+        10,
+        2,
+    );
+    let _nowhere = ins(
+        &database,
+        "nowhere.jpg",
+        Some("2026-01-03T10:00:00.000Z"),
+        AssetKind::Photo,
+        None,
+        10,
+        3,
+    );
+    // 挂账按回填形态：甲四层全挂、北两层（无省市细分）、无 GPS 零挂接
+    for (level, region) in [(0, 100i64), (1, 110), (2, 120), (3, 130)] {
+        attach_region(&database, jia, region, level);
+    }
+    for (level, region) in [(0, 200i64), (1, 210)] {
+        attach_region(&database, bei, region, level);
+    }
+    let state = query_state(db_dir.path());
+
+    // 县级节点：单点命中，排除其他地区与无地区照片
+    let county = page(
+        &state,
+        0,
+        100,
+        AssetFilters {
+            region_id: Some(130),
+            ..Default::default()
+        },
+    );
+    assert_eq!(county.iter().map(|a| a.id).collect::<Vec<_>>(), vec![jia]);
+    // 树语义：0 级中国 = 全国照片——甲照片 0 级挂的就是父节点 id，
+    // 单行挂账即含全部子孙，无需递归展开
+    let china = page(
+        &state,
+        0,
+        100,
+        AssetFilters {
+            region_id: Some(100),
+            ..Default::default()
+        },
+    );
+    assert_eq!(china.iter().map(|a| a.id).collect::<Vec<_>>(), vec![jia]);
+    // 中间层（省级）同形态命中；跨国不串
+    let province = page(
+        &state,
+        0,
+        100,
+        AssetFilters {
+            region_id: Some(210),
+            ..Default::default()
+        },
+    );
+    assert_eq!(province.iter().map(|a| a.id).collect::<Vec<_>>(), vec![bei]);
+    // 不存在的 region 节点 = 空集（不是全量兜底）
+    assert!(page(
+        &state,
+        0,
+        100,
+        AssetFilters {
+            region_id: Some(999),
+            ..Default::default()
+        }
+    )
+    .is_empty());
+
+    // 计数与分页同口径（共享条件构造器，含空集）
+    for region in [100i64, 130, 210, 999] {
+        let filters = AssetFilters {
+            region_id: Some(region),
+            ..Default::default()
+        };
+        assert_eq!(
+            database.assets_count(&filters).unwrap(),
+            page(&state, 0, 100, filters.clone()).len() as u64,
+            "region={region} 计数=分页行数"
+        );
+    }
+    // None 不过滤：三张全量（含无地区照片）
+    assert_eq!(database.assets_count(&AssetFilters::default()).unwrap(), 3);
+
+    // 日期分组链路同样吃该条件：中国仅 1 组 1 张、cover 即甲照片
+    let groups = database
+        .asset_group_dates_filtered(&AssetFilters {
+            region_id: Some(100),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].count, 1);
+    assert_eq!(groups[0].cover_asset_id, jia);
+
+    // IPC 契约：camelCase 键 regionId 进（缺省=None 出）
+    let filters: AssetFilters = serde_json::from_str(r#"{"regionId":130}"#).unwrap();
+    assert_eq!(filters.region_id, Some(130));
+    assert_eq!(
+        serde_json::to_value(AssetFilters::default()).unwrap()["regionId"],
+        serde_json::Value::Null
+    );
+}
