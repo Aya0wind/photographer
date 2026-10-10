@@ -21,7 +21,6 @@ async function createWindow(photo: EditorPhoto): Promise<void> {
   if (photo.subgroup != null) params.set("subgroup", photo.subgroup);
   const editor = new WebviewWindow(EDITOR_WINDOW, { url: `/advanced-editor?${params}`,
     title: "Photo Hub — Advanced Editor", width: 1440, height: 960, minWidth: 1000, minHeight: 680,
-    backgroundColor: "#00000000",
     decorations: true, resizable: true, focus: true, dragDropEnabled: false,
     theme: document.documentElement.dataset.theme === "light" ? "light" : "dark" });
   try {

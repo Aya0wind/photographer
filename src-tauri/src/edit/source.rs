@@ -13,6 +13,7 @@ pub struct RawSource {
 }
 
 pub struct Opened {
+    pub original_size: [u32; 2],
     pub document: Document,
     pub raw: Option<Arc<RawSource>>,
     pub warnings: Vec<String>,
@@ -63,11 +64,53 @@ fn developed_document(developed: &Developed) -> Result<Document, String> {
     from_image("RAW", &image)
 }
 
+// Shrink the contiguous 16-bit pixels before constructing a tiled document.
+// This avoids creating and then resampling a full 61MP document just for a proxy.
+fn shrink_developed(developed: &mut Developed, edge: u32) -> Result<(), String> {
+    let long = developed.width.max(developed.height);
+    if long <= edge {
+        return Ok(());
+    }
+    let pixels = std::mem::take(&mut developed.rgb);
+    let image = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(
+        developed.width,
+        developed.height,
+        pixels,
+    )
+    .ok_or("Invalid RAW preview buffer")?;
+    let width = (u64::from(developed.width) * u64::from(edge) / u64::from(long)).max(1) as u32;
+    let height = (u64::from(developed.height) * u64::from(edge) / u64::from(long)).max(1) as u32;
+    let resized =
+        image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle);
+    developed.width = width;
+    developed.height = height;
+    developed.rgb = resized.into_raw();
+    Ok(())
+}
+
 pub fn open(path: &Path) -> Result<Opened, String> {
     open_if_current(path, || true)
 }
 
 pub fn open_if_current(path: &Path, current: impl Fn() -> bool) -> Result<Opened, String> {
+    open_for(path, None, current)
+}
+
+/// Interactive preparation uses fast native demosaicing and builds tiles only
+/// for the fixed proxy. Full-quality source/export retain upstream defaults.
+pub fn open_preview_if_current(
+    path: &Path,
+    edge: u32,
+    current: impl Fn() -> bool,
+) -> Result<Opened, String> {
+    open_for(path, Some(edge), current)
+}
+
+fn open_for(
+    path: &Path,
+    preview_edge: Option<u32>,
+    current: impl Fn() -> bool,
+) -> Result<Opened, String> {
     if !current() {
         return Err("预览请求已被更新或关闭".into());
     }
@@ -79,10 +122,23 @@ pub fn open_if_current(path: &Path, current: impl Fn() -> bool) -> Result<Opened
     if photocraft_raw::is_raw(&bytes) {
         match photocraft_raw::decode(&bytes, &photocraft_raw::Limits::default()) {
             Ok(sensor) => {
-                let developed = develop_when(&sensor, &DevelopOptions::default(), &current)
-                    .map_err(|e| e.to_string())?;
+                let options = DevelopOptions {
+                    demosaic: if preview_edge.is_some() {
+                        photocraft_raw::Demosaic::Mhc
+                    } else {
+                        photocraft_raw::Demosaic::Ahd
+                    },
+                    ..DevelopOptions::default()
+                };
+                let mut developed =
+                    develop_when(&sensor, &options, &current).map_err(|e| e.to_string())?;
+                let original_size = [developed.width, developed.height];
+                if let Some(edge) = preview_edge {
+                    shrink_developed(&mut developed, edge)?;
+                }
                 let doc = developed_document(&developed)?;
                 return Ok(Opened {
+                    original_size,
                     document: doc,
                     raw: Some(Arc::new(RawSource {
                         sensor: Arc::new(sensor),
@@ -102,6 +158,7 @@ pub fn open_if_current(path: &Path, current: impl Fn() -> bool) -> Result<Opened
         return Err("预览请求已被更新或关闭".into());
     }
     Ok(Opened {
+        original_size: [imported.document.size.width, imported.document.size.height],
         document: imported.document,
         raw: None,
         warnings: imported.warnings,
@@ -141,10 +198,6 @@ impl RawSource {
 }
 
 // 初始化、精细预览和导出共用限流，避免多个完整显影争抢内存和工作线程。
-fn develop(sensor: &Sensor, options: &DevelopOptions) -> Result<Developed, String> {
-    develop_when(sensor, options, || true)
-}
-
 fn develop_when(
     sensor: &Sensor,
     options: &DevelopOptions,
@@ -160,4 +213,38 @@ fn develop_when(
         return Err("预览请求已被更新或关闭".into());
     }
     Ok(developed)
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    #[test]
+    fn preview_shrinks_before_tiling_and_preserves_16_bit_colour() {
+        let info = photocraft_raw::RawInfo {
+            format: photocraft_raw::RawFormat::Dng,
+            make: None,
+            model: None,
+            sensor_width: 240,
+            sensor_height: 160,
+            cfa: None,
+            wb_multipliers: [1.0; 3],
+            orientation: 1,
+            baseline_exposure: 0.0,
+        };
+        let mut developed = Developed {
+            width: 240,
+            height: 160,
+            rgb: vec![12000; 240 * 160 * 3],
+            info,
+            warnings: vec![],
+        };
+        shrink_developed(&mut developed, 60).unwrap();
+        assert_eq!((developed.width, developed.height), (60, 40));
+        assert!(developed.rgb.iter().all(|sample| *sample == 12000));
+        assert_eq!(developed.info.sensor_width, 240);
+        let doc = developed_document(&developed).unwrap();
+        assert_eq!(doc.depth, SampleType::U16);
+        assert_eq!(doc.size, Size::new(60, 40));
+        assert!(doc.icc_profile.is_some());
+    }
 }

@@ -1,6 +1,7 @@
+import {useZoomIndicator} from "../lib/useZoomIndicator";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { CurvePicker } from "../lib/curves";
+import type { CurvePicker, HslColorRange } from "../lib/curves";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -12,19 +13,22 @@ import ActionPopover from "@/shared/components/ActionPopover";
 import EditorCanvas, { type EditorTool } from "./EditorCanvas";
 import ExportAlbumPicker from "./ExportAlbumPicker";
 import AdvancedToolPanel from "./AdvancedToolPanel";
+import MaskPanel from "./MaskPanel";
+import type {MaskBrush} from "./MaskCanvasControls";
 import { advancedRecipe, advancedReducer } from "../lib/advancedRecipe";
 import { newLayerId, recipeEquals, recipeForPersist, type RecipeContext } from "../lib/recipe";
 import { clampCrop, isFullCrop, type Size } from "../lib/coords";
 import { useNativeEditorCanvas } from "../lib/useNativeEditorCanvas";
 import { useEditorPreview } from "../lib/useEditorPreview";
+import {useMaskOverlay} from "../lib/useMaskOverlay";
 import { ASSET_DRAG_TYPE, useAdvancedEditorStore, type EditorPhoto } from "../lib/advancedEditorStore";
 
 const TOOLS: { id: EditorTool; icon: string; label: string }[] = [
-  { id: "view", icon: "M4 8h16v12H4zM8 4h8", label: "editor.tool.view" },
   { id: "crop", icon: "M6 3v15h15M3 6h15v15", label: "editor.tool.cropRotate" },
   { id: "adjust", icon: "M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6", label: "editor.tool.adjust" },
   { id: "text", icon: "M5 5h14M12 5v14M8 19h8", label: "editor.tool.text" },
   { id: "brush", icon: "m5 15 10-11 5 5-11 10H4zM13 6l5 5", label: "editor.tool.brush" },
+  { id:"mask",icon:"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 0v18",label:"advancedEditor.masks.title" },
   { id: "output", icon: "M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5", label: "editor.tool.output" },
 ];
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
@@ -40,50 +44,54 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   );
   const recipe = history.present;
   const [tool, setTool] = useState<EditorTool>("adjust");
+  const [selectedMask,setSelectedMask]=useState<string|null>(null);
+  const [maskEditing,setMaskEditing]=useState(true);
+  const [showMaskOverlay,setShowMaskOverlay]=useState(true);
+  const [maskBrush,setMaskBrush]=useState<MaskBrush>({widthRel:0.05,hardness:1,opacity:1,flow:1,erase:false});
+  const activeMask=recipe.masks?.find(mask=>mask.id===selectedMask);
+  useEffect(()=>{if(!activeMask)setSelectedMask(recipe.masks?.[0]?.id??null);},[activeMask,recipe.masks]);
   const [nativeActive,setNativeActive]=useState(false);
   const nativeHost=useRef<HTMLElement|null>(null);
   const preview = useEditorPreview(asset.id, tool === "crop" ? { ...recipe, crop: null, textLayers: [], brushStrokes: [] } : recipe, libraryId, nativeActive);
   const sourceSize = useMemo<Size | null>(() => preview.session ? { width: preview.session.width, height: preview.session.height } : null, [preview.session]);
   context.current = sourceSize ?? { width: 0, height: 0 };
   const [zoom, setZoom] = useState(1);
-  const [zoomVisible, setZoomVisible] = useState(true);
-  const zoomControls = useRef<HTMLDivElement>(null);
-  const zoomHover = useRef(false);
-  const zoomTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  function wakeZoom() {
-    setZoomVisible(true);
-    if (zoomTimer.current) clearTimeout(zoomTimer.current);
-    zoomTimer.current = setTimeout(() => {
-      if (!zoomHover.current && !zoomControls.current?.contains(document.activeElement)) setZoomVisible(false);
-    }, 3000);
-  }
-  useEffect(() => {
-    wakeZoom();
-    return () => { if (zoomTimer.current) clearTimeout(zoomTimer.current); };
-  }, []);
+  const {visible:zoomVisible,wake:wakeZoom}=useZoomIndicator(zoom);
   const [compare, setCompare] = useState(false);
   const [picker, setPicker] = useState<CurvePicker | null>(null);
-  const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,recipe,nativeHost,
-    (tool==="adjust" || tool==="view" || tool==="output") && !picker && !recipe.crop && recipe.rotateQuarter===0,
-    compare,preview.session?.sourceUrl);
-  useEffect(() => {setNativeActive(nativeCanvas);},[nativeCanvas]);
+  const [hslRange,setHslRange]=useState<HslColorRange|null>(null);
   const [sample, setSample] = useState<[number, number, number] | null>(null);
   const [samplingError, setSamplingError] = useState<string | null>(null);
+  const [samplingBusy,setSamplingBusy]=useState(false);
+  const pickBusy=useRef(false);
+  const pickSignature=useRef("");pickSignature.current=JSON.stringify({recipe,picker,sessionId:preview.session?.sessionId,maskId:tool==="mask"?selectedMask:null});
   const pickSequence = useRef(0);
-  useEffect(() => { pickSequence.current++; }, [recipe, picker]);
+  useEffect(() => { pickSequence.current++; }, [recipe, picker,selectedMask,tool]);
   async function samplePhoto(x: number, y: number) {
     const sessionId = preview.session?.sessionId;
-    if (!sessionId || !picker) return;
+    if (!sessionId || !picker || pickBusy.current || tool==="mask"&&!activeMask) return;
+    pickBusy.current=true;setSamplingBusy(true);setSamplingError(null);
+    const signature=pickSignature.current;
     const sequence = ++pickSequence.current;
     try {
-      const result = await editPreviewPick(sessionId, recipe, x, y, picker);
-      if (sequence !== pickSequence.current) return;
+      const result = await editPreviewPick(sessionId, recipe, x, y, picker,tool==="mask"?activeMask?.id:undefined);
+      if (sequence !== pickSequence.current || signature!==pickSignature.current) return;
       setSamplingError(null);
-      if (result.sample) setSample(result.sample);
-      else dispatch({ type: "advanced", patch: { curves: result.points ?? [], channelCurves: {
-        ...recipe.advanced?.channelCurves, red: result.red ?? [], green: result.green ?? [], blue: result.blue ?? [],
-      } } });
-    } catch (error) { if (sequence === pickSequence.current) setSamplingError(String(error)); }
+      if (result.sample) {
+        setSample(result.sample);
+        if(picker==="hsl") {
+          setHslRange(result.range??null);
+          if(!result.range) setSamplingError(t("advancedEditor.hslNoColor"));
+        }
+      }
+      else {
+        const advanced=tool==="mask"?activeMask?.advanced:recipe.advanced;
+        const patch={curves:result.points??[],channelCurves:{...advanced?.channelCurves,red:result.red??[],green:result.green??[],blue:result.blue??[]}};
+        if(tool==="mask"&&activeMask)dispatch({type:"maskUpdate",id:activeMask.id,patch:{advanced:{exposure:0,temperature:0,tint:0,vibrance:0,...advanced,...patch}}});
+        else dispatch({type:"advanced",patch});
+      }
+    } catch (error) { if (sequence === pickSequence.current && signature===pickSignature.current) setSamplingError(String(error)); }
+    finally {pickBusy.current=false;if(mounted.current)setSamplingBusy(false);}
   }
   const [cropDraft, setCropDraft] = useState<EditRecipe["crop"]>(null);
   const [cropRatio, setCropRatio] = useState<number | null>(null);
@@ -100,6 +108,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const maskOverlay=useMaskOverlay(preview.session?.sessionId,recipe,selectedMask,tool==="mask"&&maskEditing&&showMaskOverlay,error=>setNotice(String(error)));
+  const [toolModalOpen,setToolModalOpen]=useState(false);
   const [confirm, setConfirm] = useState<"close" | "reset" | "switch" | null>(null);
   const [albumPicker, setAlbumPicker] = useState(false);
   const [albums, setAlbums] = useState<AlbumDto[]>([]);
@@ -114,6 +124,12 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   }, context.current).present : recipe, [tool, cropDraft, history, recipe, sourceSize]);
   const dirty = !recipeEquals(recipeForPersist(effective), recipeForPersist(baseline));
   const unavailable = libraryChanged || !preview.session || preview.error !== null || projectLoading || projectError !== null;
+
+  const canvasRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
+  const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,canvasRecipe,nativeHost,
+    (["adjust","view","output","crop"].includes(tool)||tool==="mask"&&!maskEditing) && !confirm && !albumPicker && !toolModalOpen,
+    compare,preview.session?.sourceUrl,String(zoomVisible));
+  useEffect(() => {setNativeActive(nativeCanvas);},[nativeCanvas]);
 
   useEffect(() => {
     mounted.current = true;
@@ -208,7 +224,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   }
   function chooseTool(next: EditorTool) {
     endGesture();
-    setCompare(false); setPicker(null);
+    setCompare(false); setPicker(null);setSample(null);
     if (tool === "crop" && next !== "crop") setCropDraft(null);
     if (next === "crop") { setCropDraft(recipe.crop ?? { x: 0, y: 0, w: 1, h: 1 }); setCropRatio(null); }
     setTool(next);
@@ -217,7 +233,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     busyRef.current = true; setBusy(true);
     void preview.close().finally(onClose);
   }
-  function requestClose() { if (!busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }
+  function requestClose() { if (!toolModalOpen && !busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }
 
   async function saveProject(): Promise<boolean> {
     if (busyRef.current || unavailable) return false;
@@ -273,6 +289,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
+      if(toolModalOpen) return;
       const input = event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
       if (input) return;
       if (event.key === "\\" && !event.ctrlKey && !event.metaKey && !unavailable) { event.preventDefault(); setCompare(true); return; }
@@ -324,40 +341,40 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       <nav role="tablist" aria-orientation="vertical" aria-label={t("editor.tools")} className="ui-glass flex w-14 shrink-0 flex-col items-center gap-1 rounded-2xl py-2">
         {TOOLS.map(({ id, label, icon }) => <button key={id} role="tab" aria-selected={tool === id} aria-label={t(label)} title={t(label)} disabled={busy || exporting || unavailable} onClick={() => chooseTool(id)} className={`flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${tool === id ? "bg-accent/15 text-accent" : "text-text-secondary hover:bg-panel"}`}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg></button>)}
       </nav>
-      <main ref={nativeHost} data-native-canvas-host onPointerMove={wakeZoom} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
+      <main ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
-          sampleMode={picker !== null && !compare} onSample={samplePhoto}
-          nativeVisible={nativeCanvas}
+          sampleMode={picker !== null && !compare} onSample={samplePhoto} onSampleError={()=>setSamplingError(t("advancedEditor.sampleOutside"))}
           src={preview.session?.sourceUrl ?? null} adjustedSrc={preview.url} showOriginal={compare}
           sourceSize={sourceSize} nativeGeometry nativeAnnotations backendAdjustments fallbackSize={sourceSize} zoom={zoom}
-          onZoom={(factor) => setZoom((v) => Math.max(0.25, Math.min(4, v * factor)))}
+          onZoom={(factor) => {wakeZoom();setZoom((v) => Math.max(0.25, Math.min(4, v * factor)));}}
           recipe={compare ? { ...recipe, textLayers: [], brushStrokes: [] } : recipe}
-          tool={compare || busy || exporting || unavailable ? "view" : tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
+          tool={compare || busy || exporting || unavailable ? "view" : tool==="mask"&&!maskEditing?"adjust":tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
+          maskControls={activeMask?{mask:activeMask,brush:maskBrush,overlaySrc:maskOverlay,onCommit:patch=>dispatch({type:"maskUpdate",id:activeMask.id,patch})}:undefined}
           brushOptions={{ color, widthRel: brushWidth }} selectedTextId={selectedText} onSelectText={setSelectedText}
           onPlaceText={(pos) => { const id = newLayerId(); dispatch({ type: "textAdd", layer: { id, ...pos, text: "", sizeRel: 0.05, color } }); setSelectedText(id); }}
           onTextChange={(id, patch) => dispatch({ type: "textUpdateLive", id, patch })}
           onStrokeCommit={(points) => dispatch({ type: "strokeAdd", stroke: { id: newLayerId(), points, color, widthRel: brushWidth } })}
           onGestureStart={beginGesture} onGestureEnd={endGesture} onImageReady={() => {}} onImageError={preview.reload} />}
-        {(preview.loading || projectLoading) && <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label={t("advancedEditor.loading")}><span className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-accent" /></div>}
-        <div ref={zoomControls} onPointerEnter={() => { zoomHover.current = true; wakeZoom(); }} onPointerLeave={() => { zoomHover.current = false; wakeZoom(); }} onFocusCapture={wakeZoom} onBlurCapture={wakeZoom} aria-hidden={!zoomVisible} inert={!zoomVisible} className={`absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-2xl border border-white/10 bg-black/60 p-1.5 shadow-xl backdrop-blur-xl transition-opacity ${zoomVisible ? "opacity-100" : "pointer-events-none opacity-0"}`}>
-          <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomOut")} onClick={() => setZoom((v) => Math.max(0.25, v / 1.25))}>−</button>
-          <button className="h-8 min-w-16 rounded-lg text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
-          <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomIn")} onClick={() => setZoom((v) => Math.min(4, v * 1.25))}>+</button>
-          {preview.preparingSource && <span className="text-[11px] text-text-muted">{t("advancedEditor.preparingOriginal")}</span>}
+        <div data-native-overlay data-visible={zoomVisible} data-testid="editor-zoom-hud" aria-hidden={!zoomVisible} inert={!zoomVisible} className={`absolute bottom-4 left-1/2 z-40 -translate-x-1/2 flex items-center gap-1 rounded-2xl border border-white/10 bg-[#202020] p-1.5 shadow-xl backdrop-blur-xl transition-opacity ${zoomVisible ? "opacity-100" : "pointer-events-none opacity-0"}`}>
+          <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomOut")} onClick={() => {wakeZoom();setZoom((v) => Math.max(0.25, v / 1.25));}}>−</button>
+          <button className="h-8 min-w-16 rounded-lg text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} onClick={() => {wakeZoom();setZoom(1);}}>{Math.round(zoom * 100)}%</button>
+          <button className="h-8 w-8 rounded-lg text-text-secondary hover:bg-panel" aria-label={t("editor.zoomIn")} onClick={() => {wakeZoom();setZoom((v) => Math.min(4, v * 1.25));}}>+</button>
           {preview.pending && <span role="status" aria-label={t("advancedEditor.previewUpdating")} className="mx-2 h-4 w-4 animate-spin rounded-full border border-white/20 border-t-accent" />}
         </div>
+        {(preview.loading || projectLoading) && <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label={t("advancedEditor.loading")}><span className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-accent" /></div>}
+
       </main>
       <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
         {samplingError && <p role="alert" className="mb-2 text-xs text-amber-500">{samplingError}</p>}
         {preview.session && <p className="mb-2 text-[11px] text-text-muted">{preview.session.sensorRaw ? "RAW · " : ""}{preview.session.bitDepth}</p>}
-        {preview.sourceError && <p role="status" className="mb-2 text-xs text-amber-500">{t("advancedEditor.originalFailed")}</p>}
         {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
-          <AdvancedToolPanel sampling={{ picker, setPicker, sample, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
+          {tool==="mask"?<MaskPanel recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
+            showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{picker,setPicker,sample,hslRange,busy:samplingBusy,histogram:[]}}/>:<AdvancedToolPanel onModalChange={setToolModalOpen} sampling={{ picker, setPicker, sample, hslRange, busy:samplingBusy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}
-            brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportFolder={exportFolder} />
+            brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportFolder={exportFolder} />}
         </fieldset>
       </aside>
     </div>

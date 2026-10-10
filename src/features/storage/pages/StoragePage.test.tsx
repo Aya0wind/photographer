@@ -10,7 +10,6 @@ import {
   openWithSystem,
   photoLibraryCreate,
   photoLibraryList,
-  photoLibraryRelocate,
   photoLibraryRemove,
   photoLibraryScanCancel,
   photoLibraryScanStatus,
@@ -28,7 +27,6 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     photoLibraryList: vi.fn(),
     photoLibraryCreate: vi.fn(),
     photoLibraryRemove: vi.fn(),
-    photoLibraryRelocate: vi.fn(),
     photoLibraryScanStatus: vi.fn(),
     photoLibraryScanCancel: vi.fn(),
     openWithSystem: vi.fn(),
@@ -40,7 +38,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 const listMock = vi.mocked(photoLibraryList);
 const createMock = vi.mocked(photoLibraryCreate);
 const removeMock = vi.mocked(photoLibraryRemove);
-const relocateMock = vi.mocked(photoLibraryRelocate);
 const scanStatusMock = vi.mocked(photoLibraryScanStatus);
 const scanCancelMock = vi.mocked(photoLibraryScanCancel);
 const openMock = vi.mocked(openWithSystem);
@@ -91,7 +88,6 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue([]);
   createMock.mockReset();
   removeMock.mockReset();
-  relocateMock.mockReset();
   scanStatusMock.mockReset().mockResolvedValue([]);
   scanCancelMock.mockReset().mockResolvedValue(undefined);
   openMock.mockReset().mockResolvedValue(undefined);
@@ -206,17 +202,6 @@ describe("StoragePage 卡片操作", () => {
     await waitFor(() => expect(openMock).toHaveBeenCalledWith("I:\\Photos"));
   });
 
-  it("重定位：复用设置页 RelocateLibraryDialog", async () => {
-    listMock.mockResolvedValue([lib()]);
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findAllByTestId("storage-library-card");
-
-    await user.click(screen.getAllByTestId("storage-relocate")[0]);
-    expect(screen.getByTestId("relocate-library-dialog")).toBeInTheDocument();
-    expect(within(screen.getByTestId("relocate-library-dialog")).getByText("I:\\Photos")).toBeInTheDocument();
-    void relocateMock;
-  });
 
   it("移除登记：两档确认——仅摘登记 deleteRecords=false / 连记录删 true；永不删照片文件提示在场", async () => {
     listMock.mockResolvedValue([lib({ assetCount: 35 })]);

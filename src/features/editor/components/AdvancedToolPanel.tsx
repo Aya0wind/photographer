@@ -1,14 +1,17 @@
+import GeometryPanel from "./GeometryPanel";
+import {geometrySize} from "../lib/geometry";
 import { useTranslation } from "react-i18next";
 import type { EditRecipe } from "@/ipc/api";
 import type { EditorTool } from "./EditorCanvas";
 import type { CurveSampling } from "./CurveEditor";
 import AdvancedAdjustmentPanel from "./AdvancedAdjustmentPanel";
 import { clampCrop, fitCropRect, isFullCrop } from "../lib/coords";
-import { rotatedSize, type RecipeContext } from "../lib/recipe";
+import { type RecipeContext } from "../lib/recipe";
 import type { AdvancedAction } from "../lib/advancedRecipe";
 
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
 interface ToolPanelProps {
+  onModalChange?:(open:boolean)=>void;
   sampling: CurveSampling;
   tool: EditorTool;
   recipe: EditRecipe;
@@ -31,23 +34,24 @@ interface ToolPanelProps {
   exportFolder: () => Promise<void>;
 }
 
-export default function AdvancedToolPanel({ sampling, tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({ onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
   selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder }: ToolPanelProps) {
   const { t } = useTranslation();
   const selectedLayer = recipe.textLayers.find((layer) => layer.id === selectedText);
   return <>
-          {tool === "adjust" && <AdvancedAdjustmentPanel sampling={sampling} recipe={recipe} begin={beginGesture} end={endGesture} onBasic={(patch) => dispatch({ type: "adjust", patch, record: false })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
+          {tool === "adjust" && <AdvancedAdjustmentPanel onModalChange={onModalChange} sampling={sampling} recipe={recipe} onResetDevelopment={group=>{endGesture();dispatch({type:"resetDevelopmentGroup",group});}} onReset={(group)=>{endGesture();dispatch({type:"resetAdjustmentGroup",group});}} begin={beginGesture} end={endGesture} onBasic={(patch, record=false) => dispatch({ type: "adjust", patch, record })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
           {tool === "view" && <p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.viewHint")}</p>}
           {tool === "crop" && <div className="space-y-4">
-            <div className="flex gap-2"><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: -1 }); setCropDraft(null); setTool("view"); }}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: 1 }); setCropDraft(null); setTool("view"); }}>{t("editor.rotateCw")}</button></div>
+            <div className="flex gap-2"><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: -1 }); setCropDraft(null); setTool("adjust"); }}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: 1 }); setCropDraft(null); setTool("adjust"); }}>{t("editor.rotateCw")}</button></div>
+            <GeometryPanel recipe={recipe} dispatch={dispatch} context={context.current} begin={beginGesture} end={endGesture} onCropChange={crop=>setCropDraft(crop??{x:0,y:0,w:1,h:1})}/>
             <div className="flex flex-wrap gap-2">{[null, 1, 4 / 3, 3 / 2, 16 / 9].map((ratio, index) => <button key={index} className={BUTTON} aria-pressed={cropRatio === ratio} onClick={() => {
-              setCropRatio(ratio); const size = rotatedSize(context.current, recipe.rotateQuarter);
+              setCropRatio(ratio); const size = geometrySize(context.current,recipe);
               setCropDraft(ratio ? fitCropRect(ratio, size.w / size.h) : { x: 0, y: 0, w: 1, h: 1 });
             }}>{[t("editor.crop.free"), "1:1", "4:3", "3:2", "16:9"][index]}</button>)}</div>
             <p className="text-xs text-text-muted">{t("editor.crop.hint")}</p>
-            <button className="ui-primary w-full rounded-xl py-2 text-xs" onClick={() => { dispatch({ type: "cropApply", crop: cropDraft && !isFullCrop(cropDraft) ? clampCrop(cropDraft) : null }); setCropDraft(null); setTool("view"); }}>{t("editor.crop.apply")}</button>
-            <button className={`${BUTTON} w-full`} onClick={() => { setCropDraft(null); setTool("view"); }}>{t("editor.crop.cancel")}</button>
+            <button className="ui-primary w-full rounded-xl py-2 text-xs" onClick={() => { dispatch({ type: "cropApply", crop: cropDraft && !isFullCrop(cropDraft) ? clampCrop(cropDraft) : null }); setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.apply")}</button>
+            <button className={`${BUTTON} w-full`} onClick={() => { setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.cancel")}</button>
           </div>}
           {(tool === "text" || tool === "brush") && <div className="space-y-4">
             <label className="flex items-center justify-between text-xs text-text-secondary">{t("advancedEditor.paintColor")}<input type="color" value={color} onChange={(e) => { setColor(e.target.value); if (tool === "text" && selectedText) dispatch({ type: "textUpdate", id: selectedText, patch: { color: e.target.value } }); }} /></label>

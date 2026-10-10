@@ -277,3 +277,14 @@ describe("recipeForPersist / equals / id", () => {
     expect(ids.size).toBe(50);
   });
 });
+
+it("reset preserves PhotoCraft routing and clears advanced effects",()=>{
+  const recipe={...defaultRecipe(),renderer:"photocraft" as const,advanced:{exposure:0,temperature:0,tint:0,vibrance:0,curves:[],lookup:{id:"builtin:warm",amount:100,enabled:true}}};
+  const next=recipeReducer(initRecipeHistory(recipe),{type:"reset"});
+  expect(next.present.renderer).toBe("photocraft");expect(next.present.advanced).toBeUndefined();
+});
+it("neutral advanced controls do not leave an otherwise reset recipe dirty",()=>{
+  const base={...defaultRecipe(),renderer:"photocraft" as const};
+  const empty={...base,advanced:{exposure:0,temperature:0,tint:0,vibrance:0,curves:[]}};
+  expect(recipeForPersist(empty)).toEqual(recipeForPersist(base));
+});

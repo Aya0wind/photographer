@@ -82,7 +82,7 @@ export interface PhotoLibrary {
   /** uuid（登记时生成） */
   id: string;
   name: string;
-  /** 库根目录绝对路径（登记不搬文件；整库重定位只改它，资产归属不变） */
+  /** 库根目录绝对路径（登记不搬文件；登记后保持固定） */
   rootPath: string;
   /** 登记时间（ISO 8601） */
   createdAt: string;
@@ -105,15 +105,6 @@ export type PhotoLibraryCreateResult =
 export interface PhotoLibraryRemoveResult {
   /** 连带删除的资产记录数（deleteRecords=false 时为 0） */
   recordsDeleted: number;
-}
-
-/** photo_library_relocate 结果（预检 apply=false / 应用 apply=true 同形）：
- *  affected=旧根前缀重写数；unaffected=不在旧根下保持原样数；
- *  rootExists=新根当前是否在盘（可先改后挂载，缺失走库 offline）。 */
-export interface PhotoLibraryRelocateResult {
-  affected: number;
-  unaffected: number;
-  rootExists: boolean;
 }
 
 /** 照片库扫描任务状态（photo_library_scan_status 返回）：从文件夹建立的
@@ -262,7 +253,7 @@ export type AppEvent =
   /** 数据库注册表/激活数据库变更（新建/切换/移除）：前端全量刷新——重拉
    *  database_list、照片库列表与画廊等一切库内数据（换库语义） */
   | { type: "databasesChanged" }
-  /** photos_libraries 登记表变更（新建/移除登记/重定位/在线状态翻转）：
+  /** photos_libraries 登记表变更（新建/移除登记/在线状态翻转）：
    *  存储页与导入目标选择器重拉 photo_library_list */
   | { type: "photoLibrariesChanged" }
   /** 照片库扫描任务进度（批量登记/增量扫描共用；发布侧节流 ≥100ms） */
@@ -829,15 +820,43 @@ export interface EditRecipeOutput {
 
 /** 非破坏编辑配方（后端 edit_recipe 表存储的同一 JSON） */
 export interface EditAdjustments { brightness: number; contrast: number; saturation: number; }
+export interface DevelopmentAdjustments {
+ highlights:number;shadows:number;whites:number;blacks:number;texture:number;clarity:number;dehaze:number;
+ sharpenAmount:number;sharpenRadius:number;sharpenDetail:number;sharpenMasking:number;
+ noiseLuminance:number;noiseLuminanceDetail:number;noiseColor:number;noiseColorDetail:number;
+ grainAmount:number;grainSize:number;grainRoughness:number;
+ vignetteAmount:number;vignetteMidpoint:number;vignetteRoundness:number;vignetteFeather:number;vignetteHighlights:number;vignetteStyle:"highlightPriority"|"colorPriority"|"paintOverlay";
+}
 export interface AdvancedAdjustments {
+  development?:DevelopmentAdjustments;
+  colorBalance?:{shadows:[number,number,number];midtones:[number,number,number];highlights:[number,number,number];preserveLuminosity:boolean};
+  blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number];tint:string|null};
+  selectiveColor?:{relative:boolean;ranges:Partial<Record<"reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"|"whites"|"neutrals"|"blacks",[number,number,number,number]>>};
   exposure: number;
   temperature: number;
   tint: number;
   vibrance: number;
+  lookup?:{id:string;amount:number;enabled:boolean};
   curves: [number, number][];
   channelCurves?: Partial<Record<"red" | "green" | "blue" | "luminance", [number, number][]>>;
   levels?: { black: number; white: number; gamma: number };
   hsl?: Partial<Record<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas", { hue: number; saturation: number; lightness: number }>>;
+}
+
+export interface EditLocalMask {
+  id:string;
+  name:string;
+  kind:"brush"|"linear"|"radial";
+  enabled:boolean;
+  inverted:boolean;
+  density:number;
+  feather:number;
+  /** Normalized original source coordinates, unaffected by rotation/crop. */
+  from:{x:number;y:number};
+  to:{x:number;y:number};
+  strokes:{points:{x:number;y:number}[];widthRel:number;hardness:number;opacity:number;flow:number;erase:boolean}[];
+  adjustments?:EditAdjustments;
+  advanced?:AdvancedAdjustments;
 }
 
 export interface EditRecipe {
@@ -845,7 +864,10 @@ export interface EditRecipe {
   /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
   renderer?: "photocraft";
   advanced?: AdvancedAdjustments;
+  legacyAdjustments?:EditAdjustments;
+  masks?:EditLocalMask[];
   rotateQuarter: 0 | 1 | 2 | 3;
+  geometry?:{angle:number;flipHorizontal:boolean;flipVertical:boolean};
   adjustments?: EditAdjustments;
   crop: EditRecipeCrop | null;
   textLayers: EditRecipeTextLayer[];

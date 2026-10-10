@@ -16,7 +16,7 @@ import EditorOverlay from "./EditorOverlay";
 vi.mock("@/features/editor/components/EditorCanvas", () => ({
   default: (props: {
     tool: string;
-    recipe: { rotateQuarter: number; textLayers: unknown[] };
+    recipe: { rotateQuarter: number; textLayers: unknown[];renderer?:string };
     cropDraft: unknown;
     onPlaceText: (pos: { x: number; y: number }) => void;
     onStrokeCommit: (points: { x: number; y: number }[]) => void;
@@ -26,6 +26,7 @@ vi.mock("@/features/editor/components/EditorCanvas", () => ({
       data-testid="editor-canvas-stub"
       data-tool={props.tool}
       data-rotate={props.recipe.rotateQuarter}
+      data-renderer={props.recipe.renderer??"legacy"}
     >
       <button
         type="button"
@@ -59,6 +60,11 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     editRecipeSave: vi.fn(),
+    editPreviewOpen:vi.fn(async()=>({sessionId:"basic-preview",sourceUrl:"proxy",width:4000,height:3000,bitDepth:"8 bit preview",histogram:[],warnings:[],sensorRaw:false})),
+    editPreviewClose:vi.fn(async()=>{}),
+    editPreviewRender:vi.fn(async()=>"preview"),
+    editPreviewStats:vi.fn(async()=>({})),
+    editLutList:vi.fn(async()=>[]),
     assetMetadataGet: vi.fn(),
     assetMetadataSave: vi.fn(),
     editRecipeDelete: vi.fn(),
@@ -149,7 +155,7 @@ beforeEach(() => {
 });
 
 describe("EditorOverlay 骨架与工具切换", () => {
-  it("默认浏览工具；撤销/重做初始禁用；已保存配方显示角标", () => {
+  it("默认调色工具；撤销/重做初始禁用；已保存配方显示角标", () => {
     const recipe: EditRecipe = {
       version: 1,
       rotateQuarter: 1,
@@ -159,7 +165,7 @@ describe("EditorOverlay 骨架与工具切换", () => {
       output: { longEdge: null, quality: 90 },
     };
     renderEditor({ recipe, updatedAt: "x" });
-    expect(screen.getByTestId("editor-canvas-stub").dataset.tool).toBe("view");
+    expect(screen.getByTestId("editor-canvas-stub").dataset.tool).toBe("adjust");
     expect(screen.getByTestId("editor-undo")).toBeDisabled();
     expect(screen.getByTestId("editor-redo")).toBeDisabled();
     expect(screen.getByTestId("editor-edited-badge")).toHaveTextContent("已编辑");
@@ -451,10 +457,12 @@ describe("编辑器的新布局与元数据", () => {
   it("调整参与撤销与保存；缩放只改变预览，裁剪工具不显示右侧栏", async () => {
     const user = userEvent.setup();
     renderEditor();
-    expect(screen.queryByTestId("editor-sidebar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("editor-sidebar")).toBeInTheDocument();
     await user.click(screen.getByTestId("editor-zoom-in"));
     expect(screen.getByTestId("editor-zoom-fit")).toHaveTextContent("125%");
     await user.click(screen.getByTestId("editor-tool-adjust"));
+    expect(screen.getByTestId("editor-zoom-fit")).toHaveTextContent("125%");
+    await user.click(screen.getByTestId("editor-zoom-fit"));
     expect(screen.getByTestId("editor-zoom-fit")).toHaveTextContent("100%");
     fireEvent.change(screen.getByTestId("editor-adjust-brightness"), { target: { value: 25 } });
     await user.click(screen.getByTestId("editor-save"));
@@ -464,4 +472,9 @@ describe("编辑器的新布局与元数据", () => {
     await user.click(screen.getByTestId("editor-tool-crop"));
     expect(screen.queryByTestId("editor-sidebar")).not.toBeInTheDocument();
   });
+});
+
+it("new registered photos use PhotoCraft proxy processing",async()=>{
+  render(<I18nextProvider i18n={i18n}><EditorOverlay asset={{...ASSET,libraryId:"photo-library"}} initial={{recipe:null,updatedAt:null}} onClose={()=>{}}/></I18nextProvider>);
+  await waitFor(()=>expect(screen.getByTestId("editor-canvas-stub")).toHaveAttribute("data-renderer","photocraft"));
 });

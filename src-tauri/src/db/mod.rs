@@ -26,7 +26,6 @@ mod editor;
 mod groups;
 mod import;
 mod indexing;
-mod maintenance;
 mod people;
 mod selection;
 
@@ -197,7 +196,7 @@ pub struct AssetRow {
     #[serde(default)]
     pub rejected: i64,
     // —— 单数据库多照片库（2026-10-09 定案，计划 §二/§三/§五）——
-    /// 归属照片库（photos_libraries.id；静态属性：仅整库重定位改库 root，
+    /// 归属照片库（photos_libraries.id；静态属性：登记后保持固定，
     /// 归属不变。无外键——移除登记是否连记录删由应用层决定）。
     #[serde(default)]
     pub library_id: Option<String>,
@@ -611,7 +610,7 @@ fn root_norm_char(c: char) -> char {
 /// path 前缀 == root（忽略大小写与 `/`\\` 方向；root 结尾后必须是分隔符
 /// 或恰好用尽，防 `I:\\x` 误匹配 `I:\\xy`）→ 返回 path 中前缀之后的原始
 /// 尾段（保留原分隔符形态；根自带尾分隔符时吃掉一层）。
-/// 库重定位（[`Db::rewrite_asset_roots`]）共用。
+/// 用于库根与资产路径匹配。
 pub fn strip_root_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     // 根尾分隔符归一吃掉（`I:\x\` 与 `I:\x` 同一语义）
     let root = root.trim_end_matches(|c| c == '/' || c == '\\');

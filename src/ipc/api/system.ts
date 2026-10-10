@@ -1,6 +1,6 @@
 import { ipc } from "../index";
 
-/** 用系统默认程序打开照片文件（open_with_system）。
+/** 在系统文件管理器中打开目录，或用默认程序打开照片文件（open_with_system）。
  *  不 catch：失败文案透传给调用方提示 */
 export async function openWithSystem(path: string): Promise<void> {
   await ipc<void>("open_with_system", { path });

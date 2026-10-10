@@ -4,7 +4,6 @@ import {
   type LibraryScanStatus,
   type PhotoLibrary,
   type PhotoLibraryCreateResult,
-  type PhotoLibraryRelocateResult,
   type PhotoLibraryRemoveResult,
   type SidebarCounts,
 } from "./types";
@@ -59,23 +58,6 @@ export async function photoLibraryRemove(
   deleteRecords: boolean,
 ): Promise<PhotoLibraryRemoveResult> {
   return ipc<PhotoLibraryRemoveResult>("photo_library_remove", { id, deleteRecords });
-}
-
-/**
- * 照片库整体重定位（photo_library_relocate）：前提是用户已在文件管理器把整棵
- * 照片树搬到新根；改登记 + 重写库内路径前缀（资产归属不变）。apply=false 只预检
- * 返回计数。不 catch：失败文案（相对路径拒绝/库不存在）透传给调用方。
- */
-export async function photoLibraryRelocate(
-  id: string,
-  newRootPath: string,
-  apply: boolean,
-): Promise<PhotoLibraryRelocateResult> {
-  return ipc<PhotoLibraryRelocateResult>("photo_library_relocate", {
-    id,
-    newRootPath,
-    apply,
-  });
 }
 
 /** 各照片库扫描任务状态（photo_library_scan_status）；失败/非数组回退 [] */

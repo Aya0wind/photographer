@@ -1,4 +1,4 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { editPreviewOpen, editPreviewPrepare, editPreviewClose, type EditorPreviewSession } from "@/ipc/api";
 import { useEditorPreview } from "./useEditorPreview";
@@ -18,25 +18,19 @@ beforeEach(() => {
   vi.mocked(editPreviewClose).mockResolvedValue();
 });
 
-it("allows editing the proxy before original preparation finishes and retains the adjusted frame on upgrade", async () => {
-  let finish!:(value:EditorPreviewSession)=>void;
-  vi.mocked(editPreviewPrepare).mockImplementation(() => new Promise(resolve => {finish=resolve;}));
-  const {result}=renderHook(() => useEditorPreview(1,recipe,"photos"));
-  await waitFor(() => expect(result.current.session?.sessionId).toBe("session"));
+it("keeps the cached RAW proxy for editing without starting native RAW preparation",async()=>{
+  const {result}=renderHook(()=>useEditorPreview(1,recipe,"photos"));
+  await waitFor(()=>expect(result.current.session?.sessionId).toBe("session"));
+  expect(editPreviewPrepare).not.toHaveBeenCalled();
+  expect(result.current.session?.bitDepth).toBe("8 bit preview");
+  expect(result.current.url).toBe("adjusted-frame");
   expect(result.current.loading).toBe(false);
-  expect(result.current.preparingSource).toBe(true);
-  expect(result.current.url).toBe("adjusted-frame");
-  await act(async () => finish({...proxy,sourceUrl:"native",bitDepth:"16 bit",nativeReady:true}));
-  await waitFor(() => expect(result.current.preparingSource).toBe(false));
-  expect(result.current.session?.bitDepth).toBe("16 bit");
-  expect(result.current.url).toBe("adjusted-frame");
 });
-
-it("does not replace an editable cached preview with a blocking error on native preparation failure", async () => {
-  vi.mocked(editPreviewPrepare).mockRejectedValue(new Error("source unavailable"));
-  const {result}=renderHook(() => useEditorPreview(1,recipe,"photos"));
-  await waitFor(() => expect(result.current.sourceError).toContain("source unavailable"));
+it("stops ordinary rendering after native activation and retains the same proxy",async()=>{
+  const {result,rerender}=renderHook(({native})=>useEditorPreview(1,recipe,"photos",native),{initialProps:{native:false}});
+  await waitFor(()=>expect(result.current.session).toBe(proxy));
+  rerender({native:true});
   expect(result.current.session).toBe(proxy);
-  expect(result.current.loading).toBe(false);
+  expect(editPreviewPrepare).not.toHaveBeenCalled();
   expect(result.current.error).toBeNull();
 });

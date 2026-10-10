@@ -349,7 +349,7 @@ pub fn validate_ai_settings(ai: &AiSettings) -> Result<(), String> {
 // 路径规范化（建库统一闸门）
 // ---------------------------------------------------------------------------
 
-/// 照片库根目录规范化（photo_library_create / relocate 统一闸门）：
+/// 照片库根目录规范化（photo_library_create 统一闸门）：
 /// 前端提交的 root 字符串曾放过盘符相对路径（真机实证 `I:SmartPhotoedge-photos`
 /// ——用户手输少打一个反斜杠），被按进程 CWD 解析后误落他处。规则：
 /// ① 必须是绝对路径（`Path::is_absolute()`——Windows 上 `I:xxx` 无根
@@ -418,6 +418,8 @@ fn logical_normalize(path: &Path) -> std::path::PathBuf {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SystemSettings {
+    /// Optional registered database to validate and open automatically on startup.
+    pub auto_open_database_id: Option<String>,
     pub launch_at_login: bool,
     pub close_to_tray: bool,
     pub language: String,
@@ -426,6 +428,7 @@ pub struct SystemSettings {
 impl Default for SystemSettings {
     fn default() -> Self {
         Self {
+            auto_open_database_id: None,
             launch_at_login: false,
             close_to_tray: true,
             language: "zh".to_string(),

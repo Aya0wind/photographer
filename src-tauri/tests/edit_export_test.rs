@@ -26,6 +26,35 @@ use exif::{Field, In, Tag, Value};
 use img_parts::jpeg::{Jpeg, JpegSegment};
 use img_parts::Bytes;
 
+#[test]
+fn unified_editor_storage_roundtrips_masks_and_migrates_existing_projects() {
+    let fixture=setup();
+    let id=ins_photo(&fixture.db,&fixture.photo_root,"unified.jpg",&build_bicolor_jpeg(64,48),None);
+    let legacy=serde_json::json!({"version":1,"adjustments":{"brightness":25,"contrast":10,"saturation":-30},"rotateQuarter":1});
+    edit::ipc::fetch_edit_recipe_save(&fixture.db,id,&legacy).unwrap();
+    let migrated=edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"library",id).unwrap().unwrap();
+    assert_eq!(migrated.renderer,Some(edit::recipe::RenderEngine::Photocraft));
+    assert_eq!(migrated.legacy_adjustments.unwrap().brightness,25.0);
+    assert!(migrated.adjustments.is_none());
+    assert!(edit::ipc::fetch_edit_recipe(&fixture.db,id).unwrap().recipe.unwrap().get("renderer").is_none(),"opening must not rewrite the original state");
+    let value=serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"m","name":"Saved mask","kind":"radial","enabled":true,"inverted":true,"density":60,"feather":2,"from":{"x":0.3,"y":0.4},"to":{"x":0.7,"y":0.5},"strokes":[],"advanced":{"exposure":0.8}}]});
+    let saved=edit::ipc::fetch_edit_recipe_save(&fixture.db,id,&value).unwrap().recipe.unwrap();
+    let reopened=edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"library",id).unwrap().unwrap();
+    assert_eq!(serde_json::to_value(&reopened).unwrap(),saved);
+    // The old file remains available for recovery, but cannot override a saved canonical recipe.
+    let old=fixture._dir.path().join("advanced-edits");std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join(format!("{id}.json")),"invalid old project").unwrap();
+    assert_eq!(edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"library",id).unwrap().unwrap(),reopened);
+    edit::ipc::fetch_edit_recipe_delete(&fixture.db,id).unwrap();
+    let project=serde_json::json!({"version":1,"libraryId":"library","assetId":id,"recipe":value});
+    std::fs::write(old.join(format!("{id}.json")),serde_json::to_vec(&project).unwrap()).unwrap();
+    assert_eq!(edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"library",id).unwrap().unwrap(),reopened);
+    assert!(edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"wrong-library",id).is_err());
+    edit::project::fetch_project_delete(&fixture.db,fixture._dir.path(),id).unwrap();
+    assert!(edit::project::fetch_project_open(&fixture.db,fixture._dir.path(),"library",id).unwrap().is_none(),"reset must not resurrect an old side project");
+    assert!(edit::ipc::fetch_edit_recipe_save(&fixture.db,id,&serde_json::json!({"version":1,"advanced":{"exposure":1}})).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // 脚手架
 // ---------------------------------------------------------------------------

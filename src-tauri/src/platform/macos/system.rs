@@ -13,8 +13,9 @@ end run"#;
 pub(crate) fn open_with_system(resource: super::super::ResourceRef<'_>) -> Result<(), String> {
     let path = resource.local_file()?;
     let value = std::path::absolute(path).map_err(|error| error.to_string())?;
-    Command::new("/usr/bin/open")
-        .arg(value.as_os_str())
+    let mut command=Command::new("/usr/bin/open");
+    if value.is_dir() { command.args(["-a", "Finder"]); }
+    command.arg(value.as_os_str())
         .status()
         .map_err(|error| format!("调用 macOS open 失败: {error}"))?
         .success()

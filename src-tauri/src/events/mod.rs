@@ -337,7 +337,7 @@ pub enum AppEvent {
 
     // 照片库登记表（2026-10-09 单数据库多照片库定案；命令骨架见
     // ipc/photo_library.rs，实装 M1/M2）
-    /// photos_libraries 变更（新建/移除登记/重定位/在线状态翻转）：存储页与
+    /// photos_libraries 变更（新建/移除登记/在线状态翻转）：存储页与
     /// 导入目标选择器重拉 photo_library_list。
     PhotoLibrariesChanged,
     /// 照片库扫描任务进度（从文件夹建立的批量登记 + 增量扫描共用；发布侧节流）。

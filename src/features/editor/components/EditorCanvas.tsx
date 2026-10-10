@@ -1,11 +1,12 @@
-import { sourceSamplePosition } from "../lib/coords";
+import {geometrySize,planeToSource} from "../lib/geometry";
+import MaskCanvasControls,{type MaskBrush} from "./MaskCanvasControls";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
 
-import type { EditRecipe, EditRecipeCrop } from "@/ipc/api";
-import { rotatedSize, type RecipeContext, type TextLayerPatch } from "../lib/recipe";
+import type { EditRecipe, EditRecipeCrop,EditLocalMask } from "@/ipc/api";
+import { type TextLayerPatch } from "../lib/recipe";
 import { clamp01, type Size } from "../lib/coords";
 import { getPreviewImage } from "../lib/previewImages";
 import {
@@ -28,7 +29,7 @@ import {
  * - 所有提交都经 konvaMapping 换算回归一化 recipe 字段。
  */
 
-export type EditorTool = "view" | "crop" | "text" | "brush" | "adjust" | "filters" | "metadata" | "output";
+export type EditorTool = "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
 
 const TEXT_NODE_NAME = "editor-text-layer";
 const STAGE_PADDING = 24;
@@ -89,10 +90,11 @@ function rotatedImageAttrs(
 }
 
 interface EditorCanvasProps {
-  nativeVisible?: boolean;
+  maskControls?:{mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null};
   showOriginal?: boolean;
   sampleMode?: boolean;
   onSample?: (x: number, y: number) => void;
+  onSampleError?:()=>void;
   src: string | null;
   /** 后端提供未旋转底图的调整结果；禁止再次叠加浏览器滤镜。 */
   adjustedSrc?: string | null;
@@ -126,11 +128,12 @@ interface EditorCanvasProps {
 }
 
 export default function EditorCanvas({
-  nativeVisible=false,
+  maskControls,
   src,
   showOriginal = false,
   sampleMode = false,
   onSample,
+  onSampleError,
   adjustedSrc = null,
   sourceSize = null,
   backendAdjustments = false,
@@ -157,6 +160,7 @@ export default function EditorCanvas({
 }: EditorCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
+  const canPan=!sampleMode && !["crop","brush","text","mask"].includes(tool);
   const [panning, setPanning] = useState(false);
   function stopPanning(): void {
     const pan = panRef.current;
@@ -166,7 +170,7 @@ export default function EditorCanvas({
   }
   useEffect(() => {
     stopPanning();
-  }, [tool, src]);
+  }, [tool, src, sampleMode]);
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
   useEffect(() => {
@@ -259,7 +263,7 @@ export default function EditorCanvas({
   const baseW = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 1;
   const baseH = sourceSize?.height || image.naturalHeight || fallbackSize?.height || 1;
   const quarter = recipe.rotateQuarter;
-  const rot = rotatedSize({ width: baseW, height: baseH } satisfies RecipeContext, quarter);
+  const rot = geometrySize({width:baseW,height:baseH},recipe);
   const pad = STAGE_PADDING;
   const inner: Size = {
     width: Math.max(60, avail.width - pad * 2),
@@ -298,8 +302,9 @@ export default function EditorCanvas({
     if (stage === null || stage === undefined) return;
     if (sampleMode) {
       const pos = pointerPos(stage);
-      const source = pos && sourceSamplePosition(pos, { width: frameW, height: frameH }, cropMode ? null : crop, quarter);
-      if (source) onSample?.(source[0], source[1]);
+      const sampled=pos ? planeToSource(crop.x+pos.x/canvas.width*crop.w,crop.y+pos.y/canvas.height*crop.h,recipe,{width:baseW,height:baseH}) : null;
+      const source=sampled && sampled.every(v=>v>=0&&v<=1) ? sampled : null;
+      if (source) onSample?.(source[0], source[1]);else onSampleError?.();
       return;
     }
     if (tool === "brush") {
@@ -355,14 +360,14 @@ export default function EditorCanvas({
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;
 
   const cursor =
-    sampleMode || tool === "brush" || tool === "text" ? "crosshair" : tool === "view" && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
+    sampleMode || tool === "brush" || tool === "text" ? "crosshair" : canPan && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
     <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
-      style={{ cursor, touchAction: tool === "view" ? "none" : undefined }}
+      style={{ cursor, touchAction: canPan ? "none" : undefined }}
       onPointerDown={(event) => {
         const viewport = event.currentTarget;
-        if (sampleMode || tool !== "view" || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
+        if (!canPan || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
         event.preventDefault();
         panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
         viewport.setPointerCapture(event.pointerId);
@@ -376,7 +381,8 @@ export default function EditorCanvas({
       }}
       onPointerUp={stopPanning} onPointerCancel={stopPanning} onLostPointerCapture={stopPanning}
     >
-      <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter}>
+      <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter} data-crop-guide={cropMode&&cropDraft?JSON.stringify([cropDraft.x,cropDraft.y,cropDraft.w,cropDraft.h]):undefined}>
+        {tool==="mask"&&maskControls&&!sampleMode&&<MaskCanvasControls {...maskControls} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
         <Stage
           width={dispW}
           height={dispH}
@@ -389,9 +395,9 @@ export default function EditorCanvas({
         >
           {/* 底图（裁剪模式下显示整图，其余模式平移到裁剪窗口并裁剪） */}
           <Layer clip={cropMode ? undefined : { x: 0, y: 0, width: dispW, height: dispH }}>
-            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage opacity={nativeVisible ? 0 : 1} image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
+            {nativeGeometry && backendImage && !showOriginal ? <KonvaImage opacity={1} image={backendImage} width={dispW} height={dispH} listening={false} /> : <Group x={cropMode ? 0 : -crop.x * frameW} y={cropMode ? 0 : -crop.y * frameH}>
               <KonvaImage
-                opacity={nativeVisible ? 0 : 1}
+                opacity={1}
                 image={adjustedImage ?? image}
                 {...rotatedImageAttrs(baseW, baseH, quarter, scale)}
                 listening={false}

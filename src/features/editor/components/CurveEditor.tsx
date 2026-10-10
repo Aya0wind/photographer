@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { AdvancedAdjustments } from "@/ipc/api";
-import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint } from "../lib/curves";
+import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint, type HslColorRange } from "../lib/curves";
 
 export interface CurveSampling {
+  available?:boolean;
   picker: CurvePicker | null;
+  busy?:boolean;
+  hslRange?:HslColorRange | null;
   setPicker: (picker: CurvePicker | null) => void;
   sample: [number, number, number] | null;
   histogram: number[][];
@@ -15,8 +18,9 @@ const PRESETS: Record<string, CurvePoint[]> = {
   faded: [[0, 20], [64, 70], [128, 135], [192, 198], [255, 245]],
 };
 
-export default function CurveEditor({ adjustments, onChange, begin, end, sampling }: {
+export default function CurveEditor({ adjustments, onChange, begin, end, sampling, onReset }: {
   adjustments: AdvancedAdjustments; onChange: (patch: Partial<AdvancedAdjustments>, record?: boolean) => void;
+  onReset:()=>void;
   begin: () => void; end: () => void; sampling: CurveSampling;
 }) {
   const { t } = useTranslation();
@@ -52,11 +56,14 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
   }
   const bins = channel === "rgb" && histogram.length ? histogram[0].map((v, i) => v + histogram[1][i] + histogram[2][i]) : histogram[channel === "red" ? 0 : channel === "green" ? 1 : channel === "blue" ? 2 : 3] ?? [];
   const peak = Math.max(1, ...bins);
-  return <section className="space-y-3 border-t border-edge pt-4">
-    <div className="flex items-center justify-between"><h3 className="text-xs font-semibold">{t("advancedEditor.curves")}</h3>
+  return <details open className="space-y-3 border-t border-edge pt-4">
+    <summary className="flex cursor-pointer items-center justify-between"><h3 className="text-xs font-semibold">{t("advancedEditor.curves")}</h3>
+      <button type="button" aria-label={t("advancedEditor.resetGroup",{group:t("advancedEditor.curves")})}
+        disabled={!adjustments.curves.length && !Object.values(adjustments.channelCurves??{}).some(points=>!!points?.length)}
+        className="rounded-md px-2 py-1 text-[11px] text-accent disabled:opacity-30" onClick={event=>{event.preventDefault();event.stopPropagation();finish();setSelected(null);onReset();}}>{t("editor.reset")}</button>
       <select value={channel} aria-label={t("advancedEditor.curveChannel")} className="rounded-lg border border-edge bg-bg px-2 py-1 text-xs" onChange={(e) => { finish(); setChannel(e.target.value as CurveChannel); setSelected(null); }}>
         {Object.keys(COLORS).map((key) => <option key={key} value={key}>{t(`advancedEditor.channels.${key}`)}</option>)}
-      </select></div>
+      </select></summary>
     <svg viewBox="0 0 255 255" preserveAspectRatio="none" tabIndex={0} role="application" aria-label={t("advancedEditor.curves")}
       className="aspect-square w-full touch-none rounded-xl border border-edge bg-bg outline-none focus:border-accent"
       onPointerDown={(event) => {
@@ -97,8 +104,10 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
       {points.map(([x, y], i) => <circle key={i} cx={x} cy={255 - y} r={selected === i ? 5 : 3.5} fill={selected === i ? "white" : COLORS[channel]} stroke={COLORS[channel]} />)}
     </svg>
     <div className="flex items-center justify-between text-[11px] tabular-nums text-text-muted"><span>{t("advancedEditor.inputTone")} {selected !== null && points[selected] ? points[selected][0] : "—"}</span><span>{t("advancedEditor.outputTone")} {selected !== null && points[selected] ? points[selected][1] : "—"}</span></div>
-    <div className="flex gap-1">{(["point", "black", "gray", "white"] as const).map((picker) => <button key={picker} type="button" aria-pressed={sampling.picker === picker} className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] ${sampling.picker === picker ? "border-accent text-accent" : "border-edge"}`} onClick={() => sampling.setPicker(sampling.picker === picker ? null : picker)}>{t(`advancedEditor.pickers.${picker}`)}</button>)}</div>
+    {sampling.available!==false&&<div className="flex gap-1">{(["point", "black", "gray", "white"] as const).map((picker) => <button key={picker} type="button" disabled={sampling.busy} aria-pressed={sampling.picker === picker} className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] ${sampling.picker === picker ? "border-accent text-accent" : "border-edge"}`} onClick={() => sampling.setPicker(sampling.picker === picker ? null : picker)}>{t(`advancedEditor.pickers.${picker}`)}</button>)}</div>}
+    <button type="button" className="text-[11px] text-accent" disabled={!raw?.length} onClick={()=>{finish();apply([]);setSelected(null);}}>{t("advancedEditor.resetCurveChannel")}</button>
     <div className="flex gap-1">{Object.entries(PRESETS).map(([name, curve]) => <button key={name} className="flex-1 rounded-lg border border-edge py-1.5 text-[11px]" onClick={() => { apply(curve); setSelected(null); }}>{t(`advancedEditor.curve.${name}`)}</button>)}</div>
+    {sampling.busy&&<p role="status" className="text-xs text-text-muted">{t("advancedEditor.sampling")}</p>}
     <p className="text-[11px] leading-relaxed text-text-muted">{t("advancedEditor.curveInteractionHint")}</p>
-  </section>;
+  </details>;
 }

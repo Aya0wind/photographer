@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
@@ -17,11 +17,12 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     databaseList: vi.fn(),
+    databaseSwitch: vi.fn(),
     subscribeAppEvents: vi.fn(async () => () => {}),
   };
 });
 
-import { databaseList } from "@/ipc/api";
+import { databaseList, databaseSwitch } from "@/ipc/api";
 import type { DatabaseList } from "@/ipc/api";
 
 const dbListMock = vi.mocked(databaseList);
@@ -121,4 +122,39 @@ describe("GatedShell（未选数据库或激活库无效 → 选择页；否则�
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
   });
+});
+
+it("validates and opens the remembered database without showing the picker",async()=>{
+  vi.mocked(databaseSwitch).mockResolvedValue();
+  useSettingsStore.getState().update({system:{autoOpenDatabaseId:"db-1"}});
+  renderAtGallery();
+  expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+  expect(databaseSwitch).toHaveBeenCalledWith("db-1");
+  expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
+});
+it("returns to the picker when the remembered database is inaccessible",async()=>{
+  vi.mocked(databaseSwitch).mockReset().mockRejectedValue(new Error("offline"));
+  useSettingsStore.getState().update({system:{autoOpenDatabaseId:"db-1"}});
+  renderAtGallery();
+  expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+  expect(databaseSwitch).toHaveBeenCalledTimes(1);
+  expect(useSettingsStore.getState().databaseChosen).toBe(false);
+});
+it("ignores a removed automatic database",async()=>{
+  vi.mocked(databaseSwitch).mockReset();
+  useSettingsStore.getState().update({system:{autoOpenDatabaseId:"removed"}});
+  renderAtGallery();
+  expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+  expect(databaseSwitch).not.toHaveBeenCalled();
+});
+
+it("manual return to the picker does not immediately reopen the automatic database",async()=>{
+  vi.mocked(databaseSwitch).mockReset();
+  useSettingsStore.setState({databaseChosen:true});
+  useSettingsStore.getState().update({system:{autoOpenDatabaseId:"db-1"}});
+  renderAtGallery();
+  expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+  act(()=>useSettingsStore.getState().setDatabaseChosen(false));
+  expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+  expect(databaseSwitch).not.toHaveBeenCalled();
 });

@@ -97,6 +97,7 @@ fn save_then_load_roundtrip_with_custom_values() {
             launch_at_login: true,
             close_to_tray: false,
             language: "en".to_string(),
+            auto_open_database_id: Some("preferred-db".into()),
         },
         ..Settings::default()
     };

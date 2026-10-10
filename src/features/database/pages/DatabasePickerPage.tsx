@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useLocation } from "react-router";
 import { isMacPlatform } from "@/lib/platform";
 import { useTranslation } from "react-i18next";
 
+import ErrorModal from "@/shared/components/ErrorModal";
 import TitleBar from "@/app/shell/TitleBar";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useWindowReveal } from "@/lib/windowReveal";
@@ -23,6 +24,9 @@ import RemoveDatabaseDialog from "../components/RemoveDatabaseDialog";
 export default function DatabasePickerPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location=useLocation();
+  const preferredId=useSettingsStore(s=>s.settings.system.autoOpenDatabaseId);
+  const [autoOpen,setAutoOpen]=useState(false);
   const loaded = useSettingsStore((s) => s.loaded);
   useWindowReveal(loaded);
   const databases = useDatabases();
@@ -34,7 +38,8 @@ export default function DatabasePickerPage() {
   /** 删除数据库对话框目标（卡片垃圾桶按钮打开） */
   const [deleting, setDeleting] = useState<DatabaseEntry | null>(null);
   const [opening, setOpening] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>((location.state as {autoOpenError?:string}|null)?.autoOpenError ?? null);
+  useEffect(()=>setAutoOpen(!!selectedId && selectedId===preferredId),[selectedId,preferredId]);
   useEffect(() => {
     setSelectedId((prev) =>
       prev !== null && list.some((db) => db.id === prev)
@@ -59,6 +64,13 @@ export default function DatabasePickerPage() {
     // 照片（快照跨库沿用）与张冠李戴的缩略图（assetId 跨库撞号）
     if (activeId !== database.id) resetLibrarySession();
     try {
+      // Save against the current database before switching: AI settings are
+      // database-scoped and must not be copied from the old store into the new DB.
+      const current=useSettingsStore.getState().settings;
+      const nextId=autoOpen ? database.id : null;
+      if((current.system.autoOpenDatabaseId??null)!==nextId) {
+        await useSettingsStore.getState().save({...current,system:{...current.system,autoOpenDatabaseId:nextId}});
+      }
       await databaseSwitch(database.id);
       useSettingsStore.getState().setDatabaseChosen(true);
       navigate("/gallery", { replace: true });
@@ -191,7 +203,12 @@ export default function DatabasePickerPage() {
               );
             })}
           </div>
-          <div className="flex flex-col items-center gap-2">
+          <div className="flex flex-col items-center gap-3">
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-text-secondary">
+              <input type="checkbox" className="accent-accent" checked={autoOpen} disabled={!selected || opening}
+                onChange={event=>setAutoOpen(event.target.checked)} />
+              {t("picker.autoOpen")}
+            </label>
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -211,15 +228,12 @@ export default function DatabasePickerPage() {
                 {t("picker.newDatabase")}
               </button>
             </div>
-            {error !== null && (
-              <p className="text-[11px] text-red-400" role="alert" data-testid="database-picker-error">
-                {t("picker.openFailed")}：{error}
-              </p>
-            )}
+
           </div>
         </>
       )}
       </div>
+      <ErrorModal message={error} onClose={()=>setError(null)} />
       {deleting !== null && (
         <RemoveDatabaseDialog
           database={deleting}

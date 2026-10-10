@@ -901,12 +901,12 @@ fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
 
 /// turbojpeg 缩放解码：按源尺寸选最小满足目标的缩放档（1/8..1/1，
 /// DCT 域直出），再 thumbnail 精确拟合到目标尺寸。
-fn jpeg_scaled(src: &Path, target: u16) -> Option<image::RgbImage> {
+pub(crate) fn jpeg_scaled(src: &Path, target: u16) -> Option<image::RgbImage> {
     let data = fs::read(src).ok()?;
     jpeg_scaled_bytes(&data, target)
 }
 
-fn jpeg_scaled_bytes(data: &[u8], target: u16) -> Option<image::RgbImage> {
+pub(crate) fn jpeg_scaled_bytes(data: &[u8], target: u16) -> Option<image::RgbImage> {
     let header = turbojpeg::read_header(data).ok()?;
     let factor =
         turbojpeg::ScalingFactor::new(pick_jpeg_scale(header.width, header.height, target), 8);

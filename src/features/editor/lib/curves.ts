@@ -1,6 +1,7 @@
 export type CurvePoint = [number, number];
 export type CurveChannel = "rgb" | "red" | "green" | "blue" | "luminance";
-export type CurvePicker = "point" | "black" | "gray" | "white";
+export type CurvePicker = "point" | "black" | "gray" | "white" | "hsl";
+export type HslColorRange="reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas";
 export const IDENTITY: CurvePoint[] = [[0, 0], [255, 255]];
 export const clampTone = (value: number) => Math.round(Math.max(0, Math.min(255, value)) * 100) / 100;
 

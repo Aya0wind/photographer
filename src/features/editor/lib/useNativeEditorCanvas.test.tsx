@@ -31,9 +31,9 @@ it("activates only after a successful native frame and sends metadata rather tha
   expect(result.current).toBe(false);
   act(()=>receive({payload:{sessionId:"session",ok:true}}));
   expect(result.current).toBe(true);
-  expect(document.documentElement).toHaveClass("native-editor-canvas");
+  expect(document.documentElement).not.toHaveClass("native-editor-canvas");
   rerender({enabled:false});
-  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_hide",{sessionId:"session"}));
+  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_hide",expect.objectContaining({sessionId:"session",revision:expect.any(Number)})));
   expect(result.current).toBe(false);
   expect(document.documentElement).not.toHaveClass("native-editor-canvas");
 });
@@ -48,4 +48,43 @@ it("returns to ordinary preview on GPU failure and releases the native window on
   expect(result.current).toBe(false);
   expect(document.documentElement).not.toHaveClass("native-editor-canvas");
   unmount();expect(ipc).toHaveBeenCalledWith("edit_native_close",{sessionId:"session"});log.mockRestore();
+});
+
+it("zooms by changing image coordinates while leaving the native window bounds fixed",async()=>{
+  const {rerender}=renderHook(({source})=>useNativeEditorCanvas("session",recipe,host,true,false,source),{initialProps:{source:"initial"}});
+  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.any(Object)));
+  const first=vi.mocked(ipc).mock.calls.find(([command])=>command==="edit_native_frame")![1] as {view:{rect:number[];image:number[]}};
+  const frame=host.current!.firstElementChild as HTMLElement;
+  frame.getBoundingClientRect=()=>new DOMRect(-70,-10,400,200);
+  rerender({source:"zoomed"});
+  await waitFor(()=>expect(vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_frame")).toHaveLength(2));
+  const second=vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_frame")[1][1] as typeof first;
+  expect(second.view.rect).toEqual(first.view.rect);
+  expect(second.view.image).not.toEqual(first.view.image);
+});
+
+it("keeps stale frames hidden while a modal is open and resumes with a newer revision",async()=>{
+  const {result,rerender}=renderHook(({enabled})=>useNativeEditorCanvas("session",recipe,host,enabled,false,"source"),{initialProps:{enabled:true}});
+  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.any(Object)));
+  rerender({enabled:false});
+  act(()=>receive({payload:{sessionId:"session",ok:true}}));
+  expect(result.current).toBe(false);
+  const barrier=Math.max(...vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_hide").map(([,args])=>(args as {revision:number}).revision));
+  rerender({enabled:true});
+  await waitFor(()=>expect(vi.mocked(ipc).mock.calls.some(([command,args])=>command==="edit_native_frame" && (args as {revision:number}).revision>barrier)).toBe(true));
+});
+
+it("clips the floating zoom HUD and removes the clip after it hides",async()=>{
+ const hud=document.createElement("div");hud.dataset.nativeOverlay="";hud.dataset.visible="true";
+ hud.getBoundingClientRect=()=>new DOMRect(110,250,180,40);host.current!.appendChild(hud);
+ const {rerender}=renderHook(({version})=>useNativeEditorCanvas("session",recipe,host,true,false,"source",version),{initialProps:{version:"visible"}});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({view:expect.objectContaining({overlays:[[100,230,180,40,16]]})})));
+ hud.dataset.visible="false";rerender({version:"hidden"});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({view:expect.objectContaining({overlays:[]})})));
+});
+
+it("sends crop guides and pixel scale without a JPEG request",async()=>{
+ const frame=host.current!.firstElementChild as HTMLElement;frame.dataset.cropGuide=JSON.stringify([0.1,0.2,0.7,0.6]);
+ renderHook(()=>useNativeEditorCanvas("session",recipe,host,true,false,"source"));
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({view:expect.objectContaining({cropGuide:[0.1,0.2,0.7,0.6],scale:1})})));
 });

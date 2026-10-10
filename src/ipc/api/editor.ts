@@ -110,6 +110,11 @@ export async function editPreviewClose(sessionId: string): Promise<void> {
   await ipc<void>("edit_preview_close", { sessionId });
 }
 
+export async function editPreviewMask(sessionId:string,recipe:EditRecipe,maskId:string):Promise<string> {
+  const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_mask",{sessionId,recipe,maskId});
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));
+}
+
 export async function editProjectSave(assetId: number, libraryId: string, recipe: EditRecipe): Promise<void> {
   await ipc<void>("edit_project_save", { assetId: String(assetId), libraryId, recipe });
 }
@@ -192,8 +197,8 @@ export async function exportRun(
   }
 }
 
-export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string) {
-  return ipc<{ sample?: [number, number, number]; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker });
+export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string,maskId?:string) {
+  return ipc<{ sample?: [number, number, number]; range?: "reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId });
 }
 
 
@@ -224,3 +229,9 @@ export interface EditorPreviewStats {
 export function editPreviewStats(sessionId: string): Promise<EditorPreviewStats> {
   return ipc<EditorPreviewStats>("edit_preview_stats", { sessionId });
 }
+
+export interface EditorLutEntry {id:string;name:string;size:number;builtin:boolean;removed:boolean}
+export async function editLutList():Promise<EditorLutEntry[]> {const list=await ipc<EditorLutEntry[]>("edit_lut_list");return Array.isArray(list)?list:[];}
+export const editLutImport=(path:string)=>ipc<EditorLutEntry>("edit_lut_import",{path});
+export const editLutRename=(id:string,name:string)=>ipc<void>("edit_lut_rename",{id,name});
+export const editLutRemove=(id:string)=>ipc<void>("edit_lut_remove",{id});

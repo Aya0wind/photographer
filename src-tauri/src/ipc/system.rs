@@ -1,10 +1,7 @@
-//! 系统集成命令（M8 视频：HEVC 缺解码器时的系统播放回退支点；
-//! 2026-09-21 右键菜单后端：批量复制到剪贴板 + 资源管理器定位）。
+//! 系统集成命令：默认程序打开文件、文件管理器打开目录、剪贴板与文件定位。
 //!
-//! - `open_with_system(path)`：ShellExecuteW "open"——交给系统默认程序
-//!   （视频 = 默认播放器，照片 = 查看器）。不用 shell 插件（多一份权限面
-//!   与依赖），直调 windows crate。路径不存在返回明确错误；ShellExecute
-//!   失败（无关联程序等）映射为可读错误。
+//! - `open_with_system(path)`：Windows 目录使用 ShellExecuteW explore，
+//!   macOS 目录使用 Finder；文件按系统默认关联打开。缺失路径返回明确错误。
 //! - `clipboard_copy_files(paths)`：文件列表入系统剪贴板（CF_HDROP，
 //!   DROPFILES + 双 NUL 结尾宽字符列表）。纯 Win32 clipboard API +
 //!   STA CoInitializeEx（run_blocking 线程内，幂等）。
@@ -20,19 +17,24 @@ use tauri::State;
 
 use super::{run_blocking, SharedState};
 
-/// 用系统默认程序打开文件（open 语义：视频走默认播放器）。
+/// 打开目录使用系统文件管理器；文件使用默认关联程序。
 /// 运行在 `run_blocking` 后台线程（绝不碰 UI/main 线程）。
-pub fn fetch_open_with_system(path: &str) -> Result<(), String> {
+fn validate_open_resource(path: &str) -> Result<crate::platform::ResourceRef<'_>, String> {
     let resource = crate::platform::ResourceRef::parse(path);
     if let crate::platform::ResourceRef::LocalPath(path) = resource {
-        if !std::path::Path::new(path).is_file() {
-            return Err(format!("文件不存在: {path}"));
+        let metadata=std::fs::metadata(path).map_err(|error| format!("路径不存在或不可访问: {path} ({error})"))?;
+        if !metadata.is_file() && !metadata.is_dir() {
+            return Err(format!("无法打开此路径: {path}"));
         }
     }
-    crate::platform::open_with_system(resource)
+    Ok(resource)
 }
 
-/// 用系统默认程序打开文件（snake_case 命令，camelCase 负载 path）。
+pub fn fetch_open_with_system(path: &str) -> Result<(), String> {
+    crate::platform::open_with_system(validate_open_resource(path)?)
+}
+
+/// 打开文件或目录（snake_case 命令，camelCase 负载 path）。
 #[tauri::command]
 pub async fn open_with_system(state: State<'_, SharedState>, path: String) -> Result<(), String> {
     let shared = state.inner().clone();
@@ -134,10 +136,10 @@ mod tests {
     }
 
     #[test]
-    fn directory_is_rejected_as_not_file() {
+    fn existing_directory_is_accepted_as_open_target() {
         let dir = tempfile::tempdir().unwrap();
-        let err = fetch_open_with_system(dir.path().to_str().unwrap()).unwrap_err();
-        assert!(err.contains("不存在"), "目录不当作可打开文件: {err}");
+        let path=dir.path().to_str().unwrap();
+        assert_eq!(validate_open_resource(path).unwrap(), crate::platform::ResourceRef::LocalPath(path));
     }
 
     // -----------------------------------------------------------------

@@ -106,6 +106,7 @@ function renderSettingsPage() {
       <MemoryRouter initialEntries={["/settings"]}>
         <Routes>
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/database-picker" element={<div data-testid="picker-probe">PICKER</div>} />
         </Routes>
       </MemoryRouter>
     </I18nextProvider>,
@@ -972,3 +973,11 @@ describe("AI tab：连拍分组（④ 起位于「高级」折叠分组内）", 
   });
 });
 
+
+it("returns to the database picker from general settings",async()=>{
+  useSettingsStore.setState({databaseChosen:true});
+  renderSettingsPage();
+  await userEvent.setup().click(screen.getByRole("button",{name:"回到库选择器"}));
+  expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+  expect(useSettingsStore.getState().databaseChosen).toBe(false);
+});

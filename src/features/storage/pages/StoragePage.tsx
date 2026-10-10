@@ -1,3 +1,4 @@
+import ErrorModal from "@/shared/components/ErrorModal";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -11,7 +12,6 @@ import {
 import { formatBytes, formatDateTime } from "@/lib/format";
 import CreateLibraryDialog from "@/features/storage/components/CreateLibraryDialog";
 import RemoveLibraryDialog from "@/features/storage/components/RemoveLibraryDialog";
-import RelocateLibraryDialog from "@/features/settings/components/RelocateLibraryDialog";
 import {
   useLibraryScan,
   type LibraryScanFinishSummary,
@@ -24,11 +24,9 @@ import {
  * - 新建照片库 / 从文件夹建立：登记入口（CreateLibraryDialog；从文件夹建立
  *   触发的后台递归扫描在卡片上呈现进度/取消，收尾 toast 通知——M4f）。
  * - 在系统中打开：open_with_system 打开库根文件夹。
- * - 重定位：复用设置页 RelocateLibraryDialog（整库搬迁后改登记 + 重写路径
- *   前缀，归属不变）。
  * - 移除登记：确认对话框问是否连库内记录一起删，**永不删照片文件**（红线）。
  * 列表数据 photo_library_list：挂载拉一次 + photoLibrariesChanged 事件重拉
- * （新建/移除/重定位在后端都会发）；后端不可用自然降级空态。
+ * （新建/移除在后端都会发）；后端不可用自然降级空态。
  * 扫描状态（M4f）：useLibraryScan 汇聚 photo_library_scan_status +
  * libraryScanProgress/Finished 事件——扫描中显示进度并可取消；最近同步
  * 时间会话内记录（重启后未知显示「—」，2026-10-09 定案不进契约）。
@@ -114,7 +112,7 @@ export default function StoragePage() {
   const [status, setStatus] = useState<"loading" | "ready">("loading");
   /** 登记对话框打开模式（null=关闭） */
   const [createMode, setCreateMode] = useState<"new" | "reference" | null>(null);
-  const [relocateTarget, setRelocateTarget] = useState<PhotoLibrary | null>(null);
+  const [openError,setOpenError]=useState<string|null>(null);
   const [removeTarget, setRemoveTarget] = useState<PhotoLibrary | null>(null);
   /** 操作/扫描完成反馈（hint=跨库重复提示等第二行；自动消失） */
   const [toast, setToast] = useState<{ message: string; hint?: string } | null>(null);
@@ -136,7 +134,7 @@ export default function StoragePage() {
     setStatus("ready");
   }, []);
 
-  // 挂载拉一次；photoLibrariesChanged 事件重拉（登记增删/重定位全走它）
+  // 挂载拉一次；photoLibrariesChanged 事件重拉（登记增删全走它）
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
@@ -186,12 +184,13 @@ export default function StoragePage() {
     try {
       await openWithSystem(lib.rootPath);
     } catch (e) {
-      flash(t("storage.openFailed", { error: e instanceof Error ? e.message : String(e) }));
+      setOpenError(t("storage.openFailed", { error: e instanceof Error ? e.message : String(e) }));
     }
   }
 
   return (
     <div className="relative h-full" data-testid="storage-page">
+      <ErrorModal message={openError} onClose={()=>setOpenError(null)} />
       <div className="flex h-full w-full flex-col">
         {/* 头部：标题 + 说明 + 登记入口 */}
         <header className="flex h-12 shrink-0 items-center gap-3 border-b border-edge px-4">
@@ -334,14 +333,6 @@ export default function StoragePage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => setRelocateTarget(lib)}
-                        className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
-                        data-testid="storage-relocate"
-                      >
-                        {t("storage.card.relocate")}
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => setRemoveTarget(lib)}
                         className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-red-400/70 hover:text-red-400"
                         data-testid="storage-remove"
@@ -375,14 +366,6 @@ export default function StoragePage() {
             // （后端未实装）时本地立即补拉一次，保证对话框关闭即见新卡。
             void pull();
           }}
-        />
-      )}
-
-      {/* 重定位：复用设置页对话框（预检/应用/完成面板同语义） */}
-      {relocateTarget !== null && (
-        <RelocateLibraryDialog
-          library={relocateTarget}
-          onClose={() => setRelocateTarget(null)}
         />
       )}
 

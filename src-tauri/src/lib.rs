@@ -58,6 +58,7 @@ pub fn run() {
             // own configuration namespace and never move another app's data.
             settings::config_directory::prepare(&config_dir)?;
             devices::diagnostics::init(&config_dir);
+            edit::lut::init(&config_dir);
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
             // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
             {
@@ -312,7 +313,6 @@ pub fn run() {
             ipc::photo_library::photo_library_list,
             ipc::photo_library::photo_library_create,
             ipc::photo_library::photo_library_remove,
-            ipc::photo_library::photo_library_relocate,
             ipc::photo_library::photo_library_scan_status,
             ipc::photo_library::photo_library_scan_cancel,
             // 相册导出为文件夹（M6；P0 骨架）
@@ -356,6 +356,10 @@ pub fn run() {
             ipc::thumb::thumb_get_by_path,
             ipc::thumb::device_thumb_get,
             ipc::system::open_with_system,
+            edit::lut::edit_lut_list,
+            edit::lut::edit_lut_import,
+            edit::lut::edit_lut_rename,
+            edit::lut::edit_lut_remove,
             ipc::system::clipboard_copy_files,
             ipc::system::reveal_in_explorer,
             ipc::ai::ai_models_status,
@@ -410,6 +414,7 @@ pub fn run() {
             edit::preview::edit_preview_render,
             edit::preview::edit_preview_close,
             edit::preview::edit_preview_pick,
+            edit::preview::edit_preview_mask,
             edit::preview::edit_preview_stats,
             edit::project::edit_project_open,
             edit::project::edit_project_save,

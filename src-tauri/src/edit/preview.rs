@@ -20,6 +20,7 @@ const MAX_SESSIONS: usize = 4;
 const IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
 struct Preview {
+    original_size:[u32;2],
     document: Document,
     raw: Option<Arc<source::RawSource>>,
     refined: Option<([f64; 3], Document)>,
@@ -66,8 +67,8 @@ impl PreviewRequest {
     }
 }
 
-fn new_renderer(document: &Document) -> Arc<Mutex<preview_renderer::Renderer>> {
-    Arc::new(Mutex::new(preview_renderer::Renderer::new(document)))
+fn new_renderer(document: &Document,original:[u32;2]) -> Arc<Mutex<preview_renderer::Renderer>> {
+    Arc::new(Mutex::new(preview_renderer::Renderer::new(document).with_source_size(original,document)))
 }
 
 fn sessions() -> &'static Mutex<HashMap<String, Arc<Mutex<Preview>>>> {
@@ -174,11 +175,11 @@ fn prepare_source_if_current(
     current: impl Fn() -> bool,
 ) -> Result<PreparedSource, String> {
     let source::Opened {
+        original_size: [width,height],
         document: full,
         raw,
         warnings,
-    } = source::open_if_current(path, &current)?;
-    let (width, height) = (full.size.width, full.size.height);
+    } = source::open_preview_if_current(path, PREVIEW_EDGE, &current)?;
     let bit_depth = match full.depth {
         photocraft_engine::doc::SampleType::U8 => "8 bit",
         photocraft_engine::doc::SampleType::U16 => "16 bit",
@@ -215,22 +216,14 @@ fn prepare_source_if_current(
 
 fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Option<PreparedSource> {
     let path = std::path::Path::new(&asset.path);
-    let cache =
-        crate::thumbs::cached_for_asset(db_dir, path, 2048, &asset.mtime).or_else(|| {
-            crate::thumbs::thumb_file(
-                db_dir,
-                path,
-                if asset.kind == crate::events::AssetKind::Raw {
-                    3072
-                } else {
-                    2048
-                },
-            )
-        })?;
-    let pixels = image::open(cache)
-        .ok()?
-        .thumbnail(PREVIEW_EDGE, PREVIEW_EDGE)
-        .to_rgb8();
+    let (pixels,jpeg)=super::proxy_cache::get_or_create(db_dir,asset,PREVIEW_EDGE,|| {
+        let cache=crate::thumbs::cached(db_dir,path,2048)
+            .or_else(||if !path.is_file() {crate::thumbs::cached_for_asset(db_dir,path,2048,&asset.mtime)} else {None})
+            .or_else(||crate::thumbs::thumb_file(db_dir,path,if asset.kind==crate::events::AssetKind::Raw {3072} else {2048}))
+            .or_else(||crate::thumbs::thumb_file(db_dir,path,2048))?;
+        crate::thumbs::jpeg_scaled(std::path::Path::new(&cache),PREVIEW_EDGE as u16)
+            .or_else(||image::open(&cache).ok().map(|img|img.thumbnail(PREVIEW_EDGE,PREVIEW_EDGE).to_rgb8()))
+    })?;
     let image = photocraft_codecs::Image::from_u8(
         pixels.width(),
         pixels.height(),
@@ -242,15 +235,6 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
         photocraft_cms::Builtin::Srgb.profile().to_bytes().to_vec(),
     ));
     let document = source::from_image("Preview", &image).ok()?;
-    let mut jpeg = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
-        .encode(
-            pixels.as_raw(),
-            pixels.width(),
-            pixels.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .ok()?;
     let mut histogram = vec![vec![0u64; 256]; 4];
     for pixel in pixels.pixels() {
         for ch in 0..3 {
@@ -320,8 +304,9 @@ pub async fn edit_preview_open(
         cache.insert(
             details.session_id.clone(),
             Arc::new(Mutex::new(Preview {
-                interactive_renderer: new_renderer(&interactive_document),
-                refined_renderer: new_renderer(&document),
+                original_size:[details.width,details.height],
+                interactive_renderer: new_renderer(&interactive_document,[details.width,details.height]),
+                refined_renderer: new_renderer(&document,[details.width,details.height]),
                 open_ms: opened_at.elapsed().as_secs_f64() * 1000.0,
                 native_ready: details.native_ready,
                 generation: Arc::new(Generation::default()),
@@ -393,8 +378,9 @@ pub async fn edit_preview_prepare(
         if generation.closed.load(Ordering::Acquire) {
             return Err("预览会话已关闭".into());
         }
-        p.interactive_renderer = new_renderer(&interactive_document);
-        p.refined_renderer = new_renderer(&document);
+        p.original_size=[details.width,details.height];
+        p.interactive_renderer = new_renderer(&interactive_document,p.original_size);
+        p.refined_renderer = new_renderer(&document,p.original_size);
         p.document = document;
         p.interactive_document = interactive_document;
         p.raw = raw;
@@ -559,6 +545,12 @@ pub fn edit_preview_close(session_id: String) -> Result<(), String> {
 }
 
 /// 原生高位深文档取色和曲线黑/灰/白点；UI 只接收参数，不处理像素。
+fn sampled_hsl_range(rgb:[f32;3])->Option<&'static str> {
+    let (hue,saturation,_)=photocraft_compose::adjust::rgb_to_hsl(rgb);
+    let ranges=["reds","yellows","greens","cyans","blues","magentas"];
+    (saturation>0.01).then(||ranges[((hue*6.0).round() as usize)%6])
+}
+
 #[tauri::command]
 pub async fn edit_preview_pick(
     state: State<'_, SharedState>,
@@ -567,6 +559,7 @@ pub async fn edit_preview_pick(
     x: f64,
     y: f64,
     picker: String,
+    mask_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let recipe = recipe::parse_recipe(&recipe)?;
     if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
@@ -580,13 +573,24 @@ pub async fn edit_preview_pick(
             .cloned()
             .ok_or("预览会话已关闭")?;
         let base = preview.lock().map_err(|_| "预览锁不可用")?.document.clone();
-        let a = recipe.advanced.clone().unwrap_or_default();
-        let mut before = recipe.clone();
-        if let Some(a) = &mut before.advanced {
-            a.curves.clear();
-            a.channel_curves = Default::default();
-        }
-        let doc = photocraft::adjusted_document(&base, &before)?;
+        let (a,mut before,base)=if let Some(id)=&mask_id {
+            let index=recipe.masks.iter().position(|m|&m.id==id).ok_or("所选蒙版不存在")?;
+            let mask=&recipe.masks[index];
+            let mut below=recipe.clone();below.masks.truncate(index);
+            let base=photocraft::adjusted_document(&base,&below)?;
+            let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
+            local.legacy_adjustments=None;
+            (mask.advanced.clone().unwrap_or_default(),local,base)
+        } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
+        picker_input_recipe(&mut before,&picker);
+        let doc = if mask_id.is_some() {
+            // The lower stack already contains adjustment layers. Local camera
+            // controls must append sampled upstream curves, never destructively
+            // target that stack's top adjustment layer as if it were a raster.
+            before.rotate_quarter=0;before.geometry=None;before.crop=None;
+            before.text_layers.clear();before.brush_strokes.clear();
+            preview_renderer::Renderer::new(&base).canvas_document(&base,&before)?
+        } else {photocraft::adjusted_document(&base, &before)?};
         let px = (x * f64::from(doc.size.width))
             .floor()
             .min(f64::from(doc.size.width - 1)) as i32;
@@ -601,6 +605,10 @@ pub async fn edit_preview_pick(
             .unwrap_or_default();
         if sample[3] <= 0.0 {
             return Err("不能对透明像素取色".into());
+        }
+        if picker=="hsl" {
+            let range=sampled_hsl_range([sample[0],sample[1],sample[2]]);
+            return Ok(serde_json::json!({"sample":[sample[0]*255.0,sample[1]*255.0,sample[2]*255.0],"range":range}));
         }
         if picker == "point" {
             return Ok(
@@ -624,6 +632,34 @@ pub async fn edit_preview_pick(
         Ok(photocraft_engine::adjust_params::to_params(&adjustment))
     })
     .await
+}
+
+fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str) {
+    // Local masks run after the global stack. A global picker must not sample
+    // downstream local adjustments; local callers have already composed below.
+    recipe.masks.clear();
+    if let Some(a)=&mut recipe.advanced {
+        a.curves.clear();a.channel_curves=Default::default();a.lookup=None;
+        if picker=="hsl" {a.hsl.clear();a.color_balance=None;a.black_white=None;a.selective_color=None;}
+    }
+}
+
+#[tauri::command]
+pub async fn edit_preview_mask(
+    state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,mask_id:String,
+)->Result<tauri::ipc::Response,String> {
+    let recipe=recipe::parse_recipe(&recipe)?;
+    run_blocking(state.inner().clone(),move |_|{
+        use image::ImageEncoder;
+        let preview=sessions().lock().map_err(|_|"预览锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
+        let (base,renderer)={let preview=preview.lock().map_err(|_|"预览锁不可用")?;(preview.interactive_document.clone(),preview.interactive_renderer.clone())};
+        let doc=renderer.lock().map_err(|_|"蒙版锁不可用")?.mask_overlay(&base,&recipe,&mask_id)?;
+        let pixels=photocraft_compose::flatten(&doc);
+        let rgba:Vec<u8>=pixels.px.iter().flat_map(|p|p.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)).collect();
+        let mut png=Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba,doc.size.width,doc.size.height,image::ExtendedColorType::Rgba8).map_err(|e|format!("蒙版预览失败：{e}"))?;
+        Ok(tauri::ipc::Response::new(png))
+    }).await
 }
 
 #[derive(Serialize)]
@@ -678,10 +714,33 @@ pub(super) fn canvas_source(session_id:&str)->Result<Document,String> {
     if p.generation.closed.load(Ordering::Acquire) {return Err("预览会话已关闭".into());}
     p.touched=Instant::now();Ok(p.document.clone())
 }
+pub(super) fn canvas_original_size(session_id:&str)->Result<[u32;2],String> {
+    let value=sessions().lock().map_err(|_|"预览锁不可用")?.get(session_id).cloned().ok_or("预览会话已关闭")?;
+    let p=value.lock().map_err(|_|"预览锁不可用")?;Ok(p.original_size)
+}
 
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+    #[test]
+    fn hsl_picker_excludes_downstream_black_white_and_local_adjustments() {
+        let mut recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"blackWhite":{"enabled":true,"weights":[40,60,40,60,20,80],"tint":null},"colorBalance":{"shadows":[0,0,0],"midtones":[20,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"selectiveColor":{"relative":true,"ranges":{"reds":[20,0,0,0]}},"hsl":{"reds":{"hue":90,"saturation":0,"lightness":0}}}})).unwrap();
+        let original=recipe.clone();picker_input_recipe(&mut recipe,"hsl");
+        let a=recipe.advanced.as_ref().unwrap();assert!(a.black_white.is_none()&&a.color_balance.is_none()&&a.selective_color.is_none()&&a.hsl.is_empty());
+        let base=Document::with_background("Picker",photocraft_engine::doc::Size::new(8,8),photocraft_engine::doc::ColorMode::Rgb,photocraft_engine::doc::SampleType::U8,photocraft_engine::doc::Color::rgba(1.0,0.0,0.0,1.0));
+        assert_eq!(photocraft_compose::flatten(&photocraft::adjusted_document(&base,&recipe).unwrap()).px,photocraft_compose::flatten(&base).px);
+        let mut curve_input=original;picker_input_recipe(&mut curve_input,"point");assert!(curve_input.advanced.unwrap().black_white.is_some());
+    }
+    #[test]
+    fn hsl_picker_uses_upstream_hue_and_does_not_classify_gray_as_red() {
+        assert_eq!(sampled_hsl_range([1.0,0.0,0.0]),Some("reds"));
+        assert_eq!(sampled_hsl_range([1.0,1.0,0.0]),Some("yellows"));
+        assert_eq!(sampled_hsl_range([0.0,1.0,0.0]),Some("greens"));
+        assert_eq!(sampled_hsl_range([0.0,1.0,1.0]),Some("cyans"));
+        assert_eq!(sampled_hsl_range([0.0,0.0,1.0]),Some("blues"));
+        assert_eq!(sampled_hsl_range([1.0,0.0,1.0]),Some("magentas"));
+        assert_eq!(sampled_hsl_range([0.5,0.5,0.5]),None);
+    }
 
     #[test]
     fn cached_proxy_opens_without_decoding_the_original_and_keeps_one_resolution() {

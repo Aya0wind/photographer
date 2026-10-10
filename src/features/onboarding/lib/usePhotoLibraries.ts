@@ -4,7 +4,7 @@ import { photoLibraryList, subscribeAppEvents, type AppEvent, type PhotoLibrary 
 
 /**
  * 照片库登记表 hook（2026-10-09 单库多照片库）：拉 photo_library_list +
- * photoLibrariesChanged 事件重拉（新建/移除登记/重定位/在线状态翻转全走它）。
+ * photoLibrariesChanged 事件重拉（新建/移除登记/在线状态翻转全走它）。
  * null=尚未拉到（首帧），[]=确实没有照片库；后端不可用回退 []（自然降级，
  * 门禁按「无照片库」处理——引导页可跳过，不阻塞开发调试）。
  */

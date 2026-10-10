@@ -512,13 +512,8 @@ fn offline_root_flips_status_and_recovers_when_back() {
     write(&root.join("a.jpg"), 1);
     assert!(run(&database, &db_dir, &library.id).online);
 
-    // 库根消失（用户拔盘/移走文件夹）：库 root 改指尚不存在的路径
-    //（重定位允许先改后挂载；不重写资产路径——这里只验证在盘性翻转）
-    let moved_root = holder.path().join("moved-root");
+    // 模拟拔盘：根目录消失，但登记路径不变。
     fs::remove_dir_all(&root).unwrap();
-    database
-        .photos_library_set_root(&library.id, &moved_root.to_string_lossy(), &db_dir)
-        .unwrap();
     let report = run(&database, &db_dir, &library.id);
     assert!(!report.online, "根不在盘 → online=false");
     assert_eq!(
@@ -531,7 +526,7 @@ fn offline_root_flips_status_and_recovers_when_back() {
     );
 
     // 根回来（重挂载）→ online 翻回；同库资产因根消失进入缺席流程
-    write(&moved_root.join("a.jpg"), 1);
+    write(&root.join("a.jpg"), 1);
     let back = run(&database, &db_dir, &library.id);
     assert!(back.online);
     assert_eq!(

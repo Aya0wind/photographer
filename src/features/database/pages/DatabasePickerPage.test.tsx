@@ -141,7 +141,7 @@ describe("DatabasePickerPage（达芬奇式启动首屏）", () => {
 
     await user.click(await screen.findByTestId("database-picker-open"));
 
-    expect(await screen.findByTestId("database-picker-error")).toHaveTextContent(
+    expect(await screen.findByTestId("operation-error-dialog")).toHaveTextContent(
       "导入进行中：请完成后再切换数据库",
     );
     expect(screen.queryByTestId("gallery-probe")).not.toBeInTheDocument();
@@ -205,4 +205,33 @@ describe("DatabasePickerPage（达芬奇式启动首屏）", () => {
     // 无菜单内容（菜单只在主壳 TitleBar 中）
     expect(screen.queryByTestId("menubar")).not.toBeInTheDocument();
   });
+});
+
+it("persists the automatic database before switching",async()=>{
+  const save=vi.spyOn(useSettingsStore.getState(),"save").mockImplementation(async next=>{
+    useSettingsStore.setState({settings:next});
+  });
+  renderPicker();const user=userEvent.setup();
+  const checkbox=await screen.findByRole("checkbox",{name:"下次自动打开此数据库"});
+  await user.click(checkbox);
+  await user.click(screen.getByTestId("database-picker-open"));
+  expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+  expect(save.mock.calls[0][0].system.autoOpenDatabaseId).toBe("db-1");
+  expect(save.mock.invocationCallOrder[0]).toBeLessThan(switchMock.mock.invocationCallOrder[0]);
+  save.mockRestore();
+});
+
+it("clears automatic opening when the remembered database is opened unchecked",async()=>{
+  useSettingsStore.getState().update({system:{autoOpenDatabaseId:"db-1"}});
+  const save=vi.spyOn(useSettingsStore.getState(),"save").mockImplementation(async next=>{
+    useSettingsStore.setState({settings:next});
+  });
+  renderPicker();const user=userEvent.setup();
+  const checkbox=await screen.findByRole("checkbox",{name:"下次自动打开此数据库"});
+  await waitFor(()=>expect(checkbox).toBeChecked());
+  await user.click(checkbox);
+  await user.click(screen.getByTestId("database-picker-open"));
+  expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+  expect(save.mock.calls[0][0].system.autoOpenDatabaseId).toBeNull();
+  save.mockRestore();
 });

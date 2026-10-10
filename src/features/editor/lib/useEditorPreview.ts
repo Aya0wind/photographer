@@ -1,16 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { editPreviewClose, editPreviewOpen, editPreviewPrepare, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
+import { editPreviewClose, editPreviewOpen, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
 
 import { startPreviewScheduler } from "./previewScheduler";
 
-/** 快速预览和完整显影分别限制一个在途请求，完整显影不阻塞拖动。 */
+/** Edit a stable cached proxy; original-file development is not part of opening the editor. */
 export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId: string, nativeCanvas = false) {
   const [retry, setRetry] = useState(0);
   const [session, setSession] = useState<EditorPreviewSession | null>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [preparingSource,setPreparingSource]=useState(false);
-  const [sourceError,setSourceError]=useState<string|null>(null);
   const [pending, setPending] = useState(false);
   const latest = useRef(recipe);
   latest.current = recipe;
@@ -23,7 +21,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
     if (!enabled) return;
     let cancelled = false;
     let id: string | null = null;
-    setSession(null); setUrl(null); setError(null); setSourceError(null); setPreparingSource(false);
+    setSession(null); setUrl(null); setError(null);
     const opening = editPreviewOpen(assetId, libraryId);
     openedRequest.current = opening;
     void opening.then((value) => {
@@ -31,13 +29,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
       if (cancelled) void editPreviewClose(id).catch(() => {});
       else {
         setSession(value);
-        if(value.nativeReady===false) {
-          setPreparingSource(true);
-          void editPreviewPrepare(value.sessionId).then(native => {
-            if(!cancelled) setSession(native);
-          }).catch(e => {if(!cancelled) setSourceError(String(e));})
-            .finally(() => {if(!cancelled) setPreparingSource(false);});
-        }
+
       }
     }).catch((e: unknown) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; if (id) void editPreviewClose(id).catch(() => {}); };
@@ -45,12 +37,12 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
 
   useEffect(() => {
     if (!session || nativeCanvas) { setPending(false); return; }
-    const schedulerHandle = startPreviewScheduler(session.sessionId, () => latest.current, { setUrl, setError, setPending });
+    const schedulerHandle = startPreviewScheduler(session.sessionId, () => latest.current, { setUrl, setError, setPending },session.sourceUrl);
     scheduler.current = schedulerHandle.wake;
     return () => { scheduler.current = null; schedulerHandle.close(); };
   }, [session, nativeCanvas]);
   useEffect(() => { scheduler.current?.(); }, [signature]);
-  return { enabled, preparingSource, sourceError, session, url: url ?? session?.sourceUrl ?? null, pending,
+  return { enabled, session, url: url ?? session?.sourceUrl ?? null, pending,
     loading: enabled && !session && !error, error, close: async () => {
       const request = openedRequest.current;
       if (request) { try { const value = await request; await editPreviewClose(value.sessionId); } catch (error) { console.warn("Could not release editor preview session", error); } }

@@ -197,7 +197,7 @@ const SECTIONS: NavSection[] = [
   {
     titleKey: "nav.section.system",
     items: [
-      // 存储（M3 单库多照片库定案）：照片库登记管理（新建/从文件夹建立/重定位/移除登记）
+      // 存储（M3 单库多照片库定案）：照片库登记管理（新建/从文件夹建立/移除登记）
       { to: "/storage", labelKey: "nav.storage", icon: ICONS.storage },
       { to: "/settings", labelKey: "nav.settings", icon: ICONS.settings },
     ],

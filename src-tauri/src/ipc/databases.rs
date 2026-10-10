@@ -319,6 +319,9 @@ pub fn fetch_database_remove(
     }
     let mut next = settings;
     next.databases.retain(|entry| entry.id != id);
+    if next.system.auto_open_database_id.as_deref() == Some(id) {
+        next.system.auto_open_database_id = None;
+    }
     if next.active_database_id.as_deref() == Some(id) {
         next.active_database_id = next.first_database_id().map(|s| s.to_string());
     }

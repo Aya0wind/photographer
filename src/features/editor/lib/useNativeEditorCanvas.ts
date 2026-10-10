@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ipc } from "@/ipc";
@@ -6,17 +6,18 @@ import type { EditRecipe } from "@/ipc/api";
 
 interface FrameEvent { sessionId:string; revision?:number; ok:boolean; submitMs?:number; uploadedBytes?:number; readbackBytes?:number; error?:string }
 
-/** Native compositor underneath a transparent WebView. The DOM remains the
+/** Foreground, pointer-transparent native viewport. The DOM remains the
  * input/overlay layer. Only view bounds and recipe parameters cross IPC. */
 export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRecipe,
-  host:RefObject<HTMLElement|null>, enabled:boolean, original:boolean, sourceVersion:string|undefined) {
+  host:RefObject<HTMLElement|null>, enabled:boolean, original:boolean, sourceVersion:string|undefined, overlayVersion?:string) {
   const [active,setActive]=useState(false);
+  const revision=useRef(0);
   const send=useRef<(()=>void)|null>(null);
   const latest=useRef({recipe,enabled,original});latest.current={recipe,enabled,original};
-  const signature=JSON.stringify({recipe,enabled,original});
+  const signature=JSON.stringify({recipe,enabled,original,overlayVersion});
   useEffect(() => {
     if (!sessionId || !isTauri()) return;
-    let disposed=false,failed=false,ready=false,revision=0,scheduled=0;
+    let disposed=false,failed=false,ready=false,scheduled=0;
     let release:(()=>void)|undefined;
     let observer:ResizeObserver|undefined;
     let mutation:MutationObserver|undefined;
@@ -24,7 +25,7 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
     function fail(error:unknown) {
       if(disposed) return;
       failed=true;setActive(false);document.documentElement.classList.remove("native-editor-canvas");
-      void ipc("edit_native_hide",{sessionId}).catch(() => {});
+      void ipc("edit_native_hide",{sessionId,revision:++revision.current}).catch(() => {});
       console.warn("[editor native] ordinary preview fallback",error);
     }
     async function submit() {
@@ -34,16 +35,20 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
       const frame=host.current?.querySelector<HTMLElement>('[data-testid="editor-canvas-frame"]');
       if(!value.enabled || !frame || !host.current) {
         setActive(false);document.documentElement.classList.remove("native-editor-canvas");
-        await ipc("edit_native_hide",{sessionId}).catch(() => {});return;
+        await ipc("edit_native_hide",{sessionId,revision:++revision.current}).catch(() => {});return;
       }
       const picture=frame.getBoundingClientRect(),viewport=host.current.getBoundingClientRect();
-      const x=Math.max(picture.left,viewport.left),y=Math.max(picture.top,viewport.top);
-      const w=Math.min(picture.right,viewport.right)-x,h=Math.min(picture.bottom,viewport.bottom)-y;
-      if(w<1 || h<1) {await ipc("edit_native_hide",{sessionId}).catch(() => {});return;}
+      if(viewport.width<1 || viewport.height<1 || picture.width<1 || picture.height<1) return;
       const scale=window.devicePixelRatio || 1;
-      const view={rect:[Math.round(x*scale),Math.round(y*scale),Math.round(w*scale),Math.round(h*scale)],
-        uv:[(x-picture.left)/picture.width,(y-picture.top)/picture.height,w/picture.width,h/picture.height]};
-      try {await ipc("edit_native_frame",{sessionId,recipe:value.recipe,view,revision:++revision,original:value.original});}
+      // Keep one fixed native surface. Zoom/pan change GPU coordinates only,
+      // never resize/move a visible window containing an older frame.
+      const overlays=Array.from(host.current.querySelectorAll<HTMLElement>("[data-native-overlay]")).filter(element=>element.dataset.visible!=="false").map(element=>{
+        const bounds=element.getBoundingClientRect();return [Math.round((bounds.left-viewport.left)*scale),Math.round((bounds.top-viewport.top)*scale),Math.round(bounds.width*scale),Math.round(bounds.height*scale),Math.round(16*scale)];
+      }).filter(rect=>rect[2]>0&&rect[3]>0);
+      const cropGuide=frame.dataset.cropGuide?JSON.parse(frame.dataset.cropGuide) as number[]:null;
+      const view={overlays,cropGuide,scale,rect:[Math.round(viewport.left*scale),Math.round(viewport.top*scale),Math.round(viewport.width*scale),Math.round(viewport.height*scale)],
+        uv:[0,0,1,1],image:[(picture.left-viewport.left)/viewport.width,(picture.top-viewport.top)/viewport.height,picture.width/viewport.width,picture.height/viewport.height]};
+      try {await ipc("edit_native_frame",{sessionId,recipe:value.recipe,view,revision:++revision.current,original:value.original});}
       catch(error) {fail(error);}
     }
     function wake() {if(!scheduled && !disposed) scheduled=requestAnimationFrame(() => void submit());}
@@ -53,7 +58,7 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
         if(disposed || payload.sessionId!==sessionId) return;
         if(!payload.ok) {fail(payload.error);return;}
         if(latest.current.enabled) {
-          document.documentElement.classList.add("native-editor-canvas");setActive(true);
+          setActive(true);
           try {performance.clearMeasures("editor.native.frame");performance.measure("editor.native.frame",{start:performance.now(),duration:payload.submitMs??0,detail:payload});} catch { /* diagnostics only */ }
         }
       });
@@ -64,7 +69,7 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
       if(host.current) {
         observer=new ResizeObserver(wake);observer.observe(host.current);
         const observeFrame=() => {const frame=host.current?.querySelector('[data-testid="editor-canvas-frame"]');if(frame) observer?.observe(frame);wake();};
-        mutation=new MutationObserver(observeFrame);mutation.observe(host.current,{childList:true,subtree:true});
+        mutation=new MutationObserver(observeFrame);mutation.observe(host.current,{childList:true,subtree:true,attributes:true,attributeFilter:["data-visible","data-crop-guide"]});
         observeFrame();
       }
       window.addEventListener("resize",wake);window.addEventListener("scroll",wake,true);
@@ -77,6 +82,11 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
       void ipc("edit_native_close",{sessionId}).catch(() => {});
     };
   },[sessionId,host]);
+  useLayoutEffect(() => {
+    if (!enabled && sessionId && isTauri()) {
+      setActive(false);void ipc("edit_native_hide",{sessionId,revision:++revision.current}).catch(() => {});
+    }
+  },[enabled,sessionId]);
   useEffect(() => {send.current?.();},[signature,sourceVersion]);
   return active && enabled;
 }

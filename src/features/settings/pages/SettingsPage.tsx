@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router";
+import { useSearchParams, useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
 import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
@@ -14,7 +14,7 @@ import { useSettingsStore, type DeepPartial, type Settings } from "@/stores/sett
  * 说明小字（下一行），分组用 uppercase 小节标题，不用卡片框。
  * 修改即存：settingsStore.update + save（IPC 失败本地仍生效）。
  * 旧「库」tab 已随 2026-10-09 单库多照片库定案退役：照片库管理（新建/
- * 从文件夹建立/重定位/移除登记）由左侧导航「存储」页承担（M3 已实装）；
+ * 从文件夹建立/移除登记）由左侧导航「存储」页承担（M3 已实装）；
  * 数据库管理（2026-10-09 用户定案：恢复老库管理形态）由启动选择页
  * /database-picker 承担（新建/打开/删除），设置页不再挂卡片。
  */
@@ -165,6 +165,7 @@ function AlbumTagsSetting() {
 }
 
 export default function SettingsPage() {
+  const navigate=useNavigate();
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
   // 深链 ?tab=ai（语义门禁/未就绪引导卡的「去设置」直达；非法值回常规）
@@ -215,6 +216,12 @@ export default function SettingsPage() {
           {tab === "general" && (
             <>
               <SectionTitle>{t("settings.section.system")}</SectionTitle>
+              <SettingRow label={t("settings.databasePicker")} desc={t("settings.databasePickerDesc")}>
+                <button type="button" className="ui-primary rounded-lg px-4 py-2 text-xs"
+                  onClick={()=>{useSettingsStore.getState().setDatabaseChosen(false);navigate("/database-picker");}}>
+                  {t("settings.returnToDatabasePicker")}
+                </button>
+              </SettingRow>
               <SettingRow
                 label={t("settings.closeBehavior")}
                 desc={t("settings.closeBehaviorDesc")}

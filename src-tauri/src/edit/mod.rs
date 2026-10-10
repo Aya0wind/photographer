@@ -41,15 +41,19 @@
 
 pub mod export;
 mod gpu;
+mod masks;
 pub mod native_canvas;
+mod native_geometry;
 #[cfg(windows)]
 mod native_presenter;
 pub mod ipc;
+pub mod lut;
 pub mod meta;
 pub mod metadata;
 pub mod photocraft;
 pub mod preview;
 mod preview_renderer;
+mod proxy_cache;
 pub mod project;
 pub mod recipe;
 pub mod render;

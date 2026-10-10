@@ -26,10 +26,10 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-async function canvas(tool: EditorTool = "view") {
+async function canvas(tool: EditorTool = "view",sampleMode=false) {
   const onZoom = vi.fn();
   const noop = vi.fn();
-  render(<EditorCanvas src="test.jpg" zoom={2} onZoom={onZoom} fallbackSize={null} recipe={defaultRecipe()} tool={tool}
+  render(<EditorCanvas sampleMode={sampleMode} src="test.jpg" zoom={2} onZoom={onZoom} fallbackSize={null} recipe={defaultRecipe()} tool={tool}
     brushOptions={{ color: "#FF0000", widthRel: 0.01 }} cropRatio={null} cropDraft={null}
     onCropDraftChange={noop} selectedTextId={null} onSelectText={noop} onPlaceText={noop} onTextChange={noop}
     onStrokeCommit={noop} onGestureStart={noop} onGestureEnd={noop} onImageReady={noop} onImageError={noop} />);
@@ -72,4 +72,17 @@ describe("编辑器画布缩放与拖动", () => {
     expect(viewport.scrollLeft).toBe(200);
     expect(viewport.scrollTop).toBe(150);
   });
+});
+
+it.each(["adjust","filters","output","metadata"] as EditorTool[])("%s allows panning without a separate view tool",async(tool)=>{
+ const {viewport}=await canvas(tool);
+ fireEvent.pointerDown(viewport,{pointerId:1,button:0,clientX:400,clientY:300});
+ fireEvent.pointerMove(viewport,{pointerId:1,clientX:250,clientY:180});
+ expect(viewport.scrollLeft).toBe(350);expect(viewport.scrollTop).toBe(270);
+});
+it("sampling never starts pan gestures",async()=>{
+ const {viewport}=await canvas("adjust",true);
+ fireEvent.pointerDown(viewport,{pointerId:1,button:0,clientX:400,clientY:300});
+ fireEvent.pointerMove(viewport,{pointerId:1,clientX:250,clientY:180});
+ expect(viewport.scrollLeft).toBe(200);expect(viewport.setPointerCapture).not.toHaveBeenCalled();
 });

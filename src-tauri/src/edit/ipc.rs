@@ -82,10 +82,9 @@ pub fn fetch_edit_recipe_save(
         return Err(format!("资产 {asset_id} 不存在"));
     }
     let normalized = recipe::parse_recipe(value)?;
-    if normalized.renderer.is_some() || normalized.advanced.is_some() {
-        return Err("高级编辑状态应通过独立编辑接口保存".into());
-    }
+    if normalized.advanced.is_some() && normalized.renderer.is_none() {return Err("高级调色缺少编辑引擎标识".into());}
     let text = serde_json::to_string(&normalized).map_err(|e| format!("配方序列化失败: {e}"))?;
+    if text.len()>4*1024*1024 {return Err("编辑状态过大".into());}
     let updated_at = chrono::Utc::now().timestamp_millis();
     db.edit_recipe_upsert(asset_id, &text, updated_at)
         .map_err(|e| e.to_string())?;
@@ -219,7 +218,7 @@ pub async fn edit_recipe_delete(
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
         let db = crate::ipc::app_database_db(state)?;
-        fetch_edit_recipe_delete(&db, id)
+        super::project::fetch_project_delete(&db,&crate::ipc::app_database_dir(state)?,id)
     })
     .await
 }

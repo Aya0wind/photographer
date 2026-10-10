@@ -1698,7 +1698,7 @@ fn resume_has_pending(prepared: &Prepared) -> bool {
 }
 
 /// 目标照片库 root 解析（begin/resume 共用）：photos_libraries 行失踪 →
-/// InvalidPlan（整库重定位改的是 root_path，id 不变，resume 自动跟新）。
+/// InvalidPlan；有效登记的 root_path 在登记后保持固定。
 fn resolve_library_root(db: &Db, plan: &ImportPlan) -> Result<PathBuf, EngineError> {
     let library = db
         .photos_library_get(&plan.target_library_id)

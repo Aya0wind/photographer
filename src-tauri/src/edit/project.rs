@@ -1,9 +1,9 @@
-//! 高级编辑状态由应用管理，按库/资产关联；不向 UI 暴露项目文件路径。
-//! 存储适配集中于本模块，库管理重构只需替换 resolve/path，不改 UI 或引擎。
+//! 两种编辑入口共用 SQLite 编辑配方；旧 advanced-edits 文件只作兼容读取。
+//! 库归属守卫和旧项目迁移集中于本模块；打开不改写存储，保存才更新真值。
 use super::recipe::{parse_recipe, EditRecipe, RenderEngine};
 use crate::ipc::{run_blocking, SharedState};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use tauri::State;
 
@@ -44,7 +44,7 @@ pub(super) fn resolve(
     Ok((library, asset))
 }
 
-/// 编辑状态归激活数据库目录（asset id 库内唯一，无需按照片库分目录）。
+/// 旧编辑文件位于激活数据库目录；保留用于读取历史项目。
 fn project_path(app_db_dir: &std::path::Path, asset_id: i64) -> PathBuf {
     app_db_dir
         .join("advanced-edits")
@@ -59,6 +59,39 @@ fn validate_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
     Ok(recipe)
 }
 
+pub(super) fn remove_legacy(dir:&std::path::Path,id:i64)->Result<(),String> {
+    match std::fs::remove_file(project_path(dir,id)) {
+        Ok(())=>Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(()),Err(e)=>Err(format!("清除旧编辑状态失败：{e}"))
+    }
+}
+
+pub fn fetch_project_delete(db:&crate::db::Db,dir:&std::path::Path,id:i64)->Result<(),String> {
+    remove_legacy(dir,id)?;
+    super::ipc::fetch_edit_recipe_delete(db,id)
+}
+
+/// Canonical SQLite recipe is shared by both editor entry points. Old side
+/// projects are read only for migration; opening never modifies stored data.
+pub fn fetch_project_open(db:&crate::db::Db,dir:&std::path::Path,library_id:&str,id:i64)->Result<Option<EditRecipe>,String> {
+    let stored=super::ipc::fetch_edit_recipe(db,id)?.recipe.map(|v|parse_recipe(&v)).transpose()?;
+    if stored.as_ref().is_some_and(|r|r.renderer==Some(RenderEngine::Photocraft)) {return Ok(stored);}
+    let file=match std::fs::File::open(project_path(dir,id)) {
+        Ok(file)=>Some(file),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>None,Err(e)=>return Err(format!("读取编辑状态失败：{e}"))
+    };
+    if let Some(file)=file {
+        let mut bytes=Vec::new();file.take(MAX_PROJECT_BYTES+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+        if bytes.len() as u64>MAX_PROJECT_BYTES {return Err("编辑状态过大".into());}
+        let project:Project=serde_json::from_slice(&bytes).map_err(|e|format!("编辑状态无效：{e}"))?;
+        if project.version!=1||project.library_id!=library_id||project.asset_id!=id {return Err("编辑状态与照片不匹配".into());}
+        return validate_recipe(&project.recipe).map(Some);
+    }
+    Ok(stored.map(|mut recipe|{
+        recipe.renderer=Some(RenderEngine::Photocraft);
+        recipe.legacy_adjustments=recipe.adjustments.take().filter(|a|a.brightness!=0.0||a.contrast!=0.0||a.saturation!=0.0);
+        recipe
+    }))
+}
+
 #[tauri::command]
 pub async fn edit_project_save(
     state: State<'_, SharedState>,
@@ -70,24 +103,12 @@ pub async fn edit_project_save(
         let id = super::ipc::parse_asset_id(&asset_id)?;
         resolve(state, &library_id, &asset_id)?;
         let recipe = validate_recipe(&recipe)?;
-        let path = project_path(&crate::ipc::app_database_dir(state)?, id);
-        let project = Project {
-            version: 1,
-            library_id,
-            asset_id: id,
-            recipe: serde_json::to_value(recipe).map_err(|e| e.to_string())?,
-        };
-        let bytes = serde_json::to_vec(&project).map_err(|e| e.to_string())?;
+        let value=serde_json::to_value(recipe).map_err(|e|e.to_string())?;
+        let bytes=serde_json::to_vec(&value).map_err(|e|e.to_string())?;
         if bytes.len() as u64 > MAX_PROJECT_BYTES {
             return Err("编辑状态过大".into());
         }
-        let parent = path.parent().ok_or("编辑状态位置不可用")?;
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-        temp.write_all(&bytes).map_err(|e| e.to_string())?;
-        temp.as_file().sync_all().map_err(|e| e.to_string())?;
-        temp.persist(&path)
-            .map_err(|e| format!("保存编辑失败: {e}"))?;
+        super::ipc::fetch_edit_recipe_save(&crate::ipc::app_database_db(state)?,id,&value)?;
         Ok(())
     })
     .await
@@ -102,25 +123,7 @@ pub async fn edit_project_open(
     run_blocking(state.inner().clone(), move |state| {
         let id = super::ipc::parse_asset_id(&asset_id)?;
         resolve(state, &library_id, &asset_id)?;
-        let path = project_path(&crate::ipc::app_database_dir(state)?, id);
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("读取编辑状态失败: {e}")),
-        };
-        let mut bytes = Vec::new();
-        file.take(MAX_PROJECT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > MAX_PROJECT_BYTES {
-            return Err("编辑状态过大".into());
-        }
-        let project: Project =
-            serde_json::from_slice(&bytes).map_err(|e| format!("编辑状态无效: {e}"))?;
-        if project.version != 1 || project.library_id != library_id || project.asset_id != id {
-            return Err("编辑状态与照片不匹配".into());
-        }
-        validate_recipe(&project.recipe).map(Some)
+        fetch_project_open(&crate::ipc::app_database_db(state)?,&crate::ipc::app_database_dir(state)?,&library_id,id)
     })
     .await
 }

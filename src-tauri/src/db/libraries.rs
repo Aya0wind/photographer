@@ -4,7 +4,7 @@
 //! 库修正：一切照片库操作作用于激活数据库，2026-10-09），
 //! `assets.library_id` 引用这里的 id。相册/子组是数据库全局逻辑概念，不分库。
 //!
-//! root 互斥校验（§八-6）是登记与重定位的统一闸门：各库 root 之间不得相同
+//! root 互斥校验（§八-6）是登记的统一闸门：各库 root 之间不得相同
 //! 或互相包含；root 不得与数据库目录相同或互相包含（防把 thumbs/ 缩略图
 //! 目录登记进库）。校验同时覆盖逻辑路径与 canonical 实路径（junction/
 //! 符号链接逃逸防线，与 settings::validate_library_storage_paths 同手法）。
@@ -83,7 +83,7 @@ fn map_no_rows<T>(e: rusqlite::Error) -> Result<Option<T>> {
 ///   相同或互相包含）；
 /// - `database_dir`：数据库目录解析结果（新 root 不得与其相同或互相包含，
 ///   防把 thumbs/ 缩略图登记进库）；
-/// - `root`：待登记/重定位的库根目录（规范化绝对路径）。
+/// - `root`：待登记的库根目录（规范化绝对路径）。
 ///
 /// 逻辑路径判重之外再做 canonical 实路径判重（两侧均在盘时）：junction/
 /// 符号链接指向库内/库外的逃逸路径在逻辑形态上不可见，canonical 交叉核对
@@ -183,8 +183,8 @@ impl Db {
             })
     }
 
-    /// root 互斥预检（登记/重定位共用）：加载已登记 roots 后调用
-    /// [`validate_photos_library_root`]。`exclude_id` 重定位时排除自身旧 root。
+    /// root 互斥预检（登记使用）：加载已登记 roots 后调用
+    /// [`validate_photos_library_root`]。`exclude_id` 可排除已有登记。
     pub fn photos_library_validate_root(
         &self,
         root: &Path,
@@ -229,25 +229,6 @@ impl Db {
             )
             .map_err(|e| e.to_string())?;
         Ok(row)
-    }
-
-    /// 改库根目录（整库重定向语义 §一：只改登记与库内路径前缀重写由调用方
-    /// 复用 [`Db::rewrite_asset_roots`]，资产归属不变）。先做 root 互斥校验
-    ///（排除自身），不改 status——离线判定归 reconcile。
-    pub fn photos_library_set_root(
-        &self,
-        id: &str,
-        new_root: &str,
-        database_dir: &Path,
-    ) -> Result<(), String> {
-        self.photos_library_validate_root(Path::new(new_root), database_dir, Some(id))?;
-        self.0
-            .execute(
-                "UPDATE photos_libraries SET root_path = ?2 WHERE id = ?1",
-                params![id, new_root],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     /// 设置在线状态（"online" | "offline"；reconcile 按库粒度翻转，§五）。

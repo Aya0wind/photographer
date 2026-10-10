@@ -438,9 +438,9 @@ fn photos_library_root_validation_rejects_overlap() {
     .expect("互不重叠的 root 应通过");
 }
 
-/// 登记闸门内置校验：register 拒绝重叠 root；set_root 重定位排除自身旧 root。
+/// 登记闸门内置校验：register 拒绝重叠 root。
 #[test]
-fn photos_library_register_validates_and_set_root_allows_own_root() {
+fn photos_library_register_validates_root() {
     let dir = roots_dir();
     let (_dir, db) = temp_db();
     let database_dir = dir.path().join("appdata");
@@ -448,7 +448,7 @@ fn photos_library_register_validates_and_set_root_allows_own_root() {
     let root = dir.path().join("photos");
     std::fs::create_dir_all(&root).unwrap();
 
-    let row = db
+    db
         .photos_library_register("主库", &root.to_string_lossy(), &database_dir)
         .unwrap();
     // 同 root 再登记（他库）被拒
@@ -466,18 +466,7 @@ fn photos_library_register_validates_and_set_root_allows_own_root() {
         .expect_err("数据库目录内登记必须拒绝");
     assert!(err.contains("数据库目录"), "{err}");
 
-    // 重定位到自身旧 root：排除自身后应通过（no-op 场景）
-    db.photos_library_set_root(&row.id, &root.to_string_lossy(), &database_dir)
-        .expect("重定位到自身旧 root（未变）应通过");
-    // 重定位到与其他库重叠的 root 被拒
-    let other = dir.path().join("other");
-    std::fs::create_dir_all(&other).unwrap();
-    db.photos_library_register("他库", &other.to_string_lossy(), &database_dir)
-        .unwrap();
-    let err = db
-        .photos_library_set_root(&row.id, &other.to_string_lossy(), &database_dir)
-        .expect_err("重定位到他库 root 必须拒绝");
-    assert!(err.contains("他库"), "{err}");
+
 }
 
 #[test]

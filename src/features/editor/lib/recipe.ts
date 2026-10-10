@@ -1,3 +1,4 @@
+import {changeGeometry,remapGeometry} from "./geometry";
 import type {
   EditRecipe,
   EditAdjustments,
@@ -43,6 +44,8 @@ export type TextLayerPatch = Partial<Omit<EditRecipeTextLayer, "id">>;
 
 export type RecipeAction =
   | { type: "adjust"; patch: Partial<EditAdjustments>; record?: boolean }
+  | {type:"geometry";patch:Partial<NonNullable<EditRecipe["geometry"]>>;record?:boolean;baseline?:EditRecipe}
+  | {type:"geometryReset"}
   | { type: "rotate"; delta: 1 | -1 }
   | { type: "cropApply"; crop: EditRecipeCrop | null }
   | { type: "textAdd"; layer: EditRecipeTextLayer }
@@ -108,6 +111,10 @@ function canvasPixelWidth(ctx: RecipeContext, quarter: number, crop: EditRecipeC
 /** 旋转 ±90°：变换 quarter + crop + 全部图层（点重基、尺寸按画布宽像素比缩放） */
 function applyRotate(recipe: EditRecipe, delta: 1 | -1, ctx: RecipeContext): EditRecipe {
   const quarter = (((recipe.rotateQuarter + delta) % 4) + 4) % 4 as EditRecipe["rotateQuarter"];
+  if(recipe.geometry) {
+    const g=recipe.geometry;
+    return remapGeometry(recipe,{...recipe,rotateQuarter:quarter,geometry:{...g,flipHorizontal:g.flipVertical,flipVertical:g.flipHorizontal}},ctx);
+  }
   const oldCrop = recipe.crop ?? FULL_CROP;
   // crop 矩形整块旋转（角点变换后取包围盒；对 90° 步进即轴对齐交换）
   const tl = rotatePointInImage(oldCrop.x, oldCrop.y, delta);
@@ -188,6 +195,11 @@ export function recipeReducer(
       const next = { ...present, adjustments };
       return action.record === false ? { ...state, present: next } : pushHistory(state, next);
     }
+    case "geometry": {
+      const next=changeGeometry(action.baseline??present,action.patch,ctx);
+      return action.record===false?{...state,present:next}:pushHistory(state,next);
+    }
+    case "geometryReset":return pushHistory(state,remapGeometry(present,{...present,rotateQuarter:0,geometry:undefined,crop:null},ctx,true));
     case "rotate":
       return pushHistory(state, applyRotate(present, action.delta, ctx));
     case "cropApply":
@@ -250,7 +262,7 @@ export function recipeReducer(
       };
     }
     case "reset":
-      return initRecipeHistory(null);
+      return initRecipeHistory(present.renderer ? {...defaultRecipe(),renderer:present.renderer} : null);
   }
 }
 
@@ -276,9 +288,15 @@ export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
 
 /** 持久化/导出前清洗：剔除空文字层与零点笔迹（放置后未输入的占位层不入库） */
 export function recipeForPersist(recipe: EditRecipe): EditRecipe {
+  const a=recipe.advanced;
+  const neutralAdvanced=a && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
+    && !Object.values(a.channelCurves??{}).some(points=>!!points?.length) && !a.levels && !a.lookup && !Object.keys(a.hsl??{}).length;
   return {
     ...recipe,
+    ...(neutralAdvanced ? {advanced:undefined} : {}),
+    ...(recipe.geometry && !recipe.geometry.angle && !recipe.geometry.flipHorizontal && !recipe.geometry.flipVertical ? {geometry:undefined}:{}),
     ...(recipe.adjustments && Object.values(recipe.adjustments).every((value) => value === 0) ? { adjustments: undefined } : {}),
+    ...(recipe.legacyAdjustments&&Object.values(recipe.legacyAdjustments).every(value=>value===0)?{legacyAdjustments:undefined}:{}),
     textLayers: recipe.textLayers.filter((l) => l.text.trim() !== ""),
     brushStrokes: recipe.brushStrokes.filter((s) => s.points.length > 0),
   };

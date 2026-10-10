@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS photos_libraries (
 
 -- ===========================================================================
 -- assets：全局资产表（查重索引 + 元数据）。library_id 为归属照片库的
--- 静态属性（§一：仅整库重定位改 root，归属不变；无外键——移除登记是否
+-- 静态属性（§一：登记后 root 与归属保持固定；无外键——移除登记是否
 -- 连记录删由应用层决定，见 §七）；missing=单文件缺失标记（§五，整库
 -- 离线走 photos_libraries.status）；xmp_dirty=离线期间元数据改动待补写
 -- 边车（库恢复在线后 reconcile 补写清标志）。volume_serial+file_id 为

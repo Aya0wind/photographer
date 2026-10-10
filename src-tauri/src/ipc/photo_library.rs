@@ -1,6 +1,6 @@
 //! 照片库命令（photos_libraries 登记表；2026-10-09 单数据库多照片库定案）。
 //!
-//! photo_library_list / create / remove / relocate 全量落地（db 层
+//! photo_library_list / create / remove 全量落地（db 层
 //! [`crate::db::libraries`]：root 互斥校验内置）；M4b 登记管道闭环：
 //! create(reference=true) 落批量登记任务行 + kick worker，`run_pending_
 //! batch_jobs` 持久化拾取（进度入库/软取消/导入让路/崩溃续跑），scan_
@@ -60,17 +60,6 @@ impl From<PhotosLibraryRow> for PhotoLibraryDto {
 pub struct PhotoLibraryRemoveResult {
     /// 连带删除的资产记录数（delete_records=false 时为 0）。
     pub records_deleted: u64,
-}
-
-/// photo_library_relocate 结果（预检 apply=false / 应用 apply=true 同形）：
-/// affected=旧根前缀重写数；unaffected=不在旧根下保持原样数；
-/// root_exists=新根当前是否在盘（可先改后挂载，缺失走库 offline）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhotoLibraryRelocateDto {
-    pub affected: u64,
-    pub unaffected: u64,
-    pub root_exists: bool,
 }
 
 /// 照片库扫描任务状态 DTO（photo_library_scan_status 返回）：从文件夹建立的
@@ -247,59 +236,6 @@ pub async fn photo_library_remove(
     app.emit("app://event", &AppEvent::PhotoLibrariesChanged)
         .map_err(|e| e.to_string())?;
     Ok(result)
-}
-
-/// 照片库整体重定位核（photo_library_relocate）：改登记 + 重写库内路径
-/// 前缀（资产归属不变）；apply=false 只预检返回计数。新根不必当前在盘
-///（可先改后挂载；缺失走库 offline 语义）。
-pub fn fetch_photo_library_relocate(
-    state: &super::AppState,
-    id: &str,
-    new_root_path: &str,
-    apply: bool,
-) -> Result<PhotoLibraryRelocateDto, String> {
-    let new_root = crate::settings::normalize_library_path(new_root_path)?;
-    let root_exists = std::path::Path::new(&new_root).is_dir();
-    let db = super::app_database_db(state)?;
-    let library = db
-        .photos_library_get(id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("照片库不存在：{id}"))?;
-    let same_root = new_root.eq_ignore_ascii_case(&library.root_path);
-    let (affected, unaffected) = if apply && !same_root {
-        // 先互斥校验（排除自身）再改库 root；路径前缀批量重写同库事务。
-        db.photos_library_set_root(id, &new_root, &super::app_database_dir(state)?)?;
-        db.rewrite_asset_roots(&library.root_path, &new_root)?
-    } else {
-        db.inspect_asset_roots(&library.root_path)?
-    };
-    Ok(PhotoLibraryRelocateDto {
-        affected,
-        unaffected,
-        root_exists,
-    })
-}
-
-/// 照片库整体重定位（photo_library_relocate）：改登记 + 重写库内路径前缀
-///（资产归属不变）；apply=false 只预检返回计数。
-#[tauri::command]
-pub async fn photo_library_relocate(
-    app: AppHandle,
-    state: State<'_, SharedState>,
-    id: String,
-    new_root_path: String,
-    apply: bool,
-) -> Result<PhotoLibraryRelocateDto, String> {
-    let shared = state.inner().clone();
-    let dto = run_blocking(shared, move |state| {
-        fetch_photo_library_relocate(state, &id, &new_root_path, apply)
-    })
-    .await?;
-    if apply {
-        app.emit("app://event", &AppEvent::PhotoLibrariesChanged)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(dto)
 }
 
 /// 各照片库扫描任务状态核（photo_library_scan_status）：library_scan_jobs
