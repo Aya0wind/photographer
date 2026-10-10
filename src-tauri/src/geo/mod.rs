@@ -316,6 +316,116 @@ pub(crate) fn prop_code(props: &serde_json::Value, key: &str) -> Option<String> 
 }
 
 // ---------------------------------------------------------------------------
+// GCJ-02 → WGS-84 归一（DataV 中国边界坐标系修正）
+// ---------------------------------------------------------------------------
+
+/// DataV GeoAtlas 中国边界为 GCJ-02（国测局加密坐标），NE50m 与照片 EXIF GPS
+/// 均为 WGS-84——直接叠加中国区划整体偏东数百米（华东最明显），且边界附近
+/// 照片会挂错区。DataV 族解析时统一转 WGS-84，显示/气泡/挂区三处同时归正。
+/// 无公开官方逆变换：正变换为闭式解，逆解用不动点迭代（4 轮 <1cm，业界
+/// 通用实现，eviltransform 同款）。
+const GCJ_A: f64 = 6378245.0;
+const GCJ_EE: f64 = 0.00669342162296594323;
+
+/// 境外点无加密，转换直通（含南海诸岛在内中国范围全覆盖）。
+fn out_of_china(lon: f64, lat: f64) -> bool {
+    !(72.004..=137.8347).contains(&lon) || !(0.8293..=55.8271).contains(&lat)
+}
+
+fn gcj_deltas(lon: f64, lat: f64) -> (f64, f64) {
+    let (x, y) = (lon - 105.0, lat - 35.0);
+    let d_lat = -100.0
+        + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * x.abs().sqrt()
+        + (2.0 * x + x.abs()).sin() * 300.0 * x * 0.0001
+        + (20.0 * x.sin() + 40.0 * (x / 3.0).sin() + 160.0 * (x / 12.0).sin()
+            + 320.0 * (x * std::f64::consts::PI / 180.0).sin()) * 0.6667;
+    let d_lon = 300.0
+        + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * y.abs().sqrt()
+        + (20.0 * x.sin() + 20.0 * y.sin()).sin() * 0.6667
+        + (20.0 * y.sin() + 40.0 * (y / 3.0).sin() + 160.0 * (y / 12.0).sin()
+            + 320.0 * (y * std::f64::consts::PI / 180.0).sin()) * 0.6667;
+    (d_lat, d_lon)
+}
+
+/// WGS-84 → GCJ-02（正变换；境外原样返回）。
+pub(crate) fn wgs84_to_gcj02(lon: f64, lat: f64) -> (f64, f64) {
+    if out_of_china(lon, lat) {
+        return (lon, lat);
+    }
+    let (d_lat, d_lon) = gcj_deltas(lon, lat);
+    let rad_lat = lat.to_radians();
+    let magic = 1.0 - GCJ_EE * rad_lat.sin() * rad_lat.sin();
+    let sqrt_magic = magic.sqrt();
+    let d_lat = (d_lat * 180.0)
+        / ((GCJ_A * (1.0 - GCJ_EE)) / (magic * sqrt_magic) * std::f64::consts::PI);
+    let d_lon = (d_lon * 180.0)
+        / (GCJ_A / sqrt_magic * rad_lat.cos() * std::f64::consts::PI);
+    (lon + d_lon, lat + d_lat)
+}
+
+/// GCJ-02 → WGS-84（不动点迭代逆解；境外原样返回）。
+pub(crate) fn gcj02_to_wgs84(lon: f64, lat: f64) -> (f64, f64) {
+    if out_of_china(lon, lat) {
+        return (lon, lat);
+    }
+    let (mut g_lon, mut g_lat) = (lon, lat);
+    for _ in 0..4 {
+        let (c_lon, c_lat) = wgs84_to_gcj02(g_lon, g_lat);
+        g_lon -= c_lon - lon;
+        g_lat -= c_lat - lat;
+    }
+    (g_lon, g_lat)
+}
+
+/// DataV 族整包坐标归一：geometry 环 + properties.center 锚点。NE 族天然
+/// WGS-84 不走此函数。
+fn datav_to_wgs84(collection: &mut RawCollection) {
+    fn coord(c: &mut Vec<f64>) {
+        if c.len() >= 2 {
+            let (lon, lat) = gcj02_to_wgs84(c[0], c[1]);
+            c[0] = lon;
+            c[1] = lat;
+        }
+    }
+    for feature in &mut collection.features {
+        match feature.geometry.as_mut() {
+            Some(RawGeometry::Polygon { coordinates }) => {
+                for ring in coordinates {
+                    for c in ring {
+                        coord(c);
+                    }
+                }
+            }
+            Some(RawGeometry::MultiPolygon { coordinates }) => {
+                for poly in coordinates {
+                    for ring in poly {
+                        for c in ring {
+                            coord(c);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        if let Some(center) = feature
+            .properties
+            .get_mut("center")
+            .and_then(|v| v.as_array_mut())
+        {
+            if center.len() == 2 {
+                let (lon, lat) = (
+                    center[0].as_f64().unwrap_or_default(),
+                    center[1].as_f64().unwrap_or_default(),
+                );
+                let (lon, lat) = gcj02_to_wgs84(lon, lat);
+                center[0] = serde_json::Number::from_f64(lon).into();
+                center[1] = serde_json::Number::from_f64(lat).into();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 包加载：目录 → GeoIndex
 // ---------------------------------------------------------------------------
 
@@ -359,7 +469,9 @@ fn parse_datav_parallel(
                     let mut local: HashMap<String, RawCollection> = HashMap::new();
                     for (code, path) in chunk {
                         if let Ok(file) = std::fs::File::open(path) {
-                            if let Ok(collection) = parse_collection(file) {
+                            if let Ok(mut collection) = parse_collection(file) {
+                                // DataV = GCJ-02：入树前统一归一 WGS-84
+                                datav_to_wgs84(&mut collection);
                                 local.insert(code.clone(), collection);
                             }
                         }
@@ -616,7 +728,14 @@ fn load_datav_tree(
 }
 
 /// 数据包指纹：目录内文件名+长度+mtime 的稳定串（内容变化的廉价代理）。
+/// 版本前缀 = 解析产物格式代号——变化即旧 bincode 缓存与 asset_regions
+/// 挂账连坐全量重刷（v2 = DataV GCJ-02→WGS-84 归一，2026-10-10 区划
+/// 偏东修复）。
 pub fn fingerprint_of_dir(dir: &Path) -> String {
+    format!("v2|{}", fingerprint_files_of_dir(dir))
+}
+
+fn fingerprint_files_of_dir(dir: &Path) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -841,5 +960,40 @@ mod tests {
         assert!(packages_installed(dir.path()));
         std::fs::remove_file(dir.path().join(PACKAGE_WORLD_ADM1.file)).unwrap();
         assert!(!packages_installed(dir.path()));
+    }
+
+    #[test]
+    fn gcj02_wgs84_roundtrip_direction_and_abroad_passthrough() {
+        // 境内点（上海）：GCJ 相对 WGS 东移数百米——用户报告的"区划偏东"
+        // 即来自 DataV(GCJ) 叠 NE(WGS) 底图；逆解往返闭合 <1e-6°
+        let (wgs_lon, wgs_lat) = (121.4737, 31.2304);
+        let (gcj_lon, gcj_lat) = wgs84_to_gcj02(wgs_lon, wgs_lat);
+        assert!(gcj_lon > wgs_lon, "GCJ 应东移");
+        assert!((gcj_lon - wgs_lon) > 0.002 && (gcj_lon - wgs_lon) < 0.01, "数百米量级");
+        let (back_lon, back_lat) = gcj02_to_wgs84(gcj_lon, gcj_lat);
+        assert!((back_lon - wgs_lon).abs() < 1e-6 && (back_lat - wgs_lat).abs() < 1e-6);
+        // 境外点直通（NE 世界包路径不受影响）
+        assert_eq!(gcj02_to_wgs84(-140.0, 0.0), (-140.0, 0.0));
+        assert_eq!(wgs84_to_gcj02(5.0, 5.0), (5.0, 5.0));
+    }
+
+    #[test]
+    fn datav_pipeline_converts_center_and_polygons_to_wgs84() {
+        let dir = fixture_dir();
+        let index = GeoIndex::load(dir.path()).expect("加载");
+        // DataV 节点锚点：center [104.0, 30.0]（GCJ）已归一为 WGS
+        let jing = index.nodes.iter().find(|n| n.code == "110000").unwrap();
+        let (lon, lat) = gcj02_to_wgs84(104.0, 30.0);
+        assert!((jing.lon - lon).abs() < 1e-9 && (jing.lat - lat).abs() < 1e-9);
+        assert_ne!((jing.lon, jing.lat), (104.0, 30.0), "境内锚点必须被转换");
+        // 多边形同步归一：归一后的锚点 resolve 仍命中本省（管线自洽——
+        // 挂区/显示/锚点三处同一坐标系）
+        let path = index.resolve(lat, lon);
+        assert!(path.iter().any(|r| r.code == "110000"));
+        // NE 中国 0 级锚点原样（LABEL 来自 NE props，WGS）
+        let chn = index.nodes.iter().find(|n| n.code == "CHN").unwrap();
+        assert_eq!((chn.lat, chn.lon), (30.0, 104.0));
+        // 指纹带版本前缀：旧 bincode 缓存与 asset_regions 连坐重刷的开关
+        assert!(index.fingerprint.starts_with("v2|"));
     }
 }
