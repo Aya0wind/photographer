@@ -1,5 +1,7 @@
-//! SettingsManager / Settings 行为测试（2026-10-09 多数据库修正语义）：
-//! 默认值、缺文件、roundtrip、损坏 JSON 恢复、原子写、旧键忽略（单库
+//! SettingsManager / Settings 行为测试（2026-10-09 设置独立改造语义）：
+//! 默认值、缺文件、roundtrip（全局 + 库级两层）、损坏 JSON 恢复、原子写、
+//! split/compose 往返、库级缺文件默认、一次性迁移（旧全量全局 → 激活库
+//! 落位 + 全局瘦身；库级已存在不覆盖；无激活库丢弃）、旧键忽略（单库
 //! databaseDir 残留键 serde 丢弃）、camelCase 序列化、数据库注册表解析、
 //! db_dir 互斥闸门、「数据库位置」归一化闸门。
 
@@ -8,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 use photographer_lib::settings::{
     normalize_database_path, normalize_library_path, validate_ai_settings,
-    validate_database_dir_overlap, AiSettings, DatabaseEntry, DuplicatePolicy, ImportSettings,
-    IndexSchedule, Settings, SettingsError, SettingsManager, SystemSettings, SCHEMA_VERSION,
+    validate_database_dir_overlap, AiSettings, DatabaseEntry, DatabaseSettings,
+    DuplicatePolicy, GlobalSettings, ImportSettings, IndexSchedule, Settings, SettingsError,
+    SettingsManager, SystemSettings, SCHEMA_VERSION,
 };
 
 fn temp_dir() -> tempfile::TempDir {
@@ -33,6 +36,26 @@ fn corrupt_backups(dir: &Path) -> Vec<String> {
         }
     }
     names
+}
+
+/// 把合成 Settings 拆两层落盘（save_global + save_database 的样板）：
+/// 全局键 → config_dir，七组偏好 → 激活库 db_dir。
+fn save_split(settings: &Settings, config_dir: &Path) {
+    let (global, database) = settings.split();
+    SettingsManager::save_global(&global, config_dir).expect("save global");
+    let db_dir = settings
+        .active_database_dir(config_dir)
+        .expect("需要激活库才能落库级文件");
+    SettingsManager::save_database(&database, &db_dir).expect("save database");
+}
+
+/// 临时激活库（db-1 → 真实临时目录）注册表条目。
+fn registry_with_active_db(dir: &Path) -> Vec<DatabaseEntry> {
+    vec![DatabaseEntry {
+        id: "db-1".into(),
+        name: "主数据库".into(),
+        db_dir: dir.join("db-1").to_string_lossy().into_owned(),
+    }]
 }
 
 #[test]
@@ -62,10 +85,11 @@ fn default_settings_match_spec() {
     assert_eq!(s.system.language, "zh");
 }
 
+/// 无任何文件（首次启动）→ 全默认合成（不报错，引导流程照常）。
 #[test]
-fn load_missing_file_returns_defaults() {
+fn load_missing_file_returns_default_composition() {
     let dir = temp_dir();
-    let loaded = SettingsManager::load(dir.path()).expect("load should succeed");
+    let loaded = SettingsManager::load_composed(dir.path()).expect("load should succeed");
     assert_eq!(loaded, Settings::default());
 }
 
@@ -74,11 +98,7 @@ fn save_then_load_roundtrip_with_custom_values() {
     let dir = temp_dir();
     let s = Settings {
         onboarding_completed: true,
-        databases: vec![DatabaseEntry {
-            id: "db-1".into(),
-            name: "主数据库".into(),
-            db_dir: r"I:\SmartPhoto\db".into(),
-        }],
+        databases: registry_with_active_db(dir.path()),
         active_database_id: Some("db-1".into()),
         import: ImportSettings {
             duplicate_policy: DuplicatePolicy::Rename,
@@ -102,17 +122,99 @@ fn save_then_load_roundtrip_with_custom_values() {
         ..Settings::default()
     };
 
-    SettingsManager::save(&s, dir.path()).expect("save should succeed");
-    let loaded = SettingsManager::load(dir.path()).expect("load should succeed");
+    save_split(&s, dir.path());
+    let loaded = SettingsManager::load_composed(dir.path()).expect("load should succeed");
     assert_eq!(loaded, s);
 }
 
+/// split/compose 往返（纯内存）：合成 → 拆两层 → 重组无损；schema_version
+/// 取全局侧（库级无版本键）。
+#[test]
+fn split_compose_roundtrip() {
+    let s = Settings {
+        onboarding_completed: true,
+        databases: registry_with_active_db(Path::new(r"I:\SmartPhoto")),
+        active_database_id: Some("db-1".into()),
+        ai: AiSettings {
+            enable_clip: true,
+            ..AiSettings::default()
+        },
+        ..Settings::default()
+    };
+    let (global, database) = s.split();
+    assert_eq!(global, GlobalSettings {
+        schema_version: SCHEMA_VERSION,
+        onboarding_completed: true,
+        databases: s.databases.clone(),
+        active_database_id: Some("db-1".into()),
+    });
+    assert_eq!(database, DatabaseSettings {
+        import: s.import.clone(),
+        gallery: s.gallery.clone(),
+        appearance: s.appearance.clone(),
+        ai: s.ai.clone(),
+        system: s.system.clone(),
+        storage: s.storage.clone(),
+        watch_folders: Vec::new(),
+    });
+    assert_eq!(Settings::compose(&global, &database), s);
+    // 默认合成：全局默认 + 库级默认 = Settings 默认
+    assert_eq!(
+        Settings::compose(&GlobalSettings::default(), &DatabaseSettings::default()),
+        Settings::default()
+    );
+}
+
+/// 库级文件缺省（新库/从未改过偏好）→ 全默认（每库一份的「出厂态」）。
+#[test]
+fn load_database_missing_file_returns_defaults() {
+    let dir = temp_dir();
+    let loaded = SettingsManager::load_database(&dir.path().join("db-1")).unwrap();
+    assert_eq!(loaded, DatabaseSettings::default());
+    assert!(!dir.path().join("db-1").join("settings.json").exists());
+}
+
+/// 库级 roundtrip：save_database → load_database 无损（含 watchFolders）。
+#[test]
+fn save_database_then_load_roundtrip() {
+    let dir = temp_dir();
+    let db_dir = dir.path().join("db-1");
+    let database = DatabaseSettings {
+        watch_folders: vec![r"I:\incoming".into()],
+        ai: AiSettings {
+            enable_clip: true,
+            ..AiSettings::default()
+        },
+        ..DatabaseSettings::default()
+    };
+    SettingsManager::save_database(&database, &db_dir).unwrap();
+    assert_eq!(
+        SettingsManager::load_database(&db_dir).unwrap(),
+        database,
+        "save_database 自动建目录（新库未物化时迁移路径先落偏好）"
+    );
+}
+
+/// 库级文件损坏 → .corrupt 改名隔离后回默认（单库偏好脏了不拖累启动）。
+#[test]
+fn corrupted_database_file_is_quarantined_and_defaults_returned() {
+    let dir = temp_dir();
+    let db_dir = dir.path().join("db-1");
+    fs::create_dir_all(&db_dir).unwrap();
+    fs::write(settings_path(&db_dir), "{{{ 这不是 JSON").unwrap();
+
+    let loaded = SettingsManager::load_database(&db_dir).expect("recover");
+    assert_eq!(loaded, DatabaseSettings::default());
+    assert_eq!(corrupt_backups(&db_dir).len(), 1, "db 级 .corrupt 备件一份");
+}
+
+/// 全局文件损坏 → load_composed 兜全默认合成 + .corrupt 隔离。
 #[test]
 fn corrupted_json_is_backed_up_and_defaults_returned() {
     let dir = temp_dir();
     fs::write(settings_path(dir.path()), "{{{ 这不是 JSON").expect("write corrupt file");
 
-    let loaded = SettingsManager::load(dir.path()).expect("load should recover");
+    let loaded = SettingsManager::load_composed(dir.path()).expect("load should recover");
     assert_eq!(loaded, Settings::default());
     assert!(
         !settings_path(dir.path()).exists(),
@@ -130,21 +232,23 @@ fn corrupted_json_is_backed_up_and_defaults_returned() {
 #[test]
 fn save_is_atomic_no_tmp_leftover() {
     let dir = temp_dir();
-    SettingsManager::save(&Settings::default(), dir.path()).expect("save");
-    assert!(settings_path(dir.path()).exists());
-    assert!(
-        !dir.path().join("settings.json.tmp").exists(),
-        "no .tmp file should remain after save"
-    );
+    let mut s = Settings::default();
+    s.databases = registry_with_active_db(dir.path());
+    s.active_database_id = Some("db-1".into());
+    save_split(&s, dir.path());
+    for target in [dir.path(), &dir.path().join("db-1")] {
+        assert!(settings_path(target).exists());
+        assert!(
+            !target.join("settings.json.tmp").exists(),
+            "no .tmp file should remain after save"
+        );
+    }
 
     // 覆盖保存同样不留残留
-    let s = Settings {
-        onboarding_completed: true,
-        ..Settings::default()
-    };
-    SettingsManager::save(&s, dir.path()).expect("overwrite save");
+    s.onboarding_completed = true;
+    save_split(&s, dir.path());
     assert!(!dir.path().join("settings.json.tmp").exists());
-    let reloaded = SettingsManager::load(dir.path()).expect("reload");
+    let reloaded = SettingsManager::load_composed(dir.path()).expect("reload");
     assert!(reloaded.onboarding_completed);
 }
 
@@ -157,7 +261,7 @@ fn old_json_with_missing_fields_is_filled_with_defaults() {
     )
     .expect("write partial settings");
 
-    let s = SettingsManager::load(dir.path()).expect("load");
+    let s = SettingsManager::load_composed(dir.path()).expect("load");
     assert_eq!(s.schema_version, SCHEMA_VERSION);
     // 旧字段 libraryRoot 被忽略（serde 默认不拒绝未知字段）
     assert!(s.onboarding_completed);
@@ -167,7 +271,8 @@ fn old_json_with_missing_fields_is_filled_with_defaults() {
 }
 
 /// 旧库注册表残留键（libraries/activeLibraryId/dbDir 等）整体忽略（§二
-/// 退役，不做迁移）：加载不报错、不复活任何库概念字段。
+/// 退役，不做迁移）：加载不报错、不复活任何库概念字段；本例的旧全量文件
+/// 含 db 级键（import）→ 触发拆层迁移，无激活库丢弃后全局文件瘦身。
 #[test]
 fn retired_library_registry_keys_are_ignored_on_load() {
     let dir = temp_dir();
@@ -180,28 +285,28 @@ fn retired_library_registry_keys_are_ignored_on_load() {
     )
     .expect("write old-style settings");
 
-    let s = SettingsManager::load(dir.path()).expect("load");
+    let s = SettingsManager::load_composed(dir.path()).expect("load");
     assert_eq!(s.schema_version, SCHEMA_VERSION, "不升 schema_version");
     assert_eq!(
         serde_json::to_value(&s).unwrap()["libraries"],
         serde_json::json!(null),
         "库注册表字段已不存在于序列化产物"
     );
-    assert_eq!(s.import, ImportSettings::default());
+    assert_eq!(s.import, ImportSettings::default(), "无激活库：db 级值丢弃");
 
-    // 回存后旧键消失（落盘产物 = 纯应用级设置）
-    SettingsManager::save(&s, dir.path()).unwrap();
+    // 迁移后全局文件瘦身为纯全局形态（旧键 + db 级键一并消失）
     let raw = fs::read_to_string(settings_path(dir.path())).unwrap();
     assert!(!raw.contains("libraries"));
     assert!(!raw.contains("activeLibraryId"));
     assert!(!raw.contains("photoRoot"));
+    assert!(!raw.contains("import"));
 }
 
 #[test]
 fn empty_json_object_yields_defaults() {
     let dir = temp_dir();
     fs::write(settings_path(dir.path()), "{}").expect("write empty object");
-    let s = SettingsManager::load(dir.path()).expect("load");
+    let s = SettingsManager::load_composed(dir.path()).expect("load");
     assert_eq!(s, Settings::default());
 }
 
@@ -209,7 +314,7 @@ fn empty_json_object_yields_defaults() {
 fn newer_schema_version_is_migration_error() {
     let dir = temp_dir();
     fs::write(settings_path(dir.path()), r#"{"schemaVersion":99}"#).expect("write future settings");
-    let result = SettingsManager::load(dir.path());
+    let result = SettingsManager::load_composed(dir.path());
     assert!(matches!(result, Err(SettingsError::Migration(99))));
 }
 
@@ -239,6 +344,20 @@ fn serialization_uses_camel_case() {
     // 库注册表键不复存在
     assert!(value.get("libraries").is_none());
     assert!(value.get("activeLibraryId").is_none());
+
+    // 两层落盘形态同 camelCase：全局层无偏好键，库级层无注册表键
+    let global = serde_json::to_value(GlobalSettings::default()).unwrap();
+    assert_eq!(global["onboardingCompleted"], serde_json::json!(false));
+    assert!(global.get("ai").is_none());
+    assert!(global.get("import").is_none());
+    let database = serde_json::to_value(DatabaseSettings::default()).unwrap();
+    assert_eq!(
+        database["watchFolders"],
+        serde_json::json!([]),
+        "watchFolders（camelCase）在库级层"
+    );
+    assert!(database.get("databases").is_none());
+    assert!(database.get("schemaVersion").is_none(), "库级无版本键");
 }
 
 #[test]
@@ -260,9 +379,8 @@ fn ai_settings_default_semantic_min_score_is_auto() {
     assert_eq!(ai.semantic_min_score, None, "默认 auto（null）");
 }
 
-/// 旧配置缺 semanticMinScore 字段 → serde default 落 None（auto）；显式
-/// 0.09（= 旧默认值）→ 加载迁移为 None（auto）；非 0.09 自定义值 → 保留。
-/// 画质档位缺字段 → "normal"；非法值 → 兜成 "normal"。
+/// 旧配置缺 semanticMinScore 字段 → serde default 落 None（auto）；缺
+/// qualityTier → "normal"（ai 键落库级文件后，这组迁移在 load_database 生效）。
 #[test]
 fn legacy_settings_without_semantic_min_score_gets_default() {
     let dir = temp_dir();
@@ -275,53 +393,52 @@ fn legacy_settings_without_semantic_min_score_gets_default() {
         .to_string(),
     )
     .unwrap();
-    let loaded = SettingsManager::load(dir.path()).expect("load legacy settings");
+    let loaded = SettingsManager::load_composed(dir.path()).expect("load legacy settings");
     assert_eq!(loaded.ai.semantic_min_score, None, "缺字段落 auto");
     assert_eq!(loaded.ai.quality_tier, "normal", "缺字段落 normal 档");
+
+    // 库级文件缺 ai 键同理
+    let db_dir = dir.path().join("db-1");
+    fs::create_dir_all(&db_dir).unwrap();
+    fs::write(settings_path(&db_dir), r#"{"import":{"skipImported":false}}"#).unwrap();
+    let database = SettingsManager::load_database(&db_dir).unwrap();
+    assert_eq!(database.ai.semantic_min_score, None);
+    assert_eq!(database.ai.quality_tier, "normal");
 }
 
+/// 显式 0.09（= 旧默认值）→ 加载迁移为 None（auto）；非 0.09 自定义值 →
+/// 保留；非法档位 → 兜成 "normal"（读取侧兜底，写入侧另有硬校验）。
 #[test]
 fn legacy_explicit_default_threshold_migrates_to_auto_but_custom_survives() {
     let dir = temp_dir();
-    fs::write(
-        settings_path(dir.path()),
-        serde_json::json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "onboardingCompleted": true,
-            "ai": { "semanticMinScore": 0.09 }
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let loaded = SettingsManager::load(dir.path()).expect("load");
-    assert_eq!(loaded.ai.semantic_min_score, None, "旧默认 0.09 → auto");
+    let db_dir = dir.path().join("db-1");
+    fs::create_dir_all(&db_dir).unwrap();
 
     fs::write(
-        settings_path(dir.path()),
-        serde_json::json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "onboardingCompleted": true,
-            "ai": { "semanticMinScore": 0.15, "qualityTier": "accurate" }
-        })
-        .to_string(),
+        settings_path(&db_dir),
+        serde_json::json!({ "ai": { "semanticMinScore": 0.09 } }).to_string(),
     )
     .unwrap();
-    let loaded = SettingsManager::load(dir.path()).expect("load");
-    assert_eq!(loaded.ai.semantic_min_score, Some(0.15), "自定义值保留");
-    assert_eq!(loaded.ai.quality_tier, "accurate", "合法档位保留");
+    let database = SettingsManager::load_database(&db_dir).expect("load");
+    assert_eq!(database.ai.semantic_min_score, None, "旧默认 0.09 → auto");
 
     fs::write(
-        settings_path(dir.path()),
-        serde_json::json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "onboardingCompleted": true,
-            "ai": { "qualityTier": "turbo" }
-        })
-        .to_string(),
+        settings_path(&db_dir),
+        serde_json::json!({ "ai": { "semanticMinScore": 0.15, "qualityTier": "accurate" } })
+            .to_string(),
     )
     .unwrap();
-    let loaded = SettingsManager::load(dir.path()).expect("load");
-    assert_eq!(loaded.ai.quality_tier, "normal", "非法档位兜成 normal");
+    let database = SettingsManager::load_database(&db_dir).expect("load");
+    assert_eq!(database.ai.semantic_min_score, Some(0.15), "自定义值保留");
+    assert_eq!(database.ai.quality_tier, "accurate", "合法档位保留");
+
+    fs::write(
+        settings_path(&db_dir),
+        serde_json::json!({ "ai": { "qualityTier": "turbo" } }).to_string(),
+    )
+    .unwrap();
+    let database = SettingsManager::load_database(&db_dir).expect("load");
+    assert_eq!(database.ai.quality_tier, "normal", "非法档位兜成 normal");
 }
 
 /// settings_set 的档位硬校验：三档通过，脏值拒绝。
@@ -342,6 +459,116 @@ fn validate_ai_settings_rejects_bad_tier() {
         ..AiSettings::default()
     };
     assert!(validate_ai_settings(&bad).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// 一次性迁移（设置独立改造：旧全量单文件 → 全局/库级两层）
+// ---------------------------------------------------------------------------
+
+/// 旧全量全局文件（含 db 级键）+ 激活库 → db 级值写入激活库库级文件，
+/// 全局文件瘦身为纯全局形态，合成快照还原旧值。
+#[test]
+fn migration_splits_legacy_global_into_active_db_and_slims_global() {
+    let dir = temp_dir();
+    let db_dir = dir.path().join("db-1");
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "onboardingCompleted": true,
+            "databases": [{ "id": "db-1", "name": "主数据库",
+                            "dbDir": db_dir.to_string_lossy() }],
+            "activeDatabaseId": "db-1",
+            "import": { "skipImported": false },
+            "ai": { "enableClip": true, "semanticMinScore": 0.09 },
+            "watchFolders": [r"I:\incoming"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let composed = SettingsManager::load_composed(dir.path()).unwrap();
+    assert!(!composed.import.skip_imported, "旧 import 值落位激活库");
+    assert!(composed.ai.enable_clip);
+    assert_eq!(composed.ai.semantic_min_score, None, "迁移中顺带 0.09→auto");
+    assert_eq!(composed.watch_folders, vec![r"I:\incoming".to_string()]);
+
+    // 库级文件物化在 db_dir；全局文件瘦身（不再含 db 级键）
+    let database = SettingsManager::load_database(&db_dir).unwrap();
+    assert!(!database.import.skip_imported);
+    assert!(database.ai.enable_clip);
+    let raw = fs::read_to_string(settings_path(dir.path())).unwrap();
+    assert!(!raw.contains("\"ai\""), "全局文件已瘦身：{raw}");
+    assert!(!raw.contains("\"import\""));
+    assert!(raw.contains("\"databases\""), "注册表留全局");
+    assert!(raw.contains("\"onboardingCompleted\""));
+
+    // 幂等：再跑一遍不变化、不覆盖
+    let again = SettingsManager::load_composed(dir.path()).unwrap();
+    assert_eq!(again, composed);
+}
+
+/// 库级文件已存在（用户拆层后改过偏好）→ 迁移不覆盖，盘上真值优先。
+#[test]
+fn migration_does_not_overwrite_existing_db_file() {
+    let dir = temp_dir();
+    let db_dir = dir.path().join("db-1");
+    fs::create_dir_all(&db_dir).unwrap();
+    fs::write(
+        settings_path(&db_dir),
+        serde_json::json!({ "ai": { "enableClip": false, "useGpu": false } }).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "databases": [{ "id": "db-1", "name": "主数据库",
+                            "dbDir": db_dir.to_string_lossy() }],
+            "activeDatabaseId": "db-1",
+            "ai": { "enableClip": true, "useGpu": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let composed = SettingsManager::load_composed(dir.path()).unwrap();
+    assert!(!composed.ai.enable_clip, "库级盘上真值优先于迁移值");
+    assert!(!composed.ai.use_gpu);
+    // 全局文件仍完成瘦身（迁移的另一半照做）
+    let raw = fs::read_to_string(settings_path(dir.path())).unwrap();
+    assert!(!raw.contains("\"ai\""));
+}
+
+/// 无激活库的旧全量文件 → db 级值丢弃（无处安放，回默认比错挂他库好），
+/// 全局文件照样瘦身；不物化任何库级文件。
+#[test]
+fn migration_without_active_db_drops_db_level_values() {
+    let dir = temp_dir();
+    fs::write(
+        settings_path(dir.path()),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "onboardingCompleted": true,
+            "databases": [{ "id": "db-1", "name": "主数据库",
+                            "dbDir": dir.path().join("db-1").to_string_lossy() }],
+            "activeDatabaseId": null,
+            "ai": { "enableClip": true }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let composed = SettingsManager::load_composed(dir.path()).unwrap();
+    assert!(!composed.ai.enable_clip, "无激活库：db 级值丢弃回默认");
+    assert!(composed.onboarding_completed, "全局键保留");
+    assert_eq!(composed.databases.len(), 1, "注册表保留");
+    assert!(
+        !dir.path().join("db-1").join("settings.json").exists(),
+        "不物化库级文件"
+    );
+    let raw = fs::read_to_string(settings_path(dir.path())).unwrap();
+    assert!(!raw.contains("\"ai\""), "全局文件瘦身照做");
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +648,11 @@ fn active_database_dir_requires_active_entry() {
     // 注册表序首个 id（database_remove 删激活库后的切换目标）
     assert_eq!(s.first_database_id(), Some("db-1"));
     assert_eq!(Settings::default().first_database_id(), None);
+    // GlobalSettings 同语义（注册表正主在全局层）
+    let (global, _) = s.split();
+    assert_eq!(global.first_database_id(), Some("db-1"));
+    assert_eq!(global.active_database_dir(), Some(custom));
+    assert_eq!(GlobalSettings::default().first_database_id(), None);
 }
 
 /// roundtrip：databases/activeDatabaseId 落盘读回；旧配置缺键 → 空表/None。
@@ -434,8 +666,8 @@ fn database_registry_roundtrips_and_missing_keys_default_empty() {
         db_dir: r"I:\SmartPhoto\db".into(),
     }];
     s.active_database_id = Some("db-1".into());
-    SettingsManager::save(&s, dir.path()).unwrap();
-    let loaded = SettingsManager::load(dir.path()).unwrap();
+    save_split(&s, dir.path());
+    let loaded = SettingsManager::load_composed(dir.path()).unwrap();
     assert_eq!(loaded.databases, s.databases);
     assert_eq!(loaded.active_database_id.as_deref(), Some("db-1"));
 
@@ -446,7 +678,7 @@ fn database_registry_roundtrips_and_missing_keys_default_empty() {
         r#"{"schemaVersion":1,"onboardingCompleted":true,"databaseDir":"I:\\old"}"#,
     )
     .unwrap();
-    let legacy = SettingsManager::load(dir.path()).unwrap();
+    let legacy = SettingsManager::load_composed(dir.path()).unwrap();
     assert!(legacy.databases.is_empty());
     assert_eq!(legacy.active_database_id, None);
 }
@@ -509,4 +741,3 @@ fn dir_path_ancestors_root(dir: &tempfile::TempDir) -> String {
         .to_string_lossy()
         .into_owned()
 }
-

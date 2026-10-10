@@ -240,7 +240,7 @@ jobs:
             args=(release create "$RELEASE_TAG" "${assets[@]}"
               --repo "$GITHUB_REPOSITORY"
               --target "$GITHUB_SHA"
-              --title "Photo Hub $RELEASE_TAG"
+              --title "Photographer $RELEASE_TAG"
               --generate-notes)
             if [ "$RELEASE_MODE" = "draft" ]; then
               args+=(--draft)

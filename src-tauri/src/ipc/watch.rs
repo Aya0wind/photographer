@@ -1,5 +1,6 @@
 //! 监视文件夹命令（F4 v1）：add / remove / list。列表存 settings.watch_folders
-//! （保存走 SettingsManager 原子写），轮询线程每轮重读——增删即时生效。
+//! （库级偏好——保存走激活库 db_dir 的库级文件原子写，设置独立改造），
+//! 轮询线程每轮重读——增删即时生效。
 
 use tauri::State;
 
@@ -9,7 +10,7 @@ use std::time::Duration;
 use super::{run_blocking, SharedState};
 use crate::events::{AppEvent, EventBus};
 use crate::import::engine::{ImportMode, ImportPlan};
-use crate::settings::{DuplicatePolicy, SettingsManager};
+use crate::settings::DuplicatePolicy;
 
 /// 监视文件夹列表（展示形态 = 用户输入的绝对路径）。
 pub fn fetch_watch_folders(state: &super::AppState) -> Vec<String> {
@@ -21,35 +22,39 @@ pub fn fetch_watch_folders(state: &super::AppState) -> Vec<String> {
         .clone()
 }
 
-/// 添加监视文件夹核：目录存在性校验 + 去重 + 落盘。
+/// 添加监视文件夹核：目录存在性校验 + 去重 + 落盘（激活库库级文件）。
 pub fn fetch_watch_folder_add(state: &super::AppState, path: &str) -> Result<(), String> {
     let path = path.trim();
     if !std::path::Path::new(path).is_dir() {
         return Err(format!("目录不存在或不可访问: {path}"));
     }
-    let mut settings = state.settings.lock().expect("settings mutex poisoned");
-    if settings
-        .watch_folders
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(path))
     {
-        return Ok(()); // 幂等：已在监视列表
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
+        if settings
+            .watch_folders
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(path))
+        {
+            return Ok(()); // 幂等：已在监视列表
+        }
+        settings.watch_folders.push(path.to_string());
     }
-    settings.watch_folders.push(path.to_string());
-    SettingsManager::save(&settings, &state.config_dir).map_err(|e| e.to_string())
+    super::settings::save_active_database_settings(state)
 }
 
 /// 移除监视文件夹核（不存在幂等返回 Ok）。
 pub fn fetch_watch_folder_remove(state: &super::AppState, path: &str) -> Result<(), String> {
-    let mut settings = state.settings.lock().expect("settings mutex poisoned");
-    let before = settings.watch_folders.len();
-    settings
-        .watch_folders
-        .retain(|p| !p.eq_ignore_ascii_case(path.trim()));
-    if settings.watch_folders.len() == before {
-        return Ok(()); // 幂等：本就不在列表
+    {
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
+        let before = settings.watch_folders.len();
+        settings
+            .watch_folders
+            .retain(|p| !p.eq_ignore_ascii_case(path.trim()));
+        if settings.watch_folders.len() == before {
+            return Ok(()); // 幂等：本就不在列表
+        }
     }
-    SettingsManager::save(&settings, &state.config_dir).map_err(|e| e.to_string())
+    super::settings::save_active_database_settings(state)
 }
 
 /// 监视文件夹列表。

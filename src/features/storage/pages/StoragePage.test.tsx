@@ -226,7 +226,7 @@ describe("StoragePage 卡片操作", () => {
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("照片记录保留");
   });
 
-  it("移除登记并删除记录：deleteRecords=true，toast 带删除条数", async () => {
+  it("移除登记并删除记录：两段式——需输入「我确认删除」短语才能执行 deleteRecords=true", async () => {
     listMock.mockResolvedValue([lib({ assetCount: 35 })]);
     removeMock.mockResolvedValue({ recordsDeleted: 35 });
     const user = userEvent.setup();
@@ -234,7 +234,20 @@ describe("StoragePage 卡片操作", () => {
     await screen.findAllByTestId("storage-library-card");
 
     await user.click(screen.getAllByTestId("storage-remove")[0]);
+    // 第一段：点「连记录删」只进入待确认态，不执行
     await user.click(screen.getByTestId("storage-remove-delete-records"));
+    expect(removeMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
+
+    // 短语不匹配不可执行
+    await user.type(screen.getByTestId("storage-remove-phrase"), "确认删除");
+    expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
+
+    // 第二段：输入完整短语 → 执行
+    await user.clear(screen.getByTestId("storage-remove-phrase"));
+    await user.type(screen.getByTestId("storage-remove-phrase"), "我确认删除");
+    expect(screen.getByTestId("storage-remove-confirm-delete")).toBeEnabled();
+    await user.click(screen.getByTestId("storage-remove-confirm-delete"));
 
     await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", true));
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("35");

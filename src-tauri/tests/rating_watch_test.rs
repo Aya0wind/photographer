@@ -425,11 +425,11 @@ fn watch_folder_add_remove_and_poll_imports_new_files() {
     // add / remove 契约
     assert!(ipc::watch::fetch_watch_folder_add(&state, "X:/not/exist").is_err());
     ipc::watch::fetch_watch_folder_add(&state, &watch.to_string_lossy()).unwrap();
-    // 幂等 + 落盘（settings.json）
+    // 幂等 + 落盘（设置独立改造：库级 settings.json 落激活库 db_dir）
     ipc::watch::fetch_watch_folder_add(&state, &watch.to_string_lossy()).unwrap();
     assert_eq!(ipc::watch::fetch_watch_folders(&state).len(), 1);
-    assert!(config_dir.join("settings.json").is_file());
-    let saved = settings::SettingsManager::load(&config_dir).unwrap();
+    assert!(db_dir.join("settings.json").is_file());
+    let saved = settings::SettingsManager::load_database(&db_dir).unwrap();
     assert_eq!(saved.watch_folders.len(), 1);
 
     // 空目录轮询：无导入、无任务
@@ -470,10 +470,10 @@ fn watch_folder_add_remove_and_poll_imports_new_files() {
     // 再轮询：无新文件 → 不再建导入任务（幂等）
     assert!(ipc::watch::poll_once(&state).is_empty());
 
-    // remove：即时生效 + 落盘
+    // remove：即时生效 + 落盘（库级文件）
     ipc::watch::fetch_watch_folder_remove(&state, &watch.to_string_lossy()).unwrap();
     assert!(ipc::watch::fetch_watch_folders(&state).is_empty());
-    let saved = settings::SettingsManager::load(&config_dir).unwrap();
+    let saved = settings::SettingsManager::load_database(&db_dir).unwrap();
     assert!(saved.watch_folders.is_empty());
     // 幂等移除
     ipc::watch::fetch_watch_folder_remove(&state, &watch.to_string_lossy()).unwrap();

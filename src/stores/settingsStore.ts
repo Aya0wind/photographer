@@ -195,7 +195,9 @@ let eventsBound = false;
 
 /**
  * 应用启动时调用一次：加载设置并订阅远端变更事件。
- * `settings://changed` 由 Rust 侧（配置文件热更新/托盘修改）发出。
+ * `settings://changed` 由 Rust 侧发出（配置文件热更新/托盘修改，以及
+ * database_create/switch/remove 成功后负载新激活库的合成 Settings——
+ * 建库/切库/删库即时重载内存态，DatabasePickerPage 无需自行刷新）。
  */
 export async function initSettings(): Promise<void> {
   await useSettingsStore.getState().load();
@@ -205,6 +207,7 @@ export async function initSettings(): Promise<void> {
     await listen<Settings>("settings://changed", (event) => {
       useSettingsStore.setState({
         settings: mergeDeep(clone(DEFAULT_SETTINGS), event.payload),
+        loaded: true,
       });
     });
   } catch {

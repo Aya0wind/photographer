@@ -193,7 +193,7 @@ jobs:
             ) + $assets + @(
               '--repo', $env:GITHUB_REPOSITORY,
               '--target', $env:GITHUB_SHA,
-              '--title', "Photo Hub $env:RELEASE_TAG",
+              '--title', "Photographer $env:RELEASE_TAG",
               '--generate-notes'
             )
             if ($env:RELEASE_MODE -eq 'draft') {

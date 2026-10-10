@@ -19,7 +19,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use super::{run_blocking, AppState, SharedState};
 use crate::events::AppEvent;
-use crate::settings::{DatabaseEntry, Settings, SettingsManager};
+use crate::settings::{
+    DatabaseEntry, DatabaseSettings, GlobalSettings, Settings, SettingsManager,
+};
 
 /// 数据库注册表快照 DTO（database_list 返回；databases + 激活 id 同帧
 /// 返回，避免两次读取间被切换造成的前后不一致，camelCase 与前端
@@ -57,12 +59,43 @@ fn validate_name(raw: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// 持久化注册表变更的共用收尾：内存快照 + settings.json 原子写。
-/// 调用方持 settings 锁外调用（本函数自己拿锁）。
+/// 持久化注册表变更的共用收尾：全局文件只落 GlobalSettings 形态（设置
+/// 独立改造——不再写全量，db 级键回流全局文件会反复触发拆层迁移），
+/// 内存合成快照整体换新。调用方持 settings 锁外调用（本函数自己拿锁）。
 fn save_registry(state: &AppState, settings: Settings) -> Result<(), String> {
-    SettingsManager::save(&settings, &state.config_dir).map_err(|e| e.to_string())?;
+    let (global, _) = settings.split();
+    SettingsManager::save_global(&global, &state.config_dir).map_err(|e| e.to_string())?;
     *state.settings.lock().expect("settings mutex poisoned") = settings;
     Ok(())
+}
+
+/// 换激活库后的设置收尾（create/switch/remove 共用，设置独立改造）：
+/// 按传入全局真值 + **新激活库**的库级文件重算合成快照 → 落全局文件与
+/// 内存 → [`apply_runtime_projection`] 按新库偏好重投影（防沿用上一个
+/// 库的 AI/thumbs/选片参数）。无激活库 = 七组偏好全默认合成。
+fn reload_active_preferences(state: &AppState, global: GlobalSettings) -> Result<(), String> {
+    let database = match global.active_database_dir() {
+        Some(db_dir) => SettingsManager::load_database(&db_dir).map_err(|e| e.to_string())?,
+        None => DatabaseSettings::default(),
+    };
+    let composed = Settings::compose(&global, &database);
+    save_registry(state, composed.clone())?;
+    super::settings::apply_runtime_projection(state, &composed);
+    Ok(())
+}
+
+/// 激活库变更后的设置重载广播（settings://changed，负载 = 合成快照）：
+/// 偏好按库独立后，建库/切库/删库都让 settings_get 换一套值，前端据此
+/// 重载（与 DatabasesChanged 的数据刷新互补）。在 fetch_* 已写入
+/// state.settings 之后调命令壳层。
+fn emit_settings_changed(app: &AppHandle, shared: &AppState) -> Result<(), String> {
+    let composed = shared
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .clone();
+    app.emit("settings://changed", &composed)
+        .map_err(|e| e.to_string())
 }
 
 /// 遍历注册表内**每个**数据库的 photos_libraries 收集照片库 root
@@ -129,7 +162,10 @@ pub fn database_list(state: State<'_, SharedState>) -> Result<DatabaseListDto, S
 ///    数据件落进照片库被扫描登记，§八-6 反向）；某库 library.db 读不开
 ///    时跳过该库（摘除场景同 purge 脚本语义，不阻塞新建）；
 /// ④ 物化——open_library_db 建目录 + 单版本 schema（同时验证可写）；
-/// ⑤ 注册表无激活数据库时新库自动激活（首个库），否则保持现激活。
+/// ⑤ **一律激活新库**（设置独立改造，原「首个库创建即激活」推广为每次
+///    创建即激活）：引导流程建第二库后，后续 AI 步骤的 settings_set 要
+///    落进新库；偏好快照随之重算——新库 db_dir 无库级文件 = 全默认，
+///    重新登记旧目录（摘登记后复用）则恢复当年那份偏好。
 pub fn fetch_database_create(
     state: &AppState,
     name: &str,
@@ -165,18 +201,21 @@ pub fn fetch_database_create(
     let settings = {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");
         settings.databases.push(entry.clone());
-        if settings.active_database_id.is_none() {
-            settings.active_database_id = Some(entry.id.clone());
-        }
+        settings.active_database_id = Some(entry.id.clone());
         settings.clone()
     };
-    save_registry(state, settings)?;
+    // 合成快照重算 + 重投影：注册表/激活态用内存真值，偏好取新库的库级
+    // 文件（新库 db_dir 无库级文件 = 全默认；重新登记旧目录（摘登记后
+    // 复用）则恢复当年那份偏好）。
+    let (global, _) = settings.split();
+    reload_active_preferences(state, global)?;
     Ok(entry)
 }
 
 /// 新建数据库（database_create）：名称必填 + 位置可选（缺省约定路径）；
-/// 首个库自动激活。注册表变更 + 照片库语义（新库 photos_libraries 空）
-/// 统一走 DatabasesChanged 广播。
+/// 一律激活新库（见核注释）。注册表变更 + 照片库语义（新库
+/// photos_libraries 空）统一走 DatabasesChanged 广播；偏好快照随库换，
+/// 另发 settings://changed 让前端重载设置。
 #[tauri::command]
 pub async fn database_create(
     app: AppHandle,
@@ -185,12 +224,13 @@ pub async fn database_create(
     db_dir: Option<String>,
 ) -> Result<DatabaseEntry, String> {
     let shared = state.inner().clone();
-    let entry = run_blocking(shared, move |state| {
+    let entry = run_blocking(shared.clone(), move |state| {
         fetch_database_create(state, &name, db_dir.as_deref())
     })
     .await?;
     app.emit("app://event", &AppEvent::DatabasesChanged)
         .map_err(|e| e.to_string())?;
+    emit_settings_changed(&app, &shared)?;
     Ok(entry)
 }
 
@@ -200,8 +240,9 @@ pub async fn database_create(
 
 /// 切换激活数据库核（database_switch）：校验注册表存在 → 开库验证可用
 ///（library.db 不存在或读不开 = 目录被挪走/盘未挂载，拒绝切换保持现库）
-/// → 写 active_database_id。导入在场拒绝（引擎会话锚定旧库连接，切换会
-/// 让 UI 与落库分家）。
+/// → 写 active_database_id + 按新库重算合成快照/重投影（设置独立改造：
+/// 偏好按库独立，切库即整套换——绝不沿用上一个库的 AI/thumbs/选片参数）。
+/// 导入在场拒绝（引擎会话锚定旧库连接，切换会让 UI 与落库分家）。
 pub fn fetch_database_switch(state: &AppState, id: &str) -> Result<(), String> {
     super::ensure_no_import_running(state)?;
     let settings = state.settings.lock().expect("settings mutex poisoned").clone();
@@ -222,13 +263,14 @@ pub fn fetch_database_switch(state: &AppState, id: &str) -> Result<(), String> {
     if settings.active_database_id.as_deref() == Some(id) {
         return Ok(()); // 幂等：切到当前库 no-op（不发事件由命令层判断）
     }
-    let mut next = settings;
-    next.active_database_id = Some(id.to_string());
-    save_registry(state, next)
+    let (mut global, _) = settings.split();
+    global.active_database_id = Some(id.to_string());
+    reload_active_preferences(state, global)
 }
 
 /// 切换激活数据库（database_switch）。变更广播 DatabasesChanged——前端
-/// 收到后全量刷新（照片库列表/画廊/相册等一切库内数据）。
+/// 收到后全量刷新（照片库列表/画廊/相册等一切库内数据）；偏好随库整套
+/// 换，另发 settings://changed 让设置 store 重载（设置独立改造）。
 #[tauri::command]
 pub async fn database_switch(
     app: AppHandle,
@@ -236,7 +278,7 @@ pub async fn database_switch(
     id: String,
 ) -> Result<(), String> {
     let shared = state.inner().clone();
-    let changed = run_blocking(shared, move |state| {
+    let changed = run_blocking(shared.clone(), move |state| {
         let before = state
             .settings
             .lock()
@@ -256,6 +298,7 @@ pub async fn database_switch(
     if changed {
         app.emit("app://event", &AppEvent::DatabasesChanged)
             .map_err(|e| e.to_string())?;
+        emit_settings_changed(&app, &shared)?;
     }
     Ok(())
 }
@@ -317,20 +360,28 @@ pub fn fetch_database_remove(
         std::fs::remove_dir_all(&dir).map_err(|e| format!("删除数据目录失败（{}）: {e}", entry.db_dir))?;
         data_dirs_deleted = 1;
     }
-    let mut next = settings;
-    next.databases.retain(|entry| entry.id != id);
-    if next.system.auto_open_database_id.as_deref() == Some(id) {
-        next.system.auto_open_database_id = None;
+    let (mut global, _) = settings.split();
+    global.databases.retain(|entry| entry.id != id);
+    if global.active_database_id.as_deref() == Some(id) {
+        global.active_database_id = global.first_database_id().map(|s| s.to_string());
     }
-    if next.active_database_id.as_deref() == Some(id) {
-        next.active_database_id = next.first_database_id().map(|s| s.to_string());
+    // 悬空引用清理：system.autoOpenDatabaseId 是库级偏好（落新激活库的
+    // 库级文件），指向被删库 → 就地清除并回写（单库时代在快照上清，拆层
+    // 后落点跟着激活库走）。
+    if let Some(db_dir) = global.active_database_dir() {
+        let mut database = SettingsManager::load_database(&db_dir).map_err(|e| e.to_string())?;
+        if database.system.auto_open_database_id.as_deref() == Some(id) {
+            database.system.auto_open_database_id = None;
+            SettingsManager::save_database(&database, &db_dir).map_err(|e| e.to_string())?;
+        }
     }
-    save_registry(state, next)?;
+    reload_active_preferences(state, global)?;
     Ok(DatabaseRemoveResult { data_dirs_deleted })
 }
 
 /// 移除数据库（database_remove）：两级确认由前端对话框完成（对齐
-/// photo_library_remove 形态）；变更广播 DatabasesChanged。
+/// photo_library_remove 形态）；变更广播 DatabasesChanged；删激活库引发
+/// 的回退切换让偏好快照随库换，另发 settings://changed（设置独立改造）。
 #[tauri::command]
 pub async fn database_remove(
     app: AppHandle,
@@ -339,11 +390,12 @@ pub async fn database_remove(
     delete_data: bool,
 ) -> Result<DatabaseRemoveResult, String> {
     let shared = state.inner().clone();
-    let result = run_blocking(shared, move |state| {
+    let result = run_blocking(shared.clone(), move |state| {
         fetch_database_remove(state, &id, delete_data)
     })
     .await?;
     app.emit("app://event", &AppEvent::DatabasesChanged)
         .map_err(|e| e.to_string())?;
+    emit_settings_changed(&app, &shared)?;
     Ok(result)
 }

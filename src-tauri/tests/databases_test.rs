@@ -1,9 +1,11 @@
-//! 数据库命令族测试（2026-10-09 多数据库修正）：database_create/switch/
-//! remove 核心（fetch_* 直测，命令壳只做 tauri 包装）。
+//! 数据库命令族测试（2026-10-09 多数据库修正 + 设置独立改造）：database_
+//! create/switch/remove 核心（fetch_* 直测，命令壳只做 tauri 包装）。
 //!
-//! 覆盖：首个库自动激活、默认约定路径物化、db_dir 注册表内互斥、跨库
+//! 覆盖：建库一律激活新库、默认约定路径物化、db_dir 注册表内互斥、跨库
 //! 照片库 root 重叠校验、切换校验（存在/可用）、两级移除（仅摘登记 /
-//! 连数据目录删）与「绝不删照片库文件夹」安全闸、删激活库后的回退切换。
+//! 连数据目录删）与「绝不删照片库文件夹」安全闸、删激活库后的回退切换；
+//! 偏好按库独立（建库/切库整套换偏好、两库值互不污染）与切库运行时
+//! 重投影（AI 参数不沿用上一个库）。
 
 mod common;
 
@@ -14,7 +16,7 @@ pub use common::{
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use events::EventBus;
 use ipc::AppState;
@@ -35,6 +37,12 @@ fn state_at(config_dir: &Path) -> AppState {
         thumb_queue: ipc::thumb::ThumbQueue::new(),
         ai: ai::ModelManager::new(config_dir.join("models"), EventBus::new(), supervisor),
     }
+}
+
+/// 共享 AppState（fetch_settings_set 需要 &SharedState——指纹比对 spawn
+/// 要求 'static 状态句柄，与生产命令壳一致）。
+fn shared_state_at(config_dir: &Path) -> ipc::SharedState {
+    Arc::new(state_at(config_dir))
 }
 
 /// 新建数据库并断言注册表/激活态/物化（复用样板）。
@@ -69,6 +77,11 @@ fn database_create_activates_first_and_defaults_to_convention_dir() {
     let resolved = ipc::app_database_dir(&state).unwrap();
     assert_eq!(resolved, expect);
 
+    // 全局文件只落纯全局形态（设置独立改造：无 db 级键回流）
+    let raw = std::fs::read_to_string(config.join("settings.json")).unwrap();
+    assert!(raw.contains("\"databases\""));
+    assert!(!raw.contains("\"ai\""), "全局文件不含库级偏好键：{raw}");
+
     // 无激活数据库时明确报错（新会话/删光后）
     let bare = settings::Settings::default();
     assert_eq!(
@@ -78,7 +91,7 @@ fn database_create_activates_first_and_defaults_to_convention_dir() {
 }
 
 #[test]
-fn database_create_second_keeps_active_and_rejects_overlap() {
+fn database_create_second_activates_and_rejects_overlap() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("appdata");
     std::fs::create_dir_all(&config).unwrap();
@@ -86,9 +99,14 @@ fn database_create_second_keeps_active_and_rejects_overlap() {
 
     let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
     let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
-    // 第二个库不抢激活
+    // 一律激活新库（设置独立改造：引导建第二库后，后续 AI 步的
+    // settings_set 要落进新库）
     let list = ipc::databases::fetch_database_list(&state).unwrap();
-    assert_eq!(list.active_id.as_deref(), Some(first.id.as_str()));
+    assert_eq!(
+        list.active_id.as_deref(),
+        Some(second.id.as_str()),
+        "建库即激活（不再保持旧激活）"
+    );
 
     // 注册表内互斥：相同 / 互相包含（含嵌套子目录）一律拒绝
     for bad in [
@@ -119,26 +137,32 @@ fn database_switch_changes_active_scope() {
     std::fs::create_dir_all(&config).unwrap();
     let state = state_at(&config);
 
-    let _first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let first = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
     let second = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
 
     // 不存在的 id 拒绝切换
     assert!(ipc::databases::fetch_database_switch(&state, "no-such-db").is_err());
 
-    ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+    // 建库即激活（= 库 B），真正的切换是 B → A
+    ipc::databases::fetch_database_switch(&state, &first.id).unwrap();
     assert_eq!(
         ipc::databases::fetch_database_list(&state).unwrap().active_id,
-        Some(second.id.clone()),
-        "切换后激活 = 库 B"
+        Some(first.id.clone()),
+        "切换后激活 = 库 A"
     );
     assert_eq!(
         ipc::app_database_dir(&state).unwrap(),
-        std::path::PathBuf::from(&second.db_dir),
+        std::path::PathBuf::from(&first.db_dir),
         "激活目录解析跟随切换"
     );
 
-    // 幂等：切回当前库 no-op 成功
+    // 切回 B + 幂等：切到当前库 no-op 成功
     ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+    ipc::databases::fetch_database_switch(&state, &second.id).unwrap();
+    assert_eq!(
+        ipc::databases::fetch_database_list(&state).unwrap().active_id,
+        Some(second.id)
+    );
 }
 
 #[test]
@@ -232,4 +256,101 @@ fn database_switch_rejects_unavailable_database() {
     std::fs::remove_dir_all(&first.db_dir).unwrap();
     let err = ipc::databases::fetch_database_switch(&state, &first.id).unwrap_err();
     assert!(err.contains("未切换"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// 偏好按库独立 + 切库运行时重投影（2026-10-09 设置独立改造）
+// ---------------------------------------------------------------------------
+
+/// 偏好独立性：库 A 改偏好 → 建库 B（一律激活）整套换默认 → B 改自己的
+/// → 切回 A 原样恢复；两库落各自 db_dir 的库级文件，值互不污染。
+#[test]
+fn settings_preferences_are_independent_per_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = shared_state_at(&config);
+
+    let a = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    // 库 A 改 AI 开关 + 监视目录（settings_set 核：七组偏好落激活库库级文件）
+    let mut edited = ipc::settings::fetch_settings_get(&state);
+    edited.ai.enable_clip = true;
+    edited.watch_folders = vec![r"I:\incoming".into()];
+    ipc::settings::fetch_settings_set(&state, edited).unwrap();
+    let snapshot = ipc::settings::fetch_settings_get(&state);
+    assert!(snapshot.ai.enable_clip);
+    assert_eq!(snapshot.watch_folders.len(), 1);
+
+    // 落点：A 的 db_dir 有库级 settings.json，值落位
+    let a_settings = Path::new(&a.db_dir).join("settings.json");
+    assert!(a_settings.is_file(), "库级文件落各自 db_dir");
+    let raw = std::fs::read_to_string(&a_settings).unwrap();
+    assert!(raw.contains("\"enableClip\": true"), "A 的 AI 开关落盘：{raw}");
+
+    // 建库 B（一律激活）→ 偏好整套换默认（新库无库级文件 = 出厂态）
+    let b = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+    let snapshot = ipc::settings::fetch_settings_get(&state);
+    assert!(!snapshot.ai.enable_clip, "新库 AI 开关 = 默认");
+    assert!(snapshot.watch_folders.is_empty(), "新库监视目录 = 默认");
+
+    // 库 B 改自己的偏好（gallery）→ 不污染 A
+    let mut edited = ipc::settings::fetch_settings_get(&state);
+    edited.gallery.merge_raw_jpg = false;
+    ipc::settings::fetch_settings_set(&state, edited).unwrap();
+
+    // 切回 A → A 的偏好原样恢复（B 的 gallery 改动不在）
+    ipc::databases::fetch_database_switch(&state, &a.id).unwrap();
+    let snapshot = ipc::settings::fetch_settings_get(&state);
+    assert!(snapshot.ai.enable_clip, "A 的 AI 开关原样恢复");
+    assert_eq!(snapshot.watch_folders.len(), 1);
+    assert!(snapshot.gallery.merge_raw_jpg, "B 的 gallery 改动不污染 A");
+
+    // 切到 B → B 自己的值
+    ipc::databases::fetch_database_switch(&state, &b.id).unwrap();
+    let snapshot = ipc::settings::fetch_settings_get(&state);
+    assert!(!snapshot.ai.enable_clip);
+    assert!(!snapshot.gallery.merge_raw_jpg);
+}
+
+/// 切库运行时重投影：库 A 关 GPU/改 embed 档位 → 建库 B（默认参数）→
+/// state.ai 投影换回默认，绝不沿用上一个库的参数；切回 A 再恢复。
+#[test]
+fn switching_database_reprojects_runtime_ai_params() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = shared_state_at(&config);
+
+    let a = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let mut edited = ipc::settings::fetch_settings_get(&state);
+    edited.ai.use_gpu = false;
+    edited.ai.embed_input_size = 384;
+    ipc::settings::fetch_settings_set(&state, edited).unwrap();
+    let params = state.ai.ai_params();
+    assert!(!params.use_gpu);
+    assert_eq!(params.embed_input_size, 384);
+
+    // 建库 B（默认 use_gpu=true / 256）→ 投影按新库重算
+    create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+    let params = state.ai.ai_params();
+    assert!(params.use_gpu, "建库后投影换回新库默认（不沿用 A）");
+    assert_eq!(params.embed_input_size, 256);
+
+    // 切回 A → A 的参数恢复
+    ipc::databases::fetch_database_switch(&state, &a.id).unwrap();
+    let params = state.ai.ai_params();
+    assert!(!params.use_gpu, "切回 A 恢复 A 的投影");
+    assert_eq!(params.embed_input_size, 384);
+}
+
+/// 无激活库时 settings_set 明确报错（七组偏好无处安放）。
+#[test]
+fn settings_set_without_active_database_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = shared_state_at(&config);
+
+    let err = ipc::settings::fetch_settings_set(&state, settings::Settings::default()).unwrap_err();
+    assert_eq!(err, "尚未创建数据库");
 }

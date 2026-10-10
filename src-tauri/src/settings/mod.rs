@@ -1,16 +1,29 @@
-//! 应用配置体系：`settings.json` 的加载/保存/容错迁移。
+//! 应用配置体系：设置按数据库完全独立（2026-10-09 设置独立改造）。
 //!
+//! 落盘形态拆成两层，文件名同为 `settings.json`：
+//! - **全局文件**（`<config_dir>/settings.json`）：schema_version /
+//!   onboarding_completed / 数据库注册表（databases + activeDatabaseId）。
+//! - **库级文件**（`<db_dir>/settings.json`）：import / gallery /
+//!   appearance / ai / system / storage / watch_folders 七组偏好——每库
+//!   一份，切库即整套换偏好；`Settings`（合成扁平形态）只存在于内存与
+//!   IPC 契约（前端不变），由 [`SettingsManager::load_composed`] /
+//!   [`Settings::split`] + [`Settings::compose`] 维系。
+//!
+//! 容错策略两层一致：
 //! - 文件不存在 -> 返回全默认值（schema_version = SCHEMA_VERSION）。
 //! - JSON 损坏 -> 把坏文件改名为 `settings.json.corrupt-{unix秒}` 后返回默认值，不视为错误。
 //! - 旧版本缺字段 -> 依赖 serde `#[serde(default)]` 容错填充，并视为已迁移。
 //! - 保存采用原子写：先写 `settings.json.tmp` 再 rename 覆盖。
 //!
-//! 2026-10-09 多数据库修正：settings.json 在应用级设置之外承载**数据库注册表**
-//!（`databases` + `activeDatabaseId`）——应用可登记多个数据库（为多用户协作
-//! 预埋），每个 = 独立 SQLite(library.db) + thumbs/ + 向量，落在各自的
-//! db_dir；任一时刻恰有一个「激活数据库」，一切库内操作（照片库登记表/
-//! 资产/相册）都作用于它，切换数据库即整体换库。旧单库时代的
-//! `databaseDir` 键 serde 反序列化自动忽略（不做迁移，版本未发布红线）。
+//! 一次性迁移（[`SettingsManager::load_composed`]）：全局文件若仍含 db 级
+//! 键（旧全量单文件形态），db 级值写入当前激活库的库级文件（无激活库则
+//! 丢弃），随后全局文件重写为纯全局形态；库级文件已存在则不覆盖。
+//!
+//! 2026-10-09 多数据库修正：应用可登记多个数据库（为多用户协作预埋），
+//! 每个 = 独立 SQLite(library.db) + thumbs/ + 向量，落在各自的 db_dir；
+//! 任一时刻恰有一个「激活数据库」，一切库内操作（照片库登记表/资产/
+//! 相册）都作用于它，切换数据库即整体换库。旧单库时代的 `databaseDir`
+//! 键 serde 反序列化自动忽略（不做迁移，版本未发布红线）。
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +37,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 const SETTINGS_FILE: &str = "settings.json";
 
-/// 应用配置根结构（camelCase JSON；应用级设置 + 数据库注册表）。
+/// 应用配置合成快照（camelCase JSON；内存/IPC 契约形态，前端不变）。
+/// 落盘拆两层：全局键（schema_version/onboarding/注册表）→ 全局文件，
+/// 七组偏好 → 激活库 db_dir 的库级文件（见 [`Settings::split`]）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -76,6 +91,129 @@ impl Settings {
     /// 库时切换用）；注册表空返回 None。
     pub fn first_database_id(&self) -> Option<&str> {
         self.databases.first().map(|entry| entry.id.as_str())
+    }
+
+    /// 合成快照拆两层（设置独立改造）：全局键（onboarding + 注册表）与
+    /// 七组库级偏好。落盘 = `save_global(global) + save_database(db)`；
+    /// 注册表命令族只落前半，settings_set 只落后半（写激活库）。
+    pub fn split(&self) -> (GlobalSettings, DatabaseSettings) {
+        (
+            GlobalSettings {
+                schema_version: self.schema_version,
+                onboarding_completed: self.onboarding_completed,
+                databases: self.databases.clone(),
+                active_database_id: self.active_database_id.clone(),
+            },
+            DatabaseSettings {
+                import: self.import.clone(),
+                gallery: self.gallery.clone(),
+                appearance: self.appearance.clone(),
+                ai: self.ai.clone(),
+                system: self.system.clone(),
+                storage: self.storage.clone(),
+                watch_folders: self.watch_folders.clone(),
+            },
+        )
+    }
+
+    /// [`Settings::split`] 的逆运算（load_composed / 切库 / 建库重算合成
+    /// 快照共用）：schema_version 取全局侧（库级文件无版本键）。
+    pub fn compose(global: &GlobalSettings, database: &DatabaseSettings) -> Self {
+        Self {
+            schema_version: global.schema_version,
+            onboarding_completed: global.onboarding_completed,
+            databases: global.databases.clone(),
+            active_database_id: global.active_database_id.clone(),
+            import: database.import.clone(),
+            gallery: database.gallery.clone(),
+            appearance: database.appearance.clone(),
+            ai: database.ai.clone(),
+            system: database.system.clone(),
+            storage: database.storage.clone(),
+            watch_folders: database.watch_folders.clone(),
+        }
+    }
+}
+
+/// 全局层设置（`<config_dir>/settings.json` 的全部内容）：应用一次性
+/// 状态 + 数据库注册表。全字段 serde default 容错——旧全量文件（含 db
+/// 级键）解析时 db 级键按未知字段忽略，新文件缺全局键同样兜默认。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GlobalSettings {
+    pub schema_version: u32,
+    pub onboarding_completed: bool,
+    /// 数据库注册表（2026-10-09 多数据库修正）：每个条目 = 一个独立数据库
+    ///（SQLite/thumbs/向量同居 db_dir）；照片库登记表（photos_libraries）
+    /// 在各数据库内部，不同数据库的照片库天然隔离。经 `database_*` 命令族
+    /// 维护，settings_set 对该字段原样保留后端真值。
+    pub databases: Vec<DatabaseEntry>,
+    /// 激活数据库 id（注册表内恰好一个；None=尚未创建任何数据库，一切
+    /// 依赖数据库的命令返回「尚未创建数据库」）。
+    pub active_database_id: Option<String>,
+}
+
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            onboarding_completed: false,
+            databases: Vec::new(),
+            active_database_id: None,
+        }
+    }
+}
+
+impl GlobalSettings {
+    /// 激活数据库目录（注册表条目 db_dir；None = 无激活库或激活 id 查无
+    /// ——后者是注册表被外部手改坏，load_composed 按无库兜全默认）。
+    /// 带明确错误文案的变体见 [`Settings::active_database_dir`]。
+    pub fn active_database_dir(&self) -> Option<PathBuf> {
+        let id = self.active_database_id.as_deref()?;
+        self.databases
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| PathBuf::from(&entry.db_dir))
+    }
+
+    /// 按注册表序取首个数据库 id（database_remove 删激活库时切换用）；
+    /// 注册表空返回 None（与 [`Settings::first_database_id`] 同语义——
+    /// 注册表正主在本层）。
+    pub fn first_database_id(&self) -> Option<&str> {
+        self.databases.first().map(|entry| entry.id.as_str())
+    }
+}
+
+/// 库级偏好（`<db_dir>/settings.json` 的全部内容，每库一份）：七组偏好
+/// 全字段 serde default 容错（旧文件缺键/全局键混入都解析得动）。无
+/// schema_version——结构演进靠 serde default 兜底，与旧全量时代一致。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DatabaseSettings {
+    pub import: ImportSettings,
+    pub gallery: GallerySettings,
+    pub appearance: AppearanceSettings,
+    pub ai: AiSettings,
+    pub system: SystemSettings,
+    /// 存储与缓存策略（M8-③：缩略图缓存 LRU 上限等）。
+    pub storage: StorageSettings,
+    /// 监视文件夹（F4：后台轮询发现新文件自动入册；绝对路径形态）。
+    /// 按库独立：不同数据库各监视各的目录。v1 默认空；旧文件缺字段由
+    /// serde default 容错填充。
+    pub watch_folders: Vec<String>,
+}
+
+impl Default for DatabaseSettings {
+    fn default() -> Self {
+        Self {
+            import: ImportSettings::default(),
+            gallery: GallerySettings::default(),
+            appearance: AppearanceSettings::default(),
+            ai: AiSettings::default(),
+            system: SystemSettings::default(),
+            storage: StorageSettings::default(),
+            watch_folders: Vec::new(),
+        }
     }
 }
 
@@ -467,51 +605,166 @@ pub enum SettingsError {
     Migration(u32),
 }
 
-/// 配置管理器：load/save 均为无状态关联函数。
+/// 配置管理器：load/save 均为无状态关联函数（全局层与库层两文件同理）。
 pub struct SettingsManager;
 
+/// db 级键的 JSON 形态名（一次性迁移的判定基准：全局文件含任一键即视
+/// 为旧全量单文件形态，需要拆层）。
+const DB_LEVEL_JSON_KEYS: &[&str] = &[
+    "import",
+    "gallery",
+    "appearance",
+    "ai",
+    "system",
+    "storage",
+    "watchFolders",
+];
+
 impl SettingsManager {
-    /// 从 `dir` 加载 `settings.json`。
+    /// 加载全局文件（`<config_dir>/settings.json`）。
     ///
     /// 文件不存在返回默认值；JSON 损坏时把坏文件改名为
     /// `settings.json.corrupt-{unix秒}` 后返回默认值；旧版本缺字段由
-    /// serde default 容错填充并升到当前 SCHEMA_VERSION（视为已迁移）。
-    /// 旧键（libraries/activeLibraryId/单库 databaseDir）自动忽略
-    ///（2026-10-09 多数据库修正，不做迁移）。
-    pub fn load(dir: &Path) -> Result<Settings, SettingsError> {
+    /// serde default 容错填充并升到当前 SCHEMA_VERSION（视为已迁移）；
+    /// 混入的 db 级键 / 旧键（libraries/activeLibraryId/单库 databaseDir）
+    /// 自动忽略（2026-10-09 多数据库修正，不做迁移）。
+    pub fn load_global(dir: &Path) -> Result<GlobalSettings, SettingsError> {
         let path = dir.join(SETTINGS_FILE);
         if !path.is_file() {
-            return Ok(Settings::default());
+            return Ok(GlobalSettings::default());
         }
         let raw = std::fs::read_to_string(&path)?;
-        match serde_json::from_str::<Settings>(&raw) {
-            Ok(mut settings) => {
-                if settings.schema_version > SCHEMA_VERSION {
-                    return Err(SettingsError::Migration(settings.schema_version));
+        match serde_json::from_str::<GlobalSettings>(&raw) {
+            Ok(mut global) => {
+                if global.schema_version > SCHEMA_VERSION {
+                    return Err(SettingsError::Migration(global.schema_version));
                 }
                 // 缺字段已被 serde(default) 填充，这里统一升版本号完成迁移。
-                settings.schema_version = SCHEMA_VERSION;
-                migrate_legacy_ai_settings(&mut settings);
-                Ok(settings)
+                global.schema_version = SCHEMA_VERSION;
+                Ok(global)
             }
             Err(_parse_error) => {
                 // 损坏文件备份后回归默认值，绝不因坏配置拒绝启动。
-                let backup = dir.join(format!("{SETTINGS_FILE}.corrupt-{}", unix_timestamp_secs()));
-                std::fs::rename(&path, &backup)?;
-                Ok(Settings::default())
+                quarantine_corrupt_file(&path)?;
+                Ok(GlobalSettings::default())
             }
         }
     }
 
-    /// 原子保存：先写 `settings.json.tmp`，再 rename 覆盖 `settings.json`。
-    pub fn save(settings: &Settings, dir: &Path) -> Result<(), SettingsError> {
-        std::fs::create_dir_all(dir)?;
-        let json = serde_json::to_string_pretty(settings)?;
-        let tmp_path = dir.join(format!("{SETTINGS_FILE}.tmp"));
-        std::fs::write(&tmp_path, json)?;
-        std::fs::rename(&tmp_path, dir.join(SETTINGS_FILE))?;
-        Ok(())
+    /// 原子保存全局文件：先写 `settings.json.tmp` 再 rename 覆盖。
+    pub fn save_global(global: &GlobalSettings, dir: &Path) -> Result<(), SettingsError> {
+        atomic_write_settings(dir, &serde_json::to_string_pretty(global)?)
     }
+
+    /// 加载库级偏好（`<db_dir>/settings.json`，每库一份）。
+    ///
+    /// 缺文件 = 默认值（新库/从未改过偏好）；损坏同样走 .corrupt 改名后
+    /// 回默认（单库偏好脏了不拖累应用启动）；AI 旧值迁移（0.09→auto /
+    /// 非法档位兜 normal）在此生效——ai 键的落点已从全局文件挪到库级。
+    pub fn load_database(db_dir: &Path) -> Result<DatabaseSettings, SettingsError> {
+        let path = db_dir.join(SETTINGS_FILE);
+        if !path.is_file() {
+            return Ok(DatabaseSettings::default());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        match serde_json::from_str::<DatabaseSettings>(&raw) {
+            Ok(mut database) => {
+                migrate_legacy_ai_settings(&mut database.ai);
+                Ok(database)
+            }
+            Err(_parse_error) => {
+                quarantine_corrupt_file(&path)?;
+                Ok(DatabaseSettings::default())
+            }
+        }
+    }
+
+    /// 原子保存库级偏好（与全局文件同构：tmp + rename，目标目录不存在
+    /// 则先建——迁移路径可能先于建库物化落偏好）。
+    pub fn save_database(
+        database: &DatabaseSettings,
+        db_dir: &Path,
+    ) -> Result<(), SettingsError> {
+        atomic_write_settings(db_dir, &serde_json::to_string_pretty(database)?)
+    }
+
+    /// 启动/切库装配入口：全局层 + 激活库库级层合成 [`Settings`]。
+    /// 无激活库 = 七组偏好全默认合成（首次启动引导前不报错）；激活 id
+    /// 查无（注册表被手改坏）同样按全默认兜底。内联完成一次性迁移（见
+    /// [`SettingsManager::migrate_legacy_global_file`]），幂等可重复调用。
+    pub fn load_composed(config_dir: &Path) -> Result<Settings, SettingsError> {
+        Self::migrate_legacy_global_file(config_dir)?;
+        let global = Self::load_global(config_dir)?;
+        let database = match global.active_database_dir() {
+            Some(db_dir) => Self::load_database(&db_dir)?,
+            None => DatabaseSettings::default(),
+        };
+        Ok(Settings::compose(&global, &database))
+    }
+
+    /// 一次性迁移（设置独立改造）：全局文件若仍是旧全量单文件形态（含
+    /// 任一 db 级键），把 db 级值按旧全量 `Settings` 解析后写入**当前激活
+    /// 库**的库级文件——无激活库则丢弃（无处安放，回默认比错挂他库好）；
+    /// 库级文件已存在则**不覆盖**（用户已在拆层后改过偏好，盘上真值优先
+    /// 于迁移值）。随后全局文件重写为纯全局形态。每次 load_composed 都
+    /// 先跑一遍：纯全局形态无 db 级键，幂等直通，代价只是一次解析。
+    fn migrate_legacy_global_file(config_dir: &Path) -> Result<(), SettingsError> {
+        let path = config_dir.join(SETTINGS_FILE);
+        if !path.is_file() {
+            return Ok(());
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return Ok(()); // 纯损坏文件：交给 load_global 的 .corrupt 兜底
+        };
+        let Some(obj) = value.as_object() else {
+            return Ok(()); // 合法 JSON 但非对象（如数组）：同上兜底
+        };
+        if !DB_LEVEL_JSON_KEYS.iter().any(|key| obj.contains_key(*key)) {
+            return Ok(()); // 已是纯全局形态
+        }
+        // 按旧全量 Settings 解析（db 级键类型不对 = 变相损坏，同样走
+        // .corrupt 隔离后回默认，与旧 load 行为一致）。
+        let Ok(mut legacy) = serde_json::from_str::<Settings>(&raw) else {
+            quarantine_corrupt_file(&path)?;
+            return Ok(());
+        };
+        if legacy.schema_version > SCHEMA_VERSION {
+            return Err(SettingsError::Migration(legacy.schema_version));
+        }
+        migrate_legacy_ai_settings(&mut legacy.ai);
+        let (mut global, database) = legacy.split();
+        if let Some(db_dir) = global.active_database_dir() {
+            if !db_dir.join(SETTINGS_FILE).is_file() {
+                Self::save_database(&database, &db_dir)?;
+            }
+        }
+        global.schema_version = SCHEMA_VERSION;
+        Self::save_global(&global, config_dir)
+    }
+}
+
+/// 损坏配置隔离：改名为 `settings.json.corrupt-{unix秒}`（全局/库级文件
+/// 同名同策略；改名失败如实上抛——它意味着目录本身不可写）。
+fn quarantine_corrupt_file(path: &Path) -> Result<(), SettingsError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| SETTINGS_FILE.to_string());
+    let backup = dir.join(format!("{file_name}.corrupt-{}", unix_timestamp_secs()));
+    std::fs::rename(path, &backup)?;
+    Ok(())
+}
+
+/// 原子写（全局/库级共用）：目录不存在先建，先写 tmp 再 rename 覆盖，
+/// 任何时点断电都不会留下半份 JSON。
+fn atomic_write_settings(dir: &Path, json: &str) -> Result<(), SettingsError> {
+    std::fs::create_dir_all(dir)?;
+    let tmp_path = dir.join(format!("{SETTINGS_FILE}.tmp"));
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(&tmp_path, dir.join(SETTINGS_FILE))?;
+    Ok(())
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -521,21 +774,21 @@ fn unix_timestamp_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// AI 节一次性迁移（2026-09-28 三档画质）：
-/// - 旧 settings.json 的 `semanticMinScore: 0.09` = 旧默认值（f32 存储
-///   时代写死）→ 迁移为 `None`（auto，随语义模型变体自适应）；非 0.09
-///   的自定义值保留用户语义。缺字段本就落 None（auto）。
+/// AI 节一次性迁移（2026-09-28 三档画质；设置独立改造后 ai 键落库级文件，
+/// 迁移挂在 load_database / 全局旧全量迁移两处）：
+/// - 旧文件的 `semanticMinScore: 0.09` = 旧默认值（f32 存储时代写死）→
+///   迁移为 `None`（auto，随语义模型变体自适应）；非 0.09 的自定义值保留
+///   用户语义。缺字段本就落 None（auto）。
 /// - `qualityTier` 非法（手改坏）→ 兜成 "normal"（settings_set 写入侧
 ///   有硬校验，这里只救读取侧，避免整份配置走损坏分支被备份重置）。
-fn migrate_legacy_ai_settings(settings: &mut Settings) {
-    if settings
-        .ai
+fn migrate_legacy_ai_settings(ai: &mut AiSettings) {
+    if ai
         .semantic_min_score
         .is_some_and(|v| (v - 0.09).abs() < 1e-9)
     {
-        settings.ai.semantic_min_score = None;
+        ai.semantic_min_score = None;
     }
-    if validate_ai_settings(&settings.ai).is_err() {
-        settings.ai.quality_tier = default_quality_tier();
+    if validate_ai_settings(ai).is_err() {
+        ai.quality_tier = default_quality_tier();
     }
 }

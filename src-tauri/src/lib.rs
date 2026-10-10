@@ -86,7 +86,10 @@ pub fn run() {
                     }
                 }
             }
-            let settings = SettingsManager::load(&config_dir).unwrap_or_else(|err| {
+            // 启动装配（设置独立改造）：load_composed 内联一次性迁移（旧
+            // 全量单文件 → 全局/库级两层），再按激活库合成偏好快照；无
+            // 数据库（首次启动引导前）= 七组偏好全默认合成，不报错。
+            let settings = SettingsManager::load_composed(&config_dir).unwrap_or_else(|err| {
                 eprintln!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
