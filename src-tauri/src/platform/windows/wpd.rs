@@ -101,7 +101,7 @@ impl DeviceSource for WpdSource {
     }
     fn fast_file_counts(&self) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
         if !self.friendly_name.to_ascii_lowercase().contains("sony") && !self.friendly_name.contains("ILCE") { return Ok(None); }
-        match crate::tethering::wpd_backend::fast_media_counts(&self.pnp_id) {
+        match super::super::tethering::wpd_backend::fast_media_counts(&self.pnp_id) {
             Err(DeviceError::Disconnected) => Err(DeviceError::Disconnected),
             Err(error) => { super::diagnostics::record(format!("fast count unavailable: {error}")); Ok(None) },
             result => result,
@@ -220,6 +220,8 @@ mod worker {
             com::list(&id, on_batch, names_only)
         })
     }
+    ///（open_head 退役待清，见 devices::DeviceSource 注释，2026-10-12）
+    #[allow(dead_code)]
     pub(super) fn open_head(pnp: &str, obj: &str, max: u64) -> DeviceResult<Vec<u8>> {
         let (id, obj) = (pnp.to_owned(), obj.to_owned());
         pool().call(&format!("data:{pnp}"), Duration::from_secs(30), move || {
@@ -469,7 +471,8 @@ pub(crate) mod com {
     const BATCH: usize = 64;
     /// 目录递归深度上限（防御异常设备；正常 DCIM 树深 3~5 层）。
     const MAX_DEPTH: u32 = 32;
-    /// open_head 的读块大小。
+    /// open_head 的读块大小（随 open_head 退役待清）。
+    #[allow(dead_code)]
     const HEAD_CHUNK: usize = 64 * 1024;
     /// 流泵分块大小（1MB：内存可控，导入侧 8MB 读循环多次接收）。
     const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
@@ -955,6 +958,8 @@ pub(crate) mod com {
         Ok(())
     }
 
+    ///（open_head 退役待清，见 devices::DeviceSource 注释，2026-10-12）
+    #[allow(dead_code)]
     pub fn open_head(pnp_id: &str, obj_id: &str, max: u64) -> DeviceResult<Vec<u8>> {
         let _com = ComApartment::init().map_err(win_error)?;
         let device = open_device(pnp_id)?;

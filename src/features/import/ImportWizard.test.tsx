@@ -626,7 +626,7 @@ describe("挑选步：列表与网格", () => {
     );
   });
 
-  it("MTP 清单保留持久对象 ID，扫描完成后读取相机缩略资源", async () => {
+  it("MTP 已发现文件即读取可见缩略图，不等待整卡扫描完成", async () => {
     seedSession();
     useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "scanning" }], sourceFiles: {
       "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 42, kind: "raw", objectId: "persistent-42", mtime: "today" }],
@@ -635,9 +635,6 @@ describe("挑选步：列表与网格", () => {
     deviceThumbMock.mockResolvedValue("C:\\thumbCache\\mtp.jpg");
     convertMock.mockImplementation((path) => `asset://${path}`);
     renderWizard("?device=MTP:CAM");
-    expect(await screen.findByText("扫描后加载预览")).toBeInTheDocument();
-    expect(deviceThumbMock).not.toHaveBeenCalled();
-    act(() => useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "ready" }] }));
     expect(await screen.findByRole("img", { name: "A.NEF" })).toHaveAttribute("src", "asset://C:\\thumbCache\\mtp.jpg");
     expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:42", 256);
     expect(thumbMock).not.toHaveBeenCalled();

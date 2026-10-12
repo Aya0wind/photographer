@@ -197,15 +197,24 @@ pub fn run() {
                 // 哈希补算代际自愈（gen-1 / migration 0014）：xxh=0 哨兵补齐
                 index::refresh_hash_for_generation(db_dir.clone(), &bus, &supervisor_handle);
                 // 选片分析代际自愈（gen-1 / migration 0021）：eyes/blur 任务
-                // 账建档（闭眼模型未收录→eyes 通道跳过并计数；blur 始终可用）
-                index::refresh_selection_for_generation(db_dir.clone(), &bus, &supervisor_handle);
-                // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）
-                ai::selection::kick_eyes_if_ready(
+                // 账建档（闭眼模型未收录→eyes 通道跳过并计数；blur 始终可用）。
+                // 2026-10-12：AI 功能关闭的库不建档（不写标记——开启后下轮
+                // 启动/指纹重建再补），也不触发闭眼回填
+                index::refresh_selection_for_generation(
                     db_dir.clone(),
-                    &ai_for_kick,
                     &bus,
                     &supervisor_handle,
+                    enable_clip || enable_face,
                 );
+                // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）
+                if enable_clip || enable_face {
+                    ai::selection::kick_eyes_if_ready(
+                        db_dir.clone(),
+                        &ai_for_kick,
+                        &bus,
+                        &supervisor_handle,
+                    );
+                }
                 // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）
                 thumbs::kick_startup_evict(db_dir.clone());
                 // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算

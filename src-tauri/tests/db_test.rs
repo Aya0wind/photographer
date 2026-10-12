@@ -9,30 +9,40 @@
 //! `#[path]` 把 `src/db` 及其依赖的 `src/events` 直接编译进测试 crate，
 //! 保证被测代码就是生产源码本体（events 自带的单测会随本目标重复执行一次）。
 
-#[path = "../src/platform/mod.rs"]
-#[allow(dead_code)]
-mod platform;
-#[path = "../src/db/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod db;
-#[path = "../src/devices/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树（events::DeviceScanned 引用）
-mod devices;
-#[path = "../src/events/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树
-mod events;
-#[path = "../src/metadata/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树（db::update_asset_deep_exif 引用）
-mod metadata;
-#[path = "../src/thumbs/mod.rs"]
-#[allow(dead_code)] // 测试按子集编译源码树（metadata::phash 引用）
-mod thumbs;
+// 2026-10-12：改用 common 再导出挂载（旧「crate 根直挂子集」在
+// devices::wpd 引用 tethering 层后解析断裂——super::super 在根挂下指向
+// crate 根，而 common 挂载下指向 common，tethering 在 common 可解析）。
+mod common;
+
+pub use common::{
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, tethering, thumbs,
+};
 
 use chrono::DateTime;
 use rusqlite::params;
 
 use db::{AssetRow, Db, JobFileRow, JobRow};
 use events::{AssetKind, FileState};
+
+/// 2026-10-12 新契约：插入只建 thumb 任务；eyes/blur（AI 选片通道）
+/// 不随插入登记——由导入收尾/指纹重建在 AI 开启时批量建档。
+#[test]
+fn insert_seeds_only_thumb_index_task() {
+    let (dir, db) = temp_db();
+    let root = dir.path().join("photos");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("IMG_0001.jpg");
+    std::fs::write(&path, [0u8; 16]).unwrap();
+    let asset: db::AssetRow = serde_json::from_value(serde_json::json!({
+        "path": path.to_string_lossy(), "filename": "IMG_0001.jpg", "size": 16,
+        "mtime": "2026-10-12T00:00:00Z", "xxhash": 0, "kind": "photo",
+        "source": "test", "createdAt": "2026-10-12T00:00:00Z" })).unwrap();
+    db.insert_asset(&asset).unwrap();
+    assert_eq!(db.pending_index_task_count("thumb").unwrap(), 1);
+    assert_eq!(db.pending_index_task_count("eyes").unwrap(), 0);
+    assert_eq!(db.pending_index_task_count("blur").unwrap(), 0);
+}
 
 fn temp_db() -> (tempfile::TempDir, Db) {
     // 单版本 schema（2026-10-09）：打开即幂等建表。

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use photographer_lib::settings::{
     normalize_database_path, normalize_library_path, validate_ai_settings,
-    validate_database_dir_overlap, AiSettings, DatabaseEntry, DatabaseSettings,
+    validate_database_dir_overlap, AiSettings, AppearanceSettings, ColorTheme, DatabaseEntry, DatabaseSettings,
     DuplicatePolicy, GlobalSettings, ImportSettings, IndexSchedule, Settings, SettingsError,
     SettingsManager, SystemSettings, SCHEMA_VERSION,
 };
@@ -147,11 +147,12 @@ fn split_compose_roundtrip() {
         onboarding_completed: true,
         databases: s.databases.clone(),
         active_database_id: Some("db-1".into()),
+        // 外观（主题/动画）在全局侧（2026-10-12 应用级定案）
+        appearance: s.appearance.clone(),
     });
     assert_eq!(database, DatabaseSettings {
         import: s.import.clone(),
         gallery: s.gallery.clone(),
-        appearance: s.appearance.clone(),
         ai: s.ai.clone(),
         system: s.system.clone(),
         storage: s.storage.clone(),
@@ -165,6 +166,64 @@ fn split_compose_roundtrip() {
     );
 }
 
+
+/// 2026-10-12 用户定案：外观（主题/动画）是应用级设置——切库后保留；
+/// 库级偏好（import 等）照常随库换。
+#[test]
+fn appearance_is_app_level_across_database_switch() {
+    let dir = temp_dir();
+    // 两个库级文件：import 偏好不同（库级语义）
+    for (id, policy) in [("db-1", DuplicatePolicy::Skip), ("db-2", DuplicatePolicy::Rename)] {
+        let db_dir = dir.path().join(id);
+        fs::create_dir_all(&db_dir).unwrap();
+        SettingsManager::save_database(
+            &DatabaseSettings {
+                import: ImportSettings {
+                    duplicate_policy: policy,
+                    ..ImportSettings::default()
+                },
+                ..DatabaseSettings::default()
+            },
+            &db_dir,
+        )
+        .unwrap();
+    }
+    // 全局文件：注册表两库 + 主题 Light
+    let global = GlobalSettings {
+        databases: vec![
+            DatabaseEntry { id: "db-1".into(), name: "库一".into(), db_dir: dir.path().join("db-1").to_string_lossy().into_owned() },
+            DatabaseEntry { id: "db-2".into(), name: "库二".into(), db_dir: dir.path().join("db-2").to_string_lossy().into_owned() },
+        ],
+        active_database_id: Some("db-1".into()),
+        appearance: AppearanceSettings { theme: ColorTheme::Light, animations: false },
+        ..GlobalSettings::default()
+    };
+    SettingsManager::save_global(&global, dir.path()).unwrap();
+
+    let first = SettingsManager::load_composed(dir.path()).unwrap();
+    assert_eq!(first.appearance.theme, ColorTheme::Light);
+    assert_eq!(first.import.duplicate_policy, DuplicatePolicy::Skip);
+
+    // 切库：主题保留（全局真值），库级偏好换到库二
+    let switched = GlobalSettings { active_database_id: Some("db-2".into()), ..global.clone() };
+    SettingsManager::save_global(&switched, dir.path()).unwrap();
+    let second = SettingsManager::load_composed(dir.path()).unwrap();
+    assert_eq!(second.appearance.theme, ColorTheme::Light, "主题不随库换");
+    assert!(!second.appearance.animations);
+    assert_eq!(second.import.duplicate_policy, DuplicatePolicy::Rename);
+
+    // settings_set 改主题 → 落全局文件（库级文件不含 appearance 键）
+    let (mut next_global, db) = {
+        let (g, d) = second.split();
+        (g, d)
+    };
+    next_global.appearance.theme = ColorTheme::Dark;
+    SettingsManager::save_global(&next_global, dir.path()).unwrap();
+    SettingsManager::save_database(&db, &dir.path().join("db-2")).unwrap();
+    let db_json = fs::read_to_string(dir.path().join("db-2").join("settings.json")).unwrap();
+    assert!(!db_json.contains("\"theme\""), "库级文件不得再含主题键");
+    assert_eq!(SettingsManager::load_composed(dir.path()).unwrap().appearance.theme, ColorTheme::Dark);
+}
 /// 库级文件缺省（新库/从未改过偏好）→ 全默认（每库一份的「出厂态」）。
 #[test]
 fn load_database_missing_file_returns_defaults() {

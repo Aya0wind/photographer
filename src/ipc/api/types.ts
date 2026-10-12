@@ -698,6 +698,8 @@ export interface IndexStatus {
   /** Each photo completes only after thumbnail, metadata and selection tasks. */
   image?: IndexCounters;
   selectionReady?: boolean;
+  /** AI 选片通道（eyes/blur）是否启用——「等待模型」只在开启且未就绪时成立 */
+  selectionEnabled?: boolean;
   eyes?: IndexCounters;
   blur?: IndexCounters;
   thumb: IndexCounters;

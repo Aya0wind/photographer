@@ -568,7 +568,8 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
         .query_row("SELECT camera FROM assets WHERE id = ?1", [new_id], |r| r.get(0))
         .unwrap();
     assert_eq!(camera.as_deref(), Some("Sony ILCE-7RM5"));
-    // 导入引擎同款登记：索引任务（thumb/eyes/blur）就位
+    // 2026-10-12 新契约：插入只建 thumb（eyes/blur 为 AI 选片通道，AI 开启
+    // 时由导入收尾/指纹重建批量建档）
     let tasks: i64 = fixture
         .db
         .0
@@ -578,7 +579,7 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tasks, 3);
+    assert_eq!(tasks, 1);
 
     // 重名冲突：预占 _edit.jpg 后再导出 → _edit_1.jpg（导入引擎 _N 规则）
     let options = album_options(album.id, Some("成片"));

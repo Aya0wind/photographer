@@ -36,6 +36,9 @@ pub struct IndexStatusDto {
     pub hash: IndexKindStatus,
     pub eyes: IndexKindStatus,
     pub blur: IndexKindStatus,
+    /// AI 选片通道（eyes/blur）是否启用——「等待模型」提示只在开启且模型
+    /// 未就绪时成立（2026-10-12：AI 关闭的库图像索引不含这两通道）。
+    pub selection_enabled: bool,
 }
 
 const KINDS: [&str; 9] = [
@@ -118,27 +121,43 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     if dto.exif.pending == 0 && dto.exif.running == 0 {
         dto.exif.done = total_assets;
     }
-    dto.image = image_index_status(&db)?;
+    let selection_enabled = {
+        let settings = state.settings.lock().expect("settings mutex poisoned");
+        settings.ai.enable_clip || settings.ai.enable_face
+    };
+    dto.image = image_index_status(&db, selection_enabled)?;
     dto.selection_ready = state.ai.selection_eyes_ready();
+    dto.selection_enabled = selection_enabled;
     Ok(dto)
 }
 
 /// Count each photo once; completion requires every component. EXIF with no
-/// task is the synchronous import path. Eyes/blur without task/result are pending.
-fn image_index_status(db: &crate::db::Db) -> Result<IndexKindStatus, String> {
+/// task is the synchronous import path. Eyes/blur without task/result are
+/// pending — **only while AI features are on** (2026-10-12：AI 关闭的库这两
+/// 通道不参与图像索引完成度，存量任务行也不计数）。
+fn image_index_status(db: &crate::db::Db, selection_enabled: bool) -> Result<IndexKindStatus, String> {
     let mut result = IndexKindStatus::default();
-    let mut stmt = db.0.prepare("WITH parts AS (
+    // 通道集合按开关切换：关闭时 eyes/blur 的 LEFT JOIN/判完成均剔除
+    let (join_kinds, done_extra) = if selection_enabled {
+        ("'thumb','exif','eyes','blur'", " OR eyes_done=0 OR blur_done=0")
+    } else {
+        ("'thumb','exif'", "")
+    };
+    let sql = format!(
+        "WITH parts AS (
         SELECT a.id, a.thumb_state,
           MAX(CASE WHEN t.state='running' THEN 1 ELSE 0 END) AS running,
           MAX(CASE WHEN t.state='failed' THEN 1 ELSE 0 END) AS failed,
           MAX(CASE WHEN t.state='pending' THEN 1 ELSE 0 END) AS pending,
           MAX(CASE WHEN t.kind='eyes' AND t.state='done' THEN 1 ELSE 0 END) AS eyes_done,
           MAX(CASE WHEN t.kind='blur' AND t.state='done' THEN 1 ELSE 0 END) AS blur_done
-        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ('thumb','exif','eyes','blur')
+        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ({join_kinds})
         WHERE a.kind IN ('photo','raw') GROUP BY a.id
       ) SELECT CASE WHEN running=1 THEN 'running' WHEN failed=1 THEN 'failed'
-          WHEN pending=1 OR thumb_state=0 OR eyes_done=0 OR blur_done=0 THEN 'pending'
-          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1").map_err(|e|e.to_string())?;
+          WHEN pending=1 OR thumb_state=0{done_extra} THEN 'pending'
+          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1"
+    );
+    let mut stmt = db.0.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))
         .map_err(|e| e.to_string())?;
@@ -173,16 +192,28 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             state.supervisor.resume_kind("index");
             db.create_thumb_tasks_for_unindexed()
                 .map_err(|e| e.to_string())?;
-            db.create_eyes_tasks_for_unindexed()
-                .map_err(|e| e.to_string())?;
-            db.create_blur_tasks_for_unindexed()
-                .map_err(|e| e.to_string())?;
-            for component in ["thumb", "exif", "eyes", "blur"] {
+            // eyes/blur（AI 选片通道）只在建开启 AI 的库里建档；关闭时
+            // 跳过——否则图像索引回到「等待模型」死等。
+            let selection_enabled = enable_clip || enable_face;
+            if selection_enabled {
+                db.create_eyes_tasks_for_unindexed()
+                    .map_err(|e| e.to_string())?;
+                db.create_blur_tasks_for_unindexed()
+                    .map_err(|e| e.to_string())?;
+            }
+            let components: &[&str] = if selection_enabled {
+                &["thumb", "exif", "eyes", "blur"]
+            } else {
+                &["thumb", "exif"]
+            };
+            for component in components {
                 db.retry_failed_index_tasks(component)
                     .map_err(|e| e.to_string())?;
             }
             crate::index::kick(db_dir.clone(), &supervisor);
-            crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
+            if selection_enabled {
+                crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
+            }
             Ok(())
         }
         "thumb" | "exif" | "phash" | "hash" | "eyes" | "blur" => {
@@ -591,6 +622,8 @@ fn face_tier_tag(ai: &crate::settings::AiSettings) -> Option<u64> {
 /// 选片分析指纹（0021：blur 阈值/算法版本 + eyes EAR 阈值/模型版本；f32
 /// 用 to_bits 保精确比较）。任一阈值变更 → 两通道任务重排（分析结果随
 /// 阈值变）；eyes 算法版本（facemesh 换件/判据改动）同样折叠。
+/// 2026-10-12：AI 功能开关（clip|face 任一）折入指纹——开启即重排建档
+/// （含存量补建），关闭不建新任务（消费/计数侧同步按开关让路）。
 pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for part in [
@@ -599,6 +632,7 @@ pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
         ai.eyes_ear_closed.to_bits() as u64,
         ai.eyes_ear_maybe.to_bits() as u64,
         u64::from(ai.eyes_include_single),
+        u64::from(ai.enable_clip || ai.enable_face),
     ] {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);
@@ -699,18 +733,27 @@ selection={want_sel}
     // 连拍参数变更：只重组不重算（pHash 与参数无关）。旧 marker 无 burst 行
     //（0012 前创建）视作「从未分组」——一次重组后对齐。
     // 0021 选片参数变更（或旧 marker 升级）：两通道任务重排（清分析产物
-    // 不必须——upsert 覆盖；阈值回退时旧记录随重算覆写）
+    // 不必须——upsert 覆盖；阈值回退时旧记录随重算覆写）。
+    // 2026-10-12 方向感知：仅 AI 功能开启时建档/重排（开启 = 补建存量；
+    // 关闭 = 不建新任务，存量 pending 由状态计数侧按开关让路）。
     if stored_sel != Some(want_sel) {
-        eprintln!("[params] 选片参数变更（{stored_sel:?} → {want_sel}），重排 eyes/blur 任务");
-        if let Ok(db) = super::open_library_db(db_dir) {
-            let _ = db.requeue_eyes_tasks_for_all();
-            let _ = db.requeue_blur_tasks_for_all();
-            let pending = db.pending_index_task_count("blur").unwrap_or(0);
-            if pending > 0 {
-                crate::index::kick(
-                    db_dir.to_path_buf(),
-                    &std::sync::Arc::clone(&state.supervisor),
-                );
+        let selection_enabled = ai.enable_clip || ai.enable_face;
+        eprintln!(
+            "[params] 选片参数变更（{stored_sel:?} → {want_sel}），AI 功能{} → {}eyes/blur 任务",
+            if selection_enabled { "开" } else { "关" },
+            if selection_enabled { "重排 " } else { "跳过" },
+        );
+        if selection_enabled {
+            if let Ok(db) = super::open_library_db(db_dir) {
+                let _ = db.requeue_eyes_tasks_for_all();
+                let _ = db.requeue_blur_tasks_for_all();
+                let pending = db.pending_index_task_count("blur").unwrap_or(0);
+                if pending > 0 {
+                    crate::index::kick(
+                        db_dir.to_path_buf(),
+                        &std::sync::Arc::clone(&state.supervisor),
+                    );
+                }
             }
         }
     }

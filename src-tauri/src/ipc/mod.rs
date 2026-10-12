@@ -292,7 +292,12 @@ impl From<&crate::devices::FileEntry> for FileEntryDto {
     }
 }
 
+
+
 /// 列出指定设备的全部媒体文件（透传 DeviceSource::list；MTP 源较慢属预期）。
+///（生产侧已被 files_by_id_with_progress 取代；device_lifecycle_test 仍用
+/// ——待测试迁移后删除，2026-10-12 标注。）
+#[allow(dead_code)]
 pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, String> {
     let key = crate::devices::normalize_device_id(id);
     let source = {
@@ -655,11 +660,15 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
             // 行已终结，index 任务只写 index_tasks/assets 派生列，不与收尾
             // 收割竞争）。索引天然增量：worker 只领取 pending 任务行。
             if stats.done_files > 0 {
-                // pHash 任务补差（2026-10-09 审计 P0-C）：入库只自动建
-                // thumb/eyes/blur，phash 通道（连拍分组依赖）此前无自动
-                // 建档——收尾一次幂等补建，不逐照片调用。
+                // pHash 任务补差（2026-10-09 审计 P0-C）+ eyes/blur 选片通道
+                // 建档（2026-10-12：插入不再登记这两类，AI 开启的库在此
+                // 批量幂等补建——关闭的库不产生「等待模型」任务）。
                 if let Ok(db) = open_library_db(&index_db_dir) {
                     let _ = db.create_phash_tasks_for_unindexed();
+                    if enable_clip || enable_face {
+                        let _ = db.create_eyes_tasks_for_unindexed();
+                        let _ = db.create_blur_tasks_for_unindexed();
+                    }
                 }
                 crate::index::kick(index_db_dir.clone(), &index_supervisor);
                 // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
@@ -686,13 +695,16 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
                         &index_supervisor,
                     );
                 }
-                // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021）
-                crate::ai::selection::kick_eyes_if_ready(
-                    index_db_dir.clone(),
-                    &ai_manager,
-                    &ai_bus,
-                    &index_supervisor,
-                );
+                // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021；
+                // AI 关闭时任务不存在也不消费，2026-10-12）
+                if enable_clip || enable_face {
+                    crate::ai::selection::kick_eyes_if_ready(
+                        index_db_dir.clone(),
+                        &ai_manager,
+                        &ai_bus,
+                        &index_supervisor,
+                    );
+                }
                 // 连拍重组：索引 worker（含 phash 通道）跑完后按当前参数重组
                 crate::bursts::regroup_kick(index_db_dir, burst_params, &ai_bus, &index_supervisor);
             }

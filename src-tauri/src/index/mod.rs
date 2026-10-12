@@ -501,14 +501,19 @@ pub fn refresh_hash_for_generation(
     });
 }
 
-/// 选片分析代际自愈（gen-1，0021 配套）：eyes/blur 任务账一次性建档
-/// （新导入经 insert_asset_on 自动登记；存量资产由此补种）。dbDir 标记
-/// 防每次启动重排；指纹变更重建走 ipc::indexing（selection 通道）。
+/// 选片分析代际自愈（gen-1，0021 配套）：eyes/blur 任务账一次性建档。
+/// dbDir 标记防每次启动重排；指纹变更重建走 ipc::indexing（selection 通道）。
+/// 2026-10-12：`enabled=false`（AI 功能关闭）直接跳过且**不写标记**——
+/// 开启后的下一轮启动由此补种；插入侧不再自动登记（见 insert_asset_on）。
 pub fn refresh_selection_for_generation(
     db_dir: PathBuf,
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+    enabled: bool,
 ) {
+    if !enabled {
+        return;
+    }
     let marker = db_dir.join("selection-gen-1.marker");
     if marker.is_file() {
         return;

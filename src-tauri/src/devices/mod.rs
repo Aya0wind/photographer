@@ -96,12 +96,17 @@ pub trait DeviceSource: Send + Sync {
         on_batch(files.clone());
         Ok(files)
     }
+    /// 旧枚举/头读取 API（导入改走 names_with_progress + 流式后生产侧
+    /// 无调用；旧测试仍在用——待测试迁移后整链删除，2026-10-12 标注）。
+    #[allow(dead_code)]
     fn list_with_progress(&self, on_batch: FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
         let files = self.list()?;
         on_batch(files.clone());
         Ok(files)
     }
-    /// 读取文件头部（≤max 字节）用于魔数识别与 EXIF 探测。
+    /// 读取文件头部（≤max 字节）用于魔数识别与 EXIF 探测（退役待清，
+    /// 见 list_with_progress 注释）。
+    #[allow(dead_code)]
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>>;
     /// 全文件流（复制用）。调用方负责读完或 drop。
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn Read + Send>>;

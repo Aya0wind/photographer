@@ -714,9 +714,10 @@ pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:Strin
     let mut recipe=recipe::parse_recipe(&recipe)?;
     if original{recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
     run_blocking(state.inner().clone(),move |_|{
-        let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;
-        let scale=(base.size.width.max(base.size.height) as f32/size[0].max(size[1]).max(1) as f32).min(1.0);
-        histogram_pixels(&photo_pixels(&base,&recipe,scale)?)
+        // 拖动期高频调用：交互文档（≤2048）渲染，毫秒级——255 桶显示直方图
+        // 不需要全分辨率统计（2026-10-12 实时反馈改造）。
+        let base=interactive_source(&session_id)?;
+        histogram_pixels(&photo_pixels(&base,&recipe,1.0)?)
     }).await
 }
 #[tauri::command]
@@ -794,6 +795,14 @@ pub(super) fn canvas_source(session_id:&str)->Result<Document,String> {
     let mut p=value.lock().map_err(|_|"预览锁不可用")?;
     if p.generation.closed.load(Ordering::Acquire) {return Err("预览会话已关闭".into());}
     p.touched=Instant::now();Ok(p.document.clone())
+}
+/// 交互预览文档（≤2048 代理解码）：直方图等拖动期高频按需渲染走这里，
+/// 不碰全分辨率 `document`（2026-10-12：滑块拖动中实时反馈）。
+pub(super) fn interactive_source(session_id:&str)->Result<Document,String> {
+    let value=sessions().lock().map_err(|_|"预览锁不可用")?.get(session_id).cloned().ok_or("预览会话已关闭")?;
+    let mut p=value.lock().map_err(|_|"预览锁不可用")?;
+    if p.generation.closed.load(Ordering::Acquire) {return Err("预览会话已关闭".into());}
+    p.touched=Instant::now();Ok(p.interactive_document.clone())
 }
 pub(super) fn canvas_original_size(session_id:&str)->Result<[u32;2],String> {
     let value=sessions().lock().map_err(|_|"预览锁不可用")?.get(session_id).cloned().ok_or("预览会话已关闭")?;

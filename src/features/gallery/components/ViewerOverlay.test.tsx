@@ -1430,7 +1430,8 @@ describe("查看器：AI 选片行（C）", () => {
     expect(blur).toHaveTextContent("无法判断");
     expect(blur).not.toHaveTextContent("90");
     expect(screen.getByTestId("viewer-ai-eyes")).toHaveAttribute("data-state", "not_analyzed");
-    expect(screen.getByTestId("selection-evidence")).toHaveTextContent("未确定主体");
+    // 2026-10-12 定案：分析说明只展示睁闭眼通道——仅清晰度分析时不渲染面板
+    expect(screen.queryByTestId("selection-evidence")).toBeNull();
   });
   it("已分析：闭眼三态文案 + 清晰度分与软片标黄 + 「AI 建议」徽标", async () => {
     detailMock.mockResolvedValue({
@@ -1486,6 +1487,27 @@ describe("查看器：AI 选片行（C）", () => {
     expect(eyes).toHaveTextContent("睁眼");
     expect(eyes).not.toHaveTextContent("复核");
     expect(screen.getByTestId("selection-evidence")).not.toHaveTextContent("尚未");
+  });
+
+  it("分析说明眼睛状态直说睁眼/闭眼，不用候选/复核措辞（2026-10-12 定案）", async () => {
+    detailMock.mockResolvedValue({ ...DETAIL, aiAnalysis: {
+      eyes: {value:"closed",score:null,details:{source:"thumbnail",width:1024,height:683,
+        calibrated:false,reason:null,regions:[
+          {person:1,kind:"eye",side:"left",state:"closed",reason:null,bounds:[0,0,0.2,0.2],rawScore:null,auxiliaryEar:null},
+          {person:1,kind:"eye",side:"right",state:"maybe",reason:null,bounds:[0.3,0,0.2,0.2],rawScore:null,auxiliaryEar:null},
+        ]}},
+      blur: {value:"soft",score:30,details:{source:"thumbnail",width:1024,height:683,
+        calibrated:false,reason:"subject_unknown",regions:[]}},
+    }});
+    renderViewer();
+    const panel = await screen.findByTestId("selection-evidence");
+    expect(panel).toHaveTextContent("左眼：闭眼");
+    expect(panel).toHaveTextContent("右眼：疑似闭眼");
+    // 不再出现候选/复核措辞；清晰度（blur）通道整体不展示
+    expect(panel).not.toHaveTextContent("候选");
+    expect(panel).not.toHaveTextContent("复核");
+    expect(panel).not.toHaveTextContent("失焦");
+    expect(panel).not.toHaveTextContent("清晰");
   });
 
   it("未定位眼睛与闭眼分开显示，不显示通用复核说明", async () => {

@@ -311,6 +311,20 @@ cargo check --offline --manifest-path src-tauri/Cargo.toml --tests
 结论：软件可实现面已完成并全测试绿；真机与跨平台项未验证，目标整体未完成，
 不得标记完成。
 
+## 补记 5：macOS CI 修复（2026-10-12）
+
+2cde470 推送后 dev 的 macOS 构建（Build Apple Silicon app and DMG）失败。
+根因：`platform/macos/ic_transport.rs`（objc2 骨架）从未在任何平台编译过——
+Windows 开发机的 cargo check 不编译 cfg(macos) 模块，骨架里的 objc2 API
+用法错误只能在 mac CI 暴露（本地无法复现：交叉 check 需要 Apple SDK，
+objc2-exception-helper/ring 等 C 构建脚本在 Windows 上无法完成）。
+
+处置：`macos-ic-transport` feature（默认关）门控 ic_transport 模块与
+objc2/objc2-foundation/block2 三个 macos 依赖——骨架本就未接入任何
+CameraBackend（纯 dead code），默认构建不含它即恢复 3c30326 的 mac 绿
+基线。接 macOS 真机验证时 `--features macos-ic-transport` 打开修骨架，
+修好接线后再考虑转默认开。
+
 ## 自动续做进度补记 3：点击对焦真坐标（2026-10-09）
 
 ### 用户报告

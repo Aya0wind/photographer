@@ -103,11 +103,11 @@ impl Settings {
                 onboarding_completed: self.onboarding_completed,
                 databases: self.databases.clone(),
                 active_database_id: self.active_database_id.clone(),
+                appearance: self.appearance.clone(),
             },
             DatabaseSettings {
                 import: self.import.clone(),
                 gallery: self.gallery.clone(),
-                appearance: self.appearance.clone(),
                 ai: self.ai.clone(),
                 system: self.system.clone(),
                 storage: self.storage.clone(),
@@ -124,9 +124,9 @@ impl Settings {
             onboarding_completed: global.onboarding_completed,
             databases: global.databases.clone(),
             active_database_id: global.active_database_id.clone(),
+            appearance: global.appearance.clone(),
             import: database.import.clone(),
             gallery: database.gallery.clone(),
-            appearance: database.appearance.clone(),
             ai: database.ai.clone(),
             system: database.system.clone(),
             storage: database.storage.clone(),
@@ -151,6 +151,9 @@ pub struct GlobalSettings {
     /// 激活数据库 id（注册表内恰好一个；None=尚未创建任何数据库，一切
     /// 依赖数据库的命令返回「尚未创建数据库」）。
     pub active_database_id: Option<String>,
+    /// 外观（主题/动画）——应用级（2026-10-12 用户定案：主题不随库换，
+    /// 全局文件唯一真值；旧库级文件残留 appearance 键 serde 忽略）。
+    pub appearance: AppearanceSettings,
 }
 
 impl Default for GlobalSettings {
@@ -160,6 +163,7 @@ impl Default for GlobalSettings {
             onboarding_completed: false,
             databases: Vec::new(),
             active_database_id: None,
+            appearance: AppearanceSettings::default(),
         }
     }
 }
@@ -192,7 +196,6 @@ impl GlobalSettings {
 pub struct DatabaseSettings {
     pub import: ImportSettings,
     pub gallery: GallerySettings,
-    pub appearance: AppearanceSettings,
     pub ai: AiSettings,
     pub system: SystemSettings,
     /// 存储与缓存策略（M8-③：缩略图缓存 LRU 上限等）。
@@ -208,7 +211,6 @@ impl Default for DatabaseSettings {
         Self {
             import: ImportSettings::default(),
             gallery: GallerySettings::default(),
-            appearance: AppearanceSettings::default(),
             ai: AiSettings::default(),
             system: SystemSettings::default(),
             storage: StorageSettings::default(),
@@ -613,7 +615,6 @@ pub struct SettingsManager;
 const DB_LEVEL_JSON_KEYS: &[&str] = &[
     "import",
     "gallery",
-    "appearance",
     "ai",
     "system",
     "storage",

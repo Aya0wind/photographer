@@ -741,16 +741,16 @@ fn insert_asset_on(
     // 索引待办（导入/索引任务分离）：photo/raw 写 thumb 任务；
     // other 无缩略图可言直接永久占位。REPLACE 旧资产行时
     // 其任务行随 ON DELETE CASCADE 消失，这里只补新行。
-    // 0021：photo/raw 同时登记 eyes/blur 分析任务（闭眼/疑似失焦）。
+    // 0021→2026-10-12 修正：eyes/blur（闭眼/清晰度，AI 选片通道）不再随
+    // 插入登记——AI 功能关闭的库不应产生这两类任务（否则图像索引永久
+    // 「等待模型」）。AI 开启时由导入收尾/指纹重建批量建档（幂等）。
     if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
         let now = now_rfc3339();
-        for kind in ["thumb", "eyes", "blur"] {
-            conn.execute(
-                "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
-                 VALUES (?2, ?1, 'pending', 0, ?3, ?3)",
-                params![id, kind, now],
-            )?;
-        }
+        conn.execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
+            params![id, now],
+        )?;
     } else {
         conn.execute(
             "UPDATE assets SET thumb_state = 2 WHERE id = ?1",

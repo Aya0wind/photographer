@@ -63,7 +63,7 @@ pub fn reconcile_with_truth(
             if let Some(entry) = registry.get_mut(&id) {
                 if matches!(&entry.scan, DeviceScan::Failed(_, retry) if Instant::now() >= *retry) {
                     entry.scan = DeviceScan::Scanning;
-                    entry.files = Some(Vec::new());
+                    entry.files = None;
                     state.bus.publish(AppEvent::DeviceArrived {
                         id: id.clone(),
                         kind,

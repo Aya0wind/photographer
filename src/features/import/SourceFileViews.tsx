@@ -773,7 +773,7 @@ export function FileGridView({
   });
   useEffect(() => { virtualizer.measure(); }, [columns, tileRowH]);
   const visibleFiles = virtualizer.getVirtualItems().flatMap(item => { const row = rows[item.index]; return row.type === "tiles" ? row.files : []; });
-  const { sizes } = useVisibleFileSizes(device?.kind === "mtp" && device.scanStatus !== "scanning" ? device.id : undefined, visibleFiles);
+  const { sizes } = useVisibleFileSizes(device?.kind === "mtp" ? device.id : undefined, visibleFiles);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-grid">
@@ -821,7 +821,7 @@ export function FileGridView({
                           basePath !== null ? `${basePath}/${relPathOf(f)}` : null
                         }
                         deviceId={device?.kind === "mtp" ? device.id : undefined}
-                        previewReady={device?.scanStatus !== "scanning"}
+                        previewReady={Boolean(f.objectId) || device?.kind !== "mtp"}
                         size={tile}
                       />
                     ))}

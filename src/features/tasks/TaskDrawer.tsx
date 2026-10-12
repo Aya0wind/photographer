@@ -313,12 +313,17 @@ function IndexTaskRow({
   counters,
   importActive,
   selectionReady,
+  selectionEnabled,
 }: {
   kind: IndexKind;
   counters: IndexCounters;
   importActive: boolean;
   selectionReady?: boolean;
+  selectionEnabled?: boolean;
 }) {
+  // 「等待模型」只在 AI 开启且模型未就绪时成立（关闭的库不建 eyes/blur
+  // 任务，图像索引按 thumb/exif 口径完成，不存在等待）
+  const waitingModels = kind === "image" && selectionEnabled === true && selectionReady === false && counters.running === 0;
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -359,7 +364,7 @@ function IndexTaskRow({
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
             {t(counters.failed > 0 && counters.running === 0 && counters.pending === 0 ? "jobStatus.failed"
-              : kind === "image" && selectionReady === false && counters.running === 0 ? "settings.ai.index.waitingModels" : "jobStatus.running")}
+              : waitingModels ? "settings.ai.index.waitingModels" : "jobStatus.running")}
           </span>
           <button
             type="button"
@@ -393,7 +398,7 @@ function IndexTaskRow({
           {t("backgroundTask.queue", { pending: counters.pending, running: counters.running })}
         </span>
       </div>
-      {kind === "image" && selectionReady === false && <p className="mt-1 text-[10px] text-amber-400">
+      {waitingModels && <p className="mt-1 text-[10px] text-amber-400">
         {t("settings.ai.index.waitingSelectionModels")}
       </p>}
       {kind === "image" && <ImageIndexProgress status={indexStatus} />}
@@ -753,7 +758,7 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
                 <ErrorRow message={lastError.message} onDismiss={() => setDismissedError(lastError)} />
               )}
               {indexRows.map(({ kind, counters }) => (
-                <IndexTaskRow key={kind} kind={kind} counters={counters} importActive={active.length > 0} selectionReady={indexStatus?.selectionReady} />
+                <IndexTaskRow key={kind} kind={kind} counters={counters} importActive={active.length > 0} selectionReady={indexStatus?.selectionReady} selectionEnabled={indexStatus?.selectionEnabled} />
               ))}
               {active.map((job) => (
                 <ImportActiveRow key={job.jobId} job={job} />

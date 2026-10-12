@@ -250,4 +250,35 @@ mod bulk_scan_tests {
         eprintln!("Fast discovery counts={counts:?} elapsed={:?}", now.elapsed());
         assert!(counts.values().sum::<u64>() > 0);
     }
+
+    #[test]
+    #[ignore = "requires exclusive Sony MTP camera; validates preview access while discovery is active"]
+    fn live_preview_during_discovery() {
+        use crate::devices::DeviceSource;
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let (id, name) = enumerate().unwrap().into_iter().find(|(_, name)| name.contains("ILCE")).unwrap();
+        let source = Arc::new(super::super::WpdSource::new(id, name));
+        let (send, receive) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let resume = std::sync::Mutex::new(resume);
+        let sent = AtomicBool::new(false);
+        let callback: super::super::super::FileBatchCallback = Arc::new(move |files| {
+            if !files.is_empty() && !sent.swap(true, Ordering::SeqCst) {
+                send.send(files[0].id.clone()).unwrap();
+                resume.lock().unwrap().recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+            }
+        });
+        let scan_source = source.clone();
+        let scan = std::thread::spawn(move || scan_source.list_names_with_progress(callback));
+        let id = receive.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        let start = std::time::Instant::now();
+        let preview = source.thumbnail(&id);
+        let elapsed = start.elapsed();
+        let _ = release.send(());
+        eprintln!("Preview during paused discovery: result={:?} elapsed={elapsed:?}", preview.as_ref().map(|data| data.as_ref().map(Vec::len)));
+        let result = scan.join().unwrap();
+        assert!(elapsed < std::time::Duration::from_secs(10));
+        preview.unwrap();
+        result.unwrap();
+    }
 }

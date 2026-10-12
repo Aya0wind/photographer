@@ -15,6 +15,12 @@ rust-version = "1.98"
 name = "photographer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# macOS ImageCaptureCore 传输骨架（计划 §D）：**默认不编译**——骨架尚未
+# 接入 CameraBackend 且从未在 macOS 上编译通过（2026-10-12 dev CI mac 构建
+# 即因此失败）。接 macOS 真机验证时 `--features macos-ic-transport` 打开修骨架。
+macos-ic-transport = ["dep:objc2", "dep:objc2-foundation", "dep:block2"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -132,9 +138,9 @@ ort = { version = "2.0.0-rc.13", features = ["coreml"] }
 # （crates.io 的 image-capture-core 0.1.5 停更于 2019），因此走 objc2 运行时
 # 消息 + 自写 extern 类声明；objc2-foundation 提供 NSData/NSString 等基础类型，
 # block2 用于 requestSendPTPCommand 的 completion 块。版本为 2026-10 现行稳定。
-objc2 = "0.6"
-objc2-foundation = "0.3"
-block2 = "0.6"
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }

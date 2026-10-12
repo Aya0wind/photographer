@@ -372,6 +372,33 @@ describe("任务抽屉：索引通道行", () => {
     ).toBeNull();
   });
 
+
+  it("「等待模型」只在 AI 开启且模型未就绪时显示；AI 关闭不显示（2026-10-12）", async () => {
+    // AI 关（selectionEnabled=false）：即使模型未就绪也不等模型
+    indexStatusMock.mockResolvedValue({
+      thumb: counters(2, 0, 7),
+      exif: counters(0, 0, 10),
+      ai: counters(0, 0, 10),
+      selectionReady: false,
+      selectionEnabled: false,
+    } satisfies IndexStatus);
+    renderDrawer();
+    const row = await screen.findByTestId("taskdrawer-index-image");
+    expect(row).not.toHaveTextContent(i18n.t("settings.ai.index.waitingModels"));
+
+    // AI 开但模型未就绪：显示等待模型
+    indexStatusMock.mockResolvedValue({
+      thumb: counters(2, 0, 7),
+      exif: counters(0, 0, 10),
+      ai: counters(0, 0, 10),
+      selectionReady: false,
+      selectionEnabled: true,
+    } satisfies IndexStatus);
+    renderDrawer();
+    // 同一用例内二次渲染：取最后一次渲染的行（前面的渲染仍在文档里）
+    const waiting = (await screen.findAllByTestId("taskdrawer-index-image")).pop()!;
+    await waitFor(() => expect(waiting).toHaveTextContent(i18n.t("settings.ai.index.waitingModels")));
+  });
   it("索引行暂停（running）/继续（无 running → indexTaskResume 全局恢复）；导入中禁用", async () => {
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 1, 7),

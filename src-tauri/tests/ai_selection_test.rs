@@ -480,9 +480,10 @@ fn blur_task_reports_detail_clarity_and_abstains_on_low_texture() {
     assert!(ai::selection::normalize_blur_score(sharp_var) > 90.0);
     assert!(ai::selection::normalize_blur_score(soft_var) < 10.0);
 
-    // 任务账：导入时自动登记（insert_asset_on），代际重排复位
-    assert!(db.pending_index_task_count("blur").unwrap() >= 2);
-    assert!(db.pending_index_task_count("eyes").unwrap() >= 2);
+    // 任务账（2026-10-12 新契约：插入只建 thumb，eyes/blur 由导入收尾/
+    // 指纹重建在 AI 开启时批量建档——测试里显式建档后断言）
+    assert!(db.create_blur_tasks_for_unindexed().unwrap() >= 2);
+    assert!(db.create_eyes_tasks_for_unindexed().unwrap() >= 2);
 
     // 处理 blur 任务（阈值 30）
     assert!(ai::selection::process_blur_task(&db, &db_dir, sharp, 30.0));
@@ -834,6 +835,9 @@ fn eyes_backfill_without_model_skips_and_counts() {
     let _a = ins(&db, &photos, "a.jpg", &sharp_image());
     let _b = ins(&db, &photos, "b.jpg", &soft_image());
 
+    // 2026-10-12 新契约：eyes 任务不随插入登记——显式建档（AI 开启路径
+    // 由导入收尾/指纹重建批量做）后再走回填
+    assert!(db.create_eyes_tasks_for_unindexed().unwrap() >= 2);
     let pending_before = db.pending_index_task_count("eyes").unwrap();
     assert!(pending_before >= 2);
 
@@ -949,6 +953,19 @@ fn selection_fingerprint_and_requeue() {
 
     let mut ai = settings::AiSettings::default();
     let f1 = ipc::indexing::selection_params_fingerprint(&ai);
+    // 2026-10-12：AI 功能开关折入指纹——开启/关闭即触发 selection 通道
+    // 指纹变更（开启=补建存量任务；关闭=不建新任务）
+    ai.enable_clip = true;
+    let f_on = ipc::indexing::selection_params_fingerprint(&ai);
+    assert_ne!(f1, f_on, "AI 开关变更应改变指纹");
+    ai.enable_clip = false;
+    ai.enable_face = true;
+    assert_ne!(
+        f1,
+        ipc::indexing::selection_params_fingerprint(&ai),
+        "face 开关单独开同样改变指纹"
+    );
+    ai.enable_face = false;
     ai.blur_soft_threshold = 45.0;
     let f2 = ipc::indexing::selection_params_fingerprint(&ai);
     assert_ne!(f1, f2, "阈值变更应改变指纹");

@@ -2,12 +2,15 @@ import { useTranslation } from "react-i18next";
 import type { AssetDetailDto } from "@/ipc/api/types";
 
 /** Human-readable region evidence. Raw, uncalibrated outputs stay out of the
- * verdict UI; developers can inspect them in the saved analysis payload. */
+ * verdict UI; developers can inspect them in the saved analysis payload.
+ * 2026-10-12 用户定案：只展示睁闭眼通道——清晰度（blur）说明不再展示
+ *（诊断数据仍在分析 payload 里，选片判定链路不受影响）；眼睛状态直说
+ * 睁眼/闭眼，不用「候选/复核」措辞。 */
 export function SelectionEvidencePanel({ analysis, onRegionSelect }: {
   analysis: AssetDetailDto["aiAnalysis"]; onRegionSelect?: (bounds: number[]) => void;
 }) {
   const { t } = useTranslation();
-  const channels = [analysis?.eyes, analysis?.blur].filter(channel => channel?.details);
+  const channels = [analysis?.eyes].filter(channel => channel?.details);
   if (!channels.length) return null;
   return <details className="w-full min-w-0 text-xs text-text-muted" data-testid="selection-evidence">
     <summary className="cursor-pointer text-text">{t("viewer.ai.evidence")}</summary>

@@ -790,8 +790,8 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             kind: photo.kind,
         });
         let app_db_dir = crate::ipc::app_database_dir(state)?;
-        // pHash 任务补差（2026-10-09 审计 P0-C）：入库只自动建 thumb/eyes/
-        // blur，phash 通道（连拍分组依赖）幂等补建——收尾一次，不逐照片。
+        // pHash 任务补差（2026-10-09 审计 P0-C）+ eyes/blur 选片建档
+        //（2026-10-12：插入不再登记这两类；AI 开启才批量幂等补建）。
         let _ = db.create_phash_tasks_for_unindexed();
         crate::index::kick(app_db_dir.clone(), &state.supervisor);
         // 激活数据库（多数据库修正）：AI 回填直接触发。
@@ -813,12 +813,17 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
                     &state.supervisor,
                 );
             }
-            crate::ai::selection::kick_eyes_if_ready(
-                app_db_dir,
-                &state.ai,
-                &state.bus,
-                &state.supervisor,
-            );
+            // 选片通道（eyes/blur）：AI 开启才建档并触发闭眼回填
+            if settings.ai.enable_clip || settings.ai.enable_face {
+                let _ = db.create_eyes_tasks_for_unindexed();
+                let _ = db.create_blur_tasks_for_unindexed();
+                crate::ai::selection::kick_eyes_if_ready(
+                    app_db_dir,
+                    &state.ai,
+                    &state.bus,
+                    &state.supervisor,
+                );
+            }
         }
         Ok(())
     })();
