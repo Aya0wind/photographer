@@ -1,5 +1,5 @@
 import type { AdvancedAdjustments, DevelopmentAdjustments, EditLocalMask, EditRecipe, EditRecipeTextLayer } from "@/ipc/api";
-import { defaultRecipe, initRecipeHistory, recipeEquals, recipeReducer, type RecipeAction, type RecipeContext, type RecipeHistory } from "./recipe";
+import { defaultRecipe, initRecipeHistory, recipeEquals, recipeForPersist, recipeReducer, type RecipeAction, type RecipeContext, type RecipeHistory } from "./recipe";
 
 export const DEFAULT_ADVANCED: AdvancedAdjustments = {
   exposure: 0, temperature: 0, tint: 0, vibrance: 0, curves: [],
@@ -14,16 +14,20 @@ export function advancedRecipe(): EditRecipe {
   return { ...defaultRecipe(), renderer: "photocraft", advanced: { ...DEFAULT_ADVANCED } };
 }
 
-export type AdjustmentGroup = "light" | "color" | "curves" | "levels" | "hsl" | "colorBalance" | "blackWhite" | "selectiveColor";
+export type AdjustmentGroup = "light" | "color" | "effects" | "detail" | "curves" | "levels" | "hsl" | "colorBalance" | "blackWhite" | "selectiveColor" | "colorGrading" | "parametricCurve";
 
 export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):boolean {
   const a={...DEFAULT_ADVANCED,...recipe.advanced};
   const basic={brightness:0,contrast:0,saturation:0,...recipe.adjustments};
   switch(group) {
+    case "parametricCurve":return !!a.parametricCurve;
+    case "colorGrading":return !!a.colorGrading;
     case "colorBalance":return !!a.colorBalance;
     case "blackWhite":return !!a.blackWhite;
     case "selectiveColor":return !!a.selectiveColor;
-    case "light":return !!(a.exposure||basic.brightness||basic.contrast||recipe.legacyAdjustments?.brightness||recipe.legacyAdjustments?.contrast);
+    case "light":return !!(a.exposure||basic.brightness||basic.contrast||recipe.legacyAdjustments?.brightness||recipe.legacyAdjustments?.contrast)||developmentGroupChanged(a,"tone");
+    case "effects":return developmentGroupChanged(a,"presence")||developmentGroupChanged(a,"effects");
+    case "detail":return developmentGroupChanged(a,"detail");
     case "color":return !!(a.temperature||a.tint||a.vibrance||basic.saturation||recipe.legacyAdjustments?.saturation);
     case "curves":return !!a.curves.length || Object.values(a.channelCurves??{}).some(points=>!!points?.length);
     case "levels":return !!a.levels;
@@ -32,6 +36,11 @@ export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):
 }
 
 export type AdvancedAction = RecipeAction
+  | {type:"cropStart"}
+  | {type:"cropConfirm";crop:EditRecipe["crop"]}
+  | {type:"cropCancel"}
+  | {type:"restoreHistory";history:RecipeHistory}
+  | {type:"maskResetDevelopmentGroup";id:string;group:DevelopmentGroup}
   | {type:"resetDevelopmentGroup";group:DevelopmentGroup}
   | {type:"maskAdd";mask:EditLocalMask}
   | {type:"maskUpdate";id:string;patch:Partial<Omit<EditLocalMask,"id">>;record?:boolean}
@@ -41,16 +50,36 @@ export type AdvancedAction = RecipeAction
   | { type: "resetAdjustmentGroup"; group: AdjustmentGroup }
   | { type: "advanced"; patch: Partial<AdvancedAdjustments>; record?: boolean }
   | { type: "loadProject"; recipe: EditRecipe }
+  | { type: "applyProject"; recipe: EditRecipe }
   | { type: "textUpdateLive"; id: string; patch: Partial<EditRecipeTextLayer> };
 
 export function advancedReducer(state: RecipeHistory, action: AdvancedAction, context: RecipeContext): RecipeHistory {
+  if(action.type==="restoreHistory")return action.history;
+  if(action.type==="applyProject"){
+    const before=state.cropSession??state;
+    if(recipeEquals(before.present,action.recipe))return before;
+    return {past:[...before.past,before.present],present:action.recipe,future:[]};
+  }
+  if(action.type==="cropStart")return state.cropSession?state:{...state,cropSession:{past:state.past,present:state.present,future:state.future}};
+  if(action.type==="cropCancel")return state.cropSession??state;
+  if(action.type==="cropConfirm"){
+    const before=state.cropSession??{past:state.past,present:state.present,future:state.future};
+    const next=recipeReducer({past:[],present:state.present,future:[]},{type:"cropApply",crop:action.crop},context).present;
+    if(recipeEquals(recipeForPersist(before.present),recipeForPersist(next)))return before;
+    return {past:[...before.past,before.present],present:next,future:[]};
+  }
+  if(state.cropSession&&action.type!=="reset"&&action.type!=="loadProject"){
+    if(action.type==="undo"||action.type==="redo")return state.cropSession;
+    const next=advancedReducer({past:state.past,present:state.present,future:state.future},action,context);
+    return {...next,past:state.cropSession.past,future:state.cropSession.future,cropSession:state.cropSession};
+  }
   if(action.type==="resetDevelopmentGroup"){
     const a=state.present.advanced??DEFAULT_ADVANCED;if(!developmentGroupChanged(a,action.group))return state;
     const development={...DEFAULT_DEVELOPMENT,...a.development};
     for(const key of DEVELOPMENT_GROUPS[action.group])Object.assign(development,{[key]:DEFAULT_DEVELOPMENT[key]});
     return {past:[...state.past,state.present],future:[],present:{...state.present,advanced:{...a,development}}};
   }
-  if (action.type==="maskAdd" || action.type==="maskUpdate" || action.type==="maskRemove" || action.type==="maskDuplicate" || action.type==="maskResetAdjustmentGroup") {
+  if (action.type==="maskAdd" || action.type==="maskUpdate" || action.type==="maskRemove" || action.type==="maskDuplicate" || action.type==="maskResetAdjustmentGroup" || action.type==="maskResetDevelopmentGroup") {
     let masks=state.present.masks??[];
     let record=true;
     switch(action.type) {
@@ -68,6 +97,12 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
         const reset=advancedReducer(initRecipeHistory(local),{type:"resetAdjustmentGroup",group:action.group},context).present;
         return {...m,adjustments:reset.adjustments,advanced:reset.advanced};
       });break;
+      case "maskResetDevelopmentGroup":masks=masks.map(m=>{
+        if(m.id!==action.id)return m;
+        const local={...state.present,masks:undefined,legacyAdjustments:undefined,adjustments:m.adjustments,advanced:m.advanced};
+        const reset=advancedReducer(initRecipeHistory(local),{type:"resetDevelopmentGroup",group:action.group},context).present;
+        return {...m,advanced:reset.advanced};
+      });break;
     }
     const next={...state.present,masks:masks.length?masks:undefined};
     if(recipeEquals(next,state.present))return state;
@@ -78,11 +113,21 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     const present=state.present;
     const advanced={...DEFAULT_ADVANCED,...present.advanced};
     const adjustments={brightness:0,contrast:0,saturation:0,...present.adjustments};
+    function resetDevelopment(groups:DevelopmentGroup[]){
+      if(!advanced.development)return;
+      const development={...DEFAULT_DEVELOPMENT,...advanced.development};
+      for(const group of groups)for(const key of DEVELOPMENT_GROUPS[group])Object.assign(development,{[key]:DEFAULT_DEVELOPMENT[key]});
+      advanced.development=development;
+    }
     switch(action.group) {
+      case "parametricCurve":advanced.parametricCurve=undefined;break;
+      case "colorGrading":advanced.colorGrading=undefined;break;
       case "colorBalance":advanced.colorBalance=undefined;break;
       case "blackWhite":advanced.blackWhite=undefined;break;
       case "selectiveColor":advanced.selectiveColor=undefined;break;
-      case "light": advanced.exposure=0;adjustments.brightness=0;adjustments.contrast=0;break;
+      case "light": advanced.exposure=0;adjustments.brightness=0;adjustments.contrast=0;resetDevelopment(["tone"]);break;
+      case "effects":resetDevelopment(["presence","effects"]);break;
+      case "detail":resetDevelopment(["detail"]);break;
       case "color": advanced.temperature=0;advanced.tint=0;advanced.vibrance=0;adjustments.saturation=0;break;
       case "curves": advanced.curves=[];advanced.channelCurves={};break;
       case "levels": advanced.levels=undefined;break;

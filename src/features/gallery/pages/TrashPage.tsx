@@ -7,6 +7,7 @@ import {
   trashRestore,
   type AssetDto,
 } from "@/ipc/api";
+import { notifyCountsRefresh } from "@/lib/countsRefresh";
 import { groupAssetsByDate } from "../lib/assetGroups";
 import AssetGrid from "../components/AssetGrid";
 import { useAssetSelection } from "../lib/useAssetSelection";
@@ -90,6 +91,8 @@ export default function TrashPage() {
     }
     removeFromList(ids);
     flash(t("trash.restored", { count: ids.length }));
+    // 恢复回库改变 sidebar_counts 口径内的行（in_trash=0）——通知侧栏重拉
+    notifyCountsRefresh();
   }
 
   // --- 彻底删除（两档确认） --------------------------------------------------------------
@@ -105,6 +108,8 @@ export default function TrashPage() {
     }
     removeFromList(ids);
     flash(deleteFiles ? t("trash.purgeDoneFiles", { count: ids.length }) : t("trash.purgeDone", { count: ids.length }));
+    // 删记录（两档都删）改变库内资产计数——通知侧栏重拉
+    notifyCountsRefresh();
   }
 
   const groups = useMemo(() => groupAssetsByDate(assets), [assets]);

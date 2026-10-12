@@ -1,0 +1,40 @@
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { deviceFileSizes } from "@/ipc/api";
+import { useVisibleFileSizes } from "./useVisibleFileSizes";
+import type { SourceFile } from "@/stores/importStore";
+vi.mock("@/ipc/api", () => ({ deviceFileSizes: vi.fn() }));
+const file = (id: string): SourceFile => ({ path: id, name: id + ".JPG", dir: "", kind: "photo", size: 0, objectId: id });
+afterEach(() => { vi.useRealTimers(); vi.mocked(deviceFileSizes).mockReset(); });
+it("only requests virtualized items and cancels queued requests during fast scrolling", async () => {
+  vi.useFakeTimers();
+  vi.mocked(deviceFileSizes).mockResolvedValue([["b", 123]]);
+  const { result, rerender } = renderHook(({ files }) => useVisibleFileSizes("camera", files), { initialProps: { files: [file("a")] } });
+  rerender({ files: [file("b")] });
+  await act(async () => { await vi.advanceTimersByTimeAsync(160); });
+  expect(deviceFileSizes).toHaveBeenCalledTimes(1);
+  expect(deviceFileSizes).toHaveBeenCalledWith("camera", ["b"]);
+  expect(result.current.sizes.b).toBe(123);
+});
+it("unsupported bulk metadata disables sizes without individually reading files", async () => {
+  vi.useFakeTimers();
+  vi.mocked(deviceFileSizes).mockResolvedValue(null);
+  const { result } = renderHook(() => useVisibleFileSizes("camera", [file("a")]));
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(result.current.supported).toBe(false);
+  expect(deviceFileSizes).toHaveBeenCalledTimes(1);
+});
+it("scrolling while a request runs waits for it, then requests the newest visible items", async () => {
+  vi.useFakeTimers();
+  let complete!: (values: Array<[string, number]>) => void;
+  vi.mocked(deviceFileSizes).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; })).mockResolvedValue([["b", 234]]);
+  const { result, rerender } = renderHook(({ files }) => useVisibleFileSizes("camera", files), { initialProps: { files: [file("a")] } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(160); });
+  rerender({ files: [file("b")] });
+  await act(async () => { await vi.advanceTimersByTimeAsync(160); });
+  expect(deviceFileSizes).toHaveBeenCalledTimes(1);
+  await act(async () => { complete([["a", 123]]); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(160); });
+  expect(deviceFileSizes).toHaveBeenCalledTimes(2);
+  expect(result.current.sizes.b).toBe(234);
+});

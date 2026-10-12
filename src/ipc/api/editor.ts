@@ -114,6 +114,11 @@ export async function editPreviewMask(sessionId:string,recipe:EditRecipe,maskId:
   const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_mask",{sessionId,recipe,maskId});
   return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));
 }
+export async function editPreviewClipping(sessionId:string,recipe:EditRecipe,original:boolean,warnings:number):Promise<string>{
+  const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_clipping",{sessionId,recipe,original,warnings});
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));
+}
+export function editPreviewHistogram(sessionId:string,recipe:EditRecipe,original:boolean){return ipc<number[][]>("edit_preview_histogram",{sessionId,recipe,original});}
 
 export async function editProjectSave(assetId: number, libraryId: string, recipe: EditRecipe): Promise<void> {
   await ipc<void>("edit_project_save", { assetId: String(assetId), libraryId, recipe });
@@ -122,10 +127,12 @@ export async function editProjectSave(assetId: number, libraryId: string, recipe
 export async function editProjectOpen(assetId: number, libraryId: string): Promise<EditRecipe | null> {
   return ipc<EditRecipe | null>("edit_project_open", { assetId: String(assetId), libraryId });
 }
+export function editSchemeSave(assetId:number,libraryId:string,recipe:EditRecipe,path:string){return ipc<void>("edit_scheme_save",{assetId:String(assetId),libraryId,recipe,path});}
+export function editSchemeOpen(assetId:number,libraryId:string,path:string){return ipc<EditRecipe>("edit_scheme_open",{assetId:String(assetId),libraryId,path});}
 
-export async function advancedExport(assetId: number, libraryId: string, recipe: EditRecipe, sessionId: string, albumId?: number, subgroup?: string | null): Promise<ExportTask> {
+export async function advancedExport(assetId: number, libraryId: string, recipe: EditRecipe, sessionId: string, albumId?: number, subgroup?: string | null,format:ExportOptions["format"]="jpeg",colorSpace:ExportOptions["colorSpace"]="srgb"): Promise<ExportTask> {
   return ipc<ExportTask>("edit_advanced_export", { assetId: String(assetId), libraryId, recipe,
-    albumId: albumId === undefined ? null : String(albumId), subgroup: subgroup ?? null, sessionId });
+    albumId: albumId === undefined ? null : String(albumId), subgroup: subgroup ?? null, sessionId,format,colorSpace });
 }
 
 export async function advancedExportFolder(photo: { assetId: number; libraryId: string; sessionId: string }, recipe: EditRecipe, options: ExportOptions): Promise<ExportTask> {
@@ -197,9 +204,10 @@ export async function exportRun(
   }
 }
 
-export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string,maskId?:string) {
-  return ipc<{ sample?: [number, number, number]; range?: "reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId });
+export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string,maskId?:string,curveChannel?:string,sampleSize?:number) {
+  return ipc<{ sample?: [number, number, number]; range?: "reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId,curveChannel,sampleSize });
 }
+export function editParametricSamples(value:NonNullable<EditRecipe["advanced"]>["parametricCurve"]){return ipc<number[]>("edit_parametric_samples",{value});}
 
 
 export interface EditorPreviewTimings {

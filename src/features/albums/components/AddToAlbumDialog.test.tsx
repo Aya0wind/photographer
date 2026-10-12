@@ -155,7 +155,7 @@ describe("加入相册弹窗", () => {
 
     await pickAlbumAndConfirm(user, "3");
     const toast = await screen.findByTestId("add-to-album-toast");
-    expect(toast).toHaveTextContent("已加入（引用）1 张");
+    expect(toast).toHaveTextContent("已加入相册 1 张");
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1), { timeout: 3000 });
   });
 });

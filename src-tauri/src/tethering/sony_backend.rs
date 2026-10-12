@@ -1,7 +1,8 @@
 //! Sony SDK runs in a separate helper process: callbacks and native SDK faults
 //! never run on the UI thread. All control requests share one serialized channel.
 use super::backend::{
-    CameraBackend, CameraInfo, CameraSetting, Capabilities, CapturedObject, TetherError,
+    usb_vid_pid_from_pnp, CameraBackend, CameraInfo, CameraSetting, Capabilities, CapturedObject,
+    LiveViewFrame, TetherError,
 };
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -217,10 +218,17 @@ impl CameraBackend for SonyBackend {
             .unwrap()
             .iter()
             .filter_map(|c| {
+                let pnp_id = c["pnpId"].as_str()?;
+                // 物理身份（§E）：桥端点报了就填，没报 None（诚实降级，
+                // 不按型号名猜）。端点路径含 USB vid/pid 时一并解析。
+                let (vid, pid) = usb_vid_pid_from_pnp(pnp_id);
                 Some(CameraInfo {
-                    pnp_id: c["pnpId"].as_str()?.into(),
+                    pnp_id: pnp_id.into(),
                     name: c["name"].as_str()?.into(),
                     capabilities: self.capabilities(),
+                    serial: c["serial"].as_str().map(str::to_string),
+                    vid,
+                    pid,
                 })
             })
             .collect())
@@ -236,6 +244,10 @@ impl CameraBackend for SonyBackend {
             pnp_id: id.into(),
             name: "Sony".into(),
             capabilities: self.capabilities(),
+            // connect 返回不携带身份（桥协议未定义）；枚举路径填充。
+            serial: None,
+            vid: None,
+            pid: None,
         })
     }
     fn disconnect(&self, id: &str) {
@@ -254,13 +266,15 @@ impl CameraBackend for SonyBackend {
             .request(&format!("set\t{setting}\t{value}"))?;
         Ok(())
     }
-    fn live_view_frame(&self, id: &str) -> Result<Vec<u8>, TetherError> {
+    fn live_view_frame(&self, id: &str) -> Result<LiveViewFrame, TetherError> {
         let connection = self.connection(id)?;
         let value = connection.request("frame")?;
         let path = value["path"]
             .as_str()
             .ok_or_else(|| TetherError::Other("取景帧不可用".into()))?;
-        std::fs::read(path).map_err(|e| TetherError::Other(e.to_string()))
+        std::fs::read(path)
+            .map(LiveViewFrame::plain)
+            .map_err(|e| TetherError::Other(e.to_string()))
     }
     fn trigger_capture(&self, id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         self.connection(id)?.request("capture")?;

@@ -7,6 +7,8 @@ import { I18nextProvider } from "react-i18next";
 import i18n from "@/i18n";
 import type { AssetDto, EditRecipe } from "@/ipc/api";
 import EditorOverlay from "./EditorOverlay";
+const native=vi.hoisted(()=>({available:false}));
+vi.mock("../lib/useNativeEditorCanvas",()=>({useNativeEditorCanvas:vi.fn((_id,_recipe,_host,enabled)=>Boolean(_id)&&native.available&&enabled)}));
 
 /**
  * 编辑器浮层组件测试：Konva 画布以 stub 替身（jsdom 无 canvas），经 stub 暴露的
@@ -17,6 +19,7 @@ vi.mock("@/features/editor/components/EditorCanvas", () => ({
   default: (props: {
     tool: string;
     recipe: { rotateQuarter: number; textLayers: unknown[];renderer?:string };
+    nativeDisplay?:boolean;
     cropDraft: unknown;
     onPlaceText: (pos: { x: number; y: number }) => void;
     onStrokeCommit: (points: { x: number; y: number }[]) => void;
@@ -27,6 +30,7 @@ vi.mock("@/features/editor/components/EditorCanvas", () => ({
       data-tool={props.tool}
       data-rotate={props.recipe.rotateQuarter}
       data-renderer={props.recipe.renderer??"legacy"}
+      data-native={String(props.nativeDisplay??false)}
     >
       <button
         type="button"
@@ -131,6 +135,7 @@ function renderEditor(initial: { recipe: EditRecipe | null; updatedAt: string | 
 }
 
 beforeEach(() => {
+  native.available=false;
   vi.mocked(assetMetadataGet).mockReset().mockResolvedValue({ title: "", description: "", author: "", copyright: "", keywords: [], capturedAt: "2026-09-18T10:00:00+08:00", camera: "Canon EOS R5", lens: "", gpsLat: null, gpsLon: null });
   vi.mocked(assetMetadataSave).mockReset().mockImplementation(async (_id, value) => value);
   saveMock.mockReset();
@@ -211,7 +216,7 @@ describe("EditorOverlay 编辑操作与撤销", () => {
     expect(screen.getByTestId("editor-undo")).toBeDisabled();
   });
 
-  it("旋转 90° 步进 + 撤销复位", async () => {
+  it("裁剪中的两次旋转确认后作为一次撤销操作", async () => {
     const user = userEvent.setup();
     renderEditor();
     await user.click(screen.getByTestId("editor-tool-crop"));
@@ -220,10 +225,25 @@ describe("EditorOverlay 编辑操作与撤销", () => {
     await user.click(screen.getByTestId("editor-tool-crop"));
     await user.click(screen.getByTestId("editor-rotate-cw"));
     expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("2");
+    await user.click(screen.getByTestId("editor-crop-apply"));
     await user.click(screen.getByTestId("editor-undo"));
-    expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("1");
-    await user.click(screen.getByTestId("editor-rotate-ccw"));
     expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("0");
+    await user.click(screen.getByTestId("editor-redo"));
+    expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("2");
+  });
+  it("取消裁剪会撤回本次旋转并回到调色工具",async()=>{
+    const user=userEvent.setup();renderEditor();await user.click(screen.getByTestId("editor-tool-crop"));
+    await user.click(screen.getByTestId("editor-rotate-cw"));await user.click(screen.getByTestId("editor-crop-cancel"));
+    expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("0");
+    expect(screen.getByTestId("editor-canvas-stub").dataset.tool).toBe("adjust");expect(screen.getByTestId("editor-undo")).toBeDisabled();
+  });
+  it("切换工具确认裁剪，而 Esc 撤回整个裁剪会话",async()=>{
+    const user=userEvent.setup();renderEditor();await user.click(screen.getByTestId("editor-tool-crop"));await user.click(screen.getByTestId("editor-rotate-cw"));
+    await user.click(screen.getByTestId("editor-tool-text"));await user.click(screen.getByTestId("editor-undo"));
+    expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("0");
+    await user.click(screen.getByTestId("editor-redo"));expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("1");
+    await user.click(screen.getByTestId("editor-tool-crop"));await user.click(screen.getByTestId("editor-rotate-cw"));fireEvent.keyDown(window,{key:"Escape"});
+    expect(screen.getByTestId("editor-canvas-stub").dataset.tool).toBe("adjust");expect(screen.getByTestId("editor-canvas-stub").dataset.rotate).toBe("1");
   });
 });
 
@@ -477,4 +497,18 @@ describe("编辑器的新布局与元数据", () => {
 it("new registered photos use PhotoCraft proxy processing",async()=>{
   render(<I18nextProvider i18n={i18n}><EditorOverlay asset={{...ASSET,libraryId:"photo-library"}} initial={{recipe:null,updatedAt:null}} onClose={()=>{}}/></I18nextProvider>);
   await waitFor(()=>expect(screen.getByTestId("editor-canvas-stub")).toHaveAttribute("data-renderer","photocraft"));
+});
+it("uses the native canvas for basic colour edits and hides it for confirmation and drawing",async()=>{
+  native.available=true;
+  render(<I18nextProvider i18n={i18n}><EditorOverlay asset={{...ASSET,libraryId:"photo-library"}} initial={{recipe:null,updatedAt:null}} onClose={()=>{}}/></I18nextProvider>);
+  const canvas=screen.getByTestId("editor-canvas-stub");await waitFor(()=>expect(canvas).toHaveAttribute("data-native","true"));
+  fireEvent.change(screen.getByTestId("editor-adjust-brightness"),{target:{value:25}});
+  fireEvent.click(screen.getByTestId("editor-close"));expect(screen.getByTestId("editor-confirm-dialog")).toBeInTheDocument();expect(canvas).toHaveAttribute("data-native","false");
+  fireEvent.click(screen.getByTestId("editor-confirm-cancel"));await waitFor(()=>expect(canvas).toHaveAttribute("data-native","true"));
+  fireEvent.click(screen.getByTestId("editor-tool-text"));expect(canvas).toHaveAttribute("data-native","false");
+  fireEvent.click(screen.getByTestId("editor-tool-adjust"));await waitFor(()=>expect(canvas).toHaveAttribute("data-native","true"));
+  fireEvent.click(screen.getByTestId("editor-export-album"));expect(screen.getByTestId("export-album-picker")).toBeInTheDocument();expect(canvas).toHaveAttribute("data-native","false");
+  fireEvent.click(screen.getByTestId("export-album-cancel"));await waitFor(()=>expect(canvas).toHaveAttribute("data-native","true"));
+  expect(screen.getByTestId("editor-photo-area")).toHaveAttribute("data-native-canvas-host");
+  expect(screen.getByTestId("editor-zoom-hud")).toHaveAttribute("data-native-overlay");
 });

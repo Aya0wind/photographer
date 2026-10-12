@@ -8,7 +8,7 @@
 //!
 //! 用法：`cargo run --example wpd_probe [-- 名称过滤子串]`
 
-use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::core::{GUID, PCWSTR, PWSTR, Interface};
 use windows::Win32::Devices::PortableDevices::{
     IPortableDevice, IPortableDeviceCapabilities, IPortableDeviceKeyCollection,
     IPortableDeviceManager, IPortableDevicePropVariantCollection, IPortableDeviceValues,
@@ -104,6 +104,8 @@ fn probe_device(pnp: &str) {
         }
     };
     // SAFETY: device 已成功 Open；Capabilities 为只读查询
+    let properties = unsafe { device.Content().and_then(|content| content.Properties()) };
+    println!("  bulk properties supported: {}", properties.and_then(|properties| properties.cast::<windows::Win32::Devices::PortableDevices::IPortableDevicePropertiesBulk>()).is_ok());
     let caps: IPortableDeviceCapabilities = unsafe { device.Capabilities() }.expect("Capabilities");
 
     // SAFETY: 均为只读查询

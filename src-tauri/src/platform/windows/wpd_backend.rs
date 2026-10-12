@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use super::backend::{
-    apply_cached_capabilities, CameraBackend, CameraInfo, Capabilities, CapturedObject, TetherError,
+    apply_cached_capabilities, usb_vid_pid_from_pnp, CameraBackend, CameraInfo, CameraSetting,
+    Capabilities, CapturedObject, LiveViewFrame, TetherError,
 };
 
 /// v1 唯一联拍后端：WPD 文件通道（L0）+ MTP 透传（L1）合一。
@@ -62,15 +63,6 @@ mod cache {
             .insert(key, info);
     }
 
-    /// 取设备已探测能力（未探测返回 None）。
-    pub(super) fn capabilities(pnp: &str) -> Option<Capabilities> {
-        map()
-            .lock()
-            .expect("tethering cache mutex poisoned")
-            .get(&crate::devices::normalize_device_id(pnp))
-            .map(|info| info.capabilities)
-    }
-
     /// 移除设备缓存（disconnect；v1 lib 内调用点待会话管理接线）。
     #[allow(dead_code)]
     pub(super) fn remove(pnp: &str) {
@@ -89,6 +81,15 @@ mod cache {
             .map(|(k, v)| (k.clone(), v.capabilities))
             .collect()
     }
+
+    /// 探测得到的机身序列号（枚举时物理身份合并用；未探测 None）。
+    pub(super) fn identity(pnp: &str) -> Option<String> {
+        map()
+            .lock()
+            .expect("tethering cache mutex poisoned")
+            .get(&crate::devices::normalize_device_id(pnp))
+            .and_then(|info| info.serial.clone())
+    }
 }
 
 impl CameraBackend for WpdMtpBackend {
@@ -101,46 +102,169 @@ impl CameraBackend for WpdMtpBackend {
     }
 
     /// 类型上限（设备级以探测为准）：文件通道 + 两种拍摄码 + OBJECT_ADDED
-    /// 均为 WPD 通道潜在能力；LiveView v1 不支持。
+    /// 均为 WPD 通道潜在能力；实时取景按尼康原生操作集探测。
     fn capabilities(&self) -> Capabilities {
         Capabilities::FILE_TRANSFER
             .union(Capabilities::STANDARD_CAPTURE)
             .union(Capabilities::VENDOR_CAPTURE_NIKON)
             .union(Capabilities::OBJECT_ADDED_EVENTS)
+            .union(Capabilities::LIVE_VIEW)
     }
 
     /// 枚举 WPD 设备（复用既有 worker 枚举，不逐台 Open）；已探测设备
-    /// 以缓存能力位填充，未探测设备只给默认位（fileTransfer）。
+    /// 以缓存能力位填充，未探测设备只给默认位（fileTransfer）。物理身份
+    /// （vid/pid）从设备路径解析；serial 只有 connect 探测后才填充（缓存
+    /// 命中时带出）。
     fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
         let devices = crate::devices::wpd::enumerate_mtp_devices().map_err(TetherError::from)?;
         let infos = devices
             .into_iter()
-            .map(|(pnp, name)| CameraInfo {
-                pnp_id: pnp,
-                name,
-                capabilities: Capabilities::FILE_TRANSFER,
+            .map(|(pnp, name)| {
+                let (vid, pid) = usb_vid_pid_from_pnp(&pnp);
+                let serial = cache::identity(&pnp);
+                CameraInfo {
+                    pnp_id: pnp,
+                    name,
+                    capabilities: Capabilities::FILE_TRANSFER,
+                    serial,
+                    vid,
+                    pid,
+                }
             })
             .collect();
         Ok(apply_cached_capabilities(infos, &cache::snapshot()))
     }
 
     /// 打开会话 + 全量探测（worker 线程执行；probe 通道与数据通道分离）。
+    fn probe(&self, pnp_id: &str) -> Result<CameraInfo, TetherError> {
+        let id = pnp_id.to_string();
+        let info = crate::devices::wpd::schedule_com_operation(
+            &format!("probe:{id}"),
+            Duration::from_secs(10),
+            move || com::probe_device(&id),
+        )
+        .map_err(TetherError::from)?;
+        cache::insert(info.clone());
+        Ok(info)
+    }
     fn connect(&self, pnp_id: &str) -> Result<CameraInfo, TetherError> {
-        {
-            let pnp = pnp_id.to_string();
-            let info = crate::devices::wpd::schedule_com_operation(
-                &format!("probe:{pnp}"),
-                Duration::from_secs(30),
-                move || com::probe_device(&pnp),
-            )
-            .map_err(TetherError::from)?;
-            cache::insert(info.clone());
-            Ok(info)
-        }
+        let id = pnp_id.to_string();
+        let info = crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::native::connect(&id),
+        )
+        .map_err(TetherError::from)?;
+        cache::insert(info.clone());
+        Ok(info)
+    }
+    fn trigger_capture(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        let id = pnp_id.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(30),
+            move || com::native::capture(&id, Duration::from_secs(20)),
+        )
+        .map_err(Into::into)
+    }
+    fn poll_objects(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
+        let id = pnp_id.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::native::poll(&id),
+        )
+        .map_err(Into::into)
+    }
+    /// 崩溃/重连恢复：按对象 id 校验仍在设备上并重新入收片队列（§B）。
+    fn request_objects(&self, pnp_id: &str, ids: &[String]) -> Result<Vec<String>, TetherError> {
+        let id = pnp_id.to_string();
+        let ids = ids.to_vec();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::native::request_objects(&id, &ids),
+        )
+        .map_err(Into::into)
+    }
+    /// 参数事件序号（设备属性变更事件在回调里只递增此值，不读相机）。
+    fn settings_revision(&self, pnp_id: &str) -> u64 {
+        com::native::settings_revision(pnp_id)
+    }
+    fn acknowledge_captured(
+        &self,
+        pnp_id: &str,
+        object: &CapturedObject,
+    ) -> Result<(), TetherError> {
+        com::native::acknowledge(pnp_id, &object.object_id);
+        Ok(())
+    }
+    fn live_view_frame(&self, pnp_id: &str) -> Result<LiveViewFrame, TetherError> {
+        let id = pnp_id.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::native::frame(&id),
+        )
+        .map_err(Into::into)
+    }
+    /// 待接收对象数（进程级 FIFO 直读，纯锁访问无需 COM/worker 往返）。
+    fn pending_receipts(&self, pnp_id: &str) -> usize {
+        com::native::pending_receipts(pnp_id)
+    }
+
+    fn settings(&self, pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
+        let id = pnp_id.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::control::settings(&id),
+        )
+        .map_err(Into::into)
+    }
+
+    fn set_setting(&self, pnp_id: &str, setting: &str, value: &str) -> Result<(), TetherError> {
+        let id = pnp_id.to_string();
+        let setting = setting.to_string();
+        let value = value.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::control::set_setting(&id, &setting, &value),
+        )
+        .map_err(Into::into)
+    }
+
+    fn focus_at(&self, pnp_id: &str, x: f64, y: f64) -> Result<(), TetherError> {
+        let id = pnp_id.to_string();
+        crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || {
+                match com::native::focus_at(&id, x, y) {
+                    Ok(()) => Ok(()),
+                    // 无原生连接（未开取景/临时会话）→ 独立连接整帧 AF 驱动
+                    Err(crate::devices::DeviceError::Disconnected) => com::control::focus_at(&id, x, y),
+                    Err(error) => Err(error),
+                }
+            },
+        )
+        .map_err(Into::into)
     }
 
     /// 断开：丢弃会话态缓存并隔离旧连接（复用既有 invalidate）。
     fn disconnect(&self, pnp_id: &str) {
+        let id = pnp_id.to_string();
+        if let Err(error) = crate::devices::wpd::schedule_com_operation(
+            &format!("data:{id}"),
+            Duration::from_secs(10),
+            move || com::native::close(&id),
+        ) {
+            crate::devices::diagnostics::record(format!(
+                "Native camera cleanup failed; retaining worker: {error}"
+            ));
+            return;
+        }
         cache::remove(pnp_id);
         crate::devices::wpd::invalidate_device(pnp_id);
     }
@@ -158,10 +282,10 @@ impl CameraBackend for WpdMtpBackend {
             match crate::devices::wpd::schedule_com_operation(
                 &format!("data:{pnp}"),
                 pool_timeout,
-                move || com::capture_session(&pnp, timeout),
+                move || com::native::capture_once(&pnp, timeout),
             ) {
                 // 拍摄业务结果（含 Timeout/CaptureNotSupported 等）
-                Ok(inner) => inner,
+                Ok(object) => Ok(object),
                 // 调度/COM 层失败（会话打不开、拔线等）
                 Err(device_err) => Err(TetherError::from(device_err)),
             }
@@ -172,6 +296,11 @@ impl CameraBackend for WpdMtpBackend {
 // ---------------------------------------------------------------------------
 // Windows COM 实现（全部调用带 SAFETY 注释；对象生命周期归宿 worker 线程）
 // ---------------------------------------------------------------------------
+
+pub(crate) fn fast_media_counts(id: &str) -> crate::devices::DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+    let id = id.to_owned();
+    crate::devices::wpd::schedule_com_operation(&format!("data:{id}"), std::time::Duration::from_secs(10), move || com::fast_media_counts(&id))
+}
 
 mod com {
     use std::sync::{Arc, Condvar, Mutex};
@@ -184,13 +313,16 @@ mod com {
         WPD_COMMAND_MTP_EXT_END_DATA_TRANSFER,
         WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE,
         WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_READ, WPD_COMMAND_MTP_EXT_READ_DATA,
-        WPD_EVENT_OBJECT_ADDED, WPD_EVENT_PARAMETER_EVENT_ID, WPD_OBJECT_ID, WPD_OBJECT_NAME,
+        WPD_EVENT_DEVICE_CAPABILITIES_UPDATED, WPD_EVENT_NOTIFICATION, WPD_EVENT_OBJECT_ADDED,
+        WPD_EVENT_PARAMETER_EVENT_ID, WPD_OBJECT_ID, WPD_OBJECT_NAME,
         WPD_OBJECT_ORIGINAL_FILE_NAME, WPD_OBJECT_SIZE, WPD_PROPERTY_COMMON_COMMAND_CATEGORY,
-        WPD_PROPERTY_COMMON_COMMAND_ID, WPD_PROPERTY_MTP_EXT_OPERATION_CODE,
-        WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS, WPD_PROPERTY_MTP_EXT_OPTIMAL_TRANSFER_BUFFER_SIZE,
-        WPD_PROPERTY_MTP_EXT_RESPONSE_CODE, WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT,
-        WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ,
+        WPD_PROPERTY_COMMON_COMMAND_ID, WPD_PROPERTY_COMMON_HRESULT,
+        WPD_PROPERTY_MTP_EXT_OPERATION_CODE, WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS,
+        WPD_PROPERTY_MTP_EXT_OPTIMAL_TRANSFER_BUFFER_SIZE, WPD_PROPERTY_MTP_EXT_RESPONSE_CODE,
+        WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT, WPD_PROPERTY_MTP_EXT_TRANSFER_DATA,
+        WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ,
         WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_TO_READ,
+        WPD_PROPERTY_MTP_EXT_TRANSFER_TOTAL_DATA_SIZE,
     };
     use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
@@ -200,8 +332,18 @@ mod com {
     use crate::devices::wpd::com as wpd_com;
     use crate::devices::{DeviceError, DeviceResult};
 
-    use super::super::backend::{CameraInfo, CapturedObject, TetherError};
+    use super::super::backend::{CameraInfo, CapturedObject};
     use super::super::mtp;
+    use super::super::ptp_control;
+    use super::super::vendor_dispatch;
+
+    pub(super) mod native {
+        include!("wpd_native.rs");
+    }
+
+    pub(super) mod control {
+        include!("wpd_control.rs");
+    }
 
     /// 默认读块（驱动建议值缺省时的回退）。
     const READ_CHUNK_FALLBACK: u32 = 64 * 1024;
@@ -301,7 +443,21 @@ mod com {
     ) -> DeviceResult<IPortableDeviceValues> {
         let values = build_command_values(command_key, code, params)?;
         // SAFETY: 设备已 Open；values 为本地合法参数集合
-        unsafe { device.SendCommand(0, &values) }.map_err(wpd_com::win_error)
+        send_values(device, &values)
+    }
+
+    fn send_values(
+        device: &IPortableDevice,
+        values: &IPortableDeviceValues,
+    ) -> DeviceResult<IPortableDeviceValues> {
+        // SendCommand can succeed while the command result carries a failure HRESULT.
+        // SAFETY: device is open and values owns the complete command payload.
+        let results = unsafe { device.SendCommand(0, values) }.map_err(wpd_com::win_error)?;
+        // SAFETY: static property key; results lives through the read.
+        if let Ok(status) = unsafe { results.GetErrorValue(&WPD_PROPERTY_COMMON_HRESULT) } {
+            status.ok().map_err(wpd_com::win_error)?;
+        }
+        Ok(results)
     }
 
     /// 读取响应码（驱动成功送达命令时必含；缺失视为透传层异常）。
@@ -332,15 +488,25 @@ mod com {
         code: u16,
         params: &[u32],
     ) -> DeviceResult<(u32, Vec<u8>)> {
+        execute_with_data_limit(device, code, params, DEVICE_INFO_MAX_BYTES)
+    }
+
+    fn execute_with_data_limit(
+        device: &IPortableDevice,
+        code: u16,
+        params: &[u32],
+        limit: usize,
+    ) -> DeviceResult<(u32, Vec<u8>)> {
         let results = send_command(
             device,
             &WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_READ,
             code,
             params,
         )?;
-        let resp = response_code(&results)?;
-        if resp != mtp::PTP_RESP_OK {
-            return Ok((resp, Vec::new())); // 设备层拒绝：由调用方按响应码报错
+        if let Ok(response) = response_code(&results) {
+            if response != mtp::PTP_RESP_OK {
+                return Ok((response, Vec::new()));
+            }
         }
         // 传输上下文（驱动分配的字符串句柄；后续 READ_DATA/END 均携带）
         // SAFETY: 键为静态常量
@@ -365,38 +531,82 @@ mod com {
         .unwrap_or(READ_CHUNK_FALLBACK)
         .clamp(1024, READ_CHUNK_FALLBACK) as usize;
 
+        // The begin response supplies a context and size, not the PTP response code.
+        let total = unsafe {
+            results.GetUnsignedLargeIntegerValue(&WPD_PROPERTY_MTP_EXT_TRANSFER_TOTAL_DATA_SIZE)
+        }
+        .ok();
+        let data = read_payload_limit(total, chunk, limit, |size| {
+            read_data_chunk(device, &context, size)
+        });
+        // Always close the transfer, including read/size failures, to release the camera.
+        let end = end_transfer(device, &context);
+        let data = data?;
+        let response = response_code(&end?)?;
+        Ok((response, data))
+    }
+
+    fn end_transfer(
+        device: &IPortableDevice,
+        context: &str,
+    ) -> DeviceResult<IPortableDeviceValues> {
+        let values = base_command_values(&WPD_COMMAND_MTP_EXT_END_DATA_TRANSFER)?;
+        let wide = wpd_com::to_wide(context);
+        // SAFETY: static property key; the NUL-terminated string lives through SendCommand.
+        unsafe {
+            values.SetStringValue(
+                &WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT,
+                windows::core::PCWSTR(wide.as_ptr()),
+            )
+        }
+        .map_err(wpd_com::win_error)?;
+        send_values(device, &values)
+    }
+
+    /// DeviceInfo 默认上限便捷包装（传输纯函数单测形态）。
+    #[cfg(test)]
+    fn read_payload(
+        total: Option<u64>,
+        chunk: usize,
+        read: impl FnMut(usize) -> DeviceResult<Vec<u8>>,
+    ) -> DeviceResult<Vec<u8>> {
+        read_payload_limit(total, chunk, DEVICE_INFO_MAX_BYTES, read)
+    }
+
+    fn read_payload_limit(
+        total: Option<u64>,
+        chunk: usize,
+        limit: usize,
+        mut read: impl FnMut(usize) -> DeviceResult<Vec<u8>>,
+    ) -> DeviceResult<Vec<u8>> {
+        let known = total.filter(|n| *n != u32::MAX as u64 && *n != u64::MAX);
+        if known.is_some_and(|n| n > limit as u64) {
+            return Err(DeviceError::Other("MTP DeviceInfo 数据集异常超限".into()));
+        }
         let mut data = Vec::new();
         loop {
-            let read = read_data_chunk(device, &context, chunk)?;
-            if read.is_empty() {
-                break; // 驱动报告 0 字节：数据相位结束
+            if known == Some(data.len() as u64) {
+                return Ok(data);
             }
-            data.extend_from_slice(&read);
-            if data.len() > DEVICE_INFO_MAX_BYTES {
+            let requested = known
+                .map(|n| (n as usize - data.len()).min(chunk))
+                .unwrap_or(chunk);
+            let block = read(requested)?;
+            if block.len() > requested {
+                return Err(DeviceError::Other("MTP 返回的数据超过请求大小".into()));
+            }
+            if block.is_empty() && known.is_some() {
+                return Err(DeviceError::Other("MTP DeviceInfo 数据集未完整传输".into()));
+            }
+            let short = block.len() < requested;
+            data.extend_from_slice(&block);
+            if data.len() > limit {
                 return Err(DeviceError::Other("MTP DeviceInfo 数据集异常超限".into()));
             }
-        }
-        // 结束传输（携带上下文；失败尽力而为——上下文随会话回收）
-        let end = (|| {
-            let values = base_command_values(&WPD_COMMAND_MTP_EXT_END_DATA_TRANSFER)?;
-            let wide = wpd_com::to_wide(&context);
-            // SAFETY: 键为静态常量；wide 以 NUL 结尾且在本调用内存活
-            unsafe {
-                values.SetStringValue(
-                    &WPD_PROPERTY_MTP_EXT_TRANSFER_CONTEXT,
-                    windows::core::PCWSTR(wide.as_ptr()),
-                )
+            if known.is_none() && short {
+                return Ok(data);
             }
-            .map_err(wpd_com::win_error)?;
-            // SAFETY: 设备已 Open
-            unsafe { device.SendCommand(0, &values) }.map_err(wpd_com::win_error)
-        })();
-        if let Err(err) = end {
-            crate::devices::diagnostics::record(format!(
-                "MTP END_DATA_TRANSFER 失败（忽略）: {err}"
-            ));
         }
-        Ok((resp, data))
     }
 
     /// READ_DATA 单块：携带上下文 + 请求字节数，返回数据块。
@@ -423,8 +633,13 @@ mod com {
             )
         }
         .map_err(wpd_com::win_error)?;
+        // READ_DATA requires the host to provide the destination buffer.
+        let buffer = vec![0u8; chunk];
+        // SAFETY: SetBufferValue copies this buffer into the values collection.
+        unsafe { values.SetBufferValue(&WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, &buffer) }
+            .map_err(wpd_com::win_error)?;
         // SAFETY: 设备已 Open
-        let results = unsafe { device.SendCommand(0, &values) }.map_err(wpd_com::win_error)?;
+        let results = send_values(device, &values)?;
         // SAFETY: 键为静态常量
         let got = unsafe {
             results.GetUnsignedIntegerValue(&WPD_PROPERTY_MTP_EXT_TRANSFER_NUM_BYTES_READ)
@@ -440,11 +655,14 @@ mod com {
             results.GetBufferValue(&WPD_PROPERTY_MTP_EXT_TRANSFER_DATA, &mut ptr, &mut count)
         }
         .map_err(wpd_com::win_error)?;
-        if ptr.is_null() || count == 0 {
-            return Ok(Vec::new());
+        if ptr.is_null() || count < got || got as usize > chunk {
+            if !ptr.is_null() {
+                unsafe { CoTaskMemFree(Some(ptr as *const core::ffi::c_void)) };
+            }
+            return Err(DeviceError::Other("MTP 返回的缓冲区长度无效".into()));
         }
         // SAFETY: ptr 指向驱动分配的 count 字节缓冲（本块生命周期至下方 free）
-        let chunk_data = unsafe { std::slice::from_raw_parts(ptr, count as usize) }.to_vec();
+        let chunk_data = unsafe { std::slice::from_raw_parts(ptr, got as usize) }.to_vec();
         // SAFETY: GetBufferValue 缓冲由 API 以 CoTaskMem 分配
         unsafe { CoTaskMemFree(Some(ptr as *const core::ffi::c_void)) };
         Ok(chunk_data)
@@ -453,6 +671,34 @@ mod com {
     // -----------------------------------------------------------------------
     // 能力探测（camera_probe / capture 前置）
     // -----------------------------------------------------------------------
+
+    pub(super) fn fast_media_counts(id: &str) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+        use windows::core::Interface;
+        use windows::Win32::Devices::PortableDevices::WPD_PROPERTY_MTP_EXT_RESPONSE_PARAMS;
+        let _com = wpd_com::ComApartment::init().map_err(wpd_com::win_error)?;
+        let device = wpd_com::open_device(id)?;
+        let (code, bytes) = execute_with_data_to_read(&device, 0x1001, &[])?;
+        if code != 0x2001 { return Ok(None); }
+        let info = mtp::parse_device_info(&bytes).map_err(|error| DeviceError::Other(error.to_string()))?;
+        // Sony's ARW format was verified on hardware. Other vendors keep the
+        // general enumerator until their raw format/count contract is verified.
+        if !info.manufacturer.to_ascii_lowercase().contains("sony") || !info.operations_supported.contains(&0x1006) { return Ok(None); }
+        let count = |format: u32| -> DeviceResult<Option<u64>> {
+            let results = send_command(&device, &WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE, 0x1006, &[u32::MAX, format, 0])?;
+            if response_code(&results)? != 0x2001 { return Ok(None); }
+            let values = unsafe { results.GetIUnknownValue(&WPD_PROPERTY_MTP_EXT_RESPONSE_PARAMS) }.map_err(wpd_com::win_error)?.cast::<IPortableDevicePropVariantCollection>().map_err(wpd_com::win_error)?;
+            let mut value = PROPVARIANT::default();
+            unsafe { values.GetAt(0, &mut value as *mut _ as *const _) }.map_err(wpd_com::win_error)?;
+            let number = unsafe { if value.Anonymous.Anonymous.vt == VT_UI4 { Some(value.Anonymous.Anonymous.Anonymous.ulVal as u64) } else { None } };
+            let _ = unsafe { PropVariantClear(&mut value) };
+            Ok(number)
+        };
+        let started = Instant::now();
+        let (Some(all), Some(folders), Some(jpg), Some(raw)) = (count(0)?, count(0x3001)?, count(0x3801)?, count(0xb101)?) else { return Ok(None); };
+        if all.checked_sub(folders) != jpg.checked_add(raw) { return Ok(None); }
+        crate::devices::diagnostics::record(format!("WPD fast count: jpg={jpg} raw={raw}; elapsed={:?}", started.elapsed()));
+        Ok(Some(std::collections::BTreeMap::from([(crate::events::AssetKind::Photo, jpg), (crate::events::AssetKind::Raw, raw)])))
+    }
 
     /// 打开会话 + 全量探测：MTP GetDeviceInfo（透传）解析
     /// OperationsSupported/EventsSupported，WPD GetSupportedEvents 交叉验证
@@ -470,10 +716,16 @@ mod com {
         }
         let parsed =
             mtp::parse_device_info(&data).map_err(|e| DeviceError::Other(e.to_string()))?;
+        let brand = ptp_control::detect_brand(
+            &parsed.manufacturer,
+            &parsed.model,
+            &parsed.operations_supported,
+        );
         // OpenSession 支持情况仅记录（WPD 驱动自管 PTP 会话，无需手动开）
         crate::devices::diagnostics::record(format!(
-            "MTP 探测 {}: standard=v{} vendor_ext=0x{:08X} ops={} 事件={} OpenSession 支持={}",
+            "MTP 探测 {}: vendor={:?} standard=v{} vendor_ext=0x{:08X} ops={} 事件={} OpenSession 支持={}",
             crate::devices::normalize_device_id(pnp_id),
+            brand,
             parsed.standard_version,
             parsed.vendor_extension_id,
             parsed.operations_supported.len(),
@@ -483,16 +735,75 @@ mod com {
                 .contains(&mtp::PTP_OP_OPEN_SESSION),
         ));
         let wpd_object_added = supported_events_contains_object_added(&device)?;
-        let caps = mtp::capabilities_from_probe(
+        let mut caps = mtp::capabilities_from_probe(
             &parsed.operations_supported,
             &parsed.events_supported,
             wpd_object_added,
         );
+        // LiveView 能力判定集中在 vendor_dispatch：Nikon 且声明完整
+        // 9201/9202/9203 才启用（品牌来自 Manufacturer，不用 PnP VID 猜——
+        // Sony 与 Nikon 复用同一数值区间且含义不同）。
+        let vendor = vendor_dispatch::profile(brand);
+        // Sony 等厂商的扩展操作码藏在遥控握手之后：能力判定前先展开操作码
+        // 表（幂等握手）；失败退回原始表，按保守能力报告，不阻断连接。
+        let mut session_transport = control::WpdTransport {
+            device: device.clone(),
+        };
+        let operations = match vendor.expand_operations(
+            &mut session_transport,
+            &parsed.operations_supported,
+        ) {
+            Ok(operations) => operations,
+            Err(error) => {
+                crate::devices::diagnostics::record(format!(
+                    "Probe vendor expansion failed; using raw operations: {error}"
+                ));
+                parsed.operations_supported.clone()
+            }
+        };
+        if vendor.live_view_supported(&operations) {
+            caps = caps.union(super::super::backend::Capabilities::LIVE_VIEW);
+        }
+        let (vid, pid) = super::super::backend::usb_vid_pid_from_pnp(pnp_id);
         Ok(CameraInfo {
             pnp_id: pnp_id.to_string(),
-            name: crate::devices::hotplug::pnp_display_name(pnp_id),
+            name: device_display_name(&device)
+                .unwrap_or_else(|_| crate::devices::hotplug::pnp_display_name(pnp_id)),
             capabilities: caps,
+            serial: device_serial_number(&device),
+            vid,
+            pid,
         })
+    }
+
+    /// 机身序列号（WPD 设备属性；只读探测，缺省/不可读 → None）。
+    fn device_serial_number(device: &IPortableDevice) -> Option<String> {
+        use windows::Win32::Devices::PortableDevices::{
+            WPD_DEVICE_OBJECT_ID, WPD_DEVICE_SERIAL_NUMBER,
+        };
+        // SAFETY: the open device owns these COM interfaces; the root id is static.
+        let content = unsafe { device.Content() }.ok()?;
+        let properties = unsafe { content.Properties() }.ok()?;
+        // SAFETY: read-only property query on the open device.
+        let values = unsafe { properties.GetValues(WPD_DEVICE_OBJECT_ID, None) }.ok()?;
+        wpd_com::string_prop(&values, &WPD_DEVICE_SERIAL_NUMBER)
+            .map(|serial| serial.trim().to_string())
+            .filter(|serial| !serial.is_empty())
+    }
+
+    fn device_display_name(device: &IPortableDevice) -> DeviceResult<String> {
+        use windows::Win32::Devices::PortableDevices::{
+            WPD_DEVICE_FRIENDLY_NAME, WPD_DEVICE_MODEL, WPD_DEVICE_OBJECT_ID,
+        };
+        // SAFETY: the open device owns these COM interfaces; the root id is static.
+        let content = unsafe { device.Content() }.map_err(wpd_com::win_error)?;
+        let properties = unsafe { content.Properties() }.map_err(wpd_com::win_error)?;
+        let values = unsafe { properties.GetValues(WPD_DEVICE_OBJECT_ID, None) }
+            .map_err(wpd_com::win_error)?;
+        wpd_com::string_prop(&values, &WPD_DEVICE_FRIENDLY_NAME)
+            .or_else(|| wpd_com::string_prop(&values, &WPD_DEVICE_MODEL))
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| DeviceError::Other("相机缺少名称".into()))
     }
 
     /// WPD 能力查询：GetSupportedEvents 是否含 WPD_EVENT_OBJECT_ADDED
@@ -536,92 +847,6 @@ mod com {
 
     /// 一次拍摄：Advise → 发码 → 限时等 OBJECT_ADDED → 富化 → Unadvise。
     /// 返回业务结果（含超时语义），调度层错误经 DeviceResult 外传。
-    pub fn capture_session(
-        pnp_id: &str,
-        timeout: Duration,
-    ) -> DeviceResult<Result<CapturedObject, TetherError>> {
-        (|| {
-            let _com = wpd_com::ComApartment::init().map_err(wpd_com::win_error)?;
-            let device = wpd_com::open_device(pnp_id)?;
-
-            // 能力选码：缓存命中直接用；否则本会话现场探测（GetDeviceInfo）
-            let caps = match super::cache::capabilities(pnp_id) {
-                Some(caps) => caps,
-                None => {
-                    let get_info = mtp::get_device_info_command();
-                    let (resp, data) =
-                        execute_with_data_to_read(&device, get_info.code, &get_info.params)?;
-                    if resp != mtp::PTP_RESP_OK {
-                        return Err(DeviceError::Other(format!(
-                            "GetDeviceInfo 被拒绝（MTP 响应 0x{resp:04X}）"
-                        )));
-                    }
-                    let parsed = mtp::parse_device_info(&data)
-                        .map_err(|e| DeviceError::Other(e.to_string()))?;
-                    let wpd_object_added = supported_events_contains_object_added(&device)?;
-                    mtp::capabilities_from_probe(
-                        &parsed.operations_supported,
-                        &parsed.events_supported,
-                        wpd_object_added,
-                    )
-                }
-            };
-            let command = mtp::capture_command(caps).map_err(|err| {
-                // 选不出拍摄码：设备级 Other 文案（经 From 转回 TetherError）
-                DeviceError::Other(err.to_string())
-            })?;
-
-            // 订阅 OBJECT_ADDED（回调仅提取对象 ID，经 Condvar 唤醒本线程）
-            let waiter = Arc::new(ObjectAddedWait::default());
-            // SAFETY: implement 宏生成的 COM 包装；Advise 期间驱动持有引用
-            let callback: IPortableDeviceEventCallback = ObjectAddedCallback {
-                waiter: Arc::clone(&waiter),
-            }
-            .into();
-            // SAFETY: CLSID 为静态常量；无外部聚合（空过滤参数 = 全部事件）
-            let advise_params: IPortableDeviceValues = unsafe {
-                CoCreateInstance(
-                    &wpd_com::CLSID_PORTABLE_DEVICE_VALUES,
-                    None::<&windows::core::IUnknown>,
-                    CLSCTX_INPROC_SERVER,
-                )
-            }
-            .map_err(wpd_com::win_error)?;
-            // SAFETY: 设备已 Open；回调接口已实现 IPortableDeviceEventCallback
-            let cookie_ptr = unsafe { device.Advise(0, &callback, &advise_params) }
-                .map_err(wpd_com::win_error)?;
-            // SAFETY: Advise 出参为 NUL 结尾宽字符串
-            let cookie = unsafe { wpd_com::pwstr_to_string(cookie_ptr) };
-            // SAFETY: Advise 分配的 cookie 字符串由调用方释放
-            unsafe { wpd_com::free_pwstr(cookie_ptr) };
-
-            let outcome = (|| {
-                let resp = execute_without_data(&device, command.code, &command.params)?;
-                if resp != mtp::PTP_RESP_OK {
-                    return Err(DeviceError::Other(format!(
-                        "相机拒绝拍摄命令（MTP 响应 0x{resp:04X}）"
-                    )));
-                }
-                // 等待新对象（回调线程唤醒；超时 → Timeout 语义）
-                let Some(object_id) = waiter.wait(timeout) else {
-                    return Ok(Err(TetherError::Timeout));
-                };
-                let captured = enrich_object(&device, &object_id)?;
-                Ok(Ok(captured))
-            })();
-
-            // 清理（成功/失败/超时任何路径都 Unadvise；失败尽力而为）
-            let cookie_wide = wpd_com::to_wide(&cookie);
-            // SAFETY: cookie_wide 以 NUL 结尾且在本调用内存活
-            if let Err(err) =
-                unsafe { device.Unadvise(windows::core::PCWSTR(cookie_wide.as_ptr())) }
-            {
-                crate::devices::diagnostics::record(format!("Unadvise 失败（忽略）: {err}"));
-            }
-            outcome
-        })()
-    }
-
     /// 新对象富化：批量读文件名/大小（对象 ID 来自事件参数）。
     fn enrich_object(device: &IPortableDevice, object_id: &str) -> DeviceResult<CapturedObject> {
         // SAFETY: 设备已 Open
@@ -666,75 +891,108 @@ mod com {
     // OBJECT_ADDED 回调（驱动线程 → 等待器）
     // -----------------------------------------------------------------------
 
-    /// 回调线程写 / worker 线程限时读 的单值等待器（Mutex+Condvar 天然
-    /// Send+Sync，跨 COM 回调线程安全）。
-    #[derive(Default)]
-    struct ObjectAddedWait {
-        object_id: Mutex<Option<String>>,
-        cvar: Condvar,
-    }
-
-    impl ObjectAddedWait {
-        fn set(&self, object_id: String) {
-            let mut guard = self.object_id.lock().expect("object-added mutex poisoned");
-            if guard.is_none() {
-                *guard = Some(object_id);
-            }
-            self.cvar.notify_all();
-        }
-
-        /// 限时等待（首值即返回；到期返回 None）。
-        fn wait(&self, timeout: Duration) -> Option<String> {
-            let deadline = Instant::now() + timeout;
-            let mut guard = self.object_id.lock().expect("object-added mutex poisoned");
-            loop {
-                if let Some(id) = guard.take() {
-                    return Some(id);
-                }
+    #[cfg(test)]
+    mod transfer_tests {
+        use super::*;
+        #[test]
+        #[ignore = "requires exclusive Sony MTP camera; reads protocol capabilities and property list only"]
+        fn live_mtp_bulk_operation_probe() {
+            use windows::core::Interface;
+            let _com = wpd_com::ComApartment::init().unwrap();
+            let (id, _) = wpd_com::enumerate().unwrap().into_iter().find(|(_, name)| name.contains("ILCE")).unwrap();
+            let device = wpd_com::open_device(&id).unwrap();
+            let (response, bytes) = execute_with_data_to_read(&device, 0x1001, &[]).unwrap();
+            assert_eq!(response, 0x2001);
+            let info = mtp::parse_device_info(&bytes).unwrap();
+            eprintln!("Native MTP GetObjectPropList supported: {}; operations={:x?}", info.operations_supported.contains(&0x9805), info.operations_supported);
+            for format in [0u32, 0x3001, 0x3801, 0x3000, 0xb101] {
                 let now = Instant::now();
-                if now >= deadline {
-                    return None;
-                }
-                let (next, _) = self
-                    .cvar
-                    .wait_timeout(guard, deadline - now)
-                    .expect("object-added mutex poisoned");
-                guard = next;
+                let results = send_command(&device, &WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE, 0x1006, &[u32::MAX, format, 0]).unwrap();
+                let code = response_code(&results).unwrap();
+                let params = unsafe { results.GetIUnknownValue(&windows::Win32::Devices::PortableDevices::WPD_PROPERTY_MTP_EXT_RESPONSE_PARAMS) }.unwrap().cast::<IPortableDevicePropVariantCollection>().unwrap();
+                let mut value = PROPVARIANT::default();
+                unsafe { params.GetAt(0, &mut value as *mut _ as *const _) }.unwrap();
+                let number = unsafe { value.Anonymous.Anonymous.Anonymous.ulVal };
+                let _ = unsafe { PropVariantClear(&mut value) };
+                eprintln!("GetNumObjects format={format:x} response={code:x} count={number} elapsed={:?}", now.elapsed());
+            }
+            let now = Instant::now();
+            let (response, handles) = execute_with_data_limit(&device, 0x1007, &[u32::MAX, 0x3801, 0], 128*1024).unwrap();
+            eprintln!("GetObjectHandles response={response:x} bytes={} elapsed={:?}", handles.len(), now.elapsed());
+            assert_eq!(response, 0x2001);
+            if handles.len() >= 8 {
+                let handle = u32::from_le_bytes(handles[4..8].try_into().unwrap());
+                let now = Instant::now();
+                let (response, data) = execute_with_data_limit(&device, 0x1008, &[handle], 4096).unwrap();
+                eprintln!("GetObjectInfo handle={handle:x} response={response:x} bytes={} elapsed={:?}", data.len(), now.elapsed());
+                assert_eq!(response, 0x2001);
             }
         }
-    }
-
-    /// OBJECT_ADDED 事件回调：仅提取事件 GUID 与新对象 ID（不读属性——
-    /// 富化回 worker 线程做，回调保持最小工作量）。
-    #[implement(IPortableDeviceEventCallback)]
-    struct ObjectAddedCallback {
-        waiter: Arc<ObjectAddedWait>,
-    }
-
-    impl IPortableDeviceEventCallback_Impl for ObjectAddedCallback_Impl {
-        fn OnEvent(&self, params: Ref<'_, IPortableDeviceValues>) -> windows::core::Result<()> {
-            // Ref 是 ABI 包装：ok() 取回借用（NULL 参数不可能出现于驱动回调）
-            let Ok(values) = params.ok() else {
-                return Ok(());
-            };
-            // SAFETY: values 为驱动传入的事件参数集合（回调存活期内有效）
-            unsafe {
-                if let Ok(event_id) = values.GetGuidValue(&WPD_EVENT_PARAMETER_EVENT_ID) {
-                    if event_id == WPD_EVENT_OBJECT_ADDED {
-                        // SAFETY: WPD_OBJECT_ID 出参（若存在）为 API 分配宽字符串
-                        if let Ok(ptr) = values.GetStringValue(&WPD_OBJECT_ID) {
-                            // SAFETY: GetStringValue 出参为 NUL 结尾宽字符串
-                            let id = wpd_com::pwstr_to_string(ptr);
-                            // SAFETY: 出参缓冲由 API 以 CoTaskMem 分配
-                            wpd_com::free_pwstr(ptr);
-                            if !id.is_empty() {
-                                self.waiter.set(id);
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(())
+        #[test]
+        fn known_size_finishes_without_extra_read() {
+            let mut calls = 0;
+            let data = read_payload(Some(5), 4, |size| {
+                calls += 1;
+                Ok(vec![1; size])
+            })
+            .unwrap();
+            assert_eq!(data.len(), 5);
+            assert_eq!(calls, 2);
+        }
+        #[test]
+        fn unknown_size_finishes_on_short_chunk() {
+            let mut calls = 0;
+            let data = read_payload(Some(u32::MAX as u64), 4, |_| {
+                calls += 1;
+                Ok(vec![1; if calls == 1 { 4 } else { 2 }])
+            })
+            .unwrap();
+            assert_eq!(data.len(), 6);
+            assert_eq!(calls, 2);
+        }
+        #[test]
+        fn truncated_and_oversized_payloads_fail() {
+            assert!(read_payload(Some(5), 4, |_| Ok(vec![])).is_err());
+            assert!(
+                read_payload(Some(DEVICE_INFO_MAX_BYTES as u64 + 1), 4, |_| panic!(
+                    "must not read"
+                ))
+                .is_err()
+            );
+        }
+        #[test]
+        #[ignore = "takes one photo on an explicitly selected camera"]
+        fn live_wpd_capture_and_read() {
+            use super::super::super::backend::CameraBackend;
+            use super::super::WpdMtpBackend;
+            let id =
+                std::env::var("PHOTOGRAPHER_TEST_CAMERA").expect("set PHOTOGRAPHER_TEST_CAMERA");
+            let backend = WpdMtpBackend::new();
+            backend.connect(&id).expect("connect");
+            let object = backend
+                .capture_still(&id, Duration::from_secs(20))
+                .expect("trigger shutter and receive object");
+            println!("Captured: {object:?}");
+            let mut input = backend
+                .open_captured(&id, &object)
+                .expect("open captured photo");
+            let size =
+                std::io::copy(&mut input, &mut std::io::sink()).expect("read captured photo");
+            assert!(size > 0);
+            println!("Transferred {size} bytes");
+            backend.acknowledge_captured(&id, &object).unwrap();
+            backend.disconnect(&id);
+        }
+        #[test]
+        #[ignore = "requires an explicitly selected connected camera"]
+        fn live_wpd_camera_probe() {
+            let id =
+                std::env::var("PHOTOGRAPHER_TEST_CAMERA").expect("set PHOTOGRAPHER_TEST_CAMERA");
+            let info = probe_device(&id).expect("WPD camera probe");
+            println!("Camera: {info:?}");
+            assert!(
+                info.capabilities.standard_capture() || info.capabilities.vendor_capture_nikon()
+            );
         }
     }
 }

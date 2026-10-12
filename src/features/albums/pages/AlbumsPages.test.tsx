@@ -1,7 +1,7 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -28,7 +28,9 @@ import {
   assetsByIds,
   indexStatus,
   searchSemantic,
+  subscribeAppEvents,
   type AlbumDto,
+  type AppEvent,
 } from "@/ipc/api";
 import type { AiModelStatus, IndexStatus } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -54,6 +56,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     albumDelete: vi.fn(),
     albumCoverSet: vi.fn(),
     albumAssetsPage: vi.fn(),
+    subscribeAppEvents: vi.fn(),
   };
 });
 vi.mock("@tauri-apps/api/core", () => ({
@@ -75,6 +78,7 @@ const albumDirRenameMock = vi.mocked(albumDirRename);
 const albumDeleteMock = vi.mocked(albumDelete);
 const albumCoverSetMock = vi.mocked(albumCoverSet);
 const albumAssetsPageMock = vi.mocked(albumAssetsPage);
+const subscribeMock = vi.mocked(subscribeAppEvents);
 const convertMock = vi.mocked(convertFileSrc);
 
 function gateModel(
@@ -173,6 +177,8 @@ beforeEach(() => {
   // 语义门禁默认就绪（模型全装 + 索引已建）；各用例按需覆写为被拦态
   aiModelsStatusMock.mockReset().mockResolvedValue(readyModels());
   indexStatusMock.mockReset().mockResolvedValue(builtIndex());
+  // 事件订阅默认 noop（各用例可覆写捕获 handler 手动发事件）
+  subscribeMock.mockReset().mockResolvedValue(() => {});
   useAiStore.getState().resetForTests();
   resetThumbPipelineForTests();
 });
@@ -226,7 +232,7 @@ describe("M4 路由与侧栏", () => {
     // 自动执行（无手动触发）
     await screen.findAllByTestId("gallery-tile");
     expect(searchSemanticMock).toHaveBeenCalledWith("日落", 100, undefined);
-    expect(assetsByIdsMock).toHaveBeenCalledWith([5, 6]);
+    expect(assetsByIdsMock).toHaveBeenCalledWith([5, 6], true);
     expect(screen.getByTestId("album-tag-page")).toHaveTextContent("智能相册 · 日落");
 
     const tiles = screen.getAllByTestId("gallery-tile");
@@ -493,6 +499,31 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     expect(screen.getAllByTestId("albums-tag")).toHaveLength(SMART_ALBUM_TAGS.length);
   });
 
+  // 删库联动（2026-10-09）：照片库登记增删 → 相册计数/封面随库内资产整体
+  // 消失失真，photoLibrariesChanged 事件到达即重拉清单
+  it("photoLibrariesChanged → 重拉相册清单（计数跟随新数据）", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(1, "婚礼", 10)]);
+    const handlers: Array<(event: AppEvent) => void> = [];
+    subscribeMock.mockImplementation(async (cb) => {
+      handlers.push(cb);
+      return () => {};
+    });
+    renderRoutes("/albums");
+    expect(await screen.findAllByTestId("albums-manual-card")).toHaveLength(1);
+    expect(albumListMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("albums-manual-count")).toHaveTextContent("10 张");
+
+    // 删库后重拉：库内资产没了，计数归零
+    albumListMock.mockResolvedValue([makeAlbum(1, "婚礼", 0)]);
+    act(() => {
+      for (const handler of [...handlers]) handler({ type: "photoLibrariesChanged" });
+    });
+    await waitFor(() => expect(albumListMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByTestId("albums-manual-count")).toHaveTextContent("0 张"),
+    );
+  });
+
   it("手工相册封面：coverAssetId 指定 → 该资产缩略图；未指定 → 取列表第一张", async () => {
     albumListMock.mockResolvedValue([
       { ...makeAlbum(1, "有封面", 5), coverAssetId: 9 },
@@ -555,7 +586,7 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument();
   });
 
-  it("卡片右键菜单：重命名 / 设为封面 / 删除；删除红色确认弹窗文案「N 张照片将移入回收站」", async () => {
+  it("卡片右键菜单：重命名 / 设为封面 / 删除；删除提示明确保留照片", async () => {
     const user = userEvent.setup();
     albumListMock.mockResolvedValue([makeAlbum(3, "待整理", 8)]);
     renderRoutes("/albums");
@@ -571,13 +602,26 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     await user.click(within(menu).getByTestId("albums-card-context-menu-item-delete"));
     const dialog = await screen.findByTestId("album-delete-dialog");
     expect(within(dialog).getByTestId("album-delete-hint")).toHaveTextContent(
-      "相册内 8 张照片将移入回收站",
+      "删除相册不会删除其中的 8 张照片",
     );
 
     // 确认 → album_delete(3) + 卡片移除
     await user.click(within(dialog).getByTestId("album-delete-confirm"));
-    await waitFor(() => expect(albumDeleteMock).toHaveBeenCalledWith(3));
+    await waitFor(() => expect(albumDeleteMock).toHaveBeenCalledWith(3, false));
     await waitFor(() => expect(screen.queryByTestId("albums-manual-card")).not.toBeInTheDocument());
+  });
+
+  it("删除相册可选择将照片移入回收站，不提供删除源文件操作", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(3, "待整理", 8)]);
+    renderRoutes("/albums");
+    const card = await screen.findByTestId("albums-manual-card");
+    fireEvent.contextMenu(card, { clientX: 120, clientY: 80 });
+    fireEvent.click(await screen.findByTestId("albums-card-context-menu-item-delete"));
+    expect(screen.getByTestId("album-delete-keep-photos")).toBeChecked();
+    fireEvent.click(screen.getByTestId("album-delete-trash-photos"));
+    expect(screen.getByTestId("album-delete-hint")).toHaveTextContent("源文件不会删除");
+    fireEvent.click(screen.getByTestId("album-delete-confirm"));
+    await waitFor(() => expect(albumDeleteMock).toHaveBeenCalledWith(3, true));
   });
 
   it("悬浮 ⋯ 菜单与右键同一菜单；重命名弹窗：重名错误行内提示，成功更新卡片名", async () => {
@@ -648,36 +692,27 @@ describe("相册页两区：手工相册 + 智能相册", () => {
     await waitFor(() => expect(screen.queryByTestId("album-dir-rename-dialog")).not.toBeInTheDocument());
   });
 
-  it("规格修订：系统保底相册「未分组」——卡片副标签「默认相册」；菜单无重命名入口、删除禁用", async () => {
-    const user = userEvent.setup();
-    albumListMock.mockResolvedValue([
-      { id: 1, name: "未分组", coverAssetId: null, itemCount: 6, createdAt: "2026-09-01" },
-      makeAlbum(2, "旅行", 3),
-    ]);
+  it("管理页联拍入口先要求选择或新建相册", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(7, "棚拍", 0)]);
     renderRoutes("/albums");
+    await screen.findByTestId("albums-manual-card");
+    fireEvent.click(screen.getByTestId("albums-tether-button"));
+    expect(await screen.findByTestId("tether-album-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("tether-album-next")).toBeDisabled();
+    expect(screen.getByTestId("tether-album-select")).toHaveTextContent("棚拍");
+    fireEvent.change(screen.getByTestId("tether-album-select"), { target: { value: "new" } });
+    expect(screen.getByTestId("tether-album-name")).toBeInTheDocument();
+    expect(screen.getByTestId("tether-album-next")).toBeDisabled();
+  });
 
-    const cards = await screen.findAllByTestId("albums-manual-card");
-    // 副标签「默认相册」只挂在未分组卡片
-    const ungroupedCard = cards.find((c) => c.getAttribute("data-album-id") === "1");
-    const travelCard = cards.find((c) => c.getAttribute("data-album-id") === "2");
-    expect(ungroupedCard).toBeDefined();
-    expect(within(ungroupedCard as HTMLElement).getByTestId("albums-manual-badge-ungrouped")).toHaveTextContent("默认相册");
-    expect((travelCard as HTMLElement).querySelector('[data-testid="albums-manual-badge-ungrouped"]')).toBeNull();
-
-    // 菜单：未分组无「重命名」入口、删除禁用；普通相册照旧
-    fireEvent.contextMenu(ungroupedCard as HTMLElement, { clientX: 20, clientY: 20 });
-    let menu = await screen.findByTestId("albums-card-context-menu");
-    expect(within(menu).queryByTestId("albums-card-context-menu-item-rename")).not.toBeInTheDocument();
-    expect(within(menu).getByTestId("albums-card-context-menu-item-dir-rename")).toBeInTheDocument();
-    expect(within(menu).getByTestId("albums-card-context-menu-item-delete")).toBeDisabled();
-    await user.click(within(menu).getByTestId("albums-card-context-menu-item-delete"));
-    expect(screen.queryByTestId("album-delete-dialog")).not.toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByTestId("albums-card-context-menu")).not.toBeInTheDocument());
-
-    fireEvent.contextMenu(travelCard as HTMLElement, { clientX: 20, clientY: 20 });
-    menu = await screen.findByTestId("albums-card-context-menu");
-    expect(within(menu).getByTestId("albums-card-context-menu-item-rename")).toBeInTheDocument();
+  it("未分组名称不再有系统限制，允许重命名和删除", async () => {
+    albumListMock.mockResolvedValue([makeAlbum(1, "未分组", 6)]);
+    renderRoutes("/albums");
+    const card = await screen.findByTestId("albums-manual-card");
+    expect(screen.queryByTestId("albums-manual-badge-ungrouped")).toBeNull();
+    fireEvent.contextMenu(card, { clientX: 20, clientY: 20 });
+    const menu = await screen.findByTestId("albums-card-context-menu");
+    expect(within(menu).getByTestId("albums-card-context-menu-item-rename")).toBeEnabled();
     expect(within(menu).getByTestId("albums-card-context-menu-item-delete")).toBeEnabled();
   });
 
@@ -716,4 +751,18 @@ it.each(["normal", "accurate"] as const)("智能相册只要求当前 %s 档语�
   expect(await screen.findByTestId("album-tag-page")).toBeInTheDocument();
   expect(screen.queryByTestId("albums-gate-notice")).not.toBeInTheDocument();
   useSettingsStore.setState((s) => ({ settings: { ...s.settings, ai: { ...s.settings.ai, qualityTier: "normal" } } }));
+});
+
+
+it("标签页被旧模型状态拦截后，下载完成可原页自动继续搜索",async()=>{
+  aiModelsStatusMock.mockResolvedValue(gatedModels());
+  useAiStore.setState({models:gatedModels(),modelsLoaded:true,indexStatus:builtIndex()});
+  renderRoutes("/albums/%E6%97%A5%E8%90%BD");
+  expect(await screen.findByTestId("album-tag-gate-notice")).toBeInTheDocument();
+  expect(searchSemanticMock).not.toHaveBeenCalled();
+  aiModelsStatusMock.mockResolvedValue(readyModels());
+  await act(async()=>{useAiStore.getState().handleAppEvent({type:"aiModelDownloadFinished",id:"siglip2-text",ok:true});await useAiStore.getState().refresh();});
+  await waitFor(()=>expect(searchSemanticMock).toHaveBeenCalledWith("日落",100,undefined));
+  expect(screen.queryByTestId("album-tag-gate-notice")).not.toBeInTheDocument();
+  expect(searchSemanticMock).toHaveBeenCalledTimes(1);
 });

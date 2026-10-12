@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -6,6 +6,8 @@ import { isMacPlatform } from "@/lib/platform";
 import { motion } from "motion/react";
 
 import { motionInitial, TRANS, useMotionOn } from "@/lib/motion";
+import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
+import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 
 import {
   subscribeAppEvents,
@@ -17,9 +19,13 @@ import {
   tetheringSettingSet,
   tetheringSettings,
   tetheringStop,
+  assetsByIds,
+  type AssetDto,
   type TetherCameraSetting,
   type TetherSessionDto,
 } from "@/ipc/api";
+
+import { filmCards, type FilmCard } from "./filmstrip";
 
 /**
  * 联机拍摄独立窗口（/tethering?session=<id>；后端 tethering_start 创建本窗口，
@@ -27,7 +33,8 @@ import {
  * - 顶部：自绘标题栏（decorations=false）——相册名/相机名/连接状态 + 最小化/关闭
  * - 中央：实时取景（tethering_frame 轮询，帧率 15/30/60 档可调；不支持时回落最近一张成片）
  * - 右栏：相机参数（shutter/aperture/iso 下拉；tethering_setting_set 即时生效）
- * - 底部：本次会话胶片条（tetheringPhotoAdded 事件驱动 + 预览）
+ * - 底部：本次会话胶片条（tetheringPhotoAdded 事件驱动；一次快门一张卡，
+ *   RAW+JPG 同 stem 合并 + 格式角标；点击复用画廊查看器全屏预览）
  * 会话态以后端为唯一真值（独立 webview 的 store 是空会话，不读主窗口状态）。
  */
 
@@ -53,6 +60,16 @@ function settingLabel(id: string, fallback: string, t: (k: string) => string): s
   return translated === key ? fallback : translated;
 }
 
+/** 滑条取值范围：后端嵌套 range 优先，旧扁平 min/max/step 兼容；
+ *  max ≤ min 或 step ≤ 0 视为无效（回退下拉/单值展示，不渲染滑条）。 */
+function sliderRange(s: TetherCameraSetting): { min: number; max: number; step: number } | null {
+  const r = s.range ?? (s.min !== undefined && s.max !== undefined
+    ? { min: s.min, max: s.max, step: s.step ?? 1 }
+    : null);
+  if (r === null || !(r.max > r.min) || !(r.step > 0)) return null;
+  return r;
+}
+
 /** 面板排序：常用拍摄参数在前，其余按标签字母序，动作按钮最后。 */
 const SETTING_ORDER = [
   "shutterspeed", "f-number", "iso", "expprogram", "exposuremetermode", "exposurecompensation",
@@ -61,21 +78,18 @@ const SETTING_ORDER = [
   "imagesize", "pcsaveimgsize", "liveviewsettingeffect", "manualfocus", "focusmagnifier",
 ] as const;
 
-/** 悬浮工具栏参数（拍摄模式 + 曝光三要素 + 对焦 + 白平衡）：常驻取景画面
+/** 悬浮工具栏保留拍摄模式与曝光三要素：常驻取景画面
  *  底部，随手可调不用翻面板。choice 形态才进工具栏（range/action 走右栏）。 */
-const QUICK_IDS = ["expprogram", "shutterspeed", "f-number", "iso", "whitebalance", "focusmode", "focusarea"] as const;
+const QUICK_IDS = ["expprogram", "shutterspeed", "f-number", "iso"] as const;
 
 /** 工具栏常驻例外：只读也保留展示——
- *  - expprogram（拍摄模式）：唯一能切回 M/A/S 的入口，藏了就被锁死在档位里；
+ *  - expprogram（拍摄模式）：只读时提示使用机身转盘；
  *  - f-number（光圈）：镜头环控制的机身常见，只读也要能看到当前值。 */
 const QUICK_ALWAYS_SHOW = new Set<string>(["expprogram", "f-number"]);
 
 /** 机身模式切换（A/S 档 ↔ M 档）会改变参数可写性——settings 轮询间隔：
  *  只读的快门在 A 档隐藏、切回 M 档要能自动回来，靠这轮询刷新快照。 */
 const SETTINGS_POLL_MS = 5000;
-
-/** 工具栏拖动位置持久化键（相对取景容器左上的像素）。 */
-const QUICKBAR_POS_KEY = "tethering.quickbar.pos";
 
 function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   const rank = (s: TetherCameraSetting): number => {
@@ -89,18 +103,21 @@ function orderSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   });
 }
 
-/** 工具栏参数：拍摄模式/曝光三要素/对焦/白平衡；只读隐藏——模式与光圈例外。 */
+/** 工具栏参数：拍摄模式和曝光三要素；只读模式与光圈保留展示。
+ *  可写但无候选（Range 型 ISO 等）不进工具栏（弹层只承载候选表，滑条走右栏）。 */
 function quickSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
   return QUICK_IDS.map((id) => settings.find((s) => s.id === id))
     .filter((s): s is TetherCameraSetting => {
       if (s === undefined || s.kind !== "choice") return false;
-      return s.writable || QUICK_ALWAYS_SHOW.has(s.id);
+      return (s.writable && s.options.length > 0) || QUICK_ALWAYS_SHOW.has(s.id);
     });
 }
 
-/** 右栏参数：工具栏之外的**可调**参数（只读一律不显示，光圈例外在工具栏）。 */
+/** 右栏参数：工具栏之外的可调参数。
+ *  排除口径 = 工具栏实际渲染的参数（可写但无候选的 QUICK_ID 走右栏滑条，
+ *  不能两头都不渲染）。 */
 function panelSettings(settings: TetherCameraSetting[]): TetherCameraSetting[] {
-  const quick = new Set<string>(QUICK_IDS);
+  const quick = new Set(quickSettings(settings).map((s) => s.id));
   return orderSettings(settings).filter((s) => !quick.has(s.id) && s.writable);
 }
 
@@ -112,6 +129,8 @@ export default function TetheringWindowPage() {
   const [session, setSession] = useState<TetherSessionDto | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [frame, setFrame] = useState<string | null>(null);
+  /** 相机回报的当前 AF 区域（归一化 x/y/w/h；随帧更新，null=本帧无数据）。 */
+  const [afRegion, setAfRegion] = useState<[number, number, number, number] | null>(null);
   const [fps, setFps] = useState<number>(loadStoredFps);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -136,26 +155,36 @@ export default function TetheringWindowPage() {
   /** 工具栏参数弹层：当前展开的设置 id（单开；点外部收起）。 */
   const [quickOpen, setQuickOpen] = useState<string | null>(null);
   const quickBarRef = useRef<HTMLDivElement | null>(null);
-  /** 工具栏拖动位置（null = 默认底部居中；持久化 localStorage）。 */
-  const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(() => {
-    try {
-      const raw = window.localStorage.getItem(QUICKBAR_POS_KEY);
-      if (raw === null) return null;
-      const p = JSON.parse(raw) as { x?: unknown; y?: unknown };
-      return typeof p.x === "number" && typeof p.y === "number" ? { x: p.x, y: p.y } : null;
-    } catch {
-      return null;
-    }
-  });
+  /** 每次打开默认底部居中；手动拖动的位置仅保留在当前窗口。 */
+  const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(null);
   /** AF 触发反馈（600ms 绿闪）。 */
   const [afFlash, setAfFlash] = useState(false);
+  /** 待收计数（前端近似）：快门成功触发 +1、photoAdded 事件/快照新片 -1；
+   *  后端事件暂无收据 pending 真值，以此近似显示「N 待收」。 */
+  const [pendingShots, setPendingShots] = useState(0);
+  /** 点击胶片条打开的查看器结果集（打开时按会话照片全量拉一次，≤64；
+   *  复用画廊 useAssetViewer + ViewerOverlay——左右切换/RAW↔JPG 版本切换
+   *  同一结果集内完成）。 */
+  const [viewerAssets, setViewerAssets] = useState<AssetDto[]>([]);
+  const viewerGroups = useMemo(() => [{ key: "__tether__", date: null, assets: viewerAssets }], [viewerAssets]);
+  const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(viewerGroups, viewerAssets);
   const motionOn = useMotionOn();
 
   const liveViewSupported = session?.camera.capabilities.liveView === true;
+  /** 远程拍摄能力（标准 PTP 或厂商扩展，任一即可）——能力位驱动，不做品牌假设。 */
+  const captureSupported = session?.camera.capabilities.standardCapture === true
+    || session?.camera.capabilities.vendorCaptureNikon === true;
   const connected = session?.connected === true;
   const receiving = session?.receiving === true;
   const photos = session?.photos ?? [];
+  /** 待收显示 = 后端 FIFO 真值优先（RAW+JPG/连拍按队列实数计），本地
+   *  快门计数兜底（快照未回之间的间隙）。 */
+  const pendingTotal = Math.max(pendingShots, session?.pendingReceipts ?? 0);
+  /** 胶片条合并卡（一次快门一张卡；RAW+JPG 同 stem 合并，角标标注格式）。 */
+  const cards = useMemo(() => filmCards(photos), [photos]);
   const settingsBusy = Object.keys(pendingSettings).length > 0;
+  /** 待收中的收片遇错（会话错误/拍摄错误）→ 轻提示转为「重试中」。 */
+  const receivingRetry = pendingTotal > 0 && (captureError !== null || session?.error != null);
 
   useEffect(() => {
     alive.current = true;
@@ -204,13 +233,13 @@ export default function TetheringWindowPage() {
     }
   }, [sessionId]);
 
-  const scheduleSettingsRefresh = useCallback(() => {
+  const scheduleSettingsRefresh = useCallback((delay = 50) => {
     settingsDirty.current = true;
     if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
       void refreshSettings();
-    }, 200);
+    }, delay);
   }, [refreshSettings]);
 
   useEffect(() => {
@@ -229,6 +258,9 @@ export default function TetheringWindowPage() {
   const mergeSession = useCallback((next: TetherSessionDto) => {
     setSession(next);
     const ids = next.photos.map((p) => p.id);
+    // 待收对账：快照里已到的新片冲抵待收计数（photoAdded 事件丢失/竞态时兜底）
+    const arrived = Math.max(0, next.photos.length - photosRef.current.length);
+    if (arrived > 0) setPendingShots((n) => Math.max(0, n - arrived));
     photosRef.current = ids;
     setPreviews((prev) => {
       const keep: Record<number, string> = {};
@@ -255,16 +287,30 @@ export default function TetheringWindowPage() {
     if (sessionId === "") return;
     let off: (() => void) | null = null;
     let cancelled = false;
+    /** photoAdded 后去抖重拉快照：后端 FIFO 真值（pendingReceipts）与快照
+     *  对账兜底都在快照里——RAW+JPG 第二张在途时「N 待收」不失真。 */
+    let resnapshot: number | null = null;
+    const scheduleResnapshot = () => {
+      if (resnapshot !== null) window.clearTimeout(resnapshot);
+      resnapshot = window.setTimeout(() => {
+        resnapshot = null;
+        void tetheringSession(sessionId).then((dto) => {
+          if (dto !== null && dto !== undefined && alive.current) mergeSession(dto);
+        });
+      }, 400);
+    };
     void subscribeAppEvents((event) => {
       if (event.type === "tetheringPhotoAdded" && event.sessionId === sessionId) {
+        setPendingShots((n) => Math.max(0, n - 1));
         setSession((prev) =>
           prev === null || prev.photos.some((photo) => photo.id === event.assetId)
             ? prev
             : {
                 ...prev,
-                photos: [...prev.photos, { id: event.assetId, name: event.name, kind: "photo" }].slice(-64),
+                photos: [...prev.photos, { id: event.assetId, name: event.name, kind: event.kind }].slice(-64),
               },
         );
+        scheduleResnapshot();
       } else if (event.type === "tetheringStatus" && event.sessionId === sessionId) {
         setSession((prev) =>
           prev === null ? prev : { ...prev, connected: event.connected, error: event.error },
@@ -281,9 +327,10 @@ export default function TetheringWindowPage() {
       .catch(() => {});
     return () => {
       cancelled = true;
+      if (resnapshot !== null) window.clearTimeout(resnapshot);
       off?.();
     };
-  }, [sessionId, scheduleSettingsRefresh]);
+  }, [sessionId, scheduleSettingsRefresh, mergeSession]);
 
   // 实时取景轮询：拿不到帧保持上一帧（不闪烁）；拍摄/收片期间后端返回 null
   useEffect(() => {
@@ -292,16 +339,17 @@ export default function TetheringWindowPage() {
     let timer: number | null = null;
     let emptyFrames = 0;
     const tick = () => {
-      void tetheringFrame(sessionId).then((url) => {
+      void tetheringFrame(sessionId).then((payload) => {
         if (stopped || !alive.current) return;
-        if (url !== null) {
-          setFrame(url);
+        if (payload !== null) {
+          setFrame(payload.url);
+          setAfRegion(payload.af);
           emptyFrames = 0;
         } else {
           emptyFrames += 1;
         }
         // 相机忙或暂时拿不到画面时退让，避免高帧率重复失败请求。
-        const delay = url === null ? Math.min(500, framePollMs(fps) * Math.min(emptyFrames, 15)) : framePollMs(fps);
+        const delay = payload === null ? Math.min(500, framePollMs(fps) * Math.min(emptyFrames, 15)) : framePollMs(fps);
         timer = window.setTimeout(tick, delay);
       });
     };
@@ -312,11 +360,12 @@ export default function TetheringWindowPage() {
     };
   }, [sessionId, liveViewSupported, connected, fps, capturing, settingsBusy]);
 
-  // 胶片条预览：为还没有预览的照片拉缩略图（新片到达后缩略图生成有延迟，重试 3 次）
+  // 胶片条预览：为还没有预览的合并卡代表拉缩略图（新片到达后缩略图生成有延迟，
+  // 重试 3 次；只拉代表卡——JPG 优先，缩略图解码稳定）
   useEffect(() => {
     if (sessionId === "") return;
     let cancelled = false;
-    const missing = photos.map((p) => p.id).filter((id) => previews[id] === undefined);
+    const missing = cards.map((c) => c.repId).filter((id) => previews[id] === undefined);
     if (missing.length === 0) return;
     const attempt = (id: number, round: number) => {
       if (cancelled) return;
@@ -332,7 +381,22 @@ export default function TetheringWindowPage() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, photos, previews]);
+  }, [sessionId, cards, previews]);
+
+  /** 点击胶片条卡片 → 全屏查看器（复用画廊 ViewerOverlay；结果集 = 本次
+   *  会话照片，打开时拉取——左右切换/版本切换都在会话集内）。 */
+  async function openCard(card: FilmCard): Promise<void> {
+    if (sessionId === "") return;
+    try {
+      const list = await assetsByIds(photos.map((p) => p.id));
+      const rep = list.find((a) => a.id === card.repId);
+      if (rep === undefined || !alive.current) return;
+      setViewerAssets(list);
+      openAsset(rep);
+    } catch {
+      /* 照片已删除/库不可访问：不打开 */
+    }
+  }
 
   async function closeWindow(): Promise<void> {
     alive.current = false;
@@ -345,9 +409,7 @@ export default function TetheringWindowPage() {
   }
 
   async function applySetting(setting: TetherCameraSetting, value: string): Promise<void> {
-    // 拍摄模式是档位逃生舱：相机上报只读也照常尝试（readonly 标志随机身
-    // 状态翻转——休眠/档位切换后常翻只读；真拒绝会走错误提示，不锁死入口）
-    if (sessionId === "" || !connected || captureRef.current || !alive.current || (!setting.writable && setting.id !== "expprogram")
+    if (sessionId === "" || !connected || captureRef.current || !alive.current || !setting.writable
       || value === (pendingValues.current[setting.id] ?? setting.current)) {
       return;
     }
@@ -382,7 +444,7 @@ export default function TetheringWindowPage() {
       }
     } finally {
       writingRef.current = false;
-      if (alive.current) scheduleSettingsRefresh();
+      if (alive.current) scheduleSettingsRefresh(0);
     }
   }
 
@@ -391,12 +453,21 @@ export default function TetheringWindowPage() {
     if (sessionId === "" || !liveViewSupported || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
     const img = e.currentTarget.querySelector("img");
     if (img === null) return;
-    const rect = img.getBoundingClientRect();
+    const viewBox = e.currentTarget.getBoundingClientRect();
+    const rect = contentRect === null ? img.getBoundingClientRect() : {
+      left: viewBox.left + viewBox.width * contentRect.left / 100,
+      top: viewBox.top + viewBox.height * contentRect.top / 100,
+      width: viewBox.width * contentRect.width / 100,
+      height: viewBox.height * contentRect.height / 100,
+    };
     if (rect.width <= 0 || rect.height <= 0) return;
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
     if (x < 0 || x > 1 || y < 0 || y > 1) return;
-    setFocusMark({ x, y });
+    setFocusMark({
+      x: viewBox.width > 0 ? (e.clientX - viewBox.left) / viewBox.width : x,
+      y: viewBox.height > 0 ? (e.clientY - viewBox.top) / viewBox.height : y,
+    });
     window.setTimeout(() => setFocusMark(null), 2000);
     try {
       focusingRef.current = true;
@@ -431,7 +502,7 @@ export default function TetheringWindowPage() {
   }
 
   async function shoot(): Promise<void> {
-    if (sessionId === "" || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
+    if (sessionId === "" || !connected || !captureSupported || captureRef.current || writingRef.current || focusingRef.current) return;
     captureRef.current = true;
     settingsVersion.current += 1;
     setCapturing(true);
@@ -439,6 +510,8 @@ export default function TetheringWindowPage() {
     try {
       const result = await tetheringCapture(sessionId);
       if (!result.ok && alive.current) setCaptureError(result.error ?? t("tether.captureFailed"));
+      // 快门已触发 → 进入待收（photoAdded 事件/快照新片到账后冲抵）
+      if (result.ok && alive.current) setPendingShots((n) => n + 1);
       const next = await tetheringSession(sessionId);
       if (next !== null && alive.current) mergeSession(next);
     } catch (err) {
@@ -452,9 +525,10 @@ export default function TetheringWindowPage() {
     }
   }
 
-  /** 工具栏 AF 触发：画面中心对焦（不支持/模式不符静默）+ 绿闪反馈。 */
+  /** 工具栏 AF 触发：画面中心对焦（不支持/模式不符静默）+ 绿闪反馈。
+   *  点对焦是 live view 操作——相机未上报 liveView 能力时不触发。 */
   async function triggerAf(): Promise<void> {
-    if (sessionId === "" || !connected || captureRef.current || writingRef.current || focusingRef.current) return;
+    if (sessionId === "" || !connected || !liveViewSupported || captureRef.current || writingRef.current || focusingRef.current) return;
     focusingRef.current = true;
     setAfFlash(true);
     window.setTimeout(() => setAfFlash(false), 600);
@@ -468,7 +542,7 @@ export default function TetheringWindowPage() {
     }
   }
 
-  /** 工具栏拖动：grip 按下 → pointer 跟随（限取景容器内）→ 抬起持久化。 */
+  /** 工具栏拖动：grip 按下 → pointer 跟随（限取景容器内）。 */
   function beginBarDrag(e: React.PointerEvent<HTMLButtonElement>): void {
     if (e.button !== 0) return;
     const bar = quickBarRef.current;
@@ -476,7 +550,6 @@ export default function TetheringWindowPage() {
     setQuickOpen(null);
     const offX = e.clientX - bar.getBoundingClientRect().left;
     const offY = e.clientY - bar.getBoundingClientRect().top;
-    let last: { x: number; y: number } | null = null;
     const onMove = (ev: PointerEvent) => {
       const view = quickBarRef.current?.parentElement;
       const barEl = quickBarRef.current;
@@ -484,23 +557,90 @@ export default function TetheringWindowPage() {
       const vr = view.getBoundingClientRect();
       const x = Math.min(Math.max(0, ev.clientX - vr.left - offX), Math.max(0, vr.width - barEl.offsetWidth));
       const y = Math.min(Math.max(0, ev.clientY - vr.top - offY), Math.max(0, vr.height - barEl.offsetHeight));
-      last = { x, y };
-      setBarPos(last);
+      setBarPos({ x, y });
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (last !== null) {
-        try {
-          window.localStorage.setItem(QUICKBAR_POS_KEY, JSON.stringify(last));
-        } catch {
-          /* 持久化失败：本次会话内仍有效 */
-        }
-      }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   }
+
+  // 主画面（渲染与内容矩形测量共用）：live view 帧；不支持时回落最近成片。
+  const lastCard = cards.length > 0 ? cards[cards.length - 1] : null;
+  const mainImage = liveViewSupported ? frame : lastCard !== null ? (previews[lastCard.repId] ?? null) : null;
+
+  // --- 取景画面内容矩形（AF 框叠加定位基准） ------------------------------------------
+  // object-contain 的实际显示区居中于取景容器，AF 框（归一化）必须相对内容区
+  // 定位而非容器；容器百分比几何在等比缩放下不变，帧到达/窗口变形时重算，
+  // 测不到（未布局/测试环境）为 null（不渲染叠加）。
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const [contentRect, setContentRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const measureContentRect = useCallback(() => {
+    const view = viewRef.current;
+    const img = view?.querySelector("img") ?? null;
+    if (view === null || img === null) {
+      setContentRect(null);
+      return;
+    }
+    const viewBox = view.getBoundingClientRect();
+    let imgBox = img.getBoundingClientRect();
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const scale = Math.min(viewBox.width / img.naturalWidth, viewBox.height / img.naturalHeight);
+      const width = img.naturalWidth * scale;
+      const height = img.naturalHeight * scale;
+      imgBox = { ...imgBox, width, height, left: viewBox.left + (viewBox.width - width) / 2,
+        top: viewBox.top + (viewBox.height - height) / 2 };
+    }
+    if (viewBox.width <= 0 || viewBox.height <= 0 || imgBox.width <= 0 || imgBox.height <= 0) {
+      setContentRect(null);
+      return;
+    }
+    setContentRect({
+      left: ((imgBox.left - viewBox.left) / viewBox.width) * 100,
+      top: ((imgBox.top - viewBox.top) / viewBox.height) * 100,
+      width: (imgBox.width / viewBox.width) * 100,
+      height: (imgBox.height / viewBox.height) * 100,
+    });
+  }, []);
+  useEffect(() => {
+    measureContentRect();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measureContentRect);
+    if (viewRef.current !== null) observer?.observe(viewRef.current);
+    window.addEventListener("resize", measureContentRect);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measureContentRect);
+    };
+  }, [mainImage, measureContentRect]);
+
+  useEffect(() => {
+    const bar = quickBarRef.current;
+    const view = viewRef.current;
+    if (bar === null || view === null) return;
+    const keepBarVisible = () => {
+      const bounds = view.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      const maxX = Math.max(0, bounds.width - bar.offsetWidth);
+      const maxY = Math.max(0, bounds.height - bar.offsetHeight);
+      setBarPos((position) => {
+        if (position === null) return null;
+        const x = Math.min(Math.max(0, position.x), maxX);
+        const y = Math.min(Math.max(0, position.y), maxY);
+        return x === position.x && y === position.y ? position : { x, y };
+      });
+    };
+    keepBarVisible();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(keepBarVisible);
+    observer?.observe(view);
+    observer?.observe(bar);
+    window.addEventListener("resize", keepBarVisible);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", keepBarVisible);
+    };
+  }, [loaded, session !== null]);
 
   // --- 渲染 ----------------------------------------------------------------------------
   if (sessionId === "") {
@@ -529,8 +669,6 @@ export default function TetheringWindowPage() {
     );
   }
 
-  const lastPhoto = photos.length > 0 ? photos[photos.length - 1] : null;
-  const mainImage = liveViewSupported ? frame : lastPhoto !== null ? (previews[lastPhoto.id] ?? null) : null;
   const quick = quickSettings(session.settings);
   const panel = panelSettings(session.settings);
   const quickError = quick.map((s) => settingErrors[s.id]).find(Boolean);
@@ -606,19 +744,36 @@ export default function TetheringWindowPage() {
       )}
 
       <div className="flex min-h-0 flex-1">
-        {/* 中央：取景画面（点击画面对焦） */}
+        {/* 中央：取景画面（点击画面对焦；不支持 live view 的相机回落最近成片，
+            容器 tooltip 说明原因——能力位驱动，不做品牌假设） */}
         <div
-          className="relative flex min-w-0 flex-1 items-center justify-center bg-black"
+          ref={viewRef}
+          className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden bg-black ${liveViewSupported && connected ? "cursor-crosshair" : ""}`}
           data-testid="tether-view"
+          title={!liveViewSupported ? t("tether.liveViewUnsupported") : undefined}
           onClick={(e) => void focusAtView(e)}
         >
           {mainImage !== null ? (
-            <img src={mainImage} alt="live view" className="max-h-full max-w-full object-contain" data-testid="tether-view-img" />
+            <img src={mainImage} alt="live view" className="h-full w-full object-contain" onLoad={measureContentRect} data-testid="tether-view-img" />
           ) : (
             <div className="flex flex-col items-center gap-2 text-xs text-white/40">
               <span className={liveViewSupported ? "animate-pulse" : undefined}>{liveViewSupported ? t("tether.liveViewWaiting") : t("tether.liveViewUnsupported")}</span>
-              {!liveViewSupported && lastPhoto === null && <span className="text-[11px]">{t("tether.noPhotos")}</span>}
+              {!liveViewSupported && lastCard === null && <span className="text-[11px]">{t("tether.noPhotos")}</span>}
             </div>
+          )}
+          {/* 相机回报的当前 AF 框（随帧更新；内容区内定位）——点击对焦后
+              机身落点可见，坐标映射是否正确一目了然 */}
+          {afRegion !== null && contentRect !== null && (
+            <div
+              className="pointer-events-none absolute rounded-sm border-2 border-emerald-400/90 shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+              style={{
+                left: `${(contentRect.left + afRegion[0] * contentRect.width).toFixed(3)}%`,
+                top: `${(contentRect.top + afRegion[1] * contentRect.height).toFixed(3)}%`,
+                width: `${(afRegion[2] * contentRect.width).toFixed(3)}%`,
+                height: `${(afRegion[3] * contentRect.height).toFixed(3)}%`,
+              }}
+              data-testid="tether-af-region"
+            />
           )}
           {focusMark !== null && (
             <motion.div
@@ -631,6 +786,22 @@ export default function TetheringWindowPage() {
             >
               <span className="absolute left-1/2 top-1/2 h-3 w-0.5 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
               <span className="absolute left-1/2 top-1/2 h-0.5 w-3 -translate-x-1/2 -translate-y-1/2 bg-accent/90" />
+            </motion.div>
+          )}
+          {/* 待收轻提示：快门已触发、收片未到账（前端计数近似，后端收据事件
+              在途）；收片遇错转为「重试中」。photoAdded 到账后自动消失。 */}
+          {pendingTotal > 0 && (
+            <motion.div
+              className="pointer-events-none absolute left-3 top-3 z-10 rounded-full bg-black/60 px-2.5 py-1 text-[11px] text-white/90 backdrop-blur"
+              role="status"
+              initial={motionInitial(motionOn, { y: -8, opacity: 0 })}
+              animate={{ y: 0, opacity: 1 }}
+              transition={TRANS.slide}
+              data-testid="tether-pending-receipts"
+            >
+              {receivingRetry
+                ? t("tether.receivingRetry")
+                : t("tether.pendingShots", { count: pendingTotal })}
             </motion.div>
           )}
           {capturing && (
@@ -650,20 +821,15 @@ export default function TetheringWindowPage() {
             </motion.div>
           )}
 
-          {/* 悬浮工具栏（SelectionBar 同款浮条视觉）：曝光三要素 / 对焦 / 白平衡
-              常驻画面底部，随手可调不必翻右栏；AF 触发 + 快门随时可拍；
-              grip 拖动可挪位（位置持久化）。
-              不可调参数不进工具栏——拍摄模式与光圈例外（模式是切回
-              M/A/S 的唯一入口，光圈常有镜头环控制的机身）。 */}
+          {/* 拍摄模式、曝光三要素与快门浮条，默认底部居中并支持拖动。 */}
           <div
             ref={quickBarRef}
-            className={`absolute z-20 ${barPos === null ? "bottom-3 left-1/2 w-max -translate-x-1/2" : ""}`}
+            className={`absolute z-20 w-max max-w-full ${barPos === null ? "bottom-3 left-1/2 -translate-x-1/2" : ""}`}
             style={barPos === null ? undefined : { left: barPos.x, top: barPos.y }}
             onClick={(e) => e.stopPropagation()}
             data-testid="tether-quickbar"
           >
-            {/* 单行不折行：宁可整体变长（悬浮层可盖过右栏）也不要竖排/换行 */}
-            <div className="flex items-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
+            <div className="flex flex-wrap items-center gap-1 rounded-full border border-edge bg-surface/95 px-2.5 py-1.5 shadow-xl backdrop-blur">
               {/* 拖动把手 */}
               <button
                 type="button"
@@ -684,21 +850,19 @@ export default function TetheringWindowPage() {
                   <button
                     type="button"
                     onClick={() => setQuickOpen((v) => (v === setting.id ? null : setting.id))}
-                    disabled={(setting.id !== "expprogram" && !setting.writable) || !connected || capturing}
+                    disabled={!setting.writable || !connected || capturing}
                     aria-busy={pendingSettings[setting.id] !== undefined}
                     aria-expanded={quickOpen === setting.id}
                     title={
                       setting.id === "expprogram" && !setting.writable
                         ? t("tether.modeDialHint")
-                        : !setting.writable
-                          ? t("tether.settingReadonly")
-                          : undefined
+                        : !setting.writable ? t("tether.settingReadonly") : undefined
                     }
                     className="flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:bg-panel hover:text-accent disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                     data-testid={`tether-setting-${setting.id}`}
                   >
                     {settingLabel(setting.id, setting.label, t)}
-                    <span className="font-mono tabular-nums text-text-primary">{pendingSettings[setting.id] ?? setting.current}</span>
+                    <span className="font-mono tabular-nums text-text-primary">{setting.options.find(option => option.value === (pendingSettings[setting.id] ?? setting.current))?.label ?? pendingSettings[setting.id] ?? setting.current}</span>
                     {pendingSettings[setting.id] !== undefined && <span className="h-2.5 w-2.5 animate-spin rounded-full border border-accent border-t-transparent" aria-hidden="true" />}
                     <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                       <path d="M4 10l4-4 4 4" />
@@ -727,29 +891,18 @@ export default function TetheringWindowPage() {
                           {option.label === "On" ? t("tether.on") : option.label === "Off" ? t("tether.off") : option.label}
                         </button>
                       ))}
+
                     </div>
                   )}
                 </div>
               ))}
               <span className="h-4 w-px shrink-0 bg-edge" aria-hidden="true" />
-              {/* AF 触发（画面中心对焦；绿边圆钮） */}
-              <button
-                type="button"
-                onClick={() => void triggerAf()}
-                disabled={!connected || capturing || settingsBusy}
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 border-emerald-400/80 text-[10px] font-bold tracking-wide text-emerald-400 shadow transition-all hover:bg-emerald-400/10 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:text-text-muted disabled:opacity-50 ${afFlash ? "bg-emerald-400/25" : ""}`}
-                title={t("tether.param.autofocus")}
-                aria-label={t("tether.param.autofocus")}
-                data-testid="tether-af"
-              >
-                AF
-              </button>
               <button
                 type="button"
                 onClick={() => void shoot()}
-                disabled={capturing || !connected || settingsBusy}
+                disabled={capturing || !connected || !captureSupported || settingsBusy}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-[3px] border-red-500/80 bg-red-500/15 shadow transition-all hover:bg-red-500/30 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:bg-panel disabled:opacity-50"
-                title={t("tether.shutter")}
+                title={!captureSupported ? t("tether.captureUnsupported") : t("tether.shutter")}
                 aria-label={t("tether.shutter")}
                 data-testid="tether-shutter"
               >
@@ -768,7 +921,7 @@ export default function TetheringWindowPage() {
           </div>
         </div>
 
-        {/* 右栏：相机参数 + 快门 */}
+        {/* 右栏：其他相机参数与自动对焦 */}
         <aside className="sp-scroll flex w-64 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="tether-settings-panel">
           <div className="flex items-center justify-between">
             <h2 className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">{t("tether.settings")}</h2>
@@ -781,13 +934,34 @@ export default function TetheringWindowPage() {
               {t("tether.refreshSettings")}
             </button>
           </div>
+          <div className="flex items-center gap-3" data-testid="tether-camera-actions">
+              {/* AF 触发（画面中心对焦；绿边圆钮）。点对焦是 live view 操作：
+                  未上报 liveView 能力的相机禁用并说明原因 */}
+              <button
+                type="button"
+                onClick={() => void triggerAf()}
+                disabled={!connected || !liveViewSupported || capturing || settingsBusy}
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 border-emerald-400/80 text-[10px] font-bold tracking-wide text-emerald-400 shadow transition-all hover:bg-emerald-400/10 active:scale-95 disabled:cursor-not-allowed disabled:border-edge disabled:text-text-muted disabled:opacity-50 ${afFlash ? "bg-emerald-400/25" : ""}`}
+                title={!liveViewSupported ? t("tether.focusNeedsLiveView") : t("tether.param.autofocus")}
+                aria-label={t("tether.param.autofocus")}
+                data-testid="tether-af"
+              >
+                AF
+              </button>
+
+          </div>
           {panel.length === 0 ? (
             <p className="text-[11px] leading-relaxed text-text-muted" data-testid="tether-settings-empty">
               {t("tether.noAdjustable")}
             </p>
           ) : (
-            panel.map((setting) =>
-            setting.kind === "action" ? (
+            panel.map((setting) => {
+            // 滑条判定：无离散 options 且带有效 range（嵌套优先，扁平 min/max/step
+            // 兼容）才渲染滑条；有 options 一律下拉（候选表比连续区间更精确）。
+            const bounds = setting.kind !== "action" && setting.options.length === 0
+              ? sliderRange(setting)
+              : null;
+            return setting.kind === "action" ? (
               <button
                 key={setting.id}
                 type="button"
@@ -798,22 +972,23 @@ export default function TetheringWindowPage() {
               >
                 {settingLabel(setting.id, setting.label, t)}
               </button>
-            ) : setting.kind === "range" ? (
+            ) : bounds !== null ? (
               <div key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
                 <span className="flex items-center justify-between">
                   {settingLabel(setting.id, setting.label, t)}
-                  <span className="tabular-nums text-text-primary">
+                  <span className="tabular-nums text-text-primary" data-testid={`tether-range-value-${setting.id}`}>
                     {rangeDrafts[setting.id] ?? pendingSettings[setting.id] ?? setting.current}
                     {!setting.writable && <span className="ml-1 text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
                   </span>
                 </span>
                 <input
                   type="range"
-                  min={setting.min ?? 0}
-                  max={setting.max ?? 0}
-                  step={setting.step ?? 1}
+                  min={bounds.min}
+                  max={bounds.max}
+                  step={bounds.step}
                   value={rangeDrafts[setting.id] ?? pendingSettings[setting.id] ?? setting.current}
                   disabled={!setting.writable || !connected || capturing}
+                  aria-label={settingLabel(setting.id, setting.label, t)}
                   onInput={(e) => {
                     const draft = e.currentTarget.value;
                     setRangeDrafts((prev) => ({ ...prev, [setting.id]: draft }));
@@ -830,7 +1005,8 @@ export default function TetheringWindowPage() {
                 )}
               </div>
             ) : (
-              <label key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}>
+              <label key={setting.id} className="flex flex-col gap-1 text-xs text-text-secondary" data-testid={`tether-setting-${setting.id}`}
+                title={setting.id === "expprogram" && !setting.writable ? t("tether.modeDialHint") : undefined}>
                 <span className="flex items-center justify-between">
                   {settingLabel(setting.id, setting.label, t)}
                   {!setting.writable && <span className="text-[10px] text-text-muted">{t("tether.settingReadonly")}</span>}
@@ -858,32 +1034,54 @@ export default function TetheringWindowPage() {
                   </span>
                 )}
               </label>
-            )
-            )
+            );
+            })
           )}
         </aside>
       </div>
 
-      {/* 底部：会话胶片条 */}
+      {/* 底部：会话胶片条（一次快门一张卡；RAW+JPG 合并 + 格式角标；点击全屏预览） */}
       <div className="flex h-24 shrink-0 items-center gap-2 overflow-x-auto border-t border-edge bg-surface px-3" data-testid="tether-filmstrip">
-        {photos.length === 0 && (
+        {cards.length === 0 && (
           <span className="text-[11px] text-text-muted">{t("tether.noPhotos")}</span>
         )}
-        {[...photos].reverse().map((photo) => (
-          <div
-            key={photo.id}
-            className="flex h-[88px] w-[88px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-edge bg-bg"
-            title={photo.name}
-            data-testid={`tether-film-${photo.id}`}
+        {[...cards].reverse().map((card) => (
+          <button
+            key={card.repId}
+            type="button"
+            onClick={() => void openCard(card)}
+            className="relative flex h-[88px] w-[88px] shrink-0 cursor-zoom-in items-center justify-center overflow-hidden rounded-md border border-edge bg-bg transition-colors hover:border-accent"
+            title={card.title}
+            data-testid={`tether-film-${card.repId}`}
           >
-            {previews[photo.id] !== undefined ? (
-              <img src={previews[photo.id]} alt={photo.name} className="h-full w-full object-cover" />
+            {previews[card.repId] !== undefined ? (
+              <img src={previews[card.repId]} alt={card.title} className="h-full w-full object-cover" />
             ) : (
               <span className="text-[10px] text-text-muted">…</span>
             )}
-          </div>
+            {card.badge !== null && (
+              <span
+                className="pointer-events-none absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 text-[9px] font-semibold leading-none text-white/90 backdrop-blur"
+                data-testid={`tether-film-badge-${card.repId}`}
+              >
+                {card.badge}
+              </span>
+            )}
+          </button>
         ))}
       </div>
+
+      {/* 点击胶片条的全屏预览（复用画廊查看器；结果集 = 会话照片） */}
+      {viewer && (
+        <ViewerOverlay
+          asset={viewer.asset}
+          group={viewer.group}
+          index={viewer.index}
+          onNavigate={navigateTo}
+          onClose={closeViewer}
+          onVersionSelect={selectVersion}
+        />
+      )}
     </div>
   );
 }

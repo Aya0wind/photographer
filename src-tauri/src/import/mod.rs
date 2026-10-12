@@ -3,4 +3,3 @@
 
 pub mod clean;
 pub mod engine;
-pub mod templates;

@@ -22,6 +22,8 @@ pub const PTP_OP_OPEN_SESSION: u16 = 0x1002;
 pub const PTP_OP_INITIATE_CAPTURE: u16 = 0x100E;
 /// Nikon 厂商扩展拍摄码（libmtp/libgphoto2 公开；1 参数、无数据相位）。
 pub const PTP_OP_NIKON_CAPTURE: u16 = 0x90C0;
+/// Nikon InitiateCaptureRecInMedia: mode + target (0 = card).
+pub const PTP_OP_NIKON_CAPTURE_MEDIA: u16 = 0x9207;
 /// PTP ObjectAdded 事件码（EventsSupported 交叉验证用）。
 pub const PTP_EVENT_OBJECT_ADDED: u16 = 0x4002;
 /// PTP 响应 OK。
@@ -42,13 +44,13 @@ pub struct CaptureCommand {
 /// [`super::backend::TetherError::CaptureNotSupported`]。
 ///
 /// 参数取值（真机验证项 N3，见 mod.rs 清单）：
-/// - 0x90C0：1 参数 0x1（libgphoto2 同款「拍摄至卡」取值）；
+/// - 0x90C0：1 参数 0xFFFFFFFF（libgphoto2 的普通拍摄参数，目标为 SDRAM）；
 /// - 0x100E：StorageID=0（任意存储）+ ObjectFormatCode=0（任意格式）。
 pub fn capture_command(caps: Capabilities) -> Result<CaptureCommand, super::backend::TetherError> {
     if caps.vendor_capture_nikon() {
         Ok(CaptureCommand {
             code: PTP_OP_NIKON_CAPTURE,
-            params: vec![0x1],
+            params: vec![u32::MAX],
         })
     } else if caps.standard_capture() {
         Ok(CaptureCommand {
@@ -77,7 +79,9 @@ pub fn get_device_info_command() -> CaptureCommand {
 /// 布局（ISO 15740 DeviceInfo DataSet，小端）：
 /// `u16 StandardVersion · u32 VendorExtensionID · u16 VendorExtensionVersion
 /// · STR VendorExtensionDesc · u16 FunctionalMode · AUINT16
-/// OperationsSupported · AUINT16 EventsSupported · …`
+/// OperationsSupported · AUINT16 EventsSupported · AUINT16
+/// DevicePropsSupported · AUINT16 CaptureFormats · AUINT16 ImageFormats
+/// · STR Manufacturer · STR Model · …`
 /// 容器格式：AUINT16 = u32 元素数 + N×u16；STR = u8 字符数(含 NUL，0=空)
 /// + N×u16。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +91,9 @@ pub struct DeviceInfoDataset {
     pub vendor_extension_version: u16,
     pub operations_supported: Vec<u16>,
     pub events_supported: Vec<u16>,
+    /// 厂商名/机型（品牌判定输入；数据集尾部缺失时为空串）。
+    pub manufacturer: String,
+    pub model: String,
 }
 
 /// 解析失败（数据集截断/畸形）。
@@ -108,13 +115,31 @@ pub fn parse_device_info(data: &[u8]) -> Result<DeviceInfoDataset, ParseDeviceIn
     let _functional_mode = cur.u16("FunctionalMode")?;
     let operations_supported = cur.au16("OperationsSupported")?;
     let events_supported = cur.au16("EventsSupported")?;
+    // 身份尾部尽力解析：能力字段已完整，尾部缺失/截断不构成解析失败
+    // （品牌判定对空串回退 Standard）。
+    let (manufacturer, model) = parse_identity_tail(&mut cur);
     Ok(DeviceInfoDataset {
         standard_version,
         vendor_extension_id,
         vendor_extension_version,
         operations_supported,
         events_supported,
+        manufacturer,
+        model,
     })
+}
+
+/// 解析 Manufacturer/Model：先跳过三个 AUINT16 数组再读两个字符串。
+/// 任一字段缺失/截断 → 两串皆空（容忍最小数据集与畸形尾部）。
+fn parse_identity_tail(cur: &mut Cursor<'_>) -> (String, String) {
+    for field in ["DevicePropsSupported", "CaptureFormats", "ImageFormats"] {
+        if cur.au16(field).is_err() {
+            return (String::new(), String::new());
+        }
+    }
+    let manufacturer = cur.ptp_string_value("Manufacturer").unwrap_or_default();
+    let model = cur.ptp_string_value("Model").unwrap_or_default();
+    (manufacturer, model)
 }
 
 /// 游标读取器（小端；越界报「截断于字段 X」）。
@@ -155,6 +180,18 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
 
+    /// PTP 字符串内容（UTF-16 解码，剔除 NUL 终止；解码失败 → 空串）。
+    fn ptp_string_value(&mut self, field: &str) -> Result<String, ParseDeviceInfoError> {
+        let len = self.take(1, field)?[0] as usize;
+        let units: Vec<u16> = self
+            .take(len * 2, field)?
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .filter(|unit| *unit != 0)
+            .collect();
+        Ok(String::from_utf16(&units).unwrap_or_default())
+    }
+
     /// AUINT16 容器：u32 元素数 + N×u16。空列表（N=0）合法。
     fn au16(&mut self, field: &str) -> Result<Vec<u16>, ParseDeviceInfoError> {
         let count = self.u32(&format!("{field}.count"))? as usize;
@@ -190,11 +227,131 @@ pub fn capabilities_from_probe(
     if operations.contains(&PTP_OP_INITIATE_CAPTURE) {
         caps = caps.union(Capabilities::STANDARD_CAPTURE);
     }
-    if operations.contains(&PTP_OP_NIKON_CAPTURE) {
+    if operations.contains(&PTP_OP_NIKON_CAPTURE)
+        || operations.contains(&PTP_OP_NIKON_CAPTURE_MEDIA)
+    {
         caps = caps.union(Capabilities::VENDOR_CAPTURE_NIKON);
     }
     if wpd_object_added_event || events.contains(&PTP_EVENT_OBJECT_ADDED) {
         caps = caps.union(Capabilities::OBJECT_ADDED_EVENTS);
     }
     caps
+}
+
+/// WPD needs a card-backed object. Prefer Nikon's media capture when advertised,
+/// then standard card capture; use legacy SDRAM capture only as a last resort.
+/// Parameters match libgphoto2 camlibs/ptp2/ptp.h (ptp_nikon_capture2).
+pub fn capture_command_for_operations(
+    operations: &[u16],
+) -> Result<CaptureCommand, super::backend::TetherError> {
+    if operations.contains(&PTP_OP_NIKON_CAPTURE_MEDIA) {
+        Ok(CaptureCommand {
+            code: PTP_OP_NIKON_CAPTURE_MEDIA,
+            params: vec![u32::MAX, 0],
+        })
+    } else if operations.contains(&PTP_OP_INITIATE_CAPTURE) {
+        capture_command(Capabilities::STANDARD_CAPTURE)
+    } else if operations.contains(&PTP_OP_NIKON_CAPTURE) {
+        capture_command(Capabilities::VENDOR_CAPTURE_NIKON)
+    } else {
+        Err(super::backend::TetherError::CaptureNotSupported)
+    }
+}
+
+#[cfg(test)]
+mod capture_profile_tests {
+    use super::*;
+
+    fn ptp_string(s: &str) -> Vec<u8> {
+        let mut out = vec![(s.chars().count() + 1) as u8];
+        for ch in s.chars() {
+            out.extend_from_slice(&(ch as u16).to_le_bytes());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    fn au16(values: &[u16]) -> Vec<u8> {
+        let mut out = (values.len() as u32).to_le_bytes().to_vec();
+        for v in values {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    /// 标准容器 + 完整身份尾部。
+    fn dataset_with_identity(manufacturer: &str, model: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&6u32.to_le_bytes());
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&ptp_string("MTP"));
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&au16(&[0x1001, 0x90c1]));
+        data.extend_from_slice(&au16(&[0x4002]));
+        data.extend_from_slice(&au16(&[0x5007, 0x500f])); // DevicePropsSupported
+        data.extend_from_slice(&au16(&[])); // CaptureFormats
+        data.extend_from_slice(&au16(&[0x3801])); // ImageFormats
+        data.extend_from_slice(&ptp_string(manufacturer));
+        data.extend_from_slice(&ptp_string(model));
+        data
+    }
+
+    #[test]
+    fn identity_tail_carries_manufacturer_and_model() {
+        let parsed = parse_device_info(&dataset_with_identity("NIKON CORPORATION", "Z 5II"))
+            .expect("完整数据集应解析成功");
+        assert_eq!(parsed.manufacturer, "NIKON CORPORATION");
+        assert_eq!(parsed.model, "Z 5II");
+        assert_eq!(parsed.operations_supported, vec![0x1001, 0x90c1]);
+    }
+
+    #[test]
+    fn minimal_dataset_without_tail_parses_with_empty_identity() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&6u32.to_le_bytes());
+        data.extend_from_slice(&100u16.to_le_bytes());
+        data.extend_from_slice(&ptp_string(""));
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.extend_from_slice(&au16(&[0x1001]));
+        data.extend_from_slice(&au16(&[]));
+        let parsed = parse_device_info(&data).expect("尾部缺失应容忍");
+        assert_eq!(parsed.manufacturer, "");
+        assert_eq!(parsed.model, "");
+
+        // 尾部在 Model 字符串中间截断同样回退，不报错：Manufacturer 完整
+        // 读到，Model 退为空串。
+        let full = dataset_with_identity("SONY", "ILCE-7M4");
+        let cut = &full[..full.len() - 4];
+        let parsed = parse_device_info(cut).expect("截断尾部应容忍");
+        assert_eq!(parsed.manufacturer, "SONY");
+        assert_eq!(parsed.model, "");
+    }
+
+    #[test]
+    fn modern_nikon_targets_card_with_valid_parameters() {
+        let command = capture_command_for_operations(&[0x90c0, 0x100e, 0x9207]).unwrap();
+        assert_eq!(
+            command,
+            CaptureCommand {
+                code: 0x9207,
+                params: vec![0xffffffff, 0]
+            }
+        );
+    }
+    #[test]
+    fn standard_capture_precedes_legacy_sdram() {
+        assert_eq!(
+            capture_command_for_operations(&[0x90c0, 0x100e])
+                .unwrap()
+                .code,
+            0x100e
+        );
+        assert_eq!(
+            capture_command_for_operations(&[0x90c0]).unwrap().params,
+            vec![0xffffffff]
+        );
+        assert!(capture_command_for_operations(&[]).is_err());
+    }
 }

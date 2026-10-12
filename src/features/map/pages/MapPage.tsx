@@ -69,7 +69,9 @@ export default function MapPage() {
             : prev,
         );
       }
-      if (event.type === "mapRegionsUpdated") {
+      if (event.type === "mapRegionsUpdated" || event.type === "photoLibrariesChanged") {
+        // 回填推进/编辑联动，或照片库登记增删（删库联动：气泡计数/样图随
+        // 库内资产整体消失失真）——全量失效重拉当前层
         invalidateAll();
       }
     }).then((fn) => {

@@ -17,7 +17,9 @@ pub use common::{
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use common::open_db;
 use events::EventBus;
 use ipc::AppState;
 
@@ -47,7 +49,8 @@ fn shared_state_at(config_dir: &Path) -> ipc::SharedState {
 
 /// 新建数据库并断言注册表/激活态/物化（复用样板）。
 fn create_db(state: &AppState, name: &str, db_dir: Option<&str>) -> settings::DatabaseEntry {
-    let entry = ipc::databases::fetch_database_create(state, name, db_dir)
+    let initial=ipc::databases::InitialPhotoLibrary{reorganize_existing:false,existing_folder:false,name:name.to_string(),root_path:state.config_dir.join("photos").join(uuid::Uuid::new_v4().to_string()).to_string_lossy().into_owned(),organization_template:crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.into()};
+    let entry = ipc::databases::fetch_database_create(state, name, db_dir, Some(&initial))
         .unwrap_or_else(|e| panic!("新建数据库「{name}」失败: {e}"));
     assert!(
         Path::new(&entry.db_dir).join("library.db").is_file(),
@@ -116,12 +119,12 @@ fn database_create_second_activates_and_rejects_overlap() {
             .to_string_lossy()
             .into_owned(),
     ] {
-        let err = ipc::databases::fetch_database_create(&state, "坏库", Some(&bad)).unwrap_err();
+        let err = ipc::databases::fetch_database_create(&state, "坏库", Some(&bad), None).unwrap_err();
         assert!(err.contains("相同或互相包含"), "{bad} 应被互斥拒绝：{err}");
     }
     // 相对路径 / 空名拒绝
-    assert!(ipc::databases::fetch_database_create(&state, "相对路径库", Some("relative/db")).is_err());
-    assert!(ipc::databases::fetch_database_create(&state, "  ", None).is_err());
+    assert!(ipc::databases::fetch_database_create(&state, "相对路径库", Some("relative/db"), None).is_err());
+    assert!(ipc::databases::fetch_database_create(&state, "  ", None, None).is_err());
     assert_eq!(
         ipc::databases::fetch_database_list(&state).unwrap().databases.len(),
         2,
@@ -222,7 +225,7 @@ fn database_remove_and_create_guard_photo_library_roots() {
 
     let inside_root = photo_root.join("nested");
     let err =
-        ipc::databases::fetch_database_create(&state, "坏库", Some(inside_root.to_str().unwrap()))
+        ipc::databases::fetch_database_create(&state, "坏库", Some(inside_root.to_str().unwrap()), None)
             .unwrap_err();
     assert!(err.contains("照片库"), "新建闸门应点名列出照片库：{err}");
 
@@ -353,4 +356,429 @@ fn settings_set_without_active_database_errors() {
 
     let err = ipc::settings::fetch_settings_set(&state, settings::Settings::default()).unwrap_err();
     assert_eq!(err, "尚未创建数据库");
+}
+
+// ---------------------------------------------------------------------------
+// photo_library_remove 完整级联清理 + 可选删原文件（2026-10-09 用户定案）
+// ---------------------------------------------------------------------------
+
+/// 删库场景的库内资产直插（绕过导入管线；返回自增 id）。
+fn insert_library_asset(db: &db::Db, library_id: &str, path: &Path, xxhash: i64) -> i64 {
+    db.0.execute(
+        "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, source, \
+         created_at, origin, library_id) \
+         VALUES (?1, ?2, 1, '2026-01-01T00:00:00Z', ?3, 'photo', 'imported', \
+         '2026-01-01T00:00:00Z', 'imported', ?4)",
+        rusqlite::params![
+            path.to_string_lossy().to_string(),
+            path.file_name().unwrap().to_string_lossy().to_string(),
+            xxhash,
+            library_id
+        ],
+    )
+    .unwrap();
+    db.0
+        .query_row(
+            "SELECT id FROM assets WHERE path = ?1",
+            [path.to_string_lossy().to_string()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// 删库连记录删的完整级联：FK 级联（album_item/faces）+ 补齐盲区——孤儿
+/// 人物簇 / 缩略图缓存（全档位全 mtime 代）/ 语义向量 / 空连拍壳 /
+/// library_scan_dirs 剪枝缓存 / pair 双向引用；共享人物与邻库的缓存/
+/// 向量/账本不受牵连，物理文件不动（delete_files=false）。
+#[test]
+fn photo_library_remove_with_records_cleans_children_and_derivations() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+    let entry = create_db(&state, "主数据库", Some(dir.path().join("main-db").to_str().unwrap()));
+    let db_dir = Path::new(&entry.db_dir).to_path_buf();
+    let db = ipc::app_database_db(&state).unwrap();
+
+    // 两库：A 待删（管理库），B 保留（验证共享数据不被牵连）
+    let root_a = dir.path().join("photos-a");
+    let root_b = dir.path().join("photos-b");
+    std::fs::create_dir_all(root_a.join("2026/06")).unwrap();
+    std::fs::create_dir_all(root_b.join("2026/06")).unwrap();
+    let lib_a = db
+        .photos_library_register("库A", &root_a.to_string_lossy(), &db_dir)
+        .unwrap();
+    let lib_b = db
+        .photos_library_register("库B", &root_b.to_string_lossy(), &db_dir)
+        .unwrap();
+    let file_a1 = root_a.join("2026/06/DSC_1.jpg");
+    let file_a2 = root_a.join("2026/06/DSC_2.jpg");
+    let file_b1 = root_b.join("2026/06/DSC_9.jpg");
+    for file in [&file_a1, &file_a2, &file_b1] {
+        std::fs::write(file, b"jpeg").unwrap();
+    }
+    let a1 = insert_library_asset(&db, &lib_a.id, &file_a1, 1);
+    let a2 = insert_library_asset(&db, &lib_a.id, &file_a2, 2);
+    let b1 = insert_library_asset(&db, &lib_b.id, &file_b1, 3);
+
+    // 相册引用（相册是全局概念：行保留、成员级联清）
+    db.0.execute(
+        "INSERT INTO album (name, created_at) VALUES ('相册', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    let album_id = db.0.last_insert_rowid();
+    db.0.execute(
+        "INSERT INTO album_item (album_id, asset_id, added_at) \
+         VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+        rusqlite::params![album_id, a1],
+    )
+    .unwrap();
+
+    // 人物簇：孤儿簇只挂库A 的脸；共享簇库A/B 各有脸
+    let orphan_person = db.create_person().unwrap();
+    let shared_person = db.create_person().unwrap();
+    db.insert_face(a1, 0.0, 0.0, 0.5, 0.5, &[0.1, 0.2], Some(orphan_person))
+        .unwrap();
+    db.insert_face(a2, 0.0, 0.0, 0.5, 0.5, &[0.3, 0.4], Some(orphan_person))
+        .unwrap();
+    db.insert_face(a1, 0.0, 0.0, 0.3, 0.3, &[0.5, 0.6], Some(shared_person))
+        .unwrap();
+    db.insert_face(b1, 0.0, 0.0, 0.5, 0.5, &[0.7, 0.8], Some(shared_person))
+        .unwrap();
+
+    // 连拍（库A 独占）+ 跨库 pair（B 引 A）+ 两库各自目录剪枝缓存
+    db.0.execute(
+        "INSERT INTO bursts (asset_count, started_at, ended_at) VALUES (2, NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    let burst_id = db.0.last_insert_rowid();
+    db.0.execute(
+        "UPDATE assets SET burst_id = ?2 WHERE id = ?1",
+        rusqlite::params![a1, burst_id],
+    )
+    .unwrap();
+    db.0.execute(
+        "UPDATE assets SET burst_id = ?2 WHERE id = ?1",
+        rusqlite::params![a2, burst_id],
+    )
+    .unwrap();
+    db.0.execute(
+        "UPDATE assets SET pair_asset_id = ?2 WHERE id = ?1",
+        rusqlite::params![b1, a1],
+    )
+    .unwrap();
+    for lib in [&lib_a, &lib_b] {
+        db.0.execute(
+            "INSERT INTO library_scan_dirs (library_id, dir_path, mtime) \
+             VALUES (?1, '2026', '2026-01-01T00:00:00Z')",
+            [&lib.id],
+        )
+        .unwrap();
+    }
+
+    // 缩略图缓存夹具：a1 当前代 + 陈旧 mtime 代（256 档）+ 512 档；b1 一份
+    let mtime_a1 = std::fs::metadata(&file_a1).unwrap().modified().unwrap();
+    let cache_cur = thumbs::cache_path(&db_dir, &file_a1, 256, mtime_a1);
+    let cache_stale = thumbs::cache_path(
+        &db_dir,
+        &file_a1,
+        256,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+    );
+    let cache_512 = thumbs::cache_path(&db_dir, &file_a1, 512, mtime_a1);
+    let cache_b1 = thumbs::cache_path(
+        &db_dir,
+        &file_b1,
+        256,
+        std::fs::metadata(&file_b1).unwrap().modified().unwrap(),
+    );
+    for cache in [&cache_cur, &cache_stale, &cache_512, &cache_b1] {
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(cache, b"thumb").unwrap();
+    }
+
+    // 语义向量夹具（usearch 真值文件；池内与落盘同把柄）
+    let dim = ai::embed::EMBED_DIM;
+    let index = ai::semantic::shared_index(&db_dir).unwrap();
+    {
+        let idx = index.lock().unwrap();
+        idx.reserve(64).unwrap();
+        idx.add(a1 as u64, &vec![0.5f32; dim]).unwrap();
+        idx.add(b1 as u64, &vec![0.4f32; dim]).unwrap();
+        idx.save(db_dir.join("vectors.usearch").to_str().unwrap())
+            .unwrap();
+    }
+
+    // 执行：连记录删（不动文件）
+    let result =
+        ipc::photo_library::fetch_photo_library_remove(&state, &lib_a.id, false).unwrap();
+    assert_eq!(result.records_deleted, 2);
+    assert_eq!(result.files_deleted, 0, "delete_files=false 不动物理文件");
+
+    // FK 级联 + 补齐清理逐项断言（同一连接读已提交数据）
+    let album_items: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM album_item WHERE asset_id IN (?1, ?2)",
+            rusqlite::params![a1, a2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(album_items, 0, "相册成员级联清（相册行保留）");
+    let faces_a: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM faces WHERE asset_id IN (?1, ?2)",
+            rusqlite::params![a1, a2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(faces_a, 0, "人脸实例级联清");
+    let orphan_left: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM people WHERE id = ?1", [orphan_person], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(orphan_left, 0, "变孤儿的人物簇删除");
+    let shared_left: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM people WHERE id = ?1", [shared_person], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(shared_left, 1, "别的库仍在用的人物保留");
+    let bursts_left: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM bursts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(bursts_left, 0, "空连拍壳清理");
+    let pair_of_b1: Option<i64> = db
+        .0
+        .query_row("SELECT pair_asset_id FROM assets WHERE id = ?1", [b1], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(pair_of_b1.is_none(), "指向被删资产的 pair 引用清空");
+    let scan_dirs_a: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM library_scan_dirs WHERE library_id = ?1",
+            [&lib_a.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scan_dirs_a, 0, "库扫描剪枝缓存随库清（表无 FK）");
+    let scan_dirs_b: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM library_scan_dirs WHERE library_id = ?1",
+            [&lib_b.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scan_dirs_b, 1, "保留库的剪枝缓存不动");
+
+    // 缩略图缓存：a1 全档位全代清；b1 保留
+    assert!(
+        !cache_cur.exists() && !cache_stale.exists() && !cache_512.exists(),
+        "库A 资产缩略图缓存（含陈旧代/跨档位）清理"
+    );
+    assert!(cache_b1.is_file(), "库B 资产缓存不受牵连");
+
+    // 向量：a1 删、b1 留（逐出池后从落盘文件重载，断言清理已持久化）
+    ai::semantic::invalidate_index(&db_dir);
+    let index = ai::semantic::shared_index(&db_dir).unwrap();
+    {
+        let idx = index.lock().unwrap();
+        assert!(!idx.contains(a1 as u64), "库A 资产向量删除");
+        assert!(idx.contains(b1 as u64), "库B 资产向量保留");
+    }
+
+    // 物理文件不动 + 库行消失 + 库内资产行清空
+    assert!(file_a1.is_file() && file_a2.is_file(), "不删文件档物理照片保留");
+    assert!(db.photos_library_get(&lib_a.id).unwrap().is_none());
+    let assets_left: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE library_id = ?1",
+            [&lib_a.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(assets_left, 0, "库内资产记录清空");
+}
+
+/// 管理库 delete_files=true：磁盘文件删除 + 缺失容忍（外部已删不计）+
+/// 删除失败容忍（路径是目录 → warn 日志不中断）。
+#[test]
+fn photo_library_remove_managed_library_deletes_files_with_tolerance() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+    let entry = create_db(&state, "主数据库", Some(dir.path().join("main-db").to_str().unwrap()));
+    let db_dir = Path::new(&entry.db_dir).to_path_buf();
+    let db = ipc::app_database_db(&state).unwrap();
+
+    let root = dir.path().join("photos");
+    std::fs::create_dir_all(root.join("2026/06")).unwrap();
+    let lib = db
+        .photos_library_register("管理库", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    let file_ok = root.join("2026/06/OK.jpg");
+    let file_gone = root.join("2026/06/GONE.jpg");
+    let path_dir = root.join("2026/06/DIR.jpg");
+    std::fs::write(&file_ok, b"jpeg").unwrap();
+    std::fs::write(&file_gone, b"jpeg").unwrap();
+    std::fs::create_dir_all(&path_dir).unwrap(); // 目录占位：remove_file 必失败
+    let _id_ok = insert_library_asset(&db, &lib.id, &file_ok, 1);
+    let _id_gone = insert_library_asset(&db, &lib.id, &file_gone, 2);
+    let _id_dir = insert_library_asset(&db, &lib.id, &path_dir, 3);
+    std::fs::remove_file(&file_gone).unwrap(); // 登记后外部删除 → 缺失容忍
+
+    let result = ipc::photo_library::fetch_photo_library_remove(&state, &lib.id, true).unwrap();
+    assert_eq!(result.records_deleted, 3, "三条记录照常清");
+    assert_eq!(result.files_deleted, 1, "只计实际删掉的文件（缺失/失败不计）");
+    assert!(!file_ok.exists(), "管理库原片被删");
+    assert!(path_dir.is_dir(), "删除失败的条目不中断流程");
+}
+
+/// 引用库（从已有文件夹建立）拒绝 delete_files=true：错误明确、库行原样；
+/// delete_files=false 一切正常；reference 标志经 photo_library_list 透传
+/// （前端据此隐藏删文件选项）。
+
+#[test]
+fn photo_library_remove_default_clears_records_and_cache_but_keeps_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+    let entry = create_db(&state, "主数据库", Some(dir.path().join("main-db").to_str().unwrap()));
+    let db_dir = Path::new(&entry.db_dir).to_path_buf();
+    let db = ipc::app_database_db(&state).unwrap();
+
+    let root = dir.path().join("photos");
+    std::fs::create_dir_all(root.join("2026/06")).unwrap();
+    let lib = db
+        .photos_library_register("库", &root.to_string_lossy(), &db_dir)
+        .unwrap();
+    let file = root.join("2026/06/DSC_1.jpg");
+    std::fs::write(&file, b"jpeg").unwrap();
+    insert_library_asset(&db, &lib.id, &file, 1);
+    let cache = thumbs::cache_path(
+        &db_dir,
+        &file,
+        256,
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+    );
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, b"thumb").unwrap();
+
+    let result =
+        ipc::photo_library::fetch_photo_library_remove(&state, &lib.id, false).unwrap();
+    assert_eq!(result.records_deleted, 1);
+    assert_eq!(result.files_deleted, 0);
+    assert!(file.is_file(), "物理文件不动");
+    assert!(!cache.exists(), "记录删除则缩略图缓存随清");
+    let left: i64 = db
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE library_id = ?1",
+            [&lib.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0, "资产记录已清");
+    assert!(db.photos_library_get(&lib.id).unwrap().is_none(), "登记行消失");
+}
+
+// ---------------------------------------------------------------------------
+// 切库索引恢复（2026-10-09 审计 P0 断链B）：切回旧库时遗留索引任务被
+// resume_and_kick 唤醒（running 复位 pending → worker 续跑）+ 参数指纹
+// 比对落基线（marker）。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn database_switch_resumes_pending_index_tasks_of_new_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appdata");
+    std::fs::create_dir_all(&config).unwrap();
+    let state = state_at(&config);
+    let db_a = create_db(&state, "库 A", Some(dir.path().join("a-db").to_str().unwrap()));
+    let db_b = create_db(&state, "库 B", Some(dir.path().join("b-db").to_str().unwrap()));
+    assert_eq!(
+        ipc::databases::fetch_database_list(&state).unwrap().active_id.as_deref(),
+        Some(db_b.id.as_str()),
+        "建库即激活（当前 = B）"
+    );
+
+    // 在库 A 造一条「崩溃遗留」running 任务（资产 kind=video：thumb 通道
+    // 永久占位收尾，不依赖图像解码，确定性收敛）
+    let a_dir = Path::new(&db_a.db_dir).to_path_buf();
+    let a_db = open_db(&a_dir);
+    a_db.0
+        .execute(
+            "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, source, \
+             created_at, origin, missing) \
+             VALUES ('C:/gone/clip.mp4', 'clip.mp4', 1, '2026-01-01T00:00:00Z', 0, 'video', \
+             'imported', '2026-01-01T00:00:00Z', 'imported', 0)",
+            [],
+        )
+        .unwrap();
+    a_db.0
+        .execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             SELECT 'thumb', id, 'running', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z' \
+             FROM assets WHERE path = 'C:/gone/clip.mp4'",
+            [],
+        )
+        .unwrap();
+    drop(a_db);
+
+    // 切回库 A：resume_and_kick（running 复位 pending → 派 worker 续跑）
+    ipc::databases::fetch_database_switch(&state, &db_a.id).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let check = open_db(&a_dir);
+        let state_name: String = check
+            .0
+            .query_row(
+                "SELECT state FROM index_tasks WHERE kind = 'thumb'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let thumb_state: i64 = check
+            .0
+            .query_row(
+                "SELECT thumb_state FROM assets WHERE path = 'C:/gone/clip.mp4'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        if state_name == "done" && thumb_state == 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "切库后遗留任务未被唤醒（state={state_name} thumb_state={thumb_state}）"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // 指纹基线随切库落盘（check_params_and_rebuild 执行过的痕迹）
+    assert!(
+        a_dir.join("index-params.marker").is_file(),
+        "切库后参数指纹基线应写入新库目录"
+    );
+
+    // 等 supervisor 派发的 index-resume 线程收尾（tempdir 生命周期保护）
+    let started = std::time::Instant::now();
+    while state.supervisor.running_count() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

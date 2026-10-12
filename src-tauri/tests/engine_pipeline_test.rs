@@ -82,7 +82,7 @@ fn progress_events_are_throttled() {
     let mut rx = bus.subscribe();
     let db = open_db(db_dir.path());
     let mut plan = plan_for(&db, db_dir.path(), target.path());
-    plan.album_id = Some(db.ensure_default_album().unwrap());
+    plan.album_id = Some(db.album_create("测试相册").unwrap().id);
     let engine = Engine::new(db, bus, Box::new(VolumeSource::new(src.path())), plan);
     let stats = engine.run();
     assert_eq!(stats.done_files, 40);

@@ -56,6 +56,7 @@ beforeEach(() => {
       status: "online",
       assetCount: 120,
       sizeBytes: 1024,
+      organizationTemplate: "{year}/{month}/{day}/{filename}",
     },
     {
       id: "lib-b",
@@ -65,6 +66,7 @@ beforeEach(() => {
       status: "offline",
       assetCount: 8,
       sizeBytes: 2048,
+      organizationTemplate: "{year}/{month}/{day}/{filename}",
     },
   ]);
 });

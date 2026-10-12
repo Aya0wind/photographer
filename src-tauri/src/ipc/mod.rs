@@ -48,6 +48,7 @@ pub struct DeviceEntry {
     pub source: Arc<dyn DeviceSource>,
     pub snapshot: DeviceSnapshot,
     pub scan: DeviceScan,
+    pub files: Option<Vec<crate::devices::FileEntry>>,
 }
 
 #[derive(Default)]
@@ -65,6 +66,7 @@ impl DeviceEntry {
             source,
             snapshot,
             scan: DeviceScan::Ready,
+            files: None,
         }
     }
 }
@@ -295,26 +297,63 @@ pub fn files_by_id(state: &AppState, id: &str) -> Result<Vec<FileEntryDto>, Stri
     let key = crate::devices::normalize_device_id(id);
     let source = {
         let devices = state.devices.lock().expect("devices mutex poisoned");
-        Arc::clone(
-            &devices
-                .get(&key)
-                .ok_or_else(|| format!("设备 {id} 不在线"))?
-                .source,
-        )
+        let entry = devices.get(&key).ok_or_else(|| format!("设备 {id} 不在线"))?;
+        if let Some(files) = &entry.files {
+            return Ok(files.iter().map(FileEntryDto::from).collect());
+        }
+        Arc::clone(&entry.source)
     };
     let files = source
-        .list()
+        .list_names()
         .map_err(|e| format!("枚举设备文件失败: {e}"))?;
-    if !state
-        .devices
-        .lock()
-        .expect("devices mutex poisoned")
-        .get(&key)
-        .is_some_and(|entry| Arc::ptr_eq(&entry.source, &source))
-    {
-        return Err(format!("设备 {id} 已断开或重新连接"));
-    }
+    let mut registry = state.devices.lock().expect("devices mutex poisoned");
+    let entry = registry.get_mut(&key).filter(|entry| Arc::ptr_eq(&entry.source, &source))
+        .ok_or_else(|| format!("设备 {id} 已断开或重新连接"))?;
+    entry.files = Some(files.clone());
     Ok(files.iter().map(FileEntryDto::from).collect())
+}
+
+/// 事件链路自检：向总线发布一条 Probe 事件（经转发器 emit 到前端
+pub fn files_by_id_with_progress(state: &SharedState, id: &str) -> Result<Vec<FileEntryDto>, String> {
+    let key = crate::devices::normalize_device_id(id);
+    let source = {
+        let mut registry = state.devices.lock().unwrap();
+        let entry = registry.get_mut(&key).ok_or("设备已断开")?;
+        if let Some(files) = &entry.files { return Ok(files.iter().map(FileEntryDto::from).collect()); }
+        entry.files = Some(Vec::new());
+        entry.scan = DeviceScan::Scanning;
+        let source = Arc::clone(&entry.source);
+        state.bus.publish(crate::events::AppEvent::DeviceArrived { id: key.clone(), name: source.name(), kind: source.kind() });
+        source
+    };
+    let weak = Arc::downgrade(state);
+    let expected = Arc::clone(&source);
+    let progress_key = key.clone();
+    let callback: crate::devices::FileBatchCallback = Arc::new(move |batch| {
+        let Some(state) = weak.upgrade() else { return; };
+        let mut registry = state.devices.lock().unwrap();
+        if let Some(entry) = registry.get_mut(&progress_key).filter(|entry| Arc::ptr_eq(&entry.source, &expected)) {
+            entry.files.get_or_insert_with(Vec::new).extend(batch.iter().cloned());
+            state.bus.publish(crate::events::AppEvent::DeviceFilesProgress { id: progress_key.clone(), files: batch.iter().map(FileEntryDto::from).collect() });
+        }
+    });
+    let result = source.list_names_with_progress(callback).map_err(|error| error.to_string());
+    let mut registry = state.devices.lock().unwrap();
+    let entry = registry.get_mut(&key).filter(|entry| Arc::ptr_eq(&entry.source, &source)).ok_or("设备已重新连接")?;
+    match result {
+        Ok(files) => {
+            entry.files = Some(files.clone());
+            entry.scan = DeviceScan::Ready;
+            state.bus.publish(crate::events::AppEvent::DeviceScanned { id: key, name: entry.snapshot.name.clone(), kind: entry.snapshot.kind, snapshot: entry.snapshot.clone() });
+            Ok(files.iter().map(FileEntryDto::from).collect())
+        }
+        Err(message) => {
+            entry.files = None;
+            entry.scan = DeviceScan::Failed(message.clone(), std::time::Instant::now() + std::time::Duration::from_secs(10));
+            state.bus.publish(crate::events::AppEvent::DeviceScanFailed { id: key, message: message.clone() });
+            Err(message)
+        }
+    }
 }
 
 /// 事件链路自检：向总线发布一条 Probe 事件（经转发器 emit 到前端
@@ -397,15 +436,29 @@ pub fn open_library_db(db_dir: &Path) -> Result<Db, String> {
     Ok(db)
 }
 
+/// 资产行删除后的派生数据清理（删照片库 / 回收站清除 / 重复删除 / 清理
+/// 源缺失共用）：缩略图缓存文件（按源路径跨档位清全部 mtime 代）+ 语义
+/// 向量（usearch 按 asset id 删）+ 人脸簇心缓存失效（2026-10-09 审计 P1：
+/// 四路共用本入口，簇缓存按 dbDir 整库失效——被删脸的嵌入若残留在簇心
+/// 池，后续新脸会继续归入已无人照片的簇；重启成本可接受，不做精确剔除）。
+/// 行已删，清理全程缺失容忍——失败只留盘上孤儿缓存/向量，不构成错误。
+/// 返回 (清掉的缓存文件数, 清掉的向量数)。
+pub fn purge_asset_derivations(
+    db_dir: &Path,
+    asset_ids: &[i64],
+    paths: &[&str],
+) -> (u64, u64) {
+    let mut thumbs = 0u64;
+    for path in paths {
+        thumbs += crate::thumbs::remove_src_cache(db_dir, std::path::Path::new(path));
+    }
+    let vectors = crate::ai::semantic::remove_vectors(db_dir, asset_ids);
+    crate::ai::face::invalidate_cluster_cache(db_dir);
+    (thumbs, vectors)
+}
+
 /// 扫描指定设备并刷新注册表快照（热插拔编排线程 / device_scan 共用）。
 pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> {
-    let skip_imported = state
-        .settings
-        .lock()
-        .expect("settings mutex poisoned")
-        .import
-        .skip_imported;
-    let db = app_database_db(state)?;
     let key = crate::devices::normalize_device_id(id);
     let source = {
         let mut devices = state.devices.lock().expect("devices mutex poisoned");
@@ -416,10 +469,16 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
             return Err("设备正在扫描，请稍后重试".into());
         }
         entry.scan = DeviceScan::Scanning;
+        entry.files = None;
         Arc::clone(&entry.source)
     };
+    let files = Arc::new(Mutex::new(None::<Vec<crate::devices::FileEntry>>));
+    let pending = Arc::clone(&files);
+    let callback: crate::devices::FileBatchCallback = Arc::new(move |batch| {
+        pending.lock().unwrap().get_or_insert_with(Vec::new).extend(batch);
+    });
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        orchestrator::scan_device(&*source, &db, skip_imported)
+        orchestrator::scan_device_with_progress(&*source, None, false, Some(callback))
             .map_err(|e| format!("扫描设备失败: {e}"))
     }))
     .unwrap_or_else(|_| Err("设备扫描异常，请重试".into()));
@@ -446,6 +505,7 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
     };
     entry.snapshot = snapshot.clone();
     entry.scan = DeviceScan::Ready;
+    entry.files = files.lock().unwrap().take();
     if snapshot.kind != SourceKind::Folder {
         state.bus.publish(crate::events::AppEvent::DeviceScanned {
             id: snapshot.id.clone(),
@@ -472,6 +532,7 @@ pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, Strin
             id.clone(),
             DeviceEntry {
                 scan: DeviceScan::Ready,
+                files: None,
                 source,
                 snapshot: DeviceSnapshot {
                     id: id.clone(),
@@ -557,10 +618,12 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
     let gate = std::sync::Arc::clone(&state.import_running);
     let gate_supervisor = Arc::clone(&index_supervisor);
-    let finish_controls = controls.clone();
     // 闸在派发前同步置位：调用方拿到 job_id 的瞬间，手动索引触发即被拒
-    // （闭包内才置位有窗口）。闭包 Drop 兜底放行（含 panic 路径）。
+    // （闭包内才置位有窗口）。闭包 Drop 兜底放行（含 panic 路径）。进程级
+    // 镜像旗（index::kick 让路守卫读点）与上面同点翻转——kick 无 state
+    // 访问，经它判导入在场（联拍 kick 穿透让路闸的问题由此收口）。
     gate.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::index::set_import_in_flight(true);
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
@@ -572,6 +635,8 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
             impl Drop for ImportGate {
                 fn drop(&mut self) {
                     self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                    // 进程级镜像旗同步放行（与上面置位同点，见 launch_import 注释）
+                    crate::index::set_import_in_flight(false);
                 }
             }
             let _gate = ImportGate(gate);
@@ -585,15 +650,17 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
             drop(_gate);
             gate_supervisor.resume_kind("index");
             // 索引/AI/连拍收尾统一在导入结束后一次性触发，且仅在本轮确有
-            // 新图（done_files>0；全跳过的重复导入不打扰）。索引天然增量：
-            // worker 只领取 pending 任务行，不重建已有索引。
-            // Cancelled/device-lost jobs may still have settled files, but must
-            // not start new SQLite-writing index/geo tasks while their journal
-            // is being reaped; a subsequent import should be able to open it.
-            if stats.done_files > 0
-                && !finish_controls.is_cancelled()
-                && !finish_controls.is_device_lost()
-            {
+            // 已落盘文件（done_files>0；全跳过的重复导入不打扰）。取消/
+            // 设备失联的会话同样放行——已落盘文件的任务必须被唤醒（journal
+            // 行已终结，index 任务只写 index_tasks/assets 派生列，不与收尾
+            // 收割竞争）。索引天然增量：worker 只领取 pending 任务行。
+            if stats.done_files > 0 {
+                // pHash 任务补差（2026-10-09 审计 P0-C）：入库只自动建
+                // thumb/eyes/blur，phash 通道（连拍分组依赖）此前无自动
+                // 建档——收尾一次幂等补建，不逐照片调用。
+                if let Ok(db) = open_library_db(&index_db_dir) {
+                    let _ = db.create_phash_tasks_for_unindexed();
+                }
                 crate::index::kick(index_db_dir.clone(), &index_supervisor);
                 // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
                 // 自动入图——指纹不变走 bincode 快路径 + asset_regions 增量

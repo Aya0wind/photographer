@@ -559,3 +559,26 @@ describe("Shift 区间选择（2026-09-29）", () => {
     expect(opts.shift).toBe(true);
   });
 });
+
+
+describe("照片大小与点击区域",()=>{
+  it("大小切换后信息行仍打开同一张照片，角标及收藏一起缩小",()=>{
+    const onOpenAsset=vi.fn();const groups=groupsOf([asset(1,{w:6000,h:4000})]);const badges=new Map([[1,"RAW+JPG"]]);
+    const {rerender}=renderGrid({groups,tile:200,badges,onOpenAsset});
+    const large=screen.getByTestId("tile-favorite").style.width;
+    const largeFont=screen.getByTestId("tile-resolution").style.fontSize;
+    rerender(<I18nextProvider i18n={i18n}><AssetGrid groups={groups} tile={120} badges={badges} onOpenAsset={onOpenAsset}/></I18nextProvider>);
+    fireEvent.click(screen.getByTestId("tile-resolution"));
+    expect(onOpenAsset).toHaveBeenCalledWith(expect.objectContaining({id:1}),expect.anything());
+    expect(parseFloat(screen.getByTestId("tile-favorite").style.width)).toBeLessThan(parseFloat(large));
+    expect(parseFloat(screen.getByTestId("tile-resolution").style.fontSize)).toBeLessThan(parseFloat(largeFont));
+    const favorite=screen.getByTestId("tile-favorite");const badge=screen.getByTestId("gallery-pair-badge");
+    expect(parseFloat(badge.style.right)).toBeGreaterThan(parseFloat(favorite.style.right)+parseFloat(favorite.style.width));
+    expect(badge.style.top).toBe(favorite.style.top);
+  });
+  it("瀑布布局透明虚拟行不拦截跨行照片点击",()=>{
+    renderGrid({groups:groupsOf([asset(1,{w:100,h:250}),asset(2,{w:200,h:100}),asset(3,{w:100,h:250})]),layout:"masonry",onOpenAsset:vi.fn()});
+    for(const row of screen.getAllByTestId("gallery-row").filter(r=>r.hasAttribute("data-masonry-band"))) expect(row.style.pointerEvents).toBe("none");
+    for(const tile of screen.getAllByTestId("gallery-tile")) expect(tile.style.pointerEvents).toBe("auto");
+  });
+});

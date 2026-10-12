@@ -26,13 +26,13 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-async function canvas(tool: EditorTool = "view",sampleMode=false) {
+async function canvas(tool: EditorTool = "view",sampleMode=false,onSampleGesture?:Parameters<typeof EditorCanvas>[0]["onSampleGesture"],extra:Partial<Parameters<typeof EditorCanvas>[0]>={}) {
   const onZoom = vi.fn();
   const noop = vi.fn();
-  render(<EditorCanvas sampleMode={sampleMode} src="test.jpg" zoom={2} onZoom={onZoom} fallbackSize={null} recipe={defaultRecipe()} tool={tool}
+  render(<EditorCanvas onSampleGesture={onSampleGesture} sampleMode={sampleMode} src="test.jpg" zoom={2} onZoom={onZoom} fallbackSize={null} recipe={defaultRecipe()} tool={tool}
     brushOptions={{ color: "#FF0000", widthRel: 0.01 }} cropRatio={null} cropDraft={null}
     onCropDraftChange={noop} selectedTextId={null} onSelectText={noop} onPlaceText={noop} onTextChange={noop}
-    onStrokeCommit={noop} onGestureStart={noop} onGestureEnd={noop} onImageReady={noop} onImageError={noop} />);
+    onStrokeCommit={noop} onGestureStart={noop} onGestureEnd={noop} onImageReady={noop} onImageError={noop} {...extra}/>);
   const viewport = await screen.findByTestId("editor-canvas-viewport");
   Object.defineProperties(viewport, {
     scrollWidth: { value: 1800, configurable: true }, clientWidth: { value: 600, configurable: true },
@@ -73,6 +73,13 @@ describe("编辑器画布缩放与拖动", () => {
     expect(viewport.scrollTop).toBe(150);
   });
 });
+it.each([false,true])("split comparison keeps its handle and uses a source overlay only outside native display (%s)",async(nativeDisplay)=>{
+ const recipe={...defaultRecipe(),geometry:{angle:0,flipHorizontal:true,flipVertical:false},crop:{x:0.1,y:0.2,w:0.8,h:0.7}};
+ await canvas("adjust",false,undefined,{recipe,compareSplit:0.6,onCompareSplit:vi.fn(),nativeDisplay,nativeGeometry:true,clippingSrc:"edited-warning.png",originalClippingSrc:"original-warning.png"});
+ expect(screen.getByTestId("editor-comparison")).toBeInTheDocument();
+ const original=screen.queryByTestId("editor-comparison-original");
+ if(nativeDisplay){expect(original).not.toBeInTheDocument();expect(document.querySelector('img[src="edited-warning.png"]')).not.toBeInTheDocument();}else{expect(original).toHaveStyle({width:"60%"});expect(original!.querySelector("img")!.style.transform).toMatch(/^matrix\(-/);expect(original!.querySelector('img[src="original-warning.png"]')).toBeInTheDocument();expect(document.querySelector('img[src="edited-warning.png"]')).toBeInTheDocument();}
+});
 
 it.each(["adjust","filters","output","metadata"] as EditorTool[])("%s allows panning without a separate view tool",async(tool)=>{
  const {viewport}=await canvas(tool);
@@ -85,4 +92,16 @@ it("sampling never starts pan gestures",async()=>{
  fireEvent.pointerDown(viewport,{pointerId:1,button:0,clientX:400,clientY:300});
  fireEvent.pointerMove(viewport,{pointerId:1,clientX:250,clientY:180});
  expect(viewport.scrollLeft).toBe(200);expect(viewport.setPointerCapture).not.toHaveBeenCalled();
+});
+
+it("target sampling captures one drag without pan and accumulates fine movement",async()=>{
+ const gesture=vi.fn();const {viewport}=await canvas("adjust",true,gesture);
+ const frame=screen.getByTestId("editor-canvas-frame");frame.getBoundingClientRect=()=>({left:100,top:50,width:400,height:300} as DOMRect);
+ fireEvent.pointerDown(viewport,{pointerId:1,button:0,clientX:300,clientY:200});
+ expect(gesture).toHaveBeenLastCalledWith({phase:"start",x:0.5,y:0.5,delta:0});
+ fireEvent.pointerMove(viewport,{pointerId:1,clientX:300,clientY:170});
+ fireEvent.pointerMove(viewport,{pointerId:1,clientX:300,clientY:140,altKey:true});
+ fireEvent.pointerUp(viewport,{pointerId:1});
+ expect(gesture).toHaveBeenLastCalledWith(expect.objectContaining({phase:"end",delta:0.11000000000000001}));
+ expect(viewport.scrollLeft).toBe(200);expect(viewport.scrollTop).toBe(150);
 });

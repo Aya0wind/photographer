@@ -123,6 +123,33 @@ pub fn writable_index(db_dir: &Path) -> Result<Arc<Mutex<Index>>, String> {
     shared_index(db_dir)
 }
 
+/// 批量移除资产的语义向量（删照片库 / 回收站清除 / 重复删除共用）：
+/// 可写把柄上逐 key remove 后整索引落盘一次（usearch 文件是真值，池内
+/// 实例同把柄同步可见）。key 不存在跳过；返回实际移除数。索引文件不
+/// 存在（未启用语义索引的库）时不落盘——无移除即无副作用文件。
+pub fn remove_vectors(db_dir: &Path, asset_ids: &[i64]) -> u64 {
+    if asset_ids.is_empty() {
+        return 0;
+    }
+    let Ok(index) = writable_index(db_dir) else {
+        return 0; // 池不可用（目录异常等）：清理缺失容忍，留孤儿不构成错误
+    };
+    let Ok(idx) = index.lock() else {
+        return 0;
+    };
+    let mut removed = 0u64;
+    for &id in asset_ids {
+        let key = id as u64;
+        if idx.contains(key) && idx.remove(key).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        let _ = save_index(&idx, db_dir);
+    }
+    removed
+}
+
 fn new_index() -> Result<Index, String> {
     let idx = Index::new(&IndexOptions {
         dimensions: EMBED_DIM,

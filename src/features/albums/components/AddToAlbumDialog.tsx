@@ -1,45 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
   albumAddAssets,
-  albumClaimAssets,
   albumCreate,
   albumList,
   type AlbumDto,
   type AssetDto,
 } from "@/ipc/api";
-
-/**
- * 「加入相册」选择弹窗（③ 全局入口共用：多选操作条 / 瓦片右键菜单）：
- * - 已有相册列表（单选，radio 语义）；底部「新建相册」内联输入（重名错误行内提示，
- *   创建成功自动选中并刷新列表）
- * - 「归入相册」（物理挪移改主相册）已随 2026-10-09 单库多照片库定案退役：
- *   相册/子组为纯逻辑概念，加入只建数据库引用；归入 UI 由 canClaim=false
- *   隐藏（TODO-M5 相册纯逻辑化收尾时删除全部 claim 代码路径）。
- * - 结果 toast：「已加入（引用）」，随后自动关闭弹窗
- */
-
-/** 路径归一（小写 + 统一 "\"），供目录前缀比对 */
-function normalizePath(p: string): string {
-  return p.replace(/\//g, "\\").toLowerCase();
-}
-
-/** 资产是否位于相册主目录 `photoRoot/{相册创建YYYY}/{MM}/{相册目录}/` 之下
- * （即主相册 = 该相册；固定布局公式，与后端 album_home_rel 同口径） */
-function isUnderAlbumDir(path: string, importRoot: string, albumHome: string): boolean {
-  if (importRoot === "" || albumHome === "") return false;
-  const p = normalizePath(path);
-  const root = normalizePath(importRoot);
-  if (!p.startsWith(`${root}\\`)) return false;
-  return p.slice(root.length + 1).startsWith(`${normalizePath(albumHome)}\\`);
-}
-
-/** 操作结果（toast 文案区分归入/引用；显示后自动关闭弹窗） */
-interface AddResult {
-  mode: "claim" | "add";
-  count: number;
-}
 
 export default function AddToAlbumDialog({
   assets,
@@ -56,15 +24,7 @@ export default function AddToAlbumDialog({
   const [createError, setCreateError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
-  const [claiming, setClaiming] = useState(false);
-  const [claimError, setClaimError] = useState<string | null>(null);
-  const [result, setResult] = useState<AddResult | null>(null);
-
-  // 「归入」启发式基准（照片根）已随 2026-10-09 单库多照片库定案退役：相册/
-  // 子组为纯逻辑概念（无物理足迹），“按路径归入相册主目录”不再成立。
-  // TODO-M5：相册纯逻辑化收尾时删除 claim 相关 UI 与 album_claim_assets 调用。
-  const importRoot = "";
-  const canClaim = importRoot !== "";
+  const [result, setResult] = useState<{ count: number } | null>(null);
 
   // 挂载拉相册清单（后端不可用 → 空列表 + 只能新建）
   useEffect(() => {
@@ -76,28 +36,6 @@ export default function AddToAlbumDialog({
       cancelled = true;
     };
   }, []);
-
-  // 归入语义（规格修订）：以选中目标相册为基准——
-  // 「已在该相册」= 路径位于 `photoRoot/{创建YYYY}/{创建MM}/{相册目录}/` 之下
-  // （固定布局公式；dir_name 缺省回退显示名）。
-  const targetAlbum = albums.find((a) => a.id === selectedId) ?? null;
-  const targetHome =
-    targetAlbum !== null
-      ? `${targetAlbum.createdAt.slice(0, 4)}\\${targetAlbum.createdAt.slice(5, 7)}\\${(targetAlbum.dirName ?? targetAlbum.name).trim()}`
-      : "";
-  const inTargetIds = useMemo(() => {
-    if (targetHome === "") return [];
-    return assets
-      .filter((a) => isUnderAlbumDir(a.path, importRoot, targetHome))
-      .map((a) => a.id);
-  }, [assets, importRoot, targetHome]);
-  const inTargetCount = inTargetIds.length;
-  const claimableIds = useMemo(
-    () => assets.map((a) => a.id).filter((id) => !inTargetIds.includes(id)),
-    [assets, inTargetIds],
-  );
-  /** 全部已在目标相册 → 归入禁用；部分在 → 只归入其余；全不在 → 归入全部 */
-  const allInTarget = assets.length > 0 && inTargetCount === assets.length;
 
   // 结果 toast：显示 1.6s 后自动关闭
   useEffect(() => {
@@ -112,7 +50,6 @@ export default function AddToAlbumDialog({
   useEffect(() => {
     setResult(null);
     setAddError(null);
-    setClaimError(null);
   }, [assetsKey]);
 
   // Esc 关闭（无输入焦点语义冲突时）
@@ -141,22 +78,6 @@ export default function AddToAlbumDialog({
     setNewName("");
   }
 
-  /** 归入相册：可归入子集物理挪移并改主相册（通用来源；已在目标的保持不动） */
-  async function claim(): Promise<void> {
-    if (selectedId === null || claiming || claimableIds.length === 0) return;
-    setClaiming(true);
-    setClaimError(null);
-    try {
-      const moved = await albumClaimAssets(selectedId, claimableIds);
-      setClaiming(false);
-      setResult({ mode: "claim", count: moved ?? claimableIds.length });
-    } catch (err) {
-      setClaiming(false);
-      const message = err instanceof Error ? err.message : String(err);
-      setClaimError(`${message}；${t("albums.claimErrorHint")}`);
-    }
-  }
-
   async function add(): Promise<void> {
     if (selectedId === null || adding) return;
     setAdding(true);
@@ -170,7 +91,7 @@ export default function AddToAlbumDialog({
       setAddError(t("albums.addFailed"));
       return;
     }
-    setResult({ mode: "add", count: added });
+    setResult({ count: added });
   }
 
   // 结果 toast：替代弹窗面板短暂展示（随后 onClose 由定时器收尾）
@@ -178,9 +99,7 @@ export default function AddToAlbumDialog({
     return (
       <div className="fixed bottom-6 left-1/2 z-[80] -translate-x-1/2" data-testid="add-to-album-toast" role="status">
         <p className="rounded-full border border-edge bg-surface px-4 py-2 text-xs text-text-secondary shadow-xl">
-          {result.mode === "claim"
-            ? t("albums.claimedToast", { count: result.count })
-            : t("albums.addedRefToast", { count: result.count })}
+          {t("albums.addedRefToast", { count: result.count })}
         </p>
       </div>
     );
@@ -289,27 +208,8 @@ export default function AddToAlbumDialog({
           )}
         </div>
 
-        {/* 归入 vs 引用语义说明（选中目标相册后显示；归入退役后不展示） */}
-        {canClaim && targetAlbum !== null && (
-          <p
-            className="shrink-0 border-t border-edge/60 bg-panel/30 px-4 py-2 text-[11px] leading-relaxed text-text-muted"
-            data-testid="add-to-album-mode-hint"
-          >
-            {allInTarget
-              ? t("albums.claimHintInTarget", { name: targetAlbum.name })
-              : inTargetCount > 0
-                ? t("albums.claimHintMixed", { count: inTargetCount })
-                : t("albums.claimHintAll", { count: assets.length })}
-          </p>
-        )}
-
-        {/* 底部操作条：取消 /（归入相册：已在目标册时禁用）/ 加入（引用） */}
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-edge px-4 py-3">
-          {claimError !== null ? (
-            <p className="mr-auto min-w-0 flex-1 truncate text-[11px] text-red-400" role="alert" title={claimError} data-testid="add-to-album-claim-error">
-              {claimError}
-            </p>
-          ) : addError !== null ? (
+          {addError !== null ? (
             <p className="mr-auto text-[11px] text-red-400" role="alert" data-testid="add-to-album-error">
               {addError}
             </p>
@@ -324,26 +224,6 @@ export default function AddToAlbumDialog({
           >
             {t("common.cancel")}
           </button>
-          {canClaim && targetAlbum !== null && (
-            <button
-              type="button"
-              onClick={() => void claim()}
-              disabled={allInTarget || claiming}
-              title={allInTarget ? t("albums.claimInTarget") : t("albums.claimHint")}
-              className={`rounded-md px-4 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                inTargetCount > 0 || allInTarget
-                  ? "border border-accent/60 bg-accent/10 text-accent hover:bg-accent/20"
-                  : "bg-accent text-black hover:brightness-110"
-              }`}
-              data-testid="add-to-album-claim"
-            >
-              {allInTarget
-                ? t("albums.claimInTarget")
-                : inTargetCount > 0
-                  ? t("albums.claimManyAction", { count: claimableIds.length })
-                  : t("albums.claimAction")}
-            </button>
-          )}
           <button
             type="button"
             onClick={() => void add()}

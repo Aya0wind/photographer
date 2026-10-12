@@ -134,6 +134,9 @@ impl DeviceSource for StubSource {
         "stub".into()
     }
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
+        panic!("Discovery must not request the detailed file list")
+    }
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
         Ok(vec![FileEntry {
             id: "noext".into(),
             rel_path: "noext".into(),
@@ -142,7 +145,7 @@ impl DeviceSource for StubSource {
         }])
     }
     fn open_head(&self, _id: &str, _max: u64) -> DeviceResult<Vec<u8>> {
-        Ok(vec![0xFF, 0xD8, 0xFF, 0xE0]) // JPEG 魔数
+        panic!("Discovery must never read file contents")
     }
     fn stream(&self, _id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
         Err(devices::DeviceError::NotSupported("stub".into()))
@@ -150,10 +153,26 @@ impl DeviceSource for StubSource {
 }
 
 #[test]
-fn unknown_extension_falls_back_to_magic_head_read() {
+fn discovery_keeps_cheap_metadata_without_reading_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    build_tree(dir.path());
+    let source = VolumeSource::new(dir.path());
+    let names = source.list_names().unwrap();
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.iter().map(|file| file.size).sum::<u64>(), 300);
+    let full = source.list().unwrap();
+    assert_eq!(full.iter().map(|file| file.size).sum::<u64>(), 300);
+    let snapshot = devices::orchestrator::scan_device_with_progress(&source, None, false, None).unwrap();
+    assert_eq!(snapshot.files_by_kind.values().sum::<u64>(), 2);
+    assert_eq!(snapshot.bytes_total, 300);
+}
+
+#[test]
+fn discovery_counts_unknown_files_without_reading_contents() {
     let db_dir = tempfile::tempdir().unwrap();
     let db = common::open_db(db_dir.path());
-    let snapshot = scan_device(&StubSource, &db, true).unwrap();
-    assert_eq!(snapshot.files_by_kind.get(&AssetKind::Photo), Some(&1));
-    assert_eq!(snapshot.new_files, 1);
+    let snapshot = devices::orchestrator::scan_device_with_progress(&StubSource, Some(&db), true, None).unwrap();
+    assert_eq!(snapshot.files_by_kind.get(&AssetKind::Other), Some(&1));
+    assert_eq!(snapshot.bytes_total, 4);
+    assert_eq!(snapshot.new_files, 0);
 }

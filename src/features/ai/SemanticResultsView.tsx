@@ -9,7 +9,7 @@ import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import AssetActionsHost from "@/features/gallery/components/AssetActionsHost";
 import { useAssetSelection } from "@/features/gallery/lib/useAssetSelection";
-import { useAiIndexingProgress } from "./useSemanticSearch";
+import { type SemanticStatus, useAiIndexingProgress } from "./useSemanticSearch";
 
 /**
  * 语义搜索结果视图（搜索页语义模式 / 智能相册共用）：
@@ -21,7 +21,8 @@ import { useAiIndexingProgress } from "./useSemanticSearch";
  */
 
 export interface SemanticResultsViewProps {
-  status: "idle" | "loading" | "ready" | "empty" | "modelNotReady" | "unavailable";
+  status: SemanticStatus;
+  errorMessage?: string;
   assets: AssetDto[];
   scores: Map<number, number>;
   /** 结果容器高度撑满（调用方布局内） */
@@ -92,6 +93,7 @@ function SemanticIndexBuildingHint() {
 
 export default function SemanticResultsView({
   status,
+  errorMessage,
   assets,
   scores,
   scrollTestId = "semantic-grid-scroll",
@@ -123,6 +125,12 @@ export default function SemanticResultsView({
         {t("search.semantic.loading")}
       </div>
     );
+  }
+  if (status === "error") {
+    return <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center" data-testid="semantic-error" role="alert">
+      <p className="max-w-md break-words text-sm text-text-secondary">{errorMessage}</p>
+      {onRetry && <button type="button" onClick={onRetry} className="ui-primary rounded-lg px-4 py-2 text-xs">{t("gallery.retry")}</button>}
+    </div>;
   }
   if (status === "modelNotReady") {
     return (

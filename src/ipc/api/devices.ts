@@ -89,3 +89,7 @@ export async function fsListDirs(parent?: string, strict = false): Promise<FsDir
 export async function deviceThumbGet(deviceId: string, objectId: string, version: string, size: number): Promise<string | null> {
   return ipc<string | null>("device_thumb_get", { deviceId, objectId, version, size });
 }
+
+export async function deviceFileSizes(id: string, objectIds: string[]): Promise<Array<[string, number]> | null> {
+  return ipc<Array<[string, number]> | null>("device_file_sizes", { id, objectIds });
+}

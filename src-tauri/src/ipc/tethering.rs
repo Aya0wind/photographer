@@ -97,26 +97,32 @@ fn clamp_capture_timeout(timeout_ms: Option<u64>) -> Duration {
 // ---------------------------------------------------------------------------
 
 /// 枚举全部后端可见的相机（不逐台探测；已探测设备带缓存能力位）。
+/// 2026-10-11 §E-3：跨后端按物理身份去重——同一物理相机被多个端点
+///（wpd 与 gphoto 同报一台）重复报告时只保留先到的优先端点入口（入参
+/// 顺序 = 注册表优先序：原生 → SDK → gphoto）；不同物理机同名不合并。
 pub fn cameras_from_backends(
     backends: &[std::sync::Arc<dyn CameraBackend>],
 ) -> Result<Vec<CameraDto>, String> {
     let mut out = Vec::new();
     for backend in backends {
         match backend.enumerate() {
-            Ok(cameras) => out.extend(cameras.into_iter().map(CameraDto::from)),
+            Ok(cameras) => out.extend(cameras),
             Err(error) => crate::devices::diagnostics::record(format!(
                 "Camera enumeration {} failed: {error}",
                 backend.id()
             )),
         }
     }
-    Ok(out)
+    Ok(super::super::tethering::backend::dedupe_by_physical_identity(out)
+        .into_iter()
+        .map(CameraDto::from)
+        .collect())
 }
 
 /// 探测单台相机：成功返回 DTO；失败返回 None（契约：null=未探测降级，
 /// 不向前端抛错）。
 pub fn probe_with_backend(backend: &dyn CameraBackend, pnp_id: &str) -> Option<CameraDto> {
-    backend.connect(pnp_id).ok().map(CameraDto::from)
+    backend.probe(pnp_id).ok().map(CameraDto::from)
 }
 
 /// 拍摄一次并转发收片事件：成功 → 发布 `tetheringObjectAdded` + 成功
@@ -186,6 +192,12 @@ pub async fn camera_probe(
 ) -> Result<Option<CameraDto>, String> {
     let shared = state.inner().clone();
     run_blocking(shared, move |_| {
+        if let Some(session) = super::super::tethering::session::all()
+            .into_iter()
+            .find(|session| !session.is_stopping() && session.camera.pnp_id == pnp_id)
+        {
+            return Ok(Some(session.camera.clone()));
+        }
         let registry = backend_registry();
         let backend = registry
             .for_camera_id(&pnp_id)
@@ -269,8 +281,8 @@ pub async fn tethering_start(
         tauri::WebviewUrl::App(format!("tethering?session={id}").into()),
     )
     .title("Photographer · Tethered Capture")
-    .inner_size(1100.0, 760.0)
-    .min_inner_size(860.0, 600.0);
+    .inner_size(1100.0, 680.0)
+    .min_inner_size(860.0, 520.0);
     #[cfg(target_os = "macos")]
     {
         window_builder = window_builder
@@ -375,11 +387,20 @@ pub async fn tethering_capture(
     })
     .await
 }
+/// 取景帧载荷：JPEG data URL + 相机回报的归一化 AF 区域（同帧单次往返；
+/// af = [x, y, w, h]，null = 本帧无 AF 数据）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameDto {
+    pub url: String,
+    pub af: Option<(f64, f64, f64, f64)>,
+}
+
 #[tauri::command]
 pub async fn tethering_frame(
     state: State<'_, SharedState>,
     session_id: String,
-) -> Result<Option<String>, String> {
+) -> Result<Option<FrameDto>, String> {
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
         let Some(_guard) = session.try_background() else {
@@ -388,15 +409,18 @@ pub async fn tethering_frame(
         if session.ensure_open().is_err() {
             return Ok(None);
         }
-        let bytes = session
+        let frame = session
             .backend
             .live_view_frame(&session.camera.pnp_id)
             .map_err(|e| e.to_string())?;
         use base64::Engine;
-        Ok(Some(format!(
-            "data:image/jpeg;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        )))
+        Ok(Some(FrameDto {
+            url: format!(
+                "data:image/jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(frame.jpeg)
+            ),
+            af: frame.af_region,
+        }))
     })
     .await
 }

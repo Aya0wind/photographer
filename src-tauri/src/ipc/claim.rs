@@ -38,7 +38,7 @@ pub struct ClaimResultDto {
 }
 
 /// 冲突后缀：原名保留，重名追加 ` (2)`、` (3)`…（联拍摄入等库内落盘
-/// 路径的让位约定；导入引擎主路径用 `_1` 式 [`crate::import::templates::
+/// 路径的让位约定；导入引擎主路径用 `_1` 式 [`crate::db::organization::
 /// unique_path`]，两处口径均为「绝不覆盖既有文件」）。
 pub(crate) fn resolve_conflict(dir: &Path, filename: &str) -> PathBuf {
     let mut candidate = dir.join(filename);

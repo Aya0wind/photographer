@@ -35,10 +35,12 @@ export async function databaseList(): Promise<DatabaseList> {
 export async function databaseCreate(
   name: string,
   dbDir?: string,
+  initialLibrary?:{name:string;rootPath:string;organizationTemplate:string;existingFolder:boolean;reorganizeExisting:boolean},
 ): Promise<DatabaseCreateResult> {
   try {
     const database = await ipc<DatabaseEntry>("database_create", {
       name,
+      initialLibrary:initialLibrary??null,
       dbDir: dbDir?.trim() ? dbDir.trim() : null,
     });
     if (database === null || typeof database !== "object" || typeof database.id !== "string") {

@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
 import { motion } from "motion/react";
 
@@ -7,8 +6,6 @@ import { useTranslation } from "react-i18next";
 
 import type { ReactElement } from "react";
 
-import { peopleList, sidebarCounts, subscribeAppEvents, type SidebarCounts } from "@/ipc/api";
-import { useCullingStore } from "@/features/culling/cullingStore";
 import { useDatabases } from "@/lib/useDatabases";
 
 /**
@@ -20,22 +17,14 @@ import { useDatabases } from "@/lib/useDatabases";
  *   去重：完全重复 + pHash 近似，组内勾选清理）
  * - 系统：存储（/storage，M3 照片库登记管理）、设置
  * 搜索已移除（TitleBar 全局搜索框承担；/search 路由保留）。
- * 计数徽标：图库/最近浏览/那年今天/相册走 sidebar_counts（一次性纯
- * COUNT，挂载拉一次 + 导入会话完成事件后重拉——最小事件集，不上轮询；
- * 0 或后端不可用不显示）；人物走 peopleList 聚类人脸总数（照旧）。
  * 底部只读展示当前数据库名（多数据库修正：useDatabases +
  * databasesChanged 重拉；切换入口在 设置 → 常规 →「数据库」卡片）。
  */
-
-/** sidebar_counts 键 → 徽标数据源 */
-type CountBadge = Exclude<keyof SidebarCounts, never>;
 
 interface NavItem {
   to: string;
   labelKey: string;
   icon: ReactElement;
-  /** 徽标：people=聚类人脸总数；culling=进行中选片会话数；其余=sidebar_counts 对应键 */
-  badge?: "people" | "culling" | CountBadge;
 }
 
 interface NavSection {
@@ -166,21 +155,21 @@ const ICONS = {
   ),
 };
 
-/** 分组导航结构（浏览/组织/工具/系统）；badge=sidebar_counts 键 */
+/** 分组导航结构（浏览/组织/工具/系统） */
 const SECTIONS: NavSection[] = [
   {
     titleKey: "nav.section.browse",
     items: [
-      { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery, badge: "assets" },
-      { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent, badge: "recentViewed" },
+      { to: "/gallery", labelKey: "nav.gallery", icon: ICONS.gallery },
+      { to: "/recent", labelKey: "nav.recent", icon: ICONS.recent },
     ],
   },
   {
     titleKey: "nav.section.organize",
     items: [
-      { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums, badge: "albums" },
-      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories, badge: "onThisDay" },
-      { to: "/people", labelKey: "nav.people", icon: ICONS.people, badge: "people" },
+      { to: "/albums", labelKey: "nav.albums", icon: ICONS.albums },
+      { to: "/memories", labelKey: "nav.memories", icon: ICONS.memories },
+      { to: "/people", labelKey: "nav.people", icon: ICONS.people },
       { to: "/gear", labelKey: "nav.gear", icon: ICONS.gear },
       { to: "/map", labelKey: "nav.map", icon: ICONS.map },
     ],
@@ -190,7 +179,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { to: "/import", labelKey: "nav.import", icon: ICONS.import },
       { to: "/similar", labelKey: "nav.similar", icon: ICONS.similar },
-      { to: "/culling", labelKey: "nav.culling", icon: ICONS.culling, badge: "culling" },
+      { to: "/culling", labelKey: "nav.culling", icon: ICONS.culling },
       { to: "/trash", labelKey: "nav.trash", icon: ICONS.trash },
     ],
   },
@@ -229,63 +218,6 @@ function DatabaseLabel() {
 export default function Sidebar() {
   const motionOn = useMotionOn();
   const { t } = useTranslation();
-  // 选片徽标：进行中会话数（cullingStore 集中维护，各入口建会话/收尾后刷新）
-  const cullingActive = useCullingStore((s) => s.activeCount);
-  const refreshCullingCount = useCullingStore((s) => s.refreshActiveCount);
-  useEffect(() => {
-    void refreshCullingCount();
-  }, [refreshCullingCount]);
-  // 人物入口徽标：人物数量（聚类的 person 条目数；进 app 拉一次；
-  // 失败静默 0——后端未就绪不显示）
-  const [peopleCount, setPeopleCount] = useState(0);
-  useEffect(() => {
-    let cancelled = false;
-    void peopleList().then((list) => {
-      if (cancelled) return;
-      setPeopleCount(list.length);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // 计数徽标（sidebar_counts 一次性纯 COUNT）：挂载拉一次；导入会话完成后
-  // 重拉（资产/标签/相册/最近浏览都可能变——最小事件集，不上轮询）。
-  // 后端命令在途/不可用 → null，徽标不显示。
-  const [counts, setCounts] = useState<SidebarCounts | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    const pull = () => {
-      void sidebarCounts().then((next) => {
-        if (!cancelled && next !== null) setCounts(next);
-      });
-    };
-    pull();
-    void subscribeAppEvents((event) => {
-      if (event.type === "importSessionFinished") pull();
-    })
-      .then((off) => {
-        if (cancelled) off();
-        else unlisten = off;
-      })
-      .catch(() => {
-        // 非 Tauri 环境（vite dev 预览）静默
-      });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
-
-  /** 行徽标值（people 走人物数量；culling 走进行中会话数；其余走 sidebar_counts；
-   *  0/缺数据=不显示） */
-  function badgeValueOf(badge: NonNullable<NavItem["badge"]>): number {
-    if (badge === "people") return peopleCount;
-    if (badge === "culling") return cullingActive;
-    return counts ? counts[badge] : 0;
-  }
-
   return (
     <aside className="ui-glass sp-scroll flex h-full w-[208px] shrink-0 flex-col overflow-y-auto border-r border-edge">
       <nav className="mt-3 flex flex-col gap-3 px-3 pb-4" aria-label="primary">
@@ -326,21 +258,7 @@ export default function Sidebar() {
                         ))}
                       {item.icon}
                       <span>{t(item.labelKey)}</span>
-                      {item.badge && badgeValueOf(item.badge) > 0 && (
-                        <span
-                          className="ml-auto shrink-0 rounded-full bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] leading-none tabular-nums text-accent"
-                          data-testid={
-                            item.badge === "people"
-                              ? "sidebar-people-badge"
-                              : item.badge === "culling"
-                                ? "sidebar-culling-badge"
-                                : "sidebar-count-badge"
-                          }
-                          data-kind={item.badge}
-                        >
-                          {badgeValueOf(item.badge)}
-                        </span>
-                      )}
+
                     </>
                   )}
                 </NavLink>

@@ -67,6 +67,9 @@ export function warmImageDecode(url: string | null | undefined): void {
 const thumbCache = new Map<string, string>();
 /** in-flight 去重：同 key 并发共享同一 Promise */
 const thumbInflight = new Map<string, Promise<ThumbResult>>();
+/** 会话代数：resetThumbPipeline 递增——清空后旧在途请求结算不再回写缓存
+ *  （否则复活刚清掉的旧库条目，张冠李戴换个时序回来） */
+let cacheGeneration = 0;
 
 /** 缩略图文件路径 → asset 协议 URL；非 Tauri 环境抛错回退 unavailable */
 function toAssetUrl(path: string): ThumbGetResult {
@@ -112,18 +115,19 @@ export function fetchAssetThumb(
   if (running) return running;
   const promise = (async () => {
     await acquireSlot(priority);
+    const gen = cacheGeneration; // 快照会话代：清库后旧结果不落缓存
     try {
       const result = await assetThumbGet(assetId, size);
       if (result.status === "ready") {
         const converted = toAssetUrl(result.path);
         if (converted.status === "ready") {
-          thumbCache.set(key, converted.path);
+          if (gen === cacheGeneration) thumbCache.set(key, converted.path);
           return { kind: "url", url: converted.path } as ThumbResult;
         }
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "unavailable") {
-        failedCache.set(key, { kind: "failed" });
+        if (gen === cacheGeneration) failedCache.set(key, { kind: "failed" });
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "missing") {
@@ -133,7 +137,7 @@ export function fetchAssetThumb(
           kind: "missing",
           url: result.cachedPath ? toUrlOrNull(result.cachedPath) : null,
         } as ThumbResult;
-        failedCache.set(key, settled);
+        if (gen === cacheGeneration) failedCache.set(key, settled);
         return settled;
       }
       return { kind: "pending" } as ThumbResult; // 排队中：等事件重试
@@ -176,6 +180,12 @@ function dispatchAssetEvent(event: AppEvent): void {
     // 管线终态缓存（防风暴不重试），唯有事件能复活——按资产失效让在视瓦片
     // 重查（重查会命中新位置的按内容复用缓存或重新生成）。
     for (const assetId of event.assetIds) invalidateAssetCaches(assetId);
+  } else if (event.type === "photoLibrariesChanged") {
+    // 照片库登记增删（2026-10-09 删库联动）：库内资产整体消失，而 SQLite 无
+    // AUTOINCREMENT——之后新导入会复用旧 assetId，旧缓存命中=张冠李戴的图。
+    // 整表清（成功/终态/in-flight 去重全弃；切库路径 resetLibrarySession 会
+    // 再清一次，重复清无害）。
+    resetThumbPipeline();
   }
   for (const listener of listeners) listener(event);
 }
@@ -298,8 +308,10 @@ export function emitAssetEventForTests(event: AppEvent): void {
 }
 
 /** 清空管线状态（缓存/in-flight/信号量）。切库必须调用：缓存键是
- *  assetId+size，不同库的 assetId 会撞号，跨库沿用=张冠李戴的缩略图。 */
+ *  assetId+size，不同库的 assetId 会撞号，跨库沿用=张冠李戴的缩略图。
+ *  photoLibrariesChanged（库登记增删）同款撞号风险，事件分发处同样调用。 */
 export function resetThumbPipeline(): void {
+  cacheGeneration += 1; // 旧在途请求结算不回写（见 fetchAssetThumb 代数守卫）
   thumbCache.clear();
   failedCache.clear();
   thumbInflight.clear();

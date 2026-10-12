@@ -4,13 +4,16 @@ import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 
 import { motionInitial, useMotionOn } from "@/lib/motion";
+import { notifyCountsRefresh } from "@/lib/countsRefresh";
 
 import {
   peopleAssets,
   peopleList,
   personDelete,
   personRename,
+  subscribeAppEvents,
   type AssetDto,
+  type AppEvent,
   type PersonCluster,
 } from "@/ipc/api";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
@@ -105,7 +108,11 @@ function PersonCard({
 
   async function confirmDelete(): Promise<void> {
     setConfirming(false);
-    if (await personDelete(person.clusterId)) onChanged();
+    if (await personDelete(person.clusterId)) {
+      onChanged();
+      // 人物计数无后端事件——本地通知侧栏重拉 peopleList
+      notifyCountsRefresh();
+    }
   }
 
   return (
@@ -345,9 +352,30 @@ export default function PeoplePage() {
     }
   }, []);
 
-  // v1 无新事件：进入人物页拉取刷新；重命名/删除后重拉
+  // v1 无新事件：进入人物页拉取刷新；重命名/删除后重拉。
+  // 删库联动（2026-10-09）：照片库登记增删 → 聚类计数/封面随库内资产消失
+  // 失真，photoLibrariesChanged 事件到达即重拉（封面走缩略图管线，缓存已被
+  // 管线自身对同事件整表清空）。
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void subscribeAppEvents((event: AppEvent) => {
+      if (event.type === "photoLibrariesChanged") void refresh();
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [refresh]);
 
   if (selected) {

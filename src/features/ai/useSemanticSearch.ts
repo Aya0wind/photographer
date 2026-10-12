@@ -17,7 +17,8 @@ import { tierSemanticReady } from "@/features/settings/lib/qualityTier";
  * - idle：未搜索
  * - loading：请求在途
  * - ready：有结果（assets 与 hits 同序，scores 供角标）
- * - modelNotReady：后端可达但拒绝（模型未下载/索引未建）——引导去设置
+ * - modelNotReady：后端明确报告模型未下载——引导去设置
+ * - error：查询或结果加载失败，展示实际原因
  * - unavailable：IPC 传输失败（后端未连接）
  * - empty：模型就绪但无命中
  * 模型未就绪时命令返回明确错误字符串（Rust Err）——ipc() 保持 ipcAvailable=true，
@@ -30,10 +31,12 @@ export type SemanticStatus =
   | "ready"
   | "empty"
   | "modelNotReady"
-  | "unavailable";
+  | "unavailable"
+  | "error";
 
 export interface SemanticSearchState {
   status: SemanticStatus;
+  errorMessage?: string;
   assets: AssetDto[];
   /** assetId → 相似度（0..1） */
   scores: Map<number, number>;
@@ -52,34 +55,25 @@ export function useSemanticSearch() {
     if (!trimmed) return;
     const seq = ++seqRef.current;
     setState({ status: "loading", assets: [], scores: new Map() });
-    let hits: SemanticHit[];
     try {
-      hits = await searchSemantic(trimmed, limit, minScore);
-    } catch {
+      const hits: SemanticHit[] = await searchSemantic(trimmed, limit, minScore);
       if (seq !== seqRef.current) return;
-      // 后端可达但拒绝（模型未就绪/索引未建） vs 传输失败
-      setState({
-        status: isIpcAvailable() ? "modelNotReady" : "unavailable",
-        assets: [],
-        scores: new Map(),
-      });
-      return;
+      if (hits.length === 0) {
+        setState({ status: "empty", assets: [], scores: new Map() });
+        return;
+      }
+      const assets = await assetsByIds(hits.map((h) => h.assetId), true);
+      if (seq !== seqRef.current) return;
+      const byId = new Map(assets.map((a) => [a.id, a]));
+      const ordered = hits.map((h) => byId.get(h.assetId)).filter((a): a is AssetDto => a !== undefined);
+      setState({ status: ordered.length ? "ready" : "empty", assets: ordered, scores: new Map(hits.map((h) => [h.assetId, h.score])) });
+    } catch (error) {
+      if (seq !== seqRef.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      const missingModel = /(?:模型|分词器).*未下载|model.*not.*downloaded/i.test(message);
+      setState({ status: !isIpcAvailable() ? "unavailable" : missingModel ? "modelNotReady" : "error", errorMessage: message, assets: [], scores: new Map() });
+      void useAiStore.getState().refresh();
     }
-    if (seq !== seqRef.current) return; // 已有更新的搜索
-    if (hits.length === 0) {
-      setState({ status: "empty", assets: [], scores: new Map() });
-      return;
-    }
-    const assets = await assetsByIds(hits.map((h) => h.assetId));
-    if (seq !== seqRef.current) return;
-    const byId = new Map(assets.map((a) => [a.id, a]));
-    // 保持命中序（分数降序语义由后端保证）
-    const ordered = hits.map((h) => byId.get(h.assetId)).filter((a): a is AssetDto => a !== undefined);
-    setState({
-      status: "ready",
-      assets: ordered,
-      scores: new Map(hits.map((h) => [h.assetId, h.score])),
-    });
   }, []);
 
   const reset = useCallback(() => {

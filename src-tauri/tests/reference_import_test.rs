@@ -34,14 +34,14 @@ fn reference_import_registers_in_place_with_library_ownership_and_no_footprint()
     )
     .unwrap();
 
-    let (_, stats) = common::run_engine(&source, &database, &photos, |plan| {
+    // 新规则（2026-10-11）：仅建索引的源必须在照片库内——库 root = 源文件夹本身
+    let (_, stats) = common::run_engine(&source, &database, &source, |plan| {
         plan.mode = ImportMode::Reference;
     });
     assert_eq!(stats.done_files, originals.len() as u64);
     assert_eq!(stats.failed_files, 0);
 
-    // 目标照片库 root 完全无物理足迹（reference 不搬文件）
-    assert_eq!(fs::read_dir(&photos).unwrap().count(), 0);
+    // reference 不搬文件：库 root（=源目录）零物理足迹由下方文件计数断言覆盖
 
     let db = open_db(&database);
     let library_id = db.photos_library_list().unwrap()[0].id.clone();
@@ -91,7 +91,7 @@ fn reference_import_registers_in_place_with_library_ownership_and_no_footprint()
     assert_eq!(source_files, originals.len() + 1, "本体 + 1 个边车");
 
     // 同库查重：第二次 reference 全部跳过（同路径/同指纹）
-    let (_, again) = common::run_engine(&source, &database, &photos, |plan| {
+    let (_, again) = common::run_engine(&source, &database, &source, |plan| {
         plan.mode = ImportMode::Reference;
     });
     assert_eq!(again.done_files, 0);
@@ -108,11 +108,11 @@ fn reference_import_registers_in_place_with_library_ownership_and_no_footprint()
 fn reference_reimport_after_folder_rename_rebinds_and_reads_keywords() {
     let temp = tempfile::tempdir().unwrap();
     let database = temp.path().join("database");
-    let photos = temp.path().join("photos");
     fs::create_dir_all(&database).unwrap();
-    fs::create_dir_all(&photos).unwrap();
+    // 新规则：仅建索引的源必须在库内——库 root = 父目录，源目录在库内改名
+    let library_root = temp.path().join("library");
 
-    let source = temp.path().join("lr-a");
+    let source = library_root.join("lr-a");
     let originals = common::build_source(&source);
     // 边车：星级 + 颜色 + 关键字（LR 原生 dc:subject/rdf:Bag 形态）
     fs::write(
@@ -124,7 +124,7 @@ fn reference_reimport_after_folder_rename_rebinds_and_reads_keywords() {
     )
     .unwrap();
 
-    let (_, first) = common::run_engine(&source, &database, &photos, |plan| {
+    let (_, first) = common::run_engine(&source, &database, &library_root, |plan| {
         plan.mode = ImportMode::Reference;
     });
     assert_eq!(first.done_files, originals.len() as u64);
@@ -149,10 +149,10 @@ fn reference_reimport_after_folder_rename_rebinds_and_reads_keywords() {
             [id],
         )
         .unwrap();
-    let renamed = temp.path().join("lr-b");
+    let renamed = library_root.join("lr-b");
     fs::rename(&source, &renamed).unwrap();
 
-    let (_, second) = common::run_engine(&renamed, &database, &photos, |plan| {
+    let (_, second) = common::run_engine(&renamed, &database, &library_root, |plan| {
         plan.mode = ImportMode::Reference;
     });
     // IMG_0001 重绑归位；其余两张在线同哈希照旧 skip
@@ -219,7 +219,8 @@ fn reference_reimport_same_path_recovers_missing_rows() {
     let source = temp.path().join("source");
     let originals = common::build_source(&source);
 
-    let (_, first) = common::run_engine(&source, &database, &photos, |plan| {
+    // 新规则：仅建索引的源必须在照片库内——库 root = 源文件夹本身
+    let (_, first) = common::run_engine(&source, &database, &source, |plan| {
         plan.mode = ImportMode::Reference;
     });
     assert_eq!(first.done_files, originals.len() as u64);
@@ -231,7 +232,7 @@ fn reference_reimport_same_path_recovers_missing_rows() {
         .unwrap();
 
     // 盘重插（文件原样回来），重新 reference 同一文件夹
-    let (_, second) = common::run_engine(&source, &database, &photos, |plan| {
+    let (_, second) = common::run_engine(&source, &database, &source, |plan| {
         plan.mode = ImportMode::Reference;
     });
     assert_eq!(second.done_files, 0, "同路径不重复登记");

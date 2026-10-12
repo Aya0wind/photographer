@@ -15,6 +15,16 @@ function renderPanel(value?:{id:string;amount:number;enabled:boolean}){
  return render(<I18nextProvider i18n={i18n}><LutPanel value={value} onChange={change} begin={()=>{}} end={()=>{}} onModalChange={modal}/></I18nextProvider>);
 }
 beforeEach(()=>{vi.clearAllMocks();vi.mocked(editLutList).mockResolvedValue([builtin,custom]);vi.mocked(editLutImport).mockResolvedValue(custom);vi.mocked(editLutRename).mockResolvedValue();vi.mocked(editLutRemove).mockResolvedValue();});
+it("restores an archived reference after importing a scheme with the same LUT id",async()=>{
+ vi.mocked(editLutList).mockResolvedValueOnce([builtin]);renderPanel({id:custom.id,amount:100,enabled:true});await screen.findByRole("combobox");expect(screen.getByRole("button",{name:"重命名"})).toBeDisabled();
+ fireEvent(window,new Event("editor-luts-changed"));await screen.findByRole("option",{name:custom.name});expect(screen.getByRole("button",{name:"重命名"})).toBeEnabled();
+});
+it("refreshes resources when a portable scheme introduces a new LUT reference",async()=>{
+ const view=renderPanel();await screen.findByRole("combobox");
+ const imported={...custom,id:"b".repeat(64),name:"Imported look"};vi.mocked(editLutList).mockResolvedValue([builtin,custom,imported]);
+ view.rerender(<I18nextProvider i18n={i18n}><LutPanel value={{id:imported.id,amount:100,enabled:true}} onChange={change} begin={()=>{}} end={()=>{}} onModalChange={modal}/></I18nextProvider>);
+ await waitFor(()=>expect(screen.getByRole("combobox")).toHaveValue(imported.id));await screen.findByRole("option",{name:"Imported look"});expect(screen.getByRole("button",{name:"重命名"})).toBeEnabled();
+});
 it("selects a look, changes strength without adding each frame to history and resets the group",async()=>{
  renderPanel({id:custom.id,amount:50,enabled:true});
  const selector=await screen.findByRole("combobox",{name:"选择调色方案"});

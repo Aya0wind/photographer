@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { fetchThumbUrl, cachedThumbUrl, THUMB_SIZE, thumbUrlCache } from "./lib/sourceThumbs";
 import { formatBytes } from "@/lib/format";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVisibleFileSizes } from "./lib/useVisibleFileSizes";
 
 /** 来源文件树、虚拟化列表和缩略图网格共用选中文件与预览管线。 */
 
@@ -133,6 +134,7 @@ function FileTile({
   absPath,
   size,
   deviceId,
+  displaySize,
   previewReady = true,
 }: {
   file: SourceFile;
@@ -142,6 +144,7 @@ function FileTile({
   absPath: string | null;
   size: TileSizeSpec;
   deviceId?: string;
+  displaySize?: number;
   previewReady?: boolean;
 }) {
   const { t } = useTranslation();
@@ -282,9 +285,9 @@ function FileTile({
         <span className="w-full truncate text-[11px] text-text-secondary" title={file.name}>
           {file.name}
         </span>
-        {size.showSize && (
+        {size.showSize && (displaySize ?? file.size) > 0 && (
           <span className="shrink-0 font-mono text-[10px] text-text-muted tabular-nums">
-            {formatBytes(file.size)}
+            {formatBytes(displaySize ?? file.size)}
           </span>
         )}
       </div>
@@ -587,6 +590,7 @@ export function FileListView({
   onToggleGroup,
   onToggleCollapse,
   rootDirLabel,
+  deviceId,
 }: {
   groups: DirGroup[];
   collapsed: Set<string>;
@@ -595,6 +599,7 @@ export function FileListView({
   onToggleGroup: (group: DirGroup) => void;
   onToggleCollapse: (dir: string) => void;
   rootDirLabel: string;
+  deviceId?: string;
 }) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -615,12 +620,17 @@ export function FileListView({
     overscan: 10,
   });
 
+  const visibleFiles = virtualizer.getVirtualItems().flatMap(item => { const row = rows[item.index]; return row.type === "file" ? [row.file] : []; });
+  const { sizes, supported } = useVisibleFileSizes(deviceId, visibleFiles);
+  const hasSizes = groups.some(group => group.files.some(file => file.size > 0)) || (!!deviceId && supported !== false);
+  const columns = hasSizes ? "32px minmax(0,1fr) 80px 72px" : "32px minmax(0,1fr) 72px";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-list">
-      <div className="grid shrink-0 grid-cols-[32px_minmax(0,1fr)_80px_72px] items-center border-b border-edge px-2 text-[11px] text-text-muted">
+      <div style={{ gridTemplateColumns: columns }} className="grid shrink-0 items-center border-b border-edge px-2 text-[11px] text-text-muted">
         <span aria-hidden="true" />
         <span className="px-2 py-1.5">{t("wizard.columnName")}</span>
-        <span className="py-1.5 text-right">{t("wizard.columnSize")}</span>
+        {hasSizes && <span className="py-1.5 text-right">{t("wizard.columnSize")}</span>}
         <span className="py-1.5 text-right">{t("wizard.columnKind")}</span>
       </div>
       <div
@@ -656,7 +666,8 @@ export function FileListView({
                   />
                 ) : (
                   <label
-                    className={`grid h-[26px] cursor-pointer grid-cols-[32px_minmax(0,1fr)_80px_72px] items-center border-b border-edge/40 px-2 text-xs ${
+                    style={{ gridTemplateColumns: columns }}
+                    className={`grid h-[26px] cursor-pointer items-center border-b border-edge/40 px-2 text-xs ${
                       selected.has(row.file.path) ? "" : "opacity-40"
                     }`}
                   >
@@ -673,9 +684,9 @@ export function FileListView({
                     >
                       {row.file.name}
                     </span>
-                    <span className="text-right font-mono text-[11px] text-text-secondary tabular-nums">
-                      {formatBytes(row.file.size)}
-                    </span>
+                    {hasSizes && <span className="text-right font-mono text-[11px] text-text-secondary tabular-nums">
+                      {(sizes[row.file.objectId ?? ""] ?? row.file.size) > 0 ? formatBytes(sizes[row.file.objectId ?? ""] ?? row.file.size) : "—"}
+                    </span>}
                     <span className="flex justify-end pr-1">
                       <KindBadge kind={row.file.kind} />
                     </span>
@@ -761,6 +772,8 @@ export function FileGridView({
     overscan: Math.max(3, Math.ceil(viewportHeight / tileRowH)),
   });
   useEffect(() => { virtualizer.measure(); }, [columns, tileRowH]);
+  const visibleFiles = virtualizer.getVirtualItems().flatMap(item => { const row = rows[item.index]; return row.type === "tiles" ? row.files : []; });
+  const { sizes } = useVisibleFileSizes(device?.kind === "mtp" && device.scanStatus !== "scanning" ? device.id : undefined, visibleFiles);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-grid">
@@ -801,6 +814,7 @@ export function FileGridView({
                       <FileTile
                         key={f.path}
                         file={f}
+                        displaySize={sizes[f.objectId ?? ""]}
                         selected={selected.has(f.path)}
                         onToggle={onToggleFile}
                         absPath={

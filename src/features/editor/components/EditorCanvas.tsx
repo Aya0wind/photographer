@@ -1,5 +1,8 @@
-import {geometrySize,planeToSource} from "../lib/geometry";
+import {geometrySize,planeToSource,sourceToPlane} from "../lib/geometry";
+import ComparisonOverlay from "./ComparisonOverlay";
 import MaskCanvasControls,{type MaskBrush} from "./MaskCanvasControls";
+import StraightenOverlay from "./StraightenOverlay";
+import type {SampleGesture} from "../lib/useTargetAdjustment";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
@@ -90,8 +93,15 @@ function rotatedImageAttrs(
 }
 
 interface EditorCanvasProps {
-  maskControls?:{mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null};
+  straightening?:boolean;onStraighten?:(angle:number)=>void;onStraightenCancel?:()=>void;
+  onSampleGesture?:(event:SampleGesture)=>void;
+  maskControls?:{mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null;showOverlay?:boolean};
   showOriginal?: boolean;
+  compareSplit?:number|null;
+  onCompareSplit?:(value:number)=>void;
+  nativeDisplay?:boolean;
+  clippingSrc?:string|null;
+  originalClippingSrc?:string|null;
   sampleMode?: boolean;
   onSample?: (x: number, y: number) => void;
   onSampleError?:()=>void;
@@ -128,9 +138,13 @@ interface EditorCanvasProps {
 }
 
 export default function EditorCanvas({
+  straightening=false,onStraighten,onStraightenCancel,
+  onSampleGesture,
   maskControls,
   src,
   showOriginal = false,
+  compareSplit=null,onCompareSplit,nativeDisplay=false,
+  clippingSrc=null,originalClippingSrc=null,
   sampleMode = false,
   onSample,
   onSampleError,
@@ -160,6 +174,10 @@ export default function EditorCanvas({
 }: EditorCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
+  const targetRef=useRef<{id:number;lastY:number;height:number;x:number;y:number;delta:number;handler:(event:SampleGesture)=>void}|null>(null);
+  const [straightLine,setStraightLine]=useState<[number,number,number,number]|null>(null);
+  useEffect(()=>{if(!straightening)setStraightLine(null);},[straightening]);
+  function stopTarget(cancelled:boolean){const g=targetRef.current;targetRef.current=null;if(g)g.handler({phase:cancelled?"cancel":"end",x:g.x,y:g.y,delta:g.delta});}
   const canPan=!sampleMode && !["crop","brush","text","mask"].includes(tool);
   const [panning, setPanning] = useState(false);
   function stopPanning(): void {
@@ -170,7 +188,8 @@ export default function EditorCanvas({
   }
   useEffect(() => {
     stopPanning();
-  }, [tool, src, sampleMode]);
+    stopTarget(true);
+  }, [tool, src, sampleMode,onSampleGesture]);
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
   useEffect(() => {
@@ -289,6 +308,9 @@ export default function EditorCanvas({
   const canvas: Size = { width: dispW, height: dispH };
   const frameW = rot.w * scale;
   const frameH = rot.h * scale;
+  const sourcePoint=(x:number,y:number)=>{const [u,v]=sourceToPlane(x,y,recipe,{width:baseW,height:baseH});return [(u-(tool==="crop"?0:crop.x))*frameW,(v-(tool==="crop"?0:crop.y))*frameH];};
+  const p0=sourcePoint(0,0),px=sourcePoint(1,0),py=sourcePoint(0,1);
+  const sourceTransform=`matrix(${(px[0]-p0[0])/baseW},${(px[1]-p0[1])/baseW},${(py[0]-p0[0])/baseH},${(py[1]-p0[1])/baseH},${p0[0]},${p0[1]})`;
 
   // --- 画笔（Free Drawing）---------------------------------------------------------
   const brushWidthPx = strokeWidthPx(brushOptions.widthRel, canvas);
@@ -301,6 +323,7 @@ export default function EditorCanvas({
     const stage = e.target.getStage();
     if (stage === null || stage === undefined) return;
     if (sampleMode) {
+      if(onSampleGesture)return;
       const pos = pointerPos(stage);
       const sampled=pos ? planeToSource(crop.x+pos.x/canvas.width*crop.w,crop.y+pos.y/canvas.height*crop.h,recipe,{width:baseW,height:baseH}) : null;
       const source=sampled && sampled.every(v=>v>=0&&v<=1) ? sampled : null;
@@ -367,6 +390,15 @@ export default function EditorCanvas({
       style={{ cursor, touchAction: canPan ? "none" : undefined }}
       onPointerDown={(event) => {
         const viewport = event.currentTarget;
+        if(sampleMode&&onSampleGesture&&event.button===0){
+          const rect=viewport.querySelector<HTMLElement>('[data-testid="editor-canvas-frame"]')?.getBoundingClientRect();
+          if(!rect?.width||!rect.height)return;
+          const [x,y]=planeToSource(crop.x+(event.clientX-rect.left)/rect.width*crop.w,crop.y+(event.clientY-rect.top)/rect.height*crop.h,recipe,{width:baseW,height:baseH});
+          if(x<0||y<0||x>1||y>1){onSampleError?.();return;}
+          event.preventDefault();viewport.setPointerCapture(event.pointerId);
+          targetRef.current={id:event.pointerId,lastY:event.clientY,height:rect.height,x,y,delta:0,handler:onSampleGesture};
+          onSampleGesture({phase:"start",x,y,delta:0});return;
+        }
         if (!canPan || event.button !== 0 || viewport.scrollWidth <= viewport.clientWidth && viewport.scrollHeight <= viewport.clientHeight) return;
         event.preventDefault();
         panRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
@@ -374,14 +406,17 @@ export default function EditorCanvas({
         setPanning(true);
       }}
       onPointerMove={(event) => {
+        const target=targetRef.current;
+        if(target&&target.id===event.pointerId){target.delta+=(target.lastY-event.clientY)/target.height*(event.altKey?0.1:1);target.lastY=event.clientY;target.handler({phase:"move",x:target.x,y:target.y,delta:target.delta});return;}
         const pan = panRef.current;
         if (!pan || event.pointerId !== pan.pointerId) return;
         event.currentTarget.scrollLeft = pan.left + pan.x - event.clientX;
         event.currentTarget.scrollTop = pan.top + pan.y - event.clientY;
       }}
-      onPointerUp={stopPanning} onPointerCancel={stopPanning} onLostPointerCapture={stopPanning}
+      onPointerUp={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(false);stopPanning();}} onPointerCancel={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(true);stopPanning();}} onLostPointerCapture={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(false);stopPanning();}}
     >
-      <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter} data-crop-guide={cropMode&&cropDraft?JSON.stringify([cropDraft.x,cropDraft.y,cropDraft.w,cropDraft.h]):undefined}>
+      <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter} data-straighten-guide={straightLine?JSON.stringify(straightLine):undefined} data-crop-guide={cropMode&&cropDraft?JSON.stringify([cropDraft.x,cropDraft.y,cropDraft.w,cropDraft.h]):undefined}>
+        {tool==="crop"&&straightening&&<><StraightenOverlay width={dispW} height={dispH} onPreview={setStraightLine} onCancel={onStraightenCancel} onCommit={angle=>onStraighten?.(angle)}/>{straightLine&&<svg className="pointer-events-none absolute inset-0 z-10" width={dispW} height={dispH}><line x1={straightLine[0]*dispW} y1={straightLine[1]*dispH} x2={straightLine[2]*dispW} y2={straightLine[3]*dispH} stroke="white" strokeWidth={2}/></svg>}</>}
         {tool==="mask"&&maskControls&&!sampleMode&&<MaskCanvasControls {...maskControls} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
         <Stage
           width={dispW}
@@ -588,6 +623,13 @@ export default function EditorCanvas({
             </>
           )}
         </Stage>
+        {!nativeDisplay&&clippingSrc&&!showOriginal&&<img src={clippingSrc} alt="" className="pointer-events-none absolute inset-0 h-full w-full"/>}
+        {showOriginal&&nativeGeometry&&!nativeDisplay&&<div className="pointer-events-none absolute inset-0 overflow-hidden bg-white" data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/></div>}
+        {compareSplit!==null&&!showOriginal&&onCompareSplit&&<>
+          {!nativeDisplay&&<div className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden bg-white" style={{width:`${compareSplit*100}%`}} data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/>{originalClippingSrc&&<img src={originalClippingSrc} alt="" className="pointer-events-none absolute left-0 top-0 max-w-none" style={{width:dispW,height:dispH}}/>}</div>}
+          <ComparisonOverlay position={compareSplit} onChange={onCompareSplit}/>
+        </>}
+        {!nativeDisplay&&originalClippingSrc&&showOriginal&&<img src={originalClippingSrc} alt="" className="pointer-events-none absolute inset-0 h-full w-full"/>}
 
         {/* 双击编辑文字：textarea 覆盖在画布上（官方 demo 模式；Enter 提交 / Esc 取消） */}
         {editing !== null && (

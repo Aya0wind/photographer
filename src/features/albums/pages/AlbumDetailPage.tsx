@@ -20,18 +20,20 @@ import {
   type AssetDto,
   type AssetFilters,
 } from "@/ipc/api";
+import { collectAssetIdsByFilters } from "@/features/culling/lib/cullingCore";
 import { useCullingStore } from "@/features/culling/cullingStore";
 import { groupAssetsByDate } from "@/features/gallery/lib/assetGroups";
 import { useAssetViewer } from "@/features/gallery/lib/useAssetViewer";
 import AssetGrid from "@/features/gallery/components/AssetGrid";
 import { AssetContextMenu } from "@/features/gallery/components/ContextMenu";
-import ActionPopover from "@/shared/components/ActionPopover";
-import FloatingToolbar from "@/shared/components/FloatingToolbar";
+import GalleryBrowseControls from "@/features/gallery/components/GalleryBrowseControls";
+import DuplicateMembersDialog from "@/features/gallery/components/DuplicateMembersDialog";
+import { useCrossLibraryDuplicates } from "@/features/gallery/lib/useCrossLibraryDuplicates";
+import { useGalleryLayout } from "@/features/gallery/lib/useGalleryLayout";
 import SelectionDock from "@/shared/components/SelectionDock";
-import TileSizeSwitch from "@/features/gallery/components/TileSizeSwitch";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
-import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
+import { subgroupSuggestions } from "@/features/albums/lib/subgroupSuggestions";
 import ErrorModal from "@/shared/components/ErrorModal";
 import {
   FilterChipsRow,
@@ -48,8 +50,9 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { subscribeAppEvents } from "@/ipc/api";
 import { useExportRefresh } from "@/features/editor/lib/useExportRefresh";
 import TetherStartDialog from "@/features/tethering/TetherStartDialog";
+import { albumRemoveAssets } from "@/ipc/api";
 import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
-import { GALLERY_JUSTIFY_ROW_PX, useGalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
+import { GALLERY_JUSTIFY_ROW_PX, GALLERY_TILE_PX, useGalleryTileSize } from "@/features/gallery/lib/useGalleryTileSize";
 
 /**
  * 手工相册详情页（/albums/:id，经 AlbumEntryPage 数字参数分发进入）：
@@ -229,7 +232,9 @@ export default function AlbumDetailPage() {
   }
 
   // --- 分组 + 查看器 -------------------------------------------------------------------
-  const { cards, badges } = usePhotoCards(assets);
+  const duplicates = useCrossLibraryDuplicates(assets, reloadToken);
+  const [duplicatesShowFor, setDuplicatesShowFor] = useState<AssetDto | null>(null);
+  const { cards, badges } = usePhotoCards(duplicates.assets);
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, assets);
   useEffect(() => {
@@ -237,7 +242,7 @@ export default function AlbumDetailPage() {
     if (viewer.index >= viewer.group.assets.length - 8) void appendPage();
   }, [viewer?.index, viewer?.group.assets.length, appendPage]);
   const [tileSize, setTileSize] = useGalleryTileSize();
-  const [toolsOpen, setToolsOpen] = useState(false);
+  const [layout, setLayout] = useGalleryLayout();
 
   const loadedById = useMemo(() => {
     const map = new Map<number, AssetDto>();
@@ -269,8 +274,7 @@ export default function AlbumDetailPage() {
     void refreshMeta();
   }, [exitSelection, refreshMeta]);
 
-  /** 「移入回收站」确认目标（一照一册模型：从相册移除 = 移入回收站，
-   * 真删只发生在回收站页；还原时原册仍在则回原册）。null=弹窗关闭 */
+  /** 显式移入回收站的确认目标；与仅移除相册引用分开。 */
   const [trashConfirm, setTrashConfirm] = useState<{ ids: number[] } | null>(null);
   const requestTrashMove = useCallback((targets: AssetDto[]) => {
     setTrashConfirm({ ids: targets.map((a) => a.id) });
@@ -365,22 +369,27 @@ export default function AlbumDetailPage() {
   async function startCulling(): Promise<void> {
     if (cullBusy || itemCount === 0) return;
     setCullBusy(true);
-    const result = await cullSessionCreate({
-      kind: "album",
-      albumId,
-      subgroup,
-    });
-    setCullBusy(false);
-    if (!result.ok) return; // 后端未就绪：静默降级（按钮可重试）
-    void useCullingStore.getState().refreshActiveCount();
-    navigate("/culling", { state: { open: result.session.id } });
+    try {
+      const scope = { albumId, ...(subgroup === null ? { subgroupIsNull: true } : { subgroup }) };
+      const source = filtersActive
+        ? { kind: "query" as const, assetIds: await collectAssetIdsByFilters({ ...buildFilters(parseInputs(debouncedKey)), ...scope }) }
+        : { kind: "album" as const, albumId, subgroup };
+      if (source.kind === "query" && source.assetIds.length === 0) return;
+      const result = await cullSessionCreate(source);
+      if (!result.ok) return;
+      void useCullingStore.getState().refreshActiveCount();
+      navigate("/culling", { state: { open: result.session.id } });
+    } finally {
+      setCullBusy(false);
+    }
   }
 
   return (
     <div className="relative h-full" data-testid="album-detail-page" data-album-id={albumId}>
       <div className="flex h-full w-full flex-col px-4">
         {/* 页头：相册名（点击重命名）+ 张数 + 添加照片 + 筛选 + 尺寸 */}
-        <div className="flex h-14 shrink-0 items-center gap-2.5 pr-64" data-testid="album-detail-toolbar">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4">
+        <div className="flex h-12 min-w-0 items-center gap-2.5" data-testid="album-detail-toolbar">
           {renaming ? (
             <div className="flex min-w-0 items-center gap-1.5">
               <input
@@ -440,34 +449,24 @@ export default function AlbumDetailPage() {
 
 
         </div>
-        <FloatingToolbar label={t("ui.browseActions")} locked={panelOpen || toolsOpen || addHintOpen || renaming} inactive={viewer !== null}>
-          {/* 筛选按钮（激活条件计数徽标） */}
-          <button
-            type="button"
-            onClick={() => setPanelOpen((v) => !v)}
-            aria-expanded={panelOpen}
-            className="ui-icon-button relative"
-            aria-label={t("search.filter")} title={t("search.filter")}
-            data-testid="album-detail-filter-toggle"
-          >
-            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h14l-5.5 6v5l-3 1v-6z" /></svg>
-            {chips.length > 0 && (
-              <span className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black">
-                {chips.length}
-              </span>
-            )}
-          </button>
-
-          <TileSizeSwitch value={tileSize} onChange={setTileSize} />
-          <ActionPopover label={t("ui.more")} onOpenChange={setToolsOpen} panelClassName="items-start">
+        <GalleryBrowseControls inline
+          filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen(v => !v)}
+          filterTestId="album-detail-filter-toggle" tileSize={tileSize} onTileSize={setTileSize}
+          layout={layout} onLayout={setLayout} hideDuplicates={duplicates.hidden}
+          onToggleDuplicates={() => { exitSelection(); duplicates.setHidden(!duplicates.hidden); }} duplicatesActive={duplicates.active}
+          onImport={() => navigate(`/import?album=${albumId}`)} onCull={() => void startCulling()}
+          cullBusy={cullBusy} cullDisabled={itemCount === 0 || status === "loading" || rawKey !== debouncedKey} cullTestId="album-cull-start" cullLabel={t("albums.cull")}
+          inactive={viewer !== null}>
+          {/* 操作直出（2026-10-10 定案）：不再折叠进「更多」菜单 */}
           {/* 导出为文件夹（M6，Photographer → LR）：当前作用域（根/子组）整册导出 */}
           <button
             type="button"
             onClick={() => setExportOpen(true)}
             title={subgroup === null ? t("albums.export.hint") : t("albums.export.hintSubgroup", { subgroup })}
-            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="ui-pill-button"
             data-testid="album-export-start"
           >
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 12V2m-4 4 4-4 4 4M3 12v5h14v-5" /></svg>
             {t("albums.export.action")}
           </button>
           {/* 联机拍摄（阶段 E）：先选相册再开拍——独立窗口内调参/取景/按快门，新片直接入本相册 */}
@@ -475,9 +474,10 @@ export default function AlbumDetailPage() {
             type="button"
             onClick={() => setTetherOpen(true)}
             title={t("albums.tetherHint")}
-            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
+            className="ui-pill-button"
             data-testid="album-tether-start"
           >
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="5" width="16" height="12" rx="2" /><path d="m6 5 1-3h6l1 3" /><circle cx="10" cy="11" r="3" /></svg>
             {t("albums.tether")}
           </button>
 
@@ -486,9 +486,10 @@ export default function AlbumDetailPage() {
               type="button"
               onClick={() => setAddHintOpen((v) => !v)}
               aria-expanded={addHintOpen}
-              className="flex items-center gap-1 rounded-md border border-edge px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-accent"
+              className="ui-pill-button"
               data-testid="album-add-photos"
             >
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="14" rx="2" /><path d="m4 13 3-3 3 3m6-7v6m-3-3h6" /></svg>
               {t("albums.addPhotos")}
             </button>
             {addHintOpen && (
@@ -506,34 +507,22 @@ export default function AlbumDetailPage() {
                 <button
                   type="button"
                   onClick={() => navigate("/gallery")}
-                  className="mt-2 w-full rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
+                  className="ui-pill-button ui-primary mt-2 w-full justify-center"
                   data-testid="album-add-photos-go-gallery"
                 >
+            <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="2" /><path d="m4 14 4-5 3 3 2-2 3 4" /></svg>
                   {t("albums.goGallery")}
                 </button>
               </div>
             )}
           </div>
 
-          </ActionPopover>
-          {/* 选片（Culling V1）：当前根/子组作用域一键开会话（空相册禁用） */}
-          <button
-            type="button"
-            onClick={() => void startCulling()}
-            disabled={cullBusy || itemCount === 0}
-            title={subgroup === null ? t("albums.cullHint") : t("albums.cullHintSubgroup", { subgroup })}
-            className="flex h-8 shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-3 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="album-cull-start"
-            data-busy={cullBusy}
-          >
-            {cullBusy ? t("albums.cullBusy") : t("albums.cull")}
-          </button>
-
-        </FloatingToolbar>
+        </GalleryBrowseControls>
+        </div>
 
         {/* 筛选面板（相册维度隐藏：本页已在相册上下文内） */}
-        {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4">
-          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary"><span>{t("search.filter")}</span><ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={()=>setInputs(EMPTY_INPUTS)}/><span className="flex-1"/><button type="button" className="ui-icon-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>×</button></div>
+        {panelOpen && <div className="ui-glass ui-popover z-20 mb-2 max-h-[45%] shrink-0 overflow-y-auto rounded-2xl border border-edge p-4">
+          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary"><span>{t("search.filter")}</span><ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={()=>setInputs(EMPTY_INPUTS)}/><span className="flex-1"/><button type="button" className="ui-pill-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>× {t("ui.close")}</button></div>
           <FilterPanel inputs={inputs} onPatch={patchInputs} hideAlbum />
         </div>}
 
@@ -641,8 +630,10 @@ export default function AlbumDetailPage() {
               loadingMore={loadingMore}
               hasMore={hasMoreRef.current}
               loadingTestId="album-detail-loading-more"
-              layout="justify"
-              tile={GALLERY_JUSTIFY_ROW_PX[tileSize]}
+              layout={layout}
+              tile={layout === "justify" ? GALLERY_JUSTIFY_ROW_PX[tileSize] : GALLERY_TILE_PX[tileSize]}
+              duplicateBadges={duplicates.collapse?.badges}
+              onShowDuplicates={setDuplicatesShowFor}
               scrollTestId="album-detail-grid-scroll"
             />
           )}
@@ -650,6 +641,8 @@ export default function AlbumDetailPage() {
         </div>
 
       </div>
+
+      {duplicatesShowFor && <DuplicateMembersDialog members={duplicates.collapse?.membersByVisibleId.get(duplicatesShowFor.id) ?? [duplicatesShowFor]} visibleId={duplicatesShowFor.id} libraries={duplicates.libraries} onClose={() => setDuplicatesShowFor(null)} />}
 
       {selecting && <SelectionDock count={selected.length} onClear={exitSelection}
         onMove={() => setAddToAlbumTargets(Array.from(selected).flatMap((id) => { const item = loadedById.get(id); return item ? [item] : []; }))}
@@ -672,7 +665,10 @@ export default function AlbumDetailPage() {
           windowIds={assets.map((asset) => asset.id)}
           selectedIds={selected}
           onSelectIds={setSelected}
-          extraEntries={[{ key: "move-subgroup", label: t("albums.moveToSubgroup"), onSelect: () => { setMoveTargets(ctxMenu.assets); setMoveName(""); } }, ...(subgroup !== null ? [{ key: "move-root", label: t("albums.moveToRoot"), onSelect: () => { void handleSubgroupMove(null, ctxMenu.assets); } }] : [])]}
+          extraEntries={[{ key: "remove-album", label: t("albums.removePhotos"), onSelect: () => {
+            void albumRemoveAssets(albumId, ctxMenu.assets.map(asset => asset.id)).then(handleAssetsRemoved)
+              .catch(error => setMoveError(error instanceof Error ? error.message : String(error)));
+          } }, { key: "move-subgroup", label: t("albums.moveToSubgroup"), onSelect: () => { setMoveTargets(ctxMenu.assets); setMoveName(""); } }, ...(subgroup !== null ? [{ key: "move-root", label: t("albums.moveToRoot"), onSelect: () => { void handleSubgroupMove(null, ctxMenu.assets); } }] : [])]}
         />
       )}
 

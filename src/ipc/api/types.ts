@@ -91,20 +91,26 @@ export interface PhotoLibrary {
   assetCount: number;
   /** 库内照片容量缓存（字节） */
   sizeBytes: number;
+  /** 新写入文件的组织规则；已有文件保持原位。 */
+  organizationTemplate: string;
+  /** Derived task state, not a library type. */
+  organizationPending?:boolean;
 }
 
-/** photo_library_create 结果：ok=false 时 error 为后端 Err 文案；null=invoke 不可用。
- *  reference=true 从已有文件夹建立（只登记不搬文件，触发递归扫描批量登记）；
- *  false 新建照片库（登记空文件夹，copy/move 导入落盘目标 = 该库 root）。 */
+/** 统一照片库：已有文件原位建立索引，新增文件按库的组织规则存放。 */
 export type PhotoLibraryCreateResult =
   | { ok: true; library: PhotoLibrary }
   | { ok: false; error: string | null };
 
-/** photo_library_remove 结果：移除登记永不删照片文件（用户红线）；
- *  deleteRecords=true 连库内资产记录一并删（问过用户后）。 */
+/** photo_library_remove 结果：deleteRecords=true 连库内资产记录一并删
+ *  （问过用户后）；deleteFiles=true 且非引用库时连磁盘照片文件一并删
+ *  （强确认短语后；引用库原文件不由应用管理，恒不删）。 */
 export interface PhotoLibraryRemoveResult {
   /** 连带删除的资产记录数（deleteRecords=false 时为 0） */
   recordsDeleted: number;
+  /** 连带删除的磁盘照片文件数（deleteFiles=false 或引用库时为 0；
+   *  过渡期旧后端未返回时缺省 0——toast 不显示第二行） */
+  filesDeleted: number;
 }
 
 /** 照片库扫描任务状态（photo_library_scan_status 返回）：从文件夹建立的
@@ -245,7 +251,7 @@ export type AppEvent =
     }
   /** 联拍收片（阶段 E-1；拍摄后新对象落卡即广播，UI 据此刷新设备文件列表） */
   | { type: "tetheringObjectAdded"; pnpId: string; objectName: string; objectSize: number | null }
-  | { type: "tetheringPhotoAdded"; sessionId: string; libraryId: string; albumId: number; assetId: number; name: string }
+  | { type: "tetheringPhotoAdded"; sessionId: string; libraryId: string; albumId: number; assetId: number; name: string; kind: string }
   | { type: "tetheringStatus"; sessionId: string; connected: boolean; error: string | null }
   | { type: "tetheringSettingsChanged"; sessionId: string }
   | { type: "mapGeoProgress"; stage: string; done: number; total: number; message: string | null }
@@ -831,6 +837,8 @@ export interface DevelopmentAdjustments {
  vignetteAmount:number;vignetteMidpoint:number;vignetteRoundness:number;vignetteFeather:number;vignetteHighlights:number;vignetteStyle:"highlightPriority"|"colorPriority"|"paintOverlay";
 }
 export interface AdvancedAdjustments {
+  parametricCurve?:{highlights:number;lights:number;darks:number;shadows:number;splits:[number,number,number]};
+  colorGrading?:{shadows:{hue:number;sat:number;lum:number};midtones:{hue:number;sat:number;lum:number};highlights:{hue:number;sat:number;lum:number};global:{hue:number;sat:number;lum:number};blending:number;balance:number};
   development?:DevelopmentAdjustments;
   colorBalance?:{shadows:[number,number,number];midtones:[number,number,number];highlights:[number,number,number];preserveLuminosity:boolean};
   blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number];tint:string|null};
@@ -886,6 +894,8 @@ export interface EditRecipeState {
 
 /** 导出选项（folder 模式必填 folder；album 模式必填 album，文件名后端自动生成） */
 export interface ExportOptions {
+  format?:"jpeg"|"png"|"tiff"|"pcraft";
+  colorSpace?:"srgb"|"displayP3"|"adobeRgb"|"proPhotoRgb";
   mode: "folder" | "album";
   folder?: { outputDir: string; fileName: string };
   album?: { albumId: string; subgroup: string | null };
@@ -1011,6 +1021,9 @@ export interface TetherCameraSetting {
   min?: number;
   max?: number;
   step?: number;
+  /** Range 型参数（无离散 options 的 ISO/光圈/快门等）取值范围：后端并行
+   *  切换的新契约形态；旧扁平 min/max/step 并存兼容，UI 取 range 优先。 */
+  range?: { min: number; max: number; step: number };
 }
 
 /** 会话内已入册照片（胶片条；后端只留最近 64 张）。 */
@@ -1034,6 +1047,8 @@ export interface TetherSessionDto {
   connected: boolean;
   receiving: boolean;
   error: string | null;
+  /** 收片队列待接收对象数（后端 FIFO 真值；RAW+JPG/连拍按队列实数计）。 */
+  pendingReceipts: number;
 }
 
 export type TetherStartResult =

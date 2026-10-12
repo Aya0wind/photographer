@@ -65,7 +65,7 @@ export default function ImportPhotoPicker({ flow }: { flow: ImportWizardFlow }) 
             <span className="min-w-0"><span className="block truncate text-xs font-medium text-text-primary" title={device ? sourceBasePath(device) ?? device.name : undefined}>{device?.name ?? t("wizard.chooseSource")}</span><span className="block text-[10px] text-text-muted">{t("wizard.flow.changeSource")}</span></span>
           </button>
           <p role="status" className="min-w-32 flex-1 text-xs text-text-muted">
-            {device?.scanStatus === "scanning" ? t("wizard.scanningPhotos", { count: files.length }) : t("wizard.selectedStats", { selected: selectedCount, total: files.length, size: formatBytes(selectedBytes) })}
+            {device?.scanStatus === "scanning" ? t("wizard.scanningPhotos", { count: files.length }) : t(selectedBytes > 0 ? "wizard.selectedStats" : "wizard.selectedCounts", { selected: selectedCount, total: files.length, size: formatBytes(selectedBytes) })}
           </p>
           <button type="button" onClick={selected.size === files.length ? clearSelection : selectAll} disabled={files.length === 0} className="rounded-lg px-3 py-2 text-xs text-text-secondary hover:bg-panel disabled:opacity-40">{t(selected.size === files.length && files.length > 0 ? "wizard.flow.clearSelection" : "wizard.selectAll")}</button>
           <ViewControls viewMode={viewMode} tileSize={tileSize} onViewMode={setViewMode} onTileSize={setTileSize} />
@@ -77,11 +77,11 @@ export default function ImportPhotoPicker({ flow }: { flow: ImportWizardFlow }) 
             {filesLoading || device?.scanStatus === "scanning" ? <span className="h-8 w-8 animate-spin rounded-full border-2 border-edge border-t-accent" aria-hidden="true" /> : <FolderGlyph size={40} className="text-text-muted" />}
             <p className="max-w-md text-sm leading-relaxed text-text-secondary">{filesLoading || device?.scanStatus === "scanning" ? t("wizard.tableLoading") : !device ? t("wizard.flow.sourceLost") : device.scanStatus === "failed" ? t("wizard.deviceScanFailed") : t("wizard.tableEmpty")}</p>
             {!device && <button type="button" className="ui-primary rounded-xl px-4 py-2 text-xs" onClick={() => setStep("source")}>{t("wizard.chooseSource")}</button>}
-          </div> : viewMode === "list" ? <FileListView groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} rootDirLabel={t("wizard.rootDir")} /> :
+          </div> : viewMode === "list" ? <FileListView deviceId={device?.kind === "mtp" && device.scanStatus !== "scanning" ? device.id : undefined} groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} rootDirLabel={t("wizard.rootDir")} /> :
             <FileGridView groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} basePath={sourceBasePath(device)} rootDirLabel={t("wizard.rootDir")} tile={TILE_SIZE_SPECS[tileSize]} device={device} />}
         </section>
         <footer className="ui-glass flex shrink-0 items-center gap-4 border-t border-edge px-5 py-4">
-          <div className="min-w-0 flex-1"><p className="text-sm font-medium text-text-primary">{t("wizard.readyCount", { count: selectedCount })}<span className="ml-3 text-xs font-normal text-text-muted">{formatBytes(selectedBytes)}</span></p><p className="mt-1 text-xs text-text-muted">{canReview ? t("wizard.flow.nextHint") : blockedReason}</p></div>
+          <div className="min-w-0 flex-1"><p className="text-sm font-medium text-text-primary">{t("wizard.readyCount", { count: selectedCount })}{selectedBytes > 0 && <span className="ml-3 text-xs font-normal text-text-muted">{formatBytes(selectedBytes)}</span>}</p><p className="mt-1 text-xs text-text-muted">{canReview ? t("wizard.flow.nextHint") : blockedReason}</p></div>
           <button type="button" disabled={!canReview} onClick={() => setStep("review")} className="ui-primary shrink-0 rounded-xl px-6 py-2.5 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-40" data-testid="wizard-review-next">{t("wizard.flow.continue")}<span className="ml-2" aria-hidden="true">→</span></button>
         </footer>
       </>;

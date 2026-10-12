@@ -49,26 +49,8 @@ impl VolumeSource {
     }
 }
 
-impl DeviceSource for VolumeSource {
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    fn kind(&self) -> SourceKind {
-        SourceKind::Volume
-    }
-
-    fn copy_only(&self) -> bool {
-        super::present::is_storage_card(&self.root)
-    }
-
-    fn name(&self) -> String {
-        crate::platform::volume_label(&self.root)
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.root.to_string_lossy().into_owned())
-    }
-
-    fn list(&self) -> DeviceResult<Vec<FileEntry>> {
+impl VolumeSource {
+    fn enumerate(&self) -> DeviceResult<Vec<FileEntry>> {
         let mut out = Vec::new();
         let walker = WalkDir::new(&self.root)
             .into_iter()
@@ -91,16 +73,43 @@ impl DeviceSource for VolumeSource {
                 Err(_) => continue, // 理论不可达：walkdir 条目均以 root 为前缀
             };
             let rel_path = normalize_rel_path(&rel.to_string_lossy());
-            let meta = entry.metadata().map_err(|e| DeviceError::Io(e.into()))?;
+            let metadata = entry.metadata().map_err(|e| DeviceError::Io(e.into()))?;
             out.push(FileEntry {
-                mtime: meta.modified().map_err(DeviceError::Io)?.into(),
-                size: meta.len(),
+                mtime: metadata.modified().map_err(DeviceError::Io)?.into(),
+                size: metadata.len(),
                 id: rel_path.clone(),
                 rel_path,
             });
         }
         out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
         Ok(out)
+    }
+}
+
+impl DeviceSource for VolumeSource {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn kind(&self) -> SourceKind {
+        SourceKind::Volume
+    }
+
+    fn copy_only(&self) -> bool {
+        super::present::is_storage_card(&self.root)
+    }
+
+    fn name(&self) -> String {
+        crate::platform::volume_label(&self.root)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.root.to_string_lossy().into_owned())
+    }
+
+    fn list(&self) -> DeviceResult<Vec<FileEntry>> {
+        self.enumerate()
+    }
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        self.enumerate()
     }
 
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {

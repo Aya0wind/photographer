@@ -20,6 +20,8 @@ import {
   assetsSeek,
   assetVersions,
   isIpcAvailable,
+  subscribeAppEvents,
+  type AppEvent,
   type AssetDto,
 } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -34,6 +36,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetGroupDates: vi.fn(),
     assetThumbGet: vi.fn(),
     isIpcAvailable: vi.fn(() => true),
+    subscribeAppEvents: vi.fn(),
   };
 });
 
@@ -66,6 +69,15 @@ const groupDatesMock = vi.mocked(assetGroupDates);
 const thumbMock = vi.mocked(assetThumbGet);
 const ipcAvailableMock = vi.mocked(isIpcAvailable);
 const convertMock = vi.mocked(convertFileSrc);
+const subscribeMock = vi.mocked(subscribeAppEvents);
+
+/** 事件订阅捕获（删库联动用例手动发 photoLibrariesChanged） */
+let eventHandlers: Array<(event: AppEvent) => void> = [];
+function emitEvent(event: AppEvent): void {
+  act(() => {
+    for (const handler of [...eventHandlers]) handler(event);
+  });
+}
 
 // --- 工具 -------------------------------------------------------------------------
 
@@ -172,6 +184,13 @@ beforeEach(() => {
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
   ipcAvailableMock.mockReset().mockReturnValue(true);
+  eventHandlers = [];
+  subscribeMock.mockReset().mockImplementation(async (handler) => {
+    eventHandlers.push(handler);
+    return () => {
+      eventHandlers = eventHandlers.filter((h) => h !== handler);
+    };
+  });
   resetThumbPipelineForTests();
   clearGallerySnapshotForTests(); // 模块级会话快照：用例间必须清（否则跨用例泄漏资产）
   IntersectionObserverStub.instances = [];
@@ -344,6 +363,22 @@ describe("画廊：日期分组照片墙", () => {
     assetsPageMock.mockResolvedValue(makePage(5, "2026-09-18", 5));
     renderGallery();
     await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(5));
+  });
+
+  // 删库联动（2026-10-09）：删除照片库只发 photoLibrariesChanged——此前画廊只
+  // 重拉库清单，资产列表原样残留已删资产；修复后同事件触发资产重拉
+  it("photoLibrariesChanged → 资产重拉（重置分页拉首页）", async () => {
+    assetsPageMock.mockResolvedValueOnce(makePage(3, "2026-09-18", 3));
+    renderGallery();
+    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(3);
+    expect(assetsPageMock).toHaveBeenCalledTimes(1);
+
+    // 事件到达 → 资产管线重走首页加载（assets_page 计数递增且从 0 重拉）
+    assetsPageMock.mockResolvedValueOnce(makePage(2, "2026-09-20", 9));
+    emitEvent({ type: "photoLibrariesChanged" });
+    await waitFor(() => expect(assetsPageMock).toHaveBeenCalledTimes(2));
+    expect(assetsPageMock).toHaveBeenLastCalledWith(0, 100);
+    await waitFor(() => expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2));
   });
 });
 

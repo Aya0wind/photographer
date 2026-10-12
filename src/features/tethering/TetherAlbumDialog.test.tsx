@@ -1,0 +1,31 @@
+import { beforeEach, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { I18nextProvider } from "react-i18next";
+import i18n from "@/i18n";
+import { albumCreate } from "@/ipc/api";
+import TetherAlbumDialog from "./TetherAlbumDialog";
+vi.mock("@/ipc/api", () => ({ albumCreate: vi.fn() }));
+vi.mock("./TetherStartDialog", () => ({ default: ({ albumId, albumName }: { albumId: number; albumName: string }) => <div data-testid="camera-picker">{albumId}:{albumName}</div> }));
+const album = { id: 7, name: "棚拍", coverAssetId: null, itemCount: 0, createdAt: "2026-10-11" };
+beforeEach(() => vi.mocked(albumCreate).mockReset());
+it("必须选相册才能进入相机选择，已有相册 ID 原样传递", async () => {
+  render(<I18nextProvider i18n={i18n}><TetherAlbumDialog albums={[album]} onCreated={vi.fn()} onClose={vi.fn()} /></I18nextProvider>);
+  expect(screen.getByTestId("tether-album-next")).toBeDisabled();
+  expect(screen.queryByTestId("camera-picker")).toBeNull();
+  fireEvent.change(screen.getByTestId("tether-album-select"), { target: { value: "7" } });
+  fireEvent.click(screen.getByTestId("tether-album-next"));
+  expect(await screen.findByTestId("camera-picker")).toHaveTextContent("7:棚拍");
+  expect(albumCreate).not.toHaveBeenCalled();
+});
+it("新建相册完成后用新 ID 开启相机选择", async () => {
+  const onCreated = vi.fn();
+  vi.mocked(albumCreate).mockResolvedValue({ ok: true, album });
+  render(<I18nextProvider i18n={i18n}><TetherAlbumDialog albums={[]} onCreated={onCreated} onClose={vi.fn()} /></I18nextProvider>);
+  fireEvent.change(screen.getByTestId("tether-album-select"), { target: { value: "new" } });
+  expect(screen.getByTestId("tether-album-next")).toBeDisabled();
+  fireEvent.change(screen.getByTestId("tether-album-name"), { target: { value: " 棚拍 " } });
+  fireEvent.click(screen.getByTestId("tether-album-next"));
+  await waitFor(() => expect(onCreated).toHaveBeenCalledWith(album));
+  expect(albumCreate).toHaveBeenCalledWith("棚拍");
+  expect(screen.getByTestId("camera-picker")).toHaveTextContent("7:棚拍");
+});

@@ -177,7 +177,8 @@ export async function assetViewMark(assetId: number): Promise<void> {
 
 /** 按 id 批量取资产（语义/智能相册结果回填 AssetDto 用）；失败/非数组回退 []。
  *  契约补充项（assets_by_ids，需后端 lane 实现；keyset 之外唯一的随机访问口）。 */
-export async function assetsByIds(ids: number[]): Promise<AssetDto[]> {
+export async function assetsByIds(ids: number[], strict = false): Promise<AssetDto[]> {
+  if (strict) return ipc<AssetDto[]>("assets_by_ids", { ids });
   return ipcList<AssetDto>("assets_by_ids", { ids });
 }
 

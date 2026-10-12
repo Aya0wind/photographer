@@ -715,6 +715,98 @@ fn trash_purge_offline_library_never_record_deletes_even_without_files() {
 }
 
 // ---------------------------------------------------------------------------
+// 回收站清除的派生数据清理（2026-10-09 补齐，与删照片库同一套清理）：
+// 孤儿人物簇 + 缩略图缓存 + 语义向量——记录删了，这三样即孤儿
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trash_purge_cleans_orphan_people_thumbs_and_vectors() {
+    let (_dir, state, _db) = setup();
+    let (_dir2, lib_a, root_a, _lib_b, _root_b) = two_libraries(&state);
+    let db = open_db(&state.config_dir);
+    let (a, file_a) = ins_in_library(&db, &lib_a, &root_a, "purge.jpg", true, false);
+    let (keeper, file_k) = ins_in_library(&db, &lib_a, &root_a, "keeper.jpg", true, false);
+
+    // 人物簇：孤儿簇只挂 a 的脸；共享簇 a + keeper 各一脸
+    let orphan = db.create_person().unwrap();
+    let shared = db.create_person().unwrap();
+    db.insert_face(a, 0.0, 0.0, 0.5, 0.5, &[0.1, 0.2], Some(orphan))
+        .unwrap();
+    db.insert_face(a, 0.0, 0.0, 0.3, 0.3, &[0.3, 0.4], Some(shared))
+        .unwrap();
+    db.insert_face(keeper, 0.0, 0.0, 0.5, 0.5, &[0.5, 0.6], Some(shared))
+        .unwrap();
+
+    // 缩略图缓存夹具：a 当前代 + 陈旧 mtime 代；keeper 一份必须保留
+    let db_dir = state.config_dir.clone();
+    let mtime = std::fs::metadata(&file_a).unwrap().modified().unwrap();
+    let cache_cur = thumbs::cache_path(&db_dir, &file_a, 256, mtime);
+    let cache_stale = thumbs::cache_path(
+        &db_dir,
+        &file_a,
+        256,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+    );
+    let cache_keep = thumbs::cache_path(
+        &db_dir,
+        &file_k,
+        256,
+        std::fs::metadata(&file_k).unwrap().modified().unwrap(),
+    );
+    for cache in [&cache_cur, &cache_stale, &cache_keep] {
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(cache, b"thumb").unwrap();
+    }
+
+    // 语义向量夹具：a + keeper
+    let dim = ai::embed::EMBED_DIM;
+    let index = ai::semantic::shared_index(&db_dir).unwrap();
+    {
+        let idx = index.lock().unwrap();
+        idx.reserve(64).unwrap();
+        idx.add(a as u64, &vec![0.5f32; dim]).unwrap();
+        idx.add(keeper as u64, &vec![0.4f32; dim]).unwrap();
+        idx.save(db_dir.join("vectors.usearch").to_str().unwrap())
+            .unwrap();
+    }
+
+    fetch_asset_trash_move(&state, &[a]).unwrap();
+    // delete_files=false 也清派生数据（本体不动，记录删了缓存/向量即孤儿）
+    let result = fetch_trash_purge(&state, &[a], false).unwrap();
+    assert_eq!(result.deleted_records, 1);
+
+    assert!(file_a.is_file(), "delete_files=false 不动本体");
+    assert!(
+        !cache_cur.exists() && !cache_stale.exists(),
+        "被清资产的缩略图缓存（含陈旧代）随行清理"
+    );
+    assert!(cache_keep.is_file(), "保留资产的缓存不动");
+    let orphan_left: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM people WHERE id = ?1", [orphan], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(orphan_left, 0, "变孤儿的人物簇删除");
+    let shared_left: i64 = db
+        .0
+        .query_row("SELECT COUNT(*) FROM people WHERE id = ?1", [shared], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(shared_left, 1, "仍有脸挂靠的人物保留");
+
+    // 向量：a 删、keeper 留（逐出池后从落盘文件重载，断言清理已持久化）
+    ai::semantic::invalidate_index(&db_dir);
+    let index = ai::semantic::shared_index(&db_dir).unwrap();
+    {
+        let idx = index.lock().unwrap();
+        assert!(!idx.contains(a as u64), "被清资产的向量删除");
+        assert!(idx.contains(keeper as u64), "保留资产的向量不动");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // xmp_dirty 写方向闭环（§五 M2c）：缺失/离线期间的改动进库置脏，不派边车
 // ---------------------------------------------------------------------------
 

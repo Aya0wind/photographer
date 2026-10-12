@@ -38,6 +38,7 @@ export interface RecipeHistory {
   past: EditRecipe[];
   present: EditRecipe;
   future: EditRecipe[];
+  cropSession?:{past:EditRecipe[];present:EditRecipe;future:EditRecipe[]};
 }
 
 export type TextLayerPatch = Partial<Omit<EditRecipeTextLayer, "id">>;
@@ -158,7 +159,7 @@ function rebaseLayersOnCrop(
   next: EditRecipeCrop | null,
 ): EditRecipe {
   const oldCrop = recipe.crop ?? FULL_CROP;
-  const newCrop = next === null ? FULL_CROP : clampCrop(next);
+  const newCrop = next === null ? FULL_CROP : clampCrop(next,recipe.renderer==="photocraft"?1e-6:0.05);
   const scale = oldCrop.w / newCrop.w;
   const remap = (a: number, b: number): { a: number; b: number } => {
     const img = canvasToImage(a, b, oldCrop);
@@ -289,7 +290,7 @@ export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
 /** 持久化/导出前清洗：剔除空文字层与零点笔迹（放置后未输入的占位层不入库） */
 export function recipeForPersist(recipe: EditRecipe): EditRecipe {
   const a=recipe.advanced;
-  const neutralAdvanced=a && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
+  const neutralAdvanced=a && !a.parametricCurve && !a.colorGrading && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
     && !Object.values(a.channelCurves??{}).some(points=>!!points?.length) && !a.levels && !a.lookup && !Object.keys(a.hsl??{}).length;
   return {
     ...recipe,

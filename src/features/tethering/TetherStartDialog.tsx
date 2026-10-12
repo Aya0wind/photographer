@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
   tetheringCameraList,
+  cameraProbe,
   tetheringStart,
   type CameraInfo,
 } from "@/ipc/api";
@@ -22,17 +23,28 @@ export default function TetherStartDialog({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const refreshSequence = useRef(0);
   const [cameras, setCameras] = useState<CameraInfo[] | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     setCameras(null);
-    setCameras(await tetheringCameraList());
+    const list = await tetheringCameraList();
+    // WPD enumeration initially exposes file transfer only. Probe before gating
+    // the shutter button; opening the import device dialog must not be required.
+    const resolved = await Promise.all(list.map(async camera => {
+      if (canTriggerCapture(camera.capabilities) || !camera.pnpId.startsWith("\\\\?\\")) return camera;
+      const probe = await cameraProbe(camera.pnpId);
+      return probe ? { ...probe, name: camera.name } : camera;
+    }));
+    if (sequence === refreshSequence.current) setCameras(resolved);
   }, []);
 
   useEffect(() => {
     void refresh();
+    return () => { refreshSequence.current += 1; };
   }, [refresh]);
 
   async function start(camera: CameraInfo): Promise<void> {
@@ -63,14 +75,12 @@ export default function TetherStartDialog({
         </h2>
 
         <div className="mt-3 flex items-center justify-between">
-          <span className="text-xs text-text-secondary">
-            {cameras === null ? t("albums.tetherScanning") : `${cameras.length}`}
-          </span>
+          {cameras === null && <span className="text-xs text-text-secondary">{t("albums.tetherScanning")}</span>}
           <button
             type="button"
             onClick={() => void refresh()}
             disabled={cameras === null}
-            className="rounded border border-edge px-2 py-0.5 text-[10px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+            className="ml-auto rounded border border-edge px-2 py-0.5 text-[10px] text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
             data-testid="tether-start-refresh"
           >
             {t("albums.tetherRefresh")}

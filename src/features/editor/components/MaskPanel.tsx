@@ -7,7 +7,8 @@ import AdvancedAdjustmentPanel from "./AdvancedAdjustmentPanel";
 import type {MaskBrush} from "./MaskCanvasControls";
 import type {CurveSampling} from "./CurveEditor";
 const BUTTON="rounded-lg border border-edge px-2 py-1.5 text-xs text-text-secondary hover:border-accent disabled:opacity-30";
-export default function MaskPanel({recipe,selected,onSelect,editing,onEditing,brush,onBrush,dispatch,begin,end,onModalChange,sampling,showOverlay=true,onShowOverlay}:{
+export default function MaskPanel({recipe,selected,onSelect,editing,onEditing,brush,onBrush,dispatch,begin,end,onModalChange,sampling,showOverlay=true,onShowOverlay,cancel}:{
+ cancel?:()=>void;
  recipe:EditRecipe;selected:string|null;onSelect:(id:string|null)=>void;editing:boolean;onEditing:(value:boolean)=>void;
  brush:MaskBrush;onBrush:(value:MaskBrush)=>void;dispatch:(action:AdvancedAction)=>void;begin:()=>void;end:()=>void;onModalChange:(value:boolean)=>void;
  sampling?:CurveSampling;
@@ -40,7 +41,8 @@ export default function MaskPanel({recipe,selected,onSelect,editing,onEditing,br
     <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={brush.erase} onChange={e=>onBrush({...brush,erase:e.target.checked})}/>{t("advancedEditor.masks.eraser")}</label>
     {(["widthRel","hardness","opacity","flow"] as const).map(key=><Slider key={key} label={t(`advancedEditor.masks.${key}`)} unit="%" min={key==="widthRel"?0.1:0} max={key==="widthRel"?50:100} step={0.1} value={brush[key]*100} onChange={value=>onBrush({...brush,[key]:value/100})} onSet={value=>onBrush({...brush,[key]:value/100})} onReset={()=>onBrush({...brush,[key]:key==="widthRel"?0.05:1})} defaultValue={key==="widthRel"?5:100} begin={()=>{}} end={()=>{}}/>)}
    </div>}
-   {!editing&&<AdvancedAdjustmentPanel key={mask.id} recipe={local} begin={begin} end={end} onModalChange={onModalChange} sampling={sampling??{available:false,picker:null,setPicker:()=>{},sample:null,histogram:[]}}
+   {!editing&&<AdvancedAdjustmentPanel cancel={cancel} key={mask.id} recipe={local} begin={begin} end={end} onModalChange={onModalChange} sampling={sampling??{available:false,picker:null,setPicker:()=>{},sample:null,histogram:[]}}
+    onResetDevelopment={group=>{end();dispatch({type:"maskResetDevelopmentGroup",id:mask.id,group});}}
     onBasic={(patch,record=false)=>update({adjustments:{brightness:0,contrast:0,saturation:0,...mask.adjustments,...patch}},record)}
     onAdvanced={(patch,record=true)=>update({advanced:{...DEFAULT_ADVANCED,...mask.advanced,...patch}},record)}
     onReset={group=>{end();dispatch({type:"maskResetAdjustmentGroup",id:mask.id,group});}}/>}

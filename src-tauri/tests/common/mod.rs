@@ -160,12 +160,14 @@ pub fn ensure_photo_library(db: &Db, database_dir: &Path, root: &Path) -> String
 }
 
 /// 引擎级导入计划：目标照片库 = target root 登记条目（2026-10-09 §三
-/// 照片库基准）；布局固定纯时间（无模板字段）。album_id 缺省 None（相册
-/// 为纯逻辑引用，可选）。
+/// 照片库基准）；布局钉旧两级纯时间（新库默认模板为三级
+/// {year}/{month}/{day}，期望目录助手 expected_time_dir 仍按 {year}/{month}）。
+/// album_id 缺省 None（相册为纯逻辑引用，可选）。
 pub fn plan_for(db: &Db, db_dir: &Path, target: &Path) -> ImportPlan {
     ImportPlan {
         source_id: "test-src".into(),
         target_library_id: ensure_photo_library(db, db_dir, target),
+        organization_template: Some("{year}/{month}/{filename}".into()),
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,
@@ -213,10 +215,10 @@ pub fn expected_mtime_dir(target: &Path, source_file: &Path) -> PathBuf {
     expected_time_dir(target, mtime)
 }
 
-/// plan_for + ensure_default_album（挂「未分组」引用的直接引擎测试用）。
+/// 显式创建测试相册并指定导入引用。
 pub fn plan_with_album(db: &Db, db_dir: &Path, target: &Path) -> ImportPlan {
     let mut plan = plan_for(db, db_dir, target);
-    plan.album_id = Some(db.ensure_default_album().unwrap());
+    plan.album_id = Some(db.album_create("测试相册").unwrap().id);
     plan
 }
 
@@ -433,6 +435,7 @@ pub fn ipc_plan(state: &AppState, target: &Path) -> ImportPlan {
     ImportPlan {
         source_id: device_id,
         target_library_id,
+        organization_template:None,
         duplicate_policy: DuplicatePolicy::Skip,
         skip_imported: true,
         streams: 2,

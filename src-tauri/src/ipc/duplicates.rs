@@ -154,10 +154,10 @@ pub fn fetch_duplicates_list(
 
 /// 永久删除资产核（trash_purge 同路径；原 duplicate_delete 命令已删——
 /// 2026-09-29 定案：除回收站外一律软删）：删库行（FK 级联清 index_tasks/
-/// faces/view_history/similar_bucket；同款 DB 删除路径 assets_delete_rows 为
-/// 回收站 purge 共用，顺带清 pair 双向引用）+ 磁盘文件（缺失不报错）+ 日志。
-/// 缩略图缓存按 (path, mtime) 键成为孤儿——开发期容忍，整库重建可清。
-/// 返回实际删除数。
+/// faces/view_history/similar_bucket + 孤儿人物簇；同款 DB 删除路径
+/// assets_delete_rows 为回收站 purge 共用，顺带清 pair 双向引用）+ 磁盘
+/// 文件（缺失不报错）+ 派生数据清理（缩略图缓存/语义向量，缺失容忍）
+/// + 日志。返回实际删除数。
 // 无 IPC 命令消费（lib 视角死代码），album_test 作维护核直接调用。
 #[allow(dead_code)]
 pub fn fetch_duplicate_delete(state: &super::AppState, asset_ids: &[i64]) -> Result<u64, String> {
@@ -186,6 +186,11 @@ pub fn fetch_duplicate_delete(state: &super::AppState, asset_ids: &[i64]) -> Res
             }
         }
         let _ = db.append_log("info", None, &format!("重复删除：{path}"));
+    }
+    // 派生数据清理（缩略图缓存/语义向量；缺失容忍）
+    if let Ok(db_dir) = super::app_database_dir(state) {
+        let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        super::purge_asset_derivations(&db_dir, asset_ids, &path_refs);
     }
     Ok(deleted)
 }

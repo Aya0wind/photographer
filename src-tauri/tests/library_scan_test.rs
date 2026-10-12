@@ -772,3 +772,93 @@ fn scan_yields_while_import_running() {
     assert_eq!(rounds[0].1.cooled, 1, "看到新文件（冷却中，下轮拾取）");
     assert_eq!(rounds[0].1.registered, 0);
 }
+
+// ---------------------------------------------------------------------------
+// 登记后索引唤醒（2026-10-09 审计 P0 断链A/C）：增量轮收尾 kick——登记即
+// 建 thumb/eyes/blur 任务并补建 phash 任务，worker 池被派发跑完（此前
+// 扫描登记后无人唤醒，任务滞留 pending）。
+// ---------------------------------------------------------------------------
+
+/// 真实可解码 JPEG（thumb/phash/blur 通道需要实际解码；与 index_task_test
+/// 同款 image crate 编码）。
+fn write_real_jpg(path: &Path, seed: u8) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut img = image::RgbImage::new(640, 480);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, seed]);
+    }
+    img.save(path).unwrap();
+}
+
+/// mtime 回拨 1 小时（过默认 10s 冷却窗——scan_all_libraries_once 无测试
+/// 注入口，走生产默认选项）。
+fn backdate(path: &Path) {
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+}
+
+#[test]
+fn scan_registration_kicks_index_workers_to_completion() {
+    let holder = tempfile::tempdir().unwrap();
+    let db_dir = holder.path().join("db");
+    let src = holder.path().join("src");
+    let photos = holder.path().join("photos");
+    for dir in [&db_dir, &src, &photos] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let state = common::state_with_library(&db_dir, &src, Duration::from_millis(1));
+    let database = open_db(&db_dir);
+    database
+        .photos_library_register("唤醒库", &photos.to_string_lossy(), &db_dir)
+        .unwrap();
+    for n in 0..2 {
+        let file = photos.join(format!("2026/10/real-{n}.jpg"));
+        write_real_jpg(&file, 60 + n as u8);
+        backdate(&file);
+    }
+
+    let rounds = ipc::photo_library::scan_all_libraries_once(&state);
+    assert_eq!(rounds.len(), 1);
+    assert_eq!(rounds[0].1.registered, 2, "冷却窗已过，新文件本轮登记");
+
+    // kick 生效判据：非 eyes 通道任务（thumb/blur/phash——phash 为收尾补差
+    // 建档）全部被 worker 消费到终态；eyes 无模型保持 pending 属设计
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let pending: i64 = database
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending','running') \
+                 AND kind != 'eyes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "扫描登记后索引 worker 未在期限内跑完（剩余 {pending}）"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let phash_done: i64 = database
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'phash' AND state = 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(phash_done, 2, "phash 任务由收尾补差建档并完成");
+    let thumb_done: i64 = database
+        .0
+        .query_row("SELECT COUNT(*) FROM assets WHERE thumb_state = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(thumb_done, 2, "缩略图通道完成");
+}

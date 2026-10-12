@@ -1,6 +1,7 @@
 export type CurvePoint = [number, number];
 export type CurveChannel = "rgb" | "red" | "green" | "blue" | "luminance";
-export type CurvePicker = "point" | "black" | "gray" | "white" | "hsl";
+export type CurvePicker = "point" | "black" | "gray" | "white" | "hsl" | "curveTarget" | "hslTarget";
+export type HslAxis="hue"|"saturation"|"lightness";
 export type HslColorRange="reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas";
 export const IDENTITY: CurvePoint[] = [[0, 0], [255, 255]];
 export const clampTone = (value: number) => Math.round(Math.max(0, Math.min(255, value)) * 100) / 100;
@@ -39,5 +40,7 @@ export function addCurvePoint(points: CurvePoint[], input: number, output: numbe
 export function moveCurvePoint(points: CurvePoint[], index: number, x: number, y: number): CurvePoint[] {
   const min = index === 0 ? 0 : points[index - 1][0] + 1;
   const max = index === points.length - 1 ? 255 : points[index + 1][0] - 1;
-  return points.map((point, i) => i === index ? [clampTone(Math.max(min, Math.min(max, x))), clampTone(y)] : point);
+  // Imported curves may have sub-pixel spacing. Keep their input coordinate
+  // when a one-level movement would cross a neighbour; output remains editable.
+  return points.map((point, i) => i === index ? [min>max?point[0]:clampTone(Math.max(min, Math.min(max, x))), clampTone(y)] : point);
 }

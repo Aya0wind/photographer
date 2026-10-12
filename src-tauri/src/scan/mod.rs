@@ -941,7 +941,7 @@ impl<'a> Scanner<'a> {
                         camera: file_meta.camera.clone(),
                         source: "scan".into(),
                         created_at: crate::db::now_rfc3339(),
-                        origin: "imported".into(),
+                        origin: "external".into(),
                         width: file_meta.width,
                         height: file_meta.height,
                         iso: file_meta.iso,

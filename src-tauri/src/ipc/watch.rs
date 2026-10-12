@@ -122,6 +122,7 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
             .insert(
                 source.id(),
                 super::DeviceEntry {
+                    files: None,
                     scan: super::DeviceScan::Ready,
                     snapshot: crate::devices::orchestrator::DeviceSnapshot {
                         id: source.id(),
@@ -134,7 +135,9 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
                     source: std::sync::Arc::clone(&source),
                 },
             );
-        // 目标照片库：首个登记库（无库跳过本轮）
+        // 目标照片库：首个登记库（监视文件夹无相册上下文——不像联拍可按
+        // 相册资产众数归属（tethering::session::resolve_tether_library），
+        // 维持首库；M4 起按库内监视配置细化；无库跳过本轮）
         let Ok(db) = super::app_database_db(state) else {
             eprintln!("[watch] 数据库不可用，跳过本轮");
             continue;
@@ -165,6 +168,8 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
         let plan = ImportPlan {
             source_id: source.id(),
             target_library_id: library.id,
+
+            organization_template: None,
             duplicate_policy: DuplicatePolicy::Skip,
             skip_imported: true,
             streams: 2,

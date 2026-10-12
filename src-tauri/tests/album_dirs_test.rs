@@ -2,7 +2,7 @@
 //! 相册/子组 = 纯逻辑概念——claim/挪组只改 album_item 引用，零文件操作；
 //! 导入落盘 = 纯时间 `{库root}/{拍摄年}/{拍摄月}/{原文件名}`（EXIF 时间
 //! 缺失回退 mtime），相册归属不影响物理位置；重名走 rename 策略
-//! （`_1` 后缀）且 XMP 边车同名跟随；默认相册「未分组」幂等创建禁删禁改名。
+//! （`_1` 后缀）且 XMP 边车同名跟随；相册仅保存逻辑引用。
 
 mod common;
 
@@ -99,22 +99,6 @@ fn album_create_generates_sanitized_unique_dir_names() {
 // ---------------------------------------------------------------------------
 
 /// 纯时间相对段公式表驱动：`{拍摄年}/{拍摄月}/{原文件名}`。
-#[test]
-fn time_layout_formula_is_table_driven() {
-    use import::engine::pipeline::time_rel;
-    assert_eq!(
-        time_rel(common::utc(2026, 6, 28, 15, 30, 0), "IMG_0001.CR3"),
-        "2026/06/IMG_0001.CR3"
-    );
-    assert_eq!(
-        time_rel(common::utc(2025, 12, 31, 23, 59, 59), "DSC.jpg"),
-        "2025/12/DSC.jpg"
-    );
-    assert_eq!(
-        time_rel(common::utc(1999, 1, 1, 0, 0, 0), "a.b.c.png"),
-        "1999/01/a.b.c.png"
-    );
-}
 
 /// 把文件 mtime 设到指定 UTC 时刻（EXIF 缺失回退源验证用）。
 fn set_mtime(path: &std::path::Path, at: chrono::DateTime<chrono::Utc>) {
@@ -281,32 +265,6 @@ fn claim_builds_reference_without_touching_files() {
 }
 
 // ---------------------------------------------------------------------------
-// 默认相册「未分组」（系统级保底）
-// ---------------------------------------------------------------------------
-
-#[test]
-fn default_album_ungrouped_is_immovable_and_recreated_by_name() {
-    let (_dir, state, db) = common::library_fixture();
-
-    // 自动创建幂等：两次 ensure 返回同一个 id
-    let first = db.ensure_default_album().unwrap();
-    let second = db.ensure_default_album().unwrap();
-    assert_eq!(first, second);
-    assert_eq!(first, 1);
-
-    // 禁删
-    assert!(db.album_delete(first).is_err());
-    // 禁改名
-    assert!(ipc::album::fetch_album_rename(&state, first, "改名了").is_err());
-    // 再 ensure 仍是同一条（不会重复创建）
-    assert_eq!(db.ensure_default_album().unwrap(), first);
-
-    // 普通相册不受影响：可改名、可删
-    let normal = db.album_create("普通册").unwrap();
-    ipc::album::fetch_album_rename(&state, normal.id, "改名册").unwrap();
-    db.album_delete(normal.id).unwrap();
-}
-
 /// 导入相册可选：不挂相册正常导入（画廊全局视图语义）；不存在相册早失败。
 #[test]
 fn import_album_is_optional_but_validated_when_present() {

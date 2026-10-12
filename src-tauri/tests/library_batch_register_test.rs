@@ -85,9 +85,7 @@ fn from_folder_registration_runs_to_done_with_stats_and_event() {
     let library = fetch_photo_library_create(
         &state,
         "从文件夹",
-        &photos.to_string_lossy(),
-        true,
-    )
+        &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false)
     .unwrap();
 
     // 任务行已落（pending）+ worker 唤醒旗已置（秒级开跑，不等 60s 轮询拍）
@@ -154,7 +152,7 @@ fn same_content_copy_within_library_skipped_by_hash() {
     write(&photos.join("b.jpg"), 2);
 
     let library =
-        fetch_photo_library_create(&state, "去重", &photos.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "去重", &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     run_pending_batch_jobs_with(&state, &relaxed());
 
     let database = open_db(&db_dir);
@@ -177,7 +175,7 @@ fn cancel_before_pickup_deletes_job_without_registering() {
     write(&photos.join("a.jpg"), 1);
 
     let library =
-        fetch_photo_library_create(&state, "取消", &photos.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "取消", &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     fetch_photo_library_scan_cancel(&state, &library.id).unwrap();
 
     let database = open_db(&db_dir);
@@ -272,7 +270,7 @@ fn import_running_yields_projects_paused_and_resumes_accumulated() {
     write(&photos.join("a.jpg"), 1);
 
     let library =
-        fetch_photo_library_create(&state, "让路", &photos.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "让路", &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     let database = open_db(&db_dir);
 
     // 导入在场：整轮让路，任务保持 pending，状态投影 paused
@@ -320,10 +318,10 @@ fn cross_library_duplicate_registers_and_summarizes() {
 
     let mut rx = state.bus.subscribe();
     let lib_a =
-        fetch_photo_library_create(&state, "库A", &photos_a.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "库A", &photos_a.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     run_pending_batch_jobs_with(&state, &relaxed());
     let lib_b =
-        fetch_photo_library_create(&state, "库B", &photos_b.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "库B", &photos_b.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     run_pending_batch_jobs_with(&state, &relaxed());
 
     let database = open_db(&db_dir);
@@ -363,7 +361,7 @@ fn offline_root_keeps_job_pending_for_resume() {
     write(&photos.join("a.jpg"), 1);
 
     let library =
-        fetch_photo_library_create(&state, "离线", &photos.to_string_lossy(), true).unwrap();
+        fetch_photo_library_create(&state, "离线", &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false).unwrap();
     fs::remove_dir_all(&photos).unwrap();
     run_pending_batch_jobs_with(&state, &relaxed());
 
@@ -384,4 +382,64 @@ fn offline_root_keeps_job_pending_for_resume() {
     run_pending_batch_jobs_with(&state, &relaxed());
     assert_eq!(job_row(&database, &library.id).status, "done");
     assert_eq!(count_assets(&database), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 登记后索引唤醒（2026-10-09 审计 P0 断链A/C）：批量任务收尾 kick——
+// worker 池被派发跑完登记产生的任务（thumb/blur + phash 补差建档）。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch_registration_kicks_index_workers_to_completion() {
+    let (holder, state, db_dir) = setup();
+    let photos = holder.path().join("photos");
+    // 真实可解码 JPEG（thumb/phash/blur 通道需要实际解码）
+    for n in 0..2 {
+        let path = photos.join(format!("2026/10/real-{n}.jpg"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut img = image::RgbImage::new(640, 480);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, 60 + n]);
+        }
+        img.save(&path).unwrap();
+    }
+
+    let _library =
+        fetch_photo_library_create(&state, "从文件夹唤醒", &photos.to_string_lossy(), crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE, false)
+            .unwrap();
+    run_pending_batch_jobs_with(&state, &relaxed());
+    let database = open_db(&db_dir);
+    assert_eq!(count_assets(&database), 2, "批量登记完成（前置）");
+
+    // kick 生效判据：非 eyes 通道任务全部消费到终态（eyes 无模型 pending
+    // 属设计）
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let pending: i64 = database
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending','running') \
+                 AND kind != 'eyes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "批量登记后索引 worker 未在期限内跑完（剩余 {pending}）"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let phash_done: i64 = database
+        .0
+        .query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind = 'phash' AND state = 'done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(phash_done, 2, "phash 任务由收尾补差建档并完成");
 }

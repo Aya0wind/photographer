@@ -41,6 +41,8 @@
 
 pub mod export;
 mod gpu;
+mod grading;
+mod parametric;
 mod masks;
 pub mod native_canvas;
 mod native_geometry;
@@ -49,12 +51,14 @@ mod native_presenter;
 pub mod ipc;
 pub mod lut;
 pub mod meta;
+mod tiff_metadata;
 pub mod metadata;
 pub mod photocraft;
 pub mod preview;
 mod preview_renderer;
 mod proxy_cache;
 pub mod project;
+pub mod portable;
 pub mod recipe;
 pub mod render;
 mod source;

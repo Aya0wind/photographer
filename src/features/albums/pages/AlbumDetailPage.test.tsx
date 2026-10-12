@@ -11,7 +11,10 @@ import AlbumDetailPage from "./AlbumDetailPage";
 import { resetThumbPipelineForTests } from "@/features/gallery/lib/thumbPipeline";
 import {
   albumAddAssets,
+  duplicatesList,
+  photoLibraryList,
   albumAssetsPage,
+  albumRemoveAssets,
   albumItemMoveSubgroup,
   albumList,
   albumSubgroups,
@@ -33,7 +36,10 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     albumList: vi.fn(),
+    duplicatesList: vi.fn(),
+    photoLibraryList: vi.fn(),
     albumAssetsPage: vi.fn(),
+    albumRemoveAssets: vi.fn().mockResolvedValue(undefined),
     albumSubgroups: vi.fn(),
     albumItemMoveSubgroup: vi.fn(),
     assetTrashMove: vi.fn(),
@@ -119,6 +125,10 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.removeItem("photographer.gallery.layout");
+  localStorage.removeItem("photographer.gallery.hideCrossLibraryDuplicates");
+  vi.mocked(duplicatesList).mockResolvedValue([]);
+  vi.mocked(photoLibraryList).mockResolvedValue([]);
   albumListMock.mockResolvedValue([makeAlbum(1, "青海湖 2026", 3)]);
   assetsPageMock.mockResolvedValue([]);
   subgroupsMock.mockReset().mockResolvedValue([]);
@@ -178,7 +188,21 @@ describe("相册详情页：数据与分页", () => {
   });
 });
 
-describe("相册详情页：从相册移除 = 移入回收站（一照一册）", () => {
+describe("相册详情页：移除引用与移入回收站是独立操作", () => {
+  it("从相册移除只删除选中引用，不移入回收站", async () => {
+    vi.mocked(albumRemoveAssets).mockClear();
+    assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+    await user.click(checkOf(1));
+    await user.click(checkOf(2));
+    fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
+    const menu = await screen.findByTestId("album-asset-context-menu");
+    await user.click(within(menu).getByTestId("album-asset-context-menu-item-remove-album"));
+    await waitFor(() => expect(albumRemoveAssets).toHaveBeenCalledWith(1, [1, 2]));
+    expect(trashMoveMock).not.toHaveBeenCalled();
+  });
   it("多选右键菜单「移入回收站」：确认弹窗 → asset_trash_move → 重置重拉 + 计数刷新；无独立「从相册移除」按钮", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
     const user = userEvent.setup();
@@ -211,7 +235,7 @@ describe("相册详情页：从相册移除 = 移入回收站（一照一册）"
     await user.click(checkOf(2));
     fireEvent.contextMenu(tileOf(1), { clientX: 100, clientY: 100 });
     const menu = await screen.findByTestId("album-asset-context-menu");
-    expect(within(menu).queryByTestId("album-asset-context-menu-item-remove-album")).toBeNull();
+    expect(within(menu).getByTestId("album-asset-context-menu-item-remove-album")).toBeInTheDocument();
     await user.click(within(menu).getByTestId("album-asset-context-menu-item-trash"));
     const dialog = await screen.findByTestId("trash-move-dialog");
     await user.click(within(dialog).getByTestId("trash-move-accept"));
@@ -422,14 +446,13 @@ describe("相册详情页：子分组", () => {
 });
 
 describe("相册详情页：导出为文件夹入口（M6）", () => {
-  it("更多操作内「导出为文件夹」→ 打开对话框（根作用域 subgroup=null，带相册名与张数）", async () => {
+  it("工具条直出「导出为文件夹」→ 打开对话框（根作用域 subgroup=null，带相册名与张数）", async () => {
     assetsPageMock.mockResolvedValue([makeAsset(1), makeAsset(2)]);
     const user = userEvent.setup();
     renderDetail();
     await screen.findAllByTestId("gallery-tile");
 
     // ActionPopover（details/summary）先展开再点导出入口（summary 非 button 角色，按 title 查）
-    await user.click(screen.getByTitle("更多操作"));
     await user.click(screen.getByTestId("album-export-start"));
 
     const dialog = await screen.findByTestId("album-export-dialog");
@@ -451,10 +474,41 @@ describe("相册详情页：导出为文件夹入口（M6）", () => {
       ).toBe(true),
     );
 
-    await user.click(screen.getByTitle("更多操作"));
     await user.click(screen.getByTestId("album-export-start"));
     expect(await screen.findByTestId("album-export-scope")).toHaveTextContent("青海湖 2026 ‹ 原片");
   });
 });
 
 async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("album-asset-context-menu-item-" + key); }
+
+
+describe("相册浏览工具栏与图库一致",()=>{
+  it("布局切换实际更新照片墙，所有操作均为图标加文字",async()=>{
+    assetsPageMock.mockResolvedValue([makeAsset(1),makeAsset(2)]);
+    const user=userEvent.setup();renderDetail();
+    await screen.findAllByTestId("gallery-tile");
+    for(const id of ["album-detail-filter-toggle","gallery-tile-size","gallery-layout","gallery-hide-duplicates","album-export-start","album-tether-start","album-add-photos","album-cull-start","gallery-import"]){
+      const button=screen.getByTestId(id);
+      expect(button.querySelector("svg")).not.toBeNull();
+      expect(button.textContent?.trim().length).toBeGreaterThan(0);
+    }
+    expect(screen.getByTestId("album-detail-grid-scroll")).toHaveAttribute("data-layout","justify");
+    await user.click(screen.getByTestId("gallery-layout"));
+    expect(screen.getByTestId("album-detail-grid-scroll")).toHaveAttribute("data-layout","masonry");
+  });
+  it("隐藏跨库重复仅折叠照片，关闭后恢复全部卡片",async()=>{
+    const first=assetFixture(1,{libraryId:"a"});const second=assetFixture(2,{libraryId:"b"});
+    assetsPageMock.mockResolvedValue([first,second]);
+    vi.mocked(duplicatesList).mockResolvedValue([{kind:"exact",assets:[first,second]}]);
+    const user=userEvent.setup();renderDetail();
+    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(2);
+    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    await waitFor(()=>expect(screen.getAllByTestId("gallery-tile")).toHaveLength(1));
+    expect(trashMoveMock).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("gallery-duplicate-badge"));
+    expect(await screen.findByTestId("duplicates-dialog")).toBeInTheDocument();
+    await user.click(screen.getByTestId("duplicates-dialog-close"));
+    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    await waitFor(()=>expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2));
+  });
+});

@@ -53,8 +53,12 @@ fn gphoto_connected_camera_smoke() {
         }
     }
     let frame = frame.expect("read live view");
-    println!("Live view: {} bytes", frame.len());
-    assert!(frame.starts_with(&[0xff, 0xd8]), "JPEG live view frame");
+    println!(
+        "Live view: {} bytes, af_region {:?}",
+        frame.jpeg.len(),
+        frame.af_region
+    );
+    assert!(frame.jpeg.starts_with(&[0xff, 0xd8]), "JPEG live view frame");
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +199,7 @@ fn capture_command_prefers_nikon_vendor_code() {
     let both = Capabilities::STANDARD_CAPTURE.union(Capabilities::VENDOR_CAPTURE_NIKON);
     let cmd = capture_command(both).expect("双能力应选厂商码");
     assert_eq!(cmd.code, 0x90C0);
-    assert_eq!(cmd.params, vec![0x1]);
+    assert_eq!(cmd.params, vec![0xFFFF_FFFF]);
     // 仅 Nikon
     let cmd = capture_command(Capabilities::VENDOR_CAPTURE_NIKON).expect("nikon");
     assert_eq!(cmd.code, 0x90C0);
@@ -266,6 +270,9 @@ impl CameraBackend for FakeBackend {
                 capabilities: Capabilities::FILE_TRANSFER
                     .union(Capabilities::STANDARD_CAPTURE)
                     .union(Capabilities::OBJECT_ADDED_EVENTS),
+                serial: None,
+                vid: None,
+                pid: None,
             }),
         }
     }
@@ -308,6 +315,9 @@ fn fake_camera(name: &str, caps: Capabilities) -> CameraInfo {
         pnp_id: FAKE_PNP.to_string(),
         name: name.to_string(),
         capabilities: caps,
+        serial: None,
+        vid: None,
+        pid: None,
     }
 }
 
@@ -343,6 +353,62 @@ fn cameras_from_backends_maps_dto() {
             },
         }
     );
+}
+
+#[test]
+fn cameras_from_backends_dedupes_same_physical_camera_across_backends() {
+    // 同一物理相机（serial SN-1）被原生与 gphoto 端点同时报告 → 只保留
+    // 先到的原生入口；同型不同机（SN-2）不合并。
+    struct ListBackend {
+        id: &'static str,
+        cameras: Vec<CameraInfo>,
+    }
+    impl CameraBackend for ListBackend {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            self.id
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::FILE_TRANSFER
+        }
+        fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
+            Ok(self.cameras.clone())
+        }
+        fn connect(&self, _: &str) -> Result<CameraInfo, TetherError> {
+            Err(TetherError::Disconnected)
+        }
+        fn disconnect(&self, _: &str) {}
+        fn capture_still(&self, _: &str, _: Duration) -> Result<CapturedObject, TetherError> {
+            Err(TetherError::CaptureNotSupported)
+        }
+    }
+    let camera = |pnp: &str, name: &str, serial: Option<&str>| CameraInfo {
+        pnp_id: pnp.into(),
+        name: name.into(),
+        capabilities: Capabilities::FILE_TRANSFER,
+        serial: serial.map(str::to_string),
+        vid: None,
+        pid: None,
+    };
+    let native = ListBackend {
+        id: "native",
+        cameras: vec![
+            camera(r"\\?\usb#vid_04b0&pid_0456#s1#{g}", "Nikon Z5II", Some("SN-1")),
+            camera(r"\\?\usb#vid_04b0&pid_0456#s2#{g}", "Nikon Z5II", Some("SN-2")),
+        ],
+    };
+    let gphoto = ListBackend {
+        id: "gphoto",
+        cameras: vec![camera("gphoto:usb:001,010", "Nikon Z5II", Some("SN-1"))],
+    };
+    let backends: Vec<Arc<dyn CameraBackend>> = vec![Arc::new(native), Arc::new(gphoto)];
+    let list = cameras_from_backends(&backends).expect("枚举成功");
+    assert_eq!(list.len(), 2, "同机跨端点去重，同型不同机保留");
+    assert!(list.iter().all(|dto| !dto.pnp_id.starts_with("gphoto:")));
+    assert!(list.iter().any(|dto| dto.pnp_id.ends_with("#s1#{g}")));
+    assert!(list.iter().any(|dto| dto.pnp_id.ends_with("#s2#{g}")));
 }
 
 #[test]

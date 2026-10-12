@@ -27,7 +27,7 @@ export default function ActionPopover({ label, children, onOpenChange, closeOnAc
   }, [open]);
   return (
     <details ref={ref} className="relative" onToggle={(event) => { setOpen(event.currentTarget.open); onOpenChange?.(event.currentTarget.open); }}>
-      <summary className="ui-icon-button list-none [&::-webkit-details-marker]:hidden" aria-label={label} title={label}>···</summary>
+      <summary className="ui-pill-button list-none [&::-webkit-details-marker]:hidden" aria-label={label} title={label}>··· {label}</summary>
       <div className={`ui-glass ui-popover absolute right-0 top-12 z-40 flex w-64 flex-col gap-3 rounded-2xl border p-4 ${panelClassName}`}
         onClick={(event) => { if (closeOnAction && (event.target as Element).closest("button") && ref.current) ref.current.open = false; }}>
         {children}

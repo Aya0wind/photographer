@@ -12,10 +12,24 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     databaseCreate: vi.fn(),
     photoLibraryList: vi.fn(async () => []),
+    photoLibraryReorganize:vi.fn(),
     subscribeAppEvents: vi.fn(async () => () => {}),
     aiModelsStatus: vi.fn(async () => []),
     aiModelDownload: vi.fn(async () => undefined),
   };
+});
+
+it("照片库是单独步骤，使用已有文件夹时整理开关默认关闭",async()=>{
+  const user=userEvent.setup();renderOnboarding();await user.type(screen.getByTestId("onboarding-db-name"),"新数据库");await user.click(screen.getByTestId("onboarding-db-create"));
+  expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step","library");expect(dbCreateMock).not.toHaveBeenCalled();expect(screen.getByRole("heading",{name:"设置照片库"})).toBeInTheDocument();expect(screen.queryByTestId("onboarding-reorganize-existing")).not.toBeInTheDocument();
+  await user.click(screen.getByTestId("onboarding-library-existing"));expect(screen.getByTestId("onboarding-reorganize-existing")).not.toBeChecked();expect(screen.getByText(/空文件夹也不会删除/)).toBeInTheDocument();expect(screen.getByTestId("onboarding-library-continue")).toBeDisabled();
+});
+it("先整理现有照片再进入 AI，整理失败重试不会重复建库",async()=>{
+  const user=userEvent.setup();mockDbCreateOk();vi.mocked(photoLibraryList).mockResolvedValue([{id:"organizing",name:"Photos",rootPath:"I:/Photos",organizationTemplate:"{year}/{month}/{day}/{filename}",createdAt:"2026-10-11",status:"online",assetCount:0,sizeBytes:0,organizationPending:true}]);
+  vi.mocked(photoLibraryReorganize).mockRejectedValueOnce(new Error("照片发生变化，已停止"));
+  renderOnboarding();await user.type(screen.getByTestId("onboarding-db-name"),"新数据库");await user.click(screen.getByTestId("onboarding-db-create"));await user.click(screen.getByTestId("onboarding-library-existing"));await user.type(screen.getByTestId("onboarding-photo-root"),"I:/Photos");await user.click(screen.getByTestId("onboarding-reorganize-existing"));await user.click(screen.getByTestId("onboarding-library-continue"));
+  expect(await screen.findByRole("alertdialog")).toHaveTextContent("照片发生变化");expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step","library");expect(dbCreateMock).toHaveBeenCalledWith("新数据库",undefined,expect.objectContaining({existingFolder:true,reorganizeExisting:true}));
+  await user.click(screen.getByRole("button",{name:i18n.t("common.confirm")}));vi.mocked(photoLibraryReorganize).mockResolvedValue({libraryId:"organizing",phase:"done",completed:3,total:3});await user.click(screen.getByTestId("onboarding-library-continue"));await waitFor(()=>expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step","ai"));expect(dbCreateMock).toHaveBeenCalledTimes(1);expect(photoLibraryReorganize).toHaveBeenLastCalledWith("organizing");
 });
 
 import OnboardingPage from "./OnboardingPage";
@@ -23,7 +37,7 @@ import { I18nextProvider } from "react-i18next";
 import i18n from "@/i18n";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useAiStore } from "@/stores/aiStore";
-import { databaseCreate, aiModelsStatus, aiModelDownload } from "@/ipc/api";
+import { databaseCreate,photoLibraryList,photoLibraryReorganize, aiModelsStatus, aiModelDownload } from "@/ipc/api";
 import type { AiModelStatus } from "@/ipc/api";
 
 /**
@@ -94,6 +108,8 @@ async function reachAiStep(user: ReturnType<typeof userEvent.setup>): Promise<vo
   mockDbCreateOk();
   await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
   await user.click(screen.getByTestId("onboarding-db-create"));
+    await user.type(screen.getByTestId("onboarding-photo-root"), "I:\\Photos");
+    await user.click(screen.getByTestId("onboarding-library-continue"));
   await waitFor(() =>
     expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai"),
   );
@@ -117,9 +133,11 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
     expect(screen.getByTestId("onboarding-db-create")).toBeDisabled();
     await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
     await user.click(screen.getByTestId("onboarding-db-create"));
+    await user.type(screen.getByTestId("onboarding-photo-root"), "I:\\Photos");
+    await user.click(screen.getByTestId("onboarding-library-continue"));
 
     // 位置留空 → dbDir 传 undefined（后端走默认约定路径）
-    expect(dbCreateMock).toHaveBeenCalledWith("主数据库", undefined);
+    expect(dbCreateMock).toHaveBeenCalledWith("主数据库", undefined, expect.objectContaining({rootPath:"I:\\Photos",organizationTemplate:"{year}/{month}/{day}/{filename}"}));
     await waitFor(() =>
       expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "ai"),
     );
@@ -132,12 +150,14 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
     await user.type(screen.getByTestId("onboarding-db-name"), "坏库");
     await user.type(screen.getByTestId("onboarding-db-location"), "D:\\db");
     await user.click(screen.getByTestId("onboarding-db-create"));
+    await user.type(screen.getByTestId("onboarding-photo-root"), "I:\\Photos");
+    await user.click(screen.getByTestId("onboarding-library-continue"));
 
-    expect(dbCreateMock).toHaveBeenCalledWith("坏库", "D:\\db");
-    expect(await screen.findByTestId("onboarding-db-error")).toHaveTextContent(
+    expect(dbCreateMock).toHaveBeenCalledWith("坏库", "D:\\db", expect.objectContaining({rootPath:"I:\\Photos",organizationTemplate:"{year}/{month}/{day}/{filename}"}));
+    expect(await screen.findByTestId("operation-error-dialog")).toHaveTextContent(
       "数据库位置与已有数据库相同或互相包含",
     );
-    expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "welcome");
+    expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "library");
   });
 
   it("步骤 1 invoke 不可用（error=null）：内联提示后端未连接", async () => {
@@ -146,8 +166,10 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
     renderOnboarding();
     await user.type(screen.getByTestId("onboarding-db-name"), "主数据库");
     await user.click(screen.getByTestId("onboarding-db-create"));
+    await user.type(screen.getByTestId("onboarding-photo-root"), "I:\\Photos");
+    await user.click(screen.getByTestId("onboarding-library-continue"));
 
-    expect(await screen.findByTestId("onboarding-db-error")).toHaveTextContent("后端未连接");
+    expect(await screen.findByTestId("operation-error-dialog")).toHaveTextContent("后端未连接");
   });
 
   it("AI 步默认「启用+普通档」：模型全就绪 → 下载并继续即时完成，三开关全开 + 档位写入", async () => {

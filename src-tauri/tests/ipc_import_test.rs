@@ -329,3 +329,85 @@ fn manual_index_kick_rejected_while_importing() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 取消导入也唤醒索引（2026-10-09 审计 P2）：done_files>0 即 kick——已落盘
+// 文件的任务必须被唤醒（此前取消/失联会话不 kick，任务滞留 pending）；
+// 同时覆盖导入收尾的 pHash 补差建档（P0-C）。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancelled_import_with_settled_files_still_kicks_index() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    // 数量足够多 + 每张带轻微读延迟：保证取消时已有 settled 文件
+    for n in 0..80usize {
+        image::RgbImage::from_pixel(48, 32, image::Rgb([(n % 256) as u8, 80, 120]))
+            .save(src.path().join(format!("cancel-{n:03}.jpg")))
+            .unwrap();
+    }
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(15));
+    let job_id = start_import(&state, ipc_plan(&state, target.path())).unwrap();
+
+    // 等到至少 1 个文件 verified 再取消（done_files>0 的前置）
+    let database = common::open_db(db_dir.path());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let verified: i64 = database
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM job_files WHERE job_id = ?1 AND state = 'verified'",
+                [job_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if verified >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待首个文件 verified 超时"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cancel_import(&state, job_id).unwrap();
+    assert!(wait_done(&state, Duration::from_secs(30)), "取消应收尾");
+
+    // kick 生效判据：已落盘文件的非 eyes 任务（thumb/blur/phash 补差）全部
+    // 消费到终态——取消会话同样唤醒
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let pending: i64 = database
+            .0
+            .query_row(
+                "SELECT COUNT(*) FROM index_tasks WHERE state IN ('pending','running') \
+                 AND kind != 'eyes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "取消会话的索引任务未被唤醒（剩余 {pending}）"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let phash_total: i64 = database
+        .0
+        .query_row("SELECT COUNT(*) FROM index_tasks WHERE kind = 'phash'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(phash_total >= 1, "导入收尾应补差建档 phash 任务");
+
+    // 收尾排空（tempdir 生命周期保护）
+    let started = std::time::Instant::now();
+    while state.supervisor.running_count() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(15));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

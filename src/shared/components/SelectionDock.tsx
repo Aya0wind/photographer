@@ -14,8 +14,8 @@ export default function SelectionDock({ count, onMove, onMore, onClear }: {
       <span className="whitespace-nowrap text-xs text-text-secondary">{t("ui.selectedCount", { count })}</span>
       <span className="h-5 w-px bg-edge" aria-hidden="true" />
       <button type="button" onClick={onMove} className="whitespace-nowrap rounded-lg px-2 py-1.5 text-xs text-text-primary hover:bg-panel">{t("ui.moveToAlbum")}</button>
-      <button type="button" onClick={onMore} className="ui-icon-button" aria-label={t("ui.more")} title={t("ui.more")}>···</button>
-      <button type="button" onClick={onClear} className="ui-icon-button" aria-label={t("ui.clearSelection")} title={t("ui.clearSelection")}>×</button>
+      <button type="button" onClick={onMore} className="ui-pill-button" aria-label={t("ui.more")} title={t("ui.more")}>··· {t("ui.more")}</button>
+      <button type="button" onClick={onClear} className="ui-pill-button" aria-label={t("ui.clearSelection")} title={t("ui.clearSelection")}>× {t("ui.clearSelection")}</button>
     </div>
   );
 }

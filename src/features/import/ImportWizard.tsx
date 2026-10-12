@@ -27,7 +27,6 @@ export default function ImportWizard() {
           </button>)}
         </nav>
       </header>
-
       {step === "source" ? <ImportSourcePicker devices={visibleDevices} recentSources={recentSources} selectedId={selectedId} scanningPath={scanningFolder}
         nativeUnavailable={Boolean(platformCaps && !platformCaps.volumeDevices && !platformCaps.portableDevices)}
         onDevice={selectDevice} onFolder={() => void browseFolder()} onRecent={selectRecent} /> : <ImportPhotoPicker flow={flow} />}

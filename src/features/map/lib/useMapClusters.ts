@@ -7,7 +7,8 @@ import type { MapLevel } from "./hierarchy";
 /**
  * 聚合气泡数据钩子：按 (level, parentId) 拉取；会话内缓存防来回切层重复
  * 请求；`refresh()` 重新拉当前层（「换一批」——后端 ORDER BY random()，
- * 同层样本即换）。regions-updated 事件由页面层调用 refreshAll 处理。
+ * 同层样本即换）。regions-updated / photoLibrariesChanged（删库联动）事件
+ * 由页面层调用 invalidateAll 全量失效重拉。
  */
 export function useMapClusters(level: MapLevel, parentId: number | null) {
   const cacheRef = useRef(new Map<string, MapCluster[]>());

@@ -10,8 +10,8 @@ impl Db {
     pub fn album_list(&self) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
             "SELECT a.id, a.name, \
-                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND kind IN ('photo', 'raw')), \
-                    (SELECT COUNT(*) FROM album_item i JOIN assets x ON x.id = i.asset_id AND x.kind IN ('photo', 'raw') WHERE i.album_id = a.id), a.created_at, \
+                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND in_trash = 0 AND kind IN ('photo', 'raw')), \
+                    (SELECT COUNT(*) FROM album_item i JOIN assets x ON x.id = i.asset_id AND x.in_trash = 0 AND x.kind IN ('photo', 'raw') WHERE i.album_id = a.id), a.created_at, \
                     a.dir_name \
              FROM album a ORDER BY a.created_at DESC, a.id DESC",
         )?;
@@ -24,8 +24,8 @@ impl Db {
     pub fn asset_albums(&self, asset_id: i64) -> Result<Vec<AlbumRow>> {
         let mut stmt = self.0.prepare(
             "SELECT a.id, a.name, \
-                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND kind IN ('photo', 'raw')), \
-                    (SELECT COUNT(*) FROM album_item i2 JOIN assets x ON x.id = i2.asset_id AND x.kind IN ('photo', 'raw') WHERE i2.album_id = a.id), a.created_at, \
+                    (SELECT id FROM assets WHERE id = a.cover_asset_id AND in_trash = 0 AND kind IN ('photo', 'raw')), \
+                    (SELECT COUNT(*) FROM album_item i2 JOIN assets x ON x.id = i2.asset_id AND x.in_trash = 0 AND x.kind IN ('photo', 'raw') WHERE i2.album_id = a.id), a.created_at, \
                     a.dir_name \
              FROM album a \
              WHERE EXISTS (SELECT 1 FROM album_item i WHERE i.album_id = a.id AND i.asset_id = ?1) \
@@ -33,20 +33,6 @@ impl Db {
         )?;
         let rows = stmt.query_map(params![asset_id], map_album)?;
         rows.collect()
-    }
-
-    /// 系统级保底（0018 修订）：确保默认相册「未分组」存在（按名称幂等），
-    /// 返回其 id。导入启动时调用；「未分组」禁删禁改名（用户定案），故
-    /// 幂等保证永远命中同一条，不会重复创建。
-    pub fn ensure_default_album(&self) -> Result<i64> {
-        if let Ok(id) = self.0.query_row(
-            "SELECT id FROM album WHERE name = ?1",
-            [DEFAULT_ALBUM_NAME],
-            |r| r.get::<_, i64>(0),
-        ) {
-            return Ok(id);
-        }
-        Ok(self.album_create(DEFAULT_ALBUM_NAME)?.id)
     }
 
     /// 建相册，返回新行（item_count=0、cover=None）。重名由 name UNIQUE
@@ -85,18 +71,8 @@ impl Db {
     }
 
     /// 相册重命名；相册不存在报错（同 rename_person 语义）。
-    /// 重名由 UNIQUE 兜底透传。默认相册「未分组」禁改名（0018 再修订：
-    /// 与禁删叠加——它完全固定，永远是系统兜底落点；自动创建按名幂等，
-    /// 不会重复创建）。
+    /// 重名由 UNIQUE 兜底透传。
     pub fn album_rename(&self, id: i64, name: &str) -> Result<()> {
-        let current: String =
-            self.0
-                .query_row("SELECT name FROM album WHERE id = ?1", [id], |r| r.get(0))?;
-        if current == DEFAULT_ALBUM_NAME {
-            return Err(Error::InvalidParameterName(
-                "默认相册「未分组」不可改名".into(),
-            ));
-        }
         let n = self.0.execute(
             "UPDATE album SET name = ?2 WHERE id = ?1",
             params![id, name],
@@ -109,24 +85,25 @@ impl Db {
 
     /// 删相册：只删相册行——album_item 引用经 FK ON DELETE CASCADE 级联
     /// 消失，资产与物理文件绝不动；相册不存在报错（幂等删除由 IPC 语义定）。
-    /// 默认相册「未分组」拒删（0018 修订：系统级保底，防误删后下次导入又
-    /// 冒出来；禁删禁改名——完全固定）。
     pub fn album_delete(&self, id: i64) -> Result<()> {
-        let name: String = self
-            .0
-            .query_row("SELECT name FROM album WHERE id = ?1", [id], |r| r.get(0))?;
-        if name == DEFAULT_ALBUM_NAME {
-            return Err(Error::InvalidParameterName(
-                "默认相册「未分组」不可删除（只能清空或改名）".into(),
-            ));
+        self.album_delete_with_photos(id, false)
+    }
+
+    /// 可选地将成员移入回收站；与删相册同一事务，不删除源文件。
+    pub fn album_delete_with_photos(&self, id: i64, trash_photos: bool) -> Result<()> {
+        let tx = self.0.unchecked_transaction()?;
+        if trash_photos {
+            tx.execute(
+                "UPDATE assets SET in_trash = 1, trashed_at = ?2 \
+                 WHERE in_trash = 0 AND id IN (SELECT asset_id FROM album_item WHERE album_id = ?1)",
+                params![id, now_rfc3339()],
+            )?;
         }
-        let n = self
-            .0
-            .execute("DELETE FROM album WHERE id = ?1", params![id])?;
+        let n = tx.execute("DELETE FROM album WHERE id = ?1", params![id])?;
         if n == 0 {
             return Err(Error::QueryReturnedNoRows);
         }
-        Ok(())
+        tx.commit()
     }
 
     /// 设/清相册封面（纯引用；asset_id 为 None 清回默认封面）。

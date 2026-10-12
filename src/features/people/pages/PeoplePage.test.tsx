@@ -1,7 +1,7 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -15,6 +15,8 @@ import {
   peopleList,
   personDelete,
   personRename,
+  subscribeAppEvents,
+  type AppEvent,
   type AssetDto,
   type PersonCluster,
 } from "@/ipc/api";
@@ -28,6 +30,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     personRename: vi.fn(),
     personDelete: vi.fn(),
     assetThumbGet: vi.fn(),
+    subscribeAppEvents: vi.fn(),
   };
 });
 vi.mock("@tauri-apps/api/core", () => ({
@@ -42,6 +45,7 @@ const peopleAssetsMock = vi.mocked(peopleAssets);
 const personRenameMock = vi.mocked(personRename);
 const personDeleteMock = vi.mocked(personDelete);
 const thumbMock = vi.mocked(assetThumbGet);
+const subscribeMock = vi.mocked(subscribeAppEvents);
 const convertMock = vi.mocked(convertFileSrc);
 
 const PEOPLE: PersonCluster[] = [
@@ -81,6 +85,8 @@ beforeEach(() => {
   personDeleteMock.mockReset().mockResolvedValue(true);
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   convertMock.mockReset().mockReturnValue("");
+  // 事件订阅默认 noop（删库联动用例覆写捕获 handler 手动发事件）
+  subscribeMock.mockReset().mockResolvedValue(() => {});
   resetThumbPipelineForTests();
 });
 
@@ -111,6 +117,28 @@ describe("人物页列表", () => {
     await waitFor(() => expect(thumbMock).toHaveBeenCalledWith(101, 240));
     const coverImg = await within(cards[0]).findByTestId("people-card-cover-img");
     expect(coverImg).toHaveAttribute("src", "asset://D:\\cache\\101.jpg");
+  });
+
+  // 删库联动（2026-10-09）：照片库登记增删 → 聚类计数/封面随库内资产整体
+  // 消失失真，photoLibrariesChanged 事件到达即重拉列表
+  it("photoLibrariesChanged → 重拉 peopleList（聚类列表跟随新数据）", async () => {
+    peopleListMock.mockResolvedValue(PEOPLE);
+    const handlers: Array<(event: AppEvent) => void> = [];
+    subscribeMock.mockImplementation(async (cb) => {
+      handlers.push(cb);
+      return () => {};
+    });
+    renderPeople();
+    expect(await screen.findAllByTestId("people-card")).toHaveLength(3);
+    expect(peopleListMock).toHaveBeenCalledTimes(1);
+
+    // 删库后重拉：人物清空回到空态
+    peopleListMock.mockResolvedValue([]);
+    act(() => {
+      for (const handler of [...handlers]) handler({ type: "photoLibrariesChanged" });
+    });
+    await waitFor(() => expect(peopleListMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId("people-empty")).toBeInTheDocument());
   });
 
   it("封面缩略图缺失 → 占位（不报错）", async () => {
@@ -246,7 +274,7 @@ describe("人物删除", () => {
     const confirm = screen.getByTestId("people-delete-confirm");
     // 红色确认钮
     expect(within(confirm).getByTestId("people-delete-confirm-yes").className).toContain("red");
-    expect(confirm).toHaveTextContent("照片不受影响");
+    expect(confirm).toHaveTextContent("其中的照片不会删除");
 
     // 取消路径
     await user.click(within(confirm).getByTestId("people-delete-confirm-no"));

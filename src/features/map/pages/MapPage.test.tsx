@@ -278,6 +278,25 @@ describe("MapPage 地图交互", () => {
     await waitFor(() => expect(clustersMock.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
+  // 删库联动（2026-10-09）：照片库登记增删 → 气泡计数/样图随库内资产整体
+  // 消失失真，同款全量失效重拉（会话缓存不认旧库数据）
+  it("photoLibrariesChanged 事件 → 会话缓存失效重拉", async () => {
+    statusMock.mockResolvedValue(status());
+    clustersMock.mockResolvedValue([]);
+    let handler: ((e: AppEvent) => void) | null = null;
+    subscribeMock.mockImplementation(async (cb) => {
+      handler = cb;
+      return () => {};
+    });
+    renderPage();
+    await screen.findByTestId("map-canvas");
+    expect(clustersMock).toHaveBeenCalledTimes(1);
+
+    handler!({ type: "photoLibrariesChanged" });
+    await waitFor(() => expect(clustersMock).toHaveBeenCalledTimes(2));
+    expect(clustersMock).toHaveBeenLastCalledWith(0, null);
+  });
+
   it("回填中 → 地图可看 + 顶部进度提示", async () => {
     statusMock.mockResolvedValue(
       status({ phase: "backfilling", done: 50, total: 100 }),

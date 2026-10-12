@@ -53,10 +53,10 @@ export async function albumRename(id: number, name: string): Promise<AlbumOpResu
   }
 }
 
-/** 删除相册（仅删引用组，照片保留在图库）；失败 false（调用方按需提示） */
-export async function albumDelete(id: number): Promise<boolean> {
+/** 删除相册；可选将照片移入回收站，不删除源文件。 */
+export async function albumDelete(id: number, trashPhotos = false): Promise<boolean> {
   try {
-    await ipc<void>("album_delete", { id });
+    await ipc<void>("album_delete", { id, trashPhotos });
     return true;
   } catch {
     return false;
@@ -149,6 +149,11 @@ export async function albumSubgroups(albumId: number): Promise<AlbumSubgroupDto[
   } catch {
     return [];
   }
+}
+
+/** Remove only album references; the photos stay in the library. */
+export async function albumRemoveAssets(id: number, assetIds: number[]): Promise<void> {
+  await ipc<void>("album_remove_assets", { id, assetIds });
 }
 
 /** 相册内挪子分组（album_item_move_subgroup；命令参数名是 id）：纯引用移动，

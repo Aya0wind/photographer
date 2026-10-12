@@ -6,14 +6,14 @@
 //! 表里仍是可查的历史/终态；遗留的 queued/running 行（进程中断）在下一次
 //! `export_run` 时对照内存活跃集合收尸为 error（单文件导出无续传语义）。
 //!
-//! **folder 模式**：写 `outputDir/fileName.part` → 校验目标不存在 → 原子
-//! rename；目标已存在报错（绝不覆盖）。
+//! **folder 模式**：同目录唯一暂存文件写满后，以不覆盖方式落位；
+//! 即使目标在写入期间出现也报错，避免竞争覆盖。
 //!
 //! **album 模式**：复用**导入引擎**的落位与登记路径，不平行造轮子——
 //! 2026-10-09 纯时间布局定案（§三）：导出件落**源资产所属照片库**
 //! `{库root}/{拍摄年}/{拍摄月}/{源stem}_edit.jpg`（拍摄时间与导入引擎同
 //! 口径：EXIF 缺失回退 mtime）；冲突走导入引擎的
-//! [`crate::import::templates::unique_path`]（`_1`/`_2` 可追踪后缀）；登记
+//! [`crate::db::organization::unique_path`]（`_1`/`_2` 可追踪后缀）；登记
 //! 用 [`crate::db::Db::insert_asset_with_album`]（与导入引擎同一函数：资产
 //! 行 + 缩略图/分析任务 + album_item（含 subgroup）同事务；library_id 随
 //! 源资产）。导出件就是普通资产——无原片/成片关系语义（用户定案已移除
@@ -34,7 +34,7 @@ use super::recipe::EditRecipe;
 use super::render;
 use crate::db::{AssetRow, Db, ExportJobRow};
 use crate::events::{AppEvent, AssetKind, EventBus};
-use crate::import::templates::{sanitize_component, unique_path};
+use crate::db::organization::{sanitize_component, unique_path};
 
 /// 导出落位模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub struct ExportFolderTarget {
     pub file_name: String,
 }
 
-/// album 模式目标（mode=album 必填；subgroup 可空 = 相册根）。
+/// 保存回照片库时可选的相册引用；subgroup 可空。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportAlbumTarget {
@@ -74,6 +74,10 @@ pub struct ExportAlbumTarget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
+    #[serde(default)]
+    pub format:ExportFormat,
+    #[serde(default)]
+    pub color_space:ExportColorSpace,
     pub mode: ExportMode,
     #[serde(default)]
     pub folder: Option<ExportFolderTarget>,
@@ -93,6 +97,19 @@ pub struct ExportOptions {
     pub author: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+}
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize,Default)]
+#[serde(rename_all="lowercase")]
+pub enum ExportFormat {#[default]Jpeg,Png,Tiff,Pcraft}
+impl ExportFormat {pub fn extension(self)->&'static str{match self{Self::Jpeg=>"jpg",Self::Png=>"png",Self::Tiff=>"tif",Self::Pcraft=>"pcraft"}}}
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize,Default)]
+#[serde(rename_all="camelCase")]
+pub enum ExportColorSpace {#[default]Srgb,DisplayP3,AdobeRgb,ProPhotoRgb}
+impl ExportColorSpace {
+    pub fn profile(self)->&'static photocraft_cms::Profile {
+        use photocraft_cms::Builtin;
+        match self{Self::Srgb=>Builtin::Srgb,Self::DisplayP3=>Builtin::DisplayP3,Self::AdobeRgb=>Builtin::AdobeRgbCompat,Self::ProPhotoRgb=>Builtin::ProPhotoCompat}.profile()
+    }
 }
 
 /// 导出产物四元组（+ album 模式的新资产 id）。
@@ -146,6 +163,7 @@ impl From<ExportJobRow> for ExportTaskDto {
 
 /// 选项语义校验（结构由 serde 保证；这里管跨字段与目标合法性）。
 pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOptions, String> {
+    if options.format==ExportFormat::Pcraft&&options.mode!=ExportMode::Folder{return Err("可编辑文档请导出到文件夹，不能作为照片加入相册".into());}
     let mode = options.mode;
     let (folder, album) = match mode {
         ExportMode::Folder => {
@@ -157,6 +175,9 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
                 return Err("输出目录不能为空".into());
             }
             let name = folder.file_name.trim();
+            let extension=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
+            let matches=match options.format{ExportFormat::Jpeg=>["jpg","jpeg"].contains(&extension.as_str()),ExportFormat::Png=>extension=="png",ExportFormat::Tiff=>["tif","tiff"].contains(&extension.as_str()),ExportFormat::Pcraft=>extension=="pcraft"};
+            if !matches{return Err("文件扩展名与输出格式不一致".into());}
             if name.is_empty() {
                 return Err("输出文件名不能为空".into());
             }
@@ -166,7 +187,7 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
             (Some((folder.output_dir.clone(), name.to_string())), None)
         }
         ExportMode::Album => {
-            let album = options.album.as_ref().ok_or("album 模式必须提供相册")?;
+            let target = options.album.as_ref().map(|album| -> Result<_, String> {
             let album_id: i64 = album
                 .album_id
                 .trim()
@@ -181,10 +202,14 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            (None, Some((album_id, subgroup)))
+                Ok((album_id, subgroup))
+            }).transpose()?;
+            (None, target)
         }
     };
     Ok(ValidatedOptions {
+        format:options.format,
+        color_space:options.color_space,
         mode,
         folder,
         album,
@@ -200,6 +225,8 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
 /// 校验后的选项（folder/album 二选一已定）。
 #[derive(Debug, Clone)]
 pub struct ValidatedOptions {
+    pub format:ExportFormat,
+    pub color_space:ExportColorSpace,
     pub mode: ExportMode,
     pub folder: Option<(String, String)>,
     pub album: Option<(i64, Option<String>)>,
@@ -352,12 +379,22 @@ fn execute(
         .quality
         .unwrap_or(request.recipe.output.quality)
         .clamp(1, 100);
+    let source_head = meta::source_exif(&src).or_else(||read_head(&src,2*1024*1024));
+    let meta_opts = MetaOptions {remove_gps:request.options.remove_gps,copyright:request.options.copyright.clone(),author:request.options.author.clone(),keywords:request.options.keywords.clone()};
     let (jpeg, width, height) =
-        if request.recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
-            super::photocraft::export_native_with_progress(
-                &src, &request.recipe, long_edge, quality, progress,
-            )?
+        if request.options.format==ExportFormat::Pcraft {
+            if request.recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("可编辑文档需要高级编辑处理方案".into());}
+            let doc=super::photocraft::prepare_export_document(&src,&request.recipe,None,progress)?;progress("encode");
+            (super::photocraft::native_document_with_metadata(&doc,source_head.as_deref(),&meta_opts)?,doc.size.width,doc.size.height)
+        }else if request.options.format!=ExportFormat::Jpeg {
+            if request.recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
+            let doc=super::photocraft::prepare_export_document_16(&src,&request.recipe,long_edge,progress,true)?;progress("encode");
+            (super::photocraft::lossless_with_profile(&doc,request.options.format.extension(),source_head.as_deref(),&meta_opts,request.options.color_space.profile())?,doc.size.width,doc.size.height)
+        }else if request.recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
+            let doc=super::photocraft::prepare_export_document(&src,&request.recipe,long_edge,progress)?;progress("encode");
+            (super::photocraft::jpeg_with_profile(&doc,quality,request.options.color_space.profile())?.0,doc.size.width,doc.size.height)
         } else {
+            if request.options.color_space!=ExportColorSpace::Srgb{return Err("此色彩空间需要高级编辑处理方案".into());}
             let rendered = render::render_recipe(&src, &request.recipe, long_edge)?;
             progress("encode");
             (
@@ -368,14 +405,7 @@ fn execute(
         };
 
     // ③ 元数据（源 EXIF 尽量保留 + removeGps + 版权/作者/关键词）
-    let source_head = read_head(&src, 2 * 1024 * 1024);
-    let meta_opts = MetaOptions {
-        remove_gps: request.options.remove_gps,
-        copyright: request.options.copyright.clone(),
-        author: request.options.author.clone(),
-        keywords: request.options.keywords.clone(),
-    };
-    let jpeg = meta::apply_metadata(jpeg, source_head.as_deref(), &meta_opts);
+    let jpeg = if request.options.format==ExportFormat::Jpeg{meta::apply_metadata_for_color_image(jpeg, source_head.as_deref(), &meta_opts,width,height,request.options.color_space==ExportColorSpace::Srgb)}else{jpeg};
 
     // ④ 落位 + 登记
     match request.options.mode {
@@ -393,7 +423,8 @@ fn execute(
         }
         ExportMode::Album => {
             progress("register");
-            let (album_id, subgroup) = request.options.album.clone().expect("validated");
+            let (album_id, subgroup) = request.options.album.clone()
+                .map(|(id, subgroup)| (Some(id), subgroup)).unwrap_or((None, None));
             let (dst, new_asset_id) = place_in_album(
                 db,
                 &jpeg,
@@ -426,15 +457,14 @@ fn read_head(src: &Path, limit: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// folder 模式落位：目标存在报错；.part 写满后原子改名。
+/// Folder output uses exclusive publication after writing a unique sibling file.
 fn write_folder(jpeg: &[u8], dir: &str, name: &str) -> Result<PathBuf, String> {
     let dst = Path::new(dir).join(name);
     if dst.exists() {
         return Err(format!("目标文件已存在（不覆盖）: {}", dst.display()));
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
-    let part = dst.with_extension("part");
-    atomic_write(&part, &dst, jpeg)?;
+    atomic_write(&dst, jpeg)?;
     Ok(dst)
 }
 
@@ -448,7 +478,7 @@ fn place_in_album(
     library_root: &Path,
     width: u32,
     height: u32,
-    album_id: i64,
+    album_id: Option<i64>,
     subgroup: Option<String>,
 ) -> Result<(PathBuf, i64), String> {
     let stem = source
@@ -460,10 +490,13 @@ fn place_in_album(
     // 与导入引擎同一纯时间布局公式（§三：`{拍摄年}/{拍摄月}/`，EXIF 缺失
     // 回退 mtime——captured_or_fallback 同口径）；相册/子组只是逻辑引用
     //（§一），不影响落位。同一资产的导出件与导入件同月份目录平铺。
-    let dir = library_root.join(captured_at.format("%Y/%m").to_string());
-    let name = format!("{}_edit.jpg", sanitize_component(&stem));
+    let name = format!("{}_edit.{}", sanitize_component(&stem),options.format.extension());
+    let libraries=db.photos_library_list().map_err(|e|e.to_string())?;
+    let template=libraries.iter().find(|library|Path::new(&library.root_path)==library_root).map(|library|library.organization_template.as_str()).unwrap_or(crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE);
+    let relative=crate::db::organization::organized_rel(template,captured_at,&name,source.camera.as_deref())?;
+    let intended=library_root.join(relative);let dir=intended.parent().ok_or("组织模板路径无效")?;let name=intended.file_name().ok_or("组织模板文件名无效")?.to_string_lossy().into_owned();
     let dst = unique_path(&dir, &name); // 导入引擎命名冲突规则（_1/_2）
-    atomic_write(&dst.with_extension("part"), &dst, jpeg)?;
+    atomic_write(&dst, jpeg)?;
 
     // 登记：与导入引擎同一入库函数（资产行 + 索引任务 + album_item 同事务）。
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -527,7 +560,7 @@ fn place_in_album(
         volume_serial: None,
         file_id: None,
     };
-    db.insert_asset_with_album(&row, Some(album_id), subgroup.as_deref())
+    db.insert_asset_with_album(&row, album_id, subgroup.as_deref())
         .map_err(|e| format!("导出件登记失败: {e}"))?;
     let new_id = db
         .asset_id_by_path(&row.path)
@@ -552,24 +585,15 @@ fn captured_or_fallback(asset: &AssetRow) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-/// `.part` 写满 + 原子改名（导入/缩略图同款两段式；写失败清残留）。
-fn atomic_write(part: &Path, dst: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目标目录失败: {e}"))?;
-    }
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::File::create(part)?;
-        file.write_all(bytes)?;
-        file.flush()
-    };
-    if let Err(e) = write() {
-        let _ = std::fs::remove_file(part);
-        return Err(format!("写导出文件失败: {e}"));
-    }
-    std::fs::rename(part, dst).map_err(|e| {
-        let _ = std::fs::remove_file(part);
-        format!("导出文件落位失败: {e}")
-    })
+/// Unique sibling temporary file, published with an exclusive/no-clobber
+/// operation. Drop cleans failed writes without touching another job's staging.
+fn atomic_write(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent=dst.parent().ok_or("目标目录无效")?;
+    std::fs::create_dir_all(parent).map_err(|e|format!("创建目标目录失败: {e}"))?;
+    let mut file=tempfile::Builder::new().prefix(".photo-export-").suffix(".part").tempfile_in(parent).map_err(|e|format!("创建导出暂存失败: {e}"))?;
+    file.write_all(bytes).and_then(|_|file.as_file().sync_all()).map_err(|e|format!("写导出文件失败: {e}"))?;
+    file.persist_noclobber(dst).map_err(|e|format!("导出文件落位失败（不会覆盖已有文件）: {}",e.error))?;
+    Ok(())
 }
 
 fn xxh64_of(bytes: &[u8]) -> u64 {
@@ -595,5 +619,52 @@ pub fn wait_terminal(db: &Db, job_id: i64, timeout: Duration) -> bool {
             return false;
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+#[cfg(test)]
+mod atomic_output_tests {
+    use super::*;
+    #[test]
+    fn native_document_task_keeps_source_resolution_and_rejects_album_registration(){
+        let dir=tempfile::tempdir().unwrap();let db=Db::open(&dir.path().join("data.sqlite")).unwrap();let path=dir.path().join("source.tif");image::ImageBuffer::<image::Rgb<u16>,Vec<u16>>::from_pixel(120,80,image::Rgb([16384,32768,49152])).save(&path).unwrap();let original=std::fs::read(&path).unwrap();
+        let asset:AssetRow=serde_json::from_value(serde_json::json!({"path":path.to_string_lossy(),"filename":"source.tif","size":original.len(),"mtime":"2026-09-01T00:00:00Z","xxhash":0,"kind":"photo","source":"test","createdAt":"2026-09-01T00:00:00Z"})).unwrap();db.insert_asset(&asset).unwrap();let id=db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap();
+        let mut options:ExportOptions=serde_json::from_value(serde_json::json!({"format":"pcraft","colorSpace":"displayP3","mode":"folder","folder":{"outputDir":dir.path().join("outputs"),"fileName":"edited.pcraft"},"longEdge":16,"quality":1})).unwrap();
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","output":{"longEdge":16,"quality":1},"advanced":{"exposure":0.2}})).unwrap();
+        let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe,options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{}).unwrap();assert_eq!((result.width,result.height),(120,80));assert!(result.asset_id.is_none());
+        let document=photocraft_io::import(&result.output_path,&std::fs::read(&result.output_path).unwrap()).unwrap().document;assert_eq!(document.depth,photocraft_engine::doc::SampleType::U16);assert!(!document.layers.is_empty());// 显影类(cameraRaw)调整烘焙进像素层(文档模型无非破坏性载体,且线性光数学与 Exposure 图层不等价——改图层会与预览/JPEG 分叉);曲线/蒙版等才追加图层,多图层语义由 photocraft::native_document_roundtrip 测试覆盖。assert_eq!(std::fs::read(&path).unwrap(),original);
+        options.mode=ExportMode::Album;assert!(validate_options(&db,&options).unwrap_err().contains("不能作为照片"));
+    }
+    #[test]
+    fn historical_output_options_default_to_jpeg_and_srgb_and_reject_unknown_spaces(){
+        let mut value=serde_json::json!({"mode":"folder","folder":{"outputDir":"output","fileName":"photo.jpg"}});
+        let old:ExportOptions=serde_json::from_value(value.clone()).unwrap();assert_eq!(old.format,ExportFormat::Jpeg);assert_eq!(old.color_space,ExportColorSpace::Srgb);
+        value["colorSpace"]=serde_json::json!("adobeRgb");assert_eq!(serde_json::from_value::<ExportOptions>(value.clone()).unwrap().color_space,ExportColorSpace::AdobeRgb);
+        value["colorSpace"]=serde_json::json!("unknown");assert!(serde_json::from_value::<ExportOptions>(value).is_err());
+    }
+    #[test]
+    fn lossless_formats_execute_through_folder_and_album_destinations(){
+        let dir=tempfile::tempdir().unwrap();let db=Db::open(&dir.path().join("data.sqlite")).unwrap();let path=dir.path().join("source.jpg");image::RgbImage::from_pixel(24,16,image::Rgb([80,120,160])).save(&path).unwrap();let original=std::fs::read(&path).unwrap();
+        let asset:AssetRow=serde_json::from_value(serde_json::json!({"path":path.to_string_lossy(),"filename":"source.jpg","size":original.len(),"mtime":"2026-09-01T00:00:00Z","xxhash":0,"kind":"photo","source":"test","createdAt":"2026-09-01T00:00:00Z"})).unwrap();db.insert_asset(&asset).unwrap();let id=db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap();let album=db.album_create("Output").unwrap();
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.2}})).unwrap();
+        for format in [ExportFormat::Png,ExportFormat::Tiff]{for mode in [ExportMode::Folder,ExportMode::Album]{
+            let color_space=if format==ExportFormat::Png{ExportColorSpace::DisplayP3}else{ExportColorSpace::ProPhotoRgb};
+            let options=ExportOptions{format,color_space,mode,folder:Some(ExportFolderTarget{output_dir:dir.path().join("outputs").to_string_lossy().into_owned(),file_name:format!("edited.{}",format.extension())}),album:Some(ExportAlbumTarget{album_id:album.id.to_string(),subgroup:None}),long_edge:Some(12),quality:None,remove_gps:true,copyright:Some("Rights".into()),author:Some("Artist".into()),keywords:vec!["Photo".into()]};
+            let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe:recipe.clone(),options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{}).unwrap();assert!(result.output_path.ends_with(format.extension()));let decoded=image::open(&result.output_path).unwrap();assert_eq!((decoded.width(),decoded.height()),(12,8));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));if mode==ExportMode::Album{assert!(result.asset_id.is_some());}
+            let bytes=std::fs::read(&result.output_path).unwrap();let output=photocraft_io::import(&result.output_path,&bytes).unwrap();assert_eq!(output.document.icc_profile.unwrap(),color_space.profile().to_bytes());
+        }}assert_eq!(std::fs::read(path).unwrap(),original);
+    }
+    #[test]
+    fn export_refuses_existing_targets_and_never_truncates_foreign_staging(){
+        let dir=tempfile::tempdir().unwrap();let dst=dir.path().join("photo.jpg");let part=dir.path().join("photo.part");
+        std::fs::write(&dst,b"original photo").unwrap();std::fs::write(&part,b"other task").unwrap();
+        assert!(atomic_write(&dst,b"edited photo").is_err());assert_eq!(std::fs::read(&dst).unwrap(),b"original photo");assert_eq!(std::fs::read(&part).unwrap(),b"other task");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(),2);
+    }
+    #[test]
+    fn competing_exports_publish_exactly_one_complete_file(){
+        let dir=tempfile::tempdir().unwrap();let dst=dir.path().join("photo.jpg");let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));
+        let jobs:Vec<_>=[b"first complete photo".as_slice(),b"second complete photo".as_slice()].into_iter().map(|bytes|{let dst=dst.clone();let barrier=barrier.clone();std::thread::spawn(move||{barrier.wait();atomic_write(&dst,bytes).is_ok()})}).collect();
+        let successes=jobs.into_iter().filter_map(|job|job.join().ok()).filter(|ok|*ok).count();assert_eq!(successes,1);
+        let actual=std::fs::read(dst).unwrap();assert!(actual==b"first complete photo"||actual==b"second complete photo");assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(),1);
     }
 }

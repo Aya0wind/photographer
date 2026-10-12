@@ -52,6 +52,7 @@ function lib(overrides: Partial<PhotoLibrary> = {}): PhotoLibrary {
     status: "online",
     assetCount: 120,
     sizeBytes: 1073741824, // 1.0 GiB
+    organizationTemplate: "{year}/{month}/{day}/{filename}",
     ...overrides,
   };
 }
@@ -143,39 +144,19 @@ describe("StoragePage 登记入口（photo_library_create，单一按钮 + 对�
     await screen.findByTestId("storage-empty");
 
     await user.click(screen.getByTestId("storage-create-library"));
-    const dialog = screen.getByTestId("storage-create-dialog");
-    expect(dialog).toHaveAttribute("data-mode", "new");
-    expect(screen.getByTestId("storage-create-mode-new")).toHaveAttribute("data-selected", "true");
+    expect(screen.getByTestId("storage-create-dialog")).toBeInTheDocument();
 
     await user.type(screen.getByTestId("storage-create-name"), "主照片库");
     await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos");
     await user.click(screen.getByTestId("storage-create-confirm"));
 
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith("主照片库", "I:\\Photos", false));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("主照片库", "I:\\Photos", "{year}/{month}/{day}/{filename}",false,false));
     // 登记成功：对话框关闭 + 本地补拉出新卡 + toast 提示
     await screen.findByText("主照片库");
     expect(screen.queryByTestId("storage-create-dialog")).not.toBeInTheDocument();
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("主照片库");
   });
 
-  it("对话框内切「从已有文件夹建立」：reference=true 登记（只登记不搬文件）", async () => {
-    listMock.mockResolvedValue([]);
-    createMock.mockResolvedValue({ ok: true, library: lib() });
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findByTestId("storage-empty");
-
-    // 单一「新建照片库」入口；模式在对话框内切换
-    await user.click(screen.getByTestId("storage-create-library"));
-    await user.click(screen.getByTestId("storage-create-mode-reference"));
-    expect(screen.getByTestId("storage-create-dialog")).toHaveAttribute("data-mode", "reference");
-
-    await user.type(screen.getByTestId("storage-create-name"), "LR 目录");
-    await user.type(screen.getByTestId("storage-create-root"), "D:\\Lightroom");
-    await user.click(screen.getByTestId("storage-create-confirm"));
-
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith("LR 目录", "D:\\Lightroom", true));
-  });
 
   it("登记业务错误：后端 Err 文案透传内联展示，对话框保持打开", async () => {
     listMock.mockResolvedValue([]);
@@ -189,7 +170,7 @@ describe("StoragePage 登记入口（photo_library_create，单一按钮 + 对�
     await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos");
     await user.click(screen.getByTestId("storage-create-confirm"));
 
-    expect(await screen.findByTestId("storage-create-error")).toHaveTextContent("路径与其他照片库重叠");
+    expect(await screen.findByTestId("operation-error-dialog")).toHaveTextContent("路径与其他照片库重叠");
     expect(screen.getByTestId("storage-create-dialog")).toBeInTheDocument();
   });
 });
@@ -206,35 +187,22 @@ describe("StoragePage 卡片操作", () => {
   });
 
 
-  it("移除登记：两档确认——仅摘登记 deleteRecords=false / 连记录删 true；永不删照片文件提示在场", async () => {
+  it("删除照片库：单分支两段式——短语确认后执行，默认不删文件（deleteFiles=false）", async () => {
     listMock.mockResolvedValue([lib({ assetCount: 35 })]);
-    removeMock.mockResolvedValue({ recordsDeleted: 0 });
+    removeMock.mockResolvedValue({ recordsDeleted: 35, filesDeleted: 0 });
     const user = userEvent.setup();
     renderPage();
     await screen.findAllByTestId("storage-library-card");
 
     await user.click(screen.getAllByTestId("storage-remove")[0]);
     const dialog = screen.getByTestId("storage-remove-dialog");
-    // 用户红线常驻提示
+    // 默认不动文件的常驻提示 + 删除按钮带记录数
     expect(within(dialog).getByTestId("storage-remove-never-delete")).toHaveTextContent(
-      "移除登记永远不会删除磁盘上的照片文件",
+      "默认不删除磁盘上的照片文件",
     );
     expect(within(dialog).getByTestId("storage-remove-delete-records")).toHaveTextContent("35 张");
 
-    await user.click(within(dialog).getByTestId("storage-remove-keep-records"));
-    await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", false));
-    expect(screen.getByTestId("storage-toast")).toHaveTextContent("照片记录保留");
-  });
-
-  it("移除登记并删除记录：两段式——需输入「我确认删除」短语才能执行 deleteRecords=true", async () => {
-    listMock.mockResolvedValue([lib({ assetCount: 35 })]);
-    removeMock.mockResolvedValue({ recordsDeleted: 35 });
-    const user = userEvent.setup();
-    renderPage();
-    await screen.findAllByTestId("storage-library-card");
-
-    await user.click(screen.getAllByTestId("storage-remove")[0]);
-    // 第一段：点「连记录删」只进入待确认态，不执行
+    // 第一段：点「删除照片库」只进入待确认态，不执行
     await user.click(screen.getByTestId("storage-remove-delete-records"));
     expect(removeMock).not.toHaveBeenCalled();
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
@@ -243,15 +211,44 @@ describe("StoragePage 卡片操作", () => {
     await user.type(screen.getByTestId("storage-remove-phrase"), "确认删除");
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
 
-    // 第二段：输入完整短语 → 执行
+    // 第二段：输入完整短语 → 执行（删文件勾选默认不勾 → deleteFiles=false）
     await user.clear(screen.getByTestId("storage-remove-phrase"));
     await user.type(screen.getByTestId("storage-remove-phrase"), "我确认删除");
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeEnabled();
     await user.click(screen.getByTestId("storage-remove-confirm-delete"));
 
-    await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", true));
+    await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", false));
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("35");
   });
+
+  it("连记录删 + 勾选「同时删除磁盘上的照片文件」：deleteFiles=true，勾选后提示将删除的原文件数", async () => {
+    listMock.mockResolvedValue([lib({ assetCount: 35 })]);
+    removeMock.mockResolvedValue({ recordsDeleted: 35, filesDeleted: 35 });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findAllByTestId("storage-library-card");
+
+    await user.click(screen.getAllByTestId("storage-remove")[0]);
+    await user.click(screen.getByTestId("storage-remove-delete-records"));
+
+    // 默认不勾：无文件数提示行
+    const checkbox = screen.getByTestId("storage-remove-delete-files") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(screen.queryByTestId("storage-remove-files-hint")).not.toBeInTheDocument();
+
+    // 勾选：提示将删除 N 个原文件（N=assetCount）
+    await user.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getByTestId("storage-remove-files-hint")).toHaveTextContent("已有照片");
+
+    await user.type(screen.getByTestId("storage-remove-phrase"), "我确认删除");
+    await user.click(screen.getByTestId("storage-remove-confirm-delete"));
+
+    await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", true));
+    // toast 第二行提示已删文件数
+    expect(screen.getByTestId("storage-toast-hint")).toHaveTextContent("35");
+  });
+
 });
 
 describe("StoragePage 列表刷新", () => {
@@ -280,12 +277,11 @@ describe("StoragePage 扫描闭环（M4f 从文件夹建立）", () => {
     await screen.findByTestId("storage-empty");
 
     await user.click(screen.getByTestId("storage-create-library"));
-    await user.click(screen.getByTestId("storage-create-mode-reference"));
     await user.type(screen.getByTestId("storage-create-name"), "主照片库");
     await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos");
     await user.click(screen.getByTestId("storage-create-confirm"));
 
-    await waitFor(() => expect(createMock).toHaveBeenCalledWith("主照片库", "I:\\Photos", true));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("主照片库", "I:\\Photos", "{year}/{month}/{day}/{filename}",false,false));
     // 登记即触发后台扫描：toast 说明扫描已开始（区别于新建空库的登记提示）
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("正在后台扫描");
     await screen.findByTestId("storage-library-card");

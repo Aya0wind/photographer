@@ -1,0 +1,9 @@
+import {beforeEach,afterEach,expect,it,vi} from "vitest";
+import {fireEvent,render,screen} from "@testing-library/react";
+import {I18nextProvider} from "react-i18next";
+import i18n from "@/i18n";
+import StraightenOverlay from "./StraightenOverlay";
+beforeEach(()=>vi.stubGlobal("PointerEvent",class extends MouseEvent{pointerId:number;constructor(type:string,o:PointerEventInit={}){super(type,o);this.pointerId=o.pointerId??1;}}));afterEach(()=>vi.unstubAllGlobals());
+function setup(){const commit=vi.fn(),preview=vi.fn(),cancel=vi.fn();render(<I18nextProvider i18n={i18n}><StraightenOverlay width={400} height={300} onCommit={commit} onPreview={preview} onCancel={cancel}/></I18nextProvider>);const svg=screen.getByRole("application",{name:"拉直"});svg.getBoundingClientRect=()=>({left:0,top:0,width:400,height:300} as DOMRect);svg.setPointerCapture=vi.fn();return {svg,commit,preview,cancel};}
+it("previews a line and commits one angular correction only on release",()=>{const {svg,commit,preview}=setup();fireEvent.pointerDown(svg,{button:0,clientX:100,clientY:100});fireEvent.pointerMove(svg,{clientX:300,clientY:120});expect(commit).not.toHaveBeenCalled();expect(preview).toHaveBeenLastCalledWith([0.25,1/3,0.75,0.4]);fireEvent.pointerUp(svg);expect(commit).toHaveBeenCalledTimes(1);expect(commit.mock.calls[0][0]).toBeCloseTo(-5.7106,3);fireEvent.lostPointerCapture(svg);expect(commit).toHaveBeenCalledTimes(1);});
+it("escape clears the guide and never commits the angle",()=>{const {svg,commit,preview,cancel}=setup();fireEvent.pointerDown(svg,{button:0,clientX:100,clientY:100});fireEvent.pointerMove(svg,{clientX:300,clientY:120});fireEvent.keyDown(svg,{key:"Escape"});fireEvent.pointerUp(svg);expect(commit).not.toHaveBeenCalled();expect(preview).toHaveBeenLastCalledWith(null);expect(cancel).toHaveBeenCalledTimes(1);});

@@ -243,8 +243,7 @@ fn album_add_idempotent_skips_missing_assets_and_requires_album() {
     let err = fetch_album_add_assets(&state, 9999, &[a1], None).unwrap_err();
     assert!(err.contains("相册不存在"), "{err}");
 
-    // 移除（db 层；album_remove_assets 命令已删——一照一册下 UI 走回收站，
-    // db 方法仍是归册挪移的核）：单移 + 不在册 id 幂等
+    // 移除相册引用：单移 + 不在册 id 幂等，照片不移入回收站。
     db.album_remove_assets(album.id, &[a1, 888_888]).unwrap();
     assert_eq!(fetch_album_list(&state).unwrap()[0].item_count, 1);
     db.album_remove_assets(album.id, &[a1]).unwrap(); // 已移除：无错
@@ -285,50 +284,50 @@ fn asset_permanent_delete_cascades_references_and_cover() {
 }
 
 #[test]
-fn album_delete_trashes_members_and_restore_lands_in_default_album() {
+fn album_delete_preserves_photos_and_restore_does_not_create_an_album() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
-    let album = fetch_album_create(&state, "待删册").unwrap();
+    let album = fetch_album_create(&state, "未分组").unwrap();
     let db = open_db(db_dir.path());
     let a1 = ins(&db, "X:/p/1.jpg", None, AssetKind::Photo);
     let a2 = ins(&db, "X:/p/2.jpg", None, AssetKind::Photo);
     fetch_album_add_assets(&state, album.id, &[a1, a2], None).unwrap();
+    fetch_album_rename(&state, album.id, "可改名").unwrap();
+    fetch_album_delete(&state, album.id, false).unwrap();
     assert_eq!(count_assets(&db), 2);
-
-    // 一照一册模型：删相册 = 成员全部软删入回收站（行保留 in_trash=1），
-    // 引用级联消失、列表为空
-    fetch_album_delete(&state, album.id).unwrap();
-    assert_eq!(count_assets(&db), 2, "软删不删行");
-    assert_eq!(
-        db.0
-            .query_row("SELECT COUNT(*) FROM assets WHERE in_trash = 1", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        2,
-        "成员全部在回收站"
-    );
+    assert_eq!(db.0.query_row("SELECT COUNT(*) FROM assets WHERE in_trash = 1", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     assert_eq!(album_item_count(&db), 0);
-    assert!(fetch_album_list(&state).unwrap().is_empty());
+    db.assets_trash_move(&[a1, a2]).unwrap();
+    assert_eq!(db.trash_restore(&[a1, a2]).unwrap(), 2);
+    assert!(db.album_list().unwrap().is_empty());
+    assert_eq!(album_item_count(&db), 0);
+    assert!(fetch_album_delete(&state, album.id, false).unwrap_err().contains("相册不存在"));
+}
 
-    // 还原：原册已删 → 落入默认相册「未分组」
-    assert_eq!(ipc::selection::fetch_trash_restore(&state, &[a1, a2]).unwrap(), 2);
-    let default_id = db.ensure_default_album().unwrap();
-    let in_default: i64 = db.0
-        .query_row(
-            "SELECT COUNT(*) FROM album_item WHERE album_id = ?1 AND asset_id IN (?2, ?3)",
-            rusqlite::params![default_id, a1, a2],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(in_default, 2, "还原后归属「未分组」");
-    assert_eq!(count_assets(&db), 2);
-
-    // 再删（不存在）明确报错
-    let err = fetch_album_delete(&state, album.id).unwrap_err();
-    assert!(err.contains("相册不存在"), "{err}");
-    // 默认相册「未分组」拒删
-    let err = fetch_album_delete(&state, default_id).unwrap_err();
-    assert!(err.contains("不可删除"), "{err}");
+#[test]
+fn album_delete_can_trash_members_without_deleting_source_files() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let state = state_with_library(db_dir.path(), src.path(), Duration::from_millis(1));
+    let db = open_db(db_dir.path());
+    let album = db.album_create("待删除").unwrap();
+    let other = db.album_create("其他").unwrap();
+    let original = src.path().join("original.jpg");
+    std::fs::write(&original, b"original").unwrap();
+    let member = ins(&db, original.to_str().unwrap(), None, AssetKind::Photo);
+    let unrelated = ins(&db, "other.jpg", None, AssetKind::Photo);
+    db.album_add_assets(album.id, &[member], None).unwrap();
+    db.album_add_assets(other.id, &[member, unrelated], None).unwrap();
+    fetch_album_delete(&state, album.id, true).unwrap();
+    assert!(!db.album_exists(album.id).unwrap());
+    assert_eq!(db.0.query_row("SELECT in_trash FROM assets WHERE id=?1", [member], |row| row.get::<_, i32>(0)).unwrap(), 1);
+    assert_eq!(db.0.query_row("SELECT in_trash FROM assets WHERE id=?1", [unrelated], |row| row.get::<_, i32>(0)).unwrap(), 0);
+    assert_eq!(db.album_list().unwrap()[0].item_count, 1);
+    assert_eq!(std::fs::read(&original).unwrap(), b"original");
+    assert_eq!(db.trash_restore(&[member]).unwrap(), 1);
+    assert_eq!(db.asset_albums(member).unwrap()[0].id, other.id);
+    assert_eq!(db.album_list().unwrap()[0].item_count, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +577,7 @@ fn import_without_album_keeps_behavior_unchanged() {
     engine.begin().expect("无 album_id 应正常导入（相册可选）");
 
     let state_db = open_db(db_dir.path());
-    let album_id = state_db.ensure_default_album().unwrap();
+    let album_id = state_db.album_create("测试相册").unwrap().id;
     let mut plan = plan_for(&state_db, db_dir.path(), target.path());
     plan.album_id = Some(album_id);
     let plan_json = serde_json::to_string(&plan).unwrap();
@@ -599,7 +598,7 @@ fn import_into_deleted_album_degrades_gracefully() {
     // 相册在导入启动前已被用户删除（并发窗口）：0018 起 begin 阶段显式
     // 拒绝（相册目录名缺失，落点无从谈起）；导入中途删相册的窗口仍由
     // insert_asset_on 的 album 存活检查优雅降级（跳过挂载不判失败）。
-    fetch_album_delete(&state, album.id).unwrap();
+    fetch_album_delete(&state, album.id, false).unwrap();
     build_many(src.path(), 6);
     let db = open_db(db_dir.path());
     let mut plan = plan_for(&db, db_dir.path(), target.path());
@@ -643,7 +642,7 @@ fn sidebar_albums_count_is_real_count() {
     );
     // 删相册后计数回落
     let id = fetch_album_list(&state).unwrap()[0].id;
-    fetch_album_delete(&state, id).unwrap();
+    fetch_album_delete(&state, id, false).unwrap();
     assert_eq!(
         ipc::insights::fetch_sidebar_counts(&state).unwrap().albums,
         1

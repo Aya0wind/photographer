@@ -13,6 +13,7 @@ import { TaskDrawerToggle, TaskDrawerPanel } from "@/features/tasks/TaskDrawer";
 import SummaryModalHost from "@/features/tasks/SummaryModal";
 import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGuard";
 import { isMacPlatform } from "@/lib/platform";
+import { invalidateLibraryContentCaches } from "@/lib/librarySession";
 import { subscribeAppEvents } from "@/ipc/api";
 
 /**
@@ -47,8 +48,23 @@ export default function AppShell() {
   const [dbReloadNonce, setDbReloadNonce] = useState(0);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    // 联拍新片入库（去抖 2s，连拍不逐张清）：按 assetId 键的会话缓存
+    //（缩略图/浏览打点）与新照片共存无需整清，但画廊快照的前缀真值已过时
+    //——失效后 revalidate 按新前缀拉，主窗口任何页面回到前台都拿新数据。
+    let tetherTimer: number | null = null;
     void subscribeAppEvents((event) => {
       if (event.type === "databasesChanged") setDbReloadNonce((n) => n + 1);
+      // 照片库登记增删（删库联动 2026-10-09）：不换库但库内资产整体消失，
+      // 按 assetId 键的会话缓存（画廊快照/缩略图/打点）整表失效；页面各自
+      // 订阅同事件重拉列表（见 GalleryPage/Albums/People/Culling/MapPage）。
+      if (event.type === "photoLibrariesChanged") invalidateLibraryContentCaches();
+      if (event.type === "tetheringPhotoAdded") {
+        if (tetherTimer !== null) window.clearTimeout(tetherTimer);
+        tetherTimer = window.setTimeout(() => {
+          tetherTimer = null;
+          invalidateLibraryContentCaches();
+        }, 2000);
+      }
     })
       .then((off) => {
         unlisten = off;
@@ -56,7 +72,10 @@ export default function AppShell() {
       .catch(() => {
         // 非 Tauri 环境（vite dev 预览）静默
       });
-    return () => unlisten?.();
+    return () => {
+      if (tetherTimer !== null) window.clearTimeout(tetherTimer);
+      unlisten?.();
+    };
   }, []);
 
   // 屏蔽 WebView 原生行为：右键菜单（瓦片/图片改用自定义菜单）与开发者

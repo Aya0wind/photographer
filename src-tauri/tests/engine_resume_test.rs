@@ -220,3 +220,60 @@ fn startup_reaps_orphan_running_and_paused_jobs() {
     // 任务抽屉的可删性恢复（bug② 直接痛点：running 态 import_job_delete 拒删）
     assert!(matches!(db.delete_job_history(running).unwrap(), Ok(true)));
 }
+
+// ---------------------------------------------------------------------------
+// 删库软停（2026-10-09 审计 P0）：导入在跑时目标照片库被移除登记 →
+// 会话以明确错误中止，journal 落 failed，不写悬挂 library_id 的幽灵行。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn import_aborts_when_target_library_removed_mid_run() {
+    let src = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    build_many(src.path(), 6);
+
+    let engine_db = open_db(db_dir.path());
+    let plan = common::plan_for(&engine_db, db_dir.path(), target.path());
+    let mut engine = Engine::new(
+        engine_db,
+        EventBus::new(),
+        Box::new(SlowSource {
+            inner: VolumeSource::new(src.path()),
+            delay: Duration::from_millis(20),
+        }),
+        plan.clone(),
+    );
+    let job_id = engine.begin().unwrap();
+    // begin 落任务后、run 起跑前移除登记（另一连接；删除即触发点查判死）。
+    // 新守卫要求库内至少保留一个照片库——先垫一个占位库再删目标库。
+    let admin = open_db(db_dir.path());
+    let keeper = tempfile::tempdir().unwrap();
+    admin
+        .photos_library_register("占位库", &keeper.path().to_string_lossy(), db_dir.path())
+        .unwrap();
+    admin.photos_library_remove(&plan.target_library_id).unwrap();
+    drop(admin);
+
+    let stats = engine.run();
+
+    assert_eq!(stats.done_files, 0, "不再登记任何文件");
+    assert_eq!(stats.failed_files, 6, "全部按失败收尾");
+    let check = open_db(db_dir.path());
+    assert_eq!(count_assets(&check), 0, "不写悬挂 library_id 的幽灵行");
+    assert_eq!(job_status(&check, job_id), "failed", "会话终态 failed");
+    let errors: Vec<String> = check
+        .0
+        .prepare("SELECT COALESCE(error, '') FROM job_files WHERE job_id = ?1")
+        .unwrap()
+        .query_map([job_id], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(errors.len(), 6);
+    assert!(
+        errors.iter().all(|e| e.contains("目标照片库已被删除")),
+        "journal 失败行带明确错误文案: {errors:?}"
+    );
+    assert_eq!(journal_states(&check, job_id), vec![FileState::Failed; 6]);
+}

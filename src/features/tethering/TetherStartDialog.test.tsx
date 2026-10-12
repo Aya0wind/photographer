@@ -7,6 +7,7 @@ import { I18nextProvider } from "react-i18next";
 import i18n from "@/i18n";
 import {
   tetheringCameraList,
+  cameraProbe,
   tetheringStart,
   type CameraInfo,
 } from "@/ipc/api";
@@ -17,6 +18,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     tetheringCameraList: vi.fn(),
+    cameraProbe: vi.fn(),
     tetheringStart: vi.fn(),
   };
 });
@@ -54,6 +56,7 @@ function renderDialog(albumId = 7, albumName = "棚拍") {
 }
 
 beforeEach(() => {
+  vi.mocked(cameraProbe).mockReset().mockResolvedValue(null);
   listMock.mockReset().mockResolvedValue([]);
   startMock.mockReset();
 });
@@ -99,6 +102,7 @@ describe("TetherStartDialog 联拍启动弹窗", () => {
         connected: true,
         receiving: false,
         error: null,
+        pendingReceipts: 0,
       },
     });
     const { onClose } = renderDialog(7, "棚拍");
@@ -119,4 +123,16 @@ describe("TetherStartDialog 联拍启动弹窗", () => {
     expect(await screen.findByTestId("tether-start-error")).toHaveTextContent("相机被占用");
     expect(onClose).not.toHaveBeenCalled();
   });
+});
+
+
+it("Windows MTP 相机先探测能力，无需先打开导入设备对话框",async()=>{
+  const id=String.raw`\\?\usb#vid_04b0&pid_0456#camera`;
+  listMock.mockResolvedValue([camera(id,"Z5_2",CAPS_NONE)]);
+  vi.mocked(cameraProbe).mockResolvedValue(camera(id,"fallback",{...CAPS_FULL,liveView:false,vendorCaptureNikon:true}));
+  renderDialog();
+  const option=await screen.findByTestId(`tether-start-camera-${id}`);
+  expect(cameraProbe).toHaveBeenCalledWith(id);
+  expect(option).toBeEnabled();
+  expect(option).toHaveTextContent("Z5_2");
 });

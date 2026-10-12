@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::{AssetRow, Db, JobFileRow};
 use crate::devices::{DeviceError, DeviceSource, FileEntry, SourceKind};
 use crate::events::{AppEvent, EventBus, FileState, JobStats, Throttle};
-use crate::import::templates::unique_path;
+use crate::db::organization::unique_path;
 use crate::settings::DuplicatePolicy;
 
 use dedup::{exact_verdict, loose_hit, ExactVerdict};
@@ -64,6 +64,9 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 const PAUSE_POLL: Duration = Duration::from_millis(10);
 /// `.part` 集中暂存目录名（各目标根下，点前缀）。
 const PART_DIR: &str = ".photographer-part";
+
+/// 删库软停的 journal 失败文案（2026-10-09 审计 P0：目标库被移除登记）。
+const LIBRARY_REMOVED_ERROR: &str = "目标照片库已被删除，导入已中止";
 
 /// 导入模式（M2“保留原文件”开关，spec §5.11）：
 /// copy=复制（默认，源不动）；move=移动（校验入册后删源，删源失败仅告警）。
@@ -99,6 +102,9 @@ pub struct ImportPlan {
     /// 目标照片库 id（photos_libraries.id；引擎 begin 时解析库 root）。
     #[serde(default)]
     pub target_library_id: String,
+    /// Snapshot taken before journaling; resumed jobs keep the original rule.
+    #[serde(default)]
+    pub organization_template:Option<String>,
     pub duplicate_policy: DuplicatePolicy,
     pub skip_imported: bool,
     pub streams: u32,
@@ -439,6 +445,7 @@ impl Engine {
                 library.name, library.root_path
             )));
         }
+        if self.db.photos_library_organization_pending(&library.id).map_err(EngineError::Db)?{return Err(EngineError::InvalidPlan("请先完成照片库内已有照片的整理，再导入新照片".into()));}
         let library_root = PathBuf::from(&library.root_path);
         if self.plan.mode != ImportMode::Reference {
             self.check_nesting(&library_root)?;
@@ -451,7 +458,13 @@ impl Engine {
                 .then_some(())
                 .ok_or_else(|| EngineError::InvalidPlan(format!("导入相册 {album_id} 不存在")))?;
         }
+        if self.plan.organization_template.is_none(){self.plan.organization_template=Some(library.organization_template.clone());}
+        crate::db::organization::validate_organization_template(self.plan.organization_template.as_deref().unwrap()).map_err(EngineError::InvalidPlan)?;
         let entries = self.filter_included(self.source.list()?)?;
+        if self.plan.mode==ImportMode::Reference{
+            let root=std::fs::canonicalize(&library_root).map_err(|e|EngineError::InvalidPlan(e.to_string()))?;
+            for entry in &entries{let path=self.source.local_path(&entry.id).and_then(|p|std::fs::canonicalize(p).ok()).ok_or_else(||EngineError::InvalidPlan("仅建索引需要可访问的本地文件".into()))?;if !path.starts_with(&root){return Err(EngineError::InvalidPlan("仅建索引的照片必须位于所选照片库内，请先登记源文件夹为照片库".into()));}}
+        }
         let mut base = Counters::default();
         for e in &entries {
             base.total_files += 1;
@@ -594,6 +607,7 @@ impl Engine {
             let staging_error = staging_error.clone();
             let part_seq = Arc::clone(&part_seq);
             let target_root = library_root.clone();
+            let organization_template=self.plan.organization_template.clone().unwrap_or_else(||crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.into());
             let second = self
                 .plan
                 .second_target
@@ -632,6 +646,7 @@ impl Engine {
                             self.plan.duplicate_policy,
                             &entry,
                             &target_root,
+                            &organization_template,
                             second.as_deref(),
                         )
                     };
@@ -651,8 +666,45 @@ impl Engine {
         let mut last_tick = Instant::now();
         let mut last_done_bytes = counters.done_bytes;
         let mut active = Duration::ZERO;
+        // 删库软停（2026-10-09 审计 P0 幽灵资产）：目标照片库被移除登记后
+        // 不再写出悬挂 library_id 的幽灵资产行——置位后余量（含在途已拷
+        // 产出）journal 一律落 failed，会话以明确错误中止。
+        let mut library_gone = false;
 
         for outcome in result_rx {
+            // 每文件处理前（登记前）点查目标库仍在册：微秒级主键查询，
+            // 文件拷贝耗时面前可忽略。发现删库只置位一次（软停 workers
+            // 不再领新文件），余量在下方统一按失败结算。
+            if !library_gone && !self.target_library_alive() {
+                library_gone = true;
+                self.controls.cancelled.store(true, Ordering::SeqCst);
+                let _ = self.db.append_log(
+                    "error",
+                    Some(job_id),
+                    "目标照片库已被删除，导入中止（已收尾文件保留，未处理文件可换库重导）",
+                );
+                self.bus.publish(AppEvent::AppError {
+                    level: "error".into(),
+                    message: "目标照片库已被删除，导入已中止".into(),
+                    recoverable: true,
+                });
+            }
+            if library_gone {
+                let (src, size) = self.abandon_outcome(job_id, outcome);
+                counters.failed += 1;
+                counters.failed_bytes += size;
+                let _ = self.db.upsert_job_file(&JobFileRow {
+                    job_id,
+                    src,
+                    dst: String::new(),
+                    size,
+                    state: FileState::Failed,
+                    error: Some(LIBRARY_REMOVED_ERROR.into()),
+                    xxhash: None,
+                    dst2: String::new(),
+                });
+                continue;
+            }
             let tick_now = Instant::now();
             if counters.done_bytes > last_done_bytes {
                 active += tick_now.saturating_duration_since(last_tick);
@@ -861,6 +913,33 @@ impl Engine {
             let _ = worker.join();
         }
 
+        // 删库软停收尾（审计 P0）：软取消后 workers 未领完的余量（journal
+        // 停在 pending/copying）一并落 failed——会话以明确错误中止，不让
+        // 余量留在「看似可续跑」的假象里（目标库已不在，resume 也会拒绝）。
+        if library_gone {
+            let abandoned: Vec<i64> = self
+                .db
+                .0
+                .prepare(
+                    "SELECT size FROM job_files WHERE job_id = ?1 \
+                     AND state IN ('pending', 'copying')",
+                )
+                .and_then(|mut stmt| {
+                    let rows = stmt.query_map([job_id], |r| r.get::<_, i64>(0))?;
+                    rows.collect()
+                })
+                .unwrap_or_default();
+            if !abandoned.is_empty() {
+                counters.failed += abandoned.len() as u64;
+                counters.failed_bytes += abandoned.iter().sum::<i64>() as u64;
+            }
+            let _ = self.db.0.execute(
+                "UPDATE job_files SET state = 'failed', error = ?2 \
+                 WHERE job_id = ?1 AND state IN ('pending', 'copying')",
+                rusqlite::params![job_id, LIBRARY_REMOVED_ERROR],
+            );
+        }
+
         // move：尽力清理空的源中间子目录（保留源根；MTP 无文件系统语义跳过）
         if self.plan.mode == ImportMode::Move && counters.moved > 0 {
             if let Some(root) = source_root_of(self.source.as_ref()) {
@@ -884,6 +963,8 @@ impl Engine {
         }
         let status = if device_lost || self.controls.is_device_lost() {
             "paused"
+        } else if library_gone {
+            "failed"
         } else if self.controls.is_cancelled() {
             "cancelled"
         } else {
@@ -929,7 +1010,7 @@ impl Engine {
         let selected: HashSet<&str> = include.iter().map(String::as_str).collect();
         let filtered: Vec<FileEntry> = entries
             .into_iter()
-            .filter(|e| selected.contains(e.rel_path.as_str()))
+            .filter(|e| selected.contains(&e.rel_path.as_str()))
             .collect();
         if filtered.is_empty() {
             return Err(EngineError::InvalidPlan(
@@ -937,6 +1018,35 @@ impl Engine {
             ));
         }
         Ok(filtered)
+    }
+
+    /// 目标照片库是否仍在册（删库软停点查；每文件边界一次）。读失败按
+    /// 不在处理——库表读不开时宁可停导入，不冒写幽灵行的险。
+    fn target_library_alive(&self) -> bool {
+        self.db
+            .photos_library_get(&self.plan.target_library_id)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// 删库软停后的余量结算（journal 落 failed）：Copied 的暂存 .part 丢弃
+    /// （rename 快道的 .part 是源本体——回撤源，同 [`Self::skip_discard`]，
+    /// 绝不吞源数据）；其余形态无盘上产物。返回 (src, size) 供 journal 行。
+    fn abandon_outcome(&self, job_id: i64, outcome: FileOutcome) -> (String, u64) {
+        match outcome {
+            FileOutcome::Copied(copied) => {
+                let (src, size) = (copied.entry.id.clone(), copied.entry.size);
+                self.skip_discard(job_id, &copied);
+                (src, size)
+            }
+            FileOutcome::Referenced(reference) => {
+                (reference.entry.id.clone(), reference.entry.size)
+            }
+            FileOutcome::Skipped { entry } => (entry.id, entry.size),
+            FileOutcome::Failed { entry, .. } => (entry.id, entry.size),
+            FileOutcome::Disconnected { entry, .. } => (entry.id, entry.size),
+        }
     }
 
     /// 自我嵌套守卫（spec §5.11）：文件系统源的根与任一目标根（照片库

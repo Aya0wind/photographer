@@ -288,15 +288,27 @@ pub fn fetch_trash_purge(
     if ids_to_delete.is_empty() {
         return Ok(result);
     }
+    // 行删除前留住路径（行删后即查不到）：派生数据清理用
+    let purged_paths: Vec<&str> = entries
+        .iter()
+        .filter(|(id, ..)| ids_to_delete.contains(id))
+        .map(|(_, path, ..)| path.as_str())
+        .collect();
     result.deleted_records = db
         .assets_delete_rows(&ids_to_delete)
         .map_err(|e| e.to_string())?;
+    // 派生数据清理（缩略图缓存 + 语义向量；与删照片库/重复删除共用，
+    // 缺失容忍——孤儿簇已由 assets_delete_rows 事务内清）
+    if let Ok(db_dir) = super::app_database_dir(state) {
+        super::purge_asset_derivations(&db_dir, &ids_to_delete, &purged_paths);
+    }
     Ok(result)
 }
 
 /// 清理源缺失资产核（2026-09-29 用户功能）：扫描库内活跃（in_trash=0）的
 /// photo/raw 资产，源文件已不存在的行永久删除（行级联清引用；物理文件无需
-/// 删——源已缺失是清理前提）。日志记账每条；返回删除数。
+/// 删——源已缺失是清理前提；缩略图/向量等派生数据随行清）。日志记账每条；
+/// 返回删除数。
 pub fn fetch_missing_purge(state: &super::AppState) -> Result<u64, String> {
     let db = super::app_database_db(state)?;
     let rows: Vec<(i64, String)> =
@@ -306,18 +318,26 @@ pub fn fetch_missing_purge(state: &super::AppState) -> Result<u64, String> {
             .map_err(|e| e.to_string())?
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
-    let missing: Vec<i64> = rows
-        .iter()
+    let missing: Vec<(i64, String)> = rows
+        .into_iter()
         .filter(|(_, path)| !std::path::Path::new(path).is_file())
         .map(|(id, path)| {
             let _ = db.append_log("info", None, &format!("清理源缺失资产：{path}"));
-            *id
+            (id, path)
         })
         .collect();
     if missing.is_empty() {
         return Ok(0);
     }
-    db.assets_delete_rows(&missing).map_err(|e| e.to_string())
+    let ids: Vec<i64> = missing.iter().map(|(id, _)| *id).collect();
+    let paths: Vec<&str> = missing.iter().map(|(_, p)| p.as_str()).collect();
+    let deleted = db.assets_delete_rows(&ids).map_err(|e| e.to_string())?;
+    // 派生数据清理（缩略图缓存——cached_without_source 的复用对象 + 语义
+    // 向量；缺失容忍）
+    if let Ok(db_dir) = super::app_database_dir(state) {
+        super::purge_asset_derivations(&db_dir, &ids, &paths);
+    }
+    Ok(deleted)
 }
 
 // ---------------------------------------------------------------------------

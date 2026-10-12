@@ -110,6 +110,7 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
         let mut params=serde_json::to_value(&s.ranges).map_err(|e|e.to_string())?;params["relative"]=json!(s.relative);
         add("selective-color","selectiveColor",params,false);
     }
+    let parametric=a.parametric_curve.as_ref().filter(|c|c.active()).map(|c|AdjustmentSpec{native:Some(super::parametric::adjustment(c)),key:"parametric-curve",kind:"curves",params:json!({"parametric":c}),luminosity:false,opacity:1.0});
     let mut curves = serde_json::Map::new();
     for (key, points) in [
         ("points", &a.curves),
@@ -132,6 +133,10 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             true,
         );
     }
+    if let Some(spec)=parametric {let index=specs.iter().position(|s|s.key=="curves"||s.key=="luminance").unwrap_or(specs.len());specs.insert(index,spec);}
+    if let Some(g)=a.color_grading.as_ref().filter(|g|g.active()) {
+        specs.push(AdjustmentSpec{native:Some(super::grading::adjustment(g)?),key:"color-grading",kind:"colorLookup",params:json!({"grading":g}),luminosity:false,opacity:1.0});
+    }
     if let Some(lookup)=a.lookup.as_ref().filter(|lookup|lookup.enabled && lookup.amount>0.0) {
         specs.push(AdjustmentSpec{native:None,key:"lut",kind:"colorLookup",params:super::lut::params(&lookup.id)?,luminosity:false,opacity:(lookup.amount/100.0) as f32});
     }
@@ -145,9 +150,6 @@ pub(super) fn camera_tuning(recipe: &EditRecipe) -> [f64; 3] {
         .map_or([0.0; 3], |a| [a.exposure, a.temperature, a.tint])
 }
 
-pub(super) fn camera_adjustment(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
-    camera_adjustment_scaled(session,recipe,1.0)
-}
 pub(super) fn camera_params(recipe:&EditRecipe,scale:f32)->photocraft_algo::camera_raw::CameraRaw {
     let mut params=recipe.advanced.as_ref().and_then(|a|a.development.as_ref()).map(|d|serde_json::from_value(serde_json::to_value(d).unwrap()).unwrap()).unwrap_or_else(photocraft_algo::camera_raw::CameraRaw::default);
     let [exposure,temperature,tint]=camera_tuning(recipe);
@@ -172,8 +174,8 @@ pub(super) fn camera_adjustment_scaled(session:&mut Session,recipe:&EditRecipe,s
     Ok(())
 }
 
-fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String> {
-    camera_adjustment(session, recipe)?;
+fn adjustments_scaled(session: &mut Session, recipe: &EditRecipe,scale:f32) -> Result<(), String> {
+    camera_adjustment_scaled(session, recipe,scale)?;
     for spec in adjustment_specs(recipe)? {
         if let Some(native)=spec.native {
             let state=session.active_mut().ok_or("编辑文档不存在")?;
@@ -194,21 +196,38 @@ fn adjustments(session: &mut Session, recipe: &EditRecipe) -> Result<(), String>
     }
     if !recipe.masks.is_empty() {
         let base=active_document(session)?;
-        let layers=super::masks::MaskCache::default().layers(&base,recipe)?;
+        let mut masks=super::masks::MaskCache::default();masks.set_source_scale(scale);
+        let layers=masks.layers(&base,recipe)?;
         let state=session.active_mut().ok_or("编辑文档不存在")?;
         std::sync::Arc::make_mut(&mut state.doc).layers.extend(layers);
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub fn adjusted_document(base: &Document, recipe: &EditRecipe) -> Result<Document, String> {
+    adjusted_document_scaled(base,recipe,1.0)
+}
+pub(super) fn adjusted_document_scaled(base:&Document,recipe:&EditRecipe,scale:f32)->Result<Document,String> {
     let mut session = Session::new();
     session.add_document(base.clone(), None);
-    adjustments(&mut session, recipe)?;
+    adjustments_scaled(&mut session, recipe,scale)?;
     session
         .active()
         .map(|s| (*s.doc).clone())
         .ok_or("编辑文档不存在".into())
+}
+
+/// Bake an existing stack only when a pixel filter needs its input. Callers
+/// cache this document independently from masks and downstream adjustments.
+pub(super) fn processing_input(doc:&Document)->Result<Document,String> {
+    let mut result=if let Some(surface)=super::gpu::composite(doc) {
+        let mut flat=doc.clone();flat.layers=vec![Layer::new("Processing input",LayerContent::Raster(surface))];flat
+    } else {
+        let pixels=photocraft_io::document_to_image(doc,&mut Vec::new()).map_err(|e|e.to_string())?;
+        let mut flat=super::source::from_image("Processing input",&pixels)?;flat.icc_profile=doc.icc_profile.clone();flat.resolution_dpi=doc.resolution_dpi;flat
+    };
+    result.id=photocraft_engine::doc::DocId::fresh();result.selection=None;Ok(result)
 }
 
 /// 原生缩放保留位深、色彩空间、图层和 ICC。
@@ -253,11 +272,39 @@ pub(super) struct DisplayTimings {
 pub fn jpeg(doc: &Document, quality: u8) -> Result<Vec<u8>, String> {
     jpeg_with_timings(doc, quality).map(|(bytes, _)| bytes)
 }
+/// Lossless 16-bit output through the upstream codecs. ICC conversion follows
+/// compositing, preserving adjustment semantics in the source working space.
+#[cfg(test)]
+pub(super) fn lossless_with_metadata(doc:&Document,extension:&str,source_head:Option<&[u8]>,meta:&super::meta::MetaOptions)->Result<Vec<u8>,String>{
+    lossless_with_profile(doc,extension,source_head,meta,photocraft_cms::Builtin::Srgb.profile())
+}
+pub(super) fn native_document_with_metadata(doc:&Document,source_head:Option<&[u8]>,meta:&super::meta::MetaOptions)->Result<Vec<u8>,String>{
+    let mut document=doc.clone();
+    let profile=photocraft_engine::color_cmds::document_profile(&document);
+    let source_head=source_head.or_else(||doc.metadata.exif.as_deref().map(Vec::as_slice));
+    let (exif,xmp)=super::meta::flat_metadata_with_color_space(source_head,meta,document.size.width,document.size.height,profile.to_bytes()==photocraft_cms::Builtin::Srgb.profile().to_bytes())?;
+    document.metadata.exif=Some(std::sync::Arc::new(exif));
+    if xmp.is_some(){document.metadata.xmp=xmp;}
+    photocraft_io::export(&document,"pcraft",&photocraft_io::ExportOptions::default()).map(|output|output.bytes).map_err(|e|e.to_string())
+}
+pub(super) fn lossless_with_profile(doc:&Document,extension:&str,source_head:Option<&[u8]>,meta:&super::meta::MetaOptions,profile:&photocraft_cms::Profile)->Result<Vec<u8>,String>{
+    if !["png","tif"].contains(&extension){return Err("无损输出格式无效".into());}
+    let image=photocraft_io::document_to_image(doc,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
+    let mut flat=super::source::from_image("Output",&image)?;
+    photocraft_engine::color_cmds::convert_document(&mut flat,profile,photocraft_cms::Intent::RelativeColorimetric,true).map_err(|e|e.to_string())?;
+    let (exif,xmp)=super::meta::flat_metadata_with_color_space(source_head,meta,flat.size.width,flat.size.height,profile.to_bytes()==photocraft_cms::Builtin::Srgb.profile().to_bytes())?;
+    flat.metadata.exif=Some(std::sync::Arc::new(exif.clone()));flat.metadata.xmp=xmp;
+    let bytes=photocraft_io::export(&flat,extension,&photocraft_io::ExportOptions::default()).map(|output|output.bytes).map_err(|e|e.to_string())?;
+    if extension=="tif"{super::tiff_metadata::embed(bytes,&exif)}else{Ok(bytes)}
+}
 
 pub(super) fn jpeg_with_timings(
     doc: &Document,
     quality: u8,
 ) -> Result<(Vec<u8>, DisplayTimings), String> {
+    jpeg_with_profile(doc,quality,photocraft_cms::Builtin::Srgb.profile())
+}
+pub(super) fn jpeg_with_profile(doc:&Document,quality:u8,profile:&photocraft_cms::Profile)->Result<(Vec<u8>,DisplayTimings),String>{
     let started = std::time::Instant::now();
     let mut timing = DisplayTimings::default();
     let gpu = super::gpu::composite(doc);
@@ -273,7 +320,7 @@ pub(super) fn jpeg_with_timings(
     };
     timing.composite_ms = started.elapsed().as_secs_f64() * 1000.0;
     let phase = std::time::Instant::now();
-    let srgb = photocraft_cms::Builtin::Srgb.profile();
+    let srgb = profile;
     // 只在原生解析的源/目标 ICC 完全一致时省略像素转换。
     if flat.mode == photocraft_engine::doc::ColorMode::Rgb
         && photocraft_engine::color_cmds::document_profile(&flat).to_bytes() == srgb.to_bytes()
@@ -317,17 +364,12 @@ pub fn geometry(session: &mut Session, recipe: &EditRecipe) -> Result<(), String
     }
     if let Some(crop) = recipe.crop {
         let doc = session.active().ok_or("编辑文档不存在")?;
-        let w = f64::from(doc.doc.size.width);
-        let h = f64::from(doc.doc.size.height);
-        let x = (crop.x * w).floor().clamp(0.0, w) as u32;
-        let y = (crop.y * h).floor().clamp(0.0, h) as u32;
-        let right = ((crop.x + crop.w) * w).ceil().clamp(f64::from(x), w) as u32;
-        let bottom = ((crop.y + crop.h) * h).ceil().clamp(f64::from(y), h) as u32;
-        if right > x && bottom > y {
+        let [x,y,width,height]=super::native_geometry::crop_bounds(crop,doc.doc.size);
+        if x<doc.doc.size.width&&y<doc.doc.size.height {
             execute(
                 session,
                 "image.crop",
-                json!({"x": x, "y": y, "width": right - x, "height": bottom - y}),
+                json!({"x": x, "y": y, "width": width,"height":height}),
             )?;
         }
     }
@@ -370,9 +412,12 @@ pub(super) fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<
 }
 
 pub fn render_document(base: &Document, recipe: &EditRecipe) -> Result<Document, String> {
+    render_document_scaled(base,recipe,1.0)
+}
+pub(super) fn render_document_scaled(base:&Document,recipe:&EditRecipe,scale:f32)->Result<Document,String> {
     let mut session = Session::new();
     session.add_document(base.clone(), None);
-    adjustments(&mut session, recipe)?;
+    adjustments_scaled(&mut session, recipe,scale)?;
     geometry(&mut session, recipe)?;
     annotations(&mut session, recipe)?;
     active_document(&session)
@@ -418,6 +463,7 @@ pub fn export_native(
 
 /// 阶段回调版(develop/resize/render/encode):导出任务的 UI 进度直达显影
 /// 这段剩余长耗时,不再是大黑盒。
+#[allow(dead_code)] // Compatibility wrapper for existing editor callers.
 pub fn export_native_with_progress(
     path: &std::path::Path,
     recipe: &EditRecipe,
@@ -425,10 +471,23 @@ pub fn export_native_with_progress(
     quality: u8,
     progress: &dyn Fn(&str),
 ) -> Result<(Vec<u8>, u32, u32), String> {
+    let doc=prepare_export_document(path,recipe,long_edge,progress)?;
+    progress("encode");
+    Ok((jpeg(&doc, quality)?, doc.size.width, doc.size.height))
+}
+/// Codec-independent full-source output. Previews never enter this path.
+/// All file encoders must consume this same rendered document so RAW
+/// development, geometric order and pixel scale remain consistent.
+pub(super) fn prepare_export_document(
+    path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),
+)->Result<Document,String>{
+    prepare_export_document_16(path,recipe,long_edge,progress,false)
+}
+pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),sixteen_bit:bool)->Result<Document,String>{
     progress("decode");
     let source = super::source::open(path)?;
     let mut values = recipe.clone();
-    let base = if let Some(raw) = source.raw {
+    let mut base = if let Some(raw) = source.raw {
         let a = recipe.advanced.clone().unwrap_or_default();
         // RAW 显影(曝光/白平衡)必须全分辨率烘焙(rawler 内部并行,这是地板);
         // 显影之外的一切逐像素算子都在缩放后的小图上跑。
@@ -447,6 +506,10 @@ pub fn export_native_with_progress(
     } else {
         source.document
     };
+    if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16 {
+        let image=photocraft_io::document_to_image(&base,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
+        base=super::source::from_image("16-bit output source",&image)?;
+    }
     // 缩放前置(2026-10-10 导出卡死修复):crop/文字等坐标均为归一化(预览与
     // 导出共用 recipe),先缩到目标边长再跑算子,61MP→4K 省约一个数量级的
     // CPU 与内存。唯一例外:任意角度旋转的外接矩形会放大,保持旧的先渲染
@@ -463,17 +526,79 @@ pub fn export_native_with_progress(
         let pre = pre_resize_long_edge(&base, &values, long_edge);
         let scaled = resize(&base, pre)?;
         progress("render");
-        let rendered = render_document(&scaled, &values)?;
+        let scale=scaled.size.width.max(scaled.size.height) as f32/base.size.width.max(base.size.height).max(1) as f32;
+        let rendered = render_document_scaled(&scaled, &values,scale)?;
         // 取整容差兜底:预缩系数的四舍五入可能让输出差 1px,末位归一。
         resize(&rendered, long_edge)?
     };
-    progress("encode");
-    Ok((jpeg(&doc, quality)?, doc.size.width, doc.size.height))
+    Ok(doc)
 }
 
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+    #[test]
+    fn native_document_roundtrip_keeps_layers_masks_profile_and_pixels(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let mut base=Document::with_background("Native",Size::new(32,24),ColorMode::Rgb,SampleType::U16,Color::rgba(0.2,0.4,0.7,1.0));base.icc_profile=Some(photocraft_cms::Builtin::AdobeRgbCompat.profile().to_bytes());
+        base.metadata.xmp=Some("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:test=\"urn:retained\" test:value=\"original\"/></rdf:RDF></x:xmpmeta>".into());
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.3},"masks":[{"id":"local","name":"Local","kind":"linear","enabled":true,"inverted":false,"density":70,"feather":0,"from":{"x":0.2,"y":0.2},"to":{"x":0.8,"y":0.8},"advanced":{"exposure":-0.4}}]})).unwrap();
+        let doc=render_document(&base,&recipe).unwrap();assert!(doc.layers.len()>1);assert!(doc.layers.iter().any(|layer|matches!(&layer.content,LayerContent::Group(_))));
+        let before=photocraft_compose::flatten(&doc);
+        let bytes=native_document_with_metadata(&doc,None,&super::super::meta::MetaOptions::default()).unwrap();
+        let restored=photocraft_io::import("native.pcraft",&bytes).unwrap().document;
+        assert_eq!(restored.layers.len(),doc.layers.len());assert_eq!(restored.depth,doc.depth);assert_eq!(restored.icc_profile,doc.icc_profile);assert_eq!(restored.metadata.xmp,doc.metadata.xmp);
+        let after=photocraft_compose::flatten(&restored);assert_eq!(after.rect,before.rect);assert_eq!(after.px.len(),before.px.len());for (a,b) in before.px.iter().zip(after.px.iter()){for ch in 0..4{assert!((a[ch]-b[ch]).abs()<0.0001);}}
+        let layer=restored.layers.iter().find(|layer|matches!(&layer.content,LayerContent::Group(_))).unwrap();assert!(layer.mask.is_some());
+    }
+    #[test]
+    fn prepared_output_document_supports_native_lossless_sixteen_bit_codecs(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("source.tif");image::ImageBuffer::<image::Rgb<u16>,Vec<u16>>::from_pixel(120,80,image::Rgb([16384,32768,49152])).save(&path).unwrap();let original=std::fs::read(&path).unwrap();
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.3},"crop":{"x":0.1,"y":0.1,"w":0.8,"h":0.8}})).unwrap();
+        let doc=prepare_export_document(&path,&recipe,Some(64),&|_|{}).unwrap();assert_eq!(doc.depth,photocraft_engine::doc::SampleType::U16);assert!(doc.size.width.max(doc.size.height)<=64);
+        for extension in ["png","tif"]{let encoded=photocraft_io::export(&doc,extension,&photocraft_io::ExportOptions::default()).unwrap();let decoded=image::load_from_memory(&encoded.bytes).unwrap();assert_eq!((decoded.width(),decoded.height()),(doc.size.width,doc.size.height));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));}
+        assert_eq!(std::fs::read(&path).unwrap(),original);
+    }
+    #[test]
+    fn output_colour_spaces_convert_pixels_and_embed_matching_profiles(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        use super::super::export::ExportColorSpace;
+        let mut doc=Document::with_background("Colour",Size::new(16,12),ColorMode::Rgb,SampleType::U16,Color::rgba(0.2,0.55,0.85,1.0));doc.icc_profile=Some(photocraft_cms::Builtin::Srgb.profile().to_bytes());
+        for space in [ExportColorSpace::Srgb,ExportColorSpace::DisplayP3,ExportColorSpace::AdobeRgb,ExportColorSpace::ProPhotoRgb]{
+            let profile=space.profile();let mut expected=doc.clone();photocraft_engine::color_cmds::convert_document(&mut expected,profile,photocraft_cms::Intent::RelativeColorimetric,true).unwrap();let expected=photocraft_compose::flatten(&expected).px[0];
+            for extension in ["jpg","png","tif"]{
+                let srgb=space==ExportColorSpace::Srgb;
+                let bytes=if extension=="jpg"{super::super::meta::apply_metadata_for_color_image(jpeg_with_profile(&doc,100,profile).unwrap().0,None,&super::super::meta::MetaOptions::default(),16,12,srgb)}else{lossless_with_profile(&doc,extension,None,&super::super::meta::MetaOptions::default(),profile).unwrap()};
+                let metadata=exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes)).unwrap();assert_eq!(metadata.get_field(exif::Tag::ColorSpace,exif::In::PRIMARY).unwrap().value.get_uint(0),Some(if srgb{1}else{65535}));
+                let decoded=photocraft_io::import(&format!("colour.{extension}"),&bytes).unwrap().document;
+                assert_eq!(decoded.icc_profile.as_ref().unwrap().as_ref(),profile.to_bytes().as_ref(),"profile {space:?} {extension}");
+                let actual=photocraft_compose::flatten(&decoded).px[0];let tolerance=if extension=="jpg"{0.015}else{0.0001};for ch in 0..3{assert!((actual[ch]-expected[ch]).abs()<tolerance,"pixels {space:?} {extension} {actual:?} != {expected:?}");}
+            }
+        }
+    }
+    #[test]
+    fn lossless_processing_promotes_eight_bit_sources_before_adjustments(){
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("source.png");image::RgbImage::from_pixel(16,12,image::Rgb([61,122,183])).save(&path).unwrap();
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.17}})).unwrap();
+        let doc=prepare_export_document_16(&path,&recipe,None,&|_|{},true).unwrap();assert_eq!(doc.depth,photocraft_engine::doc::SampleType::U16);
+        let bytes=photocraft_io::export(&doc,"png",&photocraft_io::ExportOptions::default()).unwrap().bytes;assert!(matches!(image::load_from_memory(&bytes).unwrap().color(),image::ColorType::Rgb16|image::ColorType::Rgba16));
+    }
+    #[test]
+    fn lossless_output_embeds_srgb_metadata_and_respects_gps_removal(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let doc=Document::with_background("Output",Size::new(8,6),ColorMode::Rgb,SampleType::U16,Color::rgba(0.25,0.5,0.75,1.0));
+        let fields=[exif::Field{tag:exif::Tag::Model,ifd_num:exif::In::PRIMARY,value:exif::Value::Ascii(vec![b"Test camera".to_vec()])},exif::Field{tag:exif::Tag::GPSLatitudeRef,ifd_num:exif::In::PRIMARY,value:exif::Value::Ascii(vec![b"N".to_vec()])}];
+        let mut writer=exif::experimental::Writer::new();for field in &fields{writer.push_field(field);}let mut source=std::io::Cursor::new(Vec::new());writer.write(&mut source,false).unwrap();
+        let opts=super::super::meta::MetaOptions{remove_gps:true,author:Some("Artist".into()),copyright:Some("Rights".into()),keywords:vec!["测试".into()]};
+        for extension in ["png","tif"]{
+            let bytes=lossless_with_metadata(&doc,extension,Some(source.get_ref()),&opts).unwrap();let decoded=photocraft_io::import(&format!("output.{extension}"),&bytes).unwrap();assert_eq!(decoded.document.depth,SampleType::U16);assert!(decoded.document.icc_profile.is_some());
+            let parsed=exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes)).unwrap();assert_eq!(parsed.get_field(exif::Tag::Orientation,exif::In::PRIMARY).unwrap().value.get_uint(0),Some(1));assert_eq!(parsed.get_field(exif::Tag::PixelXDimension,exif::In::PRIMARY).unwrap().value.get_uint(0),Some(8));assert!(parsed.get_field(exif::Tag::Model,exif::In::PRIMARY).is_some());assert!(parsed.fields().all(|f|f.tag.context()!=exif::Context::Gps));
+            assert!(decoded.document.metadata.xmp.as_ref().unwrap().contains("测试"));
+            let keep_gps=super::super::meta::MetaOptions{remove_gps:false,..opts.clone()};
+            let bytes=lossless_with_metadata(&doc,extension,Some(source.get_ref()),&keep_gps).unwrap();
+            let parsed=exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)).unwrap();assert!(parsed.get_field(exif::Tag::GPSLatitudeRef,exif::In::PRIMARY).is_some());
+        }
+    }
     #[test]
     fn historical_filters_migrate_without_changing_saved_pixel_values() {
         let bytes:Vec<u8>=(0..256*3).map(|i|((i*73+19)%256) as u8).collect();

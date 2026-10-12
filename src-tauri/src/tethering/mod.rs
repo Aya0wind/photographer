@@ -27,6 +27,10 @@
 
 pub mod backend;
 pub mod mtp;
+pub mod ptp_control;
+pub mod receipts;
+pub mod receipts_store;
+pub mod vendor_dispatch;
 #[cfg(windows)]
 #[path = "../platform/windows/wpd_backend.rs"]
 pub mod wpd_backend;
@@ -51,4 +55,5 @@ pub mod wpd_backend;
 pub mod gphoto_backend;
 pub mod session;
 pub mod sony_backend;
+pub mod sony_ptp;
 mod staging;

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import FloatingToolbar from "@/shared/components/FloatingToolbar";
 import TileSizeSwitch from "./TileSizeSwitch";
@@ -15,7 +16,12 @@ function GlyphDuplicates() {
   );
 }
 
-export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, layout, onLayout, onImport, onCull, cullBusy, cullDisabled, hideDuplicates, onToggleDuplicates, duplicatesActive, inactive = false }: {
+export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, layout, onLayout, onImport, onCull, cullBusy, cullDisabled, hideDuplicates, onToggleDuplicates, duplicatesActive, inactive = false, children, inline = false, filterTestId = "search-filter-toggle", cullTestId = "gallery-cull-start", cullLabel }: {
+  children?: ReactNode;
+  inline?: boolean;
+  filterTestId?: string;
+  cullTestId?: string;
+  cullLabel?: string;
   filterOpen: boolean;
   filterCount: number;
   onToggleFilter: () => void;
@@ -37,10 +43,12 @@ export default function GalleryBrowseControls({ filterOpen, filterCount, onToggl
 }) {
   const { t } = useTranslation();
   return (
-    <FloatingToolbar label={t("ui.browseActions")} locked={filterOpen || cullBusy} inactive={inactive}>
-      <button type="button" className="ui-icon-button relative" onClick={onToggleFilter} aria-label={t("search.moreFilters")} title={t("search.moreFilters")} aria-expanded={filterOpen} data-testid="search-filter-toggle">
+    <FloatingToolbar label={t("ui.browseActions")} locked={filterOpen || cullBusy} inactive={inactive} inline={inline}>
+      {/* 胶囊宽按钮（图标 + 文字说明；计数徽标随行内 flex 排） */}
+      <button type="button" className="ui-pill-button" onClick={onToggleFilter} aria-label={t("search.moreFilters")} title={t("search.moreFilters")} aria-expanded={filterOpen} data-testid={filterTestId}>
         <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h14l-5.5 6v5l-3 1v-6z" /></svg>
-        {filterCount > 0 && <span className="absolute -right-1 -top-1 rounded-full bg-accent px-1 text-[10px] text-black" data-testid="search-filter-count">{filterCount}</span>}
+        {t("search.moreFilters")}
+        {filterCount > 0 && <span className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black" data-testid="search-filter-count">{filterCount}</span>}
       </button>
       <TileSizeSwitch value={tileSize} onChange={onTileSize} />
       <LayoutSwitch value={layout} onChange={onLayout} />
@@ -53,20 +61,24 @@ export default function GalleryBrowseControls({ filterOpen, filterCount, onToggl
         data-testid="gallery-hide-duplicates"
         data-pressed={hideDuplicates}
         data-has-duplicates={duplicatesActive}
-        className={`ui-icon-button transition-opacity ${hideDuplicates ? "text-accent" : ""} ${duplicatesActive || hideDuplicates ? "" : "opacity-45"}`}
+        className={`ui-pill-button transition-opacity ${hideDuplicates ? "text-accent" : ""} ${duplicatesActive || hideDuplicates ? "" : "opacity-45"}`}
       >
         <GlyphDuplicates />
+        {t("gallery.hideDuplicates")}
       </button>
+      {children}
       <button type="button" onClick={onCull} disabled={cullDisabled || cullBusy}
-        className="ui-icon-button disabled:cursor-not-allowed disabled:opacity-40"
-        aria-label={cullBusy ? t("gallery.cullBusy") : t("gallery.cullFromFilter")}
-        title={cullBusy ? t("gallery.cullBusy") : t("gallery.cullFromFilter")}
-        data-testid="gallery-cull-start" data-busy={cullBusy}>
+        className="ui-pill-button disabled:cursor-not-allowed disabled:opacity-40"
+        aria-label={cullBusy ? t("gallery.cullBusy") : (cullLabel ?? t("gallery.cullFromFilter"))}
+        title={cullBusy ? t("gallery.cullBusy") : (cullLabel ?? t("gallery.cullFromFilter"))}
+        data-testid={cullTestId} data-busy={cullBusy}>
         {cullBusy ? <span className="h-4 w-4 animate-spin rounded-full border border-edge border-t-accent" aria-hidden="true" /> :
         <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2" /><path d="m6 10 3 3 5-6" /></svg>}
+        {cullBusy ? t("gallery.cullBusy") : (cullLabel ?? t("gallery.cullFromFilter"))}
       </button>
-      <button type="button" className="ui-icon-button ui-primary" onClick={onImport} aria-label={t("nav.import")} title={t("nav.import")} data-testid="gallery-import">
+      <button type="button" className="ui-pill-button ui-primary" onClick={onImport} aria-label={t("nav.import")} title={t("nav.import")} data-testid="gallery-import">
         <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M10 2v10m-4-4 4 4 4-4M3 13v4h14v-4" /></svg>
+        {t("nav.import")}
       </button>
     </FloatingToolbar>
   );

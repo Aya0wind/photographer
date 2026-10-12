@@ -139,7 +139,23 @@ pub async fn device_files(
     id: String,
 ) -> Result<Vec<FileEntryDto>, String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| super::files_by_id(state, &id)).await
+    let progress_state = shared.clone();
+    run_blocking(shared, move |_| super::files_by_id_with_progress(&progress_state, &id)).await
+}
+
+/// 文件系统目录树浏览（M2 导入向导源面板，LR 风格懒加载）：
+#[tauri::command]
+pub async fn device_file_sizes(state: State<'_, SharedState>, id: String, object_ids: Vec<String>) -> Result<Option<Vec<(String, u64)>>, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        if object_ids.len() > 64 { return Err("每批最多读取 64 个文件的属性".into()); }
+        let key = crate::devices::normalize_device_id(&id);
+        let source = state.devices.lock().unwrap().get(&key).map(|entry| std::sync::Arc::clone(&entry.source)).ok_or("设备已断开")?;
+        let values = source.file_sizes(&object_ids).map_err(|error| error.to_string())?;
+        if !state.devices.lock().unwrap().get(&key).is_some_and(|entry| std::sync::Arc::ptr_eq(&entry.source, &source)) {
+            return Err("设备已重新连接".into());
+        }
+        Ok(values)
+    }).await
 }
 
 /// 文件系统目录树浏览（M2 导入向导源面板，LR 风格懒加载）：

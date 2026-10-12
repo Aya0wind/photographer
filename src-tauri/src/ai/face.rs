@@ -929,6 +929,32 @@ pub fn invalidate_cluster_cache(db_dir: &Path) {
         .remove(&pool_key(db_dir));
 }
 
+/// 簇心缓存是否在池（观测点：集成测试断言 purge_asset_derivations 的
+/// 整库失效语义，2026-10-09 审计 P1）。
+#[allow(dead_code)] // 集成测试经 common 复用（lib 目标内无调用点）
+pub fn cluster_cache_present(db_dir: &Path) -> bool {
+    cache_pool()
+        .lock()
+        .expect("cluster pool mutex poisoned")
+        .contains_key(&pool_key(db_dir))
+}
+
+/// 测试注入口：向簇心缓存池放一个空聚类器（配合 cluster_cache_present
+/// 观测失效；不触模型/DB）。
+#[allow(dead_code)] // 集成测试经 common 复用（lib 目标内无调用点）
+pub fn seed_cluster_cache_for_test(db_dir: &Path) {
+    let key = pool_key(db_dir);
+    cache_pool()
+        .lock()
+        .expect("cluster pool mutex poisoned")
+        .insert(
+            key,
+            std::sync::Arc::new(std::sync::Mutex::new(OnlineClusterer::new(
+                CLUSTER_COS_THRESHOLD,
+            ))),
+        );
+}
+
 /// 在线归簇：命中阈值 → 簇 id；否则建新簇（people 落行 + 缓存吸收）。
 fn assign_cluster(
     db: &Db,

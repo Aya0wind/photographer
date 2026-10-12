@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS photos_libraries (
     created_at  TEXT    NOT NULL,
     status      TEXT    NOT NULL DEFAULT 'online' CHECK (status IN ('online', 'offline')),
     asset_count INTEGER NOT NULL DEFAULT 0,
-    size_bytes  INTEGER NOT NULL DEFAULT 0
+    size_bytes  INTEGER NOT NULL DEFAULT 0,
+    organization_template TEXT NOT NULL DEFAULT '{year}/{month}/{day}/{filename}'
 );
 
 -- ===========================================================================
@@ -442,4 +443,25 @@ CREATE TABLE IF NOT EXISTS asset_regions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_regions_region ON asset_regions(region_id, level);
+
+-- Explicit, opt-in organization of existing files. This journal lives only in
+-- the database; original folders are never removed.
+CREATE TABLE IF NOT EXISTS library_organization_jobs (
+    library_id TEXT PRIMARY KEY REFERENCES photos_libraries(id) ON DELETE CASCADE,
+    template TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS library_organization_moves (
+    library_id TEXT NOT NULL REFERENCES library_organization_jobs(library_id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    group_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    base_destination TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    xxhash TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(library_id,seq)
+);
 "#;

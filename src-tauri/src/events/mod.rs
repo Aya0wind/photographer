@@ -308,6 +308,8 @@ pub enum AppEvent {
         album_id: i64,
         asset_id: i64,
         name: String,
+        /// 资产格式（"photo"/"raw"；胶片条 RAW+JPG 合并卡与角标依据）。
+        kind: String,
     },
     TetheringStatus {
         session_id: String,

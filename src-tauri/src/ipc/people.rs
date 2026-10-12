@@ -44,7 +44,9 @@ pub fn fetch_person_rename(
 /// 删除人物簇（只解除归属，faces 数据保留）。
 pub fn fetch_person_delete(state: &super::AppState, cluster_id: i64) -> Result<(), String> {
     let db = super::app_database_db(state)?;
-    db.delete_person(cluster_id).map_err(|e| e.to_string())
+    db.delete_person(cluster_id).map_err(|e| e.to_string())?;
+    crate::ai::face::invalidate_cluster_cache(&super::app_database_dir(state)?);
+    Ok(())
 }
 
 /// 人物簇列表。

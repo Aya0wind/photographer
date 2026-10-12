@@ -34,6 +34,100 @@ pub struct Timings {
 mod native_tests {
     use super::*;
     #[test]
+    #[ignore="fixed proxy gradient preparation timing; run explicitly"]
+    fn live_gradient_cpu_prepare_timing(){
+        use photocraft_engine::doc::{Document,Size,Color,ColorMode,SampleType};
+        let base=Document::with_background("Gradient timing",Size::new(1600,1067),ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.5,0.7,1.0));
+        let mut recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"mask","name":"Gradient","kind":"linear","enabled":true,"inverted":false,"density":100,"feather":0,"from":{"x":0.2,"y":0.5},"to":{"x":0.7,"y":0.5},"advanced":{"exposure":1}}]})).unwrap();
+        let mut renderer=Renderer::new(&base).with_source_size([6000,4000],&base);renderer.canvas_document(&base,&recipe).unwrap();
+        let start=Instant::now();for n in 0..8{recipe.masks[0].to.x=0.71+n as f64*0.01;renderer.canvas_document(&base,&recipe).unwrap();}
+        eprintln!("[gradient timing] fixed 1600 proxy CPU photo preparation {:.2} ms/frame",start.elapsed().as_secs_f64()*1000.0/8.0);
+    }
+    #[test]
+    fn parametric_curve_reuses_layer_and_matches_export_with_point_curve() {
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Curve",Size::new(32,24),ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.5,0.8,1.0));
+        let mut r=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"parametricCurve":{"shadows":30,"lights":20},"curves":[[0,0],[128,140],[255,255]]}})).unwrap();
+        let mut renderer=Renderer::new(&base);let first=renderer.canvas_document(&base,&r).unwrap();
+        assert_eq!(first.layers[1].name,"parametric-curve");assert_eq!(first.layers[2].name,"curves");
+        r.advanced.as_mut().unwrap().parametric_curve.as_mut().unwrap().shadows=45.0;
+        let next=renderer.canvas_document(&base,&r).unwrap();assert_eq!(first.layers[1].id,next.layers[1].id);assert_eq!(next.layers[0].content,base.layers[0].content);
+        let restored=super::super::recipe::parse_recipe(&serde_json::to_value(&r).unwrap()).unwrap();
+        assert_eq!(photocraft_compose::flatten(&next).px,photocraft_compose::flatten(&photocraft::render_document(&base,&restored).unwrap()).px);
+    }
+    #[test]
+    fn grading_updates_keep_layer_and_source_and_match_export() {
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Grade",Size::new(32,24),ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.2,0.6,1.0));
+        let mut r=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"colorGrading":{"midtones":{"hue":40,"sat":30,"lum":10}}}})).unwrap();
+        let mut renderer=Renderer::new(&base);let first=renderer.canvas_document(&base,&r).unwrap();
+        assert_eq!(first.layers[0].content,base.layers[0].content);
+        r.advanced.as_mut().unwrap().color_grading.as_mut().unwrap().midtones.hue=60.0;
+        let next=renderer.canvas_document(&base,&r).unwrap();assert_eq!(first.layers[1].id,next.layers[1].id);assert_eq!(next.layers[0].content,base.layers[0].content);
+        let restored=super::super::recipe::parse_recipe(&serde_json::to_value(&r).unwrap()).unwrap();
+        let export=photocraft::render_document(&base,&restored).unwrap();assert_eq!(photocraft_compose::flatten(&next).px,photocraft_compose::flatten(&export).px);
+    }
+    #[test]
+    #[ignore = "fixed-resolution development timing; run explicitly for performance validation"]
+    fn fixed_proxy_development_timing() {
+        use serde_json::json;
+        let pixels:Vec<u8>=(0..1600*1067*3).map(|i|((i*71+i/113)%256) as u8).collect();
+        let image=photocraft_codecs::Image::from_u8(1600,1067,photocraft_codecs::ChannelLayout::Rgb,pixels).unwrap();
+        let base=super::super::source::from_image("Fixed proxy",&image).unwrap();
+        let mut recipe=super::super::recipe::parse_recipe(&json!({"version":1,"renderer":"photocraft","advanced":{"development":{"shadows":30,"highlights":-25,"texture":15,"clarity":20,"sharpenAmount":25,"noiseColor":5}}})).unwrap();
+        let mut renderer=Renderer::new(&base).with_source_size([6000,4000],&base);
+        let start=Instant::now();renderer.canvas_document(&base,&recipe).unwrap();
+        eprintln!("[development timing] fixed 1600x1067 cold spatial processing {:.2} ms",start.elapsed().as_secs_f64()*1000.0);
+        recipe.advanced.as_mut().unwrap().lookup=Some(super::super::recipe::LutSelection{id:"builtin:warm".into(),amount:40.0,enabled:true});
+        let start=Instant::now();renderer.canvas_document(&base,&recipe).unwrap();
+        assert!(renderer.timings.camera_cache_hit);
+        eprintln!("[development timing] downstream LUT update {:.2} ms; cached spatial pixels",start.elapsed().as_secs_f64()*1000.0);
+        recipe.advanced.as_mut().unwrap().development.as_mut().unwrap().shadows=35.0;
+        let start=Instant::now();renderer.canvas_document(&base,&recipe).unwrap();
+        assert!(!renderer.timings.camera_cache_hit);
+        eprintln!("[development timing] relevant spatial change {:.2} ms",start.elapsed().as_secs_f64()*1000.0);
+    }
+    #[test]
+    fn development_matches_upstream_and_reuses_pixels_for_downstream_edits() {
+        use photocraft_engine::doc::{ColorMode,SampleType};
+        use serde_json::json;
+        let pixels:Vec<u8>=(0..96*64*3).map(|i|((i*71+i/113)%256) as u8).collect();
+        let image=photocraft_codecs::Image::from_u8(96,64,photocraft_codecs::ChannelLayout::Rgb,pixels).unwrap();
+        let base=super::super::source::from_image("Development",&image).unwrap();
+        let mut recipe=super::super::recipe::parse_recipe(&json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.2,"development":{"shadows":30,"highlights":-25,"whites":10,"texture":15,"clarity":20,"sharpenAmount":25,"noiseColor":5,"grainAmount":5,"vignetteAmount":-15}}})).unwrap();
+        let mut renderer=Renderer::new(&base).with_source_size([960,640],&base);
+        let first=renderer.canvas_document(&base,&recipe).unwrap();assert!(!renderer.timings.camera_cache_hit);
+        let mut session=Session::new();session.add_document(base.clone(),None);
+        let params=photocraft::camera_params(&recipe,0.1);
+        assert_eq!(params.pixel_scale,0.1);
+        photocraft::execute(&mut session,"filter.cameraRaw",serde_json::to_value(params).unwrap()).unwrap();
+        let expected=photocraft::active_document(&session).unwrap();
+        assert_eq!(photocraft_compose::flatten(&first).px,photocraft_compose::flatten(&expected).px);
+        assert_eq!(first.depth,SampleType::U8);assert_eq!(first.mode,ColorMode::Rgb);
+        recipe.advanced.as_mut().unwrap().lookup=Some(super::super::recipe::LutSelection{id:"builtin:warm".into(),amount:50.0,enabled:true});
+        let next=renderer.canvas_document(&base,&recipe).unwrap();assert!(renderer.timings.camera_cache_hit);
+        assert_eq!(next.layers[0].id,first.layers[0].id);assert_eq!(next.layers[0].content,first.layers[0].content);
+        recipe.advanced.as_mut().unwrap().development.as_mut().unwrap().shadows=45.0;
+        renderer.canvas_document(&base,&recipe).unwrap();assert!(!renderer.timings.camera_cache_hit);
+        // Parameters belonging to a disabled effect are not cache dependencies.
+        recipe.advanced.as_mut().unwrap().development.as_mut().unwrap().grain_amount=0.0;
+        renderer.canvas_document(&base,&recipe).unwrap();
+        recipe.advanced.as_mut().unwrap().development.as_mut().unwrap().grain_size=90.0;
+        renderer.canvas_document(&base,&recipe).unwrap();assert!(renderer.timings.camera_cache_hit);
+    }
+    #[test]
+    fn ordinary_preview_updates_for_mask_changes_even_when_global_tone_is_unchanged() {
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Mask",Size::new(64,48),ColorMode::Rgb,SampleType::U8,Color::rgba(0.2,0.3,0.4,1.0));
+        let neutral=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft"})).unwrap();
+        let masked=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"m","name":"Area","kind":"linear","enabled":true,"inverted":false,"density":100,"feather":0,"from":{"x":0.2,"y":0.5},"to":{"x":0.8,"y":0.5},"adjustments":{"brightness":40,"contrast":0,"saturation":0}}]})).unwrap();
+        let mut renderer=Renderer::new(&base);
+        let original=renderer.render(&base,&neutral,95).unwrap();
+        let edited=renderer.render(&base,&masked,95).unwrap();
+        assert_ne!(original,edited,"mask-only recipe changes must invalidate ordinary preview");
+        assert_eq!(renderer.render(&base,&neutral,95).unwrap(),original);
+    }
+    #[test]
     fn extended_color_layers_match_upstream_and_keep_slider_identity() {
         use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
         use serde_json::json;
@@ -201,8 +295,10 @@ pub struct Renderer {
 
 impl Renderer {
     pub(super) fn with_source_size(mut self,original:[u32;2],base:&Document)->Self {
-        self.source_scale=(base.size.width.max(base.size.height) as f32 / original[0].max(original[1]).max(1) as f32).min(1.0);self
+        self.source_scale=(base.size.width.max(base.size.height) as f32 / original[0].max(original[1]).max(1) as f32).min(1.0);
+        self.masks.set_source_scale(self.source_scale);self
     }
+    pub(super) fn with_pixel_scale(mut self,scale:f32)->Self{self.source_scale=scale;self.masks.set_source_scale(scale);self}
     pub(super) fn mask_overlay(&mut self,base:&Document,recipe:&EditRecipe,id:&str)->Result<Document,String> {
         self.masks.overlay(base,recipe,id)
     }

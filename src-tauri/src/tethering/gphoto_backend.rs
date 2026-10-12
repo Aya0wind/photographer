@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use super::backend::{
     CameraBackend, CameraInfo, CameraSetting, CameraSettingOption, Capabilities, CapturedObject,
-    SettingKind, TetherError,
+    LiveViewFrame, SettingKind, TetherError,
 };
 
 /// FFI 类型与符号（仅本后端用到的 C API 子集；取值对照 gphoto2 2.5 头文件）。
@@ -501,9 +501,14 @@ unsafe fn cstr(raw: *const c_char) -> String {
 unsafe extern "C" fn context_error(
     _context: *mut std::ffi::c_void,
     text: *const c_char,
-    _data: *mut std::ffi::c_void,
+    data: *mut std::ffi::c_void,
 ) {
-    crate::devices::diagnostics::record(format!("tethering gphoto2 error: {}", cstr(text)));
+    let message = cstr(text);
+    crate::devices::diagnostics::record(format!("tethering gphoto2 error: {message}"));
+    if !data.is_null() {
+        // Only installed for a synchronous write, under camera_mutex.
+        (*(data as *mut Vec<String>)).push(message);
+    }
 }
 
 unsafe fn context_new(s: &Symbols) -> *mut std::ffi::c_void {
@@ -667,7 +672,14 @@ impl GphotoBackend {
             }
             let bytes = std::slice::from_raw_parts(data as *const u8, size as usize).to_vec();
             let name_str = cstr(name.as_ptr());
-            super::staging::persist(&conn.incoming, &name_str, &bytes)
+            // Use the driver's virtual name for fetching; restore the camera's
+            // original name only after the bytes have been downloaded.
+            let folder_str = cstr(folder.as_ptr());
+            super::staging::persist(
+                &conn.incoming,
+                downloaded_photo_name(&folder_str, &name_str),
+                &bytes,
+            )
         })();
         (s.gp_file_free)(file);
         result
@@ -722,7 +734,7 @@ impl GphotoBackend {
                     &mut current as *mut _ as *mut std::ffi::c_void,
                 ) >= 0;
                 let current_str = if value_ok {
-                    cstr(current)
+                    choice_current_value(name, &cstr(current))
                 } else {
                     String::new()
                 };
@@ -904,7 +916,7 @@ impl GphotoBackend {
     }
 
     /// 通用写路径：get_config → 按名找叶 → 按类型写值 → set_config(root)。
-    /// set_single_config 在 ptp2 上返回 -2（真机 probe5 实测），故走全树。
+    /// 保留已验证的全树写路径；仅修改目标叶，并验证当前可写性。
     unsafe fn apply_setting_by_name(
         s: &Symbols,
         ctx: *mut std::ffi::c_void,
@@ -912,45 +924,118 @@ impl GphotoBackend {
         name: &str,
         value: &str,
     ) -> Result<(), TetherError> {
+        let result = Self::with_config(s, ctx, camera, |root| {
+            Self::apply_setting_in_config(s, ctx, camera, root, name, value)
+        });
+        // Parameter readback needs Sony's settling time; action sequences do not.
+        if result.is_ok() {
+            std::thread::sleep(Duration::from_millis(180));
+        }
+        result
+    }
+
+    unsafe fn with_config(
+        s: &Symbols,
+        ctx: *mut std::ffi::c_void,
+        camera: *mut gpt::Camera,
+        action: impl FnOnce(*mut gpt::CameraWidget) -> Result<(), TetherError>,
+    ) -> Result<(), TetherError> {
         let mut root: *mut gpt::CameraWidget = std::ptr::null_mut();
         check((s.gp_camera_get_config)(camera, &mut root, ctx))?;
-        let inner = (|| {
-            let widget = Self::find_widget_by_leaf_name(s, root, name)?;
-            let mut wtype: c_int = 0;
-            (s.gp_widget_get_type)(widget, &mut wtype);
-            // Choice 值必须在候选内（Range 由 write 钳制；Toggle/Action 限 0/1）
-            if wtype == widget_type::RADIO || wtype == widget_type::MENU {
-                let count = (s.gp_widget_count_choices)(widget);
-                let mut allowed = false;
-                for i in 0..count {
-                    let mut choice: *const c_char = std::ptr::null();
-                    if (s.gp_widget_get_choice)(widget, i, &mut choice) >= 0
-                        && !choice.is_null()
-                        && cstr(choice) == value
-                    {
-                        allowed = true;
-                        break;
-                    }
-                }
-                if !allowed {
-                    return Err(TetherError::Other("该参数值在当前相机模式下不可用".into()));
-                }
-            }
-            if (wtype == widget_type::TOGGLE || wtype == widget_type::BUTTON)
-                && !matches!(value, "0" | "1")
-            {
-                return Err(TetherError::Other("开关参数值无效".into()));
-            }
-            Self::write_widget_value(s, widget, wtype, value)?;
-            check((s.gp_camera_set_config)(camera, root, ctx))?;
-            // Sony 属性异步生效：立即回读会拿到旧值（真机 probe6 实测），
-            // 等 180ms 再让上层刷新。
-            std::thread::sleep(std::time::Duration::from_millis(180));
-            Ok(())
-        })();
+        let result = action(root);
         (s.gp_widget_free)(root);
-        inner
+        result
     }
+
+    unsafe fn apply_setting_in_config(
+        s: &Symbols,
+        ctx: *mut std::ffi::c_void,
+        camera: *mut gpt::Camera,
+        root: *mut gpt::CameraWidget,
+        name: &str,
+        value: &str,
+    ) -> Result<(), TetherError> {
+        let widget = Self::find_widget_by_leaf_name(s, root, name)?;
+        let mut readonly = 0;
+        check((s.gp_widget_get_readonly)(widget, &mut readonly))?;
+        if readonly != 0 {
+            return Err(TetherError::Other(if name == "expprogram" {
+                "拍摄模式由机身转盘控制，请在相机上切换".into()
+            } else {
+                format!("参数 {name} 在当前拍摄模式下只读，请检查机身设置")
+            }));
+        }
+        let mut wtype: c_int = 0;
+        (s.gp_widget_get_type)(widget, &mut wtype);
+        // Choice 值必须在候选内（Range 由 write 钳制；Toggle/Action 限 0/1）
+        if wtype == widget_type::RADIO || wtype == widget_type::MENU {
+            let count = (s.gp_widget_count_choices)(widget);
+            let mut allowed = false;
+            for i in 0..count {
+                let mut choice: *const c_char = std::ptr::null();
+                if (s.gp_widget_get_choice)(widget, i, &mut choice) >= 0
+                    && !choice.is_null()
+                    && cstr(choice) == value
+                {
+                    allowed = true;
+                    break;
+                }
+            }
+            if !allowed {
+                return Err(TetherError::Other("该参数值在当前相机模式下不可用".into()));
+            }
+        }
+        if (wtype == widget_type::TOGGLE || wtype == widget_type::BUTTON)
+            && !matches!(value, "0" | "1")
+        {
+            return Err(TetherError::Other("开关参数值无效".into()));
+        }
+        Self::write_widget_value(s, widget, wtype, value)?;
+        let mut errors = Vec::<String>::new();
+        (s.gp_context_set_error_func)(ctx, context_error, &mut errors as *mut _ as *mut _);
+        let code = (s.gp_camera_set_config)(camera, root, ctx);
+        // Unregister before errors leaves scope, including all error paths.
+        (s.gp_context_set_error_func)(ctx, context_error, std::ptr::null_mut());
+        if !errors.is_empty() {
+            return Err(TetherError::Other(format!(
+                "相机拒绝修改参数 {name}：{}",
+                errors.join("；")
+            )));
+        }
+        check(code)?;
+        Ok(())
+    }
+}
+
+// Sony's magnifier choices contain only the ratio, but its current value also
+// contains the camera's retained X/Y position. Expose the same value domain as
+// the choices; the original widget keeps its position for the native write.
+fn choice_current_value(name: &str, raw: &str) -> String {
+    if name == "focusmagnifier" {
+        let parts: Vec<_> = raw.split(',').collect();
+        if parts.len() == 3
+            && (parts[0] == "Off"
+                || parts[0]
+                    .parse::<f64>()
+                    .is_ok_and(|ratio| ratio.is_finite() && ratio >= 0.0))
+            && parts[1].parse::<u16>().is_ok()
+            && parts[2].parse::<u16>().is_ok()
+        {
+            return parts[0].to_owned();
+        }
+    }
+    raw.to_owned()
+}
+
+fn downloaded_photo_name<'a>(folder: &str, name: &'a str) -> &'a str {
+    // libgphoto2 prepends capt_ to Sony's virtual RAM objects in /.
+    // Real card folders and fallback names (capt0001.jpg) are unchanged.
+    if folder == "/" {
+        if let Some(original) = name.strip_prefix("capt_").filter(|name| !name.is_empty()) {
+            return original;
+        }
+    }
+    name
 }
 
 /// f32 整数值去掉无意义的 .0（ISO/对焦步进显示用）。
@@ -959,6 +1044,27 @@ fn trim_float(v: f32) -> String {
         format!("{}", v as i64)
     } else {
         format!("{v}")
+    }
+}
+
+// Sony autofocus is a held half-shutter, not a self-releasing command.
+// Release even after a failed press: the camera may have received it before
+// the transport reported an error. Both UI entry points use this sequence.
+fn autofocus_once(
+    mut write: impl FnMut(&str) -> Result<(), TetherError>,
+    settle: impl FnOnce(),
+) -> Result<(), TetherError> {
+    let pressed = write("1");
+    if pressed.is_ok() {
+        settle();
+    }
+    let released = write("0");
+    match (pressed, released) {
+        (Ok(()), result) => result,
+        (Err(press), Ok(())) => Err(press),
+        (Err(press), Err(release)) => Err(TetherError::Other(format!(
+            "{press}；释放半按快门失败：{release}"
+        ))),
     }
 }
 
@@ -1001,6 +1107,12 @@ impl CameraBackend for GphotoBackend {
                         pnp_id: format!("gphoto:{}", cstr(port)),
                         name: cstr(model),
                         capabilities: self.capabilities(),
+                        // gphoto 端口路径（usb:总线,端口）不含 USB vid/pid，
+                        // 序列号要开配置树才能读（枚举期做太贵）——物理身份
+                        // 回退 model+端口实例路径（同型多机由端口区分）。
+                        serial: None,
+                        vid: None,
+                        pid: None,
                     });
                 }
                 (s.gp_list_free)(list);
@@ -1075,6 +1187,9 @@ impl CameraBackend for GphotoBackend {
                             pnp_id: pnp_id.to_string(),
                             name,
                             capabilities: self.capabilities(),
+                            serial: None,
+                            vid: None,
+                            pid: None,
                         })
                     })();
                     (s.gp_port_info_list_free)(ports);
@@ -1146,7 +1261,16 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         unsafe {
             let ctx = context_new(s);
-            let result = Self::apply_setting_by_name(s, ctx, conn.camera, id, value);
+            let result = if id == "autofocus" && value == "1" {
+                Self::with_config(s, ctx, conn.camera, |root| {
+                    autofocus_once(
+                        |state| Self::apply_setting_in_config(s, ctx, conn.camera, root, id, state),
+                        || std::thread::sleep(Duration::from_millis(500)),
+                    )
+                })
+            } else {
+                Self::apply_setting_by_name(s, ctx, conn.camera, id, value)
+            };
             (s.gp_context_unref)(ctx);
             result
         }
@@ -1162,25 +1286,31 @@ impl CameraBackend for GphotoBackend {
         let s = &lib.symbols;
         unsafe {
             let ctx = context_new(s);
-            let result = (|| {
+            let result = Self::with_config(s, ctx, conn.camera, |root| {
                 let px = (x.clamp(0.0, 1.0) * 639.0).round() as i32;
                 let py = (y.clamp(0.0, 1.0) * 479.0).round() as i32;
-                Self::apply_setting_by_name(
+                Self::apply_setting_in_config(
                     s,
                     ctx,
                     conn.camera,
+                    root,
                     "spotfocusarea",
                     &format!("{px},{py}"),
                 )?;
-                Self::apply_setting_by_name(s, ctx, conn.camera, "autofocus", "1")?;
+                autofocus_once(
+                    |state| {
+                        Self::apply_setting_in_config(s, ctx, conn.camera, root, "autofocus", state)
+                    },
+                    || std::thread::sleep(Duration::from_millis(500)),
+                )?;
                 Ok(())
-            })();
+            });
             (s.gp_context_unref)(ctx);
             result
         }
     }
 
-    fn live_view_frame(&self, pnp_id: &str) -> Result<Vec<u8>, TetherError> {
+    fn live_view_frame(&self, pnp_id: &str) -> Result<LiveViewFrame, TetherError> {
         let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
         let lib = lib()?;
@@ -1198,7 +1328,9 @@ impl CameraBackend for GphotoBackend {
                     if data.is_null() || size == 0 || size > 32 * 1024 * 1024 {
                         return Err(TetherError::Other("取景帧不可用".into()));
                     }
-                    Ok(std::slice::from_raw_parts(data as *const u8, size as usize).to_vec())
+                    Ok(LiveViewFrame::plain(
+                        std::slice::from_raw_parts(data as *const u8, size as usize).to_vec(),
+                    ))
                 })();
                 (s.gp_file_free)(file);
                 inner
@@ -1330,6 +1462,176 @@ impl CameraBackend for GphotoBackend {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+
+    #[test]
+    fn downloaded_sony_photos_keep_original_names_and_pair_stems() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["DSC01234.JPG", "DSC01234.ARW"] {
+            let virtual_name = format!("capt_{name}");
+            let restored = downloaded_photo_name("/", &virtual_name);
+            let receipt = super::super::staging::persist(root.path(), restored, b"photo").unwrap();
+            assert_eq!(receipt.object_name, name);
+            assert_eq!(Path::new(&receipt.object_id).file_name().unwrap(), name);
+            assert_eq!(std::fs::read(&receipt.object_id).unwrap(), b"photo");
+        }
+        assert_eq!(
+            downloaded_photo_name("/DCIM/100MSDCF", "capt_photo.JPG"),
+            "capt_photo.JPG"
+        );
+        assert_eq!(downloaded_photo_name("/", "DSC01234.JPG"), "DSC01234.JPG");
+        assert_eq!(downloaded_photo_name("/", "capt0001.jpg"), "capt0001.jpg");
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Sony connection; performs one center autofocus without capture"]
+    fn sony_center_focus_hardware() {
+        let backend = GphotoBackend::default();
+        let camera = backend
+            .enumerate()
+            .unwrap()
+            .into_iter()
+            .find(|camera| camera.name.contains("Sony"))
+            .expect("Sony camera connected");
+        backend.connect(&camera.pnp_id).unwrap();
+        let started = std::time::Instant::now();
+        let result = backend.focus_at(&camera.pnp_id, 0.5, 0.5);
+        eprintln!(
+            "Center focus including half-shutter release: {:?}, result={result:?}",
+            started.elapsed()
+        );
+        backend.disconnect(&camera.pnp_id);
+        result.unwrap();
+    }
+
+    #[test]
+    fn autofocus_releases_half_shutter_after_success_or_failed_press() {
+        for fail_press in [false, true] {
+            let mut writes = Vec::new();
+            let mut settled = false;
+            let result = autofocus_once(
+                |value| {
+                    writes.push(value.to_owned());
+                    if fail_press && value == "1" {
+                        Err(TetherError::Other("press failed".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || settled = true,
+            );
+            assert_eq!(writes, ["1", "0"]);
+            assert_eq!(settled, !fail_press);
+            assert_eq!(result.is_err(), fail_press);
+        }
+    }
+
+    #[test]
+    fn autofocus_release_failure_is_not_reported_as_success() {
+        let error = autofocus_once(
+            |value| {
+                if value == "0" {
+                    Err(TetherError::Other("release failed".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("release failed"));
+    }
+
+    #[test]
+    fn magnifier_current_uses_ratio_choices_without_coordinates() {
+        assert_eq!(choice_current_value("focusmagnifier", "9.3,269,240"), "9.3");
+        assert_eq!(choice_current_value("focusmagnifier", "1,269,240"), "1");
+        assert_eq!(choice_current_value("focusmagnifier", "Off,269,240"), "Off");
+        assert_eq!(choice_current_value("focusmagnifier", "9.3"), "9.3");
+        // Malformed replies and unrelated settings must still fail comparison.
+        for raw in ["9.3,broken,240", "9.3,269", "NaN,269,240", "9.3,269,240,1"] {
+            assert_eq!(choice_current_value("focusmagnifier", raw), raw);
+        }
+        assert_eq!(choice_current_value("iso", "9.3,269,240"), "9.3,269,240");
+        assert_ne!(choice_current_value("focusmagnifier", "4.7,269,240"), "9.3");
+    }
+
+    #[test]
+    #[ignore = "requires an exclusively connected Sony camera; changes and restores ISO"]
+    fn sony_iso_write_readback_hardware() {
+        let backend = GphotoBackend::default();
+        let camera = backend
+            .enumerate()
+            .unwrap()
+            .into_iter()
+            .find(|camera| camera.name.contains("Sony"))
+            .expect("Sony camera connected");
+        backend.connect(&camera.pnp_id).unwrap();
+        let original = backend
+            .settings(&camera.pnp_id)
+            .unwrap()
+            .into_iter()
+            .find(|setting| setting.id == "iso" && setting.writable)
+            .expect("writable ISO");
+        for setting in backend
+            .settings(&camera.pnp_id)
+            .unwrap()
+            .into_iter()
+            .filter(|setting| setting.id == "expprogram" && !setting.writable)
+        {
+            let error = backend
+                .set_setting(&camera.pnp_id, &setting.id, &setting.current)
+                .unwrap_err();
+            assert!(error.to_string().contains("机身转盘"), "{error}");
+            eprintln!("Readonly exposure program correctly rejected: {error}");
+        }
+        let target = original
+            .options
+            .iter()
+            .find(|option| option.value != original.current && option.value.parse::<u32>().is_ok())
+            .unwrap()
+            .value
+            .clone();
+        let result = (|| {
+            for requested in [&target, &original.current, &target] {
+                backend.set_setting(&camera.pnp_id, "iso", requested)?;
+                let started = std::time::Instant::now();
+                loop {
+                    let actual = backend
+                        .settings(&camera.pnp_id)?
+                        .into_iter()
+                        .find(|setting| setting.id == "iso")
+                        .unwrap()
+                        .current;
+                    eprintln!(
+                        "ISO requested={requested} actual={actual} elapsed={:?}",
+                        started.elapsed()
+                    );
+                    if actual == *requested {
+                        break;
+                    }
+                    if started.elapsed() > Duration::from_secs(3) {
+                        return Err(TetherError::Other("ISO readback mismatch".into()));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            Ok(())
+        })();
+        let restored = backend
+            .set_setting(&camera.pnp_id, "iso", &original.current)
+            .and_then(|_| backend.settings(&camera.pnp_id));
+        backend.disconnect(&camera.pnp_id);
+        assert_eq!(
+            restored
+                .unwrap()
+                .into_iter()
+                .find(|setting| setting.id == "iso")
+                .unwrap()
+                .current,
+            original.current
+        );
+        result.unwrap();
+    }
 
     #[test]
     fn busy_disconnect_retains_connection_and_unacknowledged_receipts() {

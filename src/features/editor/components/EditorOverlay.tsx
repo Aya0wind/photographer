@@ -1,9 +1,12 @@
 import GeometryPanel from "./GeometryPanel";
-import {geometrySize} from "../lib/geometry";
+import CropDimensions from "./CropDimensions";
+import {geometrySize,changeGeometry} from "../lib/geometry";
+import {remapDraftCrop} from "../lib/cropPixels";
 import {useZoomIndicator} from "../lib/useZoomIndicator";
 import LutPanel from "./LutPanel";
 import {advancedReducer,type AdvancedAction} from "../lib/advancedRecipe";
 import { useEditorPreview } from "../lib/useEditorPreview";
+import { useNativeEditorCanvas } from "../lib/useNativeEditorCanvas";
 import ActionPopover from "@/shared/components/ActionPopover";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -192,8 +195,13 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   const [tool, setTool] = useState<EditorTool>("adjust");
   const [cropRatio, setCropRatio] = useState<number | null>(null);
   const [cropDraft, setCropDraft] = useState<Parameters<typeof clampCrop>[0] | null>(null);
+  const [straightening,setStraightening]=useState(false);
+  useEffect(()=>{if(tool!=="crop")setStraightening(false);},[tool]);
   const nativeRecipe=tool==="crop"?{...present,crop:null,textLayers:[],brushStrokes:[]}:present;
-  const preview=useEditorPreview(asset.id,nativeRecipe,asset.libraryId??"");
+  const nativeHost=useRef<HTMLDivElement|null>(null);
+  const [nativeActive,setNativeActive]=useState(false);
+  const [toolModalOpen,setToolModalOpen]=useState(false);
+  const preview=useEditorPreview(asset.id,nativeRecipe,asset.libraryId??"",nativeActive);
   useEffect(()=>{if(preview.session)setBaseSize({width:preview.session.width,height:preview.session.height});},[preview.session]);
   const [selectedTextId, setSelectedTextId] = useState<string | null>(null);
   /** 新放置文字层的默认样式（选中层的样式在选项面板逐层调整） */
@@ -209,10 +217,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     (next: EditorTool) => {
       if (next === tool) return;
       if (tool === "crop" && cropDraft && next !== "crop") {
-        const crop = clampCrop(cropDraft);
-        dispatch({ type: "cropApply", crop: isFullCrop(crop) ? null : crop });
+        const crop = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
+        dispatch({ type: "cropConfirm", crop: isFullCrop(crop) ? null : crop });
       }
       if (next === "crop") {
+        dispatch({type:"cropStart"});
         setCropDraft(present.crop ?? { x: 0, y: 0, w: 1, h: 1 });
         setCropRatio(null);
       } else {
@@ -223,22 +232,25 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       setTool(next);
       setZoom(1);
     },
-    [present.crop, present.rotateQuarter, tool, cropDraft],
+    [present.crop, present.rotateQuarter, tool, cropDraft,usingPhotocraft],
   );
 
   function applyCropDraft(): void {
     if (cropDraft === null) return;
-    const clamped = clampCrop(cropDraft);
-    dispatch({ type: "cropApply", crop: isFullCrop(clamped) ? null : clamped });
+    const clamped = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
+    dispatch({ type: "cropConfirm", crop: isFullCrop(clamped) ? null : clamped });
     setTool("adjust");
     setCropDraft(null);
     setCropRatio(null);
   }
+  function cancelCropDraft(){gestureSnapshotRef.current=null;dispatch({type:"cropCancel"});setTool("adjust");setCropDraft(null);setCropRatio(null);setStraightening(false);}
+  function undoEditing(){if(tool==="crop")cancelCropDraft();else dispatch({type:"undo"});}
+  function redoEditing(){if(tool==="crop")cancelCropDraft();else dispatch({type:"redo"});}
 
   function rotateImage(delta: 1 | -1): void {
     let next = history;
     if (tool === "crop" && cropDraft) {
-      const crop = clampCrop(cropDraft);
+      const crop = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
       const action = { type: "cropApply" as const, crop: isFullCrop(crop) ? null : crop };
       next = recipeReducer(next, action, ctxRef.current);
       dispatch(action);
@@ -362,7 +374,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         setMetadata(saved); setSavedMetadata(saved);
         onMetadataSaved?.(saved);
       }
-      const toSave = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft)) ? null : clampCrop(cropDraft) }, ctxRef.current).present : present;
+      const toSave = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,usingPhotocraft?1e-6:0.05)) ? null : clampCrop(cropDraft,usingPhotocraft?1e-6:0.05) }, ctxRef.current).present : present;
       const state = await editRecipeSave(asset.id, recipeForPersist(toSave));
       if (tool === "crop" && cropDraft) { applyCropDraft(); }
       setSavedRecipe(state.recipe);
@@ -394,7 +406,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   }
 
   async function runExport(options: ExportOptions): Promise<void> {
-    const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft)) ? null : clampCrop(cropDraft) }, ctxRef.current).present : present;
+    const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,usingPhotocraft?1e-6:0.05)) ? null : clampCrop(cropDraft,usingPhotocraft?1e-6:0.05) }, ctxRef.current).present : present;
     const result = await exportRun(asset.id, recipeForPersist(recipe), options);
     if (!result.ok) {
       setToast({
@@ -445,11 +457,13 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
   // --- 关闭确认 / 快捷键 ------------------------------------------------------------------
   const [confirm, setConfirm] = useState<"close" | "reset" | null>(null);
+  const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,nativeRecipe,nativeHost,
+    usingPhotocraft && ["adjust","view","filters","output","metadata","crop"].includes(tool) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error && !missing && !failed,
+    false,preview.session?.sourceUrl,String(zoomHUD.visible));
+  useEffect(()=>setNativeActive(nativeCanvas),[nativeCanvas]);
   function requestClose(): void {
     if (tool === "crop") {
-      setTool("adjust");
-      setCropDraft(null);
-      setCropRatio(null);
+      cancelCropDraft();
       return;
     }
     if (dirty) setConfirm("close");
@@ -462,7 +476,9 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       const inInput =
         target instanceof HTMLElement &&
         (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if(straightening&&!inInput&&(e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="z"){e.preventDefault();setStraightening(false);return;}
       if (e.key === "Escape") {
+        if(straightening){e.preventDefault();setStraightening(false);return;}
         if (inInput) return; // 输入框内的 Esc 交给输入框（textarea 取消编辑等）
         e.preventDefault();
         if (albumPickerOpen) setAlbumPickerOpen(false);
@@ -478,13 +494,13 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       if (inInput) return;
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
-        dispatch({ type: "undo" });
+        undoEditing();
       } else if (
         (e.ctrlKey || e.metaKey) && (e.key === "y" || e.key === "Y" ||
           ((e.key === "z" || e.key === "Z") && e.shiftKey))
       ) {
         e.preventDefault();
-        dispatch({ type: "redo" });
+        redoEditing();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -492,8 +508,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   });
 
   const selectedText = present.textLayers.find((l) => l.id === selectedTextId) ?? null;
-  const canUndo = history.past.length > 0;
-  const canRedo = history.future.length > 0;
+  const canUndo = history.past.length > 0 || tool==="crop";
+  const canRedo = history.future.length > 0 && tool!=="crop";
 
   const TOOL_ICONS: Record<EditorTool, React.ReactNode> = {
     mask:null,
@@ -545,7 +561,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         <div className="relative ml-auto flex items-center gap-2">
           <button
             type="button"
-            onClick={() => dispatch({ type: "undo" })}
+            onClick={undoEditing}
             disabled={!canUndo}
             title={t("editor.undo")}
             className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
@@ -555,7 +571,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           </button>
           <button
             type="button"
-            onClick={() => dispatch({ type: "redo" })}
+            onClick={redoEditing}
             disabled={!canRedo}
             title={t("editor.redo")}
             className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
@@ -631,8 +647,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       <div className="flex min-h-0 flex-1">
         {/* 画布区 */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="relative flex min-h-0 flex-1" data-testid="editor-photo-area">
-        <div data-testid="editor-zoom-hud" aria-hidden={!zoomHUD.visible} inert={!zoomHUD.visible} className={`absolute bottom-4 left-1/2 z-40 -translate-x-1/2 flex shrink-0 items-center gap-1 rounded-2xl border border-edge/60 bg-[#202020] p-1.5 transition-opacity ${zoomHUD.visible?"opacity-100":"pointer-events-none opacity-0"}`}>
+        <div ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 flex-1" data-testid="editor-photo-area">
+        <div data-native-overlay data-visible={zoomHUD.visible?"true":"false"} data-testid="editor-zoom-hud" aria-hidden={!zoomHUD.visible} inert={!zoomHUD.visible} className={`absolute bottom-4 left-1/2 z-40 -translate-x-1/2 flex shrink-0 items-center gap-1 rounded-2xl border border-edge/60 bg-[#202020] p-1.5 transition-opacity ${zoomHUD.visible?"opacity-100":"pointer-events-none opacity-0"}`}>
           <button type="button" aria-label={t("editor.zoomOut")} onClick={() => {zoomHUD.wake();setZoom((v) => Math.max(0.25, v / 1.25));}} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-out">−</button>
           <button type="button" onClick={() => {zoomHUD.wake();setZoom(1);}} className="h-8 min-w-16 rounded px-2 text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} data-testid="editor-zoom-fit">{Math.round(zoom * 100)}%</button>
           <button type="button" aria-label={t("editor.zoomIn")} onClick={() => {zoomHUD.wake();setZoom((v) => Math.min(4, v * 1.25));}} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
@@ -653,8 +669,10 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
             </div>
           ) : (
             <EditorCanvas
+              straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((present.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(present,{angle},ctxRef.current);setCropDraft(remapDraftCrop(present,next,cropDraft,ctxRef.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
               src={usingPhotocraft?preview.session?.sourceUrl??null:src}
               adjustedSrc={usingPhotocraft?preview.url:null}
+              nativeDisplay={nativeCanvas}
               backendAdjustments={usingPhotocraft} nativeGeometry={usingPhotocraft} nativeAnnotations={usingPhotocraft}
               sourceSize={usingPhotocraft?baseSize:null}
               zoom={zoom}
@@ -745,7 +763,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
                   </button>
                 ))}
               </div>
-              {usingPhotocraft && <div className="mx-auto mb-3 max-w-sm text-left"><GeometryPanel recipe={present} dispatch={dispatch} context={ctxRef.current} begin={handleGestureStart} end={handleGestureEnd} onCropChange={crop=>setCropDraft(crop??{x:0,y:0,w:1,h:1})}/></div>}
+              {usingPhotocraft && <div className="mx-auto mb-3 max-w-sm text-left"><GeometryPanel recipe={present} dispatch={dispatch} cropDraft={cropDraft} cropRatio={cropRatio} context={ctxRef.current} begin={handleGestureStart} end={handleGestureEnd} onCropChange={crop=>{if(crop===null)setCropRatio(null);setCropDraft(crop??{x:0,y:0,w:1,h:1});}}/><button type="button" className="mt-2 w-full rounded-lg border border-edge py-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" aria-pressed={straightening} onClick={()=>setStraightening(!straightening)}>{t("editor.geometry.straighten")}</button>{straightening&&<p className="mt-2 text-xs text-text-muted">{t("editor.geometry.straightenHint")}</p>}</div>}
+              {usingPhotocraft&&<div className="mx-auto mb-3 max-w-sm text-left"><CropDimensions recipe={present} context={ctxRef.current} crop={cropDraft} onChange={setCropDraft} onFree={()=>setCropRatio(null)}/></div>}
               <p className="mb-2 text-[11px] leading-relaxed text-text-muted">{t("editor.crop.hint")}</p>
               <div className="mx-auto flex max-w-xs gap-2">
                 <button
@@ -758,11 +777,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setTool("adjust");
-                    setCropDraft(null);
-                    setCropRatio(null);
-                  }}
+                  onClick={cancelCropDraft}
                   className="flex-1 rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
                   data-testid="editor-crop-cancel"
                 >
@@ -786,7 +801,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
         {/* 右侧栏：工具选项 + 输出设置 */}
         {["text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
-          {usingPhotocraft && tool==="filters" && <LutPanel value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
+          {usingPhotocraft && tool==="filters" && <LutPanel onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);
             setExportDraft((draft) => ({ ...draft, author: value.author, copyright: value.copyright, keywords: value.keywords.join(", "), removeGps: value.gpsLat === null && value.gpsLon === null }));

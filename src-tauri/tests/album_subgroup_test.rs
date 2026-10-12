@@ -335,6 +335,8 @@ fn import_with_album_subgroup_and_resume_idempotent() {
         import::engine::ImportPlan {
             source_id: "test-src".into(),
             target_library_id: common::ensure_photo_library(&db, db_dir.path(), target.path()),
+
+            organization_template: None,
             duplicate_policy: settings::DuplicatePolicy::Skip,
             skip_imported: true,
             streams: 2,

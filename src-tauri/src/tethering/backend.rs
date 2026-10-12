@@ -8,7 +8,8 @@
 //! COM 边界用 trait 做 seam 隔离：IPC 核心编排函数接收 `&dyn
 //! CameraBackend`，集成测试注入假后端验证注册表/超时/错误语义（不接真机）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -81,6 +82,66 @@ pub struct CameraInfo {
     pub name: String,
     /// 设备级能力（探测产出；未探测时为后端默认位 = FILE_TRANSFER）。
     pub capabilities: Capabilities,
+    /// 物理身份（2026-10-11 §E）：机身序列号（探测读取；取不到 None）。
+    pub serial: Option<String>,
+    /// USB 厂商 id（从设备路径解析；非 USB 端点/取不到 None）。
+    pub vid: Option<String>,
+    /// USB 产品 id（同上）。
+    pub pid: Option<String>,
+}
+
+impl CameraInfo {
+    /// 物理相机稳定键（§E）：serial 优先；缺 serial 回退
+    /// vid+pid+model+设备实例路径——同一物理机跨端点（wpd 与 gphoto 同报
+    /// 一台）得到同一键，不同物理机同名不合并。
+    pub fn physical_key(&self) -> String {
+        if let Some(serial) = self.serial.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return format!("serial:{serial}");
+        }
+        format!(
+            "usb:{vid}:{pid}:{model}:{instance}",
+            vid = self.vid.as_deref().unwrap_or(""),
+            pid = self.pid.as_deref().unwrap_or(""),
+            model = self.name,
+            instance = crate::devices::normalize_device_id(&self.pnp_id),
+        )
+    }
+}
+
+/// 从 Windows PnP 设备路径解析 USB VID/PID（`usb#vid_04b0&pid_0456#...`
+/// 形态；大小写不敏感）。跨后端共用：端点路径里确有的身份才算数，
+/// gphoto 端口路径（`usb:001,010`）解析不出 → None。
+pub fn usb_vid_pid_from_pnp(pnp: &str) -> (Option<String>, Option<String>) {
+    let lower = pnp.to_ascii_lowercase();
+    let parse = |token: &str| -> Option<String> {
+        let start = lower.find(token)? + token.len();
+        let hex: String = lower[start..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .take(4)
+            .collect();
+        (hex.len() == 4).then(|| hex.to_ascii_uppercase())
+    };
+    (parse("vid_"), parse("pid_"))
+}
+
+/// 取景帧：JPEG 字节 + 相机回报的归一化 AF 区域（同一帧数据，单次往返；
+/// None = 本帧无 AF 数据或不适用）。
+#[derive(Debug, Clone)]
+pub struct LiveViewFrame {
+    pub jpeg: Vec<u8>,
+    /// 归一化 (x, y, w, h)，原点左上，相对取景画面。
+    pub af_region: Option<(f64, f64, f64, f64)>,
+}
+
+impl LiveViewFrame {
+    /// 无 AF 数据的普通帧（gphoto/Sony 桥等不解析帧头的路径）。
+    pub fn plain(jpeg: Vec<u8>) -> Self {
+        Self {
+            jpeg,
+            af_region: None,
+        }
+    }
 }
 
 /// 拍摄产出的新对象（OBJECT_ADDED 事件的富化结果）。
@@ -217,6 +278,12 @@ pub trait CameraBackend: Send + Sync {
     fn connect(&self, pnp_id: &str) -> Result<CameraInfo, TetherError>;
 
     /// 断开：清理会话态/能力缓存并隔离旧连接（不产生新错误路径）。
+    fn probe(&self, pnp_id: &str) -> Result<CameraInfo, TetherError> {
+        let info = self.connect(pnp_id)?;
+        self.disconnect(pnp_id);
+        Ok(info)
+    }
+
     fn disconnect(&self, pnp_id: &str);
 
     fn settings(&self, _pnp_id: &str) -> Result<Vec<CameraSetting>, TetherError> {
@@ -225,7 +292,7 @@ pub trait CameraBackend: Send + Sync {
     fn set_setting(&self, _pnp_id: &str, _id: &str, _value: &str) -> Result<(), TetherError> {
         Err(TetherError::Other("相机不支持参数控制".into()))
     }
-    fn live_view_frame(&self, _pnp_id: &str) -> Result<Vec<u8>, TetherError> {
+    fn live_view_frame(&self, _pnp_id: &str) -> Result<LiveViewFrame, TetherError> {
         Err(TetherError::Other("相机不支持实时取景".into()))
     }
 
@@ -241,6 +308,17 @@ pub trait CameraBackend: Send + Sync {
     }
     fn poll_objects(&self, _pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         Ok(Vec::new())
+    }
+    /// 按对象 id 主动收取（崩溃/重连恢复用）：校验对象仍在设备上并重新
+    /// 入收片队列，返回可恢复的 id。默认空 = 该后端不支持按需收取，调用
+    /// 方退回事件驱动等待。
+    fn request_objects(&self, _pnp_id: &str, _ids: &[String]) -> Result<Vec<String>, TetherError> {
+        Ok(Vec::new())
+    }
+    /// 收片队列中待接收对象数（快照真值：会话「N 待收」显示用）。无队列
+    /// 概念的后端返回 0。
+    fn pending_receipts(&self, _pnp_id: &str) -> usize {
+        0
     }
     /// 参数变化通知的序号；不支持通知的后端使用低频快照兜底。
     fn settings_revision(&self, _pnp_id: &str) -> u64 {
@@ -292,6 +370,93 @@ pub fn apply_cached_capabilities(
             }
             info
         })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 自动后端选择（§E-2）与跨后端物理去重（§E-3）
+// ---------------------------------------------------------------------------
+
+/// 判断探测能力是否达到联拍门槛（实际拍摄能力——按 GetDeviceInfo 的
+/// operations supported 探测产出，不按后端名硬编码）。
+fn supports_tethering(caps: Capabilities) -> bool {
+    caps.standard_capture() || caps.vendor_capture_nikon()
+}
+
+/// 会话建立时的后端选择（§E-2）：按入参顺序（注册表序 = 原生 → 已安装
+/// SDK → libgphoto2）逐一 connect 探测，选第一个**探测到实际拍摄能力**
+/// 的端点；全部无拍摄能力时保留第一个成功连接的端点（准确显示限制）。
+///
+/// 铁律：
+/// - 探测复用既有 connect 语义（GetDeviceInfo/能力交叉），不触发快门、
+///   不改设置；
+/// - 存在未 Acknowledge 收据的相机禁止切换后端路径——账本里未确认收据
+///   记录的产生后端（`pending.backend`）之外的后端一律跳过；该后端自身
+///   连不上则返回 Err 说明；
+/// - 未选中的已连接端点必须 disconnect（不能并留两份设备句柄）。
+pub fn establish_backend(
+    backends: &[std::sync::Arc<dyn CameraBackend>],
+    camera_id: &str,
+    receipts_dir: Option<&Path>,
+) -> Result<(std::sync::Arc<dyn CameraBackend>, CameraInfo), String> {
+    let mut fallback: Option<(std::sync::Arc<dyn CameraBackend>, CameraInfo)> = None;
+    let mut last_error = String::from("没有可用的相机后端");
+    let mut receipts_pin: Option<Vec<String>> = None;
+    for backend in backends {
+        let info = match backend.connect(camera_id) {
+            Ok(info) => info,
+            Err(error) => {
+                last_error = error.to_string();
+                continue;
+            }
+        };
+        // §E：未确认收据把相机钉在产生收据的后端上。
+        if let Some(dir) = receipts_dir {
+            let unacked =
+                super::receipts_store::ReceiptsStore::open(dir, &info.physical_key()).unacked();
+            let pinned: HashSet<String> = unacked
+                .iter()
+                .map(|receipt| receipt.backend.clone())
+                .collect();
+            if !pinned.is_empty() {
+                receipts_pin = Some(pinned.iter().cloned().collect());
+                if !pinned.contains(backend.id()) {
+                    backend.disconnect(camera_id);
+                    continue;
+                }
+            }
+        }
+        if supports_tethering(info.capabilities) {
+            if let Some((previous, _)) = fallback.take() {
+                previous.disconnect(camera_id);
+            }
+            return Ok((backend.clone(), info));
+        }
+        match &fallback {
+            None => fallback = Some((backend.clone(), info)),
+            Some(_) => backend.disconnect(camera_id), // 无拍摄能力的后来者不占设备
+        }
+    }
+    if let Some((backend, info)) = fallback {
+        return Ok((backend, info));
+    }
+    if let Some(pinned) = receipts_pin {
+        return Err(format!(
+            "相机存在未确认的接收收据（产生于 {pinned:?} 后端），该后端当前不可用；\
+             为避免照片丢失已禁止切换后端路径，请重试或重连原后端"
+        ));
+    }
+    Err(format!("无法连接相机：{last_error}"))
+}
+
+/// 枚举结果跨后端按物理身份去重（§E-3）：同一物理相机被多个端点（wpd
+/// 与 gphoto 同报一台）重复报告时只保留先到的优先端点入口（入参顺序即
+/// 注册表优先序：原生 → SDK → gphoto）；不同物理机同名不合并。
+pub fn dedupe_by_physical_identity(cameras: Vec<CameraInfo>) -> Vec<CameraInfo> {
+    let mut seen = HashSet::new();
+    cameras
+        .into_iter()
+        .filter(|info| seen.insert(info.physical_key()))
         .collect()
 }
 
@@ -394,5 +559,212 @@ mod tests {
             registry.for_camera_id("wpd-camera").unwrap().id(),
             "wpd-mtp"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 物理身份（§E-1/§E-3）
+    // -----------------------------------------------------------------------
+
+    fn info(pnp: &str, name: &str, serial: Option<&str>) -> CameraInfo {
+        let (vid, pid) = usb_vid_pid_from_pnp(pnp);
+        CameraInfo {
+            pnp_id: pnp.into(),
+            name: name.into(),
+            capabilities: Capabilities::FILE_TRANSFER,
+            serial: serial.map(str::to_string),
+            vid,
+            pid,
+        }
+    }
+
+    #[test]
+    fn usb_vid_pid_parses_from_windows_pnp_paths_only() {
+        let (vid, pid) = usb_vid_pid_from_pnp(r"\\?\usb#vid_04b0&pid_0456#000123#{g}");
+        assert_eq!(vid.as_deref(), Some("04B0"));
+        assert_eq!(pid.as_deref(), Some("0456"));
+        let (vid, pid) = usb_vid_pid_from_pnp("USB\\VID_04B0&PID_0456\\X");
+        assert_eq!(vid.as_deref(), Some("04B0"));
+        assert_eq!(pid.as_deref(), Some("0456"));
+        assert_eq!(usb_vid_pid_from_pnp("gphoto:usb:001,010"), (None, None));
+        assert_eq!(usb_vid_pid_from_pnp("sony-sdk:camera"), (None, None));
+    }
+
+    #[test]
+    fn physical_key_prefers_serial_and_falls_back_to_usb_triple() {
+        let a = info(r"\\?\usb#vid_04b0&pid_0456#s1#{g}", "Z5II", Some("SN-1"));
+        let b = info("gphoto:usb:001,010", "Z5II via gphoto", Some("sn-1 "));
+        assert_eq!(a.physical_key(), "serial:SN-1");
+        // 同序列号跨端点同键（大小写/空白归一）；不同序列号不同键。
+        assert_eq!(b.physical_key(), "serial:sn-1");
+        assert_ne!(a.physical_key(), b.physical_key());
+        // 无 serial：vid+pid+model+实例路径——同名不同实例不合并。
+        let c = info(r"\\?\usb#vid_04b0&pid_0456#s1#{g}", "D750", None);
+        let d = info(r"\\?\usb#vid_04b0&pid_0456#s2#{g}", "D750", None);
+        assert_ne!(c.physical_key(), d.physical_key());
+        assert!(c.physical_key().starts_with("usb:04B0:0456:D750:"));
+        // 空/纯空白 serial 视为缺失。
+        let blank = info(r"\\?\usb#vid_04b0&pid_0456#s3#{g}", "D750", Some("  "));
+        assert!(blank.physical_key().starts_with("usb:"));
+    }
+
+    #[test]
+    fn enumerate_dedupes_same_physical_camera_across_backends() {
+        let list = vec![
+            info(r"\\?\usb#vid_04b0&pid_0456#s1#{g}", "Z5II", Some("SN-1")), // 原生优先入口
+            info("gphoto:usb:001,010", "Nikon Z5II", Some("SN-1")), // 同机 gphoto 端点
+            info(r"\\?\usb#vid_04b0&pid_0456#s2#{g}", "Z5II", Some("SN-2")), // 同型不同机
+        ];
+        let deduped = dedupe_by_physical_identity(list);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].pnp_id, r"\\?\usb#vid_04b0&pid_0456#s1#{g}");
+        assert_eq!(deduped[1].serial.as_deref(), Some("SN-2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 自动后端选择（§E-2）
+    // -----------------------------------------------------------------------
+
+    struct SelectBackend {
+        id: &'static str,
+        caps: Capabilities,
+        ok: bool,
+        /// connect 返回的序列号（物理身份/账本键对齐用）。
+        serial: &'static str,
+        disconnects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl CameraBackend for SelectBackend {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            self.id
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.caps
+        }
+        fn enumerate(&self) -> Result<Vec<CameraInfo>, TetherError> {
+            Ok(Vec::new())
+        }
+        fn connect(&self, _: &str) -> Result<CameraInfo, TetherError> {
+            if !self.ok {
+                return Err(TetherError::Disconnected);
+            }
+            Ok(CameraInfo {
+                pnp_id: "cam".into(),
+                name: format!("{} cam", self.id),
+                capabilities: self.caps,
+                serial: Some(self.serial.into()),
+                vid: None,
+                pid: None,
+            })
+        }
+        fn disconnect(&self, _: &str) {
+            self.disconnects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn capture_still(&self, _: &str, _: Duration) -> Result<CapturedObject, TetherError> {
+            Err(TetherError::CaptureNotSupported)
+        }
+    }
+
+    fn selecting_backend(
+        id: &'static str,
+        caps: Capabilities,
+        ok: bool,
+        serial: &'static str,
+    ) -> std::sync::Arc<SelectBackend> {
+        std::sync::Arc::new(SelectBackend {
+            id,
+            caps,
+            ok,
+            serial,
+            disconnects: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    #[test]
+    fn selection_prefers_first_capable_backend_in_registry_order() {
+        // 原生连通但无拍摄能力 → 选下一个探测到拍摄能力的端点。
+        let native = selecting_backend("native", Capabilities::FILE_TRANSFER, true, "s-native");
+        let sdk = selecting_backend(
+            "sdk",
+            Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE),
+            true,
+            "s-sdk",
+        );
+        let gphoto = selecting_backend(
+            "gphoto",
+            Capabilities::FILE_TRANSFER.union(Capabilities::VENDOR_CAPTURE_NIKON),
+            true,
+            "s-gphoto",
+        );
+        let backends: Vec<std::sync::Arc<dyn CameraBackend>> =
+            vec![native.clone(), sdk.clone(), gphoto.clone()];
+        let (selected, info) = establish_backend(&backends, "cam", None).unwrap();
+        assert_eq!(selected.id(), "sdk", "按探测能力选路，不按后端名");
+        assert!(info.capabilities.standard_capture());
+        // 无拍摄能力的原生端点曾连接作回退——一旦选中能力更强的端点，
+        // 回退连接必须释放（同一相机不得并留两份设备句柄）。
+        assert_eq!(
+            native.disconnects.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            sdk.disconnects.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "选中者保持连接"
+        );
+    }
+
+    #[test]
+    fn selection_falls_back_to_first_connected_without_capture_and_skips_failed() {
+        let broken = selecting_backend("broken", Capabilities::NONE, false, "s-broken");
+        let plain = selecting_backend("plain", Capabilities::FILE_TRANSFER, true, "s-plain");
+        let backends: Vec<std::sync::Arc<dyn CameraBackend>> = vec![broken.clone(), plain.clone()];
+        let (selected, _) = establish_backend(&backends, "cam", None).unwrap();
+        assert_eq!(selected.id(), "plain");
+        let none: Vec<std::sync::Arc<dyn CameraBackend>> = vec![broken.clone()];
+        let err = establish_backend(&none, "cam", None)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("无法连接相机"), "{err}");
+    }
+
+    #[test]
+    fn unacked_receipts_pin_the_backend_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // 收据产生于 "pinned" 后端、相机 serial:s-pinned（与桩对齐）。
+        let ledger =
+            super::super::receipts_store::ReceiptsStore::open(dir.path(), "serial:s-pinned");
+        ledger.record_pending("pinned", "o1", 1, "t");
+        let capable = selecting_backend(
+            "capable",
+            Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE),
+            true,
+            "s-pinned",
+        );
+        let pinned_dead = selecting_backend(
+            "pinned",
+            Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE),
+            false, // 产生收据的后端连不上
+            "s-pinned",
+        );
+        let backends: Vec<std::sync::Arc<dyn CameraBackend>> =
+            vec![capable.clone(), pinned_dead.clone()];
+        let err = establish_backend(&backends, "cam", Some(dir.path()))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("未确认"), "{err}");
+        assert!(err.contains("pinned"), "{err}");
+        // 有能力但非收据后端的端点必须被断开（不并留设备句柄）。
+        assert_eq!(
+            capable.disconnects.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        // 收据后端可用时：即使只有文件传输能力也直接选它（恢复优先）。
+        let pinned_alive = selecting_backend("pinned", Capabilities::FILE_TRANSFER, true, "s-pinned");
+        let backends: Vec<std::sync::Arc<dyn CameraBackend>> =
+            vec![capable.clone(), pinned_alive.clone()];
+        let (selected, _) = establish_backend(&backends, "cam", Some(dir.path())).unwrap();
+        assert_eq!(selected.id(), "pinned");
     }
 }

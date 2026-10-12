@@ -272,7 +272,7 @@ pub async fn edit_advanced_export_folder(
     .await
 }
 
-/// 成片直接返回照片库；前端传来源相册，未指定时进入既有默认相册。
+/// 成片直接返回照片库；仅在明确指定来源相册时加入相册。
 #[tauri::command]
 pub async fn edit_advanced_export(
     state: State<'_, SharedState>,
@@ -282,23 +282,19 @@ pub async fn edit_advanced_export(
     album_id: Option<String>,
     subgroup: Option<String>,
     session_id: String,
+    format:Option<super::export::ExportFormat>,
+    color_space:Option<super::export::ExportColorSpace>,
 ) -> Result<ExportTaskDto, String> {
     run_blocking(state.inner().clone(), move |state| {
         let id = parse_asset_id(&asset_id)?;
         let (_, asset) = super::project::resolve(state, &library_id, &asset_id)?;
         super::preview::validate_source(&session_id, std::path::Path::new(&asset.path))?;
-        let db = crate::ipc::app_database_db(state)?;
-        let target = match album_id {
-            Some(id) => id,
-            None => db
-                .ensure_default_album()
-                .map_err(|e| e.to_string())?
-                .to_string(),
-        };
         let options = ExportOptions {
+            format:format.unwrap_or_default(),
+            color_space:color_space.unwrap_or_default(),
             mode: super::export::ExportMode::Album,
             folder: None,
-            album: Some(super::export::ExportAlbumTarget {
+            album: album_id.map(|target| super::export::ExportAlbumTarget {
                 album_id: target,
                 subgroup,
             }),

@@ -259,15 +259,15 @@ export default function DeviceDialog() {
               ))}
             </div>
 
-            <div className="mt-4 flex items-center justify-between text-xs text-text-secondary">
+            {device.bytesTotal > 0 && <div className="mt-4 flex items-center justify-between text-xs text-text-secondary">
               <span>
                 {t("deviceDialog.totalSize")}
                 <span className="ml-1.5 font-mono text-text-primary">{formatBytes(device.bytesTotal)}</span>
               </span>
-              <span className="rounded-md bg-accent/10 px-2 py-1 text-accent" data-testid="device-dialog-new">
+              {device.newFiles > 0 && <span className="rounded-md bg-accent/10 px-2 py-1 text-accent" data-testid="device-dialog-new">
                 {t("deviceDialog.newFiles", { count: device.newFiles })}
-              </span>
-            </div>
+              </span>}
+            </div>}
 
             <div className="mt-6 flex gap-2.5">
               <button

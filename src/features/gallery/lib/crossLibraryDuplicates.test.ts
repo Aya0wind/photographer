@@ -52,6 +52,7 @@ describe("compareDuplicateRank（在线 > 有高清 RAW > 评分高 > 导入早�
     status,
     assetCount: 0,
     sizeBytes: 0,
+    organizationTemplate: "{year}/{month}/{day}/{filename}",
   });
   const libraryById = new Map([
     ["lib-a", lib("lib-a", "online")],
@@ -124,6 +125,7 @@ describe("collapseCrossLibraryDuplicates（纯显示过滤）", () => {
           status: "offline",
           assetCount: 0,
           sizeBytes: 0,
+          organizationTemplate: "{year}/{month}/{day}/{filename}",
         },
       ],
     ]);

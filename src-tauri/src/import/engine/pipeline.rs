@@ -15,7 +15,7 @@ use xxhash_rust::xxh64::Xxh64;
 
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
 use crate::events::AssetKind;
-use crate::import::templates::resolve_captured;
+use crate::db::organization::resolve_captured;
 use crate::metadata::exif_lite::{self, MetaLite};
 use crate::settings::DuplicatePolicy;
 
@@ -233,9 +233,6 @@ impl PartSink {
 /// 拍摄时间 = EXIF，缺失回退文件修改时间（与 `assets.captured_at` 落库
 /// 同一来源 [`resolve_captured`]）；原文件名原样保留（重名由收集端 rename
 /// 策略收口）。第二目的地同公式仅根不同。
-pub(crate) fn time_rel(captured_at: chrono::DateTime<chrono::Utc>, filename: &str) -> String {
-    format!("{}/{}", captured_at.format("%Y/%m"), filename)
-}
 
 /// 原文件名（清单 rel_path 的最后一段；`/` 分隔）。
 pub(super) fn original_filename(rel_path: &str) -> String {
@@ -254,6 +251,7 @@ pub(super) fn copy_one(
     duplicate_policy: DuplicatePolicy,
     entry: &FileEntry,
     target_root: &Path,
+    template:&str,
     second: Option<&Path>,
 ) -> FileOutcome {
     let fail = |error: String| FileOutcome::Failed {
@@ -298,7 +296,7 @@ pub(super) fn copy_one(
     // 纯时间布局渲染（§三）：拍摄年/月段 + 原文件名。布局依赖 EXIF 时间，
     // 目标路径预测必须先读头段（旧「零设备 IO 预跳」随布局改版退役）。
     let filename = original_filename(&entry.rel_path);
-    let rel = time_rel(resolve_captured(meta.captured_at, entry.mtime), &filename);
+    let rel = match crate::db::organization::organized_rel(template,resolve_captured(meta.captured_at,entry.mtime),&filename,meta.camera.as_deref()){Ok(rel)=>rel,Err(error)=>return fail(error)};
     let dst = target_root.join(&rel);
     // 免下载预跳（2026-09-29 实测重建库全量重导：重复照片被完整拉回
     // ~600ms/张再丢弃）：Skip/Ask 策略下目标已存在与收集端 ③ 同判据

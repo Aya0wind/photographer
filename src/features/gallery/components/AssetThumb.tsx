@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState,type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AssetKind } from "@/ipc/api";
@@ -62,6 +62,8 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
 }
 
 export interface AssetThumbProps {
+  badgeStyle?:CSSProperties;
+  showRawBadge?: boolean;
   asset: { id: number; kind: AssetKind; name: string };
   /** 名义请求边长（网格 240 → 后端 snap 256 档；胶片条同 240 复用缓存） */
   size: number;
@@ -89,6 +91,8 @@ export default function AssetThumb({
   priority = "low",
   fit = "cover",
   testId,
+  badgeStyle,
+  showRawBadge = true,
 }: AssetThumbProps) {
   const { t } = useTranslation();
   // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线。
@@ -161,10 +165,11 @@ export default function AssetThumb({
         </div>
       )}
       {/* RAW 水印角标：真实缩略图就位后仍可一眼区分 RAW/JPG */}
-      {asset.kind === "raw" && (
+      {showRawBadge && asset.kind === "raw" && (
         <span
           className="asset-raw-badge absolute right-1 top-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
           data-testid="thumb-raw-badge"
+          style={badgeStyle}
         >
           RAW
         </span>

@@ -14,7 +14,7 @@ export function suggestedLibraryName(): string {
  * 重名走现有 rename 策略，边车与本体同名跟随。用于向导只读展示，
  * 落位由后端固定执行。
  */
-export const FIXED_TIME_LAYOUT = "{拍摄年}\\{拍摄月}\\{原文件名}";
+
 
 /** 导入目标根 = 照片库 root（尾部多余分隔符裁剪；布局固定后无子目录前缀）。 */
 export function importRootOf(rootPath: string): string {
@@ -22,6 +22,6 @@ export function importRootOf(rootPath: string): string {
 }
 
 /** 纯时间布局的目标路径预览（向导/双目的地第二路共用同一公式）。 */
-export function timeLayoutPreview(rootPath: string): string {
-  return directoryPreview(importRootOf(rootPath), "{拍摄年}", "{拍摄月}", "{原文件名}");
+export function timeLayoutPreview(rootPath: string,template="{year}/{month}/{day}/{filename}"): string {
+  return directoryPreview(importRootOf(rootPath),...template.split("/"));
 }

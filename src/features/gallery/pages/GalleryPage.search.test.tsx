@@ -638,3 +638,16 @@ describe("画廊：语义搜索门禁与索引提示条", () => {
     expect(screen.queryByTestId("semantic-indexing")).not.toBeInTheDocument();
   });
 });
+
+
+it("语义URL被旧状态拦截后，状态更新在原页自动恢复搜索",async()=>{
+  aiModelsStatusMock.mockResolvedValue(gatedModels());
+  useAiStore.setState({models:gatedModels(),modelsLoaded:true,indexStatus:builtIndex()});
+  renderGallery("/gallery?mode=semantic&q=cat");
+  expect(await screen.findByTestId("gallery-semantic-gate")).toBeInTheDocument();
+  expect(searchSemantic).not.toHaveBeenCalled();
+  aiModelsStatusMock.mockResolvedValue(readyModels());
+  await act(async()=>{useAiStore.getState().handleAppEvent({type:"aiModelDownloadFinished",id:"siglip2-text",ok:true});await useAiStore.getState().refresh();});
+  await waitFor(()=>expect(searchSemantic).toHaveBeenCalledWith("cat",100,undefined));
+  expect(screen.queryByTestId("gallery-semantic-gate")).not.toBeInTheDocument();
+});

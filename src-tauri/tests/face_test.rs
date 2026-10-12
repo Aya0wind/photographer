@@ -574,8 +574,14 @@ fn ipc_people_commands_roundtrip() {
             .as_deref(),
         Some("小明")
     );
-    // delete：faces 保留 + 缓存层无感（重查即空列表）
+    // 删除仅解除人物归属，并清理识别缓存。
+    face::seed_cluster_cache_for_test(db_dir.path());
+    assert!(face::cluster_cache_present(db_dir.path()));
     ipc::people::fetch_person_delete(&state, pid).unwrap();
+    assert!(!face::cluster_cache_present(db_dir.path()));
+    assert_eq!(face_count(&db), 2);
+    assert_eq!(db.asset_id_by_path("X:/p/a.jpg").unwrap(), Some(a));
+    assert_eq!(db.asset_id_by_path("X:/p/b.jpg").unwrap(), Some(b));
     assert!(ipc::people::fetch_people_list(&state).unwrap().is_empty());
     assert!(ipc::people::fetch_people_assets(&state, pid, 10)
         .unwrap()

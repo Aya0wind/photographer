@@ -7,7 +7,7 @@
 //! 无 COM 状态的代理；设备枚举、每台设备的数据操作与探活分别排队。
 //! 等待有超时，旧连接调用被隔离，恢复和线程数量限制见 timed_worker。
 
-use super::{DeviceResult, DeviceSource, FileEntry};
+use super::{DeviceError, DeviceResult, DeviceSource, FileEntry};
 use crate::events::SourceKind;
 
 // ---------------------------------------------------------------------------
@@ -97,14 +97,37 @@ impl DeviceSource for WpdSource {
     }
 
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        worker::list(&self.pnp_id, None)
+        worker::list(&self.pnp_id, None, false)
+    }
+    fn fast_file_counts(&self) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+        if !self.friendly_name.to_ascii_lowercase().contains("sony") && !self.friendly_name.contains("ILCE") { return Ok(None); }
+        match crate::tethering::wpd_backend::fast_media_counts(&self.pnp_id) {
+            Err(DeviceError::Disconnected) => Err(DeviceError::Disconnected),
+            Err(error) => { super::diagnostics::record(format!("fast count unavailable: {error}")); Ok(None) },
+            result => result,
+        }
+    }
+
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        worker::list(&self.pnp_id, None, true)
+    }
+    fn file_sizes(&self, ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> {
+        let pnp = self.pnp_id.clone();
+        let ids = ids.to_vec();
+        worker::schedule(&format!("data:{pnp}"), std::time::Duration::from_secs(30), move || {
+            com::file_sizes(&pnp, &ids)
+        })
+    }
+
+    fn list_names_with_progress(&self, on_batch: super::FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
+        worker::list(&self.pnp_id, Some(on_batch), true)
     }
 
     fn list_with_progress(
         &self,
         on_batch: super::FileBatchCallback,
     ) -> DeviceResult<Vec<FileEntry>> {
-        worker::list(&self.pnp_id, Some(on_batch))
+        worker::list(&self.pnp_id, Some(on_batch), false)
     }
 
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {
@@ -190,10 +213,11 @@ mod worker {
     pub(super) fn list(
         pnp: &str,
         on_batch: Option<super::super::FileBatchCallback>,
+        names_only: bool,
     ) -> DeviceResult<Vec<FileEntry>> {
         let id = pnp.to_owned();
         pool().call_with_idle_timeout(&format!("data:{pnp}"), Duration::from_secs(30), move || {
-            com::list(&id, on_batch)
+            com::list(&id, on_batch, names_only)
         })
     }
     pub(super) fn open_head(pnp: &str, obj: &str, max: u64) -> DeviceResult<Vec<u8>> {
@@ -276,6 +300,7 @@ pub(crate) mod com {
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STGM_READ,
     };
     use windows::Win32::System::Variant::{VT_DATE, VT_FILETIME, VT_LPWSTR};
+    include!("wpd_scan_bulk.rs");
 
     /// coclass GUID（SDK 头 PortableDeviceApi.h / PortableDeviceTypes.h 的
     /// class DECLSPEC_UUID；windows crate 未收录 CLSID 常量，此处照抄数值）。
@@ -452,6 +477,10 @@ pub(crate) mod com {
     const STREAM_BUFFER_CHUNKS: usize = 8;
 
     struct ScanProgress {
+        bulk_disabled: bool,
+        bulk_batches: usize,
+        single_queries: usize,
+        fallback_keys: Option<IPortableDeviceKeyCollection>,
         callback: Option<super::super::FileBatchCallback>,
         sent: usize,
         last_emit: std::time::Instant,
@@ -476,17 +505,23 @@ pub(crate) mod com {
     pub fn list(
         pnp_id: &str,
         on_batch: Option<super::super::FileBatchCallback>,
+        names_only: bool,
     ) -> DeviceResult<Vec<FileEntry>> {
         let _com = ComApartment::init().map_err(win_error)?;
         super::super::diagnostics::record(format!("WPD open begin: {pnp_id}"));
         let device = open_device(pnp_id)?;
         super::super::diagnostics::record("WPD open complete; enumerating media");
+        let started = std::time::Instant::now();
         // SAFETY: 设备已 Open
         let content = unsafe { device.Content() }.map_err(win_error)?;
-        let keys = build_property_keys()?;
+        let keys = build_property_keys(names_only)?;
         let mut out = Vec::new();
         let mut skipped = 0u32;
         let mut progress = ScanProgress {
+            bulk_disabled: false,
+            bulk_batches: 0,
+            single_queries: 0,
+            fallback_keys: if names_only { Some(build_property_keys(true)?) } else { None },
             callback: on_batch,
             sent: 0,
             last_emit: std::time::Instant::now(),
@@ -513,7 +548,7 @@ pub(crate) mod com {
                 "WPD 枚举跳过 {skipped} 个受限/无名对象（访问被拒或缺基本属性，                 如播放列表/系统对象），其余完整返回"
             );
         }
-        super::super::diagnostics::record(format!("WPD list complete: {} files", out.len()));
+        super::super::diagnostics::record(format!("WPD list complete: {} files; elapsed={:?}; bulk_batches={}; single_queries={}", out.len(), started.elapsed(), progress.bulk_batches, progress.single_queries));
         out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
         Ok(out)
     }
@@ -553,7 +588,7 @@ pub(crate) mod com {
     }
 
     /// 批量属性键：类型 / 大小 / 文件名 / 名称 / 持久 ID / 修改时间。
-    fn build_property_keys() -> DeviceResult<IPortableDeviceKeyCollection> {
+    fn build_property_keys(names_only: bool) -> DeviceResult<IPortableDeviceKeyCollection> {
         // SAFETY: CLSID 为静态常量；无外部聚合
         let keys: IPortableDeviceKeyCollection = unsafe {
             CoCreateInstance(
@@ -563,14 +598,15 @@ pub(crate) mod com {
             )
         }
         .map_err(win_error)?;
-        for key in [
+        let mut requested = vec![
             &WPD_OBJECT_CONTENT_TYPE,
-            &WPD_OBJECT_SIZE,
             &WPD_OBJECT_ORIGINAL_FILE_NAME,
             &WPD_OBJECT_NAME,
-            &WPD_OBJECT_PERSISTENT_UNIQUE_ID,
-            &WPD_OBJECT_DATE_MODIFIED,
-        ] {
+        ];
+        if !names_only {
+            requested.extend([&WPD_OBJECT_SIZE, &WPD_OBJECT_DATE_MODIFIED, &WPD_OBJECT_PERSISTENT_UNIQUE_ID]);
+        }
+        for key in requested {
             // SAFETY: key 指向模块级静态常量
             unsafe { keys.Add(key) }.map_err(win_error)?;
         }
@@ -619,6 +655,12 @@ pub(crate) mod com {
                     id
                 })
                 .collect();
+            let mut bulk_values = if progress.bulk_disabled { None } else {
+                let values = read_properties_batch(content, keys, &ids)?;
+                if values.is_some() { progress.bulk_batches += 1; }
+                else { progress.bulk_disabled = true; }
+                values
+            };
             for obj_id in ids {
                 if obj_id.is_empty() {
                     continue;
@@ -629,7 +671,7 @@ pub(crate) mod com {
                 // 目录、并发会话被拒）跳过并计数（收尾日志可见）；其余错误
                 // （传输中断/会话失效等）整体上抛，绝不出半份清单。
                 if let Err(err) = process_object(
-                    content, keys, &obj_id, prefix, depth, out, skipped, progress,
+                    content, keys, &obj_id, bulk_values.as_mut().and_then(|values| values.remove(&obj_id)), prefix, depth, out, skipped, progress,
                 ) {
                     if is_object_level_skip(&err) {
                         *skipped += 1;
@@ -652,6 +694,7 @@ pub(crate) mod com {
         content: &IPortableDeviceContent,
         keys: &IPortableDeviceKeyCollection,
         obj_id: &str,
+        data: Option<ObjectData>,
         prefix: &str,
         depth: u32,
         out: &mut Vec<FileEntry>,
@@ -660,15 +703,20 @@ pub(crate) mod com {
     ) -> DeviceResult<()> {
         // SAFETY: 设备已 Open
         super::super::timed_worker::checkpoint()?;
-        let properties = unsafe { content.Properties() }.map_err(win_error)?;
-        let wide = to_wide(obj_id);
-        // SAFETY: 批量属性查询；keys 为合法集合
-        let values = unsafe { properties.GetValues(PCWSTR(wide.as_ptr()), Some(keys)) }
-            .map_err(win_error)?;
+        let data = match data.filter(|data| data.content_type.is_some() &&
+            (data.content_type == Some(WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT) || data.original_name.is_some() || data.name.is_some())) {
+            Some(data) => data,
+            None => {
+                progress.single_queries += 1;
+                let properties = unsafe { content.Properties() }.map_err(win_error)?;
+                let wide = to_wide(obj_id);
+                let values = unsafe { properties.GetValues(PCWSTR(wide.as_ptr()), Some(progress.fallback_keys.as_ref().unwrap_or(keys))) }.map_err(win_error)?;
+                object_data(&values)
+            }
+        };
 
         // SAFETY: 属性键为静态常量
-        let content_type =
-            unsafe { values.GetGuidValue(&WPD_OBJECT_CONTENT_TYPE) }.unwrap_or(GUID::zeroed());
+        let content_type = data.content_type.unwrap_or(GUID::zeroed());
 
         // 目录判定：标准文件夹 + 功能对象（MTP 设备的存储根是
         // WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT，须下钻才能到达 DCIM）。
@@ -688,8 +736,7 @@ pub(crate) mod com {
                 progress,
             )?;
         } else if content_type == WPD_CONTENT_TYPE_FOLDER {
-            let name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)
-                .or_else(|| string_prop(&values, &WPD_OBJECT_NAME))
+            let name = data.original_name.clone().or_else(|| data.name.clone())
                 .unwrap_or_else(|| obj_id.to_string());
             let child_prefix = join_rel_path(prefix, &name);
             let child = to_wide(obj_id);
@@ -705,19 +752,16 @@ pub(crate) mod com {
                 progress,
             )?;
         } else {
-            let file_name = string_prop(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME)
-                .or_else(|| string_prop(&values, &WPD_OBJECT_NAME))
+            let file_name = data.original_name.clone().or_else(|| data.name.clone())
                 .ok_or_else(|| DeviceError::Other(format!("对象缺文件名: {obj_id}")))?;
             let ext = file_name.rsplit('.').next().unwrap_or_default();
             if !is_media_ext(ext) {
                 return Ok(());
             }
             // SAFETY: 属性键为静态常量
-            let size =
-                unsafe { values.GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE) }.unwrap_or(0);
-            let mtime = date_prop(&values, &WPD_OBJECT_DATE_MODIFIED).unwrap_or_else(Utc::now);
-            let id = string_prop(&values, &WPD_OBJECT_PERSISTENT_UNIQUE_ID)
-                .unwrap_or_else(|| obj_id.to_string());
+            let size = data.size.unwrap_or(0);
+            let mtime = data.mtime.unwrap_or_else(Utc::now);
+            let id = data.persistent_id.unwrap_or_else(|| obj_id.to_string());
             out.push(FileEntry {
                 id,
                 rel_path: join_rel_path(prefix, &file_name),

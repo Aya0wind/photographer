@@ -206,10 +206,12 @@ function DuplicateBadge({
   asset,
   count,
   onShow,
+  scale = 1,
 }: {
   asset: AssetDto;
   count: number;
   onShow: (asset: AssetDto) => void;
+  scale?: number;
 }) {
   const { t } = useTranslation();
   return (
@@ -232,6 +234,7 @@ function DuplicateBadge({
         }
       }}
       className="absolute bottom-14 right-1 z-20 cursor-pointer rounded bg-accent/85 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-black transition-colors hover:bg-accent"
+      style={{bottom:32*scale,right:6*scale,fontSize:10*scale,padding:`${2*scale}px ${6*scale}px`}}
       data-testid="gallery-duplicate-badge"
       data-count={count}
       data-asset-id={asset.id}
@@ -686,8 +689,8 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
   function handleTilePointerDown(asset: AssetDto): void {
     // 划选（拖拽多选）已退役（2026-09-29 用户定案：滑动多选适用移动端，
     // PC 保留点击切换 + Shift 区间）；pointerdown 只剩长按进多选的计时。
-    if (selection?.active || !onLongPress) return; // 已在多选或调用方不支持
     longPressFired.current = false;
+    if (selection?.active || !onLongPress) return; // 已在多选或调用方不支持
     clearLongPress();
     longPressTimer.current = setTimeout(() => {
       longPressTimer.current = null;
@@ -743,6 +746,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                   top: masonryItems[itemIndex].y - masonryBase,
                   width: masonryItems[itemIndex].w,
                   height: masonryItems[itemIndex].h,
+                  pointerEvents:"auto",
                 }
               : { width: tileRow?.widths[itemIndex], height: tileRow?.height };
           return (
@@ -755,6 +759,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                 left: 0,
                 width: "100%",
                 transform: `translateY(${vi.start}px)`,
+                pointerEvents:row.type==="masonry"?"none":undefined,
               }}
             >
               {row.type === "header" ? (
@@ -810,7 +815,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
               ) : (
                 <div
                   className={masonryItems ? "relative" : "flex flex-nowrap gap-1 pb-1"}
-                  style={{ height: row.height }}
+                  style={{ height: row.height, pointerEvents: masonryItems ? "none" : undefined }}
                   data-testid="gallery-row"
                   data-masonry-band={row.type === "masonry" ? row.band : undefined}
                 >
@@ -821,20 +826,22 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                     const isSelected =
                       selection?.active && selection.selected.includes(asset.id);
                     const isFavorite = localFavorites.get(asset.id) ?? (asset.rating === 5);
+                    const uiScale=Math.max(0.7,Math.min(1,Math.min(tile,Number(tileStyleOf(itemIndex).width)||tile)/TILE));
                     // 颜色标签（LR 五色标）：瓦片左下角小圆点（有 colorLabel 才显示）
                     const colorDot = asColorLabel(asset.colorLabel);
                     // 拒绝旗标：瓦片弱化（整体降不透明度）+ 右上红旗角标
                     const isRejected = asset.rejected === true;
                     const inner = (
                       <>
-                        <AssetThumb asset={asset} size={GRID_THUMB_SIZE} fit={layout === "tiles" ? "contain" : "cover"} className={`h-full w-full [&_.asset-missing-badge]:bottom-14 ${!readOnly ? "[&_.asset-raw-badge]:top-8" : ""}`} />
-                        <span className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-wrap items-center justify-center gap-x-1.5 px-3 pb-1.5 pt-5 font-mono text-[10px] leading-4 tabular-nums text-white/90" style={{ background: "linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0))" }} data-testid="tile-resolution">
+                        <AssetThumb asset={asset} showRawBadge={!badge} size={GRID_THUMB_SIZE} badgeStyle={{fontSize:Math.max(8,10*uiScale),padding:`${2*uiScale}px ${4*uiScale}px`,top:6*uiScale,right:(readOnly?4:30)*uiScale}} fit={layout === "tiles" ? "contain" : "cover"} className="h-full w-full [&_.asset-missing-badge]:bottom-14" />
+                        <span className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-nowrap items-center justify-center overflow-hidden whitespace-nowrap font-mono tabular-nums text-white/90" style={{fontSize:Math.max(8,10*uiScale),lineHeight:`${14*uiScale}px`,columnGap:4*uiScale,padding:`${16*uiScale}px ${4*uiScale}px ${4*uiScale}px`,background: "linear-gradient(to top, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0))" }} data-testid="tile-resolution">
                           <span className="whitespace-nowrap">{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}</span>
                           <span className="whitespace-nowrap"><span aria-hidden="true">· </span><span data-testid="tile-file-size">{formatBytes(asset.sizeBytes)}</span></span>
                         </span>
                         {colorDot && (
                           <span
                             className={`absolute bottom-1.5 left-1.5 z-20 h-2 w-2 rounded-full ${COLOR_DOT_CLASS[colorDot]} ${COLOR_DOT_RING}`}
+                            style={{bottom:6*uiScale,left:6*uiScale,width:8*uiScale,height:8*uiScale}}
                             data-testid="tile-color-dot"
                             data-label={colorDot}
                             title={t(`gallery.color.${colorDot}`)}
@@ -843,17 +850,19 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         {isRejected && (
                           <span
                             className={`absolute right-1 ${readOnly ? "top-7" : "top-14"} z-10 flex h-4 w-4 items-center justify-center rounded-sm bg-red-500/90 text-white`}
+                            style={{top:30*uiScale,right:6*uiScale,width:16*uiScale,height:16*uiScale}}
                             data-testid="tile-reject-badge"
                             title={t("gallery.rejectedBadge")}
                           >
-                            <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <svg viewBox="0 0 16 16" width={10*uiScale} height={10*uiScale} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                               <path d="M3.5 14V2.5M3.5 3h7l-1 2.5 1 2.5h-7" />
                             </svg>
                           </span>
                         )}
                         {badge && (
                           <span
-                            className={`absolute right-1 ${readOnly ? "top-1" : "top-8"} rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] font-bold leading-none text-white`}
+                            className="pointer-events-none absolute z-20 rounded bg-black/60 font-mono font-bold leading-none text-white"
+                            style={{top:6*uiScale,right:(readOnly?4:30)*uiScale,fontSize:Math.max(8,10*uiScale),padding:`${2*uiScale}px ${4*uiScale}px`}}
                             data-testid="gallery-pair-badge"
                           >
                             {badge}
@@ -864,6 +873,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                             className={`absolute bottom-6 left-1 rounded px-1 py-0.5 font-mono text-[10px] leading-none ${
                               SIMILARITY_BADGE_CLASS[similarityTier(score)]
                             }`}
+                            style={{bottom:24*uiScale,left:4*uiScale,fontSize:10*uiScale,padding:`${2*uiScale}px ${4*uiScale}px`}}
                             data-testid="search-score-badge"
                             data-score-tier={similarityTier(score)}
                           >
@@ -892,6 +902,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                               selection?.active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                             }`}
                             data-testid="tile-check"
+                            style={{top:6*uiScale,left:6*uiScale,width:20*uiScale,height:20*uiScale}}
                             data-asset-id={asset.id}
                             data-selected={isSelected ? "true" : "false"}
                           >
@@ -900,6 +911,7 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                                 viewBox="0 0 16 16"
                                 width="11"
                                 height="11"
+                                style={{width:11*uiScale,height:11*uiScale}}
                                 fill="none"
                                 stroke="currentColor"
                                 strokeWidth="2.2"
@@ -937,9 +949,10 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                               isFavorite ? "text-amber-400" : "text-white/75 hover:text-amber-300"
                             }`}
                             data-testid="tile-favorite"
+                            style={{top:6*uiScale,right:6*uiScale,width:20*uiScale,height:20*uiScale}}
                             data-asset-id={asset.id}
                           >
-                            <svg viewBox="0 0 24 24" width="17" height="17" fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m12 2 3.1 6.3 7 .9-5 4.9 1.2 7-6.3-3.3-6.3 3.3 1.2-7-5-4.9 7-.9z" /></svg>
+                            <svg viewBox="0 0 24 24" width={17*uiScale} height={17*uiScale} fill={isFavorite ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m12 2 3.1 6.3 7 .9-5 4.9 1.2 7-6.3-3.3-6.3 3.3 1.2-7-5-4.9 7-.9z" /></svg>
                           </span>
                         )}
                       </>
@@ -1003,11 +1016,12 @@ const AssetGrid = forwardRef<AssetGridHandle, AssetGridProps>(function AssetGrid
                         )}
                         {inner}
                         {duplicateCount !== undefined && onShowDuplicates !== undefined && (
-                          <DuplicateBadge asset={asset} count={duplicateCount} onShow={onShowDuplicates} />
+                          <DuplicateBadge asset={asset} count={duplicateCount} onShow={onShowDuplicates} scale={uiScale} />
                         )}
                         {burstCount !== undefined && (
                           <span
                             className="absolute bottom-14 left-1 z-10 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white"
+                            style={{bottom:32*uiScale,left:6*uiScale,fontSize:10*uiScale,padding:`${2*uiScale}px ${6*uiScale}px`}}
                             data-testid="gallery-burst-badge"
                           >
                             {t("gallery.burstBadge", { count: burstCount })}

@@ -212,3 +212,29 @@ impl Db {
         Ok(())
     }
 }
+
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    #[test]
+    fn deleting_person_preserves_photos_faces_and_other_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("photo.jpg");
+        std::fs::write(&photo, b"original-photo").unwrap();
+        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        db.0.execute("INSERT INTO assets (path,filename,size,mtime,xxhash,kind,source,created_at,rating) VALUES (?1,'photo.jpg',14,'now',1,'photo','local','now',5)", params![photo.to_string_lossy().as_ref()]).unwrap();
+        let asset = db.0.last_insert_rowid();
+        let person = db.create_person().unwrap();
+        let other = db.create_person().unwrap();
+        db.insert_face(asset,0.0,0.0,10.0,10.0,&[1.0],Some(person)).unwrap();
+        db.insert_face(asset,20.0,0.0,10.0,10.0,&[1.0],Some(other)).unwrap();
+        db.delete_person(person).unwrap();
+        let (count,rating):(i64,i64)=db.0.query_row("SELECT COUNT(*),MAX(rating) FROM assets",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!((count,rating),(1,5));
+        assert_eq!(std::fs::read(photo).unwrap(),b"original-photo");
+        let counts:(i64,i64)=db.0.query_row("SELECT COUNT(*),SUM(cluster_id IS NULL) FROM faces",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(counts,(2,1));
+        assert_eq!(db.people_list().unwrap()[0].id,other);
+    }
+}

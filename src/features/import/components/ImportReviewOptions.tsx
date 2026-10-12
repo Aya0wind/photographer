@@ -1,18 +1,20 @@
 import { useTranslation } from "react-i18next";
+import ImportTargetLibraryCard from "./ImportTargetLibraryCard";
 import type { ImportMode } from "@/ipc/api";
-import { subgroupSuggestions } from "@/features/albums/lib/ungroupedAlbum";
+import { subgroupSuggestions } from "@/features/albums/lib/subgroupSuggestions";
 import type { ImportWizardFlow } from "../lib/useImportWizard";
 
 export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }) {
   const { t } = useTranslation();
   const { starting, device, targetLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName, setNewAlbumName, albumError, setAlbumError, startError, copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview, albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy, setDuplicatePolicy, skipImported, setSkipImported, secondRoot, setSecondRoot, browseSecondRoot, secondImportTargetPreview } = flow;
   return <>
-        <div className="mb-5 rounded-xl bg-panel/60 px-4 py-3 text-xs"><p className="truncate text-text-primary">{device?.name}</p><p className="mt-1 text-text-muted">{t("wizard.flow.library", { name: targetLibrary?.name ?? "—" })}</p></div>
+        <div className="mb-5"><ImportTargetLibraryCard flow={flow} /></div>
+        <p className="mb-4 truncate text-xs text-text-muted">{device?.name}</p>
         <fieldset disabled={starting} className="min-w-0 space-y-5">
           <label className="flex flex-col gap-2 text-xs text-text-secondary" data-testid="wizard-album-section">
             {t("wizard.album.label")}
             <select value={albumChoice === "new" ? "new" : albumId === null ? "" : String(albumId)} aria-label={t("wizard.album.existing")} onChange={(event) => { const value = event.currentTarget.value; setAlbumError(null); if (value === "new") setAlbumChoice("new"); else { setAlbumChoice("existing"); setAlbumId(value ? Number(value) : null); } }} className="rounded-xl border border-edge bg-bg px-3 py-2.5 text-sm text-text-primary" data-testid="wizard-album-select">
-              <option value="">{t("wizard.album.selectPlaceholder")}</option>{albums.map((album) => <option key={album.id} value={album.id}>{album.name}（{album.itemCount}）</option>)}<option value="new">＋ {t("wizard.album.new")}</option>
+              <option value="">{t("wizard.album.none")}</option>{albums.map((album) => <option key={album.id} value={album.id}>{album.name}（{album.itemCount}）</option>)}<option value="new">＋ {t("wizard.album.new")}</option>
             </select>
           </label>
           {albumChoice === "new" && <input autoFocus type="text" value={newAlbumName} onChange={(event) => { setNewAlbumName(event.currentTarget.value); setAlbumError(null); }} placeholder={t("albums.newNamePlaceholder")} aria-label={t("wizard.album.new")} className="w-full rounded-xl border border-edge bg-bg px-3 py-2.5 text-sm text-text-primary" data-testid="wizard-album-new-name" />}

@@ -1,3 +1,4 @@
+import {DEFAULT_ORGANIZATION_TEMPLATE} from "@/features/storage/components/OrganizationTemplateField";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
@@ -15,7 +16,7 @@ import {
 } from "@/features/settings/lib/qualityTier";
 import { useWindowReveal } from "@/lib/windowReveal";
 import { isMacPlatform } from "@/lib/platform";
-import { databaseCreate } from "@/ipc/api";
+import PhotoLibraryStep,{type PhotoLibraryDraft} from "../steps/PhotoLibraryStep";
 import AiDownloadPanel from "../steps/AiDownloadPanel";
 
 /**
@@ -31,7 +32,7 @@ import AiDownloadPanel from "../steps/AiDownloadPanel";
  * /database-picker（选择页）；首启无数据库由选择页直送本引导。
  */
 
-type OnboardingStep = "welcome" | "ai" | "done";
+type OnboardingStep = "welcome" | "library" | "ai" | "done";
 
 const FIELD_CLASS =
   "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
@@ -43,16 +44,15 @@ function baseName(path: string): string {
 }
 
 /** 第一步（创建数据库）子组件：恒渲染创建表单（多库合法，创建即激活） */
-function DatabaseStep({ onCreated, onNext }: { onCreated: () => void; onNext: () => void }) {
+function DatabaseStep({draft,onNext}:{draft:{name:string;dbDir:string};onNext:(draft:{name:string;dbDir:string})=>void}) {
   const { t } = useTranslation();
-  const [name, setName] = useState("");
-  const [dbDir, setDbDir] = useState("");
+  const [name, setName] = useState(draft.name);
+  const [dbDir, setDbDir] = useState(draft.dbDir);
   /** 名称未被手改过时，选完文件夹自动带出末段作缺省名 */
   const [nameTouched, setNameTouched] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const ready = name.trim().length > 0 && !creating;
+  const ready = name.trim().length > 0;
 
   async function pickDirectory(): Promise<void> {
     try {
@@ -69,22 +69,7 @@ function DatabaseStep({ onCreated, onNext }: { onCreated: () => void; onNext: ()
     }
   }
 
-  async function create(): Promise<void> {
-    if (!ready) return;
-    setCreating(true);
-    setError(null);
-    const result = await databaseCreate(name.trim(), dbDir.trim() || undefined);
-    setCreating(false);
-    if (result.ok) {
-      onCreated();
-      onNext();
-      return;
-    }
-    // null=invoke 不可用（后端未连接）；字符串=后端业务 Err 文案透传
-    setError(
-      result.error === null ? t("onboarding.dbCreate.unavailable") : result.error,
-    );
-  }
+  function create(){if(ready)onNext({name:name.trim(),dbDir:dbDir.trim()});}
 
   return (
     <>
@@ -146,7 +131,7 @@ function DatabaseStep({ onCreated, onNext }: { onCreated: () => void; onNext: ()
           className="rounded-md bg-accent px-5 py-2 text-sm font-medium text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           data-testid="onboarding-db-create"
         >
-          {creating ? t("onboarding.dbCreate.creating") : t("onboarding.dbCreate.create")}
+          {t("common.next")}
         </button>
       </div>
     </>
@@ -357,6 +342,8 @@ export default function OnboardingPage() {
   useWindowReveal(loaded);
 
   const [step, setStep] = useState<OnboardingStep>("welcome");
+  const [databaseDraft,setDatabaseDraft]=useState({name:"",dbDir:""});
+  const [libraryDraft,setLibraryDraft]=useState<PhotoLibraryDraft>({rootPath:"",organizationTemplate:DEFAULT_ORGANIZATION_TEMPLATE,existingFolder:false,reorganizeExisting:false});
   const [finishing, setFinishing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -391,7 +378,7 @@ export default function OnboardingPage() {
         >
           {/* 步骤指示（创建数据库 → AI 功能 → 完成） */}
           <div className="flex items-center gap-2 text-[11px] text-text-muted" data-testid="onboarding-steps">
-            {(["welcome", "ai", "done"] as const).map((key, index) => (
+            {(["welcome", "library", "ai", "done"] as const).map((key, index) => (
               <span key={key} className="flex items-center gap-2">
                 {index > 0 && <span aria-hidden="true">·</span>}
                 <span
@@ -409,14 +396,10 @@ export default function OnboardingPage() {
           </div>
 
           {step === "welcome" && (
-            <DatabaseStep
-              onCreated={() => {
-                // 创建成功（创建即激活，多库合法）：无额外态，事件驱动注册表刷新
-              }}
-              onNext={() => setStep("ai")}
-            />
+            <DatabaseStep draft={databaseDraft} onNext={draft=>{setDatabaseDraft(draft);setStep("library");}}/>
           )}
 
+          {step === "library" && <PhotoLibraryStep database={databaseDraft} draft={libraryDraft} onChange={setLibraryDraft} onBack={()=>setStep("welcome")} onNext={()=>setStep("ai")}/>}
           {step === "ai" && <AiStep onNext={() => setStep("done")} />}
 
           {step === "done" && (

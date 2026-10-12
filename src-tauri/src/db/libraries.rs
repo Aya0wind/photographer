@@ -34,6 +34,8 @@ pub struct PhotosLibraryRow {
     pub asset_count: u64,
     /// 库内照片容量缓存（字节）。
     pub size_bytes: u64,
+    /// 新写入文件的组织模板；已有文件保持原位。
+    pub organization_template: String,
 }
 
 /// 两路径「相同或互相包含」（忽略大小写与 `/`\\` 方向；前缀后必须是
@@ -55,6 +57,17 @@ pub struct LibraryScanJobRow {
     pub skipped: u64,
     pub error: Option<String>,
     pub updated_at: String,
+}
+
+/// 删除照片库的产物：行删除前收集的库内资产 (id, path) 清单（ipc 层据此
+/// 清缩略图缓存 / 语义向量 / 物理文件——路径在行删除后即不可查）。
+#[derive(Debug, Clone, Default)]
+pub struct PhotosLibraryRemoval {
+    /// 连带删除的资产记录数。
+    pub records_deleted: u64,
+    /// 被删资产清单。
+    pub assets: Vec<(i64, String)>,
+    pub managed_files: Vec<String>,
 }
 
 fn map_scan_job(row: &rusqlite::Row<'_>) -> Result<LibraryScanJobRow> {
@@ -152,12 +165,22 @@ fn map_library(row: &rusqlite::Row<'_>) -> Result<PhotosLibraryRow> {
         status: row.get(4)?,
         asset_count: row.get::<_, i64>(5)? as u64,
         size_bytes: row.get::<_, i64>(6)? as u64,
+        organization_template: row.get(7)?,
     })
 }
 
-const LIBRARY_COLS: &str = "id, name, root_path, created_at, status, asset_count, size_bytes";
+const LIBRARY_COLS: &str =
+    "id, name, root_path, created_at, status, asset_count, size_bytes, organization_template";
 
 impl Db {
+    pub fn photos_library_organization_pending(&self,id:&str)->Result<bool>{self.0.query_row("SELECT EXISTS(SELECT 1 FROM library_organization_jobs WHERE library_id=?1 AND status NOT IN('done','cancelled'))",[id],|row|row.get(0))}
+    pub fn photos_library_queue_organization(&self,id:&str,template:&str)->Result<()> {self.0.execute("INSERT INTO library_organization_jobs(library_id,template,status) VALUES(?1,?2,'pending') ON CONFLICT(library_id) DO NOTHING",params![id,template])?;Ok(())}
+    pub fn photos_library_set_organization_template(&self,id:&str,template:&str)->Result<PhotosLibraryRow,String>{
+        if self.photos_library_organization_pending(id).map_err(|e|e.to_string())?{return Err("请先完成已有照片整理，再修改组织规则".into());}
+        crate::db::organization::validate_organization_template(template)?;
+        let n=self.0.execute("UPDATE photos_libraries SET organization_template=?2 WHERE id=?1",params![id,template]).map_err(|e|e.to_string())?;
+        if n==0{return Err("照片库不存在".into());}self.photos_library_get(id).map_err(|e|e.to_string())?.ok_or("照片库不存在".into())
+    }
     /// 全部照片库（登记序：created_at, id）。
     pub fn photos_library_list(&self) -> Result<Vec<PhotosLibraryRow>> {
         let mut stmt = self.0.prepare(&format!(
@@ -201,15 +224,25 @@ impl Db {
         validate_photos_library_root(&existing, database_dir, root)
     }
 
-    /// 登记照片库：生成 uuid + root 互斥校验 + 插入，返回新行（统计缓存
-    /// 归零，status=online）。root 必须已过调用方规范化（IPC 层
-    /// settings::normalize_library_path 同款闸门）。
+    /// 登记统一类型的照片库，使用默认组织规则。
     pub fn photos_library_register(
         &self,
         name: &str,
         root_path: &str,
         database_dir: &Path,
     ) -> Result<PhotosLibraryRow, String> {
+        self.photos_library_register_with_template(name, root_path, database_dir, crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE)
+    }
+
+    /// 登记照片库并保存独立组织规则。
+    pub fn photos_library_register_with_template(
+        &self,
+        name: &str,
+        root_path: &str,
+        database_dir: &Path,
+        organization_template: &str,
+    ) -> Result<PhotosLibraryRow, String> {
+        crate::db::organization::validate_organization_template(organization_template)?;
         let root = Path::new(root_path);
         self.photos_library_validate_root(root, database_dir, None)?;
         let row = PhotosLibraryRow {
@@ -220,12 +253,20 @@ impl Db {
             status: "online".to_string(),
             asset_count: 0,
             size_bytes: 0,
+            organization_template: organization_template.to_string(),
         };
         self.0
             .execute(
                 "INSERT INTO photos_libraries (id, name, root_path, created_at, status, \
-                 asset_count, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
-                params![row.id, row.name, row.root_path, row.created_at, row.status],
+                 asset_count, size_bytes, organization_template) VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6)",
+                params![
+                    row.id,
+                    row.name,
+                    row.root_path,
+                    row.created_at,
+                    row.status,
+                    organization_template
+                ],
             )
             .map_err(|e| e.to_string())?;
         Ok(row)
@@ -255,10 +296,17 @@ impl Db {
         Ok(())
     }
 
-    /// 移除登记：永不删照片文件（用户红线）；`delete_records=true` 连库内
-    /// 资产记录一并删（问过用户后）。返回连带删除的资产记录数。
-    /// 资产行删除触发全库级联（索引任务/人脸/相册引用等随行消失）。
-    pub fn photos_library_remove(&self, id: &str, delete_records: bool) -> Result<u64, String> {
+    /// 删除照片库（2026-10-11 定案两分支）：移除登记 = 连库内资产记录一并删
+    /// （FK 级联清 album_item/faces/index_tasks/view_history/similar 等子表），
+    /// 事务内补齐级联盲区——pair 双向引用、孤儿人物簇（faces 级联后无脸
+    /// 挂靠的 person，仍被其他库资产使用者保留）、空 photo_group/bursts
+    /// 壳、library_scan_dirs 剪枝缓存（表无 FK，随库行清）。
+    /// 磁盘源文件不在此层删（delete_files 的闸门与执行在 ipc 层）。
+    /// smart_view 为命名筛选存取（filters_json 不含资产外键），无需清理。
+    pub fn photos_library_remove(&self, id: &str) -> Result<PhotosLibraryRemoval, String> {
+        if self.photos_library_organization_pending(id).map_err(|e|e.to_string())?{return Err("请先完成已有照片整理，再移除照片库".into());}
+        // Serialize the last-library check with removal across all connections.
+        let tx=rusqlite::Transaction::new_unchecked(&self.0,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
         if self
             .photos_library_get(id)
             .map_err(|e| e.to_string())?
@@ -266,17 +314,52 @@ impl Db {
         {
             return Err(format!("照片库不存在：{id}"));
         }
-        let deleted = if delete_records {
-            self.0
-                .execute("DELETE FROM assets WHERE library_id = ?1", [id])
-                .map_err(|e| e.to_string())? as u64
-        } else {
-            0
-        };
-        self.0
-            .execute("DELETE FROM photos_libraries WHERE id = ?1", [id])
+        let count:i64=tx.query_row("SELECT COUNT(*) FROM photos_libraries",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+        if count<=1{return Err("数据库必须保留至少一个照片库，请先添加其他照片库".into());}
+        let mut removal = PhotosLibraryRemoval::default();
+        removal.managed_files=self.0.prepare("SELECT path FROM assets WHERE library_id=?1 AND origin='imported'").and_then(|mut stmt|stmt.query_map([id],|row|row.get(0))?.collect()).map_err(|e|e.to_string())?;
+        let assets: Vec<(i64, String)> = self
+            .0
+            .prepare("SELECT id, path FROM assets WHERE library_id = ?1")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect()
+            })
             .map_err(|e| e.to_string())?;
-        Ok(deleted)
+        let ids: Vec<i64> = assets.iter().map(|(id, _)| *id).collect();
+        let clusters = super::selection::clusters_on_assets(&tx, &ids)
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE assets SET pair_asset_id = NULL \
+             WHERE pair_asset_id IN (SELECT id FROM assets WHERE library_id = ?1)",
+            [id],
+        )
+        .map_err(|e| e.to_string())?;
+        let n = tx
+            .execute("DELETE FROM assets WHERE library_id = ?1", [id])
+            .map_err(|e| e.to_string())?;
+        super::selection::delete_orphan_people(&tx, &clusters)
+            .map_err(|e| e.to_string())?;
+        // 空组/空连拍壳（成员随资产行级联后留下的无引用壳行）
+        tx.execute(
+            "DELETE FROM photo_group WHERE id NOT IN (SELECT DISTINCT group_id FROM group_asset)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM bursts \
+             WHERE id NOT IN (SELECT DISTINCT burst_id FROM assets WHERE burst_id IS NOT NULL)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM library_scan_dirs WHERE library_id = ?1", [id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM photos_libraries WHERE id = ?1", [id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        removal.records_deleted = n as u64;
+        removal.assets = assets;
+        Ok(removal)
     }
 
     /// 登记指纹查重（§三 两级识别第一级）：同卷同 file id = 同一物理文件
@@ -632,5 +715,24 @@ impl Db {
         self.0
             .execute("UPDATE assets SET xmp_dirty = 0 WHERE id = ?1", [asset_id])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod organization_tests {
+    use super::*;
+    #[test]
+    fn library_rule_is_saved_and_existing_asset_paths_are_unchanged(){
+        let dir=tempfile::tempdir().unwrap();let data=dir.path().join("data");std::fs::create_dir_all(&data).unwrap();let db=Db::open(&data.join("library.db")).unwrap();
+        let root=dir.path().join("photos");let row=db.photos_library_register("Photos",&root.to_string_lossy(),&data).unwrap();assert_eq!(row.organization_template,crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE);
+        for (name,origin) in [("old.jpg","external"),("new.jpg","imported")]{db.0.execute("INSERT INTO assets(path,filename,size,mtime,xxhash,kind,source,created_at,origin,library_id) VALUES(?1,?2,1,'2026-10-11',?3,'photo','test','2026-10-11',?4,?5)",params![root.join(name).to_string_lossy(),name,if origin=="external"{1}else{2},origin,row.id]).unwrap();}
+        db.photos_library_set_organization_template(&row.id,"{camera}/{year}/{filename}").unwrap();assert_eq!(db.photos_library_get(&row.id).unwrap().unwrap().organization_template,"{camera}/{year}/{filename}");
+        db.photos_library_register("Keep",&dir.path().join("keep").to_string_lossy(),&data).unwrap();let removal=db.photos_library_remove(&row.id).unwrap();assert_eq!(removal.assets.len(),2);assert_eq!(removal.managed_files,vec![root.join("new.jpg").to_string_lossy().into_owned()]);assert_eq!(db.photos_library_list().unwrap().len(),1);
+    }
+    #[test]
+    fn concurrent_removal_cannot_delete_the_last_library(){
+        let dir=tempfile::tempdir().unwrap();let data=dir.path().join("data");std::fs::create_dir_all(&data).unwrap();let path=data.join("library.db");let db=Db::open(&path).unwrap();
+        let ids:[String;2]=["a","b"].map(|name|db.photos_library_register(name,&dir.path().join(name).to_string_lossy(),&data).unwrap().id);
+        let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));let workers:Vec<_>=ids.into_iter().map(|id|{let path=path.clone();let barrier=barrier.clone();std::thread::spawn(move||{let db=Db::open(&path).unwrap();barrier.wait();db.photos_library_remove(&id).is_ok()})}).collect();let successes=workers.into_iter().map(|worker|worker.join().unwrap()).filter(|ok|*ok).count();assert_eq!(successes,1);assert_eq!(db.photos_library_list().unwrap().len(),1);
     }
 }

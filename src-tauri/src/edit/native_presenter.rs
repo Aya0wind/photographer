@@ -20,19 +20,23 @@ pub(super) struct Presenter {
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     image: Option<wgpu::Texture>,
+    comparison:Option<(photocraft_engine::doc::DocId,[u32;2],wgpu::Texture)>,
     dimensions: [u32; 2],
     annotation:wgpu::Texture,
     annotation_dimensions:[u32;2],
+    mask_overlay:wgpu::Texture,
     lut: Option<wgpu::Texture>,
     profile: Option<(photocraft_engine::doc::ColorMode, Option<Arc<Vec<u8>>>)>,
 }
 const SHADER: &str = r#"
-struct Uniforms { uv:vec4<f32>, flags:vec4<f32>, image_rect:vec4<f32>, map_x:vec4<f32>, map_y:vec4<f32>, guide:vec4<f32>, metrics:vec4<f32> }
+struct Uniforms { uv:vec4<f32>, flags:vec4<f32>, image_rect:vec4<f32>, map_x:vec4<f32>, map_y:vec4<f32>, guide:vec4<f32>, metrics:vec4<f32>, line:vec4<f32>, warnings:vec4<f32>, mask_line:vec4<f32>, mask_info:vec4<f32> }
 @group(0) @binding(0) var image:texture_2d<f32>;
 @group(0) @binding(1) var pixel_sampler:sampler;
 @group(0) @binding(2) var display:texture_3d<f32>;
 @group(0) @binding(3) var<uniform> view:Uniforms;
 @group(0) @binding(4) var annotations:texture_2d<f32>;
+@group(0) @binding(5) var original:texture_2d<f32>;
+@group(0) @binding(6) var mask_overlay:texture_2d<f32>;
 struct Vertex { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32> }
 @vertex fn vertex(@builtin(vertex_index) i:u32)->Vertex {
     let positions=array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
@@ -49,13 +53,22 @@ fn output(encoded:vec3<f32>)->vec4<f32> {
     if any(image_uv<vec2(0.0)) || any(image_uv>vec2(1.0)) {return output(vec3(0.12549));}
     let source_uv=vec2(dot(view.map_x.xyz,vec3(image_uv,1.0)),dot(view.map_y.xyz,vec3(image_uv,1.0)));
     var working=vec3(1.0);
+    var clip_pixel=vec4(0.0);
+    let before=view.metrics.w>=0.0 && image_uv.x<view.metrics.w;
     if all(source_uv>=vec2(0.0)) && all(source_uv<=vec2(1.0)) {
-        let pixel=textureSampleLevel(image,pixel_sampler,source_uv*view.uv.zw+view.uv.xy,0.0);
+        var pixel=textureSampleLevel(image,pixel_sampler,source_uv*view.uv.zw+view.uv.xy,0.0);
+        if before {pixel=textureSampleLevel(original,pixel_sampler,source_uv*view.uv.zw+view.uv.xy,0.0);}
         working=mix(vec3(1.0),pixel.rgb,pixel.a);
+        clip_pixel=pixel;
     }
-    if view.flags.z>0.5 {let annotation=textureSampleLevel(annotations,pixel_sampler,image_uv,0.0);working=mix(working,annotation.rgb,annotation.a);}
+    if view.flags.z>0.5 && !before {let annotation=textureSampleLevel(annotations,pixel_sampler,image_uv,0.0);working=mix(working,annotation.rgb,annotation.a);}
     let coord=(clamp(working,vec3(0.0),vec3(1.0))*32.0+vec3(0.5))/33.0;
     var color=textureSampleLevel(display,pixel_sampler,coord,0.0).rgb;
+    // Same channel tests and highlight priority as PhotoCraft histogram::clipping.
+    if clip_pixel.a>0.0 && all(clip_pixel.rgb==clip_pixel.rgb) && all(abs(clip_pixel.rgb)<=vec3(65504.0)) {
+        if (u32(view.warnings.x)&2u)!=0u && any(clip_pixel.rgb>=vec3(1.0)) {color=vec3(1.0,0.0,0.0);}
+        else if (u32(view.warnings.x)&1u)!=0u && any(clip_pixel.rgb<=vec3(0.0)) {color=vec3(0.0,0.0,1.0);}
+    }
     if view.flags.y>0.5 {
         let lo=view.guide.xy;let hi=lo+view.guide.zw;
         let pixels=view.image_rect.zw*view.metrics.xy;
@@ -71,6 +84,31 @@ fn output(encoded:vec3<f32>)->vec4<f32> {
         let middle=(lo+hi)/2.0;
         let handles=array<vec2<f32>,8>(lo,vec2(middle.x,lo.y),vec2(hi.x,lo.y),vec2(hi.x,middle.y),hi,vec2(middle.x,hi.y),vec2(lo.x,hi.y),vec2(lo.x,middle.y));
         for(var n=0;n<8;n++) {let delta=abs(image_uv-handles[n])*pixels;if all(delta<vec2(5.0*view.metrics.z)){color=vec3(0.1);if all(delta<vec2(3.5*view.metrics.z)){color=vec3(1.0);}}}
+    }
+    if view.flags.w>0.5 {
+        let dimensions=view.image_rect.zw*view.metrics.xy;
+        let p=image_uv*dimensions;let a=view.line.xy*dimensions;let b=view.line.zw*dimensions;let delta=b-a;
+        let t=clamp(dot(p-a,delta)/max(dot(delta,delta),0.001),0.0,1.0);
+        if length(p-(a+t*delta))<1.5*view.metrics.z {color=vec3(1.0);}
+        if min(length(p-a),length(p-b))<4.0*view.metrics.z {color=vec3(1.0);}
+    }
+    if view.metrics.w>=0.0 && abs(image_uv.x-view.metrics.w)*view.image_rect.z*view.metrics.x<view.metrics.z {color=vec3(1.0);}
+    if view.mask_info.z>0.5 {
+        if view.mask_info.w>0.5 && all(source_uv>=vec2(0.0)) && all(source_uv<=vec2(1.0)) {let mask_uv=select(image_uv,source_uv,view.warnings.y>0.5);let mask=textureSampleLevel(mask_overlay,pixel_sampler,mask_uv,0.0);color=mix(color,vec3(1.0,0.2,0.2),mask.a*0.35);}
+        if view.mask_info.z>2.5 {
+            if view.warnings.z>0.5 {let dimensions=view.image_rect.zw*view.metrics.xy;let radius=max(view.mask_info.xy*dimensions,vec2(2.0*view.metrics.z));let distance=abs(length((image_uv-view.mask_line.zw)*dimensions/radius)-1.0)*min(radius.x,radius.y);if distance<2.0*view.metrics.z {color=vec3(0.1);if distance<view.metrics.z {color=vec3(1.0);}}}
+            return output(color);
+        }
+        let dimensions=view.image_rect.zw*view.metrics.xy;
+        let p=image_uv*dimensions;let a=view.mask_line.xy*dimensions;let b=view.mask_line.zw*dimensions;let delta=b-a;
+        let t=clamp(dot(p-a,delta)/max(dot(delta,delta),0.001),0.0,1.0);
+        if length(p-(a+t*delta))<view.metrics.z {color=vec3(1.0);}
+        if view.mask_info.z>1.5 {
+            let radius=view.mask_info.xy*dimensions;
+            if all(radius>vec2(0.0)) {let normalized=length((p-a)/radius);if abs(normalized-1.0)*min(radius.x,radius.y)<view.metrics.z {color=vec3(0.976,0.451,0.451);}}
+        }
+        let da=length(p-a);let db=length(p-b);
+        if min(da,db)<8.0*view.metrics.z {color=vec3(1.0);if min(da,db)<6.0*view.metrics.z {color=select(vec3(0.12549),vec3(0.976,0.451,0.451),db<da);}}
     }
     return output(color);
 }
@@ -153,6 +191,8 @@ impl Presenter {
                     },
                 ),
                 entry(4,texture(wgpu::TextureViewDimension::D2)),
+                entry(5,texture(wgpu::TextureViewDimension::D2)),
+                entry(6,texture(wgpu::TextureViewDimension::D2)),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -196,7 +236,7 @@ impl Presenter {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 112,
+            size: 176,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -204,6 +244,8 @@ impl Presenter {
             label:Some("annotation placeholder"),size:wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[]
         });
         queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&annotation,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},&[0u8;8],wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(8),rows_per_image:Some(1)},wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1});
+        let mask_overlay=device.create_texture(&wgpu::TextureDescriptor{label:Some("mask overlay placeholder"),size:wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[]});
+        queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&mask_overlay,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},&[0u8;8],wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(8),rows_per_image:Some(1)},wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1});
         eprintln!(
             "[editor native] {}: direct GPU display, no pixel readback",
             adapter.get_info().name
@@ -221,8 +263,10 @@ impl Presenter {
             sampler,
             uniform,
             image: None,
+            comparison:None,
             dimensions: [0, 0],
             annotation,annotation_dimensions:[1,1],
+            mask_overlay,
             lut: None,
             profile: None,
         })
@@ -234,6 +278,25 @@ impl Presenter {
         } else {
             Err("GPU 首帧未完成".into())
         }
+    }
+
+    pub(super) fn prepare_mask_overlay(&mut self,doc:&Document)->Result<usize,String>{
+        if self.mask_overlay.size().width!=doc.size.width||self.mask_overlay.size().height!=doc.size.height {
+            self.mask_overlay=self.device.create_texture(&wgpu::TextureDescriptor{label:Some("selected mask coverage"),size:wgpu::Extent3d{width:doc.size.width,height:doc.size.height,depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[]});
+        }
+        let texture=&self.mask_overlay;
+        let uploads=self.compositor.render(&self.device,&self.queue,doc,doc.bounds(),|encoder,chunk|{
+            encoder.copy_texture_to_texture(wgpu::TexelCopyTextureInfo{texture:chunk.texture,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},wgpu::TexelCopyTextureInfo{texture:&texture,mip_level:0,origin:wgpu::Origin3d{x:chunk.rect.x0 as u32,y:chunk.rect.y0 as u32,z:0},aspect:wgpu::TextureAspect::All},wgpu::Extent3d{width:chunk.rect.width(),height:chunk.rect.height(),depth_or_array_layers:1});
+        }).map_err(|e|e.0)?.bytes_uploaded;Ok(uploads)
+    }
+    pub(super) fn prepare_comparison(&mut self,doc:&Document)->Result<usize,String>{
+        let dimensions=[doc.size.width,doc.size.height];
+        if self.comparison.as_ref().is_some_and(|(id,size,_)|*id==doc.id&&*size==dimensions){return Ok(0);}
+        let texture=self.device.create_texture(&wgpu::TextureDescriptor{label:Some("unchanged comparison source"),size:wgpu::Extent3d{width:dimensions[0],height:dimensions[1],depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[]});
+        let uploads=self.compositor.render(&self.device,&self.queue,doc,doc.bounds(),|encoder,chunk|{
+            encoder.copy_texture_to_texture(wgpu::TexelCopyTextureInfo{texture:chunk.texture,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},wgpu::TexelCopyTextureInfo{texture:&texture,mip_level:0,origin:wgpu::Origin3d{x:chunk.rect.x0 as u32,y:chunk.rect.y0 as u32,z:0},aspect:wgpu::TextureAspect::All},wgpu::Extent3d{width:chunk.rect.width(),height:chunk.rect.height(),depth_or_array_layers:1});
+        }).map_err(|e|e.0)?.bytes_uploaded;
+        self.comparison=Some((doc.id,dimensions,texture));Ok(uploads)
     }
 
     pub(super) fn draw(
@@ -397,13 +460,16 @@ impl Presenter {
             },
             if view.crop_guide.is_some(){1.0}else{0.0},
             if annotation.is_some(){1.0}else{0.0},
-            0.0,
+            if view.straighten_guide.is_some(){1.0}else{0.0},
         ];
-        let values:Vec<f32>=values.into_iter().chain(view.image).chain(view.mapping).chain(view.crop_guide.unwrap_or([0.0,0.0,1.0,1.0])).chain([view.rect[2] as f32,view.rect[3] as f32,view.scale,0.0]).collect();
+        let values:Vec<f32>=values.into_iter().chain(view.image).chain(view.mapping).chain(view.crop_guide.unwrap_or([0.0,0.0,1.0,1.0])).chain([view.rect[2] as f32,view.rect[3] as f32,view.scale,view.compare_split.unwrap_or(-1.0)]).chain(view.straighten_guide.unwrap_or([0.0;4])).collect();
+        let values:Vec<f32>=values.into_iter().chain([view.clipping as f32,if view.mask_source_space {1.0}else{0.0},if view.mask_stroke.is_some(){1.0}else{0.0},0.0]).chain(view.mask_guide.unwrap_or([0.0;8])).collect();
         let data: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.queue.write_buffer(&self.uniform, 0, &data);
         let image_view = image.create_view(&Default::default());
         let annotation_view=self.annotation.create_view(&Default::default());
+        let mask_view=self.mask_overlay.create_view(&Default::default());
+        let comparison_view=self.comparison.as_ref().map(|(_,_,texture)|texture).unwrap_or(image).create_view(&Default::default());
         let lut_view = self
             .lut
             .as_ref()
@@ -430,6 +496,8 @@ impl Presenter {
                     resource: self.uniform.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry{binding:4,resource:wgpu::BindingResource::TextureView(&annotation_view)},
+                wgpu::BindGroupEntry{binding:5,resource:wgpu::BindingResource::TextureView(&comparison_view)},
+                wgpu::BindGroupEntry{binding:6,resource:wgpu::BindingResource::TextureView(&mask_view)},
             ],
         });
         let output = frame.texture.create_view(&Default::default());

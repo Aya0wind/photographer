@@ -11,6 +11,17 @@ mod native_canvas {
         pub overlays:Vec<[i32;5]>,
         pub mapping:[f32;8],
         pub crop_guide:Option<[f32;4]>,
+        pub straighten_guide:Option<[f32;4]>,
+        pub compare_split:Option<f32>,
+        pub clipping:u8,
+        pub mask_guide:Option<[f32;8]>,
+        #[allow(dead_code)]
+        pub mask_id:Option<String>,
+        #[allow(dead_code)]
+        pub mask_preview:Option<[f64;4]>,
+        pub mask_source_space:bool,
+        #[allow(dead_code)]
+        pub mask_stroke:Option<serde_json::Value>,
         pub scale:f32,
     }
 }
@@ -21,6 +32,10 @@ mod native_presenter;
 
 #[cfg(windows)]
 mod recipe {
+    pub struct ParametricCurve{pub highlights:f64,pub lights:f64,pub darks:f64,pub shadows:f64,pub splits:[f64;3]}
+    #[derive(Clone,serde::Serialize)]
+    pub struct ColorGrading {pub shadows:photocraft_algo::camera_raw::Wheel,pub midtones:photocraft_algo::camera_raw::Wheel,pub highlights:photocraft_algo::camera_raw::Wheel,pub global:photocraft_algo::camera_raw::Wheel,pub blending:f64,pub balance:f64}
+    impl Default for ColorGrading{fn default()->Self{Self{shadows:Default::default(),midtones:Default::default(),highlights:Default::default(),global:Default::default(),blending:50.0,balance:0.0}}}
     #[derive(Clone,Default)]
     pub struct Geometry {pub angle:f64,pub flip_horizontal:bool,pub flip_vertical:bool}
     #[derive(Clone,Copy)]
@@ -30,6 +45,12 @@ mod recipe {
 #[cfg(windows)]
 #[path="../src/edit/native_geometry.rs"]
 mod native_geometry;
+#[cfg(windows)]
+#[path="../src/edit/grading.rs"]
+mod grading;
+#[cfg(windows)]
+#[path="../src/edit/parametric.rs"]
+mod parametric;
 #[cfg(windows)]
 fn main() {
     use std::sync::{
@@ -124,11 +145,11 @@ fn main() {
                             rect: [0, 0, 640, 400],
                             uv: [0.0, 0.0, 1.0, 1.0],
                             image: [0.0, 0.0, 1.0, 1.0],
-                            overlays:vec![],mapping:[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0],crop_guide:None,scale:1.0,
+                            overlays:vec![],mapping:[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0],crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0,
                         };
                         // Production prewarms at 1x1, the same dimensions as
                         // default config. This must configure the surface too.
-                        let warm_view=native_canvas::View{rect:[0,0,1,1],uv:[0.0,0.0,1.0,1.0],image:[0.0,0.0,1.0,1.0],overlays:vec![],mapping:[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0],crop_guide:None,scale:1.0};
+                        let warm_view=native_canvas::View{rect:[0,0,1,1],uv:[0.0,0.0,1.0,1.0],image:[0.0,0.0,1.0,1.0],overlays:vec![],mapping:[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0],crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0};
                         presenter.draw(&doc,&warm_view,true)?;
                         presenter.wait_ready()?;
                         eprintln!("[native probe] initial 1x1 warmup succeeded");
@@ -226,6 +247,10 @@ fn main() {
                         }
                         assert_eq!(geometry_uploads,0,"geometry must only update display uniforms");
                         eprintln!("[native probe] geometry and crop guides {:.2} ms/frame; source reupload={geometry_uploads}",started.elapsed().as_secs_f64()*1000.0/30.0);
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..20 {view.straighten_guide=Some([0.15,0.3,0.8,0.3+n as f32*0.01]);uploads+=presenter.draw(&doc,&view,false)?;presenter.wait_ready()?;}
+                        assert_eq!(uploads,0,"straightening guides only update uniforms");
+                        eprintln!("[native probe] straighten guide {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);view.straighten_guide=None;
                         let overlay=Document::with_background("Overlay",Size::new(400,300),ColorMode::Rgb,SampleType::U8,Color::rgba(1.0,0.0,0.0,0.25));
                         presenter.draw_with_annotations(&doc,&view,false,Some(&overlay),true)?;presenter.wait_ready()?;
                         let started=std::time::Instant::now();let mut uploads=0;
@@ -253,6 +278,19 @@ fn main() {
                         }
                         assert_eq!(uploads,0,"local slider edits must reuse source and mask textures");
                         eprintln!("[native probe] feathered local adjustments {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);
+                        let mut grouped=doc.clone();
+                        let mut child=local.layers.last().unwrap().clone();let mask=child.mask.take();
+                        let mut group=Layer::group("Local adjustments",vec![child]);group.mask=mask;group.opacity=0.6;
+                        grouped.layers.push(group);
+                        presenter.draw(&grouped,&view,true)?;presenter.wait_ready()?;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..20 {
+                            let adjustment=photocraft_engine::adjust_params::from_params("brightnessContrast",&serde_json::json!({"brightness":n*2,"contrast":0}),None,ColorMode::Rgb).map_err(|e|e.to_string())?;
+                            if let LayerContent::Group(group)=&mut grouped.layers.last_mut().unwrap().content {group.children[0].content=LayerContent::Adjustment(adjustment);}
+                            uploads+=presenter.draw(&grouped,&view,true)?;presenter.wait_ready()?;
+                        }
+                        assert_eq!(uploads,0,"masked pass-through groups must retain source and mask textures");
+                        eprintln!("[native probe] masked adjustment group {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);
                         let mut colors=doc.clone();
                         for (kind,params) in [
                             ("colorBalance",serde_json::json!({"midtones":[20,-10,5]})),
@@ -271,6 +309,55 @@ fn main() {
                         }
                         assert_eq!(uploads,0,"extended colors must not reupload the source");
                         eprintln!("[native probe] color balance + tinted black-white + selective color {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);
+                        let mut graded=doc.clone();let mut grade=recipe::ColorGrading::default();grade.midtones.sat=25.0;grade.midtones.hue=40.0;
+                        graded.layers.push(Layer::new("Grading",LayerContent::Adjustment(grading::adjustment(&grade)?)));
+                        presenter.draw(&graded,&view,true)?;presenter.wait_ready()?;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..15{grade.midtones.hue=40.0+n as f32*2.0;graded.layers.last_mut().unwrap().content=LayerContent::Adjustment(grading::adjustment(&grade)?);uploads+=presenter.draw(&graded,&view,true)?;presenter.wait_ready()?;}
+                        eprintln!("[native probe] upstream sampled grading {:.2} ms/frame; uploaded bytes={uploads}",started.elapsed().as_secs_f64()*1000.0/15.0);
+                        let mut region=recipe::ParametricCurve{highlights:-25.0,lights:20.0,darks:-15.0,shadows:30.0,splits:[25.0,50.0,75.0]};
+                        let mut param=doc.clone();param.layers.push(Layer::new("Parametric",LayerContent::Adjustment(parametric::adjustment(&region))));
+                        presenter.draw(&param,&view,true)?;presenter.wait_ready()?;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..20{region.shadows=30.0+n as f64;param.layers.last_mut().unwrap().content=LayerContent::Adjustment(parametric::adjustment(&region));uploads+=presenter.draw(&param,&view,true)?;presenter.wait_ready()?;}
+                        assert_eq!(uploads,0,"parametric curve updates retain source textures");
+                        eprintln!("[native probe] upstream parametric curve {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);
+                        presenter.prepare_comparison(&doc)?;
+                        assert_eq!(presenter.prepare_comparison(&doc)?,0,"comparison source remains resident");
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..30{view.compare_split=Some(n as f32/29.0);uploads+=presenter.draw(&param,&view,false)?;presenter.wait_ready()?;}
+                        assert_eq!(uploads,0,"split dragging only updates view uniforms");
+                        eprintln!("[native probe] original/edited split {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/30.0);
+                        view.compare_split=None;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..30{view.clipping=(n%4) as u8;view.compare_split=Some(n as f32/29.0);uploads+=presenter.draw(&param,&view,false)?;presenter.wait_ready()?;}
+                        assert_eq!(uploads,0,"clipping switches only update uniforms");
+                        eprintln!("[native probe] clipping + comparison {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/30.0);
+                        view.clipping=0;
+                        // Reuse the upstream-painted mask already validated above.
+                        let mut coverage_doc=mask_session.active().unwrap().doc.as_ref().clone();
+                        coverage_doc.layers.last_mut().unwrap().content=doc.layers[0].content.clone();
+                        presenter.prepare_mask_overlay(&coverage_doc)?;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..30{view.mask_guide=Some([0.2,0.5,0.6+n as f32/100.0,0.5,0.3,0.4,if n%2==0{1.0}else{2.0},if n%3==0{0.0}else{1.0}]);uploads+=presenter.draw(&param,&view,false)?;presenter.wait_ready()?;}
+                        assert_eq!(uploads,0,"gradient guides and overlay switches retain photo and coverage textures");
+                        eprintln!("[native probe] mask overlay + gradient guides {:.2} ms/frame; source reupload={uploads}",started.elapsed().as_secs_f64()*1000.0/30.0);
+                        let mut gradient_session=photocraft_engine::Session::new();gradient_session.add_document(Document::new("Live gradient",doc.size,ColorMode::Rgb,SampleType::U8),None);
+                        gradient_session.execute("gradient.fill.create",serde_json::json!({"from":[400,500],"to":[1200,500],"style":"linear","stops":[[0,"#ffffff"],[1,"#000000"]],"dither":false})).map_err(|e|e.to_string())?;
+                        let mut gradient=gradient_session.active().unwrap().doc.as_ref().clone();
+                        if let LayerContent::Fill(photocraft_engine::doc::Fill::Gradient{stops,..})=&mut gradient.layers[0].content{for (_,c) in stops{*c=Color::rgba(1.0,0.2,0.2,c.to_rgb()[0]);}}
+                        presenter.prepare_mask_overlay(&gradient)?;view.mask_source_space=true;
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        let gradient_bounds=gradient.bounds();
+                        for n in 0..20{if let LayerContent::Fill(photocraft_engine::doc::Fill::Gradient{style,angle,scale,offset,..})=&mut gradient.layers[0].content{let (a,s,o)=photocraft_compose::gradient_fill::from_handles(*style,[400.0,500.0],[1000.0+n as f32*10.0,600.0],gradient_bounds,*angle);*angle=a;*scale=s;*offset=o;}
+                            uploads+=presenter.prepare_mask_overlay(&gradient)?;uploads+=presenter.draw(&param,&view,false)?;presenter.wait_ready()?;}
+                        eprintln!("[native probe] live gradient coverage {:.2} ms/frame; uploaded bytes={uploads}",started.elapsed().as_secs_f64()*1000.0/20.0);
+                        std::sync::Arc::make_mut(&mut mask_session.active_mut().unwrap().doc).layers.last_mut().unwrap().content=doc.layers[0].content.clone();
+                        view.mask_source_space=false;view.mask_stroke=Some(serde_json::json!({"points":[{"x":0.3,"y":0.5}],"widthRel":0.1,"hardness":0.5,"opacity":0.2,"flow":0.5,"erase":false}));
+                        let started=std::time::Instant::now();let mut uploads=0;
+                        for n in 0..8{mask_session.execute("paint.stroke",serde_json::json!({"target":"mask","points":[[400+n*10,500,1],[1100+n*10,600,1]],"size":120,"hardness":0.5,"opacity":0.2,"flow":0.5,"spacing":0.15,"color":"#ffffff"})).map_err(|e|e.to_string())?;
+                            let painted=mask_session.active().unwrap().doc.as_ref().clone();uploads+=presenter.prepare_mask_overlay(&painted)?;view.mask_guide=Some([0.3,0.5,(1100+n*10)as f32/1600.0,600.0/1067.0,0.05,0.08,3.0,1.0]);uploads+=presenter.draw(&param,&view,false)?;presenter.wait_ready()?;}
+                        eprintln!("[native probe] upstream brush paint + native coverage {:.2} ms/frame; uploaded bytes={uploads}",started.elapsed().as_secs_f64()*1000.0/8.0);
                         Ok(())
                     },
                 ));

@@ -412,7 +412,7 @@ fn tier_dir_name(ext: &str, size: u16) -> String {
 }
 
 /// 缓存路径：`dbDir/thumbs/<档位>/<源路径哈希>-<mtime secs>.jpg`。
-fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
+pub(crate) fn cache_path(db_dir: &Path, src: &Path, size: u16, mtime: SystemTime) -> PathBuf {
     let secs = mtime
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -461,6 +461,34 @@ pub fn rebind_cache_keys(db_dir: &Path, old: &Path, new: &Path) -> u64 {
         }
     }
     moved
+}
+
+/// 删除某源路径的全部缓存条目（删照片库 / 回收站清除 / 重复删除共用）：
+/// 跨全部档位目录（含 RAW 代际目录）按 `<源路径哈希>-` 前缀匹配，同一源
+/// 的历史 mtime 代一并清掉——源文件删除后无从重算精确键，前缀扫是唯一
+/// 完整口径。返回删除的缓存文件数（thumbs 目录不存在返回 0，缺失容忍）。
+pub fn remove_src_cache(db_dir: &Path, src: &Path) -> u64 {
+    let prefix = format!("{:016x}-", src_key(src));
+    let mut removed = 0u64;
+    let Some(tiers) = fs::read_dir(db_dir.join("thumbs")).ok() else {
+        return 0;
+    };
+    for tier in tiers.flatten() {
+        let Ok(entries) = fs::read_dir(tier.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix)
+                && name.ends_with(".jpg")
+                && fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// 命中（任意 mtime 代，取字典序最大 = 最新 mtime；零字节代视为无效跳过）

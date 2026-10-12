@@ -338,10 +338,33 @@ pub fn worker_count() -> usize {
     crate::tasks::index_parallelism()
 }
 
+/// 进程级导入在场旗（kick 让路统一，2026-10-09 审计 P2）：由
+/// `launch_import` 的闸置位/放行**同点**翻转（与 AppState.import_running
+/// 同一生命数——同一代码位写两侧，不另设第二判定点）。kick 无 state
+/// 访问，导入在场时 no-op：任务留 pending，导入收尾的 kick 兜底唤醒
+/// （此前仅手动入口拒让路，联拍 kick 穿透闸在导入期启动索引池）。
+static IMPORT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// 导入闸翻转统一入口（launch_import 置位 / ImportGate Drop 放行；测试直调）。
+pub fn set_import_in_flight(running: bool) {
+    IMPORT_IN_FLIGHT.store(running, Ordering::SeqCst);
+}
+
+/// 导入是否在场（kick 让路守卫读点）。
+pub fn import_in_flight() -> bool {
+    IMPORT_IN_FLIGHT.load(Ordering::SeqCst)
+}
+
 /// 导入完成后的钩子：派一个 supervisor 任务把当前待办全速跑完。
 /// job 不等它（importSessionFinished 只代表文件入库）。任务体接线暂停/
-/// 取消旗（导入开始时 supervisor.pause_kind("index") 让路）。
+/// 取消旗（导入开始时 supervisor.pause_kind("index") 让路）。导入在场
+/// （进程级闸）时 no-op——任务留 pending，导入收尾的 kick 兜底。
 pub fn kick(db_dir: PathBuf, supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>) {
+    // 让路统一（§八-5）：一切 kick 唤醒点共享导入在场守卫，导入期间
+    // 不启动索引池（联拍 kick 此前穿透让路闸）。
+    if import_in_flight() {
+        return;
+    }
     let _ = supervisor.spawn_coalesced(
         "index",
         format!("index-worker-pool:{}", db_dir.display()),
@@ -366,20 +389,32 @@ pub fn resume_pending(db_dir: &Path) -> u64 {
 }
 
 /// 启动恢复钩子：复位遗留 running → pending → 事件（indexTaskResumed）
-/// → 派 worker 续跑。无待办不发事件。
+/// → 派 worker 续跑。无待办不发事件、不派 worker（2026-10-09 审计 P0
+/// 断链B 切库/建库共用本入口——同步探测 + 有活才 spawn，防后台线程在
+/// 数据目录被手动清理后复活空库）。pHash 任务幂等补差（审计 P0-C：
+/// 入库只自动建 thumb/eyes/blur，phash 通道此前仅手动/代际自愈建档——
+/// 恢复唤醒点统一收口）。
 pub fn resume_and_kick(
     db_dir: PathBuf,
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    let bus = bus.clone();
-    supervisor.spawn("index", "index-resume".into(), move |_| {
-        let pending = resume_pending(&db_dir);
-        if pending > 0 {
-            bus.publish(AppEvent::IndexTaskResumed { pending });
-        }
-        run_pending(&db_dir, worker_count());
-    });
+    // 前置同步探测：库文件不在盘 = 无遗留可恢复（被手动清理的目录不
+    // 因恢复钩子复活，切换校验保持「文件在盘才可切」语义）
+    if !db_dir.join("library.db").is_file() {
+        return;
+    }
+    if let Ok(db) = crate::ipc::open_library_db(&db_dir) {
+        let _ = db.create_phash_tasks_for_unindexed();
+    }
+    let pending = resume_pending(&db_dir);
+    if pending > 0 {
+        bus.publish(AppEvent::IndexTaskResumed { pending });
+        let db_dir = db_dir.clone();
+        supervisor.spawn("index", "index-resume".into(), move |_| {
+            run_pending(&db_dir, worker_count());
+        });
+    }
 }
 
 // 代际回填共用入队、标记和消费流程；各入口保留代际名与后续业务动作。

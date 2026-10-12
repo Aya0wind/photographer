@@ -20,6 +20,9 @@ pub mod culling;
 /// photos_libraries 登记表仓储（单数据库多照片库）。
 pub mod libraries;
 
+pub mod organization;
+pub mod reorganization;
+
 mod albums;
 mod assets;
 mod editor;
@@ -909,10 +912,6 @@ fn map_album(row: &Row<'_>) -> Result<AlbumRow> {
         dir_name: row.get(5)?,
     })
 }
-
-/// 默认相册（系统级保底）：导入必落相册的归宿；禁删禁改名（用户定案
-/// 2026-09-27）——完全固定，永远是兜底落点。
-pub const DEFAULT_ALBUM_NAME: &str = "未分组";
 
 /// 相册显示名 → 物理目录名（0018，跨平台安全）：Windows 非法字符
 /// `< > : " / \ | ? *` 与控制符折叠为 `-`；去掉结尾的点/空格（Win32 路径

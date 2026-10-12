@@ -2,6 +2,17 @@
 //! on the GPU and is copied to a native swapchain. Other platforms retain JPEG.
 use serde::Deserialize;
 use tauri::{AppHandle, WebviewWindow};
+#[derive(Default)]
+struct RecipeCache {value:Option<(u64,std::sync::Arc<super::recipe::EditRecipe>)>}
+impl RecipeCache {
+    fn resolve(&mut self,recipe:Option<super::recipe::EditRecipe>,version:u64)->Result<std::sync::Arc<super::recipe::EditRecipe>,String>{
+        if let Some(recipe)=recipe {
+            if self.value.as_ref().is_some_and(|(old,stored)|version==*old&&**stored!=recipe){return Err("原生画布配方版本重复".into());}
+            if self.value.as_ref().is_none_or(|(old,_)|version>*old){self.value=Some((version,std::sync::Arc::new(recipe)));}
+        }
+        self.value.as_ref().filter(|(stored,_)|*stored==version).map(|(_,recipe)|recipe.clone()).ok_or_else(||"原生画布配方版本不匹配".into())
+    }
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,16 +27,57 @@ pub struct View {
     pub mapping:[f32;8],
     #[serde(default)]
     pub crop_guide:Option<[f32;4]>,
+    #[serde(default)]
+    pub straighten_guide:Option<[f32;4]>,
+    #[serde(default)]
+    pub compare_split:Option<f32>,
+    #[serde(default)]
+    pub clipping:u8,
+    #[serde(default)]
+    pub mask_guide:Option<[f32;8]>,
+    #[serde(default)]
+    pub mask_id:Option<String>,
+    #[serde(default)]
+    pub mask_preview:Option<[f64;4]>,
+    #[serde(default)]
+    pub mask_source_space:bool,
+    #[serde(default)]
+    pub mask_stroke:Option<super::recipe::MaskStroke>,
     #[serde(default="default_scale")]
     pub scale:f32,
 }
 fn identity_mapping()->[f32;8] {[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0]}
 fn default_scale()->f32 {1.0}
+fn mask_preview_recipe(recipe:&super::recipe::EditRecipe,view:&View)->Result<super::recipe::EditRecipe,String>{
+    let mut preview=recipe.clone();
+    if let Some(p)=view.mask_preview {
+        let id=view.mask_id.as_ref().ok_or("临时蒙版未指定区域")?;
+        let mask=preview.masks.iter_mut().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
+        if mask.kind==super::recipe::MaskKind::Brush{return Err("画笔不支持渐变临时坐标".into());}
+        mask.from=super::recipe::NormPoint{x:p[0],y:p[1]};mask.to=super::recipe::NormPoint{x:p[2],y:p[3]};
+    }
+    if let Some(stroke)=&view.mask_stroke {
+        let count:usize=preview.masks.iter().flat_map(|m|&m.strokes).map(|s|s.points.len()).sum();
+        if count.saturating_add(stroke.points.len())>100000{return Err("蒙版笔迹过长".into());}
+        let id=view.mask_id.as_ref().ok_or("临时画笔未指定蒙版")?;
+        let mask=preview.masks.iter_mut().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
+        if mask.kind!=super::recipe::MaskKind::Brush{return Err("渐变不支持临时画笔".into());}
+        mask.strokes.push(stroke.clone());
+    }Ok(preview)
+}
 fn full_image() -> [f32; 4] {
     [0.0, 0.0, 1.0, 1.0]
 }
 impl View {
     fn validate(&self) -> Result<(), String> {
+        if let Some(s)=&self.mask_stroke {
+            if s.points.is_empty()||s.points.len()>100000||s.points.iter().any(|p|![p.x,p.y].iter().all(|v|v.is_finite()&&(0.0..=1.0).contains(v)))||![s.width_rel,s.hardness,s.opacity,s.flow].iter().all(|v|v.is_finite())||!(0.0001..=1.0).contains(&s.width_rel)||![s.hardness,s.opacity,s.flow].iter().all(|v|(0.0..=1.0).contains(v)){return Err("临时画笔参数无效".into());}
+        }
+        if self.mask_preview.is_some_and(|p|p.iter().any(|v|!v.is_finite()||!(0.0..=1.0).contains(v))){return Err("临时蒙版坐标无效".into());}
+        if self.mask_id.as_ref().is_some_and(|id|id.is_empty()||id.len()>128)||self.mask_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||v.abs()>1.0e7)||g[4]<0.0||g[5]<0.0||![1.0,2.0,3.0].contains(&g[6])||![0.0,1.0].contains(&g[7])){return Err("蒙版控制线无效".into());}
+        if self.clipping>3{return Err("曝光提示参数无效".into());}
+        if self.compare_split.is_some_and(|v|!v.is_finite()||!(0.0..=1.0).contains(&v)){return Err("对比分割位置无效".into());}
+        if self.straighten_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||*v<0.0||*v>1.0)){return Err("拉直辅助线无效".into());}
         if !self.scale.is_finite() || self.scale<=0.0 || self.scale>8.0 || self.mapping.iter().any(|v|!v.is_finite()) || self.crop_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||*v<0.0||*v>1.001)||g[2]<=0.0||g[3]<=0.0) {return Err("原生画布变换参数无效".into());}
         if self.overlays.len()>8 || self.overlays.iter().any(|r|r.iter().any(|v|v.unsigned_abs()>32768)||r[2]<=0||r[3]<=0||r[4]<0) {return Err("原生画布浮动控件尺寸无效".into());}
         if self.image.iter().any(|v| !v.is_finite())
@@ -71,23 +123,25 @@ pub async fn edit_native_frame(
     app: AppHandle,
     window: WebviewWindow,
     session_id: String,
-    recipe: serde_json::Value,
+    recipe: Option<serde_json::Value>,
+    recipe_revision:Option<u64>,
     view: View,
     revision: u64,
     original: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     view.validate()?;
     if window.label() != "advanced-editor" {
         return Err("原生画布窗口无效".into());
     }
-    let recipe = super::recipe::parse_recipe(&recipe)?;
+    let recipe = recipe.as_ref().map(super::recipe::parse_recipe).transpose()?;
     #[cfg(windows)]
     {
-        windows_canvas::frame(app, &session_id, recipe, view, revision, original).await
+        windows_canvas::frame(app, &session_id, recipe,recipe_revision.unwrap_or(revision), view, revision, original).await?;
+        Ok(true)
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, session_id, recipe, revision, original);
+        let _ = (app, session_id, recipe, recipe_revision,revision, original);
         Err("此平台尚未启用原生画布".into())
     }
 }
@@ -125,7 +179,7 @@ mod windows_canvas {
     use windows::Win32::UI::WindowsAndMessaging::*;
 
     struct Frame {
-        recipe: EditRecipe,
+        recipe: Arc<EditRecipe>,
         view: View,
         revision: u64,
         original: bool,
@@ -136,6 +190,7 @@ mod windows_canvas {
         parent: String,
         window: Arc<Window>,
         latest: Mutex<Option<Frame>>,
+        recipe:Mutex<RecipeCache>,
         changed: Condvar,
         stopped: AtomicBool,
         visible: AtomicBool,
@@ -307,6 +362,7 @@ mod windows_canvas {
             parent: parent.label().into(),
             window: child,
             latest: Mutex::new(None),
+            recipe:Mutex::new(RecipeCache::default()),
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
             visible: AtomicBool::new(false),
@@ -338,9 +394,12 @@ mod windows_canvas {
                 let mut renderer=Renderer::new(&initial).with_source_size(original_size,&initial);
                 let mut overlay_renderer=Renderer::new(&initial);
                 let mut annotation_doc:Option<photocraft_engine::doc::Document>=None;
-                let mut previous_overlay:Option<(photocraft_engine::doc::DocId,EditRecipe,bool)>=None;
+                let mut previous_overlay:Option<(photocraft_engine::doc::DocId,Arc<EditRecipe>,bool)>=None;
+                let mut previous_input:Option<(Arc<EditRecipe>,Option<[f64;4]>,Option<crate::edit::recipe::MaskStroke>)>=None;
+                let mut previous_mask:Option<(photocraft_engine::doc::DocId,serde_json::Value)>=None;
+                let mut gradient_overlay:Option<photocraft_engine::doc::Document>=None;
                 let warm_start=Instant::now();
-                let warm_view=View{rect:[0,0,1,1],uv:[0.0,0.0,1.0,1.0],image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,scale:1.0};
+                let warm_view=View{rect:[0,0,1,1],uv:[0.0,0.0,1.0,1.0],image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0};
                 let warmed=renderer.warm_canvas_document(&initial)
                     .and_then(|doc| gpu.draw(&doc,&warm_view,true))
                     .and_then(|_| gpu.wait_ready());
@@ -360,20 +419,39 @@ mod windows_canvas {
                     let start=Instant::now();
                     let result=(|| {
                         let base=preview::canvas_source(&w.session)?;
+                        let input_changed=previous_input.as_ref().is_none_or(|(recipe,gradient,stroke)|!Arc::ptr_eq(recipe,&frame.recipe)||*gradient!=frame.view.mask_preview||*stroke!=frame.view.mask_stroke);
+                        let mask_recipe=if frame.view.mask_preview.is_some()||frame.view.mask_stroke.is_some(){std::borrow::Cow::Owned(crate::edit::native_canvas::mask_preview_recipe(&frame.recipe,&frame.view)?)}else{std::borrow::Cow::Borrowed(frame.recipe.as_ref())};
+                        let mut mask_uploads=0;
+                        if let Some(id)=frame.view.mask_id.as_ref().filter(|_|frame.view.mask_guide.is_some_and(|g|g[7]>0.5)) {
+                            let mask=mask_recipe.masks.iter().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
+                            frame.view.mask_source_space=mask.feather==0.0&&mask.kind!=crate::edit::recipe::MaskKind::Brush;
+                            let unchanged= !input_changed&&previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&old["id"].as_str()==Some(id.as_str()));
+                            if !unchanged {
+                            let key=serde_json::json!({"id":id,"kind":mask.kind,"from":mask.from,"to":mask.to,"strokes":mask.strokes,"inverted":mask.inverted,"feather":mask.feather,"quarter":frame.recipe.rotate_quarter,"geometry":frame.recipe.geometry,"crop":frame.recipe.crop});
+                            if !previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&*old==key){
+                                let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&base,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&base,&mask_recipe,id)?};
+                                mask_uploads=gpu.prepare_mask_overlay(&doc)?;previous_mask=Some((base.id,key));
+                            }
+                            }
+                        }
+                        if frame.view.mask_id.is_none()||!frame.view.mask_guide.is_some_and(|g|g[7]>0.5){previous_mask=None;}
                         frame.view.mapping=crate::edit::native_geometry::mapping(&frame.recipe,base.size);
-                        let mut render_recipe=frame.recipe.clone();render_recipe.rotate_quarter=0;render_recipe.geometry=None;render_recipe.crop=None;render_recipe.text_layers.clear();render_recipe.brush_strokes.clear();
-                        let overlay_changed=previous_overlay.as_ref().is_none_or(|(id,old,original)|*id!=base.id || *original!=frame.original || old.text_layers!=frame.recipe.text_layers || old.brush_strokes!=frame.recipe.brush_strokes || old.rotate_quarter!=frame.recipe.rotate_quarter || old.geometry!=frame.recipe.geometry || old.crop!=frame.recipe.crop);
+                        let overlay_changed=previous_overlay.as_ref().is_none_or(|(id,old,original)|*id!=base.id || *original!=frame.original || !Arc::ptr_eq(old,&frame.recipe)&&(old.text_layers!=frame.recipe.text_layers || old.brush_strokes!=frame.recipe.brush_strokes || old.rotate_quarter!=frame.recipe.rotate_quarter || old.geometry!=frame.recipe.geometry || old.crop!=frame.recipe.crop));
                         if overlay_changed {
                             annotation_doc=if frame.original {None}else{overlay_renderer.canvas_annotations(&base,&frame.recipe)?};
                             previous_overlay=Some((base.id,frame.recipe.clone(),frame.original));
                         }
-                        let changed=!previous.as_ref().is_some_and(|(id,recipe,original,_)| *id==base.id && *recipe==render_recipe && *original==frame.original);
+                        let candidate=if input_changed {let mut value=mask_recipe.as_ref().clone();value.rotate_quarter=0;value.geometry=None;value.crop=None;value.text_layers.clear();value.brush_strokes.clear();Some(value)}else{None};
+                        let changed=previous.as_ref().is_none_or(|(id,recipe,original,_)|*id!=base.id||*original!=frame.original||candidate.as_ref().is_some_and(|value|value!=recipe));
                         if changed {
+                            let render_recipe=candidate.or_else(||previous.as_ref().map(|(_,recipe,_,_)|recipe.clone())).ok_or("无绘制配方")?;
                             let id=base.id;
-                            let doc=if frame.original {base} else {renderer.canvas_document(&base,&render_recipe)?};
+                            let doc=if frame.original {base.clone()} else {renderer.canvas_document(&base,&render_recipe)?};
                             previous=Some((id,render_recipe,frame.original,doc));
                         }
-                        gpu.draw_with_annotations(&previous.as_ref().ok_or("无绘制文档")?.3,&frame.view,changed,annotation_doc.as_ref(),overlay_changed)
+                        previous_input=Some((frame.recipe.clone(),frame.view.mask_preview,frame.view.mask_stroke.clone()));
+                        let comparison_uploads=if frame.view.compare_split.is_some(){gpu.prepare_comparison(&base)?}else{0};
+                        gpu.draw_with_annotations(&previous.as_ref().ok_or("无绘制文档")?.3,&frame.view,changed,annotation_doc.as_ref(),overlay_changed).map(|uploads|uploads+comparison_uploads+mask_uploads)
                     })();
                     match result {
                         Ok(uploads)=>{
@@ -431,12 +509,14 @@ mod windows_canvas {
     pub async fn frame(
         app: AppHandle,
         session: &str,
-        recipe: EditRecipe,
+        recipe: Option<EditRecipe>,
+        recipe_revision:u64,
         view: View,
         revision: u64,
         original: bool,
     ) -> Result<(), String> {
         let w = worker(session)?;
+        let recipe=w.recipe.lock().map_err(|_|"配方缓存锁不可用")?.resolve(recipe,recipe_revision)?;
         let epoch = w.hide_epoch.load(Ordering::Acquire);
         if revision < w.revision.fetch_max(revision, Ordering::AcqRel) {
             return Ok(());
@@ -497,12 +577,74 @@ mod windows_canvas {
 mod tests {
     use super::{full_image,identity_mapping, View};
     #[test]
+    fn cached_recipe_views_require_exact_version_and_cannot_roll_back_newer_data(){
+        let mut cache=super::RecipeCache::default();let recipe=crate::edit::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft"})).unwrap();
+        assert!(cache.resolve(None,1).is_err());assert_eq!(cache.resolve(Some(recipe.clone()),1).unwrap().as_ref(),&recipe);assert_eq!(cache.resolve(None,1).unwrap().as_ref(),&recipe);
+        let mut changed=recipe.clone();changed.rotate_quarter=1;assert!(cache.resolve(Some(changed.clone()),1).is_err());assert_eq!(cache.resolve(None,1).unwrap().as_ref(),&recipe);
+        assert_eq!(cache.resolve(Some(changed.clone()),3).unwrap().as_ref(),&changed);assert!(cache.resolve(Some(recipe),2).is_err());assert_eq!(cache.resolve(None,3).unwrap().as_ref(),&changed);assert!(cache.resolve(None,4).is_err());
+    }
+    #[test]
+    fn recipe_cache_reuses_immutable_allocation_and_preserves_old_snapshots(){
+        let mut cache=super::RecipeCache::default();let recipe=crate::edit::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft"})).unwrap();
+        let first=cache.resolve(Some(recipe.clone()),1).unwrap();let view=cache.resolve(None,1).unwrap();assert!(std::sync::Arc::ptr_eq(&first,&view));
+        let repeated=cache.resolve(Some(recipe.clone()),1).unwrap();assert!(std::sync::Arc::ptr_eq(&first,&repeated));
+        let mut changed=recipe.clone();changed.rotate_quarter=1;let second=cache.resolve(Some(changed),2).unwrap();assert!(!std::sync::Arc::ptr_eq(&first,&second));assert_eq!(first.rotate_quarter,0);assert_eq!(second.rotate_quarter,1);
+    }
+    #[test]
+    #[ignore="large recipe reference timing; run explicitly"]
+    fn large_recipe_reference_timing(){
+        let mut recipe=crate::edit::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"m","name":"Brush","kind":"brush","enabled":true,"inverted":false,"density":100,"feather":0,"from":{"x":0,"y":0},"to":{"x":1,"y":1}}]})).unwrap();
+        recipe.masks[0].strokes.push(crate::edit::recipe::MaskStroke{points:(0..100000).map(|n|crate::edit::recipe::NormPoint{x:n as f64/100000.0,y:0.5}).collect(),width_rel:0.1,hardness:0.5,opacity:0.5,flow:0.5,erase:false});
+        let mut cache=super::RecipeCache::default();let first=cache.resolve(Some(recipe),1).unwrap();let start=std::time::Instant::now();for _ in 0..1000{std::hint::black_box(cache.resolve(None,1).unwrap());}let shared=start.elapsed().as_secs_f64();
+        let start=std::time::Instant::now();for _ in 0..1000{std::hint::black_box(first.as_ref().clone());}let copied=start.elapsed().as_secs_f64();eprintln!("[recipe references] 100k points, shared {:.4} ms; deep clone {:.4} ms",shared,copied);
+    }
+    #[test]
+    fn temporary_brush_and_eraser_update_pixels_without_committing_a_stroke(){
+        use photocraft_engine::doc::{Document,Size,Color,ColorMode,SampleType};
+        let recipe=crate::edit::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"mask","name":"Brush","kind":"brush","enabled":true,"inverted":false,"density":100,"feather":0,"from":{"x":0,"y":0},"to":{"x":1,"y":1},"advanced":{"exposure":1}}]})).unwrap();
+        let stroke=serde_json::from_value(serde_json::json!({"points":[{"x":0.3,"y":0.5},{"x":0.7,"y":0.5}],"widthRel":0.4,"hardness":0.8,"opacity":0.7,"flow":0.5,"erase":false})).unwrap();
+        let mut view=View{rect:[0,0,640,400],uv:full_image(),image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:Some([0.3,0.5,0.7,0.5,0.2,0.2,3.0,1.0]),mask_id:Some("mask".into()),mask_preview:None,mask_source_space:false,mask_stroke:Some(stroke),scale:1.0};
+        assert!(view.validate().is_ok());let painting=super::mask_preview_recipe(&recipe,&view).unwrap();assert!(recipe.masks[0].strokes.is_empty());assert_eq!(painting.masks[0].strokes.len(),1);
+        let base=Document::with_background("Photo",Size::new(32,24),ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.3,0.3,1.0));
+        let before=photocraft_compose::flatten(&crate::edit::photocraft::render_document(&base,&recipe).unwrap());let painted=photocraft_compose::flatten(&crate::edit::photocraft::render_document(&base,&painting).unwrap());assert_ne!(before.px,painted.px);
+        view.mask_stroke.as_mut().unwrap().erase=true;view.mask_stroke.as_mut().unwrap().opacity=1.0;view.mask_stroke.as_mut().unwrap().flow=1.0;
+        let erasing=super::mask_preview_recipe(&painting,&view).unwrap();let erased=photocraft_compose::flatten(&crate::edit::photocraft::render_document(&base,&erasing).unwrap());assert_ne!(painted.px,erased.px);
+        view.mask_stroke=None;assert_eq!(super::mask_preview_recipe(&recipe,&view).unwrap(),recipe);
+    }
+    #[test]
+    fn temporary_gradient_moves_local_effect_without_changing_saved_recipe(){
+        use photocraft_engine::doc::{Document,Size,Color,ColorMode,SampleType};
+        let recipe=crate::edit::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","masks":[{"id":"mask","name":"Gradient","kind":"linear","enabled":true,"inverted":false,"density":100,"feather":0,"from":{"x":0.1,"y":0.5},"to":{"x":0.5,"y":0.5},"advanced":{"exposure":2}}]})).unwrap();
+        let mut view=View{rect:[0,0,640,400],uv:full_image(),image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:Some("mask".into()),mask_preview:Some([0.5,0.5,0.9,0.5]),mask_source_space:false,mask_stroke:None,scale:1.0};
+        let preview=super::mask_preview_recipe(&recipe,&view).unwrap();assert_eq!(recipe.masks[0].from.x,0.1);assert_eq!(preview.masks[0].from.x,0.5);
+        let base=Document::with_background("Photo",Size::new(16,8),ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.3,0.3,1.0));
+        let before=photocraft_compose::flatten(&crate::edit::photocraft::render_document(&base,&recipe).unwrap());
+        let moving=photocraft_compose::flatten(&crate::edit::photocraft::render_document(&base,&preview).unwrap());assert_ne!(before.px,moving.px);
+        view.mask_preview=None;assert_eq!(super::mask_preview_recipe(&recipe,&view).unwrap(),recipe);
+    }
+    #[test]
+    fn mask_guides_accept_offscreen_handles_and_reject_invalid_payloads(){
+        let mut view=View{rect:[0,0,640,400],uv:full_image(),image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:Some([-1.0,0.5,2.0,0.5,1.5,1.5,2.0,1.0]),mask_id:Some("mask".into()),mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0};
+        assert!(view.validate().is_ok());view.mask_guide.as_mut().unwrap()[6]=4.0;assert!(view.validate().is_err());
+        view.mask_guide.as_mut().unwrap()[6]=1.0;view.mask_guide.as_mut().unwrap()[7]=0.0;assert!(view.validate().is_ok());
+        view.mask_guide.as_mut().unwrap()[0]=f32::NAN;assert!(view.validate().is_err());
+    }
+    #[test]
+    fn comparison_split_accepts_endpoints_and_rejects_invalid_positions(){
+        let mut view=View{rect:[0,0,640,400],uv:full_image(),image:full_image(),overlays:vec![],mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0};
+        for value in [0.0,0.5,1.0]{view.compare_split=Some(value);assert!(view.validate().is_ok());}
+        for value in [-0.1,1.1,f32::NAN,f32::INFINITY]{view.compare_split=Some(value);assert!(view.validate().is_err());}
+        view.compare_split=None;
+        for warnings in 0..=3{view.clipping=warnings;assert!(view.validate().is_ok());}
+        view.clipping=4;assert!(view.validate().is_err());
+    }
+    #[test]
     fn invalid_view_cannot_reach_surface_configuration() {
         assert!(View {
             rect: [0, 0, 1920, 1080],
             image: full_image(),
             overlays:vec![],
-            mapping:identity_mapping(),crop_guide:None,scale:1.0,
+            mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0,
             uv: [0.0, 0.0, 1.0, 1.0]
         }
         .validate()
@@ -511,7 +653,7 @@ mod tests {
             rect: [0, 0, 0, 1080],
             image: full_image(),
             overlays:vec![],
-            mapping:identity_mapping(),crop_guide:None,scale:1.0,
+            mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0,
             uv: [0.0, 0.0, 1.0, 1.0]
         }
         .validate()
@@ -520,7 +662,7 @@ mod tests {
             rect: [0, 0, 20000, 1080],
             image: full_image(),
             overlays:vec![],
-            mapping:identity_mapping(),crop_guide:None,scale:1.0,
+            mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0,
             uv: [0.0, 0.0, 1.0, 1.0]
         }
         .validate()
@@ -529,7 +671,7 @@ mod tests {
             rect: [0, 0, 1920, 1080],
             image: full_image(),
             overlays:vec![],
-            mapping:identity_mapping(),crop_guide:None,scale:1.0,
+            mapping:identity_mapping(),crop_guide:None,straighten_guide:None,compare_split:None,clipping:0,mask_guide:None,mask_id:None,mask_preview:None,mask_source_space:false,mask_stroke:None,scale:1.0,
             uv: [f32::NAN, 0.0, 1.0, 1.0]
         }
         .validate()

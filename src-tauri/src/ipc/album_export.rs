@@ -33,7 +33,7 @@ use tauri::State;
 
 use crate::db::{AlbumExportJobRow, AlbumExportMember, Db};
 use crate::events::{AppEvent, EventBus};
-use crate::import::templates::unique_path;
+use crate::db::organization::unique_path;
 use crate::ipc::{run_blocking, AppState, SharedState};
 
 /// 进度事件与进度落库的共用节流窗（与 libraryScanProgress 同节奏）。

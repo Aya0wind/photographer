@@ -7,7 +7,9 @@ import {
   cullSessionDiscard,
   cullSessionList,
   cullSessionRename,
+  subscribeAppEvents,
   type AlbumDto,
+  type AppEvent,
   type CullFinishResult,
   type CullSessionDto,
 } from "@/ipc/api";
@@ -195,6 +197,27 @@ export default function CullingPage() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // 删库联动（2026-10-09）：照片库登记增删 → 会话进度/相册名映射随库内资产
+  // 消失失真，photoLibrariesChanged 事件到达即轻量重拉列表
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void subscribeAppEvents((event: AppEvent) => {
+      if (event.type === "photoLibrariesChanged") void refresh();
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [refresh]);
 
   // 相册名解析（scope 来源描述用；失败不影响主流程）

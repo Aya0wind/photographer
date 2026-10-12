@@ -127,6 +127,7 @@ describe("画廊：隐藏跨库重复（M5 显示层折叠）", () => {
         status: "online",
         assetCount: 2,
         sizeBytes: 0,
+        organizationTemplate: "{year}/{month}/{day}/{filename}",
       },
       {
         id: "lib-b",
@@ -136,6 +137,7 @@ describe("画廊：隐藏跨库重复（M5 显示层折叠）", () => {
         status: "online",
         assetCount: 1,
         sizeBytes: 0,
+        organizationTemplate: "{year}/{month}/{day}/{filename}",
       },
     ]);
     duplicatesMock.mockResolvedValue([

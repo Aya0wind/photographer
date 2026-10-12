@@ -128,12 +128,20 @@ windows-core = "0.61"
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["metal"] }
 ort = { version = "2.0.0-rc.13", features = ["coreml"] }
+# 联机拍摄（计划 §D）：ImageCaptureCore PTP 传输骨架。IC 没有稳定社区绑定
+# （crates.io 的 image-capture-core 0.1.5 停更于 2019），因此走 objc2 运行时
+# 消息 + 自写 extern 类声明；objc2-foundation 提供 NSData/NSString 等基础类型，
+# block2 用于 requestSendPTPCommand 的 completion 块。版本为 2026-10 现行稳定。
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
 tempfile = "3"
+tiff = "0.11.3"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
@@ -142,6 +150,27 @@ tempfile = "3"
 codegen-units = 16
 lto = false
 opt-level = 2
+
 # GPU 驱动/合成器 panic 可隔离并回退 CPU，不能使用 abort。
 panic = "unwind"
 strip = true
+
+# Keep the editor's pixel kernels optimized while application code retains
+# normal dev diagnostics. Release builds already optimize these dependencies.
+[profile.dev.package.photocraft-algo]
+opt-level = 2
+[profile.dev.package.photocraft-raster]
+opt-level = 2
+[profile.dev.package.photocraft-compose]
+opt-level = 2
+[profile.dev.package.photocraft-color]
+opt-level = 2
+[profile.dev.package.photocraft-engine]
+opt-level = 2
+[profile.dev.package.photocraft-gpu]
+opt-level = 2
+
+# Adapter-side LUT construction is also hot; keep application debug symbols
+# while avoiding unoptimized per-sample iteration in the development editor.
+[profile.dev.package.photographer]
+opt-level = 1

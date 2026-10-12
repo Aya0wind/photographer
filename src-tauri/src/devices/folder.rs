@@ -96,6 +96,18 @@ impl DeviceSource for LocalFolderSource {
         self.inner.open_head(id, max)
     }
 
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        let files = self.inner.list_names()?;
+        Ok(files
+            .into_iter()
+            .filter(|file| {
+                self.exclude_rel.as_ref().is_none_or(|exclude| {
+                    !Path::new(&file.rel_path).starts_with(Path::new(exclude))
+                })
+            })
+            .collect())
+    }
+
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {
         self.inner.stream(id)
     }

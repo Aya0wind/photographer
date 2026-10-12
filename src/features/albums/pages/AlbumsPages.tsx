@@ -1,5 +1,5 @@
 import { usePhotoCards } from "@/features/gallery/lib/usePhotoCards";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { useTranslation } from "react-i18next";
 import { getIntlLocale } from "@/i18n";
@@ -22,14 +22,18 @@ import {
   albumDirRename,
   albumList,
   albumRename,
+  subscribeAppEvents,
   type AlbumDto,
+  type AppEvent,
   type AssetDto,
 } from "@/ipc/api";
 import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
-import { isUngroupedAlbum } from "../lib/ungroupedAlbum";
+import { notifyCountsRefresh } from "@/lib/countsRefresh";
 import { DEFAULT_SMART_TAGS, indexedTagHitCount, loadSmartTags, smartTagLabel } from "../lib/smartTags";
 import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
 import AlbumDetailPage from "./AlbumDetailPage";
+import TetherAlbumDialog from "@/features/tethering/TetherAlbumDialog";
+import ErrorModal from "@/shared/components/ErrorModal";
 
 /**
  * 相册页（手工 + 智能同页两区，2026-09 相册定案重构）：
@@ -253,7 +257,6 @@ function ManualAlbumCard({
       <span className="relative block h-20 w-full border-b border-edge/60">
         <CardCover url={cover} label={album.name} testIdImg="albums-manual-cover" testIdFallback="albums-manual-cover-fallback" />
         <span className="absolute right-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white" data-testid="albums-manual-count">{t("albums.itemCountBadge", { count: album.itemCount })}</span>
-        {isUngroupedAlbum(album) && <span className="absolute bottom-1.5 right-1.5 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white" data-testid="albums-manual-badge-ungrouped">{t("albums.ungroupedBadge")}</span>}
       </span>
       <span className="block px-2 py-2 text-sm text-text-secondary">
         <span className="block truncate" data-testid="albums-manual-name" title={album.name}>
@@ -354,11 +357,32 @@ export function AlbumsIndexPage() {
 
   // --- 手工相册清单 ---------------------------------------------------------------
   const [albums, setAlbums] = useState<AlbumDto[]>([]);
+  const [tetherOpen, setTetherOpen] = useState(false);
   const refreshAlbums = useCallback(async () => {
     setAlbums(await albumList());
   }, []);
   useEffect(() => {
     void refreshAlbums();
+  }, [refreshAlbums]);
+  // 删库联动（2026-10-09）：照片库登记增删 → 相册计数/封面随库内资产消失
+  // 失真，事件到达即重拉清单（封面按新清单自动重取）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void subscribeAppEvents((event: AppEvent) => {
+      if (event.type === "photoLibrariesChanged" || event.type === "tetheringPhotoAdded") void refreshAlbums();
+    })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 非 Tauri 环境（vite dev 预览）静默
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [refreshAlbums]);
   const covers = useManualAlbumCovers(albums);
 
@@ -384,6 +408,8 @@ export function AlbumsIndexPage() {
     setNewName("");
     setCreating(false);
     setCreateError(null);
+    // 相册计数（sidebar_counts albums）随增删改名变——本地通知侧栏重拉
+    notifyCountsRefresh();
   }
 
   // --- 卡片菜单（右键/悬浮 ⋯）与三个弹层 --------------------------------------------
@@ -396,6 +422,9 @@ export function AlbumsIndexPage() {
   const [dirRenameName, setDirRenameName] = useState("");
   const [dirRenameError, setDirRenameError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<AlbumDto | null>(null);
+  const [deletePhotos, setDeletePhotos] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [coverPicking, setCoverPicking] = useState<AlbumDto | null>(null);
   // 导出为文件夹（M6，Photographer → LR）：整册导出（subgroup=null）
   const [exporting, setExporting] = useState<AlbumDto | null>(null);
@@ -411,6 +440,7 @@ export function AlbumsIndexPage() {
     }
     setAlbums((prev) => prev.map((a) => (a.id === renaming.id ? { ...a, name } : a)));
     setRenaming(null);
+    notifyCountsRefresh();
   }
 
   async function submitDirRename(): Promise<void> {
@@ -427,10 +457,18 @@ export function AlbumsIndexPage() {
   }
 
   async function submitDelete(): Promise<void> {
-    if (!deleting) return;
-    const ok = await albumDelete(deleting.id);
-    if (ok) setAlbums((prev) => prev.filter((a) => a.id !== deleting.id));
-    setDeleting(null);
+    if (!deleting || deleteBusy) return;
+    setDeleteBusy(true);
+    const ok = await albumDelete(deleting.id, deletePhotos);
+    setDeleteBusy(false);
+    if (ok) {
+      setAlbums((prev) => prev.filter((a) => a.id !== deleting.id));
+      notifyCountsRefresh();
+      if (deletePhotos) void refreshAlbums();
+      setDeleting(null);
+    } else {
+      setDeleteError(t("albums.deleteFailed"));
+    }
   }
 
   async function submitCover(album: AlbumDto, assetId: number | null): Promise<void> {
@@ -443,10 +481,7 @@ export function AlbumsIndexPage() {
   }
 
   function cardMenuEntries(album: AlbumDto): ContextMenuEntry[] {
-    // 系统保底相册「未分组」：禁改名（隐藏重命名入口）、禁删（删除项禁用）
-    const ungrouped = isUngroupedAlbum(album);
     const entries: ContextMenuEntry[] = [];
-    if (!ungrouped) {
       entries.push({
         key: "rename",
         label: t("albums.rename"),
@@ -456,7 +491,6 @@ export function AlbumsIndexPage() {
           setRenameError(null);
         },
       });
-    }
     entries.push({
       key: "dir-rename",
         label: t("albums.dirRename"),
@@ -480,8 +514,7 @@ export function AlbumsIndexPage() {
     entries.push({
       key: "delete",
       label: t("albums.delete"),
-      onSelect: () => setDeleting(album),
-      disabled: ungrouped,
+      onSelect: () => { setDeletePhotos(false); setDeleteError(null); setDeleting(album); },
       danger: true,
     });
     return entries;
@@ -506,11 +539,17 @@ export function AlbumsIndexPage() {
   return (
     <div className="h-full overflow-y-auto" data-testid="albums-page">
       <div className="w-full px-4 pt-4 pb-8">
-        {/* 顶部工具条：标题 + 新建相册 */}
+        {tetherOpen && <TetherAlbumDialog albums={albums} onCreated={album => setAlbums(prev => [album, ...prev])} onClose={() => setTetherOpen(false)} />}
+        {/* 顶部工具条：标题 + 新建相册 + 联机拍摄 */}
         <div className="flex shrink-0 items-center gap-3" data-testid="albums-toolbar">
           <h1 className="text-sm font-semibold text-text-primary">{t("albums.title")}</h1>
           <p className="text-xs text-text-muted">{t("albums.desc")}</p>
-          <div className="ml-auto shrink-0" data-testid="albums-create-area">
+          <button type="button" onClick={() => setTetherOpen(true)} data-testid="albums-tether-button"
+            className="ml-auto flex h-8 items-center gap-2 rounded-md border border-accent/50 bg-accent/10 px-3 text-xs font-semibold text-accent hover:bg-accent/20">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M2 5h3l1-2h4l1 2h3v8H2z"/><circle cx="8" cy="9" r="2.5"/></svg>
+            {t("albums.tether")}
+          </button>
+          <div className="shrink-0" data-testid="albums-create-area">
             {creating ? (
               <div className="flex flex-col items-end gap-1">
                 <div className="flex items-center gap-1.5">
@@ -793,16 +832,18 @@ export function AlbumsIndexPage() {
       )}
 
       {/* 删除确认（红色；仅移除引用，照片保留在图库） */}
+      <ErrorModal message={deleteError} onClose={() => setDeleteError(null)} />
       {deleting && (
         <ModalShell
           title={t("albums.deleteTitle", { name: deleting.name })}
-          onClose={() => setDeleting(null)}
+          onClose={() => { if (!deleteBusy) setDeleting(null); }}
           testId="album-delete-dialog"
           footer={
             <>
               <button
                 type="button"
                 onClick={() => setDeleting(null)}
+                disabled={deleteBusy}
                 className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
                 data-testid="album-delete-cancel"
               >
@@ -811,6 +852,7 @@ export function AlbumsIndexPage() {
               <button
                 type="button"
                 onClick={() => void submitDelete()}
+                disabled={deleteBusy}
                 className="rounded-md bg-red-500/90 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-500"
                 data-testid="album-delete-confirm"
               >
@@ -820,8 +862,12 @@ export function AlbumsIndexPage() {
           }
         >
           <p className="text-xs leading-relaxed text-text-secondary" data-testid="album-delete-hint">
-            {t("albums.deleteHint", { count: deleting.itemCount })}
+            {t(deletePhotos ? "albums.deleteTrashHint" : "albums.deleteHint", { count: deleting.itemCount })}
           </p>
+          <fieldset disabled={deleteBusy} className="mt-4 space-y-3 text-xs text-text-secondary">
+            <label className="flex cursor-pointer items-center gap-2"><input type="radio" name="album-delete-mode" checked={!deletePhotos} onChange={() => setDeletePhotos(false)} data-testid="album-delete-keep-photos" />{t("albums.deleteKeepPhotos")}</label>
+            <label className="flex cursor-pointer items-center gap-2"><input type="radio" name="album-delete-mode" checked={deletePhotos} onChange={() => setDeletePhotos(true)} data-testid="album-delete-trash-photos" />{t("albums.deleteTrashPhotos")}</label>
+          </fieldset>
         </ModalShell>
       )}
 
@@ -863,19 +909,24 @@ export function AlbumTagPage() {
   // 语义门禁：被拦时不自动执行、输入框回车不发查询（文字保留）
   const gate = useSemanticGate();
   const [lastQuery, setLastQuery] = useState(tag);
+  const pendingTagQuery = useRef<string | null>(tag);
   // 标签结果同样可点开查看器（与画廊/搜索页一致）
   const { cards } = usePhotoCards(semantic.assets);
   const groups = useMemo(() => groupAssetsByDate(cards), [cards]);
   const { viewer, openAsset, closeViewer, navigateTo, selectVersion } = useAssetViewer(groups, semantic.assets);
 
-  // 标签变化（含首挂载）→ 自动语义搜索（门禁未过不发——直接展示拦截提示）
   useEffect(() => {
-    if (tag) {
-      setLastQuery(tag);
-      if (!gate.blocked) void semantic.run(tag);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tag]);
+    pendingTagQuery.current = tag;
+    setLastQuery(tag);
+    semantic.reset();
+  }, [tag, semantic.reset]);
+  // A temporarily blocked entry resumes once model/index snapshots catch up.
+  useEffect(() => {
+    if (gate.blocked || !pendingTagQuery.current) return;
+    const query = pendingTagQuery.current;
+    pendingTagQuery.current = null;
+    void semantic.run(query);
+  }, [tag, gate.blocked, semantic.run]);
 
   return (
     <div className="flex h-full flex-col" data-testid="album-tag-page">
@@ -900,6 +951,7 @@ export function AlbumTagPage() {
         )}
         <SemanticResultsView
           status={semantic.status}
+          errorMessage={semantic.errorMessage}
           assets={semantic.assets}
           scores={semantic.scores}
           onOpenAsset={openAsset}

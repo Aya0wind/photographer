@@ -78,30 +78,11 @@ pub fn fetch_album_rename(state: &super::AppState, id: i64, name: &str) -> Resul
     })
 }
 
-/// 删相册核：一照一册模型下相册是照片的唯一归属——删册前先把全部成员
-/// 移入回收站（软删；原册已不存在时，还原会落入默认相册「未分组」），
-/// 再删相册行（album_item 引用级联消失）。相册不存在报错（前端列表刷新
-/// 前的竞态显式暴露）；默认相册「未分组」拒删（db 层守卫，此处转友好文案）。
-pub fn fetch_album_delete(state: &super::AppState, id: i64) -> Result<(), String> {
+/// 删除相册，可选将成员移入回收站，源文件始终保留。
+pub fn fetch_album_delete(state: &super::AppState, id: i64, trash_photos: bool) -> Result<(), String> {
     let db = super::app_database_db(state)?;
-    let members: Vec<i64> = {
-        let mut stmt =
-            db.0.prepare("SELECT asset_id FROM album_item WHERE album_id = ?1")
-                .map_err(|e| e.to_string())?;
-        let mapped = stmt
-            .query_map([id], |r| r.get::<_, i64>(0))
-            .map_err(|e| e.to_string())?;
-        mapped.filter_map(|r| r.ok()).collect()
-    };
-    if !members.is_empty() {
-        db.assets_trash_move(&members).map_err(|e| e.to_string())?;
-    }
-    db.album_delete(id).map_err(|e| match e {
-        rusqlite::Error::InvalidParameterName(msg) => msg,
-        other => map_missing(other),
-    })
+    db.album_delete_with_photos(id, trash_photos).map_err(map_missing)
 }
-
 /// 设/清封面核：asset_id=None 清回默认；资产不存在明确报错（FK 兜底之上的
 /// 友好文案）；相册不存在报错。封面只是引用，不要求资产在册相册。
 pub fn fetch_album_cover_set(
@@ -223,9 +204,9 @@ pub async fn album_rename(
 
 /// 删相册（只删引用，绝不动物理文件）。
 #[tauri::command]
-pub async fn album_delete(state: State<'_, SharedState>, id: i64) -> Result<(), String> {
+pub async fn album_delete(state: State<'_, SharedState>, id: i64, trash_photos: Option<bool>) -> Result<(), String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| fetch_album_delete(state, id)).await
+    run_blocking(shared, move |state| fetch_album_delete(state, id, trash_photos.unwrap_or(false))).await
 }
 
 /// 设/清相册封面（asset_id=null 清回默认）。
@@ -240,6 +221,14 @@ pub async fn album_cover_set(
         fetch_album_cover_set(state, id, asset_id)
     })
     .await
+}
+
+/// 批量入册（幂等），返回实际新增数。
+#[tauri::command]
+pub async fn album_remove_assets(state: State<'_, SharedState>, id: i64, asset_ids: Vec<i64>) -> Result<(), String> {
+    run_blocking(state.inner().clone(), move |state| {
+        super::app_database_db(state)?.album_remove_assets(id, &asset_ids).map_err(map_missing)
+    }).await
 }
 
 /// 批量入册（幂等），返回实际新增数。

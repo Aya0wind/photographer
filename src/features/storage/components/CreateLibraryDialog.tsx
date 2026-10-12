@@ -1,19 +1,13 @@
-import { useState } from "react";
+import { useState,useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { photoLibraryCreate, type PhotoLibrary } from "@/ipc/api";
+import OrganizationTemplateField from "./OrganizationTemplateField";
+import { photoLibraryCreate,photoLibraryUpdateTemplate,photoLibraryStopReorganization, type PhotoLibrary,type PhotoLibraryOrganizationProgress } from "@/ipc/api";
+import {organizeLibrary} from "../lib/reorganization";
+import ErrorModal from "@/shared/components/ErrorModal";
 
-/**
- * 新建照片库对话框（M3 存储页，2026-10-10 单一入口定案）：
- * 对话框内模式二选一（不再由外部两个按钮分别进入）：
- * - 「新建」：登记空文件夹，之后 copy/move 导入落盘目标 = 该库 root
- *   （纯时间布局由后端导入引擎负责）。
- * - 「从已有文件夹建立」（reference）：只登记不搬文件；登记即触发后端递归
- *   扫描批量登记，进度/取消/完成通知由存储页卡片扫描状态行呈现（M4f 闭环）。
- * 业务错误（路径非法/与其他库或数据库目录重叠等）透传后端 Err 文案内联展示；
- * invoke 不可用（error=null）提示后端未连接。
- */
+/** 统一照片库：已有文件原位建立索引，新增文件按库的组织规则存放。 */
 
 const FIELD_CLASS =
   "w-full rounded-md border border-edge bg-bg px-2.5 py-1.5 font-mono text-xs text-text-primary outline-none transition-colors focus:border-accent";
@@ -27,29 +21,27 @@ function baseName(path: string): string {
 export default function CreateLibraryDialog({
   onClose,
   onCreated,
+  library,
 }: {
   onClose: () => void;
+  library?:PhotoLibrary;
   /** 登记成功回调（mode = 实际使用的模式；存储页据此区分 toast 文案） */
-  onCreated: (library: PhotoLibrary, mode: "new" | "reference") => void;
+  onCreated: (library: PhotoLibrary) => void;
 }) {
   const { t } = useTranslation();
-  const [mode, setMode] = useState<"new" | "reference">("new");
-  const [name, setName] = useState("");
-  const [rootPath, setRootPath] = useState("");
+  const [organizationTemplate,setOrganizationTemplate]=useState(library?.organizationTemplate??"{year}/{month}/{day}/{filename}");
+  const [existingFolder,setExistingFolder]=useState(false);
+  const [reorganizeExisting,setReorganizeExisting]=useState(false);
+  const createdLibrary=useRef<PhotoLibrary|null>(library?.organizationPending?library:null);
+  const [progress,setProgress]=useState<PhotoLibraryOrganizationProgress|null>(null);
+  const [name, setName] = useState(library?.name??"");
+  const [rootPath, setRootPath] = useState(library?.rootPath??"");
   /** 名称未被手改过时，选完文件夹自动带出末段作缺省名 */
   const [nameTouched, setNameTouched] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const ready = name.trim().length > 0 && rootPath.trim().length > 0 && !creating;
-
-  function patchMode(next: "new" | "reference"): void {
-    if (next === mode) return;
-    setMode(next);
-    // 切模式清路径；名称未手改时回空（选完文件夹自动带出）
-    setRootPath("");
-    if (!nameTouched) setName("");
-  }
 
   async function pickDirectory(): Promise<void> {
     try {
@@ -70,75 +62,57 @@ export default function CreateLibraryDialog({
     if (!ready) return;
     setCreating(true);
     setError(null);
-    const result = await photoLibraryCreate(
+    try{
+    const result = createdLibrary.current ? {ok:true as const,library:createdLibrary.current} : library ? await photoLibraryUpdateTemplate(library.id,organizationTemplate) : await photoLibraryCreate(
       name.trim(),
       rootPath.trim(),
-      mode === "reference",
+      organizationTemplate,
+      existingFolder,
+      reorganizeExisting,
     );
     setCreating(false);
     if (result.ok) {
-      onCreated(result.library, mode);
+      if(result.library.organizationPending||(!library&&reorganizeExisting)){
+        createdLibrary.current=result.library;setCreating(true);
+        await organizeLibrary(result.library.id,setProgress);
+      }
+      onCreated({...result.library,organizationPending:false});
       return;
     }
     // null=invoke 不可用（后端未连接）；字符串=后端业务 Err 文案透传
     setError(
       result.error === null ? t("storage.createDialog.unavailable") : result.error,
     );
+    }catch(error){setError(String(error).replace(/^Error:\s*/,""));}finally{setCreating(false);}
   }
 
   return (
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60"
-      onClick={onClose}
+      onClick={()=>{if(!creating)onClose();}}
       role="dialog"
       aria-modal="true"
       data-testid="storage-create-dialog"
-      data-mode={mode}
     >
       <div
         className="w-[460px] rounded-xl border border-edge bg-surface p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-sm font-semibold text-text-primary">
-          {t("storage.createDialog.title")}
+          {t(library?.organizationPending?"storage.organization.resume":library?"storage.organization.label":"onboarding.library.title")}
         </h2>
 
-        {/* 模式二选一：新建空文件夹 / 从已有文件夹建立（reference） */}
-        <div className="mt-2 grid grid-cols-2 gap-2" data-testid="storage-create-modes">
-          {(["new", "reference"] as const).map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => patchMode(key)}
-              aria-pressed={mode === key}
-              className={`rounded-lg border p-2.5 text-left transition-colors ${
-                mode === key
-                  ? "border-accent bg-accent/10"
-                  : "border-edge hover:border-text-muted"
-              }`}
-              data-testid={`storage-create-mode-${key}`}
-              data-selected={mode === key}
-            >
-              <span
-                className={`text-xs font-medium ${mode === key ? "text-accent" : "text-text-primary"}`}
-              >
-                {t(`storage.createDialog.mode.${key}`)}
-              </span>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-text-secondary">
-                {t(`storage.createDialog.mode.${key}Desc`)}
-              </p>
-            </button>
-          ))}
-        </div>
-
-        <p className="mt-2 text-xs leading-relaxed text-text-secondary">
-          {t(mode === "new" ? "storage.createDialog.new.hint" : "storage.createDialog.reference.hint")}
-        </p>
-
+        <p className="mt-2 text-xs text-text-secondary">{t("storage.organization.existingHint")}</p>
+        {!library&&<div className="mt-2 grid grid-cols-2 gap-2">{[false,true].map(existing=><button key={String(existing)} type="button" aria-pressed={existingFolder===existing} disabled={creating||!!createdLibrary.current} onClick={()=>{if(existingFolder!==existing){setExistingFolder(existing);setReorganizeExisting(false);setRootPath("");}}} className="rounded-lg border border-edge p-2 text-xs aria-pressed:border-accent">{t(existing?"storage.organization.useExisting":"storage.organization.newFolder")}</button>)}</div>}
+        <fieldset disabled={creating||!!createdLibrary.current}><OrganizationTemplateField value={organizationTemplate} onChange={setOrganizationTemplate}/></fieldset>
+        {!library&&existingFolder&&<div className="mt-3 space-y-2 rounded-lg border border-edge p-3"><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={reorganizeExisting} disabled={creating||!!createdLibrary.current} onChange={e=>setReorganizeExisting(e.target.checked)}/>{t("storage.organization.reorganize")}</label><p className="text-[11px] leading-relaxed text-text-secondary">{t("storage.organization.reorganizeNotice")}</p></div>}
+        {creating&&progress&&<p role="status" className="mt-3 text-xs text-text-secondary">{progress.phase==="scan"?t("storage.organization.scanning"):t("storage.organization.moving",{completed:progress.completed,total:progress.total})}</p>}
+        {!creating&&createdLibrary.current?.organizationPending&&<button type="button" className="mt-3 text-left text-xs text-text-secondary underline" onClick={()=>{setCreating(true);void photoLibraryStopReorganization(createdLibrary.current!.id).then(()=>onCreated({...createdLibrary.current!,organizationPending:false})).catch(error=>setError(String(error))).finally(()=>setCreating(false));}}>{t("storage.organization.stopContinue")}</button>}
         <label className="mt-3 flex flex-col gap-1 text-xs text-text-secondary">
           {t("storage.createDialog.name")}
           <input
             type="text"
+          disabled={!!library}
             value={name}
             onChange={(e) => {
               setName(e.target.value);
@@ -155,6 +129,7 @@ export default function CreateLibraryDialog({
           <div className="flex gap-2">
             <input
               type="text"
+              disabled={!!library}
               value={rootPath}
               onChange={(e) => setRootPath(e.target.value)}
               className={FIELD_CLASS}
@@ -163,6 +138,7 @@ export default function CreateLibraryDialog({
             <button
               type="button"
               onClick={() => void pickDirectory()}
+              disabled={!!library}
               className="shrink-0 rounded-md border border-edge px-3 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent"
               data-testid="storage-create-browse"
             >
@@ -171,16 +147,13 @@ export default function CreateLibraryDialog({
           </div>
         </label>
 
-        {error !== null && (
-          <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="storage-create-error">
-            {error}
-          </p>
-        )}
+        <ErrorModal message={error} onClose={()=>setError(null)}/>
 
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
+            disabled={creating}
             className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-secondary transition-colors hover:border-text-muted hover:text-text-primary"
             data-testid="storage-create-cancel"
           >

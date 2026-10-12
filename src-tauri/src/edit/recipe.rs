@@ -95,6 +95,10 @@ pub enum RenderEngine {
 #[serde(rename_all = "camelCase", default)]
 pub struct AdvancedAdjustments {
     #[serde(skip_serializing_if="Option::is_none")]
+    pub parametric_curve:Option<ParametricCurve>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub color_grading:Option<ColorGrading>,
+    #[serde(skip_serializing_if="Option::is_none")]
     pub development:Option<Development>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub color_balance:Option<ColorBalance>,
@@ -113,6 +117,21 @@ pub struct AdvancedAdjustments {
     pub levels: Option<Levels>,
     pub hsl: std::collections::BTreeMap<String, HslRange>,
 }
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase",default)]
+pub struct ParametricCurve {pub highlights:f64,pub lights:f64,pub darks:f64,pub shadows:f64,pub splits:[f64;3]}
+impl Default for ParametricCurve{fn default()->Self{Self{highlights:0.0,lights:0.0,darks:0.0,shadows:0.0,splits:[25.0,50.0,75.0]}}}
+impl ParametricCurve{pub fn active(&self)->bool{[self.highlights,self.lights,self.darks,self.shadows].iter().any(|v|*v!=0.0)}}
+
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase",default)]
+pub struct ColorGrading {
+    pub shadows:photocraft_algo::camera_raw::Wheel,pub midtones:photocraft_algo::camera_raw::Wheel,
+    pub highlights:photocraft_algo::camera_raw::Wheel,pub global:photocraft_algo::camera_raw::Wheel,
+    pub blending:f64,pub balance:f64,
+}
+impl Default for ColorGrading {fn default()->Self{Self{shadows:Default::default(),midtones:Default::default(),highlights:Default::default(),global:Default::default(),blending:50.0,balance:0.0}}}
+impl ColorGrading {pub fn active(&self)->bool{[self.shadows,self.midtones,self.highlights,self.global].iter().any(|w|w.sat!=0.0||w.lum!=0.0)}}
 
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -291,6 +310,18 @@ fn validate_curve(curves: &[[f64; 2]]) -> Result<(), String> {
 fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
     fn numbers(values:&mut [f64],min:f64,max:f64)->Result<(),String>{
         for v in values {if !v.is_finite(){return Err("调色数值无效".into());}*v=v.clamp(min,max);}Ok(())
+    }
+    if let Some(c)=&mut a.parametric_curve {
+        for v in [&mut c.highlights,&mut c.lights,&mut c.darks,&mut c.shadows]{numbers(std::slice::from_mut(v),-100.0,100.0)?;}
+        if !c.splits.iter().all(|v|v.is_finite()){return Err("曲线分区边界无效".into());}
+        c.splits[0]=c.splits[0].clamp(5.0,93.0);c.splits[1]=c.splits[1].clamp(c.splits[0]+1.0,94.0);c.splits[2]=c.splits[2].clamp(c.splits[1]+1.0,95.0);
+    }
+    if let Some(g)=&mut a.color_grading {
+        for wheel in [&mut g.shadows,&mut g.midtones,&mut g.highlights,&mut g.global] {
+            if ![wheel.hue,wheel.sat,wheel.lum].iter().all(|v|v.is_finite()){return Err("色彩分级数值无效".into());}
+            wheel.hue=wheel.hue.clamp(0.0,360.0);wheel.sat=wheel.sat.clamp(0.0,100.0);wheel.lum=wheel.lum.clamp(-100.0,100.0);
+        }
+        numbers(std::slice::from_mut(&mut g.blending),0.0,100.0)?;numbers(std::slice::from_mut(&mut g.balance),-100.0,100.0)?;
     }
     if let Some(d)=&mut a.development {
         for v in [&mut d.highlights,&mut d.shadows,&mut d.whites,&mut d.blacks,&mut d.texture,&mut d.clarity,&mut d.dehaze,&mut d.vignette_amount,&mut d.vignette_roundness] {numbers(std::slice::from_mut(v),-100.0,100.0)?;}
@@ -502,6 +533,29 @@ mod tests {
         serde_json::Value::Object(map)
     }
 
+    #[test]
+    fn parametric_curve_boundaries_are_ordered_and_use_upstream_limits() {
+        let r=parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"parametricCurve":{"shadows":200,"darks":-200,"splits":[99,2,-10]}}})).unwrap();
+        let c=r.advanced.as_ref().unwrap().parametric_curve.as_ref().unwrap();assert_eq!(c.splits,[93.0,94.0,95.0]);assert_eq!(c.shadows,100.0);assert_eq!(c.darks,-100.0);
+        assert_eq!(parse_recipe(&serde_json::to_value(&r).unwrap()).unwrap(),r);
+    }
+    #[test]
+    fn grading_defaults_and_bounds_are_normalized() {
+        let recipe=parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"colorGrading":{"midtones":{"hue":999,"sat":200,"lum":-200},"balance":-999,"blending":999}}})).unwrap();
+        let g=recipe.advanced.as_ref().unwrap().color_grading.as_ref().unwrap();assert_eq!(g.midtones.hue,360.0);assert_eq!(g.midtones.sat,100.0);assert_eq!(g.midtones.lum,-100.0);assert_eq!(g.balance,-100.0);assert_eq!(g.blending,100.0);
+        assert_eq!(parse_recipe(&serde_json::to_value(&recipe).unwrap()).unwrap(),recipe);
+        assert!(!ColorGrading::default().active());
+    }
+    #[test]
+    fn development_defaults_ranges_and_style_are_validated() {
+        let defaults=serde_json::to_value(Development::default()).unwrap();
+        let upstream=serde_json::to_value(photocraft_algo::camera_raw::CameraRaw::default()).unwrap();
+        for (key,value) in defaults.as_object().unwrap(){assert_eq!(upstream[key],*value,"default must match upstream: {key}");}
+        let mut body=serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"development":{"shadows":200,"sharpenRadius":99,"noiseColor":999,"grainAmount":-10}}});
+        let recipe=parse_recipe(&body).unwrap();let d=recipe.advanced.unwrap().development.unwrap();
+        assert_eq!(d.shadows,100.0);assert_eq!(d.sharpen_radius,3.0);assert_eq!(d.noise_color,100.0);assert_eq!(d.grain_amount,0.0);
+        body["advanced"]["development"]["vignetteStyle"]=serde_json::json!("invalid");assert!(parse_recipe(&body).is_err());
+    }
     #[test]
     fn extended_color_validates_ranges_colors_and_roundtrips_defaults() {
         let recipe=parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"colorBalance":{"shadows":[-200,0,150],"midtones":[0,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"blackWhite":{"enabled":false,"weights":[-999,60,40,60,20,999],"tint":null},"selectiveColor":{"relative":false,"ranges":{"reds":[150,0,0,-150]}}}})).unwrap();

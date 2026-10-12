@@ -112,6 +112,7 @@ export default function StoragePage() {
   const [status, setStatus] = useState<"loading" | "ready">("loading");
   /** 新建照片库对话框（true=打开；模式在对话框内二选一） */
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingLibrary,setEditingLibrary]=useState<PhotoLibrary|null>(null);
   const [openError,setOpenError]=useState<string|null>(null);
   const [removeTarget, setRemoveTarget] = useState<PhotoLibrary | null>(null);
   /** 操作/扫描完成反馈（hint=跨库重复提示等第二行；自动消失） */
@@ -307,6 +308,7 @@ export default function StoragePage() {
                       />
                     </div>
                     <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                      <button type="button" className="rounded-md border border-edge px-2.5 py-1 text-xs text-text-secondary hover:border-accent" onClick={()=>setEditingLibrary(lib)}>{t(lib.organizationPending?"storage.organization.resume":"storage.organization.label")}</button>
                       <button
                         type="button"
                         onClick={() => void openInSystem(lib)}
@@ -333,18 +335,14 @@ export default function StoragePage() {
       </div>
 
       {/* 新建照片库对话框（模式在对话框内二选一：新建 / 从已有文件夹建立） */}
-      {createOpen && (
+      {(createOpen||editingLibrary) && (
         <CreateLibraryDialog
-          onClose={() => setCreateOpen(false)}
-          onCreated={(library, mode) => {
-            // reference 模式登记即触发后台递归扫描——toast 直接说明扫描已开始，
-            // 进度/取消/完成通知由卡片扫描状态行接手（M4f 闭环）。
-            flash(
-              mode === "reference"
-                ? t("storage.createdScanning", { name: library.name })
-                : t("storage.created", { name: library.name }),
-            );
+          library={editingLibrary??undefined}
+          onClose={() => {setCreateOpen(false);setEditingLibrary(null);}}
+          onCreated={(library) => {
+            flash(t("storage.createdScanning", {name:library.name}));
             setCreateOpen(false);
+            setEditingLibrary(null);
             // 后端登记完成会发 photoLibrariesChanged 事件驱动重拉；事件未到
             // （后端未实装）时本地立即补拉一次，保证对话框关闭即见新卡。
             void pull();
@@ -352,7 +350,7 @@ export default function StoragePage() {
         />
       )}
 
-      {/* 移除登记确认（两档：仅摘登记 / 连记录删；永不删照片文件） */}
+      {/* 移除登记确认（两档：仅摘登记 / 连记录删；后者可勾选同时删磁盘文件） */}
       {removeTarget !== null && (
         <RemoveLibraryDialog
           library={removeTarget}
@@ -361,9 +359,11 @@ export default function StoragePage() {
             const name = removeTarget.name;
             setRemoveTarget(null);
             flash(
-              result.recordsDeleted > 0
-                ? t("storage.removedDeleted", { name, count: result.recordsDeleted })
-                : t("storage.removedKept", { name }),
+              t("storage.removedDeleted", { name, count: result.recordsDeleted }),
+              // 勾选删文件时第二行提示已删原文件数（引用库/未勾选 filesDeleted=0）
+              result.filesDeleted > 0
+                ? t("storage.removedFilesToast", { count: result.filesDeleted })
+                : undefined,
             );
             void pull();
           }}

@@ -189,7 +189,7 @@ export default function GalleryPage() {
   useEffect(() => {
     const urlMode = searchParams.get("mode");
     if (urlMode === "semantic" && urlQuery !== "" && appliedUrlQueryRef.current !== urlQuery) {
-      appliedUrlQueryRef.current = urlQuery;
+      if (!semanticGate.blocked) appliedUrlQueryRef.current = urlQuery;
       runSemantic(urlQuery);
     } else if (
       (urlMode !== "semantic" || urlQuery === "") &&
@@ -208,7 +208,7 @@ export default function GalleryPage() {
       setInputs((prev) => ({ ...prev, formats: [] }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, urlQuery]);
+  }, [searchParams, urlQuery, semanticGate.blocked, semanticGate.reason]);
 
   // --- 数据管线（默认/筛选共用 keyset；快照仅默认态） --------------------------------
   const cachedAtMount = gallerySnapshot();
@@ -248,8 +248,23 @@ export default function GalleryPage() {
       });
     };
     pull();
+    /** 联拍新片入库（去抖 2s：连拍期间逐张事件不逐张重拉）：同新照片到达
+     *  路径重拉首页——主窗口开着图库时，联机拍摄的照片实时出现在列表里。 */
+    let tetherTimer: number | null = null;
     void subscribeAppEvents((event: AppEvent) => {
-      if (event.type === "photoLibrariesChanged") pull();
+      if (event.type === "photoLibrariesChanged") {
+        pull();
+        // 删库联动（2026-10-09）：库内资产整体消失——同筛选变化路径重置分页
+        // 重拉首页（reloadNonce 进下方加载 effect 依赖；会话快照已被 AppShell
+        // 全局订阅失效，revalidate 不会拿旧前缀兜底）。
+        setReloadNonce((n) => n + 1);
+      } else if (event.type === "tetheringPhotoAdded") {
+        if (tetherTimer !== null) window.clearTimeout(tetherTimer);
+        tetherTimer = window.setTimeout(() => {
+          tetherTimer = null;
+          if (!cancelled) setReloadNonce((n) => n + 1);
+        }, 2000);
+      }
     })
       .then((off) => {
         if (cancelled) off();
@@ -260,6 +275,7 @@ export default function GalleryPage() {
       });
     return () => {
       cancelled = true;
+      if (tetherTimer !== null) window.clearTimeout(tetherTimer);
       unlisten?.();
     };
   }, []);
@@ -801,7 +817,7 @@ export default function GalleryPage() {
           <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary">
             <span>{t("search.moreFilters")}</span>
             <ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={clearAllFilters}/><span className="flex-1"/>
-            <button type="button" className="ui-icon-button" onClick={() => setPanelOpen(false)} aria-label={t("ui.close")}>×</button>
+            <button type="button" className="ui-pill-button" onClick={() => setPanelOpen(false)} aria-label={t("ui.close")}>× {t("ui.close")}</button>
           </div>
           <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
           <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onPurgeMissing={() => setPurgeAskOpen(true)} />
@@ -835,6 +851,8 @@ export default function GalleryPage() {
                 <p className="text-xs text-text-muted">{t("search.semantic.notReady.desc")}</p>
                 <button type="button" onClick={()=>navigate("/settings?tab=ai")} className="rounded-md bg-accent px-3 py-2 text-xs text-black">{t("search.semantic.notReady.goSettings")}</button>
               </div>
+            ) : semantic.status === "error" ? (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center" data-testid="semantic-error" role="alert"><p className="max-w-md break-words text-sm text-text-secondary">{semantic.errorMessage}</p><button type="button" onClick={() => void semantic.run(semanticQuery)} className="ui-primary rounded-lg px-4 py-2 text-xs">{t("gallery.retry")}</button></div>
             ) : semantic.status === "unavailable" ? (
               <div className="flex h-full items-center justify-center text-xs text-text-muted" data-testid="semantic-unavailable">{t("gallery.ipcUnavailable")}</div>
             ) : (

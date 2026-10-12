@@ -25,6 +25,8 @@ function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced"|"legacyAdju
       && (!a.lookup || !a.lookup.enabled || a.lookup.amount===0) && !a.levels && !Object.keys(a.hsl??{}).length
       && !developmentActive(a.development) && !a.blackWhite?.enabled && !Object.values(a.selectiveColor?.ranges??{}).some(row=>row?.some(v=>v!==0))
       && (!a.colorBalance||![...a.colorBalance.shadows,...a.colorBalance.midtones,...a.colorBalance.highlights].some(v=>v!==0))
+      && (!a.colorGrading||![a.colorGrading.shadows,a.colorGrading.midtones,a.colorGrading.highlights,a.colorGrading.global].some(w=>w.sat!==0||w.lum!==0))
+      && (!a.parametricCurve||![a.parametricCurve.shadows,a.parametricCurve.darks,a.parametricCurve.lights,a.parametricCurve.highlights].some(v=>v!==0))
       && Object.values(a.channelCurves??{}).every(points=>!points.length)));
 }
 function isNeutral(recipe:EditRecipe) {

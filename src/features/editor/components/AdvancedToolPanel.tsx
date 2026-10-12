@@ -1,7 +1,10 @@
 import GeometryPanel from "./GeometryPanel";
+import CropDimensions from "./CropDimensions";
+import {remapDraftCrop} from "../lib/cropPixels";
+import {recipeReducer,initRecipeHistory} from "../lib/recipe";
 import {geometrySize} from "../lib/geometry";
 import { useTranslation } from "react-i18next";
-import type { EditRecipe } from "@/ipc/api";
+import type { EditRecipe,ExportOptions } from "@/ipc/api";
 import type { EditorTool } from "./EditorCanvas";
 import type { CurveSampling } from "./CurveEditor";
 import AdvancedAdjustmentPanel from "./AdvancedAdjustmentPanel";
@@ -11,6 +14,13 @@ import type { AdvancedAction } from "../lib/advancedRecipe";
 
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
 interface ToolPanelProps {
+  exportFormat:NonNullable<ExportOptions["format"]>;
+  setExportFormat:(value:NonNullable<ExportOptions["format"]>)=>void;
+  exportColorSpace:NonNullable<ExportOptions["colorSpace"]>;
+  setExportColorSpace:(value:NonNullable<ExportOptions["colorSpace"]>)=>void;
+  cancelGesture?:()=>void;
+  onCancelCrop:()=>void;
+  straightening:boolean;setStraightening:(value:boolean)=>void;
   onModalChange?:(open:boolean)=>void;
   sampling: CurveSampling;
   tool: EditorTool;
@@ -34,24 +44,28 @@ interface ToolPanelProps {
   exportFolder: () => Promise<void>;
 }
 
-export default function AdvancedToolPanel({ onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
-  selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder }: ToolPanelProps) {
+  selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
   const { t } = useTranslation();
   const selectedLayer = recipe.textLayers.find((layer) => layer.id === selectedText);
+  function rotateCrop(delta:1|-1){endGesture();const next=recipeReducer(initRecipeHistory(recipe),{type:"rotate",delta},context.current).present;setCropDraft(remapDraftCrop(recipe,next,cropDraft,context.current)??{x:0,y:0,w:1,h:1});setCropRatio(null);dispatch({type:"rotate",delta});}
   return <>
-          {tool === "adjust" && <AdvancedAdjustmentPanel onModalChange={onModalChange} sampling={sampling} recipe={recipe} onResetDevelopment={group=>{endGesture();dispatch({type:"resetDevelopmentGroup",group});}} onReset={(group)=>{endGesture();dispatch({type:"resetAdjustmentGroup",group});}} begin={beginGesture} end={endGesture} onBasic={(patch, record=false) => dispatch({ type: "adjust", patch, record })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
+          {tool === "adjust" && <AdvancedAdjustmentPanel cancel={cancelGesture} onModalChange={onModalChange} sampling={sampling} recipe={recipe} onResetDevelopment={group=>{endGesture();dispatch({type:"resetDevelopmentGroup",group});}} onReset={(group)=>{endGesture();dispatch({type:"resetAdjustmentGroup",group});}} begin={beginGesture} end={endGesture} onBasic={(patch, record=false) => dispatch({ type: "adjust", patch, record })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
           {tool === "view" && <p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.viewHint")}</p>}
           {tool === "crop" && <div className="space-y-4">
-            <div className="flex gap-2"><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: -1 }); setCropDraft(null); setTool("adjust"); }}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => { dispatch({ type: "rotate", delta: 1 }); setCropDraft(null); setTool("adjust"); }}>{t("editor.rotateCw")}</button></div>
-            <GeometryPanel recipe={recipe} dispatch={dispatch} context={context.current} begin={beginGesture} end={endGesture} onCropChange={crop=>setCropDraft(crop??{x:0,y:0,w:1,h:1})}/>
+            <div className="flex gap-2"><button className={BUTTON} onClick={() => rotateCrop(-1)}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => rotateCrop(1)}>{t("editor.rotateCw")}</button></div>
+            <GeometryPanel recipe={recipe} dispatch={dispatch} context={context.current} cropDraft={cropDraft} cropRatio={cropRatio} begin={beginGesture} end={endGesture} onCropChange={crop=>{if(crop===null)setCropRatio(null);setCropDraft(crop??{x:0,y:0,w:1,h:1});}}/>
+            <button type="button" className={`${BUTTON} w-full aria-pressed:text-accent aria-pressed:border-accent`} aria-pressed={straightening} onClick={()=>setStraightening(!straightening)}>{t("editor.geometry.straighten")}</button>
+            {straightening&&<p className="text-xs text-text-muted">{t("editor.geometry.straightenHint")}</p>}
+            <CropDimensions recipe={recipe} context={context.current} crop={cropDraft} onChange={setCropDraft} onFree={()=>setCropRatio(null)}/>
             <div className="flex flex-wrap gap-2">{[null, 1, 4 / 3, 3 / 2, 16 / 9].map((ratio, index) => <button key={index} className={BUTTON} aria-pressed={cropRatio === ratio} onClick={() => {
               setCropRatio(ratio); const size = geometrySize(context.current,recipe);
               setCropDraft(ratio ? fitCropRect(ratio, size.w / size.h) : { x: 0, y: 0, w: 1, h: 1 });
             }}>{[t("editor.crop.free"), "1:1", "4:3", "3:2", "16:9"][index]}</button>)}</div>
             <p className="text-xs text-text-muted">{t("editor.crop.hint")}</p>
-            <button className="ui-primary w-full rounded-xl py-2 text-xs" onClick={() => { dispatch({ type: "cropApply", crop: cropDraft && !isFullCrop(cropDraft) ? clampCrop(cropDraft) : null }); setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.apply")}</button>
-            <button className={`${BUTTON} w-full`} onClick={() => { setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.cancel")}</button>
+            <button className="ui-primary w-full rounded-xl py-2 text-xs" onClick={() => {endGesture();dispatch({ type: "cropConfirm", crop: cropDraft && !isFullCrop(cropDraft) ? clampCrop(cropDraft,1e-6) : null }); setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.apply")}</button>
+            <button className={`${BUTTON} w-full`} onClick={onCancelCrop}>{t("editor.crop.cancel")}</button>
           </div>}
           {(tool === "text" || tool === "brush") && <div className="space-y-4">
             <label className="flex items-center justify-between text-xs text-text-secondary">{t("advancedEditor.paintColor")}<input type="color" value={color} onChange={(e) => { setColor(e.target.value); if (tool === "text" && selectedText) dispatch({ type: "textUpdate", id: selectedText, patch: { color: e.target.value } }); }} /></label>
@@ -59,8 +73,11 @@ export default function AdvancedToolPanel({ onModalChange, sampling, tool, recip
             {tool === "text" && <><p className="text-xs text-text-muted">{t("advancedEditor.textHint")}</p>{selectedLayer && <><textarea className="w-full rounded-xl border border-edge bg-bg p-3 text-xs text-text-primary" value={selectedLayer.text} onFocus={beginGesture} onBlur={endGesture} onChange={(e) => dispatch({ type: "textUpdateLive", id: selectedLayer.id, patch: { text: e.target.value } })} /><button className={BUTTON} onClick={() => { dispatch({ type: "textRemove", id: selectedLayer.id }); setSelectedText(null); }}>{t("advancedEditor.removeText")}</button></>}</>}
           </div>}
           {tool === "output" && <div className="space-y-4">
-            <label className="block space-y-2 text-xs text-text-secondary"><span>{t("editor.output.longEdge")}</span><input className="w-full rounded-xl border border-edge bg-bg p-2" type="number" min={1} value={recipe.output.longEdge ?? ""} placeholder={t("editor.output.longEdgePlaceholder")} onChange={(e) => { const value = Number(e.target.value); if (e.target.value === "" || (Number.isInteger(value) && value > 0)) dispatch({ type: "setOutput", patch: { longEdge: e.target.value === "" ? null : value } }); }} /></label>
-            <label className="grid gap-0.5 text-[11px] leading-[14px] text-text-secondary"><span>{t("editor.output.quality")} · {recipe.output.quality}</span><input className="block h-4 w-full accent-accent" type="range" min={1} max={100} value={recipe.output.quality} onChange={(e) => dispatch({ type: "setOutput", patch: { quality: Number(e.target.value) } })} /></label>
+            <label className="block space-y-2 text-xs text-text-secondary"><span>{t("advancedEditor.outputFormat")}</span><select aria-label={t("advancedEditor.outputFormat")} className="w-full rounded-xl border border-edge bg-bg p-2" value={exportFormat} onChange={e=>setExportFormat(e.target.value as NonNullable<ExportOptions["format"]>)}>{["jpeg","png","tiff","pcraft"].map(format=><option key={format} value={format}>{t(`advancedEditor.outputFormats.${format}`)}</option>)}</select></label>
+            {exportFormat!=="pcraft"&&<label className="block space-y-2 text-xs text-text-secondary"><span>{t("editor.output.longEdge")}</span><input className="w-full rounded-xl border border-edge bg-bg p-2" type="number" min={1} value={recipe.output.longEdge ?? ""} placeholder={t("editor.output.longEdgePlaceholder")} onChange={(e) => { const value = Number(e.target.value); if (e.target.value === "" || (Number.isInteger(value) && value > 0)) dispatch({ type: "setOutput", patch: { longEdge: e.target.value === "" ? null : value } }); }} /></label>}
+            {exportFormat!=="pcraft"&&<label className="block space-y-2 text-xs text-text-secondary"><span>{t("advancedEditor.outputColorSpace")}</span><select aria-label={t("advancedEditor.outputColorSpace")} className="w-full rounded-xl border border-edge bg-bg p-2" value={exportColorSpace} onChange={e=>setExportColorSpace(e.target.value as NonNullable<ExportOptions["colorSpace"]>)}>{(["srgb","displayP3","adobeRgb","proPhotoRgb"] as const).map(space=><option key={space} value={space}>{t(`advancedEditor.outputColorSpaces.${space}`)}</option>)}</select><p className="text-[11px] leading-relaxed text-text-muted">{t("advancedEditor.outputColorHint")}</p></label>}
+            {exportFormat==="pcraft"&&<p className="text-xs leading-relaxed text-text-secondary">{t("advancedEditor.outputDocumentHint")}</p>}
+            {exportFormat==="jpeg"&&<label className="grid gap-0.5 text-[11px] leading-[14px] text-text-secondary"><span>{t("editor.output.quality")} · {recipe.output.quality}</span><input className="block h-4 w-full accent-accent" type="range" min={1} max={100} value={recipe.output.quality} onChange={(e) => dispatch({ type: "setOutput", patch: { quality: Number(e.target.value) } })} /></label>}
             <button className={`${BUTTON} w-full`} disabled={exporting} onClick={() => void exportFolder()}>{t("editor.export")}</button>
           </div>}
   </>;

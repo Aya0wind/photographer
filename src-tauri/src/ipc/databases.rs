@@ -152,6 +152,23 @@ pub fn database_list(state: State<'_, SharedState>) -> Result<DatabaseListDto, S
 // database_create
 // ---------------------------------------------------------------------------
 
+/// 换激活库后的索引恢复（create/switch 共用，2026-10-09 审计 P0 断链B）：
+/// 对齐启动时行为（lib.rs）——resume_and_kick（新库遗留 running 复位
+/// pending → 派 worker 续跑 + pHash 任务幂等补差）+ 参数指纹比对（新库
+/// 偏好 vs 新库 marker，变更通道自动重建；模型未就绪/开关未开的通道不写
+/// 标记留待下轮）。指纹比对同步执行：常见路径（指纹一致/新库首跑）只读
+/// 写 marker 毫秒级，本函数已在 run_blocking 后台线程。
+fn resume_index_for_database(state: &AppState, db_dir: &Path) {
+    crate::index::resume_and_kick(db_dir.to_path_buf(), &state.bus, &state.supervisor);
+    let ai = state
+        .settings
+        .lock()
+        .expect("settings mutex poisoned")
+        .ai
+        .clone();
+    super::indexing::check_params_and_rebuild(state, db_dir, &ai);
+}
+
 /// 新建数据库核（database_create）：
 /// ① 名称/路径闸门——dbDir 缺省走约定路径（`<配置目录>/databases/<id>`），
 ///    显式给出则 normalize_database_path（绝对路径 + 盘根拒绝）；
@@ -166,10 +183,14 @@ pub fn database_list(state: State<'_, SharedState>) -> Result<DatabaseListDto, S
 ///    创建即激活）：引导流程建第二库后，后续 AI 步骤的 settings_set 要
 ///    落进新库；偏好快照随之重算——新库 db_dir 无库级文件 = 全默认，
 ///    重新登记旧目录（摘登记后复用）则恢复当年那份偏好。
+#[derive(Debug,Clone,serde::Serialize,serde::Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct InitialPhotoLibrary {pub name:String,pub root_path:String,pub organization_template:String,pub existing_folder:bool,pub reorganize_existing:bool}
 pub fn fetch_database_create(
     state: &AppState,
     name: &str,
     db_dir: Option<&str>,
+    initial_library:Option<&InitialPhotoLibrary>,
 ) -> Result<DatabaseEntry, String> {
     let name = validate_name(name)?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -196,7 +217,22 @@ pub fn fetch_database_create(
         }
     }
     // 物化（建目录 + 建表 + 验证可写）；失败不落注册表。
-    super::open_library_db(&dir).map_err(|e| format!("数据库位置不可用：{e}"))?;
+    let db=super::open_library_db(&dir).map_err(|e| format!("数据库位置不可用：{e}"))?;
+    if db.photos_library_list().map_err(|e|e.to_string())?.is_empty(){
+        let initial=initial_library.ok_or("新建数据库必须选择一个照片库文件夹")?;
+        if initial.reorganize_existing&&!initial.existing_folder{return Err("只有使用现有文件夹时才能重新组织已有照片".into());}
+        let root=crate::settings::normalize_library_path(&initial.root_path)?;
+        crate::db::organization::validate_organization_template(&initial.organization_template)?;
+        db.photos_library_validate_root(Path::new(&root),&dir,None)?;
+        crate::db::organization::validate_photo_folder(Path::new(&root),initial.existing_folder)?;
+        std::fs::create_dir_all(&root).map_err(|e|format!("照片库文件夹不可用：{e}"))?;
+        let name=validate_name(&initial.name)?;
+        let row=db.photos_library_register_with_template(&name,&root,&dir,&initial.organization_template)?;
+        if initial.reorganize_existing {
+            db.photos_library_queue_organization(&row.id,&row.organization_template).map_err(|e|e.to_string())?;
+        }else{db.library_scan_job_enqueue(&row.id).map_err(|e|e.to_string())?;}
+        state.library_scan_kick.store(true,std::sync::atomic::Ordering::SeqCst);
+    }
     let entry = DatabaseEntry { id, name, db_dir };
     let settings = {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");
@@ -209,6 +245,9 @@ pub fn fetch_database_create(
     // 复用）则恢复当年那份偏好）。
     let (global, _) = settings.split();
     reload_active_preferences(state, global)?;
+    // 索引恢复（审计 P0 断链B）：建库即激活——新库的索引任务/指纹基线
+    // 与启动路径同构唤醒（新库通常空转，重新登记旧目录则续跑遗留待办）。
+    resume_index_for_database(state, &dir);
     Ok(entry)
 }
 
@@ -222,10 +261,11 @@ pub async fn database_create(
     state: State<'_, SharedState>,
     name: String,
     db_dir: Option<String>,
+    initial_library:Option<InitialPhotoLibrary>,
 ) -> Result<DatabaseEntry, String> {
     let shared = state.inner().clone();
     let entry = run_blocking(shared.clone(), move |state| {
-        fetch_database_create(state, &name, db_dir.as_deref())
+        fetch_database_create(state, &name, db_dir.as_deref(),initial_library.as_ref())
     })
     .await?;
     app.emit("app://event", &AppEvent::DatabasesChanged)
@@ -265,7 +305,12 @@ pub fn fetch_database_switch(state: &AppState, id: &str) -> Result<(), String> {
     }
     let (mut global, _) = settings.split();
     global.active_database_id = Some(id.to_string());
-    reload_active_preferences(state, global)
+    reload_active_preferences(state, global)?;
+    // 索引恢复（审计 P0 断链B）：切库后新库的 pending 索引任务无人唤醒
+    // （原只在建库/启动时恢复）——对齐启动行为；切换前的导入在场闸
+    // （ensure_no_import_running）已挡导入会话与换库的交错。
+    resume_index_for_database(state, Path::new(&entry.db_dir));
+    Ok(())
 }
 
 /// 切换激活数据库（database_switch）。变更广播 DatabasesChanged——前端
@@ -285,6 +330,11 @@ pub async fn database_switch(
             .expect("settings mutex poisoned")
             .active_database_id
             .clone();
+        // 联机会话锚定旧库（相册/落库路径/收件账本都在旧数据库里）——
+        // 切库前全部结束，收片循环不会写进新库。
+        if before.as_deref() != Some(id.as_str()) {
+            super::super::tethering::session::stop_all();
+        }
         fetch_database_switch(state, &id)?;
         let after = state
             .settings
@@ -391,6 +441,16 @@ pub async fn database_remove(
 ) -> Result<DatabaseRemoveResult, String> {
     let shared = state.inner().clone();
     let result = run_blocking(shared.clone(), move |state| {
+        // 删的是当前激活库时：联机会话全部结束（照片将无处落库）。
+        let active = state
+            .settings
+            .lock()
+            .expect("settings mutex poisoned")
+            .active_database_id
+            .clone();
+        if active.as_deref() == Some(id.as_str()) {
+            super::super::tethering::session::stop_all();
+        }
         fetch_database_remove(state, &id, delete_data)
     })
     .await?;

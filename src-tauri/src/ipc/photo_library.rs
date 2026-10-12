@@ -2,14 +2,15 @@
 //!
 //! photo_library_list / create / remove 全量落地（db 层
 //! [`crate::db::libraries`]：root 互斥校验内置）；M4b 登记管道闭环：
-//! create(reference=true) 落批量登记任务行 + kick worker，`run_pending_
+//! create 落批量登记任务行 + kick worker，`run_pending_
 //! batch_jobs` 持久化拾取（进度入库/软取消/导入让路/崩溃续跑），scan_
 //! status / scan_cancel 返回真值。命令名与负载形状与前端契约
 //! `src/ipc/api/types.ts`（PhotoLibrary 等）和封装 `src/ipc/api/library.ts`
 //! 一一对应。
 //!
 //! 铁律：磁盘 IO / DB 批量查询一律 `run_blocking` 后台线程；移除登记
-//! 永不删照片文件（用户红线）。
+//! 默认不删照片文件，`delete_files=true` 仅管理库（reference=false）可选
+//! 代删磁盘原片——引用库一律拒绝。
 
 use std::time::Duration;
 
@@ -38,6 +39,9 @@ pub struct PhotoLibraryDto {
     pub asset_count: u64,
     /// 库内照片容量缓存（字节）。
     pub size_bytes: u64,
+    /// 新写入照片的组织模板。
+    pub organization_template: String,
+    pub organization_pending:bool,
 }
 
 impl From<PhotosLibraryRow> for PhotoLibraryDto {
@@ -50,6 +54,8 @@ impl From<PhotosLibraryRow> for PhotoLibraryDto {
             status: row.status,
             asset_count: row.asset_count,
             size_bytes: row.size_bytes,
+            organization_template: row.organization_template,
+            organization_pending:false,
         }
     }
 }
@@ -58,8 +64,11 @@ impl From<PhotosLibraryRow> for PhotoLibraryDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhotoLibraryRemoveResult {
-    /// 连带删除的资产记录数（delete_records=false 时为 0）。
+    /// 连带删除的资产记录数。
     pub records_deleted: u64,
+    /// 物理删除的磁盘照片文件数（仅管理库且 delete_files=true；
+    /// 缺失文件容忍不计）。
+    pub files_deleted: u64,
 }
 
 /// 照片库扫描任务状态 DTO（photo_library_scan_status 返回）：从文件夹建立的
@@ -124,7 +133,7 @@ pub fn fetch_photo_library_list(state: &super::AppState) -> Result<Vec<PhotoLibr
     if changed {
         state.bus.publish(AppEvent::PhotoLibrariesChanged);
     }
-    Ok(rows.into_iter().map(PhotoLibraryDto::from).collect())
+    rows.into_iter().map(|row|{let mut dto=PhotoLibraryDto::from(row);dto.organization_pending=db.photos_library_organization_pending(&dto.id).map_err(|e|e.to_string())?;Ok(dto)}).collect()
 }
 
 /// 照片库列表（photo_library_list）：激活数据库 photos_libraries 表
@@ -137,68 +146,54 @@ pub async fn photo_library_list(
     run_blocking(shared, fetch_photo_library_list).await
 }
 
-/// 新建照片库核（photo_library_create）：reference=false 登记空文件夹
-///（不存在则创建，存在则必须为空——纯新库）；reference=true 从已有文件夹
-/// 建立——只登记不搬文件，同时落批量登记任务行（library_scan_jobs
-/// pending）并 kick 扫描 worker 立即拾取（M4b 登记管道：进度入库/可取消/
-/// 导入让路；文件绝不移动/重命名）。root 统一走 normalize_library_path
-/// 闸门 + root 互斥校验（§八-6：库间互斥、与数据库目录互斥）。
+/// 登记新建或已有的文件夹，并启动原位索引扫描。
 pub fn fetch_photo_library_create(
     state: &super::AppState,
     name: &str,
     root_path: &str,
-    reference: bool,
+    organization_template: &str,
+    reorganize_existing:bool,
 ) -> Result<PhotoLibraryDto, String> {
     let name = validate_name(name)?;
     let root_path = crate::settings::normalize_library_path(root_path)?;
     let root = std::path::Path::new(&root_path);
-    if reference {
-        if !root.is_dir() {
-            return Err(format!("文件夹不存在或不可访问：{root_path}"));
-        }
-    } else {
-        match std::fs::read_dir(root) {
-            Ok(mut entries) => {
-                if entries.next().is_some() {
-                    return Err(format!(
-                        "文件夹不是空的：{root_path}\n如要登记已有照片，请使用「从已有文件夹建立」"
-                    ));
-                }
-            }
-            Err(_) => {
-                // 尚不存在：为用户创建空文件夹（前端原生对话框可选未建目录）
-                std::fs::create_dir_all(root)
-                    .map_err(|e| format!("创建照片库文件夹失败（{root_path}）: {e}"))?;
-            }
-        }
-    }
+    std::fs::create_dir_all(root).map_err(|e|format!("创建或访问照片库失败：{e}"))?;
     let db = super::app_database_db(state)?;
-    let row = db.photos_library_register(&name, &root_path, &super::app_database_dir(state)?)?;
-    if reference {
+    let row = db.photos_library_register_with_template(
+        &name,
+        &root_path,
+        &super::app_database_dir(state)?,
+        organization_template,
+    )?;
+    {
         // 从文件夹建立：登记即建任务（持久化——重启后 worker 仍会拾取），
         // kick 让轮询线程秒级开跑（不等 60s 轮询拍）。
-        db.library_scan_job_enqueue(&row.id)
-            .map_err(|e| e.to_string())?;
+        if reorganize_existing{db.photos_library_queue_organization(&row.id,&row.organization_template).map_err(|e|e.to_string())?;}
+        else{db.library_scan_job_enqueue(&row.id).map_err(|e| e.to_string())?;}
         state
             .library_scan_kick
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    Ok(PhotoLibraryDto::from(row))
+    let mut dto=PhotoLibraryDto::from(row);dto.organization_pending=reorganize_existing;Ok(dto)
 }
 
-/// 新建照片库（photo_library_create）：reference=false 登记空文件夹；
-/// reference=true 从已有文件夹建立（只登记不搬文件；批量登记 M4 闭环）。
+/// 所有照片库均使用相同登记与扫描流程。
 #[tauri::command]
 pub async fn photo_library_create(
     app: AppHandle,
     state: State<'_, SharedState>,
     name: String,
     root_path: String,
-    reference: bool,
+    organization_template: String,
+    existing_folder:bool,
+    reorganize_existing:bool,
 ) -> Result<PhotoLibraryDto, String> {
     let shared = state.inner().clone();
     let dto = run_blocking(shared, move |state| {
-        fetch_photo_library_create(state, &name, &root_path, reference)
+        if reorganize_existing&&!existing_folder{return Err("只有使用现有文件夹时才能重新组织已有照片".into());}
+        let normalized=crate::settings::normalize_library_path(&root_path)?;
+        crate::db::organization::validate_photo_folder(std::path::Path::new(&normalized),existing_folder)?;
+        fetch_photo_library_create(state, &name, &root_path, &organization_template,reorganize_existing)
     })
     .await?;
     app.emit("app://event", &AppEvent::PhotoLibrariesChanged)
@@ -206,31 +201,157 @@ pub async fn photo_library_create(
     Ok(dto)
 }
 
-/// 移除登记核（photo_library_remove）：永不删照片文件（用户红线）；
-/// delete_records=true 连库内资产记录一并删（问过用户后）。库内统计缓存
-/// 随登记行消失；相册引用经 FK 级联清理。
+#[tauri::command]
+pub async fn photo_library_set_organization_template(app:AppHandle,state:State<'_,SharedState>,id:String,organization_template:String)->Result<PhotoLibraryDto,String>{
+    let result=run_blocking(state.inner().clone(),move |state|super::app_database_db(state)?.photos_library_set_organization_template(&id,&organization_template).map(PhotoLibraryDto::from)).await?;
+    app.emit("app://event",&AppEvent::PhotoLibrariesChanged).map_err(|e|e.to_string())?;Ok(result)
+}
+
+#[tauri::command]
+pub async fn photo_library_reorganize(app:AppHandle,state:State<'_,SharedState>,id:String)->Result<crate::db::reorganization::Progress,String>{
+    let shared=state.inner().clone();
+    run_blocking(shared,move |state|{
+        if state.import_running.load(std::sync::atomic::Ordering::SeqCst){return Err("导入进行中，请稍后整理已有照片".into());}
+        let _guard=state.register_gate.lock().map_err(|_|"照片登记状态不可用")?;
+        let db=super::app_database_db(state)?;
+        let result=crate::db::reorganization::run(&db,&id,&|progress|{let _=app.emit("photo-library-organizing",&progress);})?;
+        let db_dir=super::app_database_dir(state)?;
+        kick_index_after_registration(state,&db,&db_dir,result.completed);
+        db.library_scan_job_enqueue(&id).map_err(|e|e.to_string())?;
+        state.library_scan_kick.store(true,std::sync::atomic::Ordering::SeqCst);
+        let _=app.emit("app://event",&AppEvent::PhotoLibrariesChanged);Ok(result)
+    }).await
+}
+
+#[tauri::command]
+pub async fn photo_library_stop_reorganization(app:AppHandle,state:State<'_,SharedState>,id:String)->Result<(),String>{
+    run_blocking(state.inner().clone(),move |state|{
+        let _guard=state.register_gate.lock().map_err(|_|"照片登记状态不可用")?;let db=super::app_database_db(state)?;
+        db.photos_library_get(&id).map_err(|e|e.to_string())?.ok_or("照片库不存在")?;
+        db.0.execute("UPDATE library_organization_jobs SET status='cancelled' WHERE library_id=?1 AND status IN('pending','error')",[&id]).map_err(|e|e.to_string())?;
+        if db.photos_library_organization_pending(&id).map_err(|e|e.to_string())?{return Err("照片仍在整理中，请等待当前操作结束".into());}
+        db.library_scan_job_enqueue(&id).map_err(|e|e.to_string())?;state.library_scan_kick.store(true,std::sync::atomic::Ordering::SeqCst);let _=app.emit("app://event",&AppEvent::PhotoLibrariesChanged);Ok(())
+    }).await
+}
+
+/// 删除照片库核（photo_library_remove，2026-10-11 定案两分支）：移除登记 =
+/// 连库内资产记录一并删，并补齐派生数据清理——缩略图缓存文件（按源路径跨
+/// 档位清全部 mtime 代）+ 语义向量（usearch 按 asset id 删）。磁盘源文件
+/// 默认不动；`delete_files=true` 连文件一并删：缺失容忍、每文件失败记 warn
+/// 日志不中断；只删除软件导入的文件，原位索引的已有文件保持不动。
+/// 库内统计缓存随登记行消失；相册引用经 FK 级联清理。
 pub fn fetch_photo_library_remove(
     state: &super::AppState,
     id: &str,
-    delete_records: bool,
+    delete_files: bool,
 ) -> Result<PhotoLibraryRemoveResult, String> {
     let db = super::app_database_db(state)?;
-    let records_deleted = db.photos_library_remove(id, delete_records)?;
-    Ok(PhotoLibraryRemoveResult { records_deleted })
+    let library=db.photos_library_get(id).map_err(|e|e.to_string())?.ok_or("照片库不存在")?;
+    if db.photos_library_list().map_err(|e|e.to_string())?.len()<=1{return Err("数据库必须保留至少一个照片库，请先添加其他照片库".into());}
+    let removal = db.photos_library_remove(id)?;
+    let mut files_deleted = 0u64;
+    let db_dir = super::app_database_dir(state)?;
+    if !removal.assets.is_empty() {
+        super::purge_asset_derivations(
+            &db_dir,
+            &removal.assets.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            &removal
+                .assets
+                .iter()
+                .map(|(_, p)| p.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
+    // 物理删除在行删除之后（路径已先收集）：缺失容忍（外部已删/离线
+    // 卷），失败记 warn 不中断——记录已清，文件成盘上孤儿不再碍应用
+    if delete_files {
+        for path in &removal.managed_files {
+            if crate::db::strip_root_prefix(path,&library.root_path).is_none(){continue;}
+            match std::fs::remove_file(path) {
+                Ok(()) => files_deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let _ = db.append_log(
+                        "warn",
+                        None,
+                        &format!("删照片库清文件失败 {path}: {e}（记录已清）"),
+                    );
+                }
+            }
+        }
+    }
+    // 悬挂清扫（2026-10-09 审计 P0 幽灵资产兜底）：删除段与并发登记
+    //（扫描/导入/联拍持旧会话竞态写出的行）之间的窗口可能残留
+    // library_id 悬挂的资产行——收集派生数据清理后连行删除，兜死一切
+    // 竞态窗口。
+    sweep_dangling_library_assets(&db, &db_dir);
+    Ok(PhotoLibraryRemoveResult {
+        records_deleted: removal.records_deleted,
+        files_deleted,
+    })
 }
 
-/// 移除登记（photo_library_remove）。物理照片永不删；delete_records=true
-/// 连库内资产记录一并删。
+/// 悬挂 library_id 资产清扫（fetch_photo_library_remove 收尾，审计 P0）：
+/// `assets.library_id` 不在 photos_libraries 登记表内的行 = 幽灵资产
+///（删库竞态窗口写出的），派生数据（缩略图/向量/簇心缓存）随行清理。
+fn sweep_dangling_library_assets(db: &crate::db::Db, db_dir: &std::path::Path) {
+    let ghosts: Vec<(i64, String)> = db
+        .0
+        .prepare("SELECT id, path FROM assets WHERE library_id IS NOT NULL \
+                  AND library_id NOT IN (SELECT id FROM photos_libraries)")
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+        .unwrap_or_default();
+    if ghosts.is_empty() {
+        return;
+    }
+    super::purge_asset_derivations(
+        db_dir,
+        &ghosts.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        &ghosts.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(),
+    );
+    let ids: Vec<i64> = ghosts.iter().map(|(id, _)| *id).collect();
+    let placeholders = std::iter::repeat("?")
+        .take(ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    // pair 双向引用先解（与 photos_library_remove 删除段同盲区处理）
+    let _ = db.0.execute(
+        &format!("UPDATE assets SET pair_asset_id = NULL WHERE pair_asset_id IN ({placeholders})"),
+        params.as_slice(),
+    );
+    let deleted = db
+        .0
+        .execute(
+            &format!("DELETE FROM assets WHERE id IN ({placeholders})"),
+            params.as_slice(),
+        )
+        .unwrap_or(0);
+    let _ = db.append_log(
+        "warn",
+        None,
+        &format!("清扫悬挂 library_id 幽灵资产 {deleted} 行（删库竞态残留）"),
+    );
+}
+
+/// 删除照片库（photo_library_remove）。移除登记 = 连库内资产记录与派生
+/// 数据（缩略图/向量）一并删；默认不动磁盘照片文件，delete_files=true 再
+/// 连文件删（仅管理库——引用库拒绝；缺省 false 不动文件）。
 #[tauri::command]
 pub async fn photo_library_remove(
     app: AppHandle,
     state: State<'_, SharedState>,
     id: String,
-    delete_records: bool,
+    delete_files: Option<bool>,
 ) -> Result<PhotoLibraryRemoveResult, String> {
+    let delete_files = delete_files.unwrap_or(false);
     let shared = state.inner().clone();
     let result = run_blocking(shared, move |state| {
-        fetch_photo_library_remove(state, &id, delete_records)
+        fetch_photo_library_remove(state, &id, delete_files)
     })
     .await?;
     app.emit("app://event", &AppEvent::PhotoLibrariesChanged)
@@ -319,9 +440,29 @@ pub async fn photo_library_scan_cancel(
 /// 文件夹拷贝期间逐步拾取、最终收敛。
 pub const LIBRARY_SCAN_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
+/// 登记后索引唤醒（2026-10-09 审计 P0 断链A/C）：本轮有新登记
+/// （registered>0）→ pHash 任务幂等补差（登记入库只自动建 thumb/eyes/blur，
+/// phash 通道此前仅手动/代际自愈建档）+ kick 索引 worker（此前扫描登记后
+/// 无人唤醒，任务滞留 pending 直到下一次导入/手动触发）。kick 自带导入
+/// 在场让路守卫——导入竞态期间任务留 pending，导入收尾的 kick 兜底。
+fn kick_index_after_registration(
+    state: &AppState,
+    db: &crate::db::Db,
+    db_dir: &std::path::Path,
+    registered: u64,
+) {
+    if registered == 0 {
+        return;
+    }
+    let _ = db.create_phash_tasks_for_unindexed();
+    crate::index::kick(db_dir.to_path_buf(), &state.supervisor);
+}
+
 /// 单轮全库扫描编排（M2b 数据底座；M4 的进度/取消 UI 挂在同一条线上）：
 /// 导入在场 → 让路整轮跳过（§八-5/索引让路闸同骨架）；否则逐库跑
 /// [`crate::scan::scan_library_once`]，单库失败记日志不炸整轮。
+/// 收尾：本轮有新登记 → 索引唤醒（[`kick_index_after_registration`]，
+/// 审计 P0 断链A——登记即建任务，任务需要 worker 被派发）。
 /// 返回 (library_id, 报告) 列表。
 pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::LibraryScanReport)> {
     // 登记让路（§八-5）：导入落盘产出与扫描发现共用单管道，导入在场时
@@ -347,7 +488,9 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
     let gate = std::sync::Arc::clone(&state.register_gate);
     let options = crate::scan::ScanOptions::default();
     let mut out = Vec::new();
+    let mut registered_total = 0u64;
     for library in &libraries {
+        if db.photos_library_organization_pending(&library.id).unwrap_or(true){continue;}
         match crate::scan::scan_library_once(
             &db,
             &db_dir,
@@ -356,10 +499,15 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
             Some(&gate),
             Some(&state.bus),
         ) {
-            Ok(report) => out.push((library.id.clone(), report)),
+            Ok(report) => {
+                registered_total += report.registered;
+                out.push((library.id.clone(), report));
+            }
             Err(error) => eprintln!("[library-scan] 库「{}」扫描失败: {error}", library.name),
         }
     }
+    // 收尾索引唤醒（审计 P0 断链A）：本轮有新登记才 kick（零动作轮不打扰）
+    kick_index_after_registration(state, &db, &db_dir, registered_total);
     out
 }
 
@@ -477,7 +625,9 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
         return;
     };
     let gate = std::sync::Arc::clone(&state.register_gate);
+    let mut registered_total = 0u64;
     for job in jobs {
+        if db.photos_library_organization_pending(&job.library_id).unwrap_or(true){continue;}
         // 每任务前重查导入在场（上一任务跑的当口用户可能开了导入）
         if state
             .import_running
@@ -534,6 +684,8 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
             Ok(run) => {
                 let registered = job.registered + run.report.registered + run.report.rebound;
                 let skipped = job.skipped + run.report.skipped_event_total();
+                // 本轮新登记（不含续跑基线；重绑是旧行复活无新任务）
+                registered_total += run.report.registered;
                 match run.outcome {
                     crate::scan::BatchOutcome::Completed => {
                         let _ = db.library_scan_job_finish(
@@ -574,4 +726,7 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
             }
         }
     }
+    // 收尾索引唤醒（审计 P0 断链A）：本轮有新登记才 kick（让路/离线回队
+    // 的任务在下轮登记或导入收尾兜底）
+    kick_index_after_registration(state, &db, &db_dir, registered_total);
 }

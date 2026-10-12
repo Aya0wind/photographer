@@ -222,15 +222,28 @@ describe("联拍会话 IPC 封装（tethering_*）", () => {
     if (!unavailable.ok) expect(unavailable.error).toBeNull();
   });
 
-  it("tetheringFrame/tetheringPhotoPreview：data URL 直传；null/异形归 null", async () => {
+  it("tetheringFrame/tetheringPhotoPreview：载荷归一（url 直传 + af 四元组）；null/异形归 null", async () => {
+    invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA", af: [0.25, 0.5, 0.1, 0.1] });
+    expect(await tetheringFrame("s1")).toEqual({
+      url: "data:image/jpeg;base64,AAA",
+      af: [0.25, 0.5, 0.1, 0.1],
+    });
+
+    // 旧形状（纯字符串）/缺 url → null（载荷不完整不显示半截帧）
     invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,AAA");
-    expect(await tetheringFrame("s1")).toBe("data:image/jpeg;base64,AAA");
+    expect(await tetheringFrame("s1")).toBeNull();
 
     invokeMock.mockResolvedValueOnce(null);
     expect(await tetheringFrame("s1")).toBeNull();
 
-    invokeMock.mockResolvedValueOnce("not-a-url");
+    invokeMock.mockResolvedValueOnce({ url: "not-a-url", af: null });
     expect(await tetheringFrame("s1")).toBeNull();
+
+    // af 缺失/异形 → url 保留、af 归 null（AF 框不显示但不影响帧）
+    invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA" });
+    expect(await tetheringFrame("s1")).toEqual({ url: "data:image/jpeg;base64,AAA", af: null });
+    invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA", af: [0.5, "x", 0.1, 0.1] });
+    expect(await tetheringFrame("s1")).toEqual({ url: "data:image/jpeg;base64,AAA", af: null });
 
     invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,BBB");
     expect(await tetheringPhotoPreview("s1", 9, 256)).toBe("data:image/jpeg;base64,BBB");

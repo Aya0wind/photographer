@@ -1,6 +1,13 @@
 //! Inverse display sampling: reuse PhotoCraft's canvas bounds; no pixel processing.
 use super::recipe::EditRecipe;
 use photocraft_engine::doc::Size;
+fn edge(v:f64)->f64{if (v-v.round()).abs()<1e-7 {v.round()}else{v}}
+pub(super) fn crop_bounds(crop:super::recipe::CropRect,size:Size)->[u32;4]{
+    let w=f64::from(size.width);let h=f64::from(size.height);
+    let x=edge(crop.x*w).floor().clamp(0.0,(w-1.0).max(0.0));let y=edge(crop.y*h).floor().clamp(0.0,(h-1.0).max(0.0));
+    let right=edge((crop.x+crop.w)*w).ceil().clamp(x,w);let bottom=edge((crop.y+crop.h)*h).ceil().clamp(y,h);
+    [x as u32,y as u32,(right-x).max(1.0) as u32,(bottom-y).max(1.0) as u32]
+}
 
 pub(super) fn mapping(recipe:&EditRecipe,size:Size)->[f32;8] {
     let quarter=recipe.rotate_quarter;
@@ -8,10 +15,7 @@ pub(super) fn mapping(recipe:&EditRecipe,size:Size)->[f32;8] {
     let g=recipe.geometry.clone().unwrap_or_default();
     let plane=photocraft_engine::mode_cmds::rotated_size(base,g.angle);
     let (x,y,w,h)=if let Some(crop)=recipe.crop {
-        let x=(crop.x*f64::from(plane.width)).floor();let y=(crop.y*f64::from(plane.height)).floor();
-        let right=((crop.x+crop.w)*f64::from(plane.width)).ceil().min(f64::from(plane.width));
-        let bottom=((crop.y+crop.h)*f64::from(plane.height)).ceil().min(f64::from(plane.height));
-        (x,y,(right-x).max(1.0),(bottom-y).max(1.0))
+        let b=crop_bounds(crop,plane);(f64::from(b[0]),f64::from(b[1]),f64::from(b[2]),f64::from(b[3]))
     } else {(0.0,0.0,f64::from(plane.width),f64::from(plane.height))};
     let a=g.angle.to_radians();let (sin,cos)=a.sin_cos();
     let inverse=|u:f64,v:f64| {
@@ -32,10 +36,7 @@ pub(super) fn canvas_size(recipe:&EditRecipe,size:Size)->Size {
     let base=if recipe.rotate_quarter%2==1 {Size::new(size.height,size.width)}else{size};
     let plane=photocraft_engine::mode_cmds::rotated_size(base,recipe.geometry.as_ref().map(|g|g.angle).unwrap_or(0.0));
     if let Some(crop)=recipe.crop {
-        let x=(crop.x*f64::from(plane.width)).floor();let y=(crop.y*f64::from(plane.height)).floor();
-        let right=((crop.x+crop.w)*f64::from(plane.width)).ceil().min(f64::from(plane.width));
-        let bottom=((crop.y+crop.h)*f64::from(plane.height)).ceil().min(f64::from(plane.height));
-        Size::new((right-x).max(1.0) as u32,(bottom-y).max(1.0) as u32)
+        let bounds=crop_bounds(crop,plane);Size::new(bounds[2],bounds[3])
     } else {plane}
 }
 
@@ -43,6 +44,19 @@ pub(super) fn canvas_size(recipe:&EditRecipe,size:Size)->Size {
 mod tests {
     use super::*;
     fn point(m:[f32;8],u:f32,v:f32)->[f32;2] {[m[0]*u+m[1]*v+m[2],m[4]*u+m[5]*v+m[6]]}
+    #[test]
+    fn integer_pixel_crops_do_not_gain_rounding_pixels_in_display_or_export() {
+        use photocraft_engine::doc::{Document,ColorMode,SampleType,Color};
+        let size=Size::new(601,400);
+        let mut r=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft"})).unwrap();
+        r.crop=Some(super::super::recipe::CropRect{x:123.0/601.0,y:101.0/400.0,w:17.0/601.0,h:7.0/400.0});
+        assert_eq!(crop_bounds(r.crop.unwrap(),size),[123,101,17,7]);assert_eq!(canvas_size(&r,size),Size::new(17,7));
+        let base=Document::with_background("Crop",size,ColorMode::Rgb,SampleType::U8,Color::rgba(0.3,0.2,0.4,1.0));
+        assert_eq!(super::super::photocraft::render_document(&base,&r).unwrap().size,Size::new(17,7));
+        r.crop=Some(super::super::recipe::CropRect{x:0.5,y:0.5,w:1.0/601.0,h:1.0/400.0});
+        r.crop.as_mut().unwrap().x=300.0/601.0;
+        assert_eq!(super::super::photocraft::render_document(&base,&r).unwrap().size,Size::new(1,1));
+    }
     #[test]
     fn matches_rotation_flip_and_exact_integer_crop_boundaries() {
         let plain=super::super::recipe::parse_recipe(&serde_json::json!({"version":1})).unwrap();

@@ -7,6 +7,10 @@ import { MemoryRouter } from "react-router";
 
 import i18n from "@/i18n";
 import {
+  assetsByIds,
+  assetDetail,
+  assetVersions,
+  editRecipeGet,
   subscribeAppEvents,
   tetheringCapture,
   tetheringFocusAt,
@@ -34,8 +38,24 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     tetheringFrame: vi.fn(),
     tetheringPhotoPreview: vi.fn(),
     tetheringStop: vi.fn(),
+    // 点击胶片条 → 查看器（复用画廊 ViewerOverlay）所需的 API 面
+    assetsByIds: vi.fn(),
+    assetDetail: vi.fn(),
+    assetVersions: vi.fn(),
+    editRecipeGet: vi.fn(),
+    assetThumbGet: vi.fn(),
+    assetFlagSet: vi.fn(),
+    assetRatingSet: vi.fn(),
+    assetLabelSet: vi.fn(),
+    assetRejectSet: vi.fn(),
+    clipboardCopyFiles: vi.fn(),
+    revealInExplorer: vi.fn(),
   };
 });
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: vi.fn(() => ({
@@ -52,6 +72,10 @@ const captureMock = vi.mocked(tetheringCapture);
 const frameMock = vi.mocked(tetheringFrame);
 const previewMock = vi.mocked(tetheringPhotoPreview);
 const subscribeMock = vi.mocked(subscribeAppEvents);
+const assetsByIdsMock = vi.mocked(assetsByIds);
+const assetDetailMock = vi.mocked(assetDetail);
+const assetVersionsMock = vi.mocked(assetVersions);
+const editRecipeMock = vi.mocked(editRecipeGet);
 
 function choice(id: string, current: string, writable = true, values: string[] = []): TetherCameraSetting {
   return {
@@ -92,6 +116,7 @@ function dto(overrides: Partial<TetherSessionDto> = {}): TetherSessionDto {
     connected: true,
     receiving: false,
     error: null,
+    pendingReceipts: 0,
     ...overrides,
   };
 }
@@ -245,8 +270,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     expect(screen.getByTestId("tether-shutter")).toBeInTheDocument();
   });
 
-  it("拍摄模式固定工具栏首位：只读标志下也不锁死（照常尝试切换）", async () => {
-    // P 档后机身把 expprogram 上报为只读——控件仍显示、仍可点，尝试下发
+  it("只读拍摄模式显示机身转盘提示，不提交无效修改", async () => {
     sessionMock.mockResolvedValue(
       dto({ settings: [choice("expprogram", "P", false, ["P", "A", "S", "M"]), choice("iso", "400", false)] }),
     );
@@ -255,12 +279,11 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     const mode = await screen.findByTestId("tether-setting-expprogram");
     expect(mode).toHaveTextContent("拍摄模式");
     expect(mode).toHaveTextContent("P");
-    expect(mode).not.toBeDisabled();
+    expect(mode).toBeDisabled();
     expect(mode).toHaveAttribute("title", i18n.t("tether.modeDialHint"));
-    // 只读标志不拦截模式切换：点开弹层选 M，照常下发
     fireEvent.click(mode);
-    fireEvent.click(screen.getByTestId("tether-quick-expprogram-menu").querySelector('[data-value="M"]')!);
-    await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "expprogram", "M"));
+    expect(screen.queryByTestId("tether-quick-expprogram-menu")).toBeNull();
+    expect(settingSetMock).not.toHaveBeenCalled();
     // 其他只读参数（ISO）依旧隐藏
     expect(screen.queryByTestId("tether-setting-iso")).toBeNull();
   });
@@ -271,14 +294,52 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     );
     settingSetMock.mockResolvedValue([choice("expprogram", "M", true, ["P", "A", "S", "M"])]);
     renderPage();
-    fireEvent.click(await screen.findByTestId("tether-setting-expprogram"));
+    const mode = await screen.findByTestId("tether-setting-expprogram");
+    fireEvent.click(mode);
     fireEvent.click(screen.getByTestId("tether-quick-expprogram-menu").querySelector('[data-value="M"]')!);
     await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "expprogram", "M"));
   });
 
+  it("模式、三要素和快门保留浮条，其他参数和自动对焦在右侧", async () => {
+    sessionMock.mockResolvedValue(dto({ settings: [
+      choice("expprogram", "M", true, ["P", "A", "S", "M"]),
+      choice("shutterspeed", "125", true, ["125", "250"]), choice("f-number", "2.8", true, ["2.8", "4"]), choice("iso", "100", true, ["100", "200"]),
+      choice("whitebalance", "Auto", true), choice("focusmode", "AF-S", true),
+    ] }));
+    renderPage();
+    const bar = await screen.findByTestId("tether-quickbar");
+    const panel = screen.getByTestId("tether-settings-panel");
+    for (const id of ["expprogram", "shutterspeed", "f-number", "iso"]) {
+      expect(bar).toContainElement(screen.getByTestId(`tether-setting-${id}`));
+      expect(panel).not.toContainElement(screen.getByTestId(`tether-setting-${id}`));
+    }
+    for (const id of ["whitebalance", "focusmode"]) {
+      expect(panel).toContainElement(screen.getByTestId(`tether-setting-${id}`));
+    }
+    expect(panel).toContainElement(screen.getByTestId("tether-af"));
+    expect(bar).toContainElement(screen.getByTestId("tether-shutter"));
+  });
+
+  it("取景铺满可用区域后，黑边不触发对焦且图片坐标正确", async () => {
+    sessionMock.mockResolvedValue(dto());
+    frameMock.mockResolvedValue({ url: "data:image/jpeg;base64,FRAME", af: null });
+    focusAtMock.mockResolvedValue(undefined);
+    renderPage();
+    const img = await screen.findByTestId("tether-view-img");
+    const view = screen.getByTestId("tether-view");
+    view.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+    img.getBoundingClientRect = view.getBoundingClientRect;
+    Object.defineProperties(img, { naturalWidth: { value: 600 }, naturalHeight: { value: 400 } });
+    fireEvent.load(img);
+    fireEvent.click(view, { clientX: 200, clientY: 20 });
+    expect(focusAtMock).not.toHaveBeenCalled();
+    fireEvent.click(view, { clientX: 300, clientY: 200 });
+    await waitFor(() => expect(focusAtMock).toHaveBeenCalledWith("s1", 0.75, 0.5));
+  });
+
   it("实时取景：帧轮询填充画面（data URL）", async () => {
     sessionMock.mockResolvedValue(dto());
-    frameMock.mockResolvedValue("data:image/jpeg;base64,FRAME");
+    frameMock.mockResolvedValue({ url: "data:image/jpeg;base64,FRAME", af: null });
     renderPage();
 
     await waitFor(() => expect(screen.getByTestId("tether-view-img")).toHaveAttribute("src", "data:image/jpeg;base64,FRAME"));
@@ -392,7 +453,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
 
   it("点击取景画面对焦：归一化坐标下发 + 十字标记出现", async () => {
     sessionMock.mockResolvedValue(dto());
-    frameMock.mockResolvedValue("data:image/jpeg;base64,FRAME");
+    frameMock.mockResolvedValue({ url: "data:image/jpeg;base64,FRAME", af: null });
     focusAtMock.mockResolvedValue(undefined);
     renderPage();
 
@@ -447,6 +508,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
       albumId: 7,
       assetId: 42,
       name: "DSC_0002.JPG",
+      kind: "photo",
     });
     expect(await screen.findByTestId("tether-film-42")).toBeInTheDocument();
     handler!({
@@ -456,6 +518,7 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
       albumId: 7,
       assetId: 42,
       name: "DSC_0002.JPG",
+      kind: "photo",
     });
     await waitFor(() => expect(screen.getAllByTestId("tether-film-42")).toHaveLength(1));
   });
@@ -521,11 +584,12 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     );
   }, 12000);
 
-  it("工具栏拖动：grip 按住拖动改变定位（脱离底部居中）并持久化", async () => {
-    window.localStorage.clear();
+  it("工具栏默认居中，旧拖动位置不影响新窗口，当前窗口仍可拖动", async () => {
+    window.localStorage.setItem("tethering.quickbar.pos", JSON.stringify({ x: 700, y: 500 }));
     sessionMock.mockResolvedValue(dto());
     renderPage();
     const grip = await screen.findByTestId("tether-quickbar-grip");
+    expect(screen.getByTestId("tether-quickbar")).toHaveClass("bottom-3", "left-1/2", "-translate-x-1/2");
 
     fireEvent.pointerDown(grip, { button: 0, clientX: 400, clientY: 500 });
     fireEvent.pointerMove(window, { clientX: 320, clientY: 430 });
@@ -533,7 +597,294 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
 
     const bar = screen.getByTestId("tether-quickbar");
     expect(bar.style.left).not.toBe("");
-    expect(window.localStorage.getItem("tethering.quickbar.pos")).not.toBeNull();
     window.localStorage.clear();
+  });
+
+  it("拖动后缩小再放大窗口，工具条保持可见", async () => {
+    sessionMock.mockResolvedValue(dto());
+    renderPage();
+    const bar = await screen.findByTestId("tether-quickbar");
+    const view = screen.getByTestId("tether-view");
+    Object.defineProperties(bar, { offsetWidth: { value: 300 }, offsetHeight: { value: 50 } });
+    view.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 700 }) as DOMRect;
+    fireEvent.pointerDown(screen.getByTestId("tether-quickbar-grip"), { button: 0, clientX: 0, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: 700, clientY: 500 });
+    fireEvent.pointerUp(window);
+    view.getBoundingClientRect = () => ({ width: 500, height: 300 }) as DOMRect;
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => {
+      expect(bar.style.left).toBe("200px");
+      expect(bar.style.top).toBe("250px");
+    });
+    view.getBoundingClientRect = () => ({ width: 1000, height: 700 }) as DOMRect;
+    fireEvent(window, new Event("resize"));
+    expect(bar.style.left).toBe("200px");
+    expect(bar.style.top).toBe("250px");
+    window.localStorage.clear();
+  });
+
+  it("Range 型参数（无 options + 嵌套 range）：渲染滑条、拖动入草稿、松手提交", async () => {
+    // 后端新契约：ISO 无离散候选时带 range { min, max, step }
+    const settings: TetherCameraSetting[] = [
+      {
+        id: "iso",
+        label: "ISO",
+        kind: "choice",
+        current: "400",
+        writable: true,
+        options: [],
+        range: { min: 100, max: 6400, step: 100 },
+      },
+    ];
+    sessionMock.mockResolvedValue(dto({ settings }));
+    settingSetMock.mockResolvedValue(settings);
+    renderPage();
+
+    const row = await screen.findByTestId("tether-setting-iso");
+    const slider = row.querySelector("input[type=range]") as HTMLInputElement;
+    expect(slider).not.toBeNull();
+    expect(slider.getAttribute("min")).toBe("100");
+    expect(slider.getAttribute("max")).toBe("6400");
+    expect(slider.getAttribute("step")).toBe("100");
+    expect(slider).toBeEnabled();
+    expect(slider).toHaveAttribute("aria-label", i18n.t("tether.param.iso"));
+    // 无候选的 ISO 不进悬浮工具栏（只在右栏），值显示当前值
+    expect(row).toHaveTextContent("400");
+
+    // 拖动只更新草稿数值显示，不下发
+    fireEvent.input(slider, { target: { value: "800" } });
+    expect(screen.getByTestId("tether-range-value-iso")).toHaveTextContent("800");
+    expect(settingSetMock).not.toHaveBeenCalled();
+    // 松手提交归一范围内的数字字符串
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(settingSetMock).toHaveBeenCalledWith("s1", "iso", "800"));
+  });
+
+  it("相机无远程拍摄能力位：快门禁用 + 原因 tooltip，点击不触发 tetheringCapture", async () => {
+    sessionMock.mockResolvedValue(
+      dto({
+        camera: { ...CAMERA, capabilities: { ...CAMERA.capabilities, standardCapture: false, vendorCaptureNikon: false } },
+      }),
+    );
+    renderPage();
+
+    const shutter = await screen.findByTestId("tether-shutter");
+    expect(shutter).toBeDisabled();
+    expect(shutter).toHaveAttribute("title", i18n.t("tether.captureUnsupported"));
+    fireEvent.click(shutter);
+    await new Promise((done) => window.setTimeout(done, 50));
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  it("无 live view 能力：AF 禁用带原因、取景容器 tooltip、点击画面不发送对焦坐标", async () => {
+    sessionMock.mockResolvedValue(
+      dto({
+        camera: { ...CAMERA, capabilities: { ...CAMERA.capabilities, liveView: false } },
+        photos: [{ id: 9, name: "DSC_0001.JPG", kind: "photo" }],
+        settings: [choice("iso", "400", true)],
+      }),
+    );
+    previewMock.mockResolvedValue("data:image/jpeg;base64,THUMB");
+    renderPage();
+
+    // AF 依赖 live view：禁用 + tooltip 说明；点击不触发中心对焦
+    const af = await screen.findByTestId("tether-af");
+    expect(af).toBeDisabled();
+    expect(af).toHaveAttribute("title", i18n.t("tether.focusNeedsLiveView"));
+    fireEvent.click(af);
+    expect(focusAtMock).not.toHaveBeenCalled();
+
+    // 取景不可用的原因 tooltip 挂在取景容器上
+    const view = screen.getByTestId("tether-view");
+    expect(view).toHaveAttribute("title", i18n.t("tether.liveViewUnsupported"));
+
+    // 回落成片预览上点击：不发送对焦坐标（无 live view 无点对焦）
+    const img = await waitFor(() => {
+      const el = view.querySelector("img") as HTMLImageElement | null;
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    img.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 200, height: 100, right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    fireEvent.click(view, { clientX: 50, clientY: 25 });
+    await new Promise((done) => window.setTimeout(done, 50));
+    expect(focusAtMock).not.toHaveBeenCalled();
+  });
+
+  it("待收轻提示：快门成功后显示「待收 N 张」，photoAdded 到账后消失", async () => {
+    sessionMock.mockResolvedValue(dto());
+    captureMock.mockResolvedValue({ ok: true });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("tether-shutter"));
+    // 触发成功但收片未到（快照 photos 空、无 photoAdded 事件）
+    expect(await screen.findByTestId("tether-pending-receipts")).toHaveTextContent("待收 1 张");
+
+    // 收片到账（事件路径）：计数冲抵、轻提示消失
+    handler!({
+      type: "tetheringPhotoAdded",
+      sessionId: "s1",
+      libraryId: "lib-1",
+      albumId: 7,
+      assetId: 42,
+      name: "DSC_0002.JPG",
+      kind: "photo",
+    });
+    await waitFor(() => expect(screen.queryByTestId("tether-pending-receipts")).toBeNull());
+  });
+
+  it("待收轻提示：收片遇错转为「重试中」，到账后消失", async () => {
+    sessionMock.mockResolvedValue(dto());
+    captureMock.mockResolvedValue({ ok: true });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("tether-shutter"));
+    expect(await screen.findByTestId("tether-pending-receipts")).toHaveTextContent("待收 1 张");
+
+    // 会话报错（USB 抖动等）：待收中的收片转为重试中提示
+    handler!({ type: "tetheringStatus", sessionId: "s1", connected: true, error: "USB 传输不稳" });
+    await waitFor(() => expect(screen.getByTestId("tether-pending-receipts")).toHaveTextContent(i18n.t("tether.receivingRetry")));
+
+    handler!({
+      type: "tetheringPhotoAdded",
+      sessionId: "s1",
+      libraryId: "lib-1",
+      albumId: 7,
+      assetId: 42,
+      name: "DSC_0002.JPG",
+      kind: "photo",
+    });
+    await waitFor(() => expect(screen.queryByTestId("tether-pending-receipts")).toBeNull());
+  });
+
+  it("待收计数与拍摄后快照对账：快照已含新片时不残留待收提示", async () => {
+    // 拍摄触发成功且收片极快：photoAdded 事件丢失，靠快照新片冲抵
+    sessionMock.mockResolvedValueOnce(dto()).mockResolvedValue(dto({
+      photos: [{ id: 42, name: "DSC_0002.JPG", kind: "photo" }],
+    }));
+    captureMock.mockResolvedValue({ ok: true });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("tether-shutter"));
+    await screen.findByTestId("tether-film-42");
+    // 快照新片已到账：不显示待收提示（事件丢失由对账兜底）
+    await waitFor(() => expect(screen.queryByTestId("tether-pending-receipts")).toBeNull());
+  });
+
+  it("胶片条合并卡：RAW+JPG 同 stem 合一张卡（代表=JPG）+ 格式角标", async () => {
+    sessionMock.mockResolvedValue(dto({
+      photos: [
+        { id: 9, name: "DSC_0001.JPG", kind: "photo" },
+        { id: 10, name: "DSC_0001.NEF", kind: "raw" },
+        { id: 11, name: "DSC_0002.NEF", kind: "raw" },
+        { id: 12, name: "DSC_0003.JPG", kind: "photo" },
+      ],
+    }));
+    renderPage();
+
+    // RAW+JPG 合并：一张卡（代表 JPG id9），RAW 成员不再单独出卡
+    expect(await screen.findByTestId("tether-film-9")).toBeInTheDocument();
+    expect(screen.queryByTestId("tether-film-10")).toBeNull();
+    expect(screen.getByTestId("tether-film-badge-9")).toHaveTextContent("RAW+JPG");
+    // 单 RAW / 单 JPG 如实标注
+    expect(screen.getByTestId("tether-film-badge-11")).toHaveTextContent("RAW");
+    expect(screen.getByTestId("tether-film-badge-12")).toHaveTextContent("JPG");
+    // 合并卡 tooltip 列出两个成员文件名
+    expect(screen.getByTestId("tether-film-9")).toHaveAttribute("title", "DSC_0001.JPG + DSC_0001.NEF");
+  });
+
+  it("photoAdded 事件携带 kind：RAW 新片到账即标 RAW（不等快照纠正）", async () => {
+    sessionMock.mockResolvedValue(dto());
+    renderPage();
+    await screen.findByTestId("tether-window");
+
+    handler!({
+      type: "tetheringPhotoAdded",
+      sessionId: "s1",
+      libraryId: "lib-1",
+      albumId: 7,
+      assetId: 42,
+      name: "DSC_0002.NEF",
+      kind: "raw",
+    });
+    expect(await screen.findByTestId("tether-film-42")).toBeInTheDocument();
+    expect(screen.getByTestId("tether-film-badge-42")).toHaveTextContent("RAW");
+  });
+
+  it("点击胶片条卡片 → 全屏查看器（会话照片为结果集，代表卡打开）", async () => {
+    sessionMock.mockResolvedValue(dto({
+      photos: [
+        { id: 9, name: "DSC_0001.JPG", kind: "photo" },
+        { id: 10, name: "DSC_0001.NEF", kind: "raw" },
+      ],
+    }));
+    const { assetFixture } = await import("@/test/fixtures");
+    assetsByIdsMock.mockResolvedValue([
+      assetFixture(9, { name: "DSC_0001.JPG" }),
+      assetFixture(10, { name: "DSC_0001.NEF", kind: "raw" }),
+    ]);
+    assetDetailMock.mockResolvedValue(null);
+    assetVersionsMock.mockResolvedValue(null);
+    editRecipeMock.mockResolvedValue({ recipe: null, updatedAt: null });
+    renderPage();
+
+    fireEvent.click(await screen.findByTestId("tether-film-9"));
+    // 打开时按会话照片全量拉取（查看器内左右切换 = 会话集）
+    await waitFor(() => expect(assetsByIdsMock).toHaveBeenCalledWith([9, 10]));
+      const viewer = await screen.findByTestId("viewer");
+    expect(viewer).toHaveAttribute("aria-label", "DSC_0001.JPG");
+  });
+
+  it("待收提示用后端 FIFO 真值：快照 pendingReceipts 直接显示（RAW+JPG 第二张在途不失真）", async () => {
+    sessionMock.mockResolvedValue(dto({ pendingReceipts: 2 }));
+    renderPage();
+
+    // 无本地快门计数，快照真值即显示（RAW 已到、JPG 在途 = 待收 2）
+    expect(await screen.findByTestId("tether-pending-receipts")).toHaveTextContent("待收 2 张");
+  });
+
+  it("photoAdded 事件后去抖重拉快照，pendingReceipts 归零后提示消失", async () => {
+    sessionMock.mockResolvedValue(dto({ pendingReceipts: 1 }));
+    renderPage();
+    expect(await screen.findByTestId("tether-pending-receipts")).toBeInTheDocument();
+
+    const callsBefore = sessionMock.mock.calls.length;
+    handler!({
+      type: "tetheringPhotoAdded",
+      sessionId: "s1",
+      libraryId: "lib-1",
+      albumId: 7,
+      assetId: 42,
+      name: "DSC_0002.NEF",
+      kind: "raw",
+    });
+    // 事件增量先落胶片条；去抖重拉前把快照真值切到「队列已清空」，
+    // 400ms 的重拉带着 pendingReceipts=0 到达 → 提示消失
+    sessionMock.mockResolvedValue(dto({ photos: [{ id: 42, name: "DSC_0002.NEF", kind: "raw" }], pendingReceipts: 0 }));
+    await waitFor(() => expect(sessionMock.mock.calls.length).toBeGreaterThan(callsBefore), { timeout: 2000 });
+    await waitFor(() => expect(screen.queryByTestId("tether-pending-receipts")).toBeNull(), { timeout: 2000 });
+  });
+
+  it("取景画面叠加相机回报的 AF 框（内容区内定位）", async () => {
+    sessionMock.mockResolvedValue(dto());
+    // jsdom 无布局：伪造 view（400×200）与 img（100×100 居中）的矩形
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.dataset.testid === "tether-view") {
+          return { left: 0, top: 0, width: 400, height: 200, right: 400, bottom: 200, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+        }
+        return { left: 150, top: 50, width: 100, height: 100, right: 250, bottom: 150, x: 150, y: 50, toJSON: () => ({}) } as DOMRect;
+      });
+    frameMock.mockResolvedValue({ url: "data:image/jpeg;base64,FRAME", af: [0.25, 0.25, 0.5, 0.5] });
+    renderPage();
+
+    const box = await screen.findByTestId("tether-af-region");
+    // 内容区（view 的 37.5%×25% 起，100×100/400×200）内按 af 归一化定位
+    expect(box.style.left).toBe("43.75%");
+    expect(box.style.top).toBe("37.5%");
+    expect(box.style.width).toBe("12.5%");
+    expect(box.style.height).toBe("25%");
+    rectSpy.mockRestore();
   });
 });

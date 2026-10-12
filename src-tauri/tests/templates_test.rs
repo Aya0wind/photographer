@@ -13,10 +13,7 @@ pub use common::{
     tasks, tethering, thumbs,
 };
 
-#[path = "../src/import/templates.rs"]
-mod templates;
-
-use templates::{resolve_captured, sanitize_component, unique_path};
+use db::organization::{resolve_captured, sanitize_component, unique_path};
 
 /// EXIF 优先、mtime 回退（纯时间布局年/月段与 assets.captured_at 同口径）。
 #[test]

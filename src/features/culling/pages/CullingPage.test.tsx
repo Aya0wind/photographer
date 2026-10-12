@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter } from "react-router";
@@ -19,6 +19,8 @@ import {
   cullSessionList,
   cullSessionOpen,
   cullSessionRename,
+  subscribeAppEvents,
+  type AppEvent,
   type CullSessionDto,
 } from "@/ipc/api";
 
@@ -36,6 +38,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     assetThumbGet: vi.fn(),
     assetDetail: vi.fn(),
     assetsByIds: vi.fn(),
+    subscribeAppEvents: vi.fn(),
   };
 });
 
@@ -53,6 +56,7 @@ const finishMock = vi.mocked(cullSessionFinish);
 const albumListMock = vi.mocked(albumList);
 const assetsByIdsMock = vi.mocked(assetsByIds);
 const detailMock = vi.mocked(assetDetail);
+const subscribeMock = vi.mocked(subscribeAppEvents);
 
 function session(id: number, overrides: Partial<CullSessionDto> = {}): CullSessionDto {
   return {
@@ -81,6 +85,8 @@ beforeEach(() => {
   assetsByIdsMock.mockReset().mockResolvedValue([]);
   detailMock.mockReset().mockResolvedValue(null);
   vi.mocked(cullDecisionApply).mockReset().mockResolvedValue(session(1));
+  // 事件订阅默认 noop（删库联动用例覆写捕获 handler 手动发事件）
+  subscribeMock.mockReset().mockResolvedValue(() => {});
   useCullingStore.setState({ activeCount: 0 });
 });
 
@@ -99,6 +105,30 @@ describe("选片会话页（CullingPage /culling）", () => {
     renderPage();
     await screen.findByTestId("culling-empty");
     expect(screen.getByTestId("culling-empty").textContent).toContain("还没有选片会话");
+  });
+
+  // 删库联动（2026-10-09）：照片库登记增删 → 会话进度随库内资产整体消失
+  // 失真，photoLibrariesChanged 事件到达即轻量重拉列表
+  it("photoLibrariesChanged → 重拉会话列表", async () => {
+    listMock.mockResolvedValue([session(1)]);
+    const handlers: Array<(event: AppEvent) => void> = [];
+    subscribeMock.mockImplementation(async (cb) => {
+      handlers.push(cb);
+      return () => {};
+    });
+    renderPage();
+    expect(await screen.findAllByTestId("culling-session-card")).toHaveLength(1);
+    // 页面列表 + 侧栏徽标各拉一次（refresh 内含 refreshActiveCount）
+    const before = listMock.mock.calls.length;
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    // 删库后重拉：会话清空回到空态
+    listMock.mockResolvedValue([]);
+    act(() => {
+      for (const handler of [...handlers]) handler({ type: "photoLibrariesChanged" });
+    });
+    await waitFor(() => expect(listMock.mock.calls.length).toBeGreaterThanOrEqual(before + 2));
+    await waitFor(() => expect(screen.getByTestId("culling-empty")).toBeInTheDocument());
   });
 
   it("进行中卡片：名称/来源描述/进度计数/操作；侧栏徽标计数同步", async () => {

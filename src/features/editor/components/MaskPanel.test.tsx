@@ -19,7 +19,7 @@ it("creates, duplicates and edits local adjustments without changing global tone
  const exposure=screen.getByRole("spinbutton",{name:/^曝光/});fireEvent.focus(exposure);fireEvent.change(exposure,{target:{value:"2"}});fireEvent.blur(exposure);
  recipe=JSON.parse(screen.getByTestId("recipe").textContent!);
  expect(recipe.masks[1].advanced.exposure).toBe(2);expect(recipe.advanced.exposure).toBe(0);expect(recipe.masks[0].advanced).toBeUndefined();
- fireEvent.click(screen.getByRole("button",{name:"重置光线"}));
+ fireEvent.click(screen.getByRole("button",{name:"重置影调"}));
  recipe=JSON.parse(screen.getByTestId("recipe").textContent!);expect(recipe.masks[1].advanced.exposure).toBe(0);
  fireEvent.click(screen.getByRole("button",{name:"删除"}));
  expect(JSON.parse(screen.getByTestId("recipe").textContent!).masks).toHaveLength(1);

@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { editPreviewOpen, editPreviewPrepare, editPreviewClose, type EditorPreviewSession } from "@/ipc/api";
 import { useEditorPreview } from "./useEditorPreview";
 import { advancedRecipe } from "./advancedRecipe";
+import {startPreviewScheduler} from "./previewScheduler";
 
 vi.mock("@/ipc/api", () => ({ editPreviewOpen:vi.fn(),editPreviewPrepare:vi.fn(),editPreviewClose:vi.fn() }));
 vi.mock("./previewScheduler", () => ({ startPreviewScheduler:vi.fn((_id,_recipe,callbacks) => {
@@ -27,10 +28,17 @@ it("keeps the cached RAW proxy for editing without starting native RAW preparati
   expect(result.current.loading).toBe(false);
 });
 it("stops ordinary rendering after native activation and retains the same proxy",async()=>{
-  const {result,rerender}=renderHook(({native})=>useEditorPreview(1,recipe,"photos",native),{initialProps:{native:false}});
+  const {result,rerender}=renderHook(({native,recipe})=>useEditorPreview(1,recipe,"photos",native),{initialProps:{native:false,recipe}});
   await waitFor(()=>expect(result.current.session).toBe(proxy));
-  rerender({native:true});
+  const ordinary=vi.mocked(startPreviewScheduler).mock.results[0].value;
+  rerender({native:true,recipe});
+  expect(ordinary.close).toHaveBeenCalledTimes(1);
+  const changed={...recipe,adjustments:{brightness:25,contrast:0,saturation:0}};
+  rerender({native:true,recipe:changed});expect(startPreviewScheduler).toHaveBeenCalledTimes(1);
   expect(result.current.session).toBe(proxy);
   expect(editPreviewPrepare).not.toHaveBeenCalled();
   expect(result.current.error).toBeNull();
+  rerender({native:false,recipe:changed});expect(startPreviewScheduler).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(startPreviewScheduler).mock.calls[1][1]()).toBe(changed);
+  expect(editPreviewOpen).toHaveBeenCalledTimes(1);
 });

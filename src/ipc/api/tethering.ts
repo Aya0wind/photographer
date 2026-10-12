@@ -77,6 +77,7 @@ function normalizeTetherSession(value: unknown): TetherSessionDto | null {
     connected: r.connected === true,
     receiving: r.receiving === true,
     error: typeof r.error === "string" && r.error !== "" ? r.error : null,
+    pendingReceipts: typeof r.pendingReceipts === "number" && r.pendingReceipts >= 0 ? r.pendingReceipts : 0,
   };
 }
 
@@ -94,6 +95,20 @@ function normalizeTetherSettings(value: unknown): TetherCameraSetting[] {
         : "choice";
       const num = (v: unknown): number | undefined =>
         typeof v === "number" && Number.isFinite(v) ? v : undefined;
+      // Range 型参数新契约：后端嵌套 range { min, max, step }（min/max 缺一或
+      // 非有限数则弃用，UI 回退旧扁平 min/max/step）；step 缺省 1。
+      const rangeRaw = s.range;
+      const range =
+        rangeRaw !== null && typeof rangeRaw === "object" && !Array.isArray(rangeRaw)
+          ? (() => {
+              const rr = rangeRaw as Record<string, unknown>;
+              const min = num(rr.min);
+              const max = num(rr.max);
+              return min !== undefined && max !== undefined
+                ? { min, max, step: num(rr.step) ?? 1 }
+                : undefined;
+            })()
+          : undefined;
       return {
         id: s.id as string,
         label: typeof s.label === "string" ? s.label : (s.id as string),
@@ -112,6 +127,7 @@ function normalizeTetherSettings(value: unknown): TetherCameraSetting[] {
         min: num(s.min),
         max: num(s.max),
         step: num(s.step),
+        range,
       };
     });
 }
@@ -181,12 +197,26 @@ export async function tetheringCapture(sessionId: string): Promise<TetherCapture
   }
 }
 
-/** 取一帧实时取景（tethering_frame）：JPEG data URL；相机忙（拍摄/收片中）或
- *  不支持 live view 时返回 null（UI 保持上一帧不闪烁）。 */
-export async function tetheringFrame(sessionId: string): Promise<string | null> {
+/** 取景帧载荷（url + 相机回报的归一化 AF 区域，同一帧单次往返；
+ *  af=[x,y,w,h] 原点左上，null=本帧无 AF 数据）。 */
+export interface TetherFrameDto {
+  url: string;
+  af: [number, number, number, number] | null;
+}
+
+/** 取一帧实时取景（tethering_frame）：相机忙（拍摄/收片中）或不支持
+ *  live view 时返回 null（UI 保持上一帧不闪烁）。 */
+export async function tetheringFrame(sessionId: string): Promise<TetherFrameDto | null> {
   try {
     const value = await ipc<unknown>("tethering_frame", { sessionId });
-    return typeof value === "string" && value.startsWith("data:image/") ? value : null;
+    if (value === null || typeof value !== "object") return null;
+    const r = value as Record<string, unknown>;
+    if (typeof r.url !== "string" || !r.url.startsWith("data:image/")) return null;
+    const af =
+      Array.isArray(r.af) && r.af.length === 4 && r.af.every((v) => typeof v === "number")
+        ? (r.af as [number, number, number, number])
+        : null;
+    return { url: r.url, af };
   } catch {
     return null;
   }

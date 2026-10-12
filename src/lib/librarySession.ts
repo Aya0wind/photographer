@@ -19,3 +19,17 @@ export function resetLibrarySession(): void {
   useAiStore.getState().resetLibrarySession();
   useImportStore.getState().resetLibrarySession();
 }
+
+/**
+ * 库内容缓存失效（photoLibrariesChanged 事件用，2026-10-09 删库联动）：
+ * 删除照片库只发该事件（不换库），但库内资产已整体消失，且 SQLite 无
+ * AUTOINCREMENT——之后新导入会复用旧 assetId，按 id 键的三张内存表
+ * （画廊快照/缩略图缓存/浏览打点）不整表清=张冠李戴的残留。比
+ * resetLibrarySession 轻：不动索引状态与导入任务（同库历史仍有效）。
+ * thumbPipeline 自身的事件分发会再清一次缩略图缓存（重复清无害）。
+ */
+export function invalidateLibraryContentCaches(): void {
+  clearGallerySnapshot();
+  resetThumbPipeline();
+  resetViewMark();
+}

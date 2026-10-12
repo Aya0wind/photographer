@@ -133,11 +133,19 @@ fn truth_adds_missing_device_via_scan_and_emits_scanned() {
     while let Ok(ev) = rx.try_recv() {
         if let AppEvent::DeviceScanned { id, snapshot, .. } = ev {
             assert_eq!(devices::normalize_device_id(&id), volume_id);
-            assert_eq!(snapshot.new_files, 3, "扫描结果入快照");
+            assert_eq!(snapshot.files_by_kind.values().sum::<u64>(), 3, "文件名计数入快照");
             scanned = true;
         }
     }
     assert!(scanned, "必须发布 DeviceScanned（前端弹窗依赖）");
+    let cached = state.devices.lock().unwrap()[&volume_id].files.clone().unwrap();
+    assert_eq!(cached.len(), 3);
+    // Removing the source files proves the wizard consumes the discovery cache,
+    // rather than enumerating again. The import engine still uses a fresh list.
+    for file in &cached {
+        std::fs::remove_file(src.path().join(&file.rel_path)).unwrap();
+    }
+    assert_eq!(ipc::files_by_id(&state, &volume_id).unwrap().len(), 3);
 }
 
 #[test]
@@ -262,6 +270,7 @@ fn repeated_reconcile_with_same_truth_is_idempotent() {
     state.devices.lock().unwrap().insert(
         pnp_lower.clone(),
         ipc::DeviceEntry {
+            files: None,
             scan: ipc::DeviceScan::Ready,
             source,
             snapshot: devices::orchestrator::DeviceSnapshot {
@@ -360,7 +369,7 @@ fn discovery_without_library_still_scans_and_folder_sources_survive_poll() {
         "连接应立即可见"
     );
     assert!(eventually_registry(&state, |key| key == id));
-    assert_eq!(state.devices.lock().unwrap()[&id].snapshot.new_files, 2);
+    assert_eq!(state.devices.lock().unwrap()[&id].snapshot.files_by_kind.values().sum::<u64>(), 2);
     assert!(state.devices.lock().unwrap().contains_key(&folder.id));
 }
 

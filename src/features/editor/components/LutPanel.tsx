@@ -11,12 +11,14 @@ const BUTTON="rounded-lg border border-edge px-2 py-1.5 text-xs text-text-second
 export default function LutPanel({value,onChange,begin,end,onModalChange}:{onModalChange?:(open:boolean)=>void;value:Lookup|undefined;onChange:(lookup:Lookup|undefined,record?:boolean)=>void;begin:()=>void;end:()=>void}) {
   const {t}=useTranslation();
   const [entries,setEntries]=useState<EditorLutEntry[]>([]);
+  const [catalogRevision,setCatalogRevision]=useState(0);
+  useEffect(()=>{const changed=()=>setCatalogRevision(value=>value+1);window.addEventListener("editor-luts-changed",changed);return()=>window.removeEventListener("editor-luts-changed",changed);},[]);
   const [loading,setLoading]=useState(true),[busy,setBusy]=useState(false);
   const [error,setError]=useState<string|null>(null);
   const [editing,setEditing]=useState<EditorLutEntry|null>(null),[name,setName]=useState("");
   const [removing,setRemoving]=useState<EditorLutEntry|null>(null);
   useEffect(()=>{let cancelled=false;void editLutList().then(list=>{if(!cancelled)setEntries(list);})
-    .catch(e=>{if(!cancelled)setError(String(e));}).finally(()=>{if(!cancelled)setLoading(false);});return()=>{cancelled=true;};},[]);
+    .catch(e=>{if(!cancelled)setError(String(e));}).finally(()=>{if(!cancelled)setLoading(false);});return()=>{cancelled=true;};},[value?.id,catalogRevision]);
   useLayoutEffect(()=>{onModalChange?.(!!editing||!!removing||!!error);return()=>onModalChange?.(false);},[editing,removing,error,onModalChange]);
   useEffect(()=>{
     if(!editing&&!removing&&!error)return;

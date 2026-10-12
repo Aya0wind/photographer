@@ -84,8 +84,18 @@ pub trait DeviceSource: Send + Sync {
     }
     /// 展示名（卷标 / 相机友好名）
     fn name(&self) -> String;
+    fn fast_file_counts(&self) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> { Ok(None) }
     /// 枚举全部媒体文件（跳过系统目录与非媒体扩展名）。
     fn list(&self) -> DeviceResult<Vec<FileEntry>>;
+    /// Discovery only: names/IDs, without reading content or detailed metadata.
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        self.list()
+    }
+    fn list_names_with_progress(&self, on_batch: FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
+        let files = self.list_names()?;
+        on_batch(files.clone());
+        Ok(files)
+    }
     fn list_with_progress(&self, on_batch: FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
         let files = self.list()?;
         on_batch(files.clone());
@@ -104,6 +114,7 @@ pub trait DeviceSource: Send + Sync {
     fn thumbnail(&self, _id: &str) -> DeviceResult<Option<Vec<u8>>> {
         Ok(None)
     }
+    fn file_sizes(&self, _ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> { Ok(None) }
     /// 删除源文件（M2 move 模式：校验入册后删源）。
     /// 默认不支持（仅实现该能力的源可参与移动导入）。
     fn delete(&self, _id: &str) -> DeviceResult<()> {

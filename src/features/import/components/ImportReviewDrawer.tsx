@@ -31,7 +31,7 @@ export default function ImportReviewDrawer({ children, footer, busy, onBack }: {
       <div className="flex h-full min-h-0 flex-col">
         <header className="flex shrink-0 items-center gap-3 border-b border-edge px-6 py-5">
           <div className="min-w-0 flex-1"><h2 id={titleId} className="text-lg font-semibold">{t("wizard.flow.reviewTitle")}</h2><p className="mt-1 text-xs text-text-muted">{t("wizard.flow.reviewDesc")}</p></div>
-          <button type="button" className="ui-icon-button" onClick={onBack} disabled={busy} aria-label={t("ui.close")}>×</button>
+          <button type="button" className="ui-pill-button" onClick={onBack} disabled={busy} aria-label={t("ui.close")}>× {t("ui.close")}</button>
         </header>
         <div className="sp-scroll min-h-0 flex-1 overflow-y-auto px-6 py-5">{children}</div>
         <footer className="shrink-0 border-t border-edge px-6 py-5">{footer}</footer>

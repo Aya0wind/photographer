@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
+import CurveCoordinates from "./CurveCoordinates";
 import type { AdvancedAdjustments } from "@/ipc/api";
-import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint, type HslColorRange } from "../lib/curves";
+import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint, type HslColorRange,type HslAxis } from "../lib/curves";
 
 export interface CurveSampling {
+  liveHistogram?:number[][];
+  histogramBusy?:boolean;
+  onHistogramOpen?:(open:boolean)=>void;
+  sampleSize?:1|3|5|11;
+  setSampleSize?:(size:1|3|5|11)=>void;
+  setTargetCurveChannel?:(channel:CurveChannel)=>void;
+  targetHslAxis?:HslAxis;
+  setTargetHslAxis?:(axis:HslAxis)=>void;
   available?:boolean;
   picker: CurvePicker | null;
   busy?:boolean;
@@ -29,11 +38,13 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
   const histogram = sampling.histogram;
   const drag = useRef<{ id: number; index: number; points: CurvePoint[]; x: number; y: number } | null>(null);
   const raw = channel === "rgb" ? adjustments.curves : adjustments.channelCurves?.[channel];
+  useEffect(()=>{if(drag.current&&raw!==drag.current.points)drag.current=null;},[raw]);
   const points = raw?.length ? raw : IDENTITY;
   const samples = curveSamples(points);
   const apply = (curve: CurvePoint[], record = true) => onChange(channel === "rgb" ? { curves: curve }
     : { channelCurves: { ...adjustments.channelCurves, [channel]: curve } }, record);
   const sampleRef = useRef(sampling.sample);
+  useEffect(()=>{if(sampling.picker==="curveTarget"&&sampling.sample){const rgb=sampling.sample;const x=channel==="red"?rgb[0]:channel==="green"?rgb[1]:channel==="blue"?rgb[2]:rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;const index=points.findIndex(([p])=>Math.abs(p-x)<1);setSelected(index<0?null:index);}},[sampling.picker,sampling.sample,points,channel]);
   useEffect(() => {
     if (!sampling.sample || sampleRef.current === sampling.sample || !sampling.picker) return;
     sampleRef.current = sampling.sample;
@@ -61,7 +72,7 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
       <button type="button" aria-label={t("advancedEditor.resetGroup",{group:t("advancedEditor.curves")})}
         disabled={!adjustments.curves.length && !Object.values(adjustments.channelCurves??{}).some(points=>!!points?.length)}
         className="rounded-md px-2 py-1 text-[11px] text-accent disabled:opacity-30" onClick={event=>{event.preventDefault();event.stopPropagation();finish();setSelected(null);onReset();}}>{t("editor.reset")}</button>
-      <select value={channel} aria-label={t("advancedEditor.curveChannel")} className="rounded-lg border border-edge bg-bg px-2 py-1 text-xs" onChange={(e) => { finish(); setChannel(e.target.value as CurveChannel); setSelected(null); }}>
+      <select value={channel} aria-label={t("advancedEditor.curveChannel")} className="rounded-lg border border-edge bg-bg px-2 py-1 text-xs" onChange={(e) => { finish(); setChannel(e.target.value as CurveChannel);sampling.setTargetCurveChannel?.(e.target.value as CurveChannel); setSelected(null); }}>
         {Object.keys(COLORS).map((key) => <option key={key} value={key}>{t(`advancedEditor.channels.${key}`)}</option>)}
       </select></summary>
     <svg viewBox="0 0 255 255" preserveAspectRatio="none" tabIndex={0} role="application" aria-label={t("advancedEditor.curves")}
@@ -103,8 +114,11 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
       <polyline points={samples.map((y, x) => `${x},${255 - y}`).join(" ")} fill="none" stroke={COLORS[channel]} strokeWidth="2" />
       {points.map(([x, y], i) => <circle key={i} cx={x} cy={255 - y} r={selected === i ? 5 : 3.5} fill={selected === i ? "white" : COLORS[channel]} stroke={COLORS[channel]} />)}
     </svg>
-    <div className="flex items-center justify-between text-[11px] tabular-nums text-text-muted"><span>{t("advancedEditor.inputTone")} {selected !== null && points[selected] ? points[selected][0] : "—"}</span><span>{t("advancedEditor.outputTone")} {selected !== null && points[selected] ? points[selected][1] : "—"}</span></div>
+    <CurveCoordinates key={channel} points={points} selected={selected} onChange={curve=>{finish();apply(curve);}}/>
+    {histogram.length>0&&<p className="text-[11px] text-text-muted">{t("advancedEditor.histogramOriginal")}</p>}
     {sampling.available!==false&&<div className="flex gap-1">{(["point", "black", "gray", "white"] as const).map((picker) => <button key={picker} type="button" disabled={sampling.busy} aria-pressed={sampling.picker === picker} className={`flex-1 rounded-lg border px-1 py-1.5 text-[11px] ${sampling.picker === picker ? "border-accent text-accent" : "border-edge"}`} onClick={() => sampling.setPicker(sampling.picker === picker ? null : picker)}>{t(`advancedEditor.pickers.${picker}`)}</button>)}</div>}
+    {sampling.available!==false&&sampling.setTargetCurveChannel&&<button type="button" className="w-full rounded-lg border border-edge px-2 py-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" disabled={sampling.busy} aria-pressed={sampling.picker==="curveTarget"} onClick={()=>{sampling.setTargetCurveChannel!(channel);sampling.setPicker(sampling.picker==="curveTarget"?null:"curveTarget");}}>{t("advancedEditor.targetCurve")}</button>}
+    {sampling.picker==="curveTarget"&&<p className="text-[11px] text-text-muted">{t("advancedEditor.targetHint")}</p>}
     <button type="button" className="text-[11px] text-accent" disabled={!raw?.length} onClick={()=>{finish();apply([]);setSelected(null);}}>{t("advancedEditor.resetCurveChannel")}</button>
     <div className="flex gap-1">{Object.entries(PRESETS).map(([name, curve]) => <button key={name} className="flex-1 rounded-lg border border-edge py-1.5 text-[11px]" onClick={() => { apply(curve); setSelected(null); }}>{t(`advancedEditor.curve.${name}`)}</button>)}</div>
     {sampling.busy&&<p role="status" className="text-xs text-text-muted">{t("advancedEditor.sampling")}</p>}

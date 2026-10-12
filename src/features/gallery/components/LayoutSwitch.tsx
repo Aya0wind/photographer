@@ -12,7 +12,7 @@ export default function LayoutSwitch({ value, onChange }: {
   ];
   const label = t("gallery.layout.toggle", { next: t(`gallery.layout.${next}`) });
   return (
-    <button type="button" className="ui-icon-button" onClick={() => onChange(next)}
+    <button type="button" className="ui-pill-button" onClick={() => onChange(next)}
       aria-label={label} title={label} data-testid="gallery-layout" data-layout={value}>
       <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor"
         strokeWidth="1.5" aria-hidden="true">
@@ -65,6 +65,7 @@ export default function LayoutSwitch({ value, onChange }: {
           </>
         )}
       </svg>
+      {t("gallery.layout.short")}
     </button>
   );
 }

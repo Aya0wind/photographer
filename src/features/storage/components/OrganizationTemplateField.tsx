@@ -1,0 +1,10 @@
+import {useTranslation} from "react-i18next";
+export const DEFAULT_ORGANIZATION_TEMPLATE="{year}/{month}/{day}/{filename}";
+export default function OrganizationTemplateField({value,onChange}:{value:string;onChange:(value:string)=>void}){
+ const {t}=useTranslation();
+ const examples:Record<string,string>={year:"2026",month:"10",day:"11",hour:"14",minute:"30",second:"00",camera:"Sony ILCE-7RM5",filename:"DSC_0001.ARW",stem:"DSC_0001",ext:"ARW"};
+ const preview=value.replace(/\{([^}]+)\}/g,(_,key:string)=>examples[key]??`{${key}}`);
+ return <div className="mt-3 space-y-2"><label className="flex flex-col gap-1 text-xs text-text-secondary">{t("storage.organization.label")}<input aria-label={t("storage.organization.label")} className="w-full rounded-lg border border-edge bg-bg p-2 font-mono text-xs" value={value} onChange={e=>onChange(e.target.value)} maxLength={512}/></label>
+ <select aria-label={t("storage.organization.presets")} className="w-full rounded-lg border border-edge bg-bg p-2 text-xs" value="" onChange={e=>{if(e.target.value)onChange(e.target.value);}}><option value="">{t("storage.organization.presets")}</option><option value={DEFAULT_ORGANIZATION_TEMPLATE}>{t("storage.organization.byDay")}</option><option value="{year}/{month}/{filename}">{t("storage.organization.byMonth")}</option><option value="{camera}/{year}/{month}/{day}/{filename}">{t("storage.organization.byCamera")}</option><option value="{filename}">{t("storage.organization.flat")}</option></select>
+ <div className="flex flex-wrap gap-1">{Object.keys(examples).map(key=><button key={key} type="button" className="rounded border border-edge px-1.5 py-1 text-[11px] text-text-secondary hover:border-accent" title={`{${key}}`} onClick={()=>onChange(value+`{${key}}`)}>{t(`storage.organization.variables.${key}`)}</button>)}</div><p className="break-all text-[11px] text-text-muted">{t("storage.organization.preview")}：{preview}</p><p className="text-[11px] leading-relaxed text-text-secondary">{t("storage.organization.newOnly")}</p></div>;
+}

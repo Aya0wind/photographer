@@ -232,7 +232,7 @@ fn skip_policy_existing_dst_skips_without_full_download() {
     let mut plan = common::plan_for(&db, db_dir.path(), target.path());
     plan.duplicate_policy = DuplicatePolicy::Skip;
     plan.skip_imported = false;
-    plan.album_id = Some(db.ensure_default_album().unwrap());
+    plan.album_id = Some(db.album_create("测试相册").unwrap().id);
     let mut engine = import::engine::Engine::new(db, bus, Box::new(source), plan);
     let job_id = engine.begin().unwrap();
     let stats = engine.run();

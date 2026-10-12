@@ -308,27 +308,23 @@ fn photos_library_register_list_stats_and_remove() {
     db.photos_library_set_status(&row.id, "offline").unwrap();
     assert_eq!(db.photos_library_get(&row.id).unwrap().unwrap().status, "offline");
 
-    // 移除登记不连记录：资产行保留（归属 id 悬空，应用层决定语义）
+    // 删除照片库（2026-10-11 两分支定案）：记录随登记一并删（含回收站/视频行）
     let deleted = db
-        .photos_library_remove(&row.id, false)
-        .expect("remove keep records");
-    assert_eq!(deleted, 0);
+        .photos_library_remove(&row.id)
+        .expect("remove deletes records");
+    assert_eq!(deleted.records_deleted, 4);
     assert!(db.photos_library_get(&row.id).unwrap().is_none());
     let remaining: i64 =
         db.0.query_row("SELECT COUNT(*) FROM assets WHERE library_id = ?1", [&row.id], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(remaining, 4, "不连记录删时资产行原样保留");
+    assert_eq!(remaining, 0, "库内资产行已清");
 
-    // 移除登记连记录删：库内资产行消失，他库不受影响
-    let deleted = db
-        .photos_library_remove(&row2.id, true)
-        .expect("remove with records");
-    assert_eq!(deleted, 0, "库 2 无资产");
-    assert!(db.photos_library_list().unwrap().is_empty());
+    assert!(db.photos_library_remove(&row2.id).is_err(),"必须保留最后一个照片库");
+    assert_eq!(db.photos_library_list().unwrap().len(),1);
     assert!(
-        db.photos_library_remove("no-such-id", true).is_err(),
+        db.photos_library_remove("no-such-id").is_err(),
         "移除不存在的库必须报错"
     );
 }
@@ -339,6 +335,7 @@ fn photos_library_remove_with_records_cascades_asset_rows() {
     let (_dir, db) = temp_db();
     let dir = roots_dir();
     let database_dir = dir.path().join("appdata");
+    db.photos_library_register("保留库",&dir.path().join("retained").to_string_lossy(),&database_dir).unwrap();
     std::fs::create_dir_all(&database_dir).unwrap();
     let root = dir.path().join("lib-photos");
     std::fs::create_dir_all(&root).unwrap();
@@ -359,8 +356,8 @@ fn photos_library_remove_with_records_cascades_asset_rows() {
         .unwrap();
     assert!(tasks > 0, "photo 入库自带 thumb/eyes/blur 任务");
 
-    let deleted = db.photos_library_remove(&row.id, true).unwrap();
-    assert_eq!(deleted, 1);
+    let deleted = db.photos_library_remove(&row.id).unwrap();
+    assert_eq!(deleted.records_deleted, 1);
     let assets: i64 =
         db.0.query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
             .unwrap();

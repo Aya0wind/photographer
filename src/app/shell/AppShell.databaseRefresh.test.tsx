@@ -14,13 +14,16 @@ vi.mock("@/ipc/api", async (importOriginal) => {
       databases: [{ id: "db-1", name: "主数据库", dbDir: "D:\\db" }],
       activeId: "db-1",
     })),
+    assetViewMark: vi.fn(async () => undefined),
     subscribeAppEvents: vi.fn(async () => () => {}),
   };
 });
 
 import i18n from "@/i18n";
 import AppShell from "./AppShell";
-import { subscribeAppEvents, type AppEvent } from "@/ipc/api";
+import { subscribeAppEvents, assetViewMark, type AppEvent } from "@/ipc/api";
+import { saveGallerySnapshot, gallerySnapshot } from "@/features/gallery/lib/galleryCache";
+import { markAssetViewed } from "@/features/gallery/lib/viewMark";
 import { clone, DEFAULT_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
 
 const subscribeMock = vi.mocked(subscribeAppEvents);
@@ -102,5 +105,33 @@ describe("AppShell：databasesChanged 全量刷新", () => {
   it("侧栏底部只读展示当前数据库名（useDatabases）", async () => {
     renderShell();
     expect(await screen.findByTestId("sidebar-database-name")).toHaveTextContent("主数据库");
+  });
+});
+
+describe("AppShell：photoLibrariesChanged 删库联动会话失效", () => {
+  it("事件到达 → 画廊快照清空、打点去抖表清空（不重挂内容区）", async () => {
+    saveGallerySnapshot({
+      assets: [],
+      dates: [],
+      hasMore: false,
+      scrollTop: 120,
+      savedAt: Date.now(),
+    });
+    const viewMarkMock = vi.mocked(assetViewMark);
+    markAssetViewed(1, 1_000);
+    markAssetViewed(1, 2_000); // 30s 去抖内：被吞
+    expect(viewMarkMock).toHaveBeenCalledTimes(1);
+
+    renderShell();
+    emit({ type: "photoLibrariesChanged" });
+
+    // 画廊会话快照失效（下次进入画廊重拉，不带已删资产）
+    expect(gallerySnapshot()).toBeNull();
+    // 打点表键是 assetId（删库后新导入复用旧 id）：整表清后同资产可重新打点
+    markAssetViewed(1, 3_000);
+    expect(viewMarkMock).toHaveBeenCalledTimes(2);
+    // 库登记增删不换库：内容区不重挂（区别于 databasesChanged）
+    expect(mounts).toBe(1);
+    expect(screen.getByTestId("gallery-probe")).toHaveTextContent("GALLERY-1");
   });
 });

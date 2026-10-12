@@ -62,6 +62,7 @@ function lib(overrides: Partial<PhotoLibrary> = {}): PhotoLibrary {
     status: "online",
     assetCount: 10,
     sizeBytes: 0,
+    organizationTemplate: "{year}/{month}/{day}/{filename}",
     ...overrides,
   };
 }

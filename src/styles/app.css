@@ -59,23 +59,27 @@
 
 .ui-floating-gradient { background: var(--ui-gradient); }
 .ui-popover { background: var(--ui-glass); box-shadow: var(--ui-shadow); }
-.ui-icon-button {
+/* 胶囊宽按钮（2026-10-10 定案）：图标 + 文字说明，两端全圆；替代纯图标圆钮 */
+.ui-pill-button {
   display: inline-flex;
-  width: 36px;
   height: 36px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
+  gap: 6px;
+  padding-inline: 12px;
   border: 1px solid var(--ui-glass-edge);
-  border-radius: 50%;
+  border-radius: 9999px;
   background: var(--ui-glass);
   color: var(--color-text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
   backdrop-filter: blur(16px);
   transition: background 150ms ease, color 150ms ease;
   cursor: pointer;
 }
-.ui-icon-button:hover,
-.ui-icon-button[aria-expanded="true"] {
+.ui-pill-button:hover,
+.ui-pill-button[aria-expanded="true"] {
   background: var(--color-panel);
   color: var(--color-text-primary);
 }

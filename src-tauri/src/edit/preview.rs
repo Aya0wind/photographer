@@ -103,22 +103,24 @@ fn jpeg_url(document: &Document) -> Result<String, String> {
 
 fn source_histogram(document: &Document) -> Result<Vec<Vec<u64>>, String> {
     let pixels = photocraft_compose::flatten(document);
+    histogram_pixels(&pixels)
+}
+fn histogram_pixels(pixels:&photocraft_compose::Buffer)->Result<Vec<Vec<u64>>,String>{
     let histogram = photocraft_algo::histogram::RgbHistogram::from_rgba(&pixels.px);
     let mut histogram: Vec<Vec<u64>> = histogram
         .channels
         .iter()
         .map(|bins| bins.to_vec())
         .collect();
-    let gray = photocraft_io::document_to_image(document, &mut Vec::new())
-        .map_err(|e| e.to_string())?
+    let values:Vec<f32>=pixels.px.iter().flat_map(|p|if p.iter().all(|v|v.is_finite()){*p}else{[0.0;4]}).collect();
+    let gray = photocraft_codecs::Image::from_f32(pixels.rect.width(),pixels.rect.height(),photocraft_codecs::ChannelLayout::Rgba,&values).map_err(|e|e.to_string())?
         .convert(
             photocraft_codecs::ChannelLayout::GrayA,
             photocraft_codecs::SampleType::F32,
         );
-    let gray_doc = source::from_image("Histogram", &gray)?;
-    let gray_pixels = photocraft_compose::flatten(&gray_doc);
+    let gray_pixels:Vec<[f32;4]>=gray.data().chunks_exact(8).map(|p|{let value=f32::from_ne_bytes(p[..4].try_into().unwrap());let alpha=f32::from_ne_bytes(p[4..].try_into().unwrap());[value,value,value,alpha]}).collect();
     histogram.push(
-        photocraft_algo::histogram::RgbHistogram::from_rgba(&gray_pixels.px).channels[0].to_vec(),
+        photocraft_algo::histogram::RgbHistogram::from_rgba(&gray_pixels).channels[0].to_vec(),
     );
     Ok(histogram)
 }
@@ -560,8 +562,13 @@ pub async fn edit_preview_pick(
     y: f64,
     picker: String,
     mask_id: Option<String>,
+    curve_channel:Option<String>,
+    sample_size:Option<u32>,
 ) -> Result<serde_json::Value, String> {
     let recipe = recipe::parse_recipe(&recipe)?;
+    let sample_size=sample_size.unwrap_or(1);
+    if ![1,3,5,11].contains(&sample_size){return Err("取色范围无效".into());}
+    if curve_channel.as_ref().is_some_and(|c|!["rgb","red","green","blue","luminance"].contains(&c.as_str())){return Err("曲线通道无效".into());}
     if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
         return Err("取色坐标无效".into());
     }
@@ -572,40 +579,35 @@ pub async fn edit_preview_pick(
             .get(&session_id)
             .cloned()
             .ok_or("预览会话已关闭")?;
-        let base = preview.lock().map_err(|_| "预览锁不可用")?.document.clone();
+        let (base,original_size)={let preview=preview.lock().map_err(|_|"预览锁不可用")?;(preview.document.clone(),preview.original_size)};
+        let source_scale=(base.size.width.max(base.size.height) as f32/original_size[0].max(original_size[1]).max(1) as f32).min(1.0);
         let (a,mut before,base)=if let Some(id)=&mask_id {
             let index=recipe.masks.iter().position(|m|&m.id==id).ok_or("所选蒙版不存在")?;
             let mask=&recipe.masks[index];
             let mut below=recipe.clone();below.masks.truncate(index);
-            let base=photocraft::adjusted_document(&base,&below)?;
+            let base=photocraft::adjusted_document_scaled(&base,&below,source_scale)?;
             let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
             local.legacy_adjustments=None;
             (mask.advanced.clone().unwrap_or_default(),local,base)
         } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
-        picker_input_recipe(&mut before,&picker);
+        picker_input_recipe(&mut before,&picker,curve_channel.as_deref());
         let doc = if mask_id.is_some() {
             // The lower stack already contains adjustment layers. Local camera
             // controls must append sampled upstream curves, never destructively
             // target that stack's top adjustment layer as if it were a raster.
             before.rotate_quarter=0;before.geometry=None;before.crop=None;
             before.text_layers.clear();before.brush_strokes.clear();
-            preview_renderer::Renderer::new(&base).canvas_document(&base,&before)?
-        } else {photocraft::adjusted_document(&base, &before)?};
+            let spatial=before.advanced.as_ref().and_then(|a|a.development.as_ref()).is_some_and(|d|d.active());
+            let base=if spatial {photocraft::processing_input(&base)?}else{base};
+            preview_renderer::Renderer::new(&base).with_pixel_scale(source_scale).canvas_document(&base,&before)?
+        } else {photocraft::adjusted_document_scaled(&base, &before,source_scale)?};
         let px = (x * f64::from(doc.size.width))
             .floor()
             .min(f64::from(doc.size.width - 1)) as i32;
         let py = (y * f64::from(doc.size.height))
             .floor()
             .min(f64::from(doc.size.height - 1)) as i32;
-        let area = photocraft_engine::doc::Rect::from_xywh(px, py, 1, 1);
-        let sample = photocraft_compose::render(&doc, area)
-            .px
-            .first()
-            .copied()
-            .unwrap_or_default();
-        if sample[3] <= 0.0 {
-            return Err("不能对透明像素取色".into());
-        }
+        let sample=sample_region(&doc,px,py,sample_size)?;
         if picker=="hsl" {
             let range=sampled_hsl_range([sample[0],sample[1],sample[2]]);
             return Ok(serde_json::json!({"sample":[sample[0]*255.0,sample[1]*255.0,sample[2]*255.0],"range":range}));
@@ -619,7 +621,7 @@ pub async fn edit_preview_pick(
         session.add_document(doc, None);
         let mut params = serde_json::json!({"points": a.curves, "red": a.channel_curves.red,
             "green": a.channel_curves.green, "blue": a.channel_curves.blue,
-            "eyedropper": {"point": picker, "at": [px, py]}});
+            "eyedropper": {"point": picker, "color": sample}});
         for key in ["points", "red", "green", "blue"] {
             if params[key].as_array().is_some_and(|v| v.is_empty()) {
                 params.as_object_mut().unwrap().remove(key);
@@ -629,18 +631,41 @@ pub async fn edit_preview_pick(
             photocraft_engine::adjust_params::curves_eyedropper_from_params(&session, &params)
                 .map_err(|e| e.to_string())?
                 .ok_or("取色参数无效")?;
-        Ok(photocraft_engine::adjust_params::to_params(&adjustment))
+        let mut result=photocraft_engine::adjust_params::to_params(&adjustment);
+        result["sample"]=serde_json::json!([sample[0]*255.0,sample[1]*255.0,sample[2]*255.0]);
+        Ok(result)
     })
     .await
 }
 
-fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str) {
+/// Average the same input-stage pixels for HSL, curve targets and white balance
+/// eyedroppers. Clip to the photo edge and weight by opacity so transparent
+/// padding cannot darken the sampled colour.
+fn sample_region(doc:&photocraft_engine::doc::Document,x:i32,y:i32,size:u32)->Result<[f32;3],String>{
+    let radius=(size/2) as i32;
+    let left=(x-radius).max(0);let top=(y-radius).max(0);
+    let right=(x+radius+1).min(doc.size.width as i32);let bottom=(y+radius+1).min(doc.size.height as i32);
+    let area=photocraft_engine::doc::Rect::from_xywh(left,top,(right-left) as u32,(bottom-top) as u32);
+    let rendered=photocraft_compose::render(doc,area);
+    let mut total=[0.0f64;3];let mut weight=0.0f64;
+    for p in rendered.px {let alpha=f64::from(p[3]);if alpha>0.0 {weight+=alpha;for c in 0..3 {total[c]+=f64::from(p[c])*alpha;}}}
+    if weight<=0.0{return Err("不能对透明像素取色".into());}
+    Ok(total.map(|v|(v/weight) as f32))
+}
+
+fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str,channel:Option<&str>) {
     // Local masks run after the global stack. A global picker must not sample
     // downstream local adjustments; local callers have already composed below.
     recipe.masks.clear();
     if let Some(a)=&mut recipe.advanced {
-        a.curves.clear();a.channel_curves=Default::default();a.lookup=None;
-        if picker=="hsl" {a.hsl.clear();a.color_balance=None;a.black_white=None;a.selective_color=None;}
+        a.lookup=None;a.color_grading=None;
+        if picker!="point"||channel.is_none(){a.curves.clear();a.channel_curves=Default::default();}
+        else if channel==Some("luminance"){a.channel_curves.luminance.clear();}
+        else {
+            a.curves.clear();a.channel_curves.luminance.clear();
+            match channel {Some("red")=>a.channel_curves.red.clear(),Some("green")=>a.channel_curves.green.clear(),Some("blue")=>a.channel_curves.blue.clear(),_=>{}}
+        }
+        if picker=="hsl" {a.hsl.clear();a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
     }
 }
 
@@ -658,6 +683,53 @@ pub async fn edit_preview_mask(
         let rgba:Vec<u8>=pixels.px.iter().flat_map(|p|p.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)).collect();
         let mut png=Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba,doc.size.width,doc.size.height,image::ExtendedColorType::Rgba8).map_err(|e|format!("蒙版预览失败：{e}"))?;
+        Ok(tauri::ipc::Response::new(png))
+    }).await
+}
+
+fn clipping_pixels(pixels:&[[f32;4]],warnings:u8)->Vec<u8>{
+    pixels.iter().flat_map(|p|{let (lo,hi)=photocraft_algo::histogram::clipping(*p);
+        if warnings&2!=0&&hi!=0 {[255,0,0,255]}else if warnings&1!=0&&lo!=0 {[0,0,255,255]}else{[0,0,0,0]}
+    }).collect()
+}
+fn photo_pixels(base:&Document,recipe:&recipe::EditRecipe,scale:f32)->Result<photocraft_compose::Buffer,String>{
+    let mut recipe=recipe.clone();recipe.text_layers.clear();recipe.brush_strokes.clear();
+    let doc=photocraft::render_document_scaled(base,&recipe,scale)?;
+    let mut pixels=photocraft_compose::flatten(&doc);
+    let mapping=super::native_geometry::mapping(&recipe,base.size);
+    for (i,p) in pixels.px.iter_mut().enumerate(){
+        let x=(i as u32%doc.size.width) as f32/doc.size.width as f32+0.5/doc.size.width as f32;
+        let y=(i as u32/doc.size.width) as f32/doc.size.height as f32+0.5/doc.size.height as f32;
+        let u=mapping[0]*x+mapping[1]*y+mapping[2];let v=mapping[4]*x+mapping[5]*y+mapping[6];
+        if !(0.0..=1.0).contains(&u)||!(0.0..=1.0).contains(&v){p[3]=0.0;}
+    }
+    Ok(pixels)
+}
+fn clipping_overlay(base:&Document,recipe:&recipe::EditRecipe,scale:f32,warnings:u8)->Result<(Vec<u8>,[u32;2]),String>{
+    let pixels=photo_pixels(base,recipe,scale)?;
+    Ok((clipping_pixels(&pixels.px,warnings),[pixels.rect.width(),pixels.rect.height()]))
+}
+#[tauri::command]
+pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool)->Result<Vec<Vec<u64>>,String>{
+    let mut recipe=recipe::parse_recipe(&recipe)?;
+    if original{recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
+    run_blocking(state.inner().clone(),move |_|{
+        let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;
+        let scale=(base.size.width.max(base.size.height) as f32/size[0].max(size[1]).max(1) as f32).min(1.0);
+        histogram_pixels(&photo_pixels(&base,&recipe,scale)?)
+    }).await
+}
+#[tauri::command]
+pub async fn edit_preview_clipping(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool,warnings:u8)->Result<tauri::ipc::Response,String>{
+    if warnings>3{return Err("曝光提示参数无效".into());}
+    let mut recipe=recipe::parse_recipe(&recipe)?;
+    if original {recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
+    run_blocking(state.inner().clone(),move |_|{
+        use image::ImageEncoder;
+        let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;
+        let scale=(base.size.width.max(base.size.height) as f32/size[0].max(size[1]).max(1) as f32).min(1.0);
+        let (rgba,size)=clipping_overlay(&base,&recipe,scale,warnings)?;
+        let mut png=Vec::new();image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba,size[0],size[1],image::ExtendedColorType::Rgba8).map_err(|e|format!("曝光提示失败：{e}"))?;
         Ok(tauri::ipc::Response::new(png))
     }).await
 }
@@ -706,6 +778,15 @@ pub async fn edit_preview_stats(
     .await
 }
 
+#[tauri::command]
+pub async fn edit_parametric_samples(state:State<'_,SharedState>,value:serde_json::Value)->Result<Vec<f32>,String>{
+    let recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"parametricCurve":value}}))?;
+    run_blocking(state.inner().clone(),move |_|{
+        let curve=recipe.advanced.and_then(|a|a.parametric_curve).ok_or("曲线分区参数缺失")?;
+        if let photocraft_engine::doc::Adjustment::Curves{master,..}=super::parametric::adjustment(&curve){Ok(master.into_iter().map(|p|p.output*255.0).collect())}else{Err("曲线分区不可用".into())}
+    }).await
+}
+
 /// CPU metadata snapshot for the direct canvas. Image pixels remain in stable
 /// native tiles; the compositor uploads them once and keeps them on the GPU.
 pub(super) fn canvas_source(session_id:&str)->Result<Document,String> {
@@ -723,13 +804,83 @@ pub(super) fn canvas_original_size(session_id:&str)->Result<[u32;2],String> {
 mod startup_tests {
     use super::*;
     #[test]
+    fn histogram_uses_upstream_float_bins_and_grayscale_conversion_without_phantom_pixels(){
+        let pixels=photocraft_compose::Buffer{rect:photocraft_engine::doc::Rect::from_xywh(0,0,3,1),px:vec![[1.0,0.0,0.0,1.0],[0.0,1.0,0.0,0.0],[f32::NAN,0.0,0.0,1.0]]};
+        let bins=histogram_pixels(&pixels).unwrap();assert_eq!(bins.len(),4);assert_eq!(bins[0][255],1);assert_eq!(bins[1][0],1);assert_eq!(bins[3][54],1);
+        for channel in bins{assert_eq!(channel.iter().sum::<u64>(),1);}
+    }
+    #[test]
+    fn current_histogram_follows_exposure_and_visible_crop(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Histogram",Size::new(12,8),ColorMode::Rgb,SampleType::U8,Color::rgba(0.25,0.5,0.75,1.0));
+        let neutral=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft"})).unwrap();
+        let before=histogram_pixels(&photo_pixels(&base,&neutral,1.0).unwrap()).unwrap();
+        let edited=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":1},"crop":{"x":0,"y":0,"w":0.5,"h":1}})).unwrap();
+        let after=histogram_pixels(&photo_pixels(&base,&edited,1.0).unwrap()).unwrap();assert_ne!(before,after);
+        for channel in before{assert_eq!(channel.iter().sum::<u64>(),96);}for channel in after{assert_eq!(channel.iter().sum::<u64>(),48);}
+    }
+    #[test]
+    fn clipping_overlay_excludes_arbitrary_rotation_padding_and_annotations(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Gray",Size::new(12,8),ColorMode::Rgb,SampleType::U8,Color::rgba(0.5,0.5,0.5,1.0));
+        let r=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","geometry":{"angle":45},"brushStrokes":[{"id":"stroke","points":[{"x":0,"y":0},{"x":1,"y":1}],"widthRel":0.1,"color":"#000000"}]})).unwrap();
+        let (rgba,_)=clipping_overlay(&base,&r,1.0,3).unwrap();assert!(rgba.chunks_exact(4).all(|p|p[3]==0));
+    }
+    #[test]
+    fn clipping_warnings_match_upstream_channels_transparency_and_highlight_priority(){
+        let pixels=[[0.0,0.5,0.5,1.0],[0.5,1.0,0.5,1.0],[0.0,1.0,0.5,1.0],[0.0,1.0,0.5,0.0],[f32::NAN,0.0,1.0,1.0],[0.001,0.5,0.999,1.0]];
+        assert_eq!(clipping_pixels(&pixels,3),vec![0,0,255,255,255,0,0,255,255,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0]);
+        assert_eq!(&clipping_pixels(&pixels,1)[8..12],&[0,0,255,255]);assert_eq!(&clipping_pixels(&pixels,2)[0..4],&[0,0,0,0]);
+        assert!(clipping_pixels(&pixels,0).iter().all(|v|*v==0));
+    }
+    #[test]
+    fn region_sampling_clips_edges_and_ignores_transparent_padding(){
+        let pixels=[255,0,0,255, 0,0,255,255, 0,255,0,0];
+        let image=photocraft_codecs::Image::from_u8(3,1,photocraft_codecs::ChannelLayout::Rgba,pixels.to_vec()).unwrap();
+        let doc=source::from_image("Sample",&image).unwrap();
+        assert_eq!(sample_region(&doc,0,0,1).unwrap(),[1.0,0.0,0.0]);
+        assert_eq!(sample_region(&doc,0,0,3).unwrap(),[0.5,0.0,0.5]);
+        assert_eq!(sample_region(&doc,1,0,11).unwrap(),[0.5,0.0,0.5]);
+        assert!(sample_region(&doc,2,0,1).is_err());
+    }
+    #[test]
+    fn average_sample_uses_opacity_and_feeds_upstream_neutral_gray_picker(){
+        let pixels=[255,0,0,255, 0,0,255,128, 0,255,0,0];
+        let image=photocraft_codecs::Image::from_u8(3,1,photocraft_codecs::ChannelLayout::Rgba,pixels.to_vec()).unwrap();
+        let doc=source::from_image("Sample",&image).unwrap();let sample=sample_region(&doc,1,0,3).unwrap();
+        assert!((sample[0]-255.0/383.0).abs()<0.0001);assert!((sample[2]-128.0/383.0).abs()<0.0001);assert_eq!(sample[1],0.0);
+        let mut session=photocraft_engine::Session::new();session.add_document(doc,None);
+        let params=serde_json::json!({"eyedropper":{"point":"gray","color":sample}});
+        let actual=photocraft_engine::adjust_params::curves_eyedropper_from_params(&session,&params).unwrap().unwrap();
+        let expected=photocraft_engine::adjust_params::curves_eyedropper(&serde_json::json!({}),photocraft_engine::adjust_params::CurvesEyedropper::NeutralGray,sample,photocraft_engine::doc::ColorMode::Rgb).unwrap();
+        assert_eq!(actual,expected);
+    }
+    #[test]
+    fn curve_target_channels_sample_their_input_stage() {
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"curves":[[0,0],[255,128]],"channelCurves":{"red":[[0,0],[255,200]],"green":[[0,0],[255,180]],"luminance":[[0,0],[255,180]]}}})).unwrap();
+        for picker in ["black","gray","white"] {
+            let mut before=recipe.clone();picker_input_recipe(&mut before,picker,Some("red"));
+            let a=before.advanced.unwrap();assert!(a.curves.is_empty()&&a.channel_curves.red.is_empty()&&a.channel_curves.green.is_empty()&&a.channel_curves.luminance.is_empty());
+        }
+        let base=Document::with_background("Curve input",Size::new(8,8),ColorMode::Rgb,SampleType::U8,Color::rgba(0.8,0.6,0.3,1.0));
+        let mut rgb=recipe.clone();picker_input_recipe(&mut rgb,"point",Some("rgb"));
+        let rgb=photocraft_compose::flatten(&photocraft::adjusted_document(&base,&rgb).unwrap()).px[0];
+        assert!((rgb[0]-0.8*200.0/255.0).abs()<0.01);assert!((rgb[1]-0.6*180.0/255.0).abs()<0.01);
+        let mut red=recipe.clone();picker_input_recipe(&mut red,"point",Some("red"));
+        let red=photocraft_compose::flatten(&photocraft::adjusted_document(&base,&red).unwrap()).px[0];assert!((red[0]-0.8).abs()<0.01);
+        let mut luminance=recipe;picker_input_recipe(&mut luminance,"point",Some("luminance"));
+        let luminance=photocraft_compose::flatten(&photocraft::adjusted_document(&base,&luminance).unwrap()).px[0];
+        assert!((luminance[0]-rgb[0]*128.0/255.0).abs()<0.01);
+    }
+    #[test]
     fn hsl_picker_excludes_downstream_black_white_and_local_adjustments() {
         let mut recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"blackWhite":{"enabled":true,"weights":[40,60,40,60,20,80],"tint":null},"colorBalance":{"shadows":[0,0,0],"midtones":[20,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"selectiveColor":{"relative":true,"ranges":{"reds":[20,0,0,0]}},"hsl":{"reds":{"hue":90,"saturation":0,"lightness":0}}}})).unwrap();
-        let original=recipe.clone();picker_input_recipe(&mut recipe,"hsl");
+        let original=recipe.clone();picker_input_recipe(&mut recipe,"hsl",None);
         let a=recipe.advanced.as_ref().unwrap();assert!(a.black_white.is_none()&&a.color_balance.is_none()&&a.selective_color.is_none()&&a.hsl.is_empty());
         let base=Document::with_background("Picker",photocraft_engine::doc::Size::new(8,8),photocraft_engine::doc::ColorMode::Rgb,photocraft_engine::doc::SampleType::U8,photocraft_engine::doc::Color::rgba(1.0,0.0,0.0,1.0));
         assert_eq!(photocraft_compose::flatten(&photocraft::adjusted_document(&base,&recipe).unwrap()).px,photocraft_compose::flatten(&base).px);
-        let mut curve_input=original;picker_input_recipe(&mut curve_input,"point");assert!(curve_input.advanced.unwrap().black_white.is_some());
+        let mut curve_input=original;picker_input_recipe(&mut curve_input,"point",None);assert!(curve_input.advanced.unwrap().black_white.is_some());
     }
     #[test]
     fn hsl_picker_uses_upstream_hue_and_does_not_classify_gray_as_red() {

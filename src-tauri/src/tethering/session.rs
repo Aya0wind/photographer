@@ -1,6 +1,9 @@
 //! A tethered session pins its destination library and album for its full lifetime.
 //! Each completed download is copied and registered without creating an import job.
-use super::backend::{backend_registry, CameraBackend, CameraSetting, CapturedObject, TetherError};
+use super::backend::{
+    backend_registry, establish_backend, CameraBackend, CameraSetting, CapturedObject, TetherError,
+};
+use super::receipts_store::ReceiptsStore;
 use crate::db::{AssetRow, Db};
 use crate::events::AppEvent;
 use crate::ipc::tethering::CameraDto;
@@ -10,7 +13,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, MutexGuard, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -47,6 +50,9 @@ pub struct SessionDto {
     pub connected: bool,
     pub receiving: bool,
     pub error: Option<String>,
+    /// 收片队列待接收对象数（后端 FIFO 真值；「N 待收」显示依据，
+    /// RAW+JPG 双文件、机身连拍都按队列实数计）。
+    pub pending_receipts: usize,
 }
 /// 联拍落库归属（照片库基准）：目标照片库 id（photos_libraries.id，事件
 /// 载荷 TetheringPhotoAdded.libraryId 同源）+ 库 root（纯时间布局锚点）。
@@ -54,6 +60,7 @@ pub struct SessionDto {
 pub struct TetherLibrary {
     pub id: String,
     pub root: PathBuf,
+    pub organization_template:String,
 }
 
 pub struct Session {
@@ -63,7 +70,13 @@ pub struct Session {
     pub album_id: i64,
     pub album_name: String,
     pub camera: CameraDto,
+    /// 物理相机键（2026-10-11 §E：serial 优先，缺省 vid+pid+model+实例
+    /// 路径）——同一物理机跨端点互斥、收据账本分文件的依据。
+    pub physical_key: String,
     pub backend: Arc<dyn CameraBackend>,
+    /// 崩溃安全收据账本（§B1）：`<config>/tethering/receipts/<物理键>.jsonl`；
+    /// None = 无持久化注入（引擎级测试形态）。
+    pub ledger: Option<Arc<ReceiptsStore>>,
     pub operation: Mutex<()>,
     pending_commands: AtomicUsize,
     capture_in_flight: AtomicBool,
@@ -72,13 +85,17 @@ pub struct Session {
     connected: AtomicBool,
     receiving: AtomicBool,
     settings: Mutex<Vec<CameraSetting>>,
+    /// 参数失效收敛态（§B7）：事件只标记，拉取时按失效集合合并读取。
+    convergence: Mutex<SettingsConvergence>,
+    /// 收据序号源（账本 pending 的 seq；进程内单调）。
+    receipt_seq: AtomicU64,
     photos: Mutex<Vec<TetherPhoto>>,
     seen: Mutex<HashSet<String>>,
     error: Mutex<Option<String>>,
 }
-/// 多会话存储：key = 会话 id。同一台相机（pnp_id）同一时刻只允许一个
-/// 会话（USB 控制权互斥，物理事实）；不同相机可各自开会话，入册相册
-/// 不限相同或不同。
+/// 多会话存储：key = 会话 id。独占以**物理身份**为准（2026-10-11 §E：
+/// 同一物理相机跨端点——wpd 与 gphoto 同报一台——同一时刻只允许一个
+/// 会话，USB 控制权互斥是物理事实）；不同物理机不合并。
 #[derive(Default)]
 pub struct SessionStore {
     sessions: std::collections::HashMap<String, Arc<Session>>,
@@ -94,9 +111,18 @@ impl SessionStore {
     pub fn remove(&mut self, id: &str) -> Option<Arc<Session>> {
         self.sessions.remove(id)
     }
-    /// 该相机是否已被某个在册会话占用。
+    pub fn clear(&mut self) {
+        self.sessions.clear();
+    }
+    /// 该相机端点（pnp_id）是否已被某个在册会话占用（快速预检）。
     pub fn camera_in_use(&self, pnp_id: &str) -> bool {
         self.sessions.values().any(|s| s.camera.pnp_id == pnp_id)
+    }
+    /// 该物理相机是否已被某个在册会话占用（§E 独占键：跨端点互斥）。
+    pub fn physical_camera_in_use(&self, physical_key: &str) -> bool {
+        self.sessions
+            .values()
+            .any(|s| s.physical_key == physical_key)
     }
     pub fn all(&self) -> Vec<Arc<Session>> {
         self.sessions.values().cloned().collect()
@@ -107,6 +133,112 @@ fn current() -> &'static Mutex<SessionStore> {
     static CURRENT: OnceLock<Mutex<SessionStore>> = OnceLock::new();
     CURRENT.get_or_init(|| Mutex::new(SessionStore::default()))
 }
+
+// ---------------------------------------------------------------------------
+// 参数失效收敛（§B7）：事件只标记，拉取时按失效集合合并读取
+// ---------------------------------------------------------------------------
+
+/// 一批失效参数：`All` = 后端事件无细分粒度（整表失效）；`Ids` = 已知
+/// 变化的参数 id 集合。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Invalidation {
+    All,
+    Ids(Vec<String>),
+}
+
+impl Invalidation {
+    fn contains(&self, id: &str) -> bool {
+        match self {
+            Invalidation::All => true,
+            Invalidation::Ids(ids) => ids.iter().any(|candidate| candidate == id),
+        }
+    }
+}
+
+/// 参数快照的失效账（版本号 + 失效集合）。事件到达 → `invalidate`（版本
+/// +1）；UI 拉取 → `take_invalid` 拿走失效集合并决定是否重读相机。
+#[derive(Debug, Default)]
+struct SettingsConvergence {
+    /// 失效事件计数（单调 +1；诊断/测试断言用）。
+    revision: u64,
+    invalid: Option<Invalidation>,
+    /// 是否已有可用快照（首次拉取前必须整表读）。
+    has_snapshot: bool,
+}
+
+impl SettingsConvergence {
+    fn invalidate(&mut self, ids: Option<Vec<String>>) {
+        self.revision = self.revision.saturating_add(1);
+        // `None`（无细分粒度）与空列表都算整表失效。
+        let incoming = match ids {
+            Some(ids) if !ids.is_empty() => Invalidation::Ids(ids),
+            _ => Invalidation::All,
+        };
+        // 连续事件合并：已整表失效不缩回部分失效（保守，不丢变更）。
+        self.invalid = Some(match self.invalid.take() {
+            None => incoming,
+            Some(Invalidation::All) => Invalidation::All,
+            Some(Invalidation::Ids(mut known)) => match incoming {
+                Invalidation::All => Invalidation::All,
+                Invalidation::Ids(fresh) => {
+                    known.extend(fresh);
+                    Invalidation::Ids(known)
+                }
+            },
+        });
+    }
+    /// 拿走当前失效集合（None = 干净，可直接用缓存，不读相机）。
+    fn take_invalid(&mut self) -> Option<Invalidation> {
+        if !self.has_snapshot {
+            return Some(Invalidation::All);
+        }
+        self.invalid.take()
+    }
+    fn mark_snapshot(&mut self) {
+        self.has_snapshot = true;
+        self.invalid = None;
+    }
+}
+
+/// 合并失效项：缓存的非失效项原样保留；失效项用新快照替换（相机不再
+/// 报告的失效项移除；新出现的失效项追加在后）。「只重读失效项」的读取
+/// 语义在快照层体现为——干净状态下不读相机、部分失效时非失效项不采纳
+/// 新值（它们本轮未被重读，缓存即最新已知值）。
+fn merge_settings(
+    cached: Vec<CameraSetting>,
+    fresh: Vec<CameraSetting>,
+    invalid: &Invalidation,
+) -> Vec<CameraSetting> {
+    let mut merged: Vec<CameraSetting> = cached
+        .into_iter()
+        .filter_map(|setting| {
+            if !invalid.contains(&setting.id) {
+                return Some(setting);
+            }
+            fresh
+                .iter()
+                .find(|candidate| candidate.id == setting.id)
+                .cloned() // 新快照缺席 → 相机已不再报告该参数，移除
+        })
+        .collect();
+    for candidate in fresh {
+        if invalid.contains(&candidate.id)
+            && !merged.iter().any(|setting| setting.id == candidate.id)
+        {
+            merged.push(candidate); // 失效集合里新出现的参数
+        }
+    }
+    merged
+}
+
+/// 无参数事件能力相机的低频兜底节流（§B7）：距上次全量刷新 ≥20s 才允许
+/// 再刷（`last=None` 视为立即可刷）。`now` 注入以便测试。
+fn fallback_refresh_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.duration_since(last) >= FALLBACK_SETTINGS_INTERVAL)
+}
+
+/// 兜底全量刷新间隔。
+const FALLBACK_SETTINGS_INTERVAL: Duration = Duration::from_secs(20);
 
 pub fn get(id: &str) -> Result<Arc<Session>, String> {
     current()
@@ -193,6 +325,7 @@ impl Session {
             connected: self.connected.load(Ordering::Acquire),
             receiving: self.receiving.load(Ordering::Acquire),
             error: self.error.lock().unwrap().clone(),
+            pending_receipts: self.backend.pending_receipts(&self.camera.pnp_id),
         }
     }
     fn record_error(&self, state: &SharedState, error: String) {
@@ -208,12 +341,46 @@ impl Session {
         let Some(_operation) = self.try_background() else {
             return Ok(self.settings.lock().unwrap().clone());
         };
-        let settings = self
+        // §B7 收敛：干净状态（无失效标记）直接用缓存，不读相机；失效则
+        // 读快照后只合并失效项。前端契约不变——返回值始终是全量表。
+        // 失效集合在拿到操作锁**之后**取走——锁忙时返回缓存，失效标记
+        // 留给下一次拉取，不丢失。
+        let Some(invalid) = self.convergence.lock().unwrap().take_invalid() else {
+            return Ok(self.settings.lock().unwrap().clone());
+        };
+        let fresh = self
             .backend
             .settings(&self.camera.pnp_id)
             .map_err(|e| e.to_string())?;
-        *self.settings.lock().unwrap() = settings.clone();
-        Ok(settings)
+        let merged = match invalid {
+            Invalidation::All => fresh.clone(),
+            Invalidation::Ids(_) => {
+                let cached = std::mem::take(&mut *self.settings.lock().unwrap());
+                merge_settings(cached, fresh.clone(), &invalid)
+            }
+        };
+        *self.settings.lock().unwrap() = merged.clone();
+        self.convergence.lock().unwrap().mark_snapshot();
+        Ok(merged)
+    }
+    /// 参数事件到达：标记对应参数失效（版本号 +1）。`ids=None` 表示后端
+    /// 事件无细分粒度（整表失效）。
+    fn invalidate_settings(&self, ids: Option<Vec<String>>) {
+        self.convergence.lock().unwrap().invalidate(ids);
+    }
+    /// 兜底全量刷新（§B7：无参数事件能力的相机 20s 一次；节流由调用方
+    /// 的 `fallback_refresh_due` 把关）。刷新后向窗口广播重拉。
+    fn fallback_refresh_settings(&self, state: &SharedState) {
+        let Some(_operation) = self.try_background() else {
+            return;
+        };
+        if let Ok(fresh) = self.backend.settings(&self.camera.pnp_id) {
+            *self.settings.lock().unwrap() = fresh;
+            self.convergence.lock().unwrap().mark_snapshot();
+            state.bus.publish(AppEvent::TetheringSettingsChanged {
+                session_id: self.id.clone(),
+            });
+        }
     }
     pub fn set_setting(&self, id: &str, value: &str) -> Result<Vec<CameraSetting>, String> {
         self.command("set-parameter", || {
@@ -241,54 +408,101 @@ impl Session {
                 });
                 *self.settings.lock().unwrap() = settings.clone();
                 if confirmed {
+                    // 回读确认的快照是权威值：清空失效账。
+                    self.convergence.lock().unwrap().mark_snapshot();
+                    // The mode can be acknowledged before dependent exposure
+                    // descriptors update. Force the next refresh to reread them.
+                    if id == "expprogram" {
+                        self.invalidate_settings(None);
+                    }
                     return Ok(settings);
                 }
                 self.ensure_open()?;
                 if Instant::now() >= deadline {
-                    return Err("相机未确认参数修改，请检查拍摄模式或机身控制".into());
+                    let actual = settings.iter().find(|setting| setting.id == id)
+                        .map(|setting| setting.current.as_str()).unwrap_or("不可用");
+                    crate::devices::diagnostics::record(format!(
+                        "tethering parameter unconfirmed backend={} id={id} requested={value} actual={actual}",
+                        self.backend.id()
+                    ));
+                    return Err(format!("相机未确认参数 {id} 的修改（请求 {value}，实际 {actual}），请检查拍摄模式或机身控制"));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         })
     }
 }
+/// 联拍目标照片库解析（2026-10-09 审计 P1）：相册现有资产的 library_id
+/// 众数（SQL GROUP BY 计数取最大——新拍照片归入相册主体所在库，多库时
+/// 不再把整册新片灌进首库）；空相册（无在册资产）回退首库（无相册
+/// 上下文，与监视文件夹同策略）。众数指向已移除登记的库 → 明确报错。
+pub fn resolve_tether_library(
+    db: &Db,
+    album_id: i64,
+) -> Result<crate::db::libraries::PhotosLibraryRow, String> {
+    let libraries = db.photos_library_list().map_err(|e| e.to_string())?;
+    let majority: Option<String> = db
+        .0
+        .query_row(
+            "SELECT a.library_id FROM album_item i JOIN assets a ON a.id = i.asset_id \
+             WHERE i.album_id = ?1 AND a.library_id IS NOT NULL \
+             GROUP BY a.library_id ORDER BY COUNT(*) DESC, a.library_id LIMIT 1",
+            [album_id],
+            |r| r.get(0),
+        )
+        .ok();
+    match majority {
+        Some(id) => libraries
+            .into_iter()
+            .find(|library| library.id == id)
+            .ok_or_else(|| "相册资产归属的照片库已不存在，无法开始联拍".into()),
+        None => libraries
+            .into_iter()
+            .next()
+            .ok_or_else(|| "尚未建立照片库".into()),
+    }
+}
+
 pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<SessionDto, String> {
     let mut guard = current().lock().unwrap();
     if guard.camera_in_use(camera_id) {
         return Err("该相机已在联机拍摄会话中，请先结束其窗口".into());
     }
-    // 2026-10-09 §三：联拍落库切换照片库基准——目标 = 首个登记照片库
-    //（多库时 UI 细化归属前取主库；无库明确报错）。
+    // 2026-10-09 审计 P1：目标照片库 = 相册现有资产的 library_id 众数
+    //（新拍照片归相册主体库）；空相册回退首个登记库（无相册上下文）。
     let db = crate::ipc::app_database_db(&state)?;
-    let library = db
-        .photos_library_list()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next()
-        .ok_or("尚未建立照片库")?;
-    let library = TetherLibrary {
-        id: library.id,
-        root: PathBuf::from(library.root_path),
-    };
     let album_name: String =
         db.0.query_row("SELECT name FROM album WHERE id=?1", [album_id], |r| {
             r.get(0)
         })
         .map_err(|_| "相册不存在")?;
-    let backend = backend_registry()
-        .get(if camera_id.starts_with("sony-sdk:") {
-            "sony-sdk"
-        } else if camera_id.starts_with("gphoto:") {
-            "gphoto"
-        } else {
-            "wpd-mtp"
-        })
-        .cloned()
-        .ok_or("相机后端不可用")?;
-    let mut camera: CameraDto = backend
-        .connect(camera_id)
-        .map_err(|e| e.to_string())?
-        .into();
+    let library = resolve_tether_library(&db, album_id)?;
+    let library = TetherLibrary {
+        id: library.id,
+        root: PathBuf::from(library.root_path),
+    organization_template: library.organization_template,
+};
+    // 2026-10-11 §E-2 自动后端选择：原生 → 已安装 SDK → libgphoto2，按
+    // connect 探测的实际能力选路（探测不触发快门/改设置）；存在未确认
+    // 收据的相机被钉在产生收据的后端上（选择函数内返回 Err 说明）。
+    // 账本目录与 db_dir 同源注入（state.config_dir，不新建全局）。
+    let receipts_dir = state.config_dir.join("tethering").join("receipts");
+    let (backend, info) = establish_backend(
+        backend_registry().all(),
+        camera_id,
+        Some(&receipts_dir),
+    )?;
+    // §E-3 物理独占：同一物理相机跨端点（wpd 与 gphoto 同报一台）互斥——
+    // 与插入存储在存储锁下原子判定，冲突时释放刚建立的连接。
+    let physical_key = info.physical_key();
+    if guard.physical_camera_in_use(&physical_key) {
+        backend.disconnect(camera_id);
+        return Err(
+            "该相机已在联机拍摄会话中（同一物理相机的其他连接端点），请先结束其窗口".into(),
+        );
+    }
+    let ledger = Arc::new(ReceiptsStore::open(&receipts_dir, &physical_key));
+    let mut camera: CameraDto = info.into();
     if camera_id.starts_with("sony-sdk:") {
         camera.name = "Sony A7R V".into();
     }
@@ -305,7 +519,9 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
         album_id,
         album_name,
         camera,
+        physical_key,
         backend,
+        ledger: Some(ledger),
         operation: Mutex::new(()),
         pending_commands: AtomicUsize::new(0),
         capture_in_flight: AtomicBool::new(false),
@@ -314,6 +530,12 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
         connected: AtomicBool::new(true),
         receiving: AtomicBool::new(false),
         settings: Mutex::new(settings),
+        convergence: Mutex::new(SettingsConvergence {
+            revision: 0,
+            invalid: None,
+            has_snapshot: true,
+        }),
+        receipt_seq: AtomicU64::new(0),
         photos: Mutex::new(Vec::new()),
         seen: Mutex::new(HashSet::new()),
         error: Mutex::new(None),
@@ -321,9 +543,14 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     let dto = session.dto();
     guard.insert(session.clone());
     drop(guard);
+    // §B1 崩溃恢复：载入未确认收据并优先按对象 id 主动收取（恢复的照
+    // 片走与正常收片完全相同的 receive/ingest/ack 路径）。
+    recover_unacked(&session);
     std::thread::spawn(move || {
         let mut notified_revision = session.backend.settings_revision(&session.camera.pnp_id);
         let mut last_notification = Instant::now();
+        // §B7 兜底：无参数事件能力（revision 恒 0）的相机 20s 全量刷新一次。
+        let mut last_fallback = Instant::now();
         let mut consecutive_errors = 0;
         while !session.cancelled.load(Ordering::Acquire) {
             // 轮询也纳入操作锁：旧会话清理后绝不能再操作相机，影响新会话。
@@ -346,15 +573,25 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                     }
                     drop(operation);
                     let revision = session.backend.settings_revision(&session.camera.pnp_id);
-                    // 一秒内的参数事件合并为一个失效通知，由窗口按需读取快照。
+                    // 短暂合并参数事件，及时同步模式切换带来的可写性变化。
                     if revision != notified_revision
-                        && last_notification.elapsed() >= Duration::from_secs(1)
+                        && last_notification.elapsed() >= Duration::from_millis(100)
                     {
+                        // §B7：通知前先标记失效（版本号 +1），窗口下一次
+                        // 拉取 settings 时才重读失效项并合并。
+                        session.invalidate_settings(None);
                         state.bus.publish(AppEvent::TetheringSettingsChanged {
                             session_id: session.id.clone(),
                         });
                         notified_revision = revision;
                         last_notification = Instant::now();
+                    }
+                    // §B7 低频兜底：事件能力缺失（revision 恒 0）时 20s
+                    // 全量刷新一次；取景轮询不读参数（per-frame 保持禁用）。
+                    if revision == 0 && fallback_refresh_due(Some(last_fallback), Instant::now())
+                    {
+                        session.fallback_refresh_settings(&state);
+                        last_fallback = Instant::now();
                     }
                     // 排空模式（高速连拍）：拿到事件立即回轮（驱动侧事件
                     // 还在排队）；空轮才歇——固定 200ms 会把相机自拍收片
@@ -384,6 +621,45 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     });
     Ok(dto)
 }
+
+/// §B1 崩溃/重连恢复：从磁盘账本载入未确认收据（最后一态非 acked），
+/// 通过 `request_objects` 优先按对象 id 主动收取——后端把仍存在的对象
+/// 重新入收片队列，poller 随后走正常收片路径；后端不支持按需收取
+///（返回空）或对象已消失（瞬态 id）则退回事件驱动等待，账本保留。
+fn recover_unacked(session: &Session) {
+    let Some(ledger) = session.ledger.as_ref() else {
+        return;
+    };
+    let unacked = ledger.unacked();
+    if unacked.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = unacked.iter().map(|receipt| receipt.id.clone()).collect();
+    crate::devices::diagnostics::record(format!(
+        "tethering recovery camera={} unacked={} backend={}",
+        session.physical_key,
+        ids.len(),
+        session.backend.id()
+    ));
+    match session
+        .backend
+        .request_objects(&session.camera.pnp_id, &ids)
+    {
+        Ok(requeued) => {
+            crate::devices::diagnostics::record(format!(
+                "tethering recovery requeued={} dropped={}",
+                requeued.len(),
+                ids.len() - requeued.len()
+            ));
+        }
+        Err(error) => {
+            // 不阻断会话：退回事件驱动等待，未确认条目保留待后续恢复。
+            crate::devices::diagnostics::record(format!(
+                "tethering recovery unavailable: {error}"
+            ));
+        }
+    }
+}
 /// poller 节奏：空轮歇 200ms；拿到事件立即回轮（排空模式——高速连拍
 /// 时驱动侧事件还在排队，固定间隔会把收片上限压到 ~5 张/秒）。
 fn poll_pace_ms(received: usize) -> u64 {
@@ -401,6 +677,19 @@ pub fn stop(id: &str) {
         session.disconnect();
         current().lock().unwrap().remove(id);
     }
+}
+/// 结束全部联机会话（切库/删库联动：会话锚定旧库的相册与落库路径，
+/// 库切换后继续收片会把照片写进错误的数据库）。先置取消再断开——
+/// 收片循环在对象间检查取消位，尽量不做半程写入。
+pub fn stop_all() {
+    let sessions = current().lock().unwrap().all();
+    for session in &sessions {
+        session.cancelled.store(true, Ordering::Release);
+    }
+    for session in &sessions {
+        session.disconnect();
+    }
+    current().lock().unwrap().clear();
 }
 /// 窗口事件回调只发取消信号，真正断开交给后台，保持 UI 响应。
 pub fn request_stop(id: &str) {
@@ -435,6 +724,9 @@ pub fn capture(state: &SharedState, id: &str) -> Result<(), String> {
     })
 }
 fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> Result<(), String> {
+    if session.is_stopping() {
+        return Ok(()); // 会话收尾中（删库软停等）：剩余对象不再入册
+    }
     if session.seen.lock().unwrap().contains(&object.object_id) {
         return Ok(());
     }
@@ -442,8 +734,27 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
         return Ok(());
     }
     session.receiving.store(true, Ordering::Release);
-    let result = (|| {
+    // §B1 先记 Pending：对象进入收片管线即落盘（崩溃后可恢复；写失败仅
+    // 日志，绝不阻断收片）。seq 保持进程内递增，恢复时按其排序。
+    if let Some(ledger) = session.ledger.as_ref() {
+        let seq = session.receipt_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        ledger.record_pending(
+            session.backend.id(),
+            &object.object_id,
+            seq,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+    }
+    let result: Result<(), String> = (|| {
         let db = crate::ipc::app_database_db(state)?;
+        // 删库软停（2026-10-09 审计 P0）：ingest 前查 pin 的照片库仍在册，
+        // 不在 → 结束会话（request_stop 软信号——poller 线程此刻持操作锁，
+        // 直接 stop() 会同线程重入死锁；循环顶检测 cancelled 后收尾断开），
+        // 错误经既有 TetheringStatus 通道上报（poller 侧 record_error 收口）。
+        if db.photos_library_get(&session.library.id).ok().flatten().is_none() {
+            request_stop(&session.id);
+            return Err("目标照片库已被删除，拍摄会话已结束".into());
+        }
         let (photo, cleanup_error) = ingest_from_backend(
             &db,
             &session.library,
@@ -451,6 +762,7 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             session.backend.as_ref(),
             &session.camera.pnp_id,
             object,
+            Some(&state.register_gate),
         )?;
         session
             .seen
@@ -475,8 +787,12 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
             album_id: session.album_id,
             asset_id: photo.id,
             name: photo.name,
+            kind: photo.kind,
         });
         let app_db_dir = crate::ipc::app_database_dir(state)?;
+        // pHash 任务补差（2026-10-09 审计 P0-C）：入库只自动建 thumb/eyes/
+        // blur，phash 通道（连拍分组依赖）幂等补建——收尾一次，不逐照片。
+        let _ = db.create_phash_tasks_for_unindexed();
         crate::index::kick(app_db_dir.clone(), &state.supervisor);
         // 激活数据库（多数据库修正）：AI 回填直接触发。
         {
@@ -506,6 +822,16 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
         }
         Ok(())
     })();
+    // §B1 终态落盘：入库成功（含 acknowledge_captured 已过）记 Acked；
+    // 失败记 Failed——账本保留该 id（重试由现有内存退避管，崩溃后由
+    // 恢复路径重收）。终态写失败仍仅日志。
+    if let Some(ledger) = session.ledger.as_ref() {
+        let ts = chrono::Utc::now().to_rfc3339();
+        match &result {
+            Ok(()) => ledger.record_acked(&object.object_id, &ts),
+            Err(error) => ledger.record_failed(&object.object_id, error, &ts),
+        }
+    }
     session.receiving.store(false, Ordering::Release);
     result
 }
@@ -517,6 +843,7 @@ fn ingest_from_backend(
     backend: &dyn CameraBackend,
     camera_id: &str,
     object: &CapturedObject,
+    gate: Option<&std::sync::Arc<std::sync::Mutex<()>>>,
 ) -> Result<(TetherPhoto, Option<String>), String> {
     let mut source = backend
         .open_captured(camera_id, object)
@@ -528,6 +855,7 @@ fn ingest_from_backend(
         &object.object_name,
         object.object_size,
         &mut source,
+        gate,
     )?;
     drop(source); // Windows cannot remove the local receipt while still open.
     let cleanup_error = backend
@@ -541,6 +869,10 @@ fn ingest_from_backend(
 /// 2026-10-09 §三：落盘布局 = 纯时间 `{库root}/{拍摄年}/{拍摄月}/{原文件名}`
 ///（EXIF 拍摄时间，缺失回退当前时刻——联拍文件刚落盘，mtime≈now）；
 /// 相册只是逻辑引用（§一），不影响落位。
+/// 2026-10-09 审计 P2：登记段（路径冲突处理 → 原子 rename → 相册校验 →
+/// 入库）持 `register_gate`（§八-5 单管道）——与库扫描/导入的登记段
+/// 互斥串行；未注入（引擎级测试形态）跳过。查重不设：新拍照片语义上
+/// 就是新资产。
 pub fn ingest(
     db: &Db,
     library: &TetherLibrary,
@@ -548,6 +880,7 @@ pub fn ingest(
     name: &str,
     expected_size: u64,
     source: &mut dyn Read,
+    gate: Option<&std::sync::Arc<std::sync::Mutex<()>>>,
 ) -> Result<TetherPhoto, String> {
     let filename = name
         .rsplit(['/', '\\'])
@@ -595,10 +928,18 @@ pub fn ingest(
         drop(file);
         let meta = crate::metadata::exif_lite::parse(&head);
         let captured =
-            crate::import::templates::resolve_captured(meta.captured_at, chrono::Utc::now());
-        let dir = library.root.join(captured.format("%Y/%m").to_string());
+            crate::db::organization::resolve_captured(meta.captured_at, chrono::Utc::now());
+        let relative=crate::db::organization::organized_rel(&library.organization_template,captured,filename,meta.camera.as_deref())?;
+        let intended=library.root.join(relative);let dir=intended.parent().ok_or("组织模板路径无效")?.to_path_buf();
+        let organized_filename=intended.file_name().ok_or("组织模板文件名无效")?.to_string_lossy();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let destination = crate::ipc::claim::resolve_conflict(&dir, filename);
+        // 登记单管道闸（§八-5，审计 P2）：冲突处理 → rename → 入库整段
+        // 持闸——return 路径随栈释放守卫。
+        let _registration_guard = gate.map(|gate| {
+            gate.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        });
+        let destination = crate::ipc::claim::resolve_conflict(&dir, &organized_filename);
         std::fs::rename(&part, &destination).map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
         let filename = destination
@@ -751,12 +1092,24 @@ mod tests {
     }
 
     fn make_session(id: &str, camera_pnp: &str, album_id: i64) -> Arc<Session> {
+        make_session_with(id, camera_pnp, album_id, None, None)
+    }
+
+    /// 测试会话工厂：可注入物理键与磁盘账本（§B1/§E 测试形态）。
+    pub(super) fn make_session_with(
+        id: &str,
+        camera_pnp: &str,
+        album_id: i64,
+        physical_key: Option<&str>,
+        ledger: Option<Arc<ReceiptsStore>>,
+    ) -> Arc<Session> {
         Arc::new(Session {
             id: id.to_string(),
             library: TetherLibrary {
                 id: "lib".into(),
                 root: PathBuf::from("unused"),
-            },
+            organization_template: crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.to_string(),
+},
             album_id,
             album_name: format!("相册{album_id}"),
             camera: crate::ipc::tethering::CameraDto {
@@ -770,7 +1123,12 @@ mod tests {
                     live_view: false,
                 },
             },
+            // 测试缺省物理键：回退 pnp 端点形态（与生产无 serial 时同构）。
+            physical_key: physical_key
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("usb:::假相机:{camera_pnp}")),
             backend: Arc::new(NoopBackend::default()),
+            ledger,
             operation: Mutex::new(()),
             pending_commands: AtomicUsize::new(0),
             capture_in_flight: AtomicBool::new(false),
@@ -779,6 +1137,8 @@ mod tests {
             connected: AtomicBool::new(true),
             receiving: AtomicBool::new(false),
             settings: Mutex::new(Vec::new()),
+            convergence: Mutex::new(SettingsConvergence::default()),
+            receipt_seq: AtomicU64::new(0),
             photos: Mutex::new(Vec::new()),
             seen: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
@@ -827,6 +1187,168 @@ mod tests {
         assert!(!store.camera_in_use("gphoto:usb:001,010"));
     }
 
+    /// stop_all（切库/删库联动）：先置取消再断开，全部会话结束、存储清空。
+    #[test]
+    fn stop_all_cancels_then_disconnects_every_session() {
+        let mut store = SessionStore::default();
+        let a = make_session("s1", "gphoto:usb:001,010", 1);
+        let b = make_session("s2", "gphoto:usb:001,011", 2);
+        store.insert(a.clone());
+        store.insert(b.clone());
+        let sessions = store.all();
+        for session in &sessions {
+            session.cancelled.store(true, Ordering::Release);
+        }
+        for session in &sessions {
+            session.disconnect();
+        }
+        store.clear();
+        assert!(store.all().is_empty());
+        assert!(!a.connected.load(Ordering::Acquire));
+        assert!(!b.connected.load(Ordering::Acquire));
+        assert!(a.cancelled.load(Ordering::Acquire));
+        assert!(b.cancelled.load(Ordering::Acquire));
+    }
+
+    // -----------------------------------------------------------------------
+    // §E-3 物理独占键：同一物理相机跨端点互斥，不同物理机同名不合并
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn physical_key_mutexes_cross_endpoint_sessions_but_not_same_models() {
+        let mut store = SessionStore::default();
+        // 同一台 Z5II：wpd 端点在会话中，gphoto 端点试图再开。
+        store.insert(make_session_with(
+            "s1",
+            r"\\?\usb#vid_04b0&pid_0456#sn1#{g}",
+            1,
+            Some("serial:SN-1"),
+            None,
+        ));
+        assert!(store.physical_camera_in_use("serial:SN-1"));
+        assert!(
+            !store.physical_camera_in_use("serial:SN-2"),
+            "同型不同机不合并"
+        );
+        // pnp 预检不误伤：跨端点 pnp 不同 → 快速预检放行，物理键在 connect
+        // 之后原子判定（start 语义）。
+        assert!(!store.camera_in_use("gphoto:usb:001,010"));
+        store.remove("s1");
+        assert!(!store.physical_camera_in_use("serial:SN-1"), "停止后可重开");
+    }
+
+    // -----------------------------------------------------------------------
+    // §B7 参数失效收敛
+    // -----------------------------------------------------------------------
+
+    fn setting(id: &str, current: &str) -> CameraSetting {
+        CameraSetting {
+            id: id.into(),
+            label: id.into(),
+            kind: super::super::backend::SettingKind::Choice,
+            current: current.into(),
+            writable: true,
+            options: Vec::new(),
+            min: None,
+            max: None,
+            step: None,
+        }
+    }
+
+    #[test]
+    fn invalidation_merges_only_invalidated_ids_into_cache() {
+        let cached = vec![setting("iso", "100"), setting("f-number", "4")];
+        let fresh = vec![setting("iso", "800"), setting("f-number", "11")];
+        // 部分失效：只采纳 iso 的新值，f-number 保持缓存（本轮未重读）。
+        let merged = merge_settings(
+            cached.clone(),
+            fresh,
+            &Invalidation::Ids(vec!["iso".into()]),
+        );
+        assert_eq!(merged[0].current, "800");
+        assert_eq!(merged[1].current, "4", "非失效项不采纳未重读的新值");
+        // 整表失效：全部替换。
+        let merged = merge_settings(cached, vec![setting("iso", "1600")], &Invalidation::All);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].current, "1600", "相机不再报告的失效项移除");
+        // 失效集合里新出现的参数追加。
+        let merged = merge_settings(
+            vec![setting("iso", "100")],
+            vec![setting("iso", "200"), setting("whitebalance", "auto")],
+            &Invalidation::Ids(vec!["whitebalance".into()]),
+        );
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].current, "100", "iso 未失效");
+        assert_eq!(merged[1].id, "whitebalance");
+    }
+
+    #[test]
+    fn invalidation_events_bump_revision_and_merge_consecutive_signals() {
+        let mut convergence = SettingsConvergence::default();
+        assert_eq!(
+            convergence.take_invalid(),
+            Some(Invalidation::All),
+            "无快照前要求整表读"
+        );
+        convergence.mark_snapshot();
+        assert_eq!(convergence.take_invalid(), None, "干净状态不读相机");
+        convergence.invalidate(Some(vec!["iso".into()]));
+        assert_eq!(convergence.revision, 1);
+        assert_eq!(
+            convergence.take_invalid(),
+            Some(Invalidation::Ids(vec!["iso".into()]))
+        );
+        // 连续部分失效合并；整表失效不缩回部分。
+        convergence.invalidate(Some(vec!["iso".into()]));
+        convergence.invalidate(Some(vec!["f-number".into()]));
+        assert_eq!(
+            convergence.take_invalid(),
+            Some(Invalidation::Ids(vec!["iso".into(), "f-number".into()]))
+        );
+        convergence.invalidate(None);
+        convergence.invalidate(Some(vec!["iso".into()]));
+        assert_eq!(convergence.take_invalid(), Some(Invalidation::All));
+        convergence.mark_snapshot();
+        assert_eq!(convergence.take_invalid(), None);
+    }
+
+    #[test]
+    fn settings_refresh_hits_camera_only_through_invalidation() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("conv", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        // 首次拉取（无快照）→ 整表读。
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 干净状态重复拉取 → 缓存，不读相机。
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 事件失效 → 再读一次。
+        session.invalidate_settings(None);
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+        assert_eq!(session.dto().settings.len(), 0);
+    }
+
+    #[test]
+    fn fallback_refresh_throttles_to_twenty_seconds() {
+        let now = Instant::now();
+        assert!(fallback_refresh_due(None, now), "从未刷新过 → 立即可刷");
+        assert!(!fallback_refresh_due(Some(now), now), "刚刷过 → 节流");
+        assert!(
+            !fallback_refresh_due(Some(now - Duration::from_secs(19)), now),
+            "19s → 仍节流"
+        );
+        assert!(
+            fallback_refresh_due(Some(now - Duration::from_secs(20)), now),
+            "满 20s → 放行"
+        );
+        assert!(fallback_refresh_due(
+            Some(now - Duration::from_secs(120)),
+            now
+        ));
+    }
+
     #[test]
     fn parameter_write_is_confirmed_by_readback_before_cache_update_completes() {
         let backend = Arc::new(NoopBackend::default());
@@ -837,6 +1359,17 @@ mod tests {
         assert_eq!(session.dto().settings[0].current, "400");
         assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
         assert_eq!(session.pending_commands.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn mode_confirmation_invalidates_dependent_parameter_descriptors() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("mode", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        session.set_setting("expprogram", "M").unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 3);
     }
 
     #[test]
@@ -918,6 +1451,179 @@ mod tests {
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
         stop(&next_id);
     }
+
+    // -----------------------------------------------------------------------
+    // 2026-10-09 审计：相册众数选库（P1）/ 删库软停（P0）/ 登记闸（P2）
+    // -----------------------------------------------------------------------
+
+    /// 测试 AppState（激活数据库指向 db_dir；联拍收片路径的最小真值）。
+    pub(super) fn test_state(db_dir: &std::path::Path) -> crate::ipc::SharedState {
+        let supervisor = crate::tasks::TaskSupervisor::new(crate::events::EventBus::new());
+        let settings = crate::settings::Settings {
+            databases: vec![crate::settings::DatabaseEntry {
+                id: "test-db".into(),
+                name: "测试数据库".into(),
+                db_dir: db_dir.to_string_lossy().into_owned(),
+            }],
+            active_database_id: Some("test-db".into()),
+            ..Default::default()
+        };
+        std::sync::Arc::new(crate::ipc::AppState {
+            settings: Mutex::new(settings),
+            config_dir: db_dir.to_path_buf(),
+            bus: crate::events::EventBus::new(),
+            devices: Mutex::new(std::collections::HashMap::new()),
+            active_import: Mutex::new(None),
+            import_running: Arc::new(AtomicBool::new(false)),
+            register_gate: Arc::new(Mutex::new(())),
+            library_scan_kick: Arc::new(AtomicBool::new(false)),
+            supervisor: supervisor.clone(),
+            thumb_queue: crate::ipc::thumb::ThumbQueue::new(),
+            ai: crate::ai::ModelManager::new(
+                db_dir.join("models"),
+                crate::events::EventBus::new(),
+                supervisor,
+            ),
+        })
+    }
+
+    #[test]
+    fn tether_library_follows_album_majority_with_first_library_fallback() {
+        let holder = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap(); // 库根与数据库目录分离（§八-6 互斥）
+        for name in ["a", "b"] {
+            std::fs::create_dir_all(roots.path().join(name)).unwrap();
+        }
+        let db = Db::open(&holder.path().join("library.db")).unwrap();
+        let lib_a = db
+            .photos_library_register(
+                "库A",
+                &roots.path().join("a").to_string_lossy(),
+                holder.path(),
+            )
+            .unwrap();
+        let lib_b = db
+            .photos_library_register(
+                "库B",
+                &roots.path().join("b").to_string_lossy(),
+                holder.path(),
+            )
+            .unwrap();
+        let album = db.album_create("相册").unwrap();
+        // 相册资产：3 行属库 B + 1 行属库 A（众数 = B；首库 = A，两者不同
+        // 才能区分两种策略）
+        for (i, library) in [(0i64, &lib_b), (1, &lib_b), (2, &lib_b), (3, &lib_a)] {
+            let path = holder.path().join(format!("p{i}.jpg"));
+            db.0.execute(
+                "INSERT INTO assets (path, filename, size, mtime, xxhash, kind, source, \
+                 created_at, origin, library_id, missing) \
+                 VALUES (?1, ?2, 1, '2026-01-01T00:00:00Z', ?3, 'photo', 'imported', \
+                 '2026-01-01T00:00:00Z', 'imported', ?4, 0)",
+                rusqlite::params![
+                    path.to_string_lossy().to_string(),
+                    format!("p{i}.jpg"),
+                    i,
+                    library.id
+                ],
+            )
+            .unwrap();
+            let id = db
+                .asset_id_by_path(&path.to_string_lossy())
+                .unwrap()
+                .unwrap();
+            db.0.execute(
+                "INSERT INTO album_item (album_id, asset_id, added_at) \
+                 VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+                rusqlite::params![album.id, id],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_tether_library(&db, album.id).unwrap().id,
+            lib_b.id,
+            "相册资产众数在库 B → 新拍照片落库 B"
+        );
+        let empty = db.album_create("空相册").unwrap();
+        // 首库 = 登记表序首行（同毫秒登记的并列序由 id 决胜——断言与列表
+        // 头一致即生产语义，不钉死具体哪个库）
+        let list_head = db.photos_library_list().unwrap()[0].clone();
+        assert_eq!(
+            resolve_tether_library(&db, empty.id).unwrap().id,
+            list_head.id,
+            "空相册回退首库（登记序，无相册上下文）"
+        );
+    }
+
+    #[test]
+    fn receive_ends_session_when_pinned_library_removed() {
+        let holder = tempfile::tempdir().unwrap();
+        let db_dir = holder.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let state = test_state(&db_dir);
+        let _db = crate::ipc::open_library_db(&db_dir).unwrap();
+        // 会话 pin 的库 id 不在登记表（移除登记后的形态）
+        let id = uuid::Uuid::new_v4().to_string();
+        let session = make_session(&id, "test-camera-gone", 1);
+        current().lock().unwrap().insert(session.clone());
+        let object = CapturedObject {
+            object_id: "o1".into(),
+            object_name: "DSC_0001.jpg".into(),
+            object_size: 4,
+        };
+        let err = receive(&state, &session, &object).unwrap_err();
+        assert!(err.contains("目标照片库已被删除"), "{err}");
+        assert!(session.is_stopping(), "会话应结束（软信号，poller 收尾断开）");
+        stop(&id);
+    }
+
+    #[test]
+    fn ingest_registration_waits_for_register_gate() {
+        let holder = tempfile::tempdir().unwrap();
+        let db = Db::open(&holder.path().join("library.db")).unwrap();
+        let album = db.album_create("闸").unwrap();
+        let library = TetherLibrary {
+            id: "lib-gate".into(),
+            root: holder.path().join("photos"),
+        organization_template: crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.to_string(),
+};
+        let gate = Arc::new(Mutex::new(()));
+        // 外持闸（模拟库扫描登记段在跑）：ingest 只能完成流式落盘，登记段
+        // 阻塞等待，不写库
+        let guard = gate.lock().unwrap();
+        let bytes: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4];
+        let ingest_thread = {
+            let gate = Arc::clone(&gate);
+            let db = Db::open(&holder.path().join("library.db")).unwrap();
+            let library = library.clone();
+            let bytes = bytes.clone();
+            std::thread::spawn(move || {
+                let mut cursor = std::io::Cursor::new(bytes.clone());
+                ingest(
+                    &db,
+                    &library,
+                    album.id,
+                    "gate.jpg",
+                    bytes.len() as u64,
+                    &mut cursor,
+                    Some(&gate),
+                )
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let blocked: i64 = db
+            .0
+            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(blocked, 0, "登记闸被持有时不得入库");
+        drop(guard);
+        let photo = ingest_thread.join().unwrap().unwrap();
+        let settled: i64 = db
+            .0
+            .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(settled, 1, "放行后登记完成");
+        assert!(photo.id > 0);
+    }
 }
 
 #[cfg(test)]
@@ -931,6 +1637,8 @@ mod receipt_tests {
     struct ReceiptBackend {
         root: PathBuf,
         acknowledged: AtomicUsize,
+        /// request_objects 收到的 id（恢复路径断言用）。
+        requested: Mutex<Vec<String>>,
     }
 
     impl CameraBackend for ReceiptBackend {
@@ -960,6 +1668,17 @@ mod receipt_tests {
 
         fn capture_still(&self, _: &str, _: Duration) -> Result<CapturedObject, TetherError> {
             Err(TetherError::CaptureNotSupported)
+        }
+
+        /// 按需收取：对象仍在（暂存文件在）才算可恢复——与 wpd 校验
+        /// 「对象还存在」的语义一致；消失的 id 不返回（退回事件驱动）。
+        fn request_objects(&self, _: &str, ids: &[String]) -> Result<Vec<String>, TetherError> {
+            self.requested.lock().unwrap().extend(ids.iter().cloned());
+            Ok(ids
+                .iter()
+                .filter(|id| Path::new(id).is_file())
+                .cloned()
+                .collect())
         }
 
         fn open_captured(
@@ -992,16 +1711,19 @@ mod receipt_tests {
         let library = TetherLibrary {
             id: "lib-test".into(),
             root: root.path().join("photos"),
-        };
+        organization_template: crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.to_string(),
+};
         let backend = ReceiptBackend {
             root: incoming.clone(),
             acknowledged: AtomicUsize::new(0),
+            requested: Mutex::new(Vec::new()),
         };
         let receipt = staging::persist(&incoming, "original.jpg", b"retained bytes").unwrap();
         let mut truncated = receipt.clone();
         truncated.object_size += 1;
         assert!(
-            ingest_from_backend(&db, &library, album.id, &backend, "camera", &truncated).is_err()
+            ingest_from_backend(&db, &library, album.id, &backend, "camera", &truncated, None)
+                .is_err()
         );
         backend.disconnect("camera");
         assert_eq!(
@@ -1011,7 +1733,8 @@ mod receipt_tests {
         assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 0);
 
         let (photo, error) =
-            ingest_from_backend(&db, &library, album.id, &backend, "camera", &receipt).unwrap();
+            ingest_from_backend(&db, &library, album.id, &backend, "camera", &receipt, None)
+                .unwrap();
         assert!(error.is_none());
         assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 1);
         assert!(!Path::new(&receipt.object_id).exists());
@@ -1021,5 +1744,146 @@ mod receipt_tests {
             })
             .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"retained bytes");
+    }
+
+    // -----------------------------------------------------------------------
+    // §B1 会话恢复：request_objects 优先收取 + Ack 落盘
+    // -----------------------------------------------------------------------
+
+    /// 崩溃形态：磁盘账本有未确认收据（一台相机两条），重启后新会话
+    /// 建立 → 恢复路径必须调用 request_objects；可恢复对象走正常
+    /// receive/ingest 后账本落 Acked，消失对象保持未确认。
+    #[test]
+    fn session_recovery_requests_unacked_and_acks_ledger_after_ingest() {
+        let root = tempfile::tempdir().unwrap();
+        let db_dir = root.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let state = super::tests::test_state(&db_dir);
+        let db = crate::ipc::open_library_db(&db_dir).unwrap();
+        let album = db.album_create("恢复").unwrap();
+        let photos_root = root.path().join("photos");
+        std::fs::create_dir(&photos_root).unwrap();
+        let library = db
+            .photos_library_register("恢复库", &photos_root.to_string_lossy(), &db_dir)
+            .unwrap();
+        let incoming = root.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        // 「崩溃前」的暂存对象 + 磁盘账本两条未确认收据。
+        let retained = staging::persist(&incoming, "DSC_9999.jpg", b"recovered").unwrap();
+        let receipts_dir = root.path().join("receipts");
+        let ledger = Arc::new(ReceiptsStore::open(&receipts_dir, "serial:SN-1"));
+        ledger.record_pending("receipt-test", &retained.object_id, 1, "t1");
+        ledger.record_pending("receipt-test", "object-gone", 2, "t2");
+        let backend = Arc::new(ReceiptBackend {
+            root: incoming.clone(),
+            acknowledged: AtomicUsize::new(0),
+            requested: Mutex::new(Vec::new()),
+        });
+        let mut session = super::tests::make_session_with(
+            "recover",
+            "test-camera-recover",
+            album.id,
+            Some("serial:SN-1"),
+            Some(ledger.clone()),
+        );
+        {
+            let session = Arc::get_mut(&mut session).unwrap();
+            session.backend = backend.clone();
+            // receive() 校验会话 pin 的照片库在册（删库软停）——对齐真实库。
+            session.library = TetherLibrary {
+                id: library.id,
+                root: photos_root,
+                organization_template:
+                    crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.to_string(),
+            };
+        }
+        // 会话启动恢复（生产在 start() 建立后、poller 拉起前调用）。
+        recover_unacked(&session);
+        // request_objects 必须收到两条未确认 id（含已消失的）。
+        let requested = backend.requested.lock().unwrap().clone();
+        assert_eq!(
+            requested,
+            vec![retained.object_id.clone(), "object-gone".to_string()],
+            "恢复按账本未确认 id 调用 request_objects"
+        );
+        // 恢复对象走正常收片路径（poller 交付形态）→ 入库 + Ack 落盘。
+        receive(&state, &session, &retained).unwrap();
+        assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 1);
+        let unacked = ledger.unacked();
+        assert_eq!(unacked.len(), 1, "只剩消失对象的未确认条目");
+        assert_eq!(unacked[0].id, "object-gone");
+        assert!(!Path::new(&retained.object_id).exists(), "暂存已确认清理");
+    }
+
+    /// 后端不支持按需收取（trait 默认返回空）→ 恢复退回事件驱动等待，
+    /// 账本条目保留（不删除、不阻断会话）。
+    #[test]
+    fn recovery_without_backend_support_falls_back_to_event_driven() {
+        let root = tempfile::tempdir().unwrap();
+        let receipts_dir = root.path().join("receipts");
+        let ledger = Arc::new(ReceiptsStore::open(&receipts_dir, "serial:SN-2"));
+        ledger.record_pending("noop", "o1", 1, "t1");
+        // NoopBackend 未覆写 request_objects → 默认空。
+        let session = super::tests::make_session_with(
+            "recover-default",
+            "test-camera-default",
+            1,
+            Some("serial:SN-2"),
+            Some(ledger.clone()),
+        );
+        recover_unacked(&session); // 不 panic、不报错
+        assert_eq!(
+            ledger.unacked().len(),
+            1,
+            "默认后端无法按需收取 → 账本保留待事件驱动"
+        );
+    }
+
+    /// ingest 失败 → 账本记 Failed 且保持未确认（重试语义与 pending 同）。
+    #[test]
+    fn failed_ingestion_records_failed_state_in_ledger() {
+        let root = tempfile::tempdir().unwrap();
+        let db_dir = root.path().join("db");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let state = super::tests::test_state(&db_dir);
+        let db = crate::ipc::open_library_db(&db_dir).unwrap();
+        let album = db.album_create("失败").unwrap();
+        let photos_root = root.path().join("photos");
+        std::fs::create_dir(&photos_root).unwrap();
+        let library = db
+            .photos_library_register("失败库", &photos_root.to_string_lossy(), &db_dir)
+            .unwrap();
+        let incoming = root.path().join("incoming");
+        std::fs::create_dir(&incoming).unwrap();
+        let receipts_dir = root.path().join("receipts");
+        let ledger = Arc::new(ReceiptsStore::open(&receipts_dir, "serial:SN-3"));
+        let backend = ReceiptBackend {
+            root: incoming.clone(),
+            acknowledged: AtomicUsize::new(0),
+            requested: Mutex::new(Vec::new()),
+        };
+        let mut session = super::tests::make_session_with(
+            "failed",
+            "test-camera-failed",
+            album.id,
+            Some("serial:SN-3"),
+            Some(ledger.clone()),
+        );
+        {
+            let session = Arc::get_mut(&mut session).unwrap();
+            session.backend = Arc::new(backend);
+            session.library = TetherLibrary {
+                id: library.id,
+                root: photos_root,
+                organization_template:
+                    crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.to_string(),
+            };
+        }
+        let mut truncated = staging::persist(&incoming, "broken.jpg", b"short").unwrap();
+        truncated.object_size += 1; // 传输不完整 → ingest 失败
+        assert!(receive(&state, &session, &truncated).is_err());
+        let unacked = ledger.unacked();
+        assert_eq!(unacked.len(), 1, "失败保持未确认（可重试）");
+        assert_eq!(unacked[0].id, truncated.object_id);
     }
 }

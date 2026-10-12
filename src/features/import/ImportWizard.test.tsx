@@ -90,6 +90,7 @@ const PHOTO_LIB: PhotoLibrary = {
   status: "online",
   assetCount: 0,
   sizeBytes: 0,
+  organizationTemplate: "{year}/{month}/{day}/{filename}",
 };
 
 function volumeDevice() {
@@ -189,8 +190,7 @@ async function openReview(user: ReturnType<typeof userEvent.setup>, query = "?de
   await waitFor(() => expect(next).toBeEnabled());
   await user.click(next);
   await screen.findByTestId("wizard-review-drawer");
-  // 等默认相册「未分组」预选就位（相册必选契约）
-  await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue("1"));
+  await waitFor(() => expect(screen.getByTestId("wizard-album-select")).toHaveValue(query.includes("album=") ? "1" : ""));
   return view;
 }
 
@@ -835,13 +835,18 @@ it("快速滚动时跳过已离开预加载区域且尚未开始的预览请求"
 // --- 确认抽屉与导入方案（目标照片库 + 纯时间布局契约） ---------------------------------
 
 describe("确认抽屉与导入方案", () => {
-  it("无照片库：状态行提示「尚未选择照片库」，继续按钮禁用", async () => {
+  it("未选照片库可进入确认步骤，但不能开始导入", async () => {
     useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
+    const user = userEvent.setup();
     renderWizard("?device=E:");
-
     await screen.findByTestId("wizard-table-stats");
-    expect(screen.getByTestId("wizard-review-next")).toBeDisabled();
-    expect(await screen.findByText(/尚未选择照片库/)).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-target-library-card")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("wizard-review-next")).toBeEnabled());
+    await user.click(screen.getByTestId("wizard-review-next"));
+    expect(await screen.findByTestId("wizard-target-library-card")).toBeInTheDocument();
+    expect(screen.getByRole("button", {name:"开始导入"})).toBeDisabled();
+    expect(within(screen.getByTestId("wizard-import-summary")).getByRole("status")).toHaveTextContent("尚未选择照片库");
+    expect(startMock).not.toHaveBeenCalled();
   });
 
   it("进入抽屉与返回；成功启动后回画廊（LR 式后台导入，不跳任务中心）", async () => {
@@ -877,8 +882,6 @@ describe("确认抽屉与导入方案", () => {
       sourceId: "E:",
       // 2026-10-09 单库多照片库：目标 = 照片库 id（dirTemplate/nameTemplate 退役）
       targetLibraryId: "lib1",
-      // 相册必选：默认预选系统保底相册「未分组」（纯逻辑引用）
-      albumId: 1,
       duplicatePolicy: "skip",
       skipImported: true,
       streams: 4,
@@ -956,7 +959,7 @@ describe("确认抽屉与导入方案", () => {
       "导入位置预览",
     );
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+      "Y:\\照片\\{year}\\{month}\\{day}\\{filename}",
     );
     // 目标根/布局均不可编辑
     expect(screen.queryByLabelText("目标根目录")).not.toBeInTheDocument();
@@ -978,14 +981,14 @@ describe("确认抽屉与导入方案", () => {
     // 改选青海湖 2026（createdAt 2025-12-15）→ 预览仍是纯时间公式
     await user.selectOptions(screen.getByTestId("wizard-album-select"), "3");
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+      "Y:\\照片\\{year}\\{month}\\{day}\\{filename}",
     );
 
     // 新建相册输入名 → 预览同样不变
     await user.selectOptions(screen.getByTestId("wizard-album-select"), "new");
     await user.type(screen.getByTestId("wizard-album-new-name"), "婚礼0927");
     expect(screen.getByTestId("wizard-album-path-preview")).toHaveTextContent(
-      "Y:\\照片\\{拍摄年}\\{拍摄月}\\{原文件名}",
+      "Y:\\照片\\{year}\\{month}\\{day}\\{filename}",
     );
   });
 
@@ -1022,7 +1025,7 @@ describe("确认抽屉与导入方案", () => {
     await user.selectOptions(screen.getByTestId("wizard-album-select"), "new");
     const input = screen.getByTestId("wizard-album-new-name");
 
-    // 空名：开始按钮禁用 + 底部状态行提示（相册必选契约）
+    // 选择新建相册时必须填写名称。
     const start = screen.getByRole("button", { name: "开始导入" });
     expect(start).toBeDisabled();
     expect(screen.getByText("请填写新相册名称")).toBeInTheDocument();
@@ -1044,7 +1047,7 @@ describe("确认抽屉与导入方案", () => {
     expect(plan.albumId).toBe(9);
   });
 
-  it("未选相册（清单为空）：开始禁用并提示「请选择相册」，不启动", async () => {
+  it("未选相册（清单为空）仍可以导入所选照片库", async () => {
     seedSession();
     albumListMock.mockResolvedValue([]);
     const user = userEvent.setup();
@@ -1055,16 +1058,16 @@ describe("确认抽屉与导入方案", () => {
     await screen.findByTestId("wizard-review-drawer");
 
     const start = await screen.findByRole("button", { name: "开始导入" });
-    expect(start).toBeDisabled();
-    expect(screen.getByText("请选择相册")).toBeInTheDocument();
-    expect(startMock).not.toHaveBeenCalled();
+    expect(start).toBeEnabled();
+    await user.click(start);
+    await waitFor(()=>expect(startMock).toHaveBeenCalledWith(expect.objectContaining({targetLibraryId:"lib1",albumId:undefined})));
   });
 
   it("子分组（可选）：留空 = 相册根不带 albumSubgroup", async () => {
     seedSession();
     const user = userEvent.setup();
     startMock.mockResolvedValue({ ok: true, jobId: 36 });
-    await openReview(user);
+    await openReview(user, "?device=E:&album=1");
 
     if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
     expect(screen.getByTestId("wizard-album-subgroup")).toHaveValue("");
@@ -1188,7 +1191,7 @@ describe("确认抽屉与导入方案", () => {
     expect(panel).not.toHaveTextContent("请填写第二目标根目录");
     // 第二目的地预览 = 第二根目录 + 同一纯时间公式
     expect(screen.getByTestId("wizard-second-path-preview")).toHaveTextContent(
-      "D:\\照片备份\\{拍摄年}\\{拍摄月}\\{原文件名}",
+      "D:\\照片备份\\{year}\\{month}\\{day}\\{filename}",
     );
 
     startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
@@ -1268,4 +1271,35 @@ describe("全局滚动条主题", () => {
     await user.click(screen.getByTestId("wizard-view-grid"));
     expect(screen.getByTestId("wizard-grid-scroll").className).toContain("sp-scroll");
   });
+});
+
+
+it("只在确认步骤选择目标照片库，返回挑选后保留选择",async()=>{
+  seedSession();
+  photoLibraryListMock.mockResolvedValue([PHOTO_LIB,{...PHOTO_LIB,id:"lib2",name:"旅行照片库",rootPath:"Z:/旅行"}]);
+  const user=userEvent.setup();renderWizard("?device=E:");
+  await screen.findByTestId("wizard-table-stats");
+  expect(screen.queryByTestId("wizard-target-library-card")).not.toBeInTheDocument();
+  await waitFor(()=>expect(screen.getByTestId("wizard-review-next")).toBeEnabled());
+  await user.click(screen.getByTestId("wizard-review-next"));
+  const review=await screen.findByTestId("wizard-review-drawer");
+  expect(within(review).getByRole("button",{name:"开始导入"})).toBeDisabled();
+  const card=within(review).getByTestId("wizard-target-library-card");
+  await user.selectOptions(within(card).getByRole("combobox"),"lib2");
+  expect(within(card).getByText("Z:/旅行")).toBeInTheDocument();
+  expect(within(review).getByRole("button",{name:"开始导入"})).toBeEnabled();
+  await user.click(within(review).getByRole("button",{name:"关闭"}));
+  expect(screen.queryByTestId("wizard-target-library-card")).not.toBeInTheDocument();
+  await user.click(screen.getByTestId("wizard-review-next"));
+  expect(await screen.findByRole("combobox",{name:/目标照片库/})).toHaveValue("lib2");
+});
+
+
+it("从相册打开导入时预选该相册，仍在确认步骤选择照片库",async()=>{
+  seedSession();const user=userEvent.setup();
+  renderWizard("?device=E:&album=3");
+  await screen.findByTestId("wizard-table-stats");
+  await user.click((await screen.findAllByTestId("wizard-review-next"))[0]);
+  await screen.findByTestId("wizard-review-drawer");
+  expect(screen.getByTestId("wizard-album-select")).toHaveValue("3");
 });

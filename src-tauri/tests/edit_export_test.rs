@@ -201,6 +201,8 @@ fn ins_photo(db: &db::Db, dir: &Path, name: &str, bytes: &[u8], captured: Option
 
 fn folder_options(dir: &Path, name: &str) -> edit::export::ExportOptions {
     edit::export::ExportOptions {
+        format: edit::export::ExportFormat::Jpeg,
+        color_space: edit::export::ExportColorSpace::Srgb,
         mode: edit::export::ExportMode::Folder,
         folder: Some(edit::export::ExportFolderTarget {
             output_dir: dir.to_string_lossy().into_owned(),
@@ -218,6 +220,8 @@ fn folder_options(dir: &Path, name: &str) -> edit::export::ExportOptions {
 
 fn album_options(album_id: i64, subgroup: Option<&str>) -> edit::export::ExportOptions {
     edit::export::ExportOptions {
+        format: edit::export::ExportFormat::Jpeg,
+        color_space: edit::export::ExportColorSpace::Srgb,
         mode: edit::export::ExportMode::Album,
         folder: None,
         album: Some(edit::export::ExportAlbumTarget {
@@ -514,13 +518,14 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
     let options = album_options(album.id, Some("成片"));
     let row = run_job(&db_dir, id, &plain_recipe(), &options, &fixture.photo_root);
 
-    // 落位（2026-10-09 §三）：{库root}/{拍摄年}/{拍摄月}/{stem}_edit.jpg
-    //（拍摄时间 2026-06-01 → 2026/06；相册/子组只是逻辑引用，不影响落位）
+    // 落位（2026-10-11 起随库组织模板）：{库root}/{年}/{月}/{日}/{stem}_edit.jpg
+    //（拍摄时间 2026-06-01 → 2026/06/01；相册/子组只是逻辑引用，不影响落位）
     let dst = PathBuf::from(row.output_path.clone().unwrap());
     let expected = fixture
         .photo_root
         .join("2026")
         .join("06")
+        .join("01")
         .join("DSC_0004_edit.jpg");
     assert_eq!(dst, expected, "album 落位路径（纯时间，子组不落盘）");
     assert!(dst.is_file());
@@ -593,6 +598,7 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
         .photo_root
         .join("2026")
         .join("06")
+        .join("01")
         .join("DSC_0004_edit_2.jpg");
     assert_eq!(dst3, expected3, "subgroup 可空 = 同纯时间目录（递增 _2）");
     assert!(dst3.is_file());
@@ -606,6 +612,20 @@ fn album_export_placement_subgroup_and_conflict_suffix() {
         )
         .unwrap();
     assert_eq!(subgroup3, None, "subgroup 可空 = 相册根");
+}
+
+#[test]
+fn library_export_without_album_does_not_create_default_album() {
+    let fixture = setup();
+    let id = ins_photo(&fixture.db, &fixture.photo_root, "DSC_0004.jpg",
+        &build_source_jpeg(80, 60), Some("2026-06-01T10:00:00.000Z"));
+    let mut options = album_options(0, None);
+    options.album = None;
+    let row = run_job(&fixture._dir.path().join("db"), id, &plain_recipe(), &options, &fixture.photo_root);
+    assert!(Path::new(&row.output_path.unwrap()).is_file());
+    assert!(row.new_asset_id.is_some());
+    assert!(fixture.db.album_list().unwrap().is_empty());
+    assert_eq!(fixture.db.0.query_row("SELECT COUNT(*) FROM album_item", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------

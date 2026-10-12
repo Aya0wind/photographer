@@ -8,6 +8,8 @@ import {
   type IndexStatus,
 } from "@/ipc/api";
 
+let modelsEpoch = 0;
+let modelsRefreshRun: IndexRefreshRun | null = null;
 let indexStatusEpoch = 0;
 interface IndexRefreshRun { epoch: number; queued: boolean; promise: Promise<void> }
 let indexRefreshRun: IndexRefreshRun | null = null;
@@ -61,9 +63,27 @@ export const useAiStore = create<AiState>((set, get) => ({
   indexProgress: null,
   indexStatus: null,
 
-  refresh: async () => {
-    const models = await aiModelsStatus();
-    set({ models, modelsLoaded: true });
+  refresh: () => {
+    if (modelsRefreshRun?.epoch === modelsEpoch) {
+      modelsRefreshRun.queued = true;
+      return modelsRefreshRun.promise;
+    }
+    const run: IndexRefreshRun = { epoch: modelsEpoch, queued: false, promise: Promise.resolve() };
+    modelsRefreshRun = run;
+    run.promise = (async () => {
+      do {
+        run.queued = false;
+        try {
+          const models = await aiModelsStatus(true);
+          if (run.epoch !== modelsEpoch) return;
+          // A download completion invalidates the earlier in-flight snapshot.
+          if (!run.queued) set({ models, modelsLoaded: true });
+        } catch {
+          // Keep the last valid snapshot when the backend is temporarily busy.
+        }
+      } while (run.queued && run.epoch === modelsEpoch);
+    })().finally(() => { if (modelsRefreshRun === run) modelsRefreshRun = null; });
+    return run.promise;
   },
 
   refreshIndexStatus: () => {
@@ -110,6 +130,11 @@ export const useAiStore = create<AiState>((set, get) => ({
         void get().refresh();
         break;
       }
+      case "aiIndexFinished": {
+        void get().refresh();
+        void get().refreshIndexStatus();
+        break;
+      }
       case "importFileProgress":
       case "importSessionFinished":
       case "indexTaskResumed": {
@@ -136,6 +161,8 @@ export const useAiStore = create<AiState>((set, get) => ({
   },
 
   resetForTests: () => {
+    modelsEpoch += 1;
+    modelsRefreshRun = null;
     indexStatusEpoch += 1;
     indexRefreshRun = null;
     set({

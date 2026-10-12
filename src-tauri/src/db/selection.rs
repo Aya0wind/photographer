@@ -109,8 +109,8 @@ impl Db {
     }
 
     /// 回收站还原（幂等）。返回还原行数。
-    /// 还原即归位「一照一册」模型：原相册已删（归属级联消失）的照片落入
-    /// 默认相册「未分组」（已有归属的保持不变；未分组禁删，见 albums 层）。
+    /// 保留尚存的相册引用；没有相册的照片还原后仍然没有相册。
+
     pub fn trash_restore(&self, ids: &[i64]) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -126,26 +126,6 @@ impl Db {
             ),
             rusqlite::params_from_iter(ids.iter().copied()),
         )? as u64;
-        if n > 0 {
-            let default_id = self.ensure_default_album()?;
-            // 参数序：?1=默认相册 id，?2=added_at，?3..=资产 id（IN 子句）
-            let in_slots = (0..ids.len())
-                .map(|i| format!("?{}", i + 3))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.0.execute(
-                &format!(
-                    "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at) \
-                     SELECT ?1, id, ?2 FROM assets WHERE id IN ({in_slots}) \
-                     AND NOT EXISTS (SELECT 1 FROM album_item ai WHERE ai.asset_id = assets.id)"
-                ),
-                rusqlite::params_from_iter(
-                    std::iter::once(rusqlite::types::Value::from(default_id))
-                        .chain(std::iter::once(rusqlite::types::Value::from(now_rfc3339())))
-                        .chain(ids.iter().map(|id| rusqlite::types::Value::from(*id))),
-                ),
-            )?;
-        }
         Ok(n)
     }
 
@@ -197,8 +177,10 @@ impl Db {
 
     /// 资产记录级删除（duplicate_delete / trash_purge 共用路径）：事务内
     /// 清 pair 双向引用 → 删行（album_item/faces/view_history/similar_bucket/
-    /// index_tasks 等经既有 FK ON DELETE CASCADE 级联）→ 清空组。返回删除数。
-    /// 物理文件删除由调用方负责（失败容忍记账，见 ipc::duplicates）。
+    /// index_tasks 等经既有 FK ON DELETE CASCADE 级联）→ 孤儿人物簇清理
+    ///（faces 级联后无脸挂靠的 person，[`delete_orphan_people`]）→ 清空组/
+    /// 空连拍壳。返回删除数。物理文件与派生数据（缩略图/向量）删除由调用
+    /// 方负责（失败容忍记账，见 ipc::duplicates / ipc::selection）。
     pub fn assets_delete_rows(&self, ids: &[i64]) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -208,6 +190,8 @@ impl Db {
             .collect::<Vec<_>>()
             .join(", ");
         let tx = self.0.unchecked_transaction()?;
+        // 孤儿簇记账先行：被删资产 faces 上挂的簇 id（删行后即查不到了）
+        let clusters = clusters_on_assets(&tx, ids)?;
         tx.execute(
             &format!("UPDATE assets SET pair_asset_id = NULL WHERE pair_asset_id IN ({slots})"),
             rusqlite::params_from_iter(ids.iter()),
@@ -216,12 +200,58 @@ impl Db {
             &format!("DELETE FROM assets WHERE id IN ({slots})"),
             rusqlite::params_from_iter(ids.iter()),
         )?;
-        // 空组清理（group_asset 随资产级联后，可能留下无成员壳组）
+        delete_orphan_people(&tx, &clusters)?;
+        // 空组/空连拍壳清理（group_asset/burst_id 随资产级联后，可能留下
+        // 无成员壳行；bursts 整体重建型账本，壳行只碍统计不碍正确性）
         tx.execute(
             "DELETE FROM photo_group WHERE id NOT IN (SELECT DISTINCT group_id FROM group_asset)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM bursts \
+             WHERE id NOT IN (SELECT DISTINCT burst_id FROM assets WHERE burst_id IS NOT NULL)",
             [],
         )?;
         tx.commit()?;
         Ok(n as u64)
     }
+}
+
+/// 被删资产 faces 上挂的簇 id（去重；孤儿人物清理的输入）。只取确有
+/// 挂靠的簇——本就无脸的簇不受本次删除影响，不进清理候选。
+pub(super) fn clusters_on_assets(conn: &Connection, ids: &[i64]) -> Result<Vec<i64>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let slots = (0..ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT cluster_id FROM faces WHERE cluster_id IS NOT NULL AND asset_id IN ({slots})"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| r.get(0))?;
+    rows.collect()
+}
+
+/// 孤儿人物簇清理（删资产后的共用收尾）：候选簇中已无任何 faces 挂靠的
+/// person 删除（faces 级联清空 = 该人物只剩空壳）；仍被其他库资产使用
+/// （还有脸）的簇保留。剩余人物若封面脸被级联删，cover_face_id 已由 FK
+/// ON DELETE SET NULL 归空，人物页封面回退簇内最大框的既有路径。
+pub(super) fn delete_orphan_people(conn: &Connection, clusters: &[i64]) -> Result<()> {
+    if clusters.is_empty() {
+        return Ok(());
+    }
+    let slots = (0..clusters.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.execute(
+        &format!(
+            "DELETE FROM people WHERE id IN ({slots}) \
+             AND NOT EXISTS (SELECT 1 FROM faces WHERE cluster_id = people.id)"
+        ),
+        rusqlite::params_from_iter(clusters.iter()),
+    )?;
+    Ok(())
 }

@@ -36,7 +36,7 @@ fn catalog(root: &Path) -> Result<Vec<LutEntry>, String> {
         Err(e) => Err(e.to_string()),
     }
 }
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all(target.parent().ok_or("资源目录无效")?).map_err(|e| e.to_string())?;
     let temporary = target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let result =
@@ -75,7 +75,7 @@ pub(super) fn params(id: &str) -> Result<serde_json::Value, String> {
         serde_json::json!({"file":root.join(format!("{id}.cube")).to_string_lossy(),"interpolation":"tetrahedral"}),
     )
 }
-fn import_at(root: &Path, path: &Path) -> Result<LutEntry, String> {
+pub(super) fn import_at(root: &Path, path: &Path) -> Result<LutEntry, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_BYTES {
         return Err("请选择不超过 16 MB 的有效 LUT 文件".into());
@@ -123,6 +123,40 @@ fn import_at(root: &Path, path: &Path) -> Result<LutEntry, String> {
     entries.push(entry.clone());
     save(root, &entries)?;
     Ok(entry)
+}
+#[derive(Debug,Clone,Serialize,Deserialize)]
+pub(super) struct PackagedLut {pub id:String,pub name:String,pub cube:String}
+pub(super) fn validate_packaged(resource:&PackagedLut)->Result<(),String>{
+    validate_id(&resource.id)?;
+    if resource.id.starts_with("builtin:")||resource.cube.len() as u64>MAX_BYTES||resource.name.trim().is_empty()||resource.name.chars().count()>120{return Err("方案中的调色资源无效".into());}
+    let parsed=photocraft_cms::lutfile::parse("resource.cube",resource.cube.as_bytes()).map_err(|e|format!("方案调色资源无效：{}",e.0))?;
+    if parsed.size>65||!parsed.domain_is_default(){return Err("方案中的调色资源不受支持".into());}
+    let canonical=photocraft_cms::lutfile::write_cube(&parsed);
+    if format!("{:x}",Sha256::digest(canonical.as_bytes()))!=resource.id{return Err("方案中的调色资源校验失败".into());}
+    Ok(())
+}
+pub(super) fn package_resources(root:&Path,ids:&std::collections::BTreeSet<String>)->Result<Vec<PackagedLut>,String>{
+    use std::io::Read;
+    let _guard=STORE.lock().map_err(|_|"资源锁不可用")?;let entries=catalog(root)?;let mut resources=Vec::new();
+    for id in ids {validate_id(id)?;if id.starts_with("builtin:"){continue;}
+        let file=std::fs::File::open(root.join(format!("{id}.cube"))).map_err(|e|format!("方案需要的调色资源不可用：{e}"))?;
+        let mut cube=String::new();file.take(MAX_BYTES+1).read_to_string(&mut cube).map_err(|e|e.to_string())?;
+        let name=entries.iter().find(|e|&e.id==id).map(|e|e.name.clone()).unwrap_or_else(||"LUT".into());
+        let resource=PackagedLut{id:id.clone(),name,cube};validate_packaged(&resource)?;resources.push(resource);
+    }Ok(resources)
+}
+pub(super) fn install_packaged(root:&Path,resources:&[PackagedLut])->Result<(),String>{
+    for resource in resources {validate_packaged(resource)?;}
+    let _guard=STORE.lock().map_err(|_|"资源锁不可用")?;let mut entries=catalog(root)?;
+    for resource in resources {
+        // Verified immutable payloads are additive cache writes. Publish the
+        // catalog only after every resource has been validated and stored.
+        let target=root.join(format!("{}.cube",resource.id));
+        if std::fs::read(&target).ok().as_deref()!=Some(resource.cube.as_bytes()){atomic_write(&target,resource.cube.as_bytes())?;}
+        if let Some(entry)=entries.iter_mut().find(|e|e.id==resource.id){entry.removed=false;}
+        else {let parsed=photocraft_cms::lutfile::parse("resource.cube",resource.cube.as_bytes()).map_err(|e|e.0)?;entries.push(LutEntry{id:resource.id.clone(),name:resource.name.clone(),size:parsed.size,builtin:false,removed:false});}
+    }
+    if !resources.is_empty(){save(root,&entries)?;}Ok(())
 }
 fn mutate_at(root: &Path, id: &str, name: Option<&str>) -> Result<(), String> {
     validate_id(id)?;

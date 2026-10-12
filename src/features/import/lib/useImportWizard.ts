@@ -7,7 +7,6 @@ import { deviceFiles, deviceCopyOnly, platformCapabilities, kindFromName, albumL
 import { useImportStore, seedDevicesFromBackend, type RecentSource } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { importRootOf, timeLayoutPreview } from "@/features/onboarding/onboardingConfig";
-import { isUngroupedAlbum } from "@/features/albums/lib/ungroupedAlbum";
 import { groupByDir, type DirGroup } from "../SourceFileViews";
 import { useImportLayout } from "./useImportLayout";
 
@@ -48,7 +47,9 @@ export function useImportWizard() {
       cancelled = true;
     };
   }, []);
-  const targetLibrary = photoLibraries.find((lib) => lib.status === "online") ?? null;
+  const [targetLibraryId,setTargetLibraryId]=useState("");
+  useEffect(()=>{if(!targetLibraryId&&photoLibraries.filter(lib=>lib.status==="online"&&!lib.organizationPending).length===1)setTargetLibraryId(photoLibraries.find(lib=>lib.status==="online"&&!lib.organizationPending)!.id);},[photoLibraries,targetLibraryId]);
+  const targetLibrary = photoLibraries.find(lib=>lib.id===targetLibraryId&&lib.status==="online"&&!lib.organizationPending)??null;
 
   // 用户选择或设备深链指定来源；来源失效时不自动改选其他设备。
   // 显式 ID 优先于 URL，避免路径编码或更新批次影响当前选择。
@@ -147,9 +148,9 @@ export function useImportWizard() {
   }, []);
   const [duplicatePolicy, setDuplicatePolicy] = useState(importSettings.duplicatePolicy);
   const [skipImported, setSkipImported] = useState(importSettings.skipImported);
-  // 存入相册（规格修订后必选）：无「不添加」分支；默认预选系统保底相册「未分组」，
-  // 清单到位后按名匹配回填；新建分支照旧。
+  // 相册可选；从相册进入导入时才预选该相册。
   const [albumChoice, setAlbumChoice] = useState<"existing" | "new">("existing");
+  const [requestedAlbumId] = useState(() => Number(searchParams.get("album")));
   const [albumId, setAlbumId] = useState<number | null>(null);
   const [newAlbumName, setNewAlbumName] = useState("");
   const [albums, setAlbums] = useState<AlbumDto[]>([]);
@@ -163,12 +164,12 @@ export function useImportWizard() {
       cancelled = true;
     };
   }, []);
-  // 默认预选「未分组」（后端按名幂等自动创建；仅在未手选时回填）
+  // 只采用入口明确指定的相册，不按名称自动归组。
   useEffect(() => {
     if (albums.length === 0) return;
-    const ungrouped = albums.find((a) => isUngroupedAlbum(a));
-    if (ungrouped) setAlbumId((prev) => (prev === null ? ungrouped.id : prev));
-  }, [albums]);
+    const preferred = albums.find(a => a.id === requestedAlbumId);
+    if (preferred) setAlbumId(prev => prev === null ? preferred.id : prev);
+  }, [albums, requestedAlbumId]);
   // 子分组（B4 定案，可选）：所选相册的现有子分组名（datalist 提示）；换相册即清空
   const [albumSubgroup, setAlbumSubgroup] = useState("");
   const [albumSubgroupNames, setAlbumSubgroupNames] = useState<string[]>([]);
@@ -186,7 +187,7 @@ export function useImportWizard() {
   }, [albumChoice, albumId]);
   // 目标路径预览（纯时间布局公式，2026-10-09 定案）：`{库root}/{拍摄年}/{拍摄月}/
   // {原文件名}`——具体每文件的拍摄年/月由后端按 EXIF 落位，前端只展示公式。
-  const importTargetPreview = timeLayoutPreview(targetRoot);
+  const importTargetPreview = timeLayoutPreview(targetRoot,targetLibrary?.organizationTemplate);
   // 双目的地（M2）：默认关；移动模式互斥（后端拒 move+secondTarget）
   const [secondEnabled, setSecondEnabled] = useState(false);
   const [secondRoot, setSecondRoot] = useState("");
@@ -231,10 +232,10 @@ export function useImportWizard() {
   const effectiveStreams = isMtp ? 1 : 4;
   // 双目的地开启且第二目标根目录为空 → 必填校验拦住开始
   const secondReady = !secondEnabled || secondRoot.trim().length > 0;
-  const canReview = Boolean(device && targetLibrary) && scanningFolder === null && !filesLoading && device?.scanStatus !== "scanning"
+  const canReview = Boolean(device) && scanningFolder === null && !filesLoading && device?.scanStatus !== "scanning"
     && device?.scanStatus !== "failed" && !policyPending && selected.size > 0 && !starting;
-  const albumReady = albumChoice === "existing" ? albumId !== null : newAlbumName.trim().length > 0;
-  const canStart = canReview && Boolean(targetRoot) && !(mode !== "copy" && copyOnly) && secondReady && albumReady;
+  const albumReady = albumChoice === "existing" || newAlbumName.trim().length > 0;
+  const canStart = canReview && Boolean(targetLibrary && targetRoot) && !(mode !== "copy" && copyOnly) && secondReady && albumReady;
 
   const selectedCount = selected.size;
   const selectedBytes = files
@@ -349,13 +350,12 @@ export function useImportWizard() {
 
   // --- 方案与启动 ----------------------------------------------------------------
 
-  async function resolveAlbum(): Promise<number | undefined> {
-    // 相册必选（规格修订）：存入已有相册需选中；新建分支先建相册拿 id（重名等错误透出行内提示并中止启动）
+  async function resolveAlbum(): Promise<number | null | undefined> {
+    // 不选相册直接登记照片；新建分支先创建相册，失败则中止启动。
     let resolvedAlbumId: number | undefined;
     if (albumChoice === "existing") {
       if (albumId === null) {
-        setAlbumError(t("wizard.album.required"));
-        return;
+        return null;
       }
       resolvedAlbumId = albumId;
     } else {
@@ -402,7 +402,7 @@ export function useImportWizard() {
         // 勾选即范围：只导入选中的文件（rel_path 集合），引擎按此过滤
         include: files.filter((f) => selected.has(f.path)).map((f) => f.path),
         // 添加到相册（可选）：导入完成后新入库照片加入该相册
-        albumId: resolvedAlbumId,
+        albumId: resolvedAlbumId??undefined,
         // 子分组（B4 定案，可选）：留空 = 相册根
         albumSubgroup:
           albumChoice === "existing" && albumSubgroup.trim() !== ""
@@ -448,9 +448,9 @@ export function useImportWizard() {
     : filesLoading || device.scanStatus === "scanning" ? t("wizard.scanBeforeImport")
     : device.scanStatus === "failed" ? t("wizard.deviceScanFailed")
     : policyPending ? t("wizard.flow.checkingSource")
-    : !targetLibrary || !targetRoot ? t("wizard.location.noLibrary")
+    : step === "review" && (!targetLibrary || !targetRoot) ? t("wizard.location.noLibrary")
     : selectedCount === 0 ? t("wizard.selectPhotosHint")
-    : !albumReady ? t(albumChoice === "new" ? "wizard.album.nameRequired" : "wizard.album.required")
+    : !albumReady ? t("wizard.album.nameRequired")
     : !secondReady ? t("wizard.second.required") : null;
 
   return {
@@ -458,7 +458,7 @@ export function useImportWizard() {
     selectDevice, browseFolder, selectRecent, filesLoading, files, selected, selectedCount, selectedBytes,
     viewMode, setViewMode, tileSize, setTileSize, selectAll, clearSelection, invertSelection, refreshDevice,
     groups, collapsed, toggleFile, toggleGroup, toggleCollapse, canReview, blockedReason, canStart, starting,
-    startImport, targetLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName,
+    startImport, targetLibrary,photoLibraries,targetLibraryId,setTargetLibraryId, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName,
     setNewAlbumName, albumError, setAlbumError, startError, setStartError, sourceError, setSourceError,
     copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview,
     albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy,

@@ -18,23 +18,21 @@ export async function photoLibraryList(): Promise<PhotoLibrary[]> {
   return ipcList<PhotoLibrary>("photo_library_list");
 }
 
-/**
- * 新建照片库（photo_library_create）：reference=false 登记空文件夹（之后
- * copy/move 导入落盘目标 = 该库 root）；reference=true 从已有文件夹建立
- * （只登记不搬文件，后端触发递归扫描批量登记，进度走
- * libraryScanProgress/libraryScanFinished 事件）。业务错误（路径非法/与其他
- * 库或数据库目录重叠等）透传原始 Err 文案；invoke 不可用 error=null。
- */
+/** 统一照片库：已有文件原位建立索引，新增文件按库的组织规则存放。 */
 export async function photoLibraryCreate(
   name: string,
   rootPath: string,
-  reference: boolean,
+  organizationTemplate: string,
+  existingFolder=false,
+  reorganizeExisting=false,
 ): Promise<PhotoLibraryCreateResult> {
   try {
     const library = await ipc<PhotoLibrary>("photo_library_create", {
       name,
       rootPath,
-      reference,
+      organizationTemplate,
+      existingFolder,
+      reorganizeExisting,
     });
     if (library === null || typeof library !== "object" || typeof library.id !== "string") {
       return { ok: false, error: null };
@@ -50,14 +48,15 @@ export async function photoLibraryCreate(
 }
 
 /**
- * 移除登记（photo_library_remove）：永不删照片文件（用户红线）；deleteRecords=true
- * 连库内资产记录一并删（对话框问过用户后）。不 catch：失败文案透传给调用方提示。
+ * 删除照片库（photo_library_remove）：登记与库内资产记录/派生数据一并删；
+ * 默认不动磁盘照片文件，deleteFiles=true 连原文件删（确认短语后勾选；引用库
+ * 原文件不由应用管理，后端拒绝代删）。不 catch：失败文案透传给调用方提示。
  */
 export async function photoLibraryRemove(
   id: string,
-  deleteRecords: boolean,
+  deleteFiles: boolean,
 ): Promise<PhotoLibraryRemoveResult> {
-  return ipc<PhotoLibraryRemoveResult>("photo_library_remove", { id, deleteRecords });
+  return ipc<PhotoLibraryRemoveResult>("photo_library_remove", { id, deleteFiles });
 }
 
 /** 各照片库扫描任务状态（photo_library_scan_status）；失败/非数组回退 [] */
@@ -95,3 +94,10 @@ export async function sidebarCounts(): Promise<SidebarCounts | null> {
     return null;
   }
 }
+
+export async function photoLibraryUpdateTemplate(id:string,organizationTemplate:string):Promise<PhotoLibraryCreateResult>{
+ try{const library=await ipc<PhotoLibrary>("photo_library_set_organization_template",{id,organizationTemplate});return {ok:true,library};}catch(error){return {ok:false,error:String(error)};}
+}
+export interface PhotoLibraryOrganizationProgress {libraryId:string;phase:"scan"|"move"|"done";completed:number;total:number}
+export function photoLibraryReorganize(id:string){return ipc<PhotoLibraryOrganizationProgress>("photo_library_reorganize",{id});}
+export function photoLibraryStopReorganization(id:string){return ipc<void>("photo_library_stop_reorganization",{id});}

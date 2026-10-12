@@ -3,7 +3,12 @@ import { ipcList } from "../read";
 import { type AiModelStatus, type AssetDto, type PersonCluster, type SemanticHit } from "./types";
 
 /** 模型清单（ai_models_status 失败/非数组回退 []——UI 显示后端未连接态） */
-export async function aiModelsStatus(): Promise<AiModelStatus[]> {
+export async function aiModelsStatus(strict = false): Promise<AiModelStatus[]> {
+  if (strict) {
+    const models = await ipc<AiModelStatus[]>("ai_models_status");
+    if (!Array.isArray(models)) throw new Error("Invalid model status response");
+    return models;
+  }
   return ipcList<AiModelStatus>("ai_models_status");
 }
 

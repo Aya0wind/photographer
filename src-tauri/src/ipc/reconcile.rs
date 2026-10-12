@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{app_database_db, DeviceEntry, DeviceScan, SharedState};
+use super::{DeviceEntry, DeviceScan, SharedState};
 use crate::devices::orchestrator::{scan_device_with_progress, DeviceSnapshot};
 use crate::devices::volume::VolumeSource;
 use crate::devices::wpd::WpdSource;
@@ -63,6 +63,7 @@ pub fn reconcile_with_truth(
             if let Some(entry) = registry.get_mut(&id) {
                 if matches!(&entry.scan, DeviceScan::Failed(_, retry) if Instant::now() >= *retry) {
                     entry.scan = DeviceScan::Scanning;
+                    entry.files = Some(Vec::new());
                     state.bus.publish(AppEvent::DeviceArrived {
                         id: id.clone(),
                         kind,
@@ -93,6 +94,7 @@ pub fn reconcile_with_truth(
                     source: Arc::clone(&source),
                     snapshot,
                     scan: DeviceScan::Scanning,
+                    files: None,
                 },
             );
             crate::devices::diagnostics::record(format!("device ready: {id}; {name}"));
@@ -124,14 +126,13 @@ fn spawn_scan(state: &SharedState, id: String, source: Arc<dyn DeviceSource>, tr
         let progress_source = Arc::clone(&source);
         let progress_id = id.clone();
         let on_batch: crate::devices::FileBatchCallback = Arc::new(move |files| {
-            let registry = progress_state
+            let mut registry = progress_state
                 .devices
                 .lock()
                 .expect("devices mutex poisoned");
-            if registry
-                .get(&progress_id)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.source, &progress_source))
-            {
+            if let Some(entry) = registry.get_mut(&progress_id)
+                .filter(|entry| Arc::ptr_eq(&entry.source, &progress_source)) {
+                entry.files.get_or_insert_with(Vec::new).extend(files.iter().cloned());
                 progress_state.bus.publish(AppEvent::DeviceFilesProgress {
                     id: progress_id.clone(),
                     files: files.iter().map(super::FileEntryDto::from).collect(),
@@ -140,23 +141,8 @@ fn spawn_scan(state: &SharedState, id: String, source: Arc<dyn DeviceSource>, tr
         });
         // Panic 也完成扫描状态转换，不能永远占着“扫描中”。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let skip = state
-                .settings
-                .lock()
-                .expect("settings mutex poisoned")
-                .import
-                .skip_imported;
-            // 没有可用的照片库仍能发现相机和扫描媒体；查重暂按全部未导入。
-            let db = app_database_db(&state)
-                .map_err(|error| {
-                    crate::devices::diagnostics::record(format!(
-                        "scan library unavailable: {error}"
-                    ));
-                    error
-                })
-                .ok();
             crate::devices::diagnostics::record(format!("scan media begin: {id}"));
-            scan_device_with_progress(&*source, db.as_ref(), skip, Some(on_batch))
+            scan_device_with_progress(&*source, None, false, Some(on_batch))
                 .map_err(|err| err.to_string())
         }))
         .unwrap_or_else(|_| Err("设备扫描异常，请重试".into()));
