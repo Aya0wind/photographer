@@ -7,9 +7,15 @@
 import "@testing-library/jest-dom/vitest";
 
 import { afterEach, vi } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 
 afterEach(cleanup);
+
+// waitFor/findBy 默认 1s 上限在 CI 慢机上不够（ViewerOverlay 侧栏退场动画、
+// 预取层、画廊分组等时序断言在 CI 稳定超时，本地快所以一直绿——2026-10-12
+// 双平台回归 CI 全挂在同一批用例）。统一放宽到 5s：语义不变（仍需最终
+// 成立），只消除慢机竞态。
+configure({ asyncUtilTimeout: 5000 });
 
 // --- Tauri API 全局 mock ----------------------------------------------------
 

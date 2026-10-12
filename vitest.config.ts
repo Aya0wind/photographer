@@ -10,6 +10,9 @@ export default defineConfig({
     environment: "jsdom",
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
+    // 单测上限放宽（默认 5s）：waitFor 已统一 5s（见 setup.ts），含多个
+    // 长等待的用例在 CI 慢机上会撞默认测试超时——只允许更久，不改变语义。
+    testTimeout: 15000,
   },
   resolve: {
     alias: {

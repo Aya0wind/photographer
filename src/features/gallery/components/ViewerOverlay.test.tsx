@@ -568,8 +568,9 @@ describe("查看器：左右切换与关闭", () => {
     const img = await screen.findByTestId("viewer-img");
 
     fireEvent.click(screen.getByTestId("viewer-rotate-cw"));
-    await waitFor(() =>
-      expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg)"),
+    await waitFor(
+      () => expect(img.style.transform).toBe("translate(0px, 0px) rotate(90deg)"),
+      { timeout: 5000 },
     );
   });
 
