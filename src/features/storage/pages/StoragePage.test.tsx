@@ -187,7 +187,7 @@ describe("StoragePage 卡片操作", () => {
   });
 
 
-  it("删除照片库：单分支两段式——短语确认后执行，默认不删文件（deleteFiles=false）", async () => {
+  it("删除照片库：单级确认——输入库名执行，默认不删文件（deleteFiles=false）", async () => {
     listMock.mockResolvedValue([lib({ assetCount: 35 })]);
     removeMock.mockResolvedValue({ recordsDeleted: 35, filesDeleted: 0 });
     const user = userEvent.setup();
@@ -196,31 +196,26 @@ describe("StoragePage 卡片操作", () => {
 
     await user.click(screen.getAllByTestId("storage-remove")[0]);
     const dialog = screen.getByTestId("storage-remove-dialog");
-    // 默认不动文件的常驻提示 + 删除按钮带记录数
-    expect(within(dialog).getByTestId("storage-remove-never-delete")).toHaveTextContent(
-      "默认不删除磁盘上的照片文件",
-    );
-    expect(within(dialog).getByTestId("storage-remove-delete-records")).toHaveTextContent("35 张");
-
-    // 第一段：点「删除照片库」只进入待确认态，不执行
-    await user.click(screen.getByTestId("storage-remove-delete-records"));
-    expect(removeMock).not.toHaveBeenCalled();
+    // 单级：打开即见勾选与库名输入（无两段式待确认步骤）
+    expect(within(dialog).getByTestId("storage-remove-delete-files")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("storage-remove-name")).toBeInTheDocument();
+    expect(within(dialog).queryByTestId("storage-remove-delete-records")).toBeNull();
+    expect(within(dialog).getByText("同时删除原文件")).toBeInTheDocument();
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
 
-    // 短语不匹配不可执行
-    await user.type(screen.getByTestId("storage-remove-phrase"), "确认删除");
+    // 库名不匹配不可执行
+    await user.type(screen.getByTestId("storage-remove-name"), "主照片");
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeDisabled();
 
-    // 第二段：输入完整短语 → 执行（删文件勾选默认不勾 → deleteFiles=false）
-    await user.clear(screen.getByTestId("storage-remove-phrase"));
-    await user.type(screen.getByTestId("storage-remove-phrase"), "我确认删除");
+    // 输入完整库名 → 执行（勾选默认不勾 → deleteFiles=false）
+    await user.clear(screen.getByTestId("storage-remove-name"));
+    await user.type(screen.getByTestId("storage-remove-name"), "主照片库");
     expect(screen.getByTestId("storage-remove-confirm-delete")).toBeEnabled();
     await user.click(screen.getByTestId("storage-remove-confirm-delete"));
 
     await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", false));
     expect(screen.getByTestId("storage-toast")).toHaveTextContent("35");
   });
-
   it("连记录删 + 勾选「同时删除磁盘上的照片文件」：deleteFiles=true，勾选后提示将删除的原文件数", async () => {
     listMock.mockResolvedValue([lib({ assetCount: 35 })]);
     removeMock.mockResolvedValue({ recordsDeleted: 35, filesDeleted: 35 });
@@ -229,7 +224,6 @@ describe("StoragePage 卡片操作", () => {
     await screen.findAllByTestId("storage-library-card");
 
     await user.click(screen.getAllByTestId("storage-remove")[0]);
-    await user.click(screen.getByTestId("storage-remove-delete-records"));
 
     // 默认不勾：无文件数提示行
     const checkbox = screen.getByTestId("storage-remove-delete-files") as HTMLInputElement;
@@ -241,7 +235,7 @@ describe("StoragePage 卡片操作", () => {
     expect(checkbox.checked).toBe(true);
     expect(screen.getByTestId("storage-remove-files-hint")).toHaveTextContent("已有照片");
 
-    await user.type(screen.getByTestId("storage-remove-phrase"), "我确认删除");
+    await user.type(screen.getByTestId("storage-remove-name"), "主照片库");
     await user.click(screen.getByTestId("storage-remove-confirm-delete"));
 
     await waitFor(() => expect(removeMock).toHaveBeenCalledWith("lib-1", true));
