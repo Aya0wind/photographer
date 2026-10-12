@@ -324,6 +324,12 @@ pub trait CameraBackend: Send + Sync {
     fn settings_revision(&self, _pnp_id: &str) -> u64 {
         0
     }
+    /// 曝光模式（描述符可写性）变化的序号——模式切换（A/S ↔ M）改变
+    /// 哪些参数可调，面板更新需要**立即**重读描述符（会话层据此绕过
+    /// 参数读取节流）。事件无属性细分能力的后端恒返回 0（维持节流兜底）。
+    fn mode_revision(&self, _pnp_id: &str) -> u64 {
+        0
+    }
     /// Library ingestion has committed successfully. Backends may now release
     /// their local download copy; never call this on an ingestion failure.
     fn acknowledge_captured(

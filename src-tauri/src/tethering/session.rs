@@ -87,6 +87,14 @@ pub struct Session {
     settings: Mutex<Vec<CameraSetting>>,
     /// 参数失效收敛态（§B7）：事件只标记，拉取时按失效集合合并读取。
     convergence: Mutex<SettingsConvergence>,
+    /// 最近一次真实相机参数读取（失效风暴节流，见 [`SETTINGS_READ_MIN_INTERVAL`]）。
+    last_settings_read: Mutex<Option<Instant>>,
+    /// 最近一次成功取景帧（取景活跃判定：参数读取间隔在活跃期间放大，
+    /// 见 [`LIVE_VIEW_SETTINGS_READ_INTERVAL`]）。
+    last_frame_at: Mutex<Option<Instant>>,
+    /// 强制下次参数读取绕过节流（模式切换等改变**描述符可写性**的事件；
+    /// 值类变化走缓存合并即可，不必绕过）。
+    settings_read_bypass: AtomicBool,
     /// 收据序号源（账本 pending 的 seq；进程内单调）。
     receipt_seq: AtomicU64,
     photos: Mutex<Vec<TetherPhoto>>,
@@ -194,6 +202,20 @@ impl SettingsConvergence {
         }
         self.invalid.take()
     }
+    /// 放回失效集合（读取节流时用）：与期间新到达的失效合并，All 不降级。
+    fn restore_invalid(&mut self, invalid: Invalidation) {
+        match self.invalid.take() {
+            None => self.invalid = Some(invalid),
+            Some(Invalidation::All) => self.invalid = Some(Invalidation::All),
+            Some(Invalidation::Ids(mut known)) => match invalid {
+                Invalidation::All => self.invalid = Some(Invalidation::All),
+                Invalidation::Ids(fresh) => {
+                    known.extend(fresh);
+                    self.invalid = Some(Invalidation::Ids(known));
+                }
+            },
+        }
+    }
     fn mark_snapshot(&mut self) {
         self.has_snapshot = true;
         self.invalid = None;
@@ -239,6 +261,28 @@ fn fallback_refresh_due(last: Option<Instant>, now: Instant) -> bool {
 
 /// 兜底全量刷新间隔。
 const FALLBACK_SETTINGS_INTERVAL: Duration = Duration::from_secs(20);
+
+/// 失效风暴读取节流（2026-10-09 联机取景卡顿）：取景期间相机持续上报
+/// 属性变更（测光类），事件 → 前端拉取 → 真实相机读取若不加节流会近乎
+/// 连续占用相机通道，取景帧排队掉帧。距上次真实读取 ≥1s 才允许再读；
+/// 不满足时返回缓存并把失效标记原样放回（不丢失，仅推迟 ≤1s）。
+const SETTINGS_READ_MIN_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// 取景活跃期间的读取间隔：gphoto 等后端的一次全量参数读取要持相机锁
+/// 数百毫秒到秒级（索尼 set-parameter 实测 1.3-2s）——取景中每次读取都
+/// 是一次预览冻结。取景活跃（近 2s 内有帧到达）时把读取间隔放大到 10s：
+/// 一次冻结束死 ≤1 次/10s；机身拨盘改动最迟 10s 反映到面板（用户改参
+/// 走 set_setting 回读，不受影响）。
+const LIVE_VIEW_SETTINGS_READ_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 判定「取景活跃」的帧静默窗口（最近一帧距今不足此值 = 活跃）。
+const LIVE_VIEW_ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+
+/// 读取是否到期（`last=None` 视为立即可读；间隔由调用方按取景状态选择）。
+/// `now` 注入以便测试。
+fn settings_read_due(last: Option<Instant>, now: Instant, min_interval: Duration) -> bool {
+    last.is_none_or(|last| now.duration_since(last) >= min_interval)
+}
 
 pub fn get(id: &str) -> Result<Arc<Session>, String> {
     current()
@@ -348,10 +392,36 @@ impl Session {
         let Some(invalid) = self.convergence.lock().unwrap().take_invalid() else {
             return Ok(self.settings.lock().unwrap().clone());
         };
-        let fresh = self
-            .backend
-            .settings(&self.camera.pnp_id)
-            .map_err(|e| e.to_string())?;
+        let fresh = {
+            // 强制旁路（模式切换）：消耗一次性标记，无视两种节流直接读。
+            let bypass = self.settings_read_bypass.swap(false, Ordering::AcqRel);
+            if !bypass {
+                let live_view_active = self
+                    .last_frame_at
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|at| Instant::now().duration_since(at) < LIVE_VIEW_ACTIVE_WINDOW);
+                let min_interval = if live_view_active {
+                    LIVE_VIEW_SETTINGS_READ_INTERVAL
+                } else {
+                    SETTINGS_READ_MIN_INTERVAL
+                };
+                if !settings_read_due(
+                    *self.last_settings_read.lock().unwrap(),
+                    Instant::now(),
+                    min_interval,
+                ) {
+                    self.convergence.lock().unwrap().restore_invalid(invalid);
+                    return Ok(self.settings.lock().unwrap().clone());
+                }
+            }
+            let fresh = self
+                .backend
+                .settings(&self.camera.pnp_id)
+                .map_err(|e| e.to_string())?;
+            *self.last_settings_read.lock().unwrap() = Some(Instant::now());
+            fresh
+        };
         let merged = match invalid {
             Invalidation::All => fresh.clone(),
             Invalidation::Ids(_) => {
@@ -368,6 +438,15 @@ impl Session {
     fn invalidate_settings(&self, ids: Option<Vec<String>>) {
         self.convergence.lock().unwrap().invalidate(ids);
     }
+    /// 取景帧到达打点（IPC 取帧成功时调用）：参数读取节流的取景活跃判定。
+    pub fn note_frame(&self) {
+        *self.last_frame_at.lock().unwrap() = Some(Instant::now());
+    }
+    /// 强制下一次参数读取绕过节流（一次性）：模式切换等改变描述符可写性
+    /// 的事件用——面板的可调参数集合依赖最新 writable，不能等节流窗口。
+    pub fn force_next_settings_read(&self) {
+        self.settings_read_bypass.store(true, Ordering::Release);
+    }
     /// 兜底全量刷新（§B7：无参数事件能力的相机 20s 一次；节流由调用方
     /// 的 `fallback_refresh_due` 把关）。刷新后向窗口广播重拉。
     fn fallback_refresh_settings(&self, state: &SharedState) {
@@ -375,6 +454,7 @@ impl Session {
             return;
         };
         if let Ok(fresh) = self.backend.settings(&self.camera.pnp_id) {
+            *self.last_settings_read.lock().unwrap() = Some(Instant::now());
             *self.settings.lock().unwrap() = fresh;
             self.convergence.lock().unwrap().mark_snapshot();
             state.bus.publish(AppEvent::TetheringSettingsChanged {
@@ -394,6 +474,7 @@ impl Session {
                     .backend
                     .settings(&self.camera.pnp_id)
                     .map_err(|e| e.to_string())?;
+                *self.last_settings_read.lock().unwrap() = Some(Instant::now());
                 let confirmed = settings.iter().any(|setting| {
                     setting.id == id
                         && (setting.current == value
@@ -411,9 +492,12 @@ impl Session {
                     // 回读确认的快照是权威值：清空失效账。
                     self.convergence.lock().unwrap().mark_snapshot();
                     // The mode can be acknowledged before dependent exposure
-                    // descriptors update. Force the next refresh to reread them.
+                    // descriptors update. Force the next refresh to reread
+                    // them——模式切换改变可写性（A 档快门只读/M 档可调），
+                    // 面板更新依赖描述符重读，绕过节流立即执行。
                     if id == "expprogram" {
                         self.invalidate_settings(None);
+                        self.force_next_settings_read();
                     }
                     return Ok(settings);
                 }
@@ -535,6 +619,9 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
             invalid: None,
             has_snapshot: true,
         }),
+        last_settings_read: Mutex::new(None),
+        last_frame_at: Mutex::new(None),
+        settings_read_bypass: AtomicBool::new(false),
         receipt_seq: AtomicU64::new(0),
         photos: Mutex::new(Vec::new()),
         seen: Mutex::new(HashSet::new()),
@@ -548,6 +635,7 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     recover_unacked(&session);
     std::thread::spawn(move || {
         let mut notified_revision = session.backend.settings_revision(&session.camera.pnp_id);
+        let mut notified_mode_revision = session.backend.mode_revision(&session.camera.pnp_id);
         let mut last_notification = Instant::now();
         // §B7 兜底：无参数事件能力（revision 恒 0）的相机 20s 全量刷新一次。
         let mut last_fallback = Instant::now();
@@ -573,6 +661,18 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
                     }
                     drop(operation);
                     let revision = session.backend.settings_revision(&session.camera.pnp_id);
+                    // 曝光模式切换（机身转盘/软件改 expprogram 的另一侧回声）：
+                    // 改变描述符可写性——立即强制重读（绕过节流），通知不受
+                    // 100ms 合并节流（面板可调参数集合不能等窗口）。
+                    let mode_revision = session.backend.mode_revision(&session.camera.pnp_id);
+                    if mode_revision != notified_mode_revision {
+                        session.invalidate_settings(None);
+                        session.force_next_settings_read();
+                        state.bus.publish(AppEvent::TetheringSettingsChanged {
+                            session_id: session.id.clone(),
+                        });
+                        notified_mode_revision = mode_revision;
+                    }
                     // 短暂合并参数事件，及时同步模式切换带来的可写性变化。
                     if revision != notified_revision
                         && last_notification.elapsed() >= Duration::from_millis(100)
@@ -1143,6 +1243,9 @@ mod tests {
             receiving: AtomicBool::new(false),
             settings: Mutex::new(Vec::new()),
             convergence: Mutex::new(SettingsConvergence::default()),
+            last_settings_read: Mutex::new(None),
+        last_frame_at: Mutex::new(None),
+        settings_read_bypass: AtomicBool::new(false),
             receipt_seq: AtomicU64::new(0),
             photos: Mutex::new(Vec::new()),
             seen: Mutex::new(HashSet::new()),
@@ -1328,11 +1431,86 @@ mod tests {
         // 干净状态重复拉取 → 缓存，不读相机。
         session.refresh_settings().unwrap();
         assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
-        // 事件失效 → 再读一次。
+        // 事件失效（节流窗口已过）→ 再读一次。
         session.invalidate_settings(None);
+        *session.last_settings_read.lock().unwrap() = None;
         session.refresh_settings().unwrap();
         assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
         assert_eq!(session.dto().settings.len(), 0);
+    }
+
+    #[test]
+    fn settings_read_storm_is_throttled_and_invalidation_survives() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("storm", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 取景中测光类属性变更风暴：失效 → 立即拉取 → 1s 窗口内返回缓存
+        // 不读相机，失效标记保留（不丢失，仅推迟）。
+        session.invalidate_settings(None);
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 窗口过后同一份失效 → 真实读取。
+        *session.last_settings_read.lock().unwrap() = None;
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn live_view_activity_widens_settings_read_interval() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("lv", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 取景活跃（2s 内有帧）：常规 1s 节流已过，但取景间隔（10s）未到
+        // → 仍读缓存；失效保留。
+        session.note_frame();
+        *session.last_settings_read.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(2));
+        session.invalidate_settings(None);
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 取景静默（最后帧 >2s）：回到常规 1s 节流 → 读取放行。
+        *session.last_frame_at.lock().unwrap() =
+            Some(Instant::now() - Duration::from_secs(5));
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn settings_read_intervals_gate_by_injected_window() {
+        let now = Instant::now();
+        assert!(settings_read_due(None, now, SETTINGS_READ_MIN_INTERVAL), "从未读过 → 立即可读");
+        assert!(!settings_read_due(Some(now), now, SETTINGS_READ_MIN_INTERVAL), "刚读过 → 节流");
+        assert!(
+            !settings_read_due(
+                Some(now - Duration::from_millis(999)),
+                now,
+                SETTINGS_READ_MIN_INTERVAL
+            ),
+            "不足 1s → 仍节流"
+        );
+        assert!(
+            settings_read_due(Some(now - Duration::from_secs(1)), now, SETTINGS_READ_MIN_INTERVAL),
+            "满 1s → 放行"
+        );
+        // 取景活跃期间按 10s 间隔：9s 仍节流、10s 放行。
+        assert!(
+            !settings_read_due(
+                Some(now - Duration::from_secs(9)),
+                now,
+                LIVE_VIEW_SETTINGS_READ_INTERVAL
+            )
+        );
+        assert!(
+            settings_read_due(
+                Some(now - Duration::from_secs(10)),
+                now,
+                LIVE_VIEW_SETTINGS_READ_INTERVAL
+            )
+        );
     }
 
     #[test]
@@ -1373,8 +1551,29 @@ mod tests {
         Arc::get_mut(&mut session).unwrap().backend = backend.clone();
         session.set_setting("expprogram", "M").unwrap();
         assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+        // 模式确认即置强制旁路：紧接着的刷新无视节流立即重读描述符
+        //（模式切换改变可写性，面板更新不能等节流窗口）。
         session.refresh_settings().unwrap();
         assert_eq!(backend.settings_reads.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn forced_read_is_one_shot_and_bypasses_live_view_interval() {
+        let backend = Arc::new(NoopBackend::default());
+        let mut session = make_session("force", "test-camera", 1);
+        Arc::get_mut(&mut session).unwrap().backend = backend.clone();
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 1);
+        // 取景活跃 + 刚读过（10s 间隔远未到），但 force 置位 → 立即真读。
+        session.note_frame();
+        session.invalidate_settings(None);
+        session.force_next_settings_read();
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
+        // 旁路一次性：紧接着的失效回到节流（返回缓存，标记保留）。
+        session.invalidate_settings(None);
+        session.refresh_settings().unwrap();
+        assert_eq!(backend.settings_reads.load(Ordering::Acquire), 2);
     }
 
     #[test]

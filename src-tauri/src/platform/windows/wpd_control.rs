@@ -100,9 +100,17 @@ fn write_data(
 /// Brand + advertised operations, read once per settings transaction from
 /// GetDeviceInfo. Brand detection lives in ptp_control; vendor gating in
 /// vendor_dispatch — this layer only moves bytes.
-struct DeviceProfile {
+pub(super) struct DeviceProfile {
     brand: Brand,
     operations: Vec<u16>,
+}
+
+impl DeviceProfile {
+    /// 从原生连接的缓存构造（连接握手时已做过 GetDeviceInfo + 厂商展开，
+    /// 参数刷新不必每次重读）。
+    pub(super) fn from_parts(brand: Brand, operations: Vec<u16>) -> Self {
+        Self { brand, operations }
+    }
 }
 
 fn device_profile<T: PtpTransport>(transport: &mut T) -> Result<DeviceProfile, String> {
@@ -181,7 +189,7 @@ fn autofocus_action() -> CameraSetting {
 
 /// Transport-independent settings assembly (mock-testable): vendor protocol
 /// routing, property reads and the autofocus action listing.
-fn camera_settings<T: PtpTransport>(
+pub(super) fn camera_settings<T: PtpTransport>(
     transport: &mut T,
     profile: &DeviceProfile,
 ) -> Result<Vec<CameraSetting>, String> {

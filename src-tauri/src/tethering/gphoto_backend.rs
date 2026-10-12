@@ -498,6 +498,19 @@ unsafe fn cstr(raw: *const c_char) -> String {
     }
 }
 
+/// gphoto 事件描述是否为曝光模式（描述符可写性）属性变化。
+/// ptp2 camlib 的事件描述形如 "PTP Property d500E changed"（第三段为
+/// d + 属性码）；PTP_DPC_ExposureProgramMode = 0x500E。模式切换改变
+/// 哪些参数可调（A 档快门只读 / M 档可调）——会话层据此立即强制重读
+/// 描述符，绕过参数读取节流。未识别的厂商码漏过（维持节流兜底），
+/// 不做全量 force 以免取景中重演读取风暴。
+fn is_exposure_mode_event(description: &str) -> bool {
+    description
+        .split_whitespace()
+        .nth(2)
+        .is_some_and(|token| token.eq_ignore_ascii_case("d500e"))
+}
+
 unsafe extern "C" fn context_error(
     _context: *mut std::ffi::c_void,
     text: *const c_char,
@@ -532,6 +545,9 @@ struct GphotoConnection {
     /// 确认设备消失后置否；短暂 busy/timeout 不等于断开。
     connected: AtomicBool,
     settings_revision: AtomicU64,
+    /// 曝光模式（描述符可写性）变化计数：事件描述带属性码，命中模式
+    /// 属性才递增（见 [`is_exposure_mode_event`]）。
+    mode_revision: AtomicU64,
 }
 unsafe impl Send for GphotoConnection {}
 unsafe impl Sync for GphotoConnection {}
@@ -1178,6 +1194,7 @@ impl CameraBackend for GphotoBackend {
                             incoming,
                             connected: AtomicBool::new(true),
                             settings_revision: AtomicU64::new(0),
+                            mode_revision: AtomicU64::new(0),
                         });
                         self.connections
                             .lock()
@@ -1378,9 +1395,13 @@ impl CameraBackend for GphotoBackend {
             let result = (|| -> Result<Vec<CapturedObject>, TetherError> {
                 let mut eventtype: c_int = 0;
                 let mut eventdata: *mut std::ffi::c_void = std::ptr::null_mut();
+                // 超时 0（纯排空检查，不等待）：这里持着相机锁，任何等待
+                // 都直接从取景帧的轮转里偷走时间（50ms×每 200ms 一轮 =
+                // 5Hz 的周期性顿挫，2026-10-09 索尼取景卡顿实测根因之一）。
+                // 事件在驱动侧排队，下一轮排空即可读到，不丢。
                 let code = (s.gp_camera_wait_for_event)(
                     conn.camera,
-                    50,
+                    0,
                     &mut eventtype,
                     &mut eventdata,
                     ctx,
@@ -1404,6 +1425,9 @@ impl CameraBackend for GphotoBackend {
                         || description.starts_with("PTP Deviceinfo changed")
                     {
                         conn.settings_revision.fetch_add(1, Ordering::AcqRel);
+                        if is_exposure_mode_event(&description) {
+                            conn.mode_revision.fetch_add(1, Ordering::AcqRel);
+                        }
                     }
                 }
                 if eventtype == gpt::GP_EVENT_FILE_ADDED && !eventdata.is_null() {
@@ -1437,6 +1461,11 @@ impl CameraBackend for GphotoBackend {
             .map(|connection| connection.settings_revision.load(Ordering::Acquire))
             .unwrap_or(0)
     }
+    fn mode_revision(&self, pnp_id: &str) -> u64 {
+        self.connection(pnp_id)
+            .map(|connection| connection.mode_revision.load(Ordering::Acquire))
+            .unwrap_or(0)
+    }
     fn acknowledge_captured(
         &self,
         pnp_id: &str,
@@ -1462,6 +1491,17 @@ impl CameraBackend for GphotoBackend {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+
+    #[test]
+    fn exposure_mode_event_matches_only_ptp_property_500e() {
+        // ptp2 事件描述：属性码段（第 3 段）d500E 命中；大小写不敏感
+        assert!(is_exposure_mode_event("PTP Property d500E changed"));
+        assert!(is_exposure_mode_event("PTP Property d500e changed to 4"));
+        // 其他属性码 / Deviceinfo 变更 / 异形描述不命中
+        assert!(!is_exposure_mode_event("PTP Property d5007 changed"));
+        assert!(!is_exposure_mode_event("PTP Deviceinfo changed"));
+        assert!(!is_exposure_mode_event(""));
+    }
 
     #[test]
     fn downloaded_sony_photos_keep_original_names_and_pair_stems() {
@@ -1648,6 +1688,7 @@ mod lock_tests {
             incoming: incoming.path().to_owned(),
             connected: AtomicBool::new(true),
             settings_revision: AtomicU64::new(0),
+            mode_revision: AtomicU64::new(0),
         });
         backend
             .connections

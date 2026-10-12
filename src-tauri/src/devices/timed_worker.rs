@@ -95,7 +95,20 @@ impl WorkerPool {
         timeout: Duration,
         operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
     ) -> DeviceResult<T> {
-        self.call_inner(key, timeout, false, None, operation)
+        self.call_inner(key, timeout, false, false, None, operation)
+            .map(|value| value.expect("regular calls are scheduled"))
+    }
+
+    /// 高频通道操作（实时取景帧、收片轮询）：不记 start/finish 诊断——
+    /// 每秒数十次时 chrono 格式化 + eprintln 本身成为帧延迟；超时/异常
+    /// 路径仍完整留痕。
+    pub fn call_quiet<T: Send + 'static>(
+        &self,
+        key: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
+    ) -> DeviceResult<T> {
+        self.call_inner(key, timeout, false, true, None, operation)
             .map(|value| value.expect("regular calls are scheduled"))
     }
     /// 文件扫描按无进展时长超时；大卡持续读取时不受固定总时长截断。
@@ -105,7 +118,7 @@ impl WorkerPool {
         timeout: Duration,
         operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
     ) -> DeviceResult<T> {
-        self.call_inner(key, timeout, false, Some(timeout), operation)
+        self.call_inner(key, timeout, false, false, Some(timeout), operation)
             .map(|value| value.expect("regular calls are scheduled"))
     }
     /// 在同一个设备通道内原子检查并派发；忙碌时不排队、不计探活失败。
@@ -115,13 +128,14 @@ impl WorkerPool {
         timeout: Duration,
         operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
     ) -> DeviceResult<Option<T>> {
-        self.call_inner(key, timeout, true, None, operation)
+        self.call_inner(key, timeout, true, false, None, operation)
     }
     fn call_inner<T: Send + 'static>(
         &self,
         key: &str,
         timeout: Duration,
         idle_only: bool,
+        quiet: bool,
         idle_timeout: Option<Duration>,
         operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
     ) -> DeviceResult<Option<T>> {
@@ -204,7 +218,8 @@ impl WorkerPool {
             worker.id
         };
         let started = std::time::Instant::now();
-        if !idle_only && key != "enumerate" {
+        let verbose = !idle_only && !quiet && key != "enumerate";
+        if verbose {
             super::diagnostics::record(format!(
                 "WPD request started: {key}; generation={generation}"
             ));
@@ -225,7 +240,8 @@ impl WorkerPool {
         };
         match response {
             Ok(result) => {
-                if !idle_only && key != "enumerate" {
+                // 静音（高频帧/轮询）路径失败仍留痕——驱动异常排查依据。
+                if verbose || (quiet && result.is_err()) {
                     super::diagnostics::record(format!(
                         "WPD request finished: {key}; elapsed={:?}; error={:?}",
                         started.elapsed(),

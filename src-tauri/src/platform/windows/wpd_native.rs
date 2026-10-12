@@ -1,5 +1,5 @@
 // Included in wpd_backend::com::native. COM objects remain on their owning worker.
-use super::super::super::backend::{CameraInfo, CapturedObject, LiveViewFrame};
+use super::super::super::backend::{CameraInfo, CameraSetting, CapturedObject, LiveViewFrame};
 use super::super::super::ptp_control as ptp;
 use super::super::super::receipts::Receipts;
 use super::super::super::vendor_dispatch::{self, LiveViewSession};
@@ -309,8 +309,24 @@ pub(crate) fn capture(id: &str, timeout: Duration) -> DeviceResult<Vec<CapturedO
     })
 }
 
-pub(crate) fn frame(id: &str) -> DeviceResult<LiveViewFrame> {
+/// 参数刷新（原生连接路径）：复用连接上已打开的设备与握手时缓存的
+/// 操作码表——省去每次重开设备 + 全量 GetDeviceInfo（取景期间属性变更
+/// 频繁触发刷新，这两步是通道占用的主要部分）。描述符仍逐次读取：
+/// 可写性随机身模式（A/S ↔ M）变化，缓存会吞掉模式切换的显示变化。
+pub(crate) fn settings(id: &str) -> DeviceResult<Vec<CameraSetting>> {
     with(id, |connection| {
+        let profile = super::control::DeviceProfile::from_parts(
+            connection.brand,
+            connection.operations.clone(),
+        );
+        let mut transport = super::control::WpdTransport {
+            device: connection.device.clone(),
+        };
+        super::control::camera_settings(&mut transport, &profile).map_err(DeviceError::Other)
+    })
+}
+
+pub(crate) fn frame(id: &str) -> DeviceResult<LiveViewFrame> {    with(id, |connection| {
         if !connection.info.capabilities.live_view() {
             return Err(DeviceError::NotSupported("实时取景".into()));
         }

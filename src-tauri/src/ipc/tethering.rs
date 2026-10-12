@@ -387,40 +387,42 @@ pub async fn tethering_capture(
     })
     .await
 }
-/// 取景帧载荷：JPEG data URL + 相机回报的归一化 AF 区域（同帧单次往返；
-/// af = [x, y, w, h]，null = 本帧无 AF 数据）。
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameDto {
-    pub url: String,
-    pub af: Option<(f64, f64, f64, f64)>,
-}
-
+/// 取景帧载荷（2026-10-09 卡顿治理改二进制）：32 字节 AF 头（4×f64 LE，
+/// 全 NaN = 无 AF 数据）+ JPEG 正文（超阈值帧先降档重编码，见
+/// [`crate::tethering::frame_relay`]）。**空载荷 = 无帧**（相机忙/
+/// 收片中/不支持），前端保持上一帧。此前 base64 data URL JSON 每帧
+/// +33% 体积且 WebView 端需再解一次 data URL——同链路二进制直传。
 #[tauri::command]
 pub async fn tethering_frame(
     state: State<'_, SharedState>,
     session_id: String,
-) -> Result<Option<FrameDto>, String> {
+) -> Result<tauri::ipc::Response, String> {
     run_blocking(state.inner().clone(), move |_| {
         let session = super::super::tethering::session::get(&session_id)?;
         let Some(_guard) = session.try_background() else {
-            return Ok(None);
+            return Ok(tauri::ipc::Response::new(Vec::new()));
         };
         if session.ensure_open().is_err() {
-            return Ok(None);
+            return Ok(tauri::ipc::Response::new(Vec::new()));
         }
-        let frame = session
-            .backend
-            .live_view_frame(&session.camera.pnp_id)
-            .map_err(|e| e.to_string())?;
-        use base64::Engine;
-        Ok(Some(FrameDto {
-            url: format!(
-                "data:image/jpeg;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(frame.jpeg)
-            ),
-            af: frame.af_region,
-        }))
+        let frame = {
+            let started = std::time::Instant::now();
+            let frame = session
+                .backend
+                .live_view_frame(&session.camera.pnp_id)
+                .map_err(|e| e.to_string())?;
+            session.note_frame();
+            super::super::tethering::frame_relay::note_frame_latency(
+                started.elapsed(),
+                session.backend.id(),
+                frame.jpeg.len(),
+            );
+            frame
+        };
+        let jpeg = super::super::tethering::frame_relay::downscale_frame(frame.jpeg);
+        Ok(tauri::ipc::Response::new(
+            super::super::tethering::frame_relay::frame_payload(frame.af_region, jpeg),
+        ))
     })
     .await
 }

@@ -169,7 +169,9 @@ impl CameraBackend for WpdMtpBackend {
     }
     fn poll_objects(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         let id = pnp_id.to_string();
-        crate::devices::wpd::schedule_com_operation(
+        // 静音：空轮不产生 COM 读，唯一开销就是通道往返与日志——200ms 一轮
+        // 的 start/finish 诊断在长会话里只稀释真正的异常信号。
+        crate::devices::wpd::schedule_com_operation_quiet(
             &format!("data:{id}"),
             Duration::from_secs(10),
             move || com::native::poll(&id),
@@ -201,7 +203,9 @@ impl CameraBackend for WpdMtpBackend {
     }
     fn live_view_frame(&self, pnp_id: &str) -> Result<LiveViewFrame, TetherError> {
         let id = pnp_id.to_string();
-        crate::devices::wpd::schedule_com_operation(
+        // 静音：30-60fps 下 start/finish 双记录 = 每秒上百条诊断（chrono
+        // 格式化 + eprintln），是实测可见的帧延迟。
+        crate::devices::wpd::schedule_com_operation_quiet(
             &format!("data:{id}"),
             Duration::from_secs(10),
             move || com::native::frame(&id),
@@ -218,7 +222,16 @@ impl CameraBackend for WpdMtpBackend {
         crate::devices::wpd::schedule_com_operation(
             &format!("data:{id}"),
             Duration::from_secs(10),
-            move || com::control::settings(&id),
+            move || {
+                // 原生连接优先：复用已打开的设备 + 缓存操作码表（取景期间
+                // 属性变更频繁刷新，重开设备/重读 DeviceInfo 是通道占用
+                // 大头）；无原生连接（临时会话）回退独立连接整读。
+                match com::native::settings(&id) {
+                    Ok(values) => Ok(values),
+                    Err(crate::devices::DeviceError::Disconnected) => com::control::settings(&id),
+                    Err(error) => Err(error),
+                }
+            },
         )
         .map_err(Into::into)
     }
@@ -347,8 +360,19 @@ mod com {
 
     /// 默认读块（驱动建议值缺省时的回退）。
     const READ_CHUNK_FALLBACK: u32 = 64 * 1024;
+    /// 单块读取上限（大读取按 limit 放宽后的封顶，见 [`chunk_cap`]）。
+    const MAX_READ_CHUNK: u32 = 1024 * 1024;
     /// DeviceInfo 数据集大小上限（正常 ≤ 数 KB；防御异常设备）。
     const DEVICE_INFO_MAX_BYTES: usize = 256 * 1024;
+
+    /// 读块上限按读取自身的 limit 放宽：小读取（描述符 64KB / DeviceInfo
+    /// 256KB）保持原钳制；取景帧一类的 16MB 上限读取可到 1MB 块——
+    /// 驱动建议的最优块（常 ≥1MB）不再被 64KB 钳死。
+    fn chunk_cap(limit: usize) -> u32 {
+        limit
+            .clamp(READ_CHUNK_FALLBACK as usize, MAX_READ_CHUNK as usize)
+            as u32
+    }
 
     // -----------------------------------------------------------------------
     // MTP 透传参数组装 + SendCommand
@@ -523,13 +547,15 @@ mod com {
                     Ok(s)
                 }
             })?;
-        // 驱动建议块大小（尽力而为；缺省 64KB）
+        // 驱动建议块大小（尽力而为；缺省 64KB）。上限随读取自身的 limit
+        // 放宽：取景帧读取（16MB 上限）一帧 500KB+ 按 64KB 分块要 8-9 次
+        // COM 往返（每次含目标缓冲双重拷贝）——大读取允许到 1MB 块。
         // SAFETY: 键为静态常量
         let chunk = unsafe {
             results.GetUnsignedIntegerValue(&WPD_PROPERTY_MTP_EXT_OPTIMAL_TRANSFER_BUFFER_SIZE)
         }
         .unwrap_or(READ_CHUNK_FALLBACK)
-        .clamp(1024, READ_CHUNK_FALLBACK) as usize;
+        .clamp(1024, chunk_cap(limit)) as usize;
 
         // The begin response supplies a context and size, not the PTP response code.
         let total = unsafe {
@@ -959,6 +985,15 @@ mod com {
                 ))
                 .is_err()
             );
+        }
+        #[test]
+        fn chunk_cap_widens_only_for_large_reads() {
+            // 小读取维持 64KB 原钳制（描述符 64KB / DeviceInfo 256KB 各自不变）
+            assert_eq!(chunk_cap(64 * 1024), 64 * 1024);
+            assert_eq!(chunk_cap(256 * 1024), 256 * 1024);
+            // 取景帧一类的 16MB 上限读取放宽到 1MB 封顶
+            assert_eq!(chunk_cap(16 * 1024 * 1024), 1024 * 1024);
+            assert_eq!(chunk_cap(usize::MAX), 1024 * 1024);
         }
         #[test]
         #[ignore = "takes one photo on an explicitly selected camera"]

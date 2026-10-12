@@ -197,26 +197,38 @@ export async function tetheringCapture(sessionId: string): Promise<TetherCapture
   }
 }
 
-/** 取景帧载荷（url + 相机回报的归一化 AF 区域，同一帧单次往返；
- *  af=[x,y,w,h] 原点左上，null=本帧无 AF 数据）。 */
+/** 取景帧载荷（url = blob: URL，**调用方负责换帧/卸载时 revoke**；
+ *  af=[x,y,w,h] 原点左上，null=本帧无 AF 数据）。二进制线格式（2026-10-09
+ *  卡顿治理，取代 base64 data URL JSON——每帧 +33% 体积且 WebView 端还需
+ *  再解一次 data URL）：32 字节 AF 头（4×f64 LE，全 NaN=无 AF）+ JPEG
+ *  正文（后端对超阈值帧已降档重编码）。 */
 export interface TetherFrameDto {
   url: string;
   af: [number, number, number, number] | null;
 }
 
+/** AF 头长度（4×f64 LE）。 */
+const AF_HEADER_BYTES = 32;
+
 /** 取一帧实时取景（tethering_frame）：相机忙（拍摄/收片中）或不支持
- *  live view 时返回 null（UI 保持上一帧不闪烁）。 */
+ *  live view 时空载荷（UI 保持上一帧不闪烁）。 */
 export async function tetheringFrame(sessionId: string): Promise<TetherFrameDto | null> {
   try {
     const value = await ipc<unknown>("tethering_frame", { sessionId });
-    if (value === null || typeof value !== "object") return null;
-    const r = value as Record<string, unknown>;
-    if (typeof r.url !== "string" || !r.url.startsWith("data:image/")) return null;
-    const af =
-      Array.isArray(r.af) && r.af.length === 4 && r.af.every((v) => typeof v === "number")
-        ? (r.af as [number, number, number, number])
-        : null;
-    return { url: r.url, af };
+    // 空载荷 = 无帧；非 ArrayBuffer（异常形态/旧后端）按无帧处理。
+    if (!(value instanceof ArrayBuffer) || value.byteLength <= AF_HEADER_BYTES) return null;
+    const view = new DataView(value);
+    const numbers = [
+      view.getFloat64(0, true),
+      view.getFloat64(8, true),
+      view.getFloat64(16, true),
+      view.getFloat64(24, true),
+    ];
+    const af = numbers.every((n) => Number.isFinite(n))
+      ? (numbers as [number, number, number, number])
+      : null;
+    const blob = new Blob([value.slice(AF_HEADER_BYTES)], { type: "image/jpeg" });
+    return { url: URL.createObjectURL(blob), af };
   } catch {
     return null;
   }

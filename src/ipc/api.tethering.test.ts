@@ -222,28 +222,47 @@ describe("联拍会话 IPC 封装（tethering_*）", () => {
     if (!unavailable.ok) expect(unavailable.error).toBeNull();
   });
 
-  it("tetheringFrame/tetheringPhotoPreview：载荷归一（url 直传 + af 四元组）；null/异形归 null", async () => {
-    invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA", af: [0.25, 0.5, 0.1, 0.1] });
-    expect(await tetheringFrame("s1")).toEqual({
-      url: "data:image/jpeg;base64,AAA",
+  it("tetheringFrame：二进制载荷（32B AF 头 + JPEG）解析；空/异形归 null；tetheringPhotoPreview 直传", async () => {
+    // jsdom 无 createObjectURL：stub 成固定串断言调用
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock-frame");
+    const header = (...values: number[]) => {
+      const out = new ArrayBuffer(32);
+      const view = new DataView(out);
+      values.forEach((n, i) => view.setFloat64(i * 8, n, true));
+      return out;
+    };
+    const payload = (af: ArrayBuffer, jpeg = new Uint8Array([0xff, 0xd8, 0xff])) => {
+      const out = new Uint8Array(32 + jpeg.length);
+      out.set(new Uint8Array(af), 0);
+      out.set(jpeg, 32);
+      return out.buffer;
+    };
+
+    // 带 AF 的帧：af 四元组 + blob URL
+    invokeMock.mockResolvedValueOnce(payload(header(0.25, 0.5, 0.1, 0.1)));
+    await expect(tetheringFrame("s1")).resolves.toEqual({
+      url: "blob:mock-frame",
       af: [0.25, 0.5, 0.1, 0.1],
     });
+    expect(createUrl).toHaveBeenCalledTimes(1);
+    const [blob] = createUrl.mock.calls[0] as [Blob];
+    expect(blob).toBeInstanceOf(Blob);
+    expect(blob.type).toBe("image/jpeg");
 
-    // 旧形状（纯字符串）/缺 url → null（载荷不完整不显示半截帧）
-    invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,AAA");
-    expect(await tetheringFrame("s1")).toBeNull();
+    // AF 头全 NaN → af=null（AF 框不显示但不影响帧）
+    invokeMock.mockResolvedValueOnce(payload(header(NaN, NaN, NaN, NaN)));
+    await expect(tetheringFrame("s1")).resolves.toEqual({ url: "blob:mock-frame", af: null });
 
-    invokeMock.mockResolvedValueOnce(null);
-    expect(await tetheringFrame("s1")).toBeNull();
-
-    invokeMock.mockResolvedValueOnce({ url: "not-a-url", af: null });
-    expect(await tetheringFrame("s1")).toBeNull();
-
-    // af 缺失/异形 → url 保留、af 归 null（AF 框不显示但不影响帧）
+    // 空载荷（相机忙）/不足头的载荷/非二进制形态 → null
+    invokeMock.mockResolvedValueOnce(new ArrayBuffer(0));
+    await expect(tetheringFrame("s1")).resolves.toBeNull();
+    invokeMock.mockResolvedValueOnce(new ArrayBuffer(16));
+    await expect(tetheringFrame("s1")).resolves.toBeNull();
     invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA" });
-    expect(await tetheringFrame("s1")).toEqual({ url: "data:image/jpeg;base64,AAA", af: null });
-    invokeMock.mockResolvedValueOnce({ url: "data:image/jpeg;base64,AAA", af: [0.5, "x", 0.1, 0.1] });
-    expect(await tetheringFrame("s1")).toEqual({ url: "data:image/jpeg;base64,AAA", af: null });
+    await expect(tetheringFrame("s1")).resolves.toBeNull();
+    invokeMock.mockResolvedValueOnce(null);
+    await expect(tetheringFrame("s1")).resolves.toBeNull();
+    createUrl.mockRestore();
 
     invokeMock.mockResolvedValueOnce("data:image/jpeg;base64,BBB");
     expect(await tetheringPhotoPreview("s1", 9, 256)).toBe("data:image/jpeg;base64,BBB");

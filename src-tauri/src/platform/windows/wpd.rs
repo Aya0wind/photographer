@@ -178,6 +178,16 @@ pub(crate) fn schedule_com_operation<T: Send + 'static>(
     worker::schedule(lane, timeout, operation)
 }
 
+/// 高频通道操作（实时取景帧 / 收片轮询）：静音 start/finish 诊断（详见
+/// [`super::super::timed_worker::WorkerPool::call_quiet`]）。
+pub(crate) fn schedule_com_operation_quiet<T: Send + 'static>(
+    lane: &str,
+    timeout: std::time::Duration,
+    operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
+) -> DeviceResult<T> {
+    worker::schedule_quiet(lane, timeout, operation)
+}
+
 /// 测试注入：验证 worker 命令 panic 被捕获（进程存活、后续命令可用）。
 /// lib 目标内无调用点（集成测试经 #[path] 模块树引用）——豁免 dead_code。
 #[doc(hidden)]
@@ -271,6 +281,13 @@ mod worker {
         operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
     ) -> DeviceResult<T> {
         pool().call(lane, timeout, operation)
+    }
+    pub(super) fn schedule_quiet<T: Send + 'static>(
+        lane: &str,
+        timeout: Duration,
+        operation: impl FnOnce() -> DeviceResult<T> + Send + 'static,
+    ) -> DeviceResult<T> {
+        pool().call_quiet(lane, timeout, operation)
     }
 }
 

@@ -26,6 +26,7 @@
 //! | - | WPD→PTP ObjectAdded 事件映射 | MTP 类驱动将 PTP ObjectAdded(0x4002) 映射为 WPD_EVENT_OBJECT_ADDED 的机制（评估文档推断项） |
 
 pub mod backend;
+pub mod frame_relay;
 pub mod mtp;
 pub mod ptp_control;
 pub mod receipts;

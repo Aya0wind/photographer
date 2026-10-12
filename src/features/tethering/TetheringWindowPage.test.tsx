@@ -345,6 +345,24 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
     await waitFor(() => expect(screen.getByTestId("tether-view-img")).toHaveAttribute("src", "data:image/jpeg;base64,FRAME"));
   });
 
+  it("轮询节奏按 tick 起点对齐：链路耗时计入帧周期，不叠加在间隔之上", async () => {
+    sessionMock.mockResolvedValue(dto());
+    // 显式 30fps 档（默认已是 15fps，间隔 67ms 会吞掉本测试的延迟差）：
+    // 间隔 33ms；帧回包延迟 40ms > 间隔 → 下一帧应立即发出（≈40ms/帧）。
+    // 若回包后再排 33ms，实际周期 73ms → 200ms 只够 ~2.7 帧。下界 4 帧
+    // 区分两种节奏。
+    window.localStorage.setItem("tethering.frameFps", "30");
+    frameMock.mockImplementation(async () => {
+      await new Promise((done) => window.setTimeout(done, 40));
+      return { url: "data:image/jpeg;base64,FRAME", af: null };
+    });
+    renderPage();
+    await screen.findByTestId("tether-window");
+    await new Promise((done) => window.setTimeout(done, 200));
+    expect(frameMock.mock.calls.length).toBeGreaterThanOrEqual(4);
+    window.localStorage.removeItem("tethering.frameFps");
+  });
+
   it("帧率选择器：15/30/60 三档，点击切换 aria-pressed 并持久化 localStorage", async () => {
     window.localStorage.clear();
     sessionMock.mockResolvedValue(dto());
@@ -353,13 +371,13 @@ describe("TetheringWindowPage 联拍独立窗口", () => {
 
     await waitFor(() => expect(screen.getByTestId("tether-window")).toBeInTheDocument());
     expect(screen.getByTestId("tether-fps")).toHaveAttribute("role", "group");
-    // 默认档：非法/缺失存储回退 30
-    expect(screen.getByTestId("tether-fps-30")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("tether-fps-15")).toHaveAttribute("aria-pressed", "false");
+    // 默认档：非法/缺失存储回退 15
+    expect(screen.getByTestId("tether-fps-15")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("tether-fps-30")).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.click(screen.getByTestId("tether-fps-60"));
     expect(screen.getByTestId("tether-fps-60")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("tether-fps-30")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("tether-fps-15")).toHaveAttribute("aria-pressed", "false");
     expect(window.localStorage.getItem("tethering.frameFps")).toBe("60");
     window.localStorage.clear();
   });
