@@ -43,7 +43,9 @@ const INDEX_POLL_MS = 1500;
 const HISTORY_PAGE_SIZE = 50;
 
 /** 抽屉内索引通道展示序 */
-const INDEX_KINDS: readonly IndexKind[] = ["image", "ai", "face"];
+/** 抽屉展示的索引行（image=图片索引 thumb+exif；selection=选片索引
+ * eyes+blur——仅 AI 开启的库渲染；2026-10-12 拆分后选片独立触发/独立池）。 */
+const INDEX_KINDS: readonly IndexKind[] = ["image", "selection", "ai", "face"];
 
 const EMPTY_COUNTERS: IndexCounters = { pending: 0, running: 0, done: 0, failed: 0, total: 0 };
 
@@ -52,7 +54,8 @@ function indexActive(counters: IndexCounters): boolean {
   return counters.pending > 0 || counters.running > 0;
 }
 
-/** 运行中任务总数（徽标口径）：运行中导入任务 + 有活儿的索引通道 */
+/** 运行中任务总数（徽标口径）：运行中导入任务 + 有活儿的索引通道
+ *  （选片行仅在 AI 开启时计入——关闭的库选片计数恒 pending，不构成活儿） */
 export function countRunningTasks(
   activeJobs: Record<number, ActiveJob>,
   indexStatus: IndexStatus | null,
@@ -63,6 +66,7 @@ export function countRunningTasks(
   }
   if (indexStatus !== null) {
     for (const kind of INDEX_KINDS) {
+      if (kind === "selection" && indexStatus.selectionEnabled !== true) continue;
       if (indexActive(kind === "image" ? imageIndexCounters(indexStatus) : indexStatus[kind] ?? EMPTY_COUNTERS)) count += 1;
     }
   }
@@ -321,9 +325,9 @@ function IndexTaskRow({
   selectionReady?: boolean;
   selectionEnabled?: boolean;
 }) {
-  // 「等待模型」只在 AI 开启且模型未就绪时成立（关闭的库不建 eyes/blur
-  // 任务，图像索引按 thumb/exif 口径完成，不存在等待）
-  const waitingModels = kind === "image" && selectionEnabled === true && selectionReady === false && counters.running === 0;
+  // 「等待模型」只在选片索引行、AI 开启且闭眼模型未就绪时成立（图片索引
+  // 2026-10-12 拆分后不含选片通道，永不等模型）
+  const waitingModels = kind === "selection" && selectionEnabled === true && selectionReady === false && counters.running === 0;
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -334,13 +338,14 @@ function IndexTaskRow({
   async function togglePause(): Promise<void> {
     setBusy(true);
     try {
+      const pool = kind === "selection" ? "selection" : "index";
       if (counters.running > 0) {
-        await indexTaskPause();
+        await indexTaskPause(pool);
       } else {
-        await indexTaskResume();
+        await indexTaskResume(pool);
       // A missing-model lane may have no live worker to resume. Unified kick
       // starts available components and leaves unavailable eye tasks pending.
-        if (kind === "image") await indexKickNow("image");
+        if (kind === "image" || kind === "selection") await indexKickNow(kind);
       }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -401,7 +406,8 @@ function IndexTaskRow({
       {waitingModels && <p className="mt-1 text-[10px] text-amber-400">
         {t("settings.ai.index.waitingSelectionModels")}
       </p>}
-      {kind === "image" && <ImageIndexProgress status={indexStatus} />}
+      {kind === "image" && <ImageIndexProgress status={indexStatus} scope="image" />}
+      {kind === "selection" && <ImageIndexProgress status={indexStatus} scope="selection" />}
       <ErrorModal message={error} onClose={() => setError(null)} />
       {counters.failed > 0 && (
         <p className="mt-1 text-[10px] font-medium text-red-400" data-testid="taskdrawer-index-failed">
@@ -625,19 +631,25 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
   const indexRows = useMemo<Array<{ kind: IndexKind; counters: IndexCounters }>>(() => {
     if (indexStatus === null) return [];
     return INDEX_KINDS.map((kind) => ({ kind, counters: kind === "image" ? imageIndexCounters(indexStatus) : indexStatus[kind] ?? EMPTY_COUNTERS })).filter(
-      ({ counters }) => indexActive(counters) || counters.failed > 0,
+      ({ kind, counters }) =>
+        // 选片行仅 AI 开启时渲染（关闭的库无任务行，计数恒 pending）
+        (kind !== "selection" || indexStatus.selectionEnabled === true)
+        && (indexActive(counters) || counters.failed > 0),
     );
   }, [indexStatus]);
 
   const hasRunning =
     active.length > 0 || indexRows.length > 0;
 
-  /** 全部暂停：运行中导入逐个暂停 + 索引通道暂停 */
+  /** 全部暂停：运行中导入逐个暂停 + 两个索引池（图片/选片）都暂停 */
   async function pauseAll(): Promise<void> {
     for (const job of active) {
       if (job.status === "running") await pauseJob(job.jobId);
     }
-    if (indexRows.length > 0) await indexTaskPause();
+    if (indexRows.length > 0) {
+      await indexTaskPause("index");
+      await indexTaskPause("selection");
+    }
     void useAiStore.getState().refreshIndexStatus();
   }
 

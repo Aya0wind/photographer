@@ -729,14 +729,24 @@ fn run_eyes_worker(
         if controls.is_some_and(|c| c.is_cancelled()) {
             break;
         }
-        let _permit = crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image)
-            .acquire(1);
+        let _permit =
+            crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Selection)
+                .acquire(1);
         if controls.is_some_and(|c| c.is_paused() || c.is_cancelled()) {
             continue;
         }
         let barrier = crate::index::image_index_lock(db_dir);
         let _guard = barrier.read().expect("image index barrier poisoned");
-        let Some(task) = db.claim_index_task("eyes").ok().flatten() else {
+        // 门控同 blur：同一张照片的 eyes 排在其缩略图之后（输入是缩略图
+        // 缓存，抢跑会多一次源解码）；不同照片之间不设序——别家缩略图
+        // 已完成的照常认领。门控等待中小睡重试，缩略图推进后接上。
+        let Some(task) = db.claim_selection_task_after_thumb("eyes").ok().flatten() else {
+            drop(_guard);
+            if db.gated_selection_task_count("eyes").unwrap_or(0) > 0 {
+                drop(barrier);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
             break;
         };
         let ok = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -775,10 +785,100 @@ pub fn kick_eyes_if_ready(
     let manager = std::sync::Arc::new(manager.clone());
     let bus = bus.clone();
     let _ = supervisor.spawn_coalesced(
-        "index",
+        "selection",
         format!("eyes-backfill:{}", db_dir.display()),
         move |controls| {
             run_eyes_backfill_gated(&db_dir, &manager, &bus, Some(&controls));
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 选片索引专属消费（2026-10-12 拆分）：blur 任务不再由图片索引池（thumb/
+// exif/hash/phash 同队）混消——独立 supervisor 池 "selection"（与 eyes 回填
+// 同池），选片索引不与缩略图/详细信息索引绑定执行。
+// ---------------------------------------------------------------------------
+
+/// 选片 blur worker 循环：认领 → 处理 → 收尾（无模型依赖；暂停/取消旗
+/// 步进间生效）。认领门控缩略图就绪（[`Db::claim_selection_task_after_thumb`]）
+/// ——门控等待中（缩略图池还没做到这张）步进间小睡重试而不是退出，
+/// 缩略图推进后自然接上；嵌入图全程只由缩略图任务读一次。预算用选片
+/// 域（与图片域分离，两池互不排队）。
+fn selection_blur_worker_loop(
+    db_dir: &Path,
+    controls: Option<&crate::tasks::TaskControls>,
+) -> u64 {
+    let Ok(db) = crate::ipc::open_library_db(db_dir) else {
+        return 0;
+    };
+    let mut processed = 0u64;
+    loop {
+        while controls.is_some_and(|c| c.is_paused() && !c.is_cancelled()) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if controls.is_some_and(|c| c.is_cancelled()) {
+            break;
+        }
+        let _permit =
+            crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Selection)
+                .acquire(1);
+        if controls.is_some_and(|c| c.is_paused() || c.is_cancelled()) {
+            continue;
+        }
+        let barrier = crate::index::image_index_lock(db_dir);
+        let _guard = barrier.read().expect("image index barrier poisoned");
+        let Some(task) = db.claim_selection_task_after_thumb("blur").ok().flatten() else {
+            drop(_guard);
+            // 无可认领：门控等待中（缩略图未就绪）小睡重试；彻底无待办才退出
+            if db.gated_selection_task_count("blur").unwrap_or(0) > 0 {
+                drop(barrier);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            break;
+        };
+        let ok = process_blur_task(&db, db_dir, task.asset_id, blur_soft_threshold());
+        let _ = db.finish_index_task(task.id, ok);
+        processed += u64::from(ok);
+    }
+    processed
+}
+
+/// 跑完当前全部选片 blur 待办（supervisor 任务体接线用）。
+fn run_selection_index_gated(
+    db_dir: &Path,
+    controls: Option<&crate::tasks::TaskControls>,
+) -> u64 {
+    let workers = crate::tasks::index_parallelism();
+    let processed = std::sync::atomic::AtomicU64::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let processed = &processed;
+            scope.spawn(move || {
+                processed.fetch_add(
+                    selection_blur_worker_loop(db_dir, controls),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            });
+        }
+    });
+    processed.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 触发选片索引（blur 消费池）。导入在场让路（与 index::kick 同款守卫：
+/// 任务留 pending，导入收尾的 kick 兜底唤醒）。
+pub fn kick_selection_index(
+    db_dir: PathBuf,
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+) {
+    if crate::index::import_in_flight() {
+        return;
+    }
+    let _ = supervisor.spawn_coalesced(
+        "selection",
+        format!("selection-index:{}", db_dir.display()),
+        move |controls| {
+            run_selection_index_gated(&db_dir, Some(&controls));
         },
     );
 }

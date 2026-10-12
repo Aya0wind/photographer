@@ -1,13 +1,14 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 import i18n from "@/i18n";
 import GalleryPage from "./GalleryPage";
+import { useSettingsStore, DEFAULT_SETTINGS, clone } from "@/stores/settingsStore";
 import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import { clearGallerySnapshotForTests } from "../lib/galleryCache";
 import {
@@ -22,7 +23,7 @@ import {
 
 /**
  * 画廊「隐藏跨库重复」（M5 §四，纯显示过滤）：
- * - 开关在浮动工具条（aria-pressed），开启才拉 duplicates_list(exact)
+ * - 由持久化展示设置控制，默认开启，开启才拉 duplicates_list(exact)
  * - 跨库同哈希组只显示一张代表（在线 > RAW > 评分 > 导入早），瓦片 ×N 徽标
  * - 徽标点击 → 重复项列表（组内全部副本，含所属库名/缺失标记）
  * - 操作只作用于可见资产（隐藏副本不渲染瓦片）；开关关闭恢复全部
@@ -103,7 +104,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  localStorage.removeItem("photographer.gallery.hideCrossLibraryDuplicates");
+  useSettingsStore.setState({ settings: clone(DEFAULT_SETTINGS) });
   duplicatesMock.mockReset().mockResolvedValue([]);
   listLibrariesMock.mockReset().mockResolvedValue([]);
   assetsPageMock.mockReset();
@@ -114,7 +115,7 @@ beforeEach(() => {
 });
 
 describe("画廊：隐藏跨库重复（M5 显示层折叠）", () => {
-  it("默认关：两库同内容副本都显示；开启后只显示代表 + ×2 徽标；关闭恢复", async () => {
+  it("默认开启只显示代表，设置关闭后恢复全部副本", async () => {
     // id 1（lib-a 普通 JPG）与 id 2（lib-b 普通 JPG）同内容；id 3 无重复
     const page = [asset(1, "lib-a"), asset(2, "lib-b"), asset(3, "lib-a")];
     assetsPageMock.mockResolvedValue(page);
@@ -146,11 +147,7 @@ describe("画廊：隐藏跨库重复（M5 显示层折叠）", () => {
     const user = userEvent.setup();
     renderGallery();
 
-    // 默认全显示
-    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(3);
-
-    // 开启开关：拉 exact 重复组 → 折叠为 2 张瓦片（1、3），代表 1 带徽标 ×2
-    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    expect(screen.queryByTestId("gallery-hide-duplicates")).not.toBeInTheDocument();
     await waitFor(() => expect(duplicatesMock).toHaveBeenCalledWith("exact", 0, 100));
     await waitFor(() =>
       expect(screen.getAllByTestId("gallery-tile").map((t) => t.getAttribute("data-asset-id"))).toEqual(["1", "3"]),
@@ -168,25 +165,20 @@ describe("画廊：隐藏跨库重复（M5 显示层折叠）", () => {
     expect(screen.queryByTestId("duplicates-dialog")).not.toBeInTheDocument();
 
     // 关闭开关：副本回来、徽标消失、不再持有组数据
-    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    act(() => useSettingsStore.getState().update({ gallery: { hideCrossLibraryDuplicates: false } }));
     await waitFor(() =>
       expect(screen.getAllByTestId("gallery-tile").map((t) => t.getAttribute("data-asset-id"))).toEqual(["1", "2", "3"]),
     );
     expect(screen.queryByTestId("gallery-duplicate-badge")).not.toBeInTheDocument();
   });
 
-  it("无重复组：开关可点但无徽标（弱化态）", async () => {
+  it("无重复组不显示徽标，工具条不提供重复开关", async () => {
     assetsPageMock.mockResolvedValue([asset(1, "lib-a")]);
     duplicatesMock.mockResolvedValue([]);
-    const user = userEvent.setup();
     renderGallery();
 
     await screen.findAllByTestId("gallery-tile");
-    const toggle = screen.getByTestId("gallery-hide-duplicates");
-    expect(toggle).toHaveAttribute("data-pressed", "false");
-    expect(toggle).toHaveAttribute("data-has-duplicates", "false");
-
-    await user.click(toggle);
+    expect(screen.queryByTestId("gallery-hide-duplicates")).not.toBeInTheDocument();
     await waitFor(() => expect(duplicatesMock).toHaveBeenCalled());
     expect(screen.queryByTestId("gallery-duplicate-badge")).not.toBeInTheDocument();
   });

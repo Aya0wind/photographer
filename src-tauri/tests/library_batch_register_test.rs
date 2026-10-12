@@ -68,6 +68,55 @@ fn job_row(db: &db::Db, library_id: &str) -> db::libraries::LibraryScanJobRow {
     db.library_scan_job_get(library_id).unwrap().unwrap()
 }
 
+#[test]
+fn existing_folder_is_indexed_in_place_and_nested_folder_reuses_its_library() {
+    let (holder, state, db_dir) = setup();
+    let photos = holder.path().join("photos");
+    let original = photos.join("old-layout/trip.jpg");
+    write(&original, 901);
+    let original_bytes = fs::read(&original).unwrap();
+    let template = crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE;
+    let library = ipc::photo_library::fetch_photo_library_setup(
+        &state, "已有照片", &photos.to_string_lossy(), template, true, false,
+    ).unwrap();
+    run_pending_batch_jobs_with(&state, &relaxed());
+    let database = open_db(&db_dir);
+    assert_eq!(fs::read(&original).unwrap(), original_bytes);
+    let asset_path: String = database.0.query_row(
+        "SELECT path FROM assets WHERE library_id = ?1", [&library.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(Path::new(&asset_path), original);
+    let before = database.photos_library_list().unwrap().len();
+    let reused = ipc::photo_library::fetch_photo_library_setup(
+        &state, "不能成为嵌套库", &photos.join("old-layout").to_string_lossy(), template, true, false,
+    ).unwrap();
+    assert_eq!(reused.id, library.id);
+    assert_eq!(database.photos_library_list().unwrap().len(), before);
+    assert_eq!(job_row(&database, &library.id).status, "pending");
+    assert!(ipc::photo_library::fetch_photo_library_setup(
+        &state, "不能改变所属库规则", &photos.join("old-layout").to_string_lossy(), template, true, true,
+    ).is_err());
+}
+
+#[test]
+fn registering_parent_of_existing_library_is_rejected() {
+    let (holder, state, db_dir) = setup();
+    let parent = holder.path().join("photos");
+    let child = parent.join("child");
+    fs::create_dir_all(&child).unwrap();
+    let template = crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE;
+    ipc::photo_library::fetch_photo_library_setup(
+        &state, "子目录照片库", &child.to_string_lossy(), template, true, false,
+    ).unwrap();
+    let database = open_db(&db_dir);
+    let before = database.photos_library_list().unwrap().len();
+    let error = ipc::photo_library::fetch_photo_library_setup(
+        &state, "父目录照片库", &parent.to_string_lossy(), template, true, false,
+    ).unwrap_err();
+    assert!(error.contains("互相包含"));
+    assert_eq!(database.photos_library_list().unwrap().len(), before);
+}
+
 // ---------------------------------------------------------------------------
 // 文件夹登记闭环：create(reference) 落任务行 + kick → worker 跑到 done
 // ---------------------------------------------------------------------------

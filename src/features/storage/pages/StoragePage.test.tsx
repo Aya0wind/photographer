@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
+import { MemoryRouter } from "react-router";
 
 import i18n from "@/i18n";
 import StoragePage from "./StoragePage";
@@ -77,10 +78,10 @@ function emit(event: AppEvent): void {
   for (const handler of eventHandlers) handler(event);
 }
 
-function renderPage() {
+function renderPage(path = "/storage") {
   return render(
     <I18nextProvider i18n={i18n}>
-      <StoragePage />
+      <MemoryRouter initialEntries={[path]}><StoragePage /></MemoryRouter>
     </I18nextProvider>,
   );
 }
@@ -128,11 +129,49 @@ describe("StoragePage 渲染（M3 存储页）", () => {
     expect(await screen.findByTestId("storage-empty")).toBeInTheDocument();
     expect(screen.queryByTestId("storage-library-card")).not.toBeInTheDocument();
     expect(screen.getByTestId("storage-empty-create")).toBeInTheDocument();
-    expect(screen.queryByTestId("storage-empty-from-folder")).not.toBeInTheDocument();
+    expect(screen.getByTestId("storage-empty-from-folder")).toBeInTheDocument();
   });
 });
 
 describe("StoragePage 登记入口（photo_library_create，单一按钮 + 对话框内模式二选一）", () => {
+  it("开启重新整理后展开规则与移动说明，主按钮明确表示会整理", async () => {
+    const user = userEvent.setup();
+    renderPage("/storage?addExisting=1");
+    const dialog = await screen.findByTestId("storage-create-dialog");
+    expect(screen.getByTestId("storage-organization-options")).not.toHaveAttribute("open");
+    await user.click(within(dialog).getByRole("checkbox"));
+    expect(screen.getByTestId("storage-organization-options")).toHaveAttribute("open");
+    expect(screen.getByTestId("storage-create-confirm")).toHaveTextContent("整理并添加");
+    expect(dialog).toHaveTextContent(/移动/);
+  });
+  it("已有库的子文件夹显示所属库，只能扫描或查看，不显示新建和整理选项", async () => {
+    listMock.mockResolvedValue([lib()]);
+    createMock.mockResolvedValue({ ok: true, library: lib() });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByTestId("storage-add-existing-library"));
+    await user.type(screen.getByTestId("storage-create-root"), "I:\\Photos\\Trip");
+    expect(await screen.findByTestId("storage-existing-library-match")).toHaveTextContent("主照片库");
+    expect(screen.queryByTestId("storage-create-name")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("storage-organization-options")).not.toBeInTheDocument();
+    expect(screen.getByTestId("storage-create-confirm")).toHaveTextContent("扫描照片库 主照片库");
+    await user.click(screen.getByTestId("storage-create-confirm"));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("主照片库", "I:\\Photos\\Trip", "{year}/{month}/{day}/{filename}", true, false));
+  });
+  it.each([false, true])("添加已有照片库入口（导入页跳转=%s）默认原地扫描、不重新组织", async (fromImport) => {
+    const created = lib();
+    createMock.mockResolvedValue({ ok: true, library: created });
+    const user = userEvent.setup();
+    renderPage(fromImport ? "/storage?addExisting=1" : "/storage");
+    if (!fromImport) await user.click(await screen.findByTestId("storage-add-existing-library"));
+    const dialog = await screen.findByTestId("storage-create-dialog");
+    expect(within(dialog).getByRole("heading")).toHaveTextContent("添加已有照片库");
+    expect(within(dialog).getByRole("checkbox")).not.toBeChecked();
+    await user.type(screen.getByTestId("storage-create-name"), "已有照片");
+    await user.type(screen.getByTestId("storage-create-root"), "I:\\ExistingPhotos");
+    await user.click(screen.getByTestId("storage-create-confirm"));
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith("已有照片", "I:\\ExistingPhotos", "{year}/{month}/{day}/{filename}", true, false));
+  });
   it("新建照片库：默认新建模式 → photoLibraryCreate(name, root, false) → 刷新列表", async () => {
     const created = lib();
     listMock

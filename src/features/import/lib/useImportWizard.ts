@@ -434,7 +434,7 @@ export function useImportWizard() {
       // 导入任务已成功启动；偏好保存失败由 store 记录，不能令任务重复启动。
       void save(useSettingsStore.getState().settings).catch(() => {});
       // 任务启动后继续在后台处理；进度由全局任务抽屉展示。
-      if (mounted.current) navigate("/gallery");
+      if (mounted.current) navigate("/gallery", { state: { photoAddNotice: t(`addPhotos.${mode}Started`) } });
     } catch (error) {
       setStartError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -464,6 +464,10 @@ export function useImportWizard() {
     albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy,
     setDuplicatePolicy, skipImported, setSkipImported, secondRoot, setSecondRoot, browseSecondRoot,
     secondImportTargetPreview,
+    onLibraryCreated: (library: PhotoLibrary) => {
+      setPhotoLibraries(previous => [...previous.filter(item => item.id !== library.id), library]);
+      setTargetLibraryId(library.id);
+    },
   };
 }
 

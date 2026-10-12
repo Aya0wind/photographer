@@ -62,6 +62,8 @@ function KindPlaceholder({ kind, name }: { kind: AssetKind; name: string }) {
 }
 
 export interface AssetThumbProps {
+  /** 封面等场景可在照片或缓存无法显示时改用其他候选照片。 */
+  onUnavailable?: (assetId: number) => void;
   badgeStyle?:CSSProperties;
   showRawBadge?: boolean;
   asset: { id: number; kind: AssetKind; name: string };
@@ -93,6 +95,7 @@ export default function AssetThumb({
   testId,
   badgeStyle,
   showRawBadge = true,
+  onUnavailable,
 }: AssetThumbProps) {
   const { t } = useTranslation();
   // RAW 走后端内嵌预览提取（最大段直出），与 photo 同管线。
@@ -105,6 +108,11 @@ export default function AssetThumb({
   const loaded = imageKey !== null && loadedKey === imageKey;
   const failed = imageKey !== null && failedKey === imageKey;
   const settled = imageKey !== null && settledKey === imageKey;
+  useEffect(() => {
+    if (failed || status === "failed" || (status === "missing" && url === null)) {
+      onUnavailable?.(asset.id);
+    }
+  }, [failed, status, url, asset.id, onUnavailable]);
   // 换图（imageKey 变）时重置 settled 计时，卸载时清理
   useEffect(() => {
     return () => {

@@ -6,17 +6,7 @@ import LayoutSwitch from "./LayoutSwitch";
 import type { GalleryTileSize } from "../lib/useGalleryTileSize";
 import type { GalleryLayout } from "../lib/useGalleryLayout";
 
-/** 跨库重复折叠开关图标：两张叠起的同内容卡片（显示过滤语义） */
-function GlyphDuplicates() {
-  return (
-    <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" />
-      <path d="M8 2.5h7A1.5 1.5 0 0 1 16.5 4v7" />
-    </svg>
-  );
-}
-
-export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, layout, onLayout, onImport, onCull, cullBusy, cullDisabled, hideDuplicates, onToggleDuplicates, duplicatesActive, inactive = false, children, inline = false, filterTestId = "search-filter-toggle", cullTestId = "gallery-cull-start", cullLabel }: {
+export default function GalleryBrowseControls({ filterOpen, filterCount, onToggleFilter, tileSize, onTileSize, layout, onLayout, onImport, onCull, cullBusy, cullDisabled, inactive = false, children, inline = false, filterTestId = "search-filter-toggle", cullTestId = "gallery-cull-start", cullLabel }: {
   children?: ReactNode;
   inline?: boolean;
   filterTestId?: string;
@@ -34,38 +24,19 @@ export default function GalleryBrowseControls({ filterOpen, filterCount, onToggl
   onCull: () => void;
   cullBusy: boolean;
   cullDisabled: boolean;
-  /** 「隐藏跨库重复」开关（M5 §四纯显示过滤；语义态不显示） */
-  hideDuplicates: boolean;
-  onToggleDuplicates: () => void;
-  /** 当前结果里存在跨库重复组（无重复时开关降为可点但无效果，样式弱化） */
-  duplicatesActive: boolean;
   inactive?: boolean;
 }) {
   const { t } = useTranslation();
   return (
     <FloatingToolbar label={t("ui.browseActions")} locked={filterOpen || cullBusy} inactive={inactive} inline={inline}>
       {/* 胶囊宽按钮（图标 + 文字说明；计数徽标随行内 flex 排） */}
-      <button type="button" className="ui-pill-button" onClick={onToggleFilter} aria-label={t("search.moreFilters")} title={t("search.moreFilters")} aria-expanded={filterOpen} data-testid={filterTestId}>
+      <button type="button" className="ui-pill-button" onClick={onToggleFilter} aria-label={t("search.moreFilters")} title={t("search.moreFilters")} aria-expanded={filterOpen} data-filter-toggle="" data-testid={filterTestId}>
         <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 4h14l-5.5 6v5l-3 1v-6z" /></svg>
         {t("search.moreFilters")}
         {filterCount > 0 && <span className="rounded-full bg-accent px-1.5 text-[10px] font-bold leading-4 text-black" data-testid="search-filter-count">{filterCount}</span>}
       </button>
       <TileSizeSwitch value={tileSize} onChange={onTileSize} />
       <LayoutSwitch value={layout} onChange={onLayout} />
-      <button
-        type="button"
-        onClick={onToggleDuplicates}
-        aria-pressed={hideDuplicates}
-        aria-label={t("gallery.hideDuplicates")}
-        title={hideDuplicates ? t("gallery.hideDuplicatesOnHint") : t("gallery.hideDuplicatesHint")}
-        data-testid="gallery-hide-duplicates"
-        data-pressed={hideDuplicates}
-        data-has-duplicates={duplicatesActive}
-        className={`ui-pill-button transition-opacity ${hideDuplicates ? "text-accent" : ""} ${duplicatesActive || hideDuplicates ? "" : "opacity-45"}`}
-      >
-        <GlyphDuplicates />
-        {t("gallery.hideDuplicates")}
-      </button>
       {children}
       <button type="button" onClick={onCull} disabled={cullDisabled || cullBusy}
         className="ui-pill-button disabled:cursor-not-allowed disabled:opacity-40"

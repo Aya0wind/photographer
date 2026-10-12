@@ -373,8 +373,8 @@ describe("任务抽屉：索引通道行", () => {
   });
 
 
-  it("「等待模型」只在 AI 开启且模型未就绪时显示；AI 关闭不显示（2026-10-12）", async () => {
-    // AI 关（selectionEnabled=false）：即使模型未就绪也不等模型
+  it("「等待模型」只在选片索引行、AI 开启且模型未就绪时显示；AI 关闭不渲染选片行（2026-10-12 拆分）", async () => {
+    // AI 关（selectionEnabled=false）：选片行不渲染，图片索引永不等模型
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 0, 7),
       exif: counters(0, 0, 10),
@@ -385,19 +385,22 @@ describe("任务抽屉：索引通道行", () => {
     renderDrawer();
     const row = await screen.findByTestId("taskdrawer-index-image");
     expect(row).not.toHaveTextContent(i18n.t("settings.ai.index.waitingModels"));
+    expect(screen.queryByTestId("taskdrawer-index-selection")).not.toBeInTheDocument();
 
-    // AI 开但模型未就绪：显示等待模型
+    // AI 开但模型未就绪：选片行显示等待模型；图片行不再含选片口径
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 0, 7),
       exif: counters(0, 0, 10),
       ai: counters(0, 0, 10),
+      selection: counters(5, 0, 5),
       selectionReady: false,
       selectionEnabled: true,
     } satisfies IndexStatus);
     renderDrawer();
     // 同一用例内二次渲染：取最后一次渲染的行（前面的渲染仍在文档里）
-    const waiting = (await screen.findAllByTestId("taskdrawer-index-image")).pop()!;
+    const waiting = (await screen.findAllByTestId("taskdrawer-index-selection")).pop()!;
     await waitFor(() => expect(waiting).toHaveTextContent(i18n.t("settings.ai.index.waitingModels")));
+    expect(waiting).toHaveTextContent(i18n.t("backgroundTask.index.selection"));
   });
   it("索引行暂停（running）/继续（无 running → indexTaskResume 全局恢复）；导入中禁用", async () => {
     indexStatusMock.mockResolvedValue({
@@ -430,12 +433,14 @@ describe("任务抽屉：索引通道行", () => {
     expect(toggle).toBeDisabled();
   });
 
-  it("全部暂停：运行中导入逐个暂停 + 索引暂停", async () => {
+  it("全部暂停：运行中导入逐个暂停 + 图片/选片两个索引池都暂停", async () => {
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 1, 7),
       exif: counters(0, 0, 10),
       ai: counters(0, 0, 10),
       face: counters(0, 0, 10),
+      selection: counters(3, 0, 7),
+      selectionEnabled: true,
     } satisfies IndexStatus);
     const user = userEvent.setup();
     renderDrawer();
@@ -447,7 +452,10 @@ describe("任务抽屉：索引通道行", () => {
     await waitFor(() => {
       expect(pauseMock).toHaveBeenCalledWith(7);
       expect(pauseMock).toHaveBeenCalledWith(8);
-      expect(indexPauseMock).toHaveBeenCalledTimes(1);
+      // 两池各暂停一次（pool 参数区分图片索引/选片索引）
+      expect(indexPauseMock).toHaveBeenCalledTimes(2);
+      expect(indexPauseMock).toHaveBeenCalledWith("index");
+      expect(indexPauseMock).toHaveBeenCalledWith("selection");
     });
   });
 });

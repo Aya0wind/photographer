@@ -32,8 +32,8 @@ const subscribeAppEventsMock = vi.mocked(subscribeAppEvents);
 const EXPECTED_SECTIONS: Array<{ section: string; links: string[]; disabled: string[] }> = [
   { section: "浏览", links: ["图库", "最近浏览"], disabled: [] },
   { section: "组织", links: ["相册", "那年今天", "人物", "器材统计"], disabled: [] },
-  { section: "工具", links: ["导入", "相似照片", "回收站"], disabled: [] },
-  { section: "系统", links: ["存储", "设置"], disabled: [] },
+  { section: "工具", links: ["添加照片", "相似照片", "回收站"], disabled: [] },
+  { section: "系统", links: ["照片库", "设置"], disabled: [] },
 ];
 
 function renderSidebar(initialPath: string) {
@@ -103,7 +103,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     const active = screen.getByRole("link", { name: /最近浏览/ });
     expect(active).toHaveAttribute("aria-current", "page");
     expect(active.className).toContain("text-accent");
-    for (const label of ["图库", "导入", "设置"] as const) {
+    for (const label of ["图库", "添加照片", "设置"] as const) {
       expect(screen.getByRole("link", { name: new RegExp(label) })).not.toHaveAttribute("aria-current");
     }
   });
@@ -169,7 +169,7 @@ describe("Sidebar（M4.5 A3 分组信息架构）", () => {
     renderSidebar("/gallery");
     const user = userEvent.setup();
 
-    const storage = screen.getByRole("link", { name: /存储/ });
+    const storage = screen.getByRole("link", { name: /照片库/ });
     const system = screen.getAllByTestId("nav-section").find((s) => s.textContent?.includes("系统"));
     expect(system).toContain(storage);
     expect(storage).toHaveAttribute("href", "/storage");

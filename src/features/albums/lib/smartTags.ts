@@ -57,6 +57,12 @@ export function indexedTagCover(tag: string): number | null | undefined {
   return loadIndex()[libraryKey()]?.[tag]?.cover;
 }
 
+export function indexedTagCandidates(tag: string): number[] {
+  const record = loadIndex()[libraryKey()]?.[tag];
+  return [...new Set([record?.cover, ...(record?.hits ?? []).map((hit) => hit.assetId)]
+    .filter((id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0))];
+}
+
 export function rememberTagCover(tag: string, assetId: number | null): void {
   const scope = libraryKey();
   const index = loadIndex();

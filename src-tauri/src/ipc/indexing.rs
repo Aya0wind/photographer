@@ -27,6 +27,9 @@ pub struct IndexKindStatus {
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatusDto {
     pub image: IndexKindStatus,
+    /// 选片索引（eyes+blur 合并完成度；2026-10-12 拆分为独立索引——图片
+    /// 索引不再含这两通道，选片索引单独成行/单独触发/单独消费池）。
+    pub selection: IndexKindStatus,
     pub selection_ready: bool,
     pub thumb: IndexKindStatus,
     pub exif: IndexKindStatus,
@@ -37,12 +40,12 @@ pub struct IndexStatusDto {
     pub eyes: IndexKindStatus,
     pub blur: IndexKindStatus,
     /// AI 选片通道（eyes/blur）是否启用——「等待模型」提示只在开启且模型
-    /// 未就绪时成立（2026-10-12：AI 关闭的库图像索引不含这两通道）。
+    /// 未就绪时成立（2026-10-12：AI 关闭的库选片索引不建任务不计数）。
     pub selection_enabled: bool,
 }
 
-const KINDS: [&str; 9] = [
-    "image", "thumb", "exif", "ai", "face", "phash", "hash", "eyes", "blur",
+const KINDS: [&str; 10] = [
+    "image", "selection", "thumb", "exif", "ai", "face", "phash", "hash", "eyes", "blur",
 ];
 
 /// 状态聚合核：index_tasks 按 (kind, state) 计数 + assets 可索引总数。
@@ -125,39 +128,63 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
         let settings = state.settings.lock().expect("settings mutex poisoned");
         settings.ai.enable_clip || settings.ai.enable_face
     };
-    dto.image = image_index_status(&db, selection_enabled)?;
+    dto.image = image_index_status(&db)?;
+    dto.selection = selection_index_status(&db);
     dto.selection_ready = state.ai.selection_eyes_ready();
     dto.selection_enabled = selection_enabled;
     Ok(dto)
 }
 
 /// Count each photo once; completion requires every component. EXIF with no
-/// task is the synchronous import path. Eyes/blur without task/result are
-/// pending — **only while AI features are on** (2026-10-12：AI 关闭的库这两
-/// 通道不参与图像索引完成度，存量任务行也不计数）。
-fn image_index_status(db: &crate::db::Db, selection_enabled: bool) -> Result<IndexKindStatus, String> {
+/// task is the synchronous import path. **图片索引口径 = thumb + exif**
+/// （2026-10-12 拆分：eyes/blur 归选片索引，不再参与图片完成度——图片
+/// 索引不被选片模型的就绪状态拖住）。
+fn image_index_status(db: &crate::db::Db) -> Result<IndexKindStatus, String> {
     let mut result = IndexKindStatus::default();
-    // 通道集合按开关切换：关闭时 eyes/blur 的 LEFT JOIN/判完成均剔除
-    let (join_kinds, done_extra) = if selection_enabled {
-        ("'thumb','exif','eyes','blur'", " OR eyes_done=0 OR blur_done=0")
-    } else {
-        ("'thumb','exif'", "")
-    };
-    let sql = format!(
-        "WITH parts AS (
+    let sql = "\
+        WITH parts AS (
         SELECT a.id, a.thumb_state,
+          MAX(CASE WHEN t.state='running' THEN 1 ELSE 0 END) AS running,
+          MAX(CASE WHEN t.state='failed' THEN 1 ELSE 0 END) AS failed,
+          MAX(CASE WHEN t.state='pending' THEN 1 ELSE 0 END) AS pending
+        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ('thumb','exif')
+        WHERE a.kind IN ('photo','raw') GROUP BY a.id
+      ) SELECT CASE WHEN running=1 THEN 'running' WHEN failed=1 THEN 'failed'
+          WHEN pending=1 OR thumb_state=0 THEN 'pending'
+          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1";
+    per_asset_status(db, sql, &mut result)?;
+    Ok(result)
+}
+
+/// 选片索引完成度（eyes+blur 合并，每张照片两通道都完成才计 done；
+/// 与图片索引同构的 per-asset 聚合）。任务行不存在 = pending——AI 关闭
+/// 的库无任务行，此口径全 pending，前端按 selectionEnabled 隐藏该行。
+fn selection_index_status(db: &crate::db::Db) -> IndexKindStatus {
+    let mut result = IndexKindStatus::default();
+    let sql = "\
+        WITH parts AS (
+        SELECT a.id,
           MAX(CASE WHEN t.state='running' THEN 1 ELSE 0 END) AS running,
           MAX(CASE WHEN t.state='failed' THEN 1 ELSE 0 END) AS failed,
           MAX(CASE WHEN t.state='pending' THEN 1 ELSE 0 END) AS pending,
           MAX(CASE WHEN t.kind='eyes' AND t.state='done' THEN 1 ELSE 0 END) AS eyes_done,
           MAX(CASE WHEN t.kind='blur' AND t.state='done' THEN 1 ELSE 0 END) AS blur_done
-        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ({join_kinds})
+        FROM assets a LEFT JOIN index_tasks t ON t.asset_id=a.id AND t.kind IN ('eyes','blur')
         WHERE a.kind IN ('photo','raw') GROUP BY a.id
       ) SELECT CASE WHEN running=1 THEN 'running' WHEN failed=1 THEN 'failed'
-          WHEN pending=1 OR thumb_state=0{done_extra} THEN 'pending'
-          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1"
-    );
-    let mut stmt = db.0.prepare(&sql).map_err(|e| e.to_string())?;
+          WHEN pending=1 OR eyes_done=0 OR blur_done=0 THEN 'pending'
+          ELSE 'done' END, COUNT(*) FROM parts GROUP BY 1";
+    let _ = per_asset_status(db, sql, &mut result);
+    result
+}
+
+/// per-asset 完成度聚合查询核（image/selection 共用）。
+fn per_asset_status(
+    db: &crate::db::Db,
+    sql: &str,
+    result: &mut IndexKindStatus,
+) -> Result<(), String> {
+    let mut stmt = db.0.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))
         .map_err(|e| e.to_string())?;
@@ -171,7 +198,7 @@ fn image_index_status(db: &crate::db::Db, selection_enabled: bool) -> Result<Ind
         }
         result.total += count;
     }
-    Ok(result)
+    Ok(())
 }
 
 /// 手动触发核：thumb/exif → index::kick（全核跑待办）；ai → 语义回填
@@ -192,28 +219,43 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             state.supervisor.resume_kind("index");
             db.create_thumb_tasks_for_unindexed()
                 .map_err(|e| e.to_string())?;
-            // eyes/blur（AI 选片通道）只在建开启 AI 的库里建档；关闭时
-            // 跳过——否则图像索引回到「等待模型」死等。
-            let selection_enabled = enable_clip || enable_face;
-            if selection_enabled {
-                db.create_eyes_tasks_for_unindexed()
-                    .map_err(|e| e.to_string())?;
-                db.create_blur_tasks_for_unindexed()
-                    .map_err(|e| e.to_string())?;
-            }
-            let components: &[&str] = if selection_enabled {
-                &["thumb", "exif", "eyes", "blur"]
-            } else {
-                &["thumb", "exif"]
-            };
-            for component in components {
+            // 图片域消费的全部通道一起重试失败行（thumb/exif/phash 都在
+            // 图片池——一键恢复暂态性批量失败，2026-10-13 真机案例）
+            for component in ["thumb", "exif", "phash"] {
                 db.retry_failed_index_tasks(component)
                     .map_err(|e| e.to_string())?;
             }
-            crate::index::kick(db_dir.clone(), &supervisor);
-            if selection_enabled {
-                crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
+            super::super::index::pipeline::kick(
+                db_dir.clone(),
+                &supervisor,
+                super::super::index::pipeline::Pools::IMAGE,
+            );
+            Ok(())
+        }
+        // 选片索引（2026-10-12 拆分）：eyes+blur 独立触发/独立消费池，
+        // 与缩略图/详细信息索引不绑定。AI 关闭的库不建任务（明确报错，
+        // 与语义/人脸通道同款契约）。
+        "selection" => {
+            if !(enable_clip || enable_face) {
+                return Err("选片索引未开启（设置 → AI）".into());
             }
+            state.supervisor.resume_kind("selection");
+            db.create_eyes_tasks_for_unindexed()
+                .map_err(|e| format!("创建闭眼任务失败: {e}"))?;
+            db.create_blur_tasks_for_unindexed()
+                .map_err(|e| format!("创建失焦任务失败: {e}"))?;
+            for component in ["eyes", "blur"] {
+                db.retry_failed_index_tasks(component)
+                    .map_err(|e| e.to_string())?;
+            }
+            // eyes 模型未就绪时任务保持 pending（等待模型提示在选片行）；
+            // blur 无模型依赖，消费池直接跑
+            super::super::index::pipeline::kick(
+                db_dir.clone(),
+                &supervisor,
+                super::super::index::pipeline::Pools::SELECTION,
+            );
+            crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &state.bus, &supervisor);
             Ok(())
         }
         "thumb" | "exif" | "phash" | "hash" | "eyes" | "blur" => {
@@ -248,8 +290,8 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             }
             db.retry_failed_index_tasks(kind)
                 .map_err(|e| format!("重试失败索引任务失败: {e}"))?;
-            // eyes 任务不被 index worker 池认领（step 白名单外，模型会话
-            // 在闭眼回填 worker）→ 走专属回填入口；其余通道走通用池
+            // 通道 → 消费池：eyes → 闭眼回填（模型会话）；blur → 选片
+            // 消费池（2026-10-12 拆分后不再走图片索引池）；其余走通用池
             if kind == "eyes" {
                 crate::ai::selection::kick_eyes_if_ready(
                     db_dir.clone(),
@@ -257,6 +299,8 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
                     &state.bus,
                     &supervisor,
                 );
+            } else if kind == "blur" {
+                crate::ai::selection::kick_selection_index(db_dir, &supervisor);
             } else {
                 crate::index::kick(db_dir, &supervisor);
             }
@@ -332,17 +376,16 @@ pub fn rebuild_channel_core(
             let transaction = db.0.unchecked_transaction().map_err(|e| e.to_string())?;
             db.reset_thumb_states().map_err(|e| e.to_string())?;
             db.clear_exif_columns().map_err(|e| e.to_string())?;
+            // 2026-10-12 拆分：图片重建只动 thumb/exif（选片产物/任务归
+            // "selection" 重建通道，不动）
             db.0.execute_batch(
-                "DELETE FROM ai_analysis WHERE kind IN ('eyes','blur');
-                DELETE FROM index_tasks WHERE kind IN ('thumb','exif','eyes','blur');",
+                "DELETE FROM index_tasks WHERE kind IN ('thumb','exif');",
             )
             .map_err(|e| e.to_string())?;
             let pending = db
                 .requeue_thumb_tasks_for_all()
                 .map_err(|e| e.to_string())?
-                + db.requeue_exif_tasks_for_all().map_err(|e| e.to_string())?
-                + db.requeue_eyes_tasks_for_all().map_err(|e| e.to_string())?
-                + db.requeue_blur_tasks_for_all().map_err(|e| e.to_string())?;
+                + db.requeue_exif_tasks_for_all().map_err(|e| e.to_string())?;
             transaction.commit().map_err(|e| e.to_string())?;
             Ok(pending)
         }
@@ -386,7 +429,11 @@ pub fn rebuild_channel_core(
         }
         "selection" => {
             // 0021 选片分析重建：清分析产物 + 两通道任务账重排（eyes 模型
-            // 未收录时其任务保持 pending 空转跳过）
+            // 未收录时其任务保持 pending 空转跳过）。写闸与图片重建同款：
+            // 在途选片 worker（持读闸）收尾后才开始清理——旧任务不能在
+            // 清理后回写分析产物。
+            let barrier = crate::index::image_index_lock(db_dir);
+            let _guard = barrier.write().map_err(|e| e.to_string())?;
             db.0
                 .execute_batch("DELETE FROM ai_analysis;                                DELETE FROM index_tasks WHERE kind IN ('eyes', 'blur');")
                 .map_err(|e| e.to_string())?;
@@ -411,8 +458,12 @@ fn kick_rebuilt_channel(
     }
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
-        "image" | "selection" => {
-            crate::index::kick(db_dir.clone(), &supervisor);
+        "image" => {
+            crate::index::kick(db_dir, &supervisor);
+        }
+        // 选片重建 → 选片消费池（blur）+ 闭眼回填（eyes）
+        "selection" => {
+            crate::ai::selection::kick_selection_index(db_dir.clone(), &supervisor);
             crate::ai::selection::kick_eyes_if_ready(db_dir, &state.ai, &bus, &supervisor);
         }
         "semantic" => {
@@ -805,29 +856,51 @@ selection={want_sel}
     );
 }
 
-/// 暂停索引类后台任务（kind="index"：thumb/exif/hash/phash/blur 池 + AI
-/// 回填池）。软语义：worker 步进间轮询生效。接线 2026-09-29——此前前端
-/// 按钮静默无效（命令未注册）。
+/// 索引池名归一（'static——spawn_blocking 闭包需要）：None/未知 → None。
+fn as_index_pool(pool: Option<&str>) -> Option<&'static str> {
+    match pool {
+        Some("selection") => Some("selection"),
+        Some("index") | None => Some("index"),
+        _ => None,
+    }
+}
+
+/// 暂停索引类后台任务。pool="index"（thumb/exif/hash/phash 图片索引池）
+/// 或 "selection"（eyes/blur 选片索引池，2026-10-12 拆分）；缺省 "index"。
+/// 软语义：worker 步进间轮询生效。
 #[tauri::command]
-pub async fn index_task_pause(state: State<'_, SharedState>) -> Result<(), String> {
+pub async fn index_task_pause(
+    state: State<'_, SharedState>,
+    pool: Option<String>,
+) -> Result<(), String> {
+    let Some(pool) = as_index_pool(pool.as_deref()) else {
+        return Err(format!("未知索引池: {}", pool.unwrap_or_default()));
+    };
     let shared = state.inner().clone();
-    run_blocking(shared, |state| {
-        let hit = state.supervisor.pause_kind("index");
-        eprintln!("手动暂停索引：命中 {hit} 个任务");
+    run_blocking(shared, move |state| {
+        let hit = state.supervisor.pause_kind(pool);
+        eprintln!("手动暂停索引（{pool}）：命中 {hit} 个任务");
         Ok(())
     })
     .await
 }
 
-/// 恢复索引类后台任务。导入让路闸开着时拒绝（用户定案 2026-09-29：
-/// 导入完成前无法手动恢复——导入收尾会自动恢复并按需触发一轮）。
+/// 恢复索引类后台任务（pool 语义同 [`index_task_pause`]）。导入让路闸
+/// 开着时拒绝（用户定案 2026-09-29：导入完成前无法手动恢复——导入收尾
+/// 会自动恢复并按需触发一轮）。
 #[tauri::command]
-pub async fn index_task_resume(state: State<'_, SharedState>) -> Result<(), String> {
+pub async fn index_task_resume(
+    state: State<'_, SharedState>,
+    pool: Option<String>,
+) -> Result<(), String> {
+    let Some(pool) = as_index_pool(pool.as_deref()) else {
+        return Err(format!("未知索引池: {}", pool.unwrap_or_default()));
+    };
     let shared = state.inner().clone();
-    run_blocking(shared, |state| {
+    run_blocking(shared, move |state| {
         super::ensure_no_import_running(state)?;
-        let hit = state.supervisor.resume_kind("index");
-        eprintln!("手动恢复索引：命中 {hit} 个任务");
+        let hit = state.supervisor.resume_kind(pool);
+        eprintln!("手动恢复索引（{pool}）：命中 {hit} 个任务");
         Ok(())
     })
     .await

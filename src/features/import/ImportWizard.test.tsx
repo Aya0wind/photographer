@@ -23,6 +23,7 @@ import {
   folderScan,
   importStart,
   photoLibraryList,
+  photoLibraryCreate,
   platformCapabilities,
   thumbGet,
   deviceThumbGet,
@@ -54,6 +55,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     albumList: vi.fn(),
     albumSubgroups: vi.fn(),
     albumCreate: vi.fn(),
+    photoLibraryCreate: vi.fn(),
   };
 });
 
@@ -166,7 +168,7 @@ function StorageProbe() {
   return <div data-testid="storage-probe">STORAGE_PAGE</div>;
 }
 
-function renderWizard(query = "") {
+function renderWizard(query = "?flow=import") {
   return render(
     <I18nextProvider i18n={i18n}>
       <MemoryRouter initialEntries={[`/import${query}`]}>
@@ -181,6 +183,37 @@ function renderWizard(query = "") {
     </I18nextProvider>,
   );
 }
+
+describe("添加照片入口", () => {
+  it("先选择添加方式，可以进入复制移动流程并返回", async () => {
+    const user = userEvent.setup();
+    renderWizard("");
+    expect(screen.getByTestId("add-photos-choice")).toBeInTheDocument();
+    expect(screen.getByTestId("add-photos-import")).toHaveTextContent("选择来源");
+    expect(screen.getByTestId("add-photos-existing")).toHaveTextContent("选择照片文件夹");
+    await user.click(screen.getByTestId("add-photos-import"));
+    expect(screen.queryByTestId("add-photos-choice")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("add-photos-back"));
+    expect(screen.getByTestId("add-photos-choice")).toBeInTheDocument();
+  });
+
+  it("已有文件夹原地添加：自动填名称，默认不整理，不创建复制任务", async () => {
+    const user = userEvent.setup();
+    openMock.mockResolvedValue("Z:\\Trips");
+    vi.mocked(photoLibraryCreate).mockResolvedValue({ ok: true, library: { ...PHOTO_LIB, id: "trips", name: "Trips", rootPath: "Z:\\Trips" } });
+    renderWizard("");
+    await user.click(screen.getByTestId("add-photos-existing"));
+    expect(await screen.findByTestId("storage-create-name")).toHaveValue("Trips");
+    expect(screen.getByTestId("storage-create-root")).toHaveValue("Z:\\Trips");
+    expect(screen.getByTestId("storage-create-confirm")).toHaveTextContent("添加并扫描");
+    expect(screen.getByTestId("storage-organization-options")).not.toHaveAttribute("open");
+    await user.click(screen.getByTestId("storage-create-confirm"));
+    expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
+    expect(photoLibraryCreate).toHaveBeenCalledWith("Trips", "Z:\\Trips", "{year}/{month}/{day}/{filename}", true, false);
+    expect(startMock).not.toHaveBeenCalled();
+    expect(scanMock).not.toHaveBeenCalled();
+  });
+});
 
 /** 渲染并走到确认抽屉（等待照片库/相册等异步初始值就绪）；返回 render 结果供卸载 */
 async function openReview(user: ReturnType<typeof userEvent.setup>, query = "?device=E:") {
@@ -227,6 +260,7 @@ beforeEach(() => {
   deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
   // 默认无照片库（「未选库」用例的默认态）；有用例经 seedSession 指定目标库
   photoLibraryListMock.mockReset().mockResolvedValue([]);
+  vi.mocked(photoLibraryCreate).mockReset();
   platformCapsMock.mockReset().mockResolvedValue({
     filesystemRoots: true,
     volumeDevices: true,
@@ -832,6 +866,36 @@ it("快速滚动时跳过已离开预加载区域且尚未开始的预览请求"
 // --- 确认抽屉与导入方案（目标照片库 + 纯时间布局契约） ---------------------------------
 
 describe("确认抽屉与导入方案", () => {
+  it("在确认抽屉中新建库失败时错误对话框仍可见，Escape 只关闭错误", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    vi.mocked(photoLibraryCreate).mockResolvedValue({ ok: false, error: "照片库目录不能嵌套" });
+    await openReview(user);
+    await user.click(screen.getByTestId("wizard-new-target-library"));
+    await user.type(screen.getByTestId("storage-create-name"), "新目标");
+    await user.type(screen.getByTestId("storage-create-root"), "Y:\\照片\\嵌套");
+    await user.click(screen.getByTestId("storage-create-confirm"));
+    const error = await screen.findByRole("alertdialog");
+    expect(error.closest("dialog")).toBe(screen.getByTestId("wizard-review-drawer"));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.getByTestId("storage-create-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-review-drawer")).toBeInTheDocument();
+  });
+  it("确认页直接新建空照片库并选中，不离开导入流程", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    vi.mocked(photoLibraryCreate).mockResolvedValue({ ok: true, library: { ...PHOTO_LIB, id: "new-target", name: "新目标", rootPath: "Z:\\NewPhotos" } });
+    await openReview(user);
+    await user.click(screen.getByTestId("wizard-new-target-library"));
+    await user.type(screen.getByTestId("storage-create-name"), "新目标");
+    await user.type(screen.getByTestId("storage-create-root"), "Z:\\NewPhotos");
+    await user.click(screen.getByTestId("storage-create-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("storage-create-dialog")).not.toBeInTheDocument());
+    expect(screen.getByLabelText("目标照片库（必选）")).toHaveValue("new-target");
+    expect(screen.getByTestId("wizard-path-summary")).toHaveTextContent("Z:\\NewPhotos");
+    expect(photoLibraryCreate).toHaveBeenCalledWith("新目标", "Z:\\NewPhotos", "{year}/{month}/{day}/{filename}", false, false);
+  });
   it("未选照片库可进入确认步骤，但不能开始导入", async () => {
     useImportStore.setState({ devices: [volumeDevice()], sourceFiles: { "E:": files() } });
     const user = userEvent.setup();
@@ -841,8 +905,8 @@ describe("确认抽屉与导入方案", () => {
     await waitFor(() => expect(screen.getByTestId("wizard-review-next")).toBeEnabled());
     await user.click(screen.getByTestId("wizard-review-next"));
     expect(await screen.findByTestId("wizard-target-library-card")).toBeInTheDocument();
-    expect(screen.getByRole("button", {name:"开始导入"})).toBeDisabled();
-    expect(within(screen.getByTestId("wizard-import-summary")).getByRole("status")).toHaveTextContent("尚未选择照片库");
+    expect(screen.getByTestId("wizard-start")).toBeDisabled();
+    expect(within(screen.getByTestId("wizard-import-summary")).getByRole("status")).toHaveTextContent("请选择目标照片库");
     expect(startMock).not.toHaveBeenCalled();
   });
 
@@ -860,7 +924,7 @@ describe("确认抽屉与导入方案", () => {
     // 再进抽屉启动：回画廊、不跳任务中心
     await user.click(screen.getByTestId("wizard-review-next"));
     await screen.findByTestId("wizard-review-drawer");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await user.click(await screen.findByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
   });
@@ -871,7 +935,7 @@ describe("确认抽屉与导入方案", () => {
     startMock.mockResolvedValueOnce({ ok: true, jobId: 7 });
     await openReview(user);
 
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await user.click(await screen.findByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock).toHaveBeenCalledTimes(1);
     const plan: ImportPlan = startMock.mock.calls[0][0];
@@ -908,7 +972,7 @@ describe("确认抽屉与导入方案", () => {
 
     await user.click(screen.getByTestId("wizard-review-next"));
     await screen.findByTestId("wizard-review-drawer");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await user.click(await screen.findByTestId("wizard-start"));
     await screen.findByTestId("gallery-probe");
 
     const plan = startMock.mock.calls[0][0];
@@ -921,7 +985,7 @@ describe("确认抽屉与导入方案", () => {
     startMock.mockResolvedValue({ ok: true, jobId: 21 });
 
     await openReview(user);
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await user.click(await screen.findByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].streams).toBe(4);
   });
@@ -939,7 +1003,7 @@ describe("确认抽屉与导入方案", () => {
     startMock.mockResolvedValue({ ok: true, jobId: 22 });
 
     await openReview(user, "?device=MTP:CAM");
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
+    await user.click(await screen.findByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].streams).toBe(1);
   });
@@ -1000,7 +1064,7 @@ describe("确认抽屉与导入方案", () => {
       "青海湖 2026（12）",
     );
     await user.selectOptions(select, "3");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await screen.findByTestId("gallery-probe");
 
     const plan = startMock.mock.calls[0][0] as ImportPlan;
@@ -1023,21 +1087,22 @@ describe("确认抽屉与导入方案", () => {
     const input = screen.getByTestId("wizard-album-new-name");
 
     // 选择新建相册时必须填写名称。
-    const start = screen.getByRole("button", { name: "开始导入" });
+    const start = screen.getByTestId("wizard-start");
     expect(start).toBeDisabled();
     expect(screen.getByText("请填写新相册名称")).toBeInTheDocument();
 
     // 重名错误透传（行内 alert，不关抽屉、不启动）
     await user.type(input, "旅行");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("同名相册已存在");
+    await user.click(screen.getByTestId("wizard-start"));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("同名相册已存在");
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "确定" }));
     expect(albumCreateMock).toHaveBeenCalledWith("旅行");
     expect(startMock).not.toHaveBeenCalled();
 
     // 修正后成功：album_create → import_start(albumId=9)
     await user.clear(input);
     await user.type(input, "旅行 2");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
     expect(albumCreateMock).toHaveBeenLastCalledWith("旅行 2");
     const plan = startMock.mock.calls[0][0] as ImportPlan;
@@ -1054,7 +1119,7 @@ describe("确认抽屉与导入方案", () => {
     await user.click((await screen.findAllByTestId("wizard-review-next"))[0]);
     await screen.findByTestId("wizard-review-drawer");
 
-    const start = await screen.findByRole("button", { name: "开始导入" });
+    const start = await screen.findByTestId("wizard-start");
     expect(start).toBeEnabled();
     await user.click(start);
     await waitFor(()=>expect(startMock).toHaveBeenCalledWith(expect.objectContaining({targetLibraryId:"lib1",albumId:undefined})));
@@ -1069,7 +1134,7 @@ describe("确认抽屉与导入方案", () => {
     if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
     expect(screen.getByTestId("wizard-album-subgroup")).toHaveValue("");
 
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await screen.findByTestId("gallery-probe");
     expect((startMock.mock.calls[0][0] as ImportPlan).albumSubgroup).toBeUndefined();
   });
@@ -1093,12 +1158,12 @@ describe("确认抽屉与导入方案", () => {
 
     // 输入新名随 plan 下发
     fireEvent.change(screen.getByTestId("wizard-album-subgroup"), { target: { value: "机内直出" } });
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await waitFor(() => expect(startMock).toHaveBeenCalledTimes(1));
     expect((startMock.mock.calls[0][0] as ImportPlan).albumSubgroup).toBe("机内直出");
   });
 
-  it("导入模式：默认复制；切移动 plan.mode=move 并记录 jobMode；引用模式不设第二目的地", async () => {
+  it("导入模式只提供复制和移动，切移动后正确记录 jobMode", async () => {
     seedSession();
     const user = userEvent.setup();
     startMock.mockResolvedValue({ ok: true, jobId: 11 });
@@ -1106,12 +1171,16 @@ describe("确认抽屉与导入方案", () => {
 
     const mode = screen.getByLabelText("导入模式");
     expect(mode).toHaveValue("copy");
+    expect(screen.getByTestId("wizard-start")).toHaveTextContent(/复制.*张照片/);
+    expect(within(mode).getAllByRole("option").map(option => (option as HTMLOptionElement).value)).toEqual(["copy", "move"]);
+    expect(screen.getByTestId("wizard-add-existing-library")).toBeInTheDocument();
     expect(screen.getByText("复制：源文件保持不动。")).toBeInTheDocument();
 
     // 切移动：说明切换 + plan.mode=move + jobMode 预挂（sessionStarted 先到也能归位）
     await user.selectOptions(mode, "move");
+    expect(screen.getByTestId("wizard-start")).toHaveTextContent(/移动.*张照片/);
     expect(screen.getByText(/入库后删除源文件/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(useImportStore.getState().jobModes[11]).toBe("move");
@@ -1119,15 +1188,18 @@ describe("确认抽屉与导入方案", () => {
     expect(useImportStore.getState().pendingJobSource).toBe("volume");
     view.unmount();
 
-    // 引用模式：仅登记，不设复制目的地
-    await openReview(user);
-    await user.selectOptions(screen.getByLabelText("导入模式"), "reference");
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    await screen.findByTestId("gallery-probe");
-    expect(startMock.mock.calls[1][0]).toMatchObject({ mode: "reference", secondTarget: undefined });
   });
 
-  it("MTP 相机不提供引用/移动（copyOnly：模式下拉禁用且恒复制）", async () => {
+  it("不移动照片的入口前往添加已有照片库，不创建导入任务", async () => {
+    seedSession();
+    const user = userEvent.setup();
+    await openReview(user);
+    await user.click(screen.getByTestId("wizard-add-existing-library"));
+    expect(await screen.findByTestId("storage-probe")).toBeInTheDocument();
+    expect(startMock).not.toHaveBeenCalled();
+  });
+
+  it("MTP 相机不提供移动（copyOnly：模式下拉禁用且恒复制）", async () => {
     useImportStore.setState({
       devices: [mtpDevice()],
       sourceFiles: { "MTP:CAM": [{ path: "A.JPG", dir: "", name: "A.JPG", kind: "photo", size: 10 }] },
@@ -1155,7 +1227,7 @@ describe("确认抽屉与导入方案", () => {
     if (!screen.getByTestId("wizard-advanced").hasAttribute("open")) await user.click(screen.getByText("更多导入选项"));
     await user.click(screen.getByRole("radio", { name: "重命名导入（追加 _1 后缀）" }));
     await user.click(screen.getByLabelText("跳过已导入文件（按内容指纹）"));
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await screen.findByTestId("gallery-probe");
 
     expect(startMock.mock.calls[0][0]).toMatchObject({ duplicatePolicy: "rename", skipImported: false });
@@ -1179,12 +1251,12 @@ describe("确认抽屉与导入方案", () => {
     const panel = await screen.findByTestId("wizard-second-panel");
     expect(within(panel).getByLabelText("第二目标根目录")).toBeInTheDocument();
     // 必填校验：第二目录为空 → 开始禁用 + 提示（无路径预览）
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeDisabled();
+    expect(screen.getByTestId("wizard-start")).toBeDisabled();
     expect(panel).toHaveTextContent("请填写第二目标根目录");
     expect(screen.queryByTestId("wizard-second-path-preview")).not.toBeInTheDocument();
 
     await user.type(screen.getByTestId("wizard-second-root"), "D:\\照片备份");
-    expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
+    expect(screen.getByTestId("wizard-start")).toBeEnabled();
     expect(panel).not.toHaveTextContent("请填写第二目标根目录");
     // 第二目的地预览 = 第二根目录 + 同一纯时间公式
     expect(screen.getByTestId("wizard-second-path-preview")).toHaveTextContent(
@@ -1192,7 +1264,7 @@ describe("确认抽屉与导入方案", () => {
     );
 
     startMock.mockResolvedValueOnce({ ok: true, jobId: 31 });
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     await screen.findByTestId("gallery-probe");
     expect(startMock.mock.calls[0][0].secondTarget).toEqual({
       targetRoot: "D:\\照片备份",
@@ -1222,7 +1294,7 @@ describe("确认抽屉与导入方案", () => {
     expect(screen.getByText("移动模式不支持双目的地。")).toBeInTheDocument();
 
     // 移动模式启动：plan 不带 secondTarget（后端拒 move+secondTarget，前端互斥保证）
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await user.click(screen.getByTestId("wizard-start"));
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
     expect(startMock.mock.calls[0][0].mode).toBe("move");
     expect(startMock.mock.calls[0][0].secondTarget).toBeUndefined();
@@ -1235,16 +1307,17 @@ describe("确认抽屉与导入方案", () => {
 
     // 后端逻辑错误：原文透出（行内 alert）
     startMock.mockResolvedValueOnce({ ok: false, error: "目标目录不能位于源目录内" });
-    await user.click(await screen.findByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("目标目录不能位于源目录内");
+    await user.click(await screen.findByTestId("wizard-start"));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("目标目录不能位于源目录内");
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "确定" }));
     expect(screen.queryByTestId("tasks-probe")).not.toBeInTheDocument();
     // 失败留在抽屉可重试
     expect(screen.getByTestId("wizard-review-drawer")).toBeInTheDocument();
 
     // invoke 不可用（error=null）→ 通用文案
     startMock.mockResolvedValueOnce({ ok: false, error: null });
-    await user.click(screen.getByRole("button", { name: "开始导入" }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByTestId("wizard-start"));
+    expect(await screen.findByRole("alertdialog")).toBeInTheDocument();
   });
 });
 
@@ -1280,11 +1353,11 @@ it("只在确认步骤选择目标照片库，返回挑选后保留选择",async
   await waitFor(()=>expect(screen.getByTestId("wizard-review-next")).toBeEnabled());
   await user.click(screen.getByTestId("wizard-review-next"));
   const review=await screen.findByTestId("wizard-review-drawer");
-  expect(within(review).getByRole("button",{name:"开始导入"})).toBeDisabled();
+  expect(within(review).getByTestId("wizard-start")).toBeDisabled();
   const card=within(review).getByTestId("wizard-target-library-card");
   await user.selectOptions(within(card).getByRole("combobox"),"lib2");
   expect(within(card).getByText("Z:/旅行")).toBeInTheDocument();
-  expect(within(review).getByRole("button",{name:"开始导入"})).toBeEnabled();
+  expect(within(review).getByTestId("wizard-start")).toBeEnabled();
   await user.click(within(review).getByRole("button",{name:"关闭"}));
   expect(screen.queryByTestId("wizard-target-library-card")).not.toBeInTheDocument();
   await user.click(screen.getByTestId("wizard-review-next"));

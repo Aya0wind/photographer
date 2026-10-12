@@ -6,9 +6,11 @@ import { useTranslation } from "react-i18next";
 export default function ErrorModal({
   message,
   onClose,
+  portalTarget,
 }: {
   message: string | null;
   onClose: () => void;
+  portalTarget?: Element | null;
 }) {
   const { t } = useTranslation();
   const button = useRef<HTMLButtonElement>(null);
@@ -17,15 +19,15 @@ export default function ErrorModal({
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     button.current?.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (event.key === "Tab") {
         event.preventDefault();
         button.current?.focus();
       }
     };
-    window.addEventListener("keydown", keydown);
+    window.addEventListener("keydown", keydown, true);
     return () => {
-      window.removeEventListener("keydown", keydown);
+      window.removeEventListener("keydown", keydown, true);
       previousFocus?.focus();
     };
   }, [message, onClose]);
@@ -40,6 +42,6 @@ export default function ErrorModal({
         </div>
       </div>
     </div>,
-    document.body,
+    portalTarget ?? document.body,
   );
 }

@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use rusqlite::params;
 
@@ -89,16 +90,20 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
     .ok()
 }
 
+pub mod pipeline;
+
 /// 消费一条任务（认领 → 处理 → 收尾）。返回 false 表示队列已空。
 /// 认领优先级：exif（量小且解锁筛选 UI）→ hash（毫秒级，解锁精确查重
 /// 层）→ phash → thumb（数量大头）。每 worker 一次认领一条，认领经
-/// SQLite 写锁串行化，不重不漏。
+/// SQLite 写锁串行化，不重不漏。eyes/blur（选片索引）不在此认领——
+/// 2026-10-12 拆分后由选片专属池消费（ai::selection），图片索引不与
+/// 选片索引绑定执行。
 fn step(db: &Db, db_dir: &Path) -> bool {
     let _permit =
         crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
     let barrier = image_index_lock(db_dir);
     let _guard = barrier.read().expect("image index barrier poisoned");
-    let task = ["exif", "thumb", "hash", "phash", "blur"]
+    let task = ["exif", "thumb", "hash", "phash"]
         .iter()
         .find_map(|kind| db.claim_index_task(kind).ok().flatten())
         .or_else(|| db.claim_index_task("thumb").ok().flatten());
@@ -110,18 +115,19 @@ fn step(db: &Db, db_dir: &Path) -> bool {
         "exif" => process_exif_task(db, task.asset_id),
         "phash" => process_phash_task(db, db_dir, task.asset_id),
         "hash" => process_hash_task(db, task.asset_id),
-        // Selection source-v2: high-resolution regional diagnostics; no focus
-        // verdict from an uncalibrated Laplacian/background score.
-        "blur" => crate::ai::selection::process_blur_task(
-            db,
-            db_dir,
-            task.asset_id,
-            crate::ai::selection::blur_soft_threshold(),
-        ),
-        // eyes 通道由 ai::selection::run_eyes_backfill 并发消费（依赖
-        // SCRFD + 闭眼分类器，index worker 无模型会话，不在此认领）
+        // eyes/blur 由选片池消费（ai::selection::run_selection_index_gated
+        // + run_eyes_backfill；index worker 无模型会话也不混队选片任务）
         _ => false,
     };
+    // 暂态失败（源仍在写入：登记 size ≠ 盘上 size）不烧额度——回 pending
+    // 延迟重试 + 本 worker 小退避，防慢速拷贝把任务烧成永久 failed
+    //（2026-10-13 真机：180MB TIF 拷贝中入库连败 3 次）。
+    if !ok && db.asset_source_in_flight(task.asset_id) {
+        let _ = db.defer_index_task(task.id);
+        drop(_guard);
+        std::thread::sleep(Duration::from_millis(500));
+        return true;
+    }
     let _ = db.finish_index_task(task.id, ok);
     true
 }
@@ -519,7 +525,7 @@ pub fn refresh_selection_for_generation(
         return;
     }
     let bus = bus.clone();
-    supervisor.spawn("index", "selection-gen1-regen".into(), move |_| {
+    supervisor.spawn("selection", "selection-gen1-regen".into(), move |_| {
         run_generation_refresh(&db_dir, &bus, &marker, |db| {
             let eyes = db.create_eyes_tasks_for_unindexed()?;
             let blur = db.create_blur_tasks_for_unindexed()?;

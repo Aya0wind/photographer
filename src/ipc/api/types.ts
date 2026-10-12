@@ -33,7 +33,7 @@ export interface DeviceSnapshot {
 export type DuplicatePolicy = "skip" | "rename" | "ask";
 
 /** 导入模式：copy=保留原文件（复制），move=入库后删除源（纳管已有照片） */
-export type ImportMode = "copy" | "move" | "reference";
+export type ImportMode = "copy" | "move";
 
 // --- 数据库注册表（2026-10-09 多数据库修正） ------------------
 // 应用可登记多个数据库（为多用户协作预埋），每个 = 独立 SQLite(library.db) +
@@ -678,7 +678,7 @@ export type ThumbGetResult =
 
 // --- 索引任务（缩略图/EXIF/语义）：状态与手动触发 -------------------------------------
 
-export type IndexKind = "image" | "thumb" | "exif" | "ai" | "face";
+export type IndexKind = "image" | "selection" | "thumb" | "exif" | "ai" | "face";
 
 /**
  * 单通道任务计数（index_status，对应后端 IndexKindStatus）。与后端持久化
@@ -695,8 +695,10 @@ export interface IndexCounters {
 
 /** 索引状态（index_status 返回；thumb/exif/ai 三通道计数） */
 export interface IndexStatus {
-  /** Each photo completes only after thumbnail, metadata and selection tasks. */
+  /** 图片索引完成度（thumb+exif；选片通道拆出后不含 eyes/blur） */
   image?: IndexCounters;
+  /** 选片索引完成度（eyes+blur 合并；仅 AI 开启的库有任务，行按 selectionEnabled 显示） */
+  selection?: IndexCounters;
   selectionReady?: boolean;
   /** AI 选片通道（eyes/blur）是否启用——「等待模型」只在开启且未就绪时成立 */
   selectionEnabled?: boolean;
@@ -712,7 +714,7 @@ export interface IndexStatus {
 // --- 索引重建 / 资产标记（M5） --------------------------------------------------------
 
 /** 重建索引的通道（index_rebuild；语义通道在重建命令里叫 semantic，与 IndexKind 的 ai 区分） */
-export type RebuildKind = "image" | "thumb" | "exif" | "semantic" | "face";
+export type RebuildKind = "image" | "thumb" | "exif" | "semantic" | "face" | "selection";
 
 /** 侧栏导航计数（sidebar_counts：一次性纯 COUNT；后端在途契约——
  *  命令未注册/失败/形状异常静默 null，侧栏不显示徽标） */

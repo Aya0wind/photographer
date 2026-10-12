@@ -27,22 +27,44 @@ pub fn analysis_lock() -> &'static Mutex<()> {
 
 /// No original-file read on cache hits and never full RAW development. The
 /// thumbnail is already oriented, and its real pixel dimensions remain evidence.
+///
+/// 2026-10-12 解码共享：照片（非 RAW）优先读缩略图任务已生成的 2048 档
+/// 缓存（内存降到 1024）——1024 不是缩略图档位（{256,512,2048}），单独
+/// 请求会触发一次多余的源解码；1024 档缓存仍作离线/旧库回退（源不在
+/// 也能出分析）。RAW 的 2048 是懒显影档（贵），保持 1024 内嵌直出（IO
+/// 级）。选片认领已门控缩略图就绪（见选片 worker），照片路径全程零额外
+/// 源解码。
 pub fn thumbnail(
     db: &crate::db::Db,
     db_dir: &Path,
     asset_id: i64,
 ) -> Option<(image::RgbImage, &'static str)> {
-    let (path, mtime): (String, String) =
+    let (path, mtime, kind): (String, String, String) =
         db.0.query_row(
-            "SELECT path,mtime FROM assets WHERE id=?1",
+            "SELECT path,mtime,kind FROM assets WHERE id=?1",
             [asset_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok()?;
     let src = Path::new(&path);
-    let cache = crate::thumbs::cached_for_asset(db_dir, src, ANALYSIS_SIZE, &mtime)
-        .or_else(|| crate::thumbs::cached_without_source(db_dir, src, ANALYSIS_SIZE))
-        .or_else(|| crate::thumbs::thumb_file(db_dir, src, ANALYSIS_SIZE))?;
+    // 照片：2048 档（缩略图任务产出）优先，1024 缓存离线回退；
+    // RAW：1024 内嵌直出档（2048 是懒显影档，不碰）
+    let lookup: &[u16] = if kind == "photo" {
+        &[2048, ANALYSIS_SIZE]
+    } else {
+        &[ANALYSIS_SIZE]
+    };
+    let mut cache: Option<String> = None;
+    for &tier in lookup {
+        cache = crate::thumbs::cached_for_asset(db_dir, src, tier, &mtime)
+            .or_else(|| crate::thumbs::cached_without_source(db_dir, src, tier));
+        if cache.is_some() {
+            break;
+        }
+    }
+    let generate_tier = if kind == "photo" { 2048 } else { ANALYSIS_SIZE };
+    let cache =
+        cache.or_else(|| crate::thumbs::thumb_file(db_dir, src, generate_tier))?;
     let decoded = image::ImageReader::open(cache).ok()?.decode().ok()?;
     Some((
         decoded

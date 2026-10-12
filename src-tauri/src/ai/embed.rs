@@ -322,12 +322,14 @@ impl SemanticEmbedder for ModelManager {
     }
 
     fn embed_text(&self, text: &str) -> Result<Vec<f32>, String> {
-        let mut slots = slots().lock().expect("infer slots mutex poisoned");
-        self.ensure_text(&mut slots)?;
-        let tokenizer = slots.tokenizer.as_ref().expect("ensure_text 已保证");
-        let encoding = tokenizer
-            .encode(text, true)
-            .map_err(|e| format!("分词失败: {e}"))?;
+        let encoding = {
+            let mut slots = slots().lock().expect("infer slots mutex poisoned");
+            self.ensure_text(&mut slots)?;
+            let tokenizer = slots.tokenizer.as_ref().expect("ensure_text 已保证");
+            tokenizer
+                .encode(text, true)
+                .map_err(|e| format!("分词失败: {e}"))?
+        };
         let ids: Vec<i64> = encoding.get_ids().iter().map(|v| i64::from(*v)).collect();
         let mask: Vec<i64> = encoding
             .get_attention_mask()
@@ -335,32 +337,47 @@ impl SemanticEmbedder for ModelManager {
             .map(|v| i64::from(*v))
             .collect();
         let seq = ids.len() as i64;
-        let session = slots.text.as_mut().expect("ensure_text 已保证");
+        let use_gpu = self.ai_params().use_gpu;
+        let text_model = super::semantic_model_ids(self.ai_params().quality_tier)[1];
+        // pick_embed 的 mean-pool 掩码（u32 形态；原实现从 encoding 取）
+        let pool_mask = encoding.get_attention_mask().to_vec();
 
-        let ids_t = Tensor::from_array((vec![1i64, seq], ids))
-            .map_err(|e| format!("构造 ids 张量失败: {e}"))?;
-        let mask_t = Tensor::from_array((vec![1i64, seq], mask))
-            .map_err(|e| format!("构造 mask 张量失败: {e}"))?;
-        let has_mask = session
-            .inputs()
-            .iter()
-            .any(|i| i.name().to_ascii_lowercase().contains("attention"));
-        let out_name = pick_embed_name(session, &["text_embeds", "pooler", "embeds", "hidden"])?;
-        let outputs = if has_mask {
-            session.run(ort::inputs![
-                input_name_input_ids(session) => ids_t,
-                input_name_attention_mask(session) => mask_t,
-            ])
-        } else {
-            session.run(ort::inputs![input_name_input_ids(session) => ids_t])
-        }
-        .map_err(|e| format!("text 推理失败: {e}"))?;
-        let mask = encoding.get_attention_mask().to_vec();
-        Ok(Self::normalize(pick_embed(
-            &outputs,
-            out_name.as_str(),
-            Some(&mask),
-        )?))
+        // run 段走加速回退封装（与 vision 同款）：GPU 设备移除
+        // （DXGI_ERROR_DEVICE_REMOVED 0x887A0005，2026-10-13 真机）等运行时
+        // 故障 → 毒化该模型 DML + 丢弃会话 → 重跑在 CPU 会话上自愈；此前
+        // 直跑 session.run 导致设备移除后 text 推理永久失败。
+        let extract = || -> Result<Vec<f32>, String> {
+            let ids_t = Tensor::from_array((vec![1i64, seq], ids.clone()))
+                .map_err(|e| format!("构造 ids 张量失败: {e}"))?;
+            let mask_t = Tensor::from_array((vec![1i64, seq], mask.clone()))
+                .map_err(|e| format!("构造 mask 张量失败: {e}"))?;
+            let mut slots = slots().lock().expect("infer slots mutex poisoned");
+            self.ensure_text(&mut slots)?;
+            let session = slots.text.as_mut().expect("ensure_text 已保证");
+            let has_mask = session
+                .inputs()
+                .iter()
+                .any(|i| i.name().to_ascii_lowercase().contains("attention"));
+            let out_name =
+                pick_embed_name(session, &["text_embeds", "pooler", "embeds", "hidden"])?;
+            let outputs = if has_mask {
+                session.run(ort::inputs![
+                    input_name_input_ids(session) => ids_t,
+                    input_name_attention_mask(session) => mask_t,
+                ])
+            } else {
+                session.run(ort::inputs![input_name_input_ids(session) => ids_t])
+            }
+            .map_err(|e| format!("text 推理失败: {e}"))?;
+            pick_embed(&outputs, out_name.as_str(), Some(&pool_mask))
+        };
+        let reset = || {
+            let mut slots = slots().lock().expect("infer slots mutex poisoned");
+            slots.text = None; // 丢弃 DML 会话：重建走 CPU 分支（毒化位已置）
+        };
+        let embedded =
+            super::run_with_acceleration_fallback(use_gpu, text_model, extract, reset)?;
+        Ok(Self::normalize(embedded))
     }
 }
 

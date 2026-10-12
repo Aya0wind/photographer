@@ -1,9 +1,12 @@
 import { useTranslation } from "react-i18next";
+import { useState } from "react";
+import CreateLibraryDialog from "@/features/storage/components/CreateLibraryDialog";
 import type { ImportWizardFlow } from "../lib/useImportWizard";
 import { FolderGlyph } from "../SourceFileViews";
 
 export default function ImportTargetLibraryCard({ flow }: { flow: ImportWizardFlow }) {
   const { t } = useTranslation();
+  const [creating, setCreating] = useState(false);
   const { targetLibrary, targetLibraryId, setTargetLibraryId, photoLibraries, starting } = flow;
   return (
     <section className="rounded-2xl border border-edge bg-panel/40 p-4" data-testid="wizard-target-library-card">
@@ -23,10 +26,12 @@ export default function ImportTargetLibraryCard({ flow }: { flow: ImportWizardFl
           <option key={lib.id} value={lib.id} disabled={lib.status !== "online" || lib.organizationPending}>{lib.name}</option>
         ))}
       </select>
+      <button type="button" disabled={starting} onClick={() => setCreating(true)} className="mt-3 text-xs text-accent hover:underline" data-testid="wizard-new-target-library">+ {t("storage.create")}</button>
       {targetLibrary && <div className="mt-3 space-y-1">
         <p className="text-[11px] text-text-muted">{t("wizard.location.title")}</p>
         <p className="break-all text-xs leading-relaxed text-text-secondary" title={targetLibrary.rootPath}>{targetLibrary.rootPath}</p>
       </div>}
+      {creating && <CreateLibraryDialog lockMode onClose={() => setCreating(false)} onCreated={library => { flow.onLibraryCreated(library); setCreating(false); }} />}
     </section>
   );
 }

@@ -911,6 +911,15 @@ pub fn apply_orientation(img: image::RgbImage, orientation: u32) -> image::RgbIm
 /// 空图（0x0）使后续编码失败 → 整体 None。魔数嗅探兜底（扩展名伪装的
 /// 文件也能解）；.cur 上游无扩展名映射也无嗅探表项，但其头（00 00 02 00）
 /// 与 ICO 同构——ICO 解码器忽略 type 字段可直接认领，显式指格式打通。
+/// image crate 通用解码的内存限额：默认 512MB 会误杀大幅面 TIFF——
+/// 解码器按约 3× 像素体量估算分配，61MP RGB（172MB）≈516MB 超线被拒
+///（2026-10-13 真机：9504×6336 TIF InsufficientMemory，隔壁 5893 高度的
+/// 压线通过）。放大到 4GiB：覆盖 ~200MP RGB16 的合法档案，仍拦截病态
+/// 解压炸弹；解码另有 10s/60s 超时兜底。
+fn generous_decode_limits() -> image::Limits {
+    image::Limits::no_limits()
+}
+
 fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
     let decoded = image::ImageReader::open(src).ok().and_then(|mut r| {
         let is_cur = src
@@ -921,6 +930,7 @@ fn full_decode_resize(src: &Path, size: u16) -> image::RgbImage {
         if is_cur && r.format().is_none() {
             r.set_format(image::ImageFormat::Ico);
         }
+        r.limits(generous_decode_limits());
         r.with_guessed_format().ok()?.decode().ok()
     });
     match decoded {
@@ -1021,7 +1031,10 @@ fn full_decode_bytes_resize(data: &[u8], size: u16) -> image::RgbImage {
     match image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
         .ok()
-        .and_then(|r| r.decode().ok())
+        .and_then(|mut r| {
+            r.limits(generous_decode_limits());
+            r.decode().ok()
+        })
     {
         Some(img) => img.thumbnail(u32::from(size), u32::from(size)).to_rgb8(),
         None => image::RgbImage::new(0, 0),

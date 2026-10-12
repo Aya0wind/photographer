@@ -206,13 +206,19 @@ pub fn run() {
                     &supervisor_handle,
                     enable_clip || enable_face,
                 );
-                // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）
+                // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）+ blur
+                // 选片消费池（统一经 pipeline 契约入口，2026-10-12）
                 if enable_clip || enable_face {
                     ai::selection::kick_eyes_if_ready(
                         db_dir.clone(),
                         &ai_for_kick,
                         &bus,
                         &supervisor_handle,
+                    );
+                    index::pipeline::kick(
+                        db_dir.clone(),
+                        &supervisor_handle,
+                        index::pipeline::Pools::SELECTION,
                     );
                 }
                 // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）

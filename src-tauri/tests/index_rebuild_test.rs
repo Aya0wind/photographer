@@ -117,10 +117,13 @@ fn rebuild_image_requeues_all_components_without_touching_user_or_ai_data() {
     db.insert_face(1,0.1,0.1,0.3,0.3,&[0.1;512],Some(pid)).unwrap();
     std::fs::write(db_dir.join("thumbs/256/old.jpg"),b"cache").unwrap();
     std::fs::write(db_dir.join("vectors.usearch"),b"unchanged").unwrap();
-    assert_eq!(rebuild_channel_core(&db,&db_dir,"image").unwrap(),4);
-    for component in ["thumb","exif","eyes","blur"] { assert_eq!(pending_count(&db,component),1); }
+    // 2026-10-12 拆分：图片重建只重排 thumb/exif（2 条）
+    assert_eq!(rebuild_channel_core(&db,&db_dir,"image").unwrap(),2);
+    for component in ["thumb","exif"] { assert_eq!(pending_count(&db,component),1); }
+    // 选片通道不回流图片重建：eyes/blur 任务行与分析产物原样保留
+    for component in ["eyes","blur"] { assert_eq!(pending_count(&db,component),0); }
     assert!(!db_dir.join("thumbs").exists());
-    assert!(db.ai_analysis_for(1).unwrap().is_empty());
+    assert!(db.ai_analysis_for(1).unwrap().len()==1,"选片分析不被图片重建清除");
     let retained:(i32,i32,String,String,i32,Option<i32>)=db.0.query_row(
         "SELECT rating,flagged,ai_indexed_at,face_indexed_at,thumb_state,iso FROM assets WHERE id=1",[],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).unwrap();
@@ -131,10 +134,10 @@ fn rebuild_image_requeues_all_components_without_touching_user_or_ai_data() {
 }
 
 #[test]
-fn image_rebuild_waits_for_previous_component_writes() {
+fn selection_rebuild_waits_for_previous_component_writes() {
     let dir = tempfile::tempdir().unwrap();
     let db_dir = dir.path().join("db");
-    std::fs::create_dir_all(&db_dir).unwrap();
+    std::fs::create_dir_all(db_dir.join("db")).unwrap();
     let db = open_db(&db_dir);
     db.insert_asset(&asset("X:/original.jpg",Photo)).unwrap();
     let barrier = index::image_index_lock(&db_dir);
@@ -145,7 +148,7 @@ fn image_rebuild_waits_for_previous_component_writes() {
     let worker=std::thread::spawn(move || {
         let db=open_db(&destination);
         started_tx.send(()).unwrap();
-        rebuild_channel_core(&db,&destination,"image").unwrap();
+        rebuild_channel_core(&db,&destination,"selection").unwrap();
         done_tx.send(()).unwrap();
     });
     started_rx.recv().unwrap();

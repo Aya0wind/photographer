@@ -27,6 +27,7 @@ export interface Settings {
   /** 画廊展示（M3+）：RAW+JPG 同 pairId 合并为一张卡（优先 JPG 缩略图 + RAW+JPG 角标） */
   gallery: {
     mergeRawJpg: boolean;
+    hideCrossLibraryDuplicates: boolean;
   };
   ai: {
     enableClip: boolean;
@@ -85,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   gallery: {
     mergeRawJpg: true,
+    hideCrossLibraryDuplicates: true,
   },
   ai: {
     enableClip: false,

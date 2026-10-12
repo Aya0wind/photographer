@@ -9,8 +9,8 @@
 //! 一一对应。
 //!
 //! 铁律：磁盘 IO / DB 批量查询一律 `run_blocking` 后台线程；移除登记
-//! 默认不删照片文件，`delete_files=true` 仅管理库（reference=false）可选
-//! 代删磁盘原片——引用库一律拒绝。
+//! 默认不删照片文件，`delete_files=true` 只删除软件复制或移动进库的文件，
+//! 原地扫描登记的已有照片保持不动。
 
 use std::time::Duration;
 
@@ -177,6 +177,44 @@ pub fn fetch_photo_library_create(
     let mut dto=PhotoLibraryDto::from(row);dto.organization_pending=reorganize_existing;Ok(dto)
 }
 
+/// 添加已有文件夹：位于已登记库内时扫描所属库，避免重复登记。
+pub fn fetch_photo_library_setup(
+    state: &super::AppState,
+    name: &str,
+    root_path: &str,
+    organization_template: &str,
+    existing_folder: bool,
+    reorganize_existing: bool,
+) -> Result<PhotoLibraryDto, String> {
+    let _guard = state.register_gate.lock().map_err(|_| "照片登记状态不可用")?;
+    if reorganize_existing && !existing_folder {
+        return Err("只有使用现有文件夹时才能重新组织已有照片".into());
+    }
+    let normalized = crate::settings::normalize_library_path(root_path)?;
+    let root = std::path::Path::new(&normalized);
+    crate::db::organization::validate_photo_folder(root, existing_folder)?;
+    if existing_folder {
+        let db = super::app_database_db(state)?;
+        let real_root = root.canonicalize().map_err(|e| e.to_string())?;
+        for library in db.photos_library_list().map_err(|e| e.to_string())? {
+            let contains = crate::db::strip_root_prefix(&normalized, &library.root_path).is_some()
+                || std::path::Path::new(&library.root_path).canonicalize()
+                    .is_ok_and(|existing| real_root.starts_with(existing));
+            if !contains { continue; }
+            if db.photos_library_organization_pending(&library.id).map_err(|e| e.to_string())? {
+                return Err(format!("照片库「{}」正在整理已有照片，请完成整理后再扫描", library.name));
+            }
+            if reorganize_existing {
+                return Err(format!("此文件夹已属于照片库「{}」，请在该照片库的整理设置中执行重新组织", library.name));
+            }
+            db.library_scan_job_enqueue(&library.id).map_err(|e| e.to_string())?;
+            state.library_scan_kick.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(PhotoLibraryDto::from(library));
+        }
+    }
+    fetch_photo_library_create(state, name, &normalized, organization_template, reorganize_existing)
+}
+
 /// 所有照片库均使用相同登记与扫描流程。
 #[tauri::command]
 pub async fn photo_library_create(
@@ -190,10 +228,7 @@ pub async fn photo_library_create(
 ) -> Result<PhotoLibraryDto, String> {
     let shared = state.inner().clone();
     let dto = run_blocking(shared, move |state| {
-        if reorganize_existing&&!existing_folder{return Err("只有使用现有文件夹时才能重新组织已有照片".into());}
-        let normalized=crate::settings::normalize_library_path(&root_path)?;
-        crate::db::organization::validate_photo_folder(std::path::Path::new(&normalized),existing_folder)?;
-        fetch_photo_library_create(state, &name, &root_path, &organization_template,reorganize_existing)
+        fetch_photo_library_setup(state, &name, &root_path, &organization_template, existing_folder, reorganize_existing)
     })
     .await?;
     app.emit("app://event", &AppEvent::PhotoLibrariesChanged)

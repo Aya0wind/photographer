@@ -184,6 +184,14 @@ beforeEach(() => {
 });
 
 describe("M4 路由与侧栏", () => {
+  it.each(["/albums/1", "/albums/%E6%97%A5%E8%90%BD"])("相册详情 %s 的面包屑返回相册列表", async (path) => {
+    albumListMock.mockResolvedValue([makeAlbum(1, "旅行", 0)]);
+    const user = userEvent.setup();
+    renderRoutes(path);
+    const breadcrumbs = await screen.findByTestId("album-breadcrumbs");
+    await user.click(within(breadcrumbs).getByRole("link", { name: "相册" }));
+    expect(await screen.findByTestId("albums-page")).toBeInTheDocument();
+  });
   it("侧栏「人物」「相册」入口，点击导航对应路由", async () => {
     const user = userEvent.setup();
     renderRoutes("/gallery");
@@ -257,6 +265,29 @@ describe("M4 路由与侧栏", () => {
 // --- 标签封面（M4 二轮）：首条语义命中缩略图，后台批量预取，失败静默占位 -------------
 
 describe("智能相册标签封面", () => {
+  it("封面资产不可用时自动换图，不一直等待失效的照片", async () => {
+    localStorage.setItem("photographer.albums.tagIndex.v2", JSON.stringify({ app: {
+      "日落": { cover: 9, hits: [{ assetId: 9, score: 0.9 }, { assetId: 10, score: 0.8 }] },
+    } }));
+    thumbMock.mockImplementation((id) => Promise.resolve(id === 9
+      ? { status: "unavailable" } : { status: "ready", path: "D:\\cache\\10.jpg" }));
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderRoutes("/albums");
+    expect(await screen.findByTestId("albums-tag-cover-img")).toHaveAttribute("src", "asset://D:\\cache\\10.jpg");
+    expect(thumbMock).toHaveBeenCalledWith(10, 240);
+    expect(searchSemanticMock).not.toHaveBeenCalled();
+  });
+
+  it("缓存图片无法加载时自动换用另一张封面", async () => {
+    localStorage.setItem("photographer.albums.tagIndex.v2", JSON.stringify({ app: {
+      "日落": { cover: 9, hits: [{ assetId: 9, score: 0.9 }, { assetId: 10, score: 0.8 }] },
+    } }));
+    thumbMock.mockImplementation((id) => Promise.resolve({ status: "ready", path: `D:\\cache\\${id}.jpg` }));
+    convertMock.mockImplementation((p: string) => `asset://${p}`);
+    renderRoutes("/albums");
+    fireEvent.error(await screen.findByTestId("albums-tag-cover-img"));
+    await waitFor(() => expect(screen.getByTestId("albums-tag-cover-img")).toHaveAttribute("src", "asset://D:\\cache\\10.jpg"));
+  });
   it("命中标签显示封面 img（首条命中缩略图）；未命中标签显示占位", async () => {
     searchSemanticMock.mockImplementation((q: string) =>
       q === "日落" ? Promise.resolve([{ assetId: 9, score: 0.9 }]) : Promise.resolve([]),

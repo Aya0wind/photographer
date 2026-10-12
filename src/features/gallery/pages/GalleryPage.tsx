@@ -1,4 +1,6 @@
 import FilterResultsTransition from "@/shared/components/FilterResultsTransition";
+import PhotosAddedNotice from "@/features/import/components/PhotosAddedNotice";
+import { usePhotoAdditionRefresh } from "@/features/import/lib/usePhotoAdditionRefresh";
 import { useExportRefresh } from "@/features/editor/lib/useExportRefresh";
 import { usePageSentinel } from "@/features/gallery/lib/usePageSentinel";
 import { usePhotoTimeline } from "../lib/usePhotoTimeline";
@@ -110,6 +112,21 @@ export default function GalleryPage() {
     setInputs((prev) => ({ ...prev, ...patch }));
   }, []);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 筛选弹层「点外部关闭」（2026-10-13 定案：去掉右上角 × 按钮）：
+  // 弹层内交互不关；筛选切换按钮（data-filter-toggle）自己处理开合，
+  // 排除掉防「pointerdown 关 + click 又开」的抖动。
+  const filterPopoverRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!panelOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (filterPopoverRef.current?.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest("[data-filter-toggle]") !== null) return;
+      setPanelOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [panelOpen]);
 
   const rawKey = serializeInputs(inputs);
   const debouncedKey = useDebouncedValue(rawKey, DEBOUNCE_MS);
@@ -233,8 +250,8 @@ export default function GalleryPage() {
   const resultKey=useRef<string|null>(null);
   const [resultsRevision,setResultsRevision]=useState(0);
 
-  // --- 跨库重复折叠（M5 §四：纯显示过滤，开关默认关） --------------------------------
-  const [hideDuplicates, setHideDuplicates] = useHideCrossLibraryDuplicates();
+  // 跨库重复折叠：遵循设置页的展示偏好，默认开启。
+  const hideDuplicates = useHideCrossLibraryDuplicates();
   /** 照片库登记表（折叠在线判定 + 重复项列表展示库名；null=未拉到） */
   const [libraries, setLibraries] = useState<PhotoLibrary[] | null>(null);
   /** exact 重复组全量（开关开启才拉；null=未拉到不折叠）；导入/扫描收尾重拉跟上新副本 */
@@ -288,20 +305,21 @@ export default function GalleryPage() {
     /** 全量翻页拉 exact 重复组（组序按组大小降序；after=0 基组偏移，短页=到底） */
     const pullAll = async (): Promise<void> => {
       const collected: DuplicateGroupDto[] = [];
-      for (let after = 0; ; after += collected.length) {
+      for (let after = 0; ; ) {
         const page = await duplicatesList("exact", after, 100);
         if (cancelled) return;
         collected.push(...page);
         if (page.length < 100) break;
+        after += page.length;
       }
       if (!cancelled) setDuplicateGroups(collected);
     };
-    void pullAll();
+    void pullAll().catch(() => {});
     let unlisten: (() => void) | null = null;
     void subscribeAppEvents((event: AppEvent) => {
       // 导入/扫描登记都会产生新副本——收尾后重拉（幂等）
       if (event.type === "importSessionFinished" || event.type === "libraryScanFinished") {
-        void pullAll();
+        void pullAll().catch(() => {});
       }
     })
       .then((off) => {
@@ -346,6 +364,16 @@ export default function GalleryPage() {
 
   /** 视口滚动位置（快照保存用；重挂载恢复） */
   const scrollTopRef = useRef(cachedAtMount?.scrollTop ?? 0);
+  const pendingAdditionRefresh = useRef(false);
+  usePhotoAdditionRefresh(() => {
+    // 阅读旧照片或使用筛选时保留当前窗口；回到图库顶部再接入新增照片。
+    if (modeRef.current !== "default" || timelineWindowRef.current || scrollTopRef.current > 160) {
+      pendingAdditionRefresh.current = true;
+      return;
+    }
+    pendingAdditionRefresh.current = false;
+    setReloadNonce((n) => n + 1);
+  });
   const gridRef = useRef<AssetGridHandle | null>(null);
   const [viewport, setViewport] = useState<ViewportInfo>({
     scrollTop: scrollTopRef.current,
@@ -468,6 +496,10 @@ export default function GalleryPage() {
   const handleViewportChange = useCallback((info: ViewportInfo) => {
     scrollTopRef.current = info.scrollTop;
     setViewport(info);
+    if (pendingAdditionRefresh.current && info.scrollTop <= 160 && modeRef.current === "default" && !timelineWindowRef.current) {
+      pendingAdditionRefresh.current = false;
+      setReloadNonce((n) => n + 1);
+    }
   }, []);
 
   const timelineCurrentAssets = useCallback(() => assetsRef.current, []);
@@ -755,6 +787,7 @@ export default function GalleryPage() {
 
   return (
     <div className="relative h-full" data-testid="gallery-page">
+      <PhotosAddedNotice />
       {/* 内容区：水平居中 + 左右对称 padding（修复贴导航边起排/首卡被切） */}
       <div
         className="flex h-full w-full flex-col px-4"
@@ -773,9 +806,6 @@ export default function GalleryPage() {
           tileSize={tileSize} onTileSize={setTileSize} layout={layout} onLayout={setLayout} onImport={() => navigate("/import")}
           onCull={() => void startCullingFromFilter()} cullBusy={cullBusy}
           cullDisabled={resultsBusy || (semanticMode ? semantic.assets.length : totalCount ?? assets.length) === 0}
-          hideDuplicates={hideDuplicates}
-          onToggleDuplicates={() => setHideDuplicates(!hideDuplicates)}
-          duplicatesActive={!semanticMode && collapse !== null && duplicateGroups !== null && duplicateGroups.length > 0}
         />
 
 
@@ -812,12 +842,12 @@ export default function GalleryPage() {
           <SemanticGateNotice reason={semanticGate.reason} testId="gallery-semantic-gate" />
         )}
 
-        {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单） */}
-        {panelOpen && <div className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4" data-testid="gallery-filter-popover">
+        {/* 筛选面板（默认收起；修改筛选自动退出语义态；保存视图成功后刷新清单；
+            点外部关闭——无 × 按钮，2026-10-13 定案） */}
+        {panelOpen && <div ref={filterPopoverRef} className="ui-glass ui-popover absolute inset-x-4 top-14 z-20 max-h-[calc(100%_-_80px)] overflow-y-auto rounded-2xl border border-edge p-4" data-testid="gallery-filter-popover">
           <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary">
             <span>{t("search.moreFilters")}</span>
             <ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={clearAllFilters}/><span className="flex-1"/>
-            <button type="button" className="ui-pill-button" onClick={() => setPanelOpen(false)} aria-label={t("ui.close")}>× {t("ui.close")}</button>
           </div>
           <QuickFilterBar inputs={inputs} onPatch={patchFilters} />
           <FilterPanel inputs={inputs} onPatch={patchFilters} advancedOnly onPurgeMissing={() => setPurgeAskOpen(true)} />

@@ -33,6 +33,7 @@ import { useGalleryLayout } from "@/features/gallery/lib/useGalleryLayout";
 import SelectionDock from "@/shared/components/SelectionDock";
 import ViewerOverlay from "@/features/gallery/components/ViewerOverlay";
 import AddToAlbumDialog from "@/features/albums/components/AddToAlbumDialog";
+import AlbumBreadcrumbs from "../components/AlbumBreadcrumbs";
 import { subgroupSuggestions } from "@/features/albums/lib/subgroupSuggestions";
 import ErrorModal from "@/shared/components/ErrorModal";
 import {
@@ -100,6 +101,20 @@ export default function AlbumDetailPage() {
     setInputs((prev) => ({ ...prev, ...patch }));
   }, []);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 筛选弹层「点外部关闭」（2026-10-13 定案：去掉右上角 × 按钮）；
+  // 切换按钮（data-filter-toggle）自己处理开合，排除防抖动。
+  const filterPopoverRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!panelOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (filterPopoverRef.current?.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest("[data-filter-toggle]") !== null) return;
+      setPanelOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [panelOpen]);
   const rawKey = serializeInputs(inputs);
   const debouncedKey = useDebouncedValue(rawKey, DEBOUNCE_MS);
   const filtersActive = useMemo(() => hasActiveFilters(parseInputs(debouncedKey)), [debouncedKey]);
@@ -390,6 +405,7 @@ export default function AlbumDetailPage() {
         {/* 页头：相册名（点击重命名）+ 张数 + 添加照片 + 筛选 + 尺寸 */}
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4">
         <div className="flex h-12 min-w-0 items-center gap-2.5" data-testid="album-detail-toolbar">
+          <AlbumBreadcrumbs>
           {renaming ? (
             <div className="flex min-w-0 items-center gap-1.5">
               <input
@@ -436,10 +452,12 @@ export default function AlbumDetailPage() {
               title={t("albums.rename")}
               className="min-w-0 shrink-0 truncate text-sm font-semibold text-text-primary transition-colors hover:text-accent"
               data-testid="album-detail-name"
+              aria-current="page"
             >
               {albumName}
             </button>
           )}
+          </AlbumBreadcrumbs>
           <span
             className="shrink-0 rounded-full bg-panel px-2 py-0.5 font-mono text-[11px] tabular-nums text-text-secondary"
             data-testid="album-detail-count"
@@ -452,8 +470,7 @@ export default function AlbumDetailPage() {
         <GalleryBrowseControls inline
           filterOpen={panelOpen} filterCount={chips.length} onToggleFilter={() => setPanelOpen(v => !v)}
           filterTestId="album-detail-filter-toggle" tileSize={tileSize} onTileSize={setTileSize}
-          layout={layout} onLayout={setLayout} hideDuplicates={duplicates.hidden}
-          onToggleDuplicates={() => { exitSelection(); duplicates.setHidden(!duplicates.hidden); }} duplicatesActive={duplicates.active}
+          layout={layout} onLayout={setLayout}
           onImport={() => navigate(`/import?album=${albumId}`)} onCull={() => void startCulling()}
           cullBusy={cullBusy} cullDisabled={itemCount === 0 || status === "loading" || rawKey !== debouncedKey} cullTestId="album-cull-start" cullLabel={t("albums.cull")}
           inactive={viewer !== null}>
@@ -521,8 +538,8 @@ export default function AlbumDetailPage() {
         </div>
 
         {/* 筛选面板（相册维度隐藏：本页已在相册上下文内） */}
-        {panelOpen && <div className="ui-glass ui-popover z-20 mb-2 max-h-[45%] shrink-0 overflow-y-auto rounded-2xl border border-edge p-4">
-          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary"><span>{t("search.filter")}</span><ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={()=>setInputs(EMPTY_INPUTS)}/><span className="flex-1"/><button type="button" className="ui-pill-button" aria-label={t("ui.close")} onClick={() => setPanelOpen(false)}>× {t("ui.close")}</button></div>
+        {panelOpen && <div ref={filterPopoverRef} className="ui-glass ui-popover z-20 mb-2 max-h-[45%] shrink-0 overflow-y-auto rounded-2xl border border-edge p-4">
+          <div className="mb-2 flex items-center gap-3 text-xs text-text-secondary"><span>{t("search.filter")}</span><ClearFiltersButton disabled={!hasActiveFilters(inputs)} onClear={()=>setInputs(EMPTY_INPUTS)}/><span className="flex-1"/></div>
           <FilterPanel inputs={inputs} onPatch={patchInputs} hideAlbum />
         </div>}
 

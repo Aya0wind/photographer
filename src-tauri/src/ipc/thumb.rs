@@ -108,6 +108,7 @@ impl ThumbQueue {
     /// 生成结果记账：成功清失败计数；失败 +1（达 3 后不再入队）。
     fn record_result(inner: &QueueInner, key: (i64, u16), ok: bool) {
         let mut state = inner.state.lock().expect("thumb queue mutex poisoned");
+        state.queued.remove(&key);
         if ok {
             state.failures.remove(&key);
         } else {
@@ -120,7 +121,6 @@ impl ThumbQueue {
         let mut state = inner.state.lock().expect("thumb queue mutex poisoned");
         loop {
             if let Some(job) = state.pending.pop_front() {
-                state.queued.remove(&(job.asset_id, job.size));
                 return Some(job);
             }
             if state.stop {
@@ -169,6 +169,11 @@ impl ThumbQueue {
             .expect("thumb queue mutex poisoned")
             .pending
             .len()
+    }
+
+    fn permanently_failed(&self, asset_id: i64, size: u16) -> bool {
+        self.inner.state.lock().expect("thumb queue mutex poisoned")
+            .failures.get(&(asset_id, size)).copied().unwrap_or(0) >= 3
     }
 }
 
@@ -249,6 +254,9 @@ pub fn fetch_asset_thumb(
         let _ = db.set_thumb_state(asset_id, 0);
     } else if thumb_state == 2 || !decodable {
         return Ok(ThumbOutcome::Unavailable); // 永久占位/不可解码：不入队
+    }
+    if state.thumb_queue.permanently_failed(asset_id, size) {
+        return Ok(ThumbOutcome::Unavailable);
     }
     let queued = state.thumb_queue.push(ThumbJob {
         asset_id,
@@ -389,4 +397,40 @@ pub async fn device_thumb_get(
         fetch_device_thumb(state, &device_id, &object_id, &version, size)
     })
     .await
+}
+
+#[cfg(test)]
+mod queue_lifecycle_tests {
+    use super::*;
+
+    fn job() -> ThumbJob {
+        ThumbJob { asset_id: 1, size: 240, src: "photo.jpg".into(), db_dir: "db".into() }
+    }
+
+    #[test]
+    fn processing_job_remains_deduplicated_until_completion() {
+        let queue = ThumbQueue::new();
+        assert!(queue.push(job()));
+        ThumbQueue::pop(&queue.inner).unwrap();
+        assert!(queue.push(job()));
+        assert_eq!(queue.pending_len(), 0);
+        ThumbQueue::record_result(&queue.inner, (1, 240), false);
+        assert!(queue.push(job()));
+        assert_eq!(queue.pending_len(), 1);
+    }
+
+    #[test]
+    fn repeated_failures_settle_instead_of_waiting_forever() {
+        let queue = ThumbQueue::new();
+        for _ in 0..3 {
+            assert!(queue.push(job()));
+            ThumbQueue::pop(&queue.inner).unwrap();
+            ThumbQueue::record_result(&queue.inner, (1, 240), false);
+        }
+        assert!(queue.permanently_failed(1, 240));
+        assert!(!queue.push(job()));
+        assert_eq!(queue.pending_len(), 0);
+        ThumbQueue::record_result(&queue.inner, (1, 240), true);
+        assert!(!queue.permanently_failed(1, 240));
+    }
 }

@@ -645,7 +645,10 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
                 }
             }
             let _gate = ImportGate(gate);
-            let paused = gate_supervisor.pause_kind("index");
+            // 让路闸覆盖两个索引池：index（thumb/exif/hash/phash）+
+            // selection（eyes/blur 选片索引，2026-10-12 拆分后独立池）
+            let paused = gate_supervisor.pause_kind("index")
+                + gate_supervisor.pause_kind("selection");
             if paused > 0 {
                 eprintln!("导入让路：已暂停 {paused} 个索引任务，导入完成后自动恢复");
             }
@@ -654,23 +657,28 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
             // 才能起跑，不存在互相踩暂停/恢复的交错）。
             drop(_gate);
             gate_supervisor.resume_kind("index");
+            gate_supervisor.resume_kind("selection");
             // 索引/AI/连拍收尾统一在导入结束后一次性触发，且仅在本轮确有
             // 已落盘文件（done_files>0；全跳过的重复导入不打扰）。取消/
             // 设备失联的会话同样放行——已落盘文件的任务必须被唤醒（journal
             // 行已终结，index 任务只写 index_tasks/assets 派生列，不与收尾
             // 收割竞争）。索引天然增量：worker 只领取 pending 任务行。
             if stats.done_files > 0 {
-                // pHash 任务补差（2026-10-09 审计 P0-C）+ eyes/blur 选片通道
-                // 建档（2026-10-12：插入不再登记这两类，AI 开启的库在此
-                // 批量幂等补建——关闭的库不产生「等待模型」任务）。
+                // 导入收尾统一追加分（2026-10-12 管线契约：phash 补差 +
+                // AI 开启库的选片账；缩略图在插入时已播种——见
+                // index::pipeline 模块文档）
                 if let Ok(db) = open_library_db(&index_db_dir) {
-                    let _ = db.create_phash_tasks_for_unindexed();
-                    if enable_clip || enable_face {
-                        let _ = db.create_eyes_tasks_for_unindexed();
-                        let _ = db.create_blur_tasks_for_unindexed();
-                    }
+                    crate::index::pipeline::enqueue_import_backlog(
+                        &db,
+                        crate::index::pipeline::selection_enabled(&ai_settings),
+                    );
                 }
-                crate::index::kick(index_db_dir.clone(), &index_supervisor);
+                // 图片 + 选片两池统一唤醒（导入在场让路闸在 kick 内）
+                crate::index::pipeline::kick(
+                    index_db_dir.clone(),
+                    &index_supervisor,
+                    crate::index::pipeline::Pools::ALL,
+                );
                 // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
                 // 自动入图——指纹不变走 bincode 快路径 + asset_regions 增量
                 crate::geo::install::ensure_installed(
@@ -696,7 +704,8 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
                     );
                 }
                 // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021；
-                // AI 关闭时任务不存在也不消费，2026-10-12）
+                // AI 关闭时任务不存在也不消费，2026-10-12。blur 消费池已由
+                // 上面的 pipeline::kick(ALL) 唤醒）
                 if enable_clip || enable_face {
                     crate::ai::selection::kick_eyes_if_ready(
                         index_db_dir.clone(),

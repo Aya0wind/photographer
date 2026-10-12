@@ -31,6 +31,26 @@ beforeEach(() => {
 });
 
 describe("标签封面资产（fetchAlbumCoverAssetId）", () => {
+  it("失效封面改用已缓存的其他命中，无需重新运行语义搜索", async () => {
+    localStorage.setItem("photographer.albums.tagIndex.v2", JSON.stringify({ app: {
+      "日落": { cover: 9, hits: [{ assetId: 9, score: 0.9 }, { assetId: 10, score: 0.8 }] },
+    } }));
+    await expect(fetchAlbumCoverAssetId("日落", [9])).resolves.toBe(10);
+    expect(searchSemanticMock).not.toHaveBeenCalled();
+  });
+
+  it("空封面但仍有索引命中时恢复封面", async () => {
+    localStorage.setItem("photographer.albums.tagIndex.v2", JSON.stringify({ app: {
+      "日落": { cover: null, hits: [{ assetId: 10, score: 0.8 }] },
+    } }));
+    await expect(fetchAlbumCoverAssetId("日落")).resolves.toBe(10);
+  });
+
+  it("缓存候选耗尽后重新查询，跳过已失败的照片", async () => {
+    searchSemanticMock.mockResolvedValue([{ assetId: 9, score: 0.9 }, { assetId: 10, score: 0.8 }]);
+    await expect(fetchAlbumCoverAssetId("日落", [9])).resolves.toBe(10);
+    expect(searchSemanticMock).toHaveBeenCalledWith("日落", 100);
+  });
   it("命中：searchSemantic(tag, 1) 返回首条资产 id", async () => {
     searchSemanticMock.mockResolvedValue([{ assetId: 9, score: 0.9 }]);
 

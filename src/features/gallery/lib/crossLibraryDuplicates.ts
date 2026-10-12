@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 import type { AssetDto, DuplicateGroupDto, PhotoLibrary } from "@/ipc/api";
 
@@ -21,32 +21,9 @@ import type { AssetDto, DuplicateGroupDto, PhotoLibrary } from "@/ipc/api";
  *   留下永不填充的洞。
  */
 
-/** localStorage 键：隐藏跨库重复开关（默认关，计划定案） */
-export const HIDE_CROSS_LIBRARY_DUPLICATES_KEY = "photographer.gallery.hideCrossLibraryDuplicates";
-
-export function loadHideCrossLibraryDuplicates(): boolean {
-  try {
-    return localStorage.getItem(HIDE_CROSS_LIBRARY_DUPLICATES_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-export function saveHideCrossLibraryDuplicates(value: boolean): void {
-  try {
-    localStorage.setItem(HIDE_CROSS_LIBRARY_DUPLICATES_KEY, value ? "1" : "0");
-  } catch {
-    // 存储不可用时仅内存态生效
-  }
-}
-
-export function useHideCrossLibraryDuplicates(): [boolean, (next: boolean) => void] {
-  const [value, setValue] = useState(loadHideCrossLibraryDuplicates);
-  const change = (next: boolean) => {
-    setValue(next);
-    saveHideCrossLibraryDuplicates(next);
-  };
-  return [value, change];
+/** 全局展示设置：默认隐藏跨照片库的重复副本，设置页修改后立即同步。 */
+export function useHideCrossLibraryDuplicates(): boolean {
+  return useSettingsStore((state) => state.settings.gallery.hideCrossLibraryDuplicates);
 }
 
 /** 重复组是否跨库（≥2 个互不相同的已知 libraryId；同库组不受开关影响） */

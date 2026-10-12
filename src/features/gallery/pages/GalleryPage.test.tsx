@@ -199,6 +199,33 @@ beforeEach(() => {
 // --- 分组渲染 ---------------------------------------------------------------------
 
 describe("画廊：日期分组照片墙", () => {
+  it("筛选弹层：点外部区域关闭；弹层内交互与筛选切换按钮不关闭（2026-10-13）", async () => {
+    const user = userEvent.setup();
+    renderGallery();
+    const toggle = await screen.findByTestId("search-filter-toggle");
+    await user.click(toggle);
+    const popover = await screen.findByTestId("gallery-filter-popover");
+    expect(popover).toBeInTheDocument();
+
+    // 弹层内 pointerdown：不关闭
+    fireEvent.pointerDown(popover);
+    expect(screen.getByTestId("gallery-filter-popover")).toBeInTheDocument();
+
+    // 筛选切换按钮：toggle 自管开合（pointerdown 不触发外部关闭）
+    fireEvent.pointerDown(toggle);
+    expect(screen.getByTestId("gallery-filter-popover")).toBeInTheDocument();
+
+    // 弹层外区域：关闭
+    fireEvent.pointerDown(window.document.body);
+    await waitFor(() => expect(screen.queryByTestId("gallery-filter-popover")).not.toBeInTheDocument());
+
+    // 重新打开后再次点外部可关闭（监听器随开合重挂/清理）
+    await user.click(screen.getByTestId("search-filter-toggle"));
+    await screen.findByTestId("gallery-filter-popover");
+    fireEvent.pointerDown(window.document.body);
+    await waitFor(() => expect(screen.queryByTestId("gallery-filter-popover")).not.toBeInTheDocument());
+  });
+
   it("跳转到未知日期后向上补页，仍可浏览有日期的照片，筛选条件不变", async () => {
     assetsPageMock.mockResolvedValue(makePage(100, "2026-09-18", 1000));
     groupDatesMock.mockResolvedValue([
@@ -535,7 +562,7 @@ describe("RAW+JPG 合并展示", () => {
 
   it("设置关闭合并 → RAW/JPG 分开展示（3 张卡，无合并角标；RAW 卡有水印）", async () => {
     useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, gallery: { mergeRawJpg: false } },
+      settings: { ...s.settings, gallery: { ...s.settings.gallery, mergeRawJpg: false } },
     }));
     assetsPageMock.mockResolvedValue(pairAssets());
     renderGallery();
@@ -547,7 +574,7 @@ describe("RAW+JPG 合并展示", () => {
 
     // 恢复默认开（store 跨用例共享）
     useSettingsStore.setState((s) => ({
-      settings: { ...s.settings, gallery: { mergeRawJpg: true } },
+      settings: { ...s.settings, gallery: { ...s.settings.gallery, mergeRawJpg: true } },
     }));
   });
 });

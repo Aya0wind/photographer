@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import ErrorModal from "@/shared/components/ErrorModal";
 import ImportTargetLibraryCard from "./ImportTargetLibraryCard";
 import type { ImportMode } from "@/ipc/api";
 import { subgroupSuggestions } from "@/features/albums/lib/subgroupSuggestions";
@@ -9,7 +10,11 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
   const { starting, device, targetLibrary, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName, setNewAlbumName, albumError, setAlbumError, startError, copyOnly, policyPending, mode, setMode, secondEnabled, setSecondEnabled, importTargetPreview, albumSubgroup, setAlbumSubgroup, albumSubgroupNames, navigate, targetRoot, duplicatePolicy, setDuplicatePolicy, skipImported, setSkipImported, secondRoot, setSecondRoot, browseSecondRoot, secondImportTargetPreview } = flow;
   return <>
         <div className="mb-5"><ImportTargetLibraryCard flow={flow} /></div>
-        <p className="mb-4 truncate text-xs text-text-muted">{device?.name}</p>
+        <div className={`mb-4 rounded-xl border border-edge p-3 text-xs ${mode === "move" ? "bg-amber-500/10" : "bg-panel/30"}`} data-testid="wizard-path-summary">
+          <p className="text-text-secondary">{t("addPhotos.source")} <span className="text-text-primary">{device?.name}</span></p>
+          <p className="mt-2 break-all text-text-secondary">{t("addPhotos.destination")} <span className="text-text-primary">{targetLibrary ? `${targetLibrary.name} · ${targetRoot}` : t("storage.organization.selectLibrary")}</span></p>
+          <p className="mt-2 text-text-muted">{t(`wizard.mode.${mode}Desc`)}</p>
+        </div>
         <fieldset disabled={starting} className="min-w-0 space-y-5">
           <label className="flex flex-col gap-2 text-xs text-text-secondary" data-testid="wizard-album-section">
             {t("wizard.album.label")}
@@ -21,12 +26,13 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
           <label className="flex flex-col gap-2 text-xs text-text-secondary" data-testid="wizard-mode">
             {t("wizard.mode.label")}
             <select value={mode} disabled={policyPending || copyOnly} aria-label={t("wizard.mode.label")} onChange={(event) => { const next = event.currentTarget.value as ImportMode; setMode(next); if (next !== "copy") setSecondEnabled(false); }} className="rounded-xl border border-edge bg-bg px-3 py-2 text-text-primary">
-              {(["copy", "move", "reference"] as const).map((option) => <option key={option} value={option} disabled={option !== "copy" && copyOnly}>{t(`wizard.mode.${option}`)}</option>)}
+              {(["copy", "move"] as const).map((option) => <option key={option} value={option} disabled={option !== "copy" && copyOnly}>{t(`wizard.mode.${option}`)}</option>)}
             </select>
             {copyOnly && <span className="text-[11px] leading-relaxed text-text-muted">{t("wizard.mode.copyOnly")}</span>}
           </label>
-          <p className={`rounded-xl px-3 py-3 text-xs leading-relaxed ${mode === "move" ? "bg-amber-500/10 text-text-primary" : "bg-panel/40 text-text-secondary"}`}>{t(`wizard.mode.${mode}Desc`)}</p>
-          <p className="break-all text-[11px] leading-relaxed text-text-muted" data-testid="wizard-album-path-preview">{t("wizard.album.pathPreview")}：{mode === "reference" ? t("wizard.mode.reference") : importTargetPreview}</p>
+          <p className="break-all text-[11px] leading-relaxed text-text-muted" data-testid="wizard-album-path-preview">{t("wizard.album.pathPreview")}：{importTargetPreview}</p>
+          {!copyOnly && <button type="button" disabled={starting} onClick={() => navigate("/storage?addExisting=1")}
+            className="text-left text-xs text-accent underline-offset-4 hover:underline" data-testid="wizard-add-existing-library">{t("wizard.mode.addExisting")}</button>}
           <details className="rounded-xl border border-edge bg-bg/40 p-3" data-testid="wizard-advanced">
             <summary className="cursor-pointer text-xs font-medium text-text-secondary">{t("wizard.advanced")}</summary>
             {albumChoice === "existing" && albumId !== null && (
@@ -70,9 +76,7 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
               className="flex flex-col gap-1.5 rounded-lg border border-edge bg-bg p-2.5"
               data-testid="wizard-location-card"
             >
-              {mode === "reference" ? (
-                <span className="text-xs leading-relaxed text-text-secondary">{t("wizard.mode.referenceDesc")}</span>
-              ) : targetLibrary ? (
+              {targetLibrary ? (
                 <span className="break-all font-mono text-xs text-text-primary" title={targetRoot}>
                   {targetRoot}
                 </span>
@@ -179,6 +183,6 @@ export default function ImportReviewOptions({ flow }: { flow: ImportWizardFlow }
 
           </details>
         </fieldset>
-        {(albumError ?? startError) && <p role="alert" className="mt-4 whitespace-pre-wrap rounded-xl bg-red-500/10 p-3 text-xs leading-relaxed text-red-500">{albumError ?? startError}</p>}
+        <ErrorModal message={albumError ?? startError} onClose={() => { setAlbumError(null); flow.setStartError(null); }} portalTarget={document.querySelector("dialog[open]")} />
   </>;
 }

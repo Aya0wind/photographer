@@ -1336,3 +1336,127 @@ fn binary_eyes_have_no_quality_or_ambiguous_band_after_detection() {
     };
     assert_eq!(photo_eyes(&[missing], false), "no_eye");
 }
+#[test]
+fn image_and_selection_index_status_are_split() {
+    let (dir, db, state) = setup();
+    let photos = dir.path().join("photos");
+    let a = ins(&db, &photos, "done.jpg", &sharp_image());
+    let b = ins(&db, &photos, "half.jpg", &sharp_image());
+    // AI 开启（选片行存在）；a 缩略图完成 + eyes/blur 全 done；
+    // b 缩略图未完成且选片任务缺席。
+    state.settings.lock().unwrap().ai.enable_clip = true;
+    db.0
+        .execute("UPDATE assets SET thumb_state = 1 WHERE id = ?1", [a])
+        .unwrap();
+    // 插入播种的 thumb pending 任务行按完成收尾（生产路径 finish_index_task）
+    db.0
+        .execute(
+            "UPDATE index_tasks SET state = 'done' WHERE kind = 'thumb' AND asset_id = ?1",
+            [a],
+        )
+        .unwrap();
+    db.0
+        .execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)
+             VALUES ('eyes', ?1, 'done', 0, '2026-10-12', '2026-10-12'),
+                    ('blur', ?1, 'done', 0, '2026-10-12', '2026-10-12')",
+            [a],
+        )
+        .unwrap();
+
+    let status = ipc::indexing::fetch_index_status(&state).unwrap();
+    // 图片索引口径 = thumb + exif（选片通道拆出）：a 计完成——即使选片
+    // 任务在场/缺席都不影响图片行（旧口径 a 会因 blur 任务存在而 pending
+    // 的场景由 b 的 eyes-only 半程覆盖）。
+    assert_eq!(status.image.done, 1, "a 缩略图完成即图片索引完成");
+    assert_eq!(status.image.pending, 1);
+    assert_eq!(status.image.total, 2);
+    // 选片索引独立计数：a 两通道 done；b 无任务 = pending
+    assert_eq!(status.selection.done, 1);
+    assert_eq!(status.selection.pending, 1);
+    assert_eq!(status.selection.total, 2);
+
+    // 半程校验：b 补 eyes done（blur 缺）→ 选片仍 pending（两通道都完成
+    // 才计 done），图片行不变。
+    db.0
+        .execute(
+            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)
+             VALUES ('eyes', ?1, 'done', 0, '2026-10-12', '2026-10-12')",
+            [b],
+        )
+        .unwrap();
+    let status = ipc::indexing::fetch_index_status(&state).unwrap();
+    assert_eq!(status.selection.done, 1);
+    assert_eq!(status.selection.pending, 1);
+    assert_eq!(status.image.pending, 1, "选片任务不回流图片索引口径");
+}
+
+#[test]
+fn blur_claim_waits_for_thumb_and_recovers_when_thumb_lands() {
+    let (dir, db, _state) = setup();
+    let photos = dir.path().join("photos");
+    let ready = ins(&db, &photos, "ready.jpg", &sharp_image());
+    let waiting = ins(&db, &photos, "waiting.jpg", &sharp_image());
+    db.create_blur_tasks_for_unindexed().unwrap();
+
+    // 门控：缩略图未就绪（thumb_state=0）不可认领；就绪/永久失败（=2）可
+    assert!(db.claim_selection_task_after_thumb("blur").unwrap().is_none());
+    db.0.execute("UPDATE assets SET thumb_state = 1 WHERE id = ?1", [ready]).unwrap();
+    db.0.execute("UPDATE assets SET thumb_state = 2 WHERE id = ?1", [waiting]).unwrap();
+    let claimed = db.claim_selection_task_after_thumb("blur").unwrap().unwrap();
+    assert_eq!(claimed.asset_id, ready);
+    assert_eq!(claimed.kind, "blur");
+    let _ = db.finish_index_task(claimed.id, true);
+
+    // 门控计数：回到 pending 且 thumb_state=0 时计 1（worker 自旋依据）
+    db.0.execute(
+        "UPDATE assets SET thumb_state = 0 WHERE id = ?1;
+         INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at)
+         VALUES ('blur', ?1, 'pending', 0, '2026-10-12', '2026-10-12')",
+        [waiting],
+    ).unwrap();
+    assert_eq!(db.gated_selection_task_count("blur").unwrap(), 1);
+    assert!(db.claim_selection_task_after_thumb("blur").unwrap().is_none());
+    // 普通认领不受门控（手动单通道 kick 语义保留）
+    assert!(db.claim_index_task("blur").unwrap().is_some());
+}
+
+#[test]
+fn selection_worker_processes_only_thumb_ready_and_spins_until_landed() {
+    let (dir, db, _state) = setup();
+    let photos = dir.path().join("photos");
+    let a = ins(&db, &photos, "a.jpg", &sharp_image());
+    let b = ins(&db, &photos, "b.jpg", &sharp_image());
+    db.create_blur_tasks_for_unindexed().unwrap();
+    // a 缩略图就绪；b 未就绪（模拟图片索引还没做到）
+    db.0.execute("UPDATE assets SET thumb_state = 1 WHERE id = ?1", [a]).unwrap();
+
+    let supervisor = tasks::TaskSupervisor::new(events::EventBus::new());
+    ai::selection::kick_selection_index(dir.path().join("db"), &supervisor);
+    // a 被处理（源不可达 → unknown 收尾 = done）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let done = db.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind='blur' AND asset_id=?1 AND state='done'",
+            [a], |r| r.get::<_, i32>(0)).unwrap();
+        if done == 1 { break; }
+        assert!(std::time::Instant::now() < deadline, "a 的 blur 应在缩略图就绪后被处理");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // b 仍 pending：门控期间不处理
+    let b_state: String = db.0.query_row(
+        "SELECT state FROM index_tasks WHERE kind='blur' AND asset_id=?1", [b], |r| r.get(0)).unwrap();
+    assert_eq!(b_state, "pending");
+
+    // b 的缩略图落位（图片索引推进）→ 自旋的选片 worker 接上
+    db.0.execute("UPDATE assets SET thumb_state = 1 WHERE id = ?1", [b]).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let done = db.0.query_row(
+            "SELECT COUNT(*) FROM index_tasks WHERE kind='blur' AND asset_id=?1 AND state='done'",
+            [b], |r| r.get::<_, i32>(0)).unwrap();
+        if done == 1 { break; }
+        assert!(std::time::Instant::now() < deadline, "b 的 blur 应在缩略图就绪后被自旋接上");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}

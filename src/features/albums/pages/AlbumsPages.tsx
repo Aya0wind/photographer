@@ -27,10 +27,11 @@ import {
   type AppEvent,
   type AssetDto,
 } from "@/ipc/api";
-import { ALBUM_COVER_THUMB_SIZE, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
+import { ALBUM_COVER_THUMB_SIZE, fetchAlbumCoverAssetId, useAlbumCoverAssetIds, useManualAlbumCovers } from "../lib/albumCovers";
 import { notifyCountsRefresh } from "@/lib/countsRefresh";
 import { DEFAULT_SMART_TAGS, indexedTagHitCount, loadSmartTags, smartTagLabel } from "../lib/smartTags";
 import ExportAlbumDialog from "@/features/albums/components/ExportAlbumDialog";
+import AlbumBreadcrumbs from "../components/AlbumBreadcrumbs";
 import AlbumDetailPage from "./AlbumDetailPage";
 import TetherAlbumDialog from "@/features/tethering/TetherAlbumDialog";
 import ErrorModal from "@/shared/components/ErrorModal";
@@ -118,7 +119,25 @@ function CardCover({
 
 /** 智能相册封面：搜索期间和缩略图生成/解码期间均显示共享骨架动画。 */
 function SmartAlbumCover({ assetId, tag }: { assetId: number | null | undefined; tag: string }) {
-  if (assetId === undefined) {
+  const [replacement, setReplacement] = useState<{ original: number; id: number | null } | null>(null);
+  const rejected = useRef(new Set<number>());
+  const generation = useRef(0);
+  useEffect(() => {
+    rejected.current.clear();
+    setReplacement(null);
+    generation.current += 1;
+    return () => { generation.current += 1; };
+  }, [assetId, tag]);
+  const replaceUnavailable = useCallback((id: number) => {
+    if (rejected.current.has(id) || assetId == null) return;
+    rejected.current.add(id);
+    const current = generation.current;
+    void fetchAlbumCoverAssetId(tag, [...rejected.current]).then((next) => {
+      if (current === generation.current) setReplacement({ original: assetId, id: next });
+    });
+  }, [assetId, tag]);
+  const coverId = replacement && replacement.original === assetId ? replacement.id : assetId;
+  if (coverId === undefined) {
     return (
       <div
         className="sp-skeleton h-full w-full"
@@ -127,7 +146,7 @@ function SmartAlbumCover({ assetId, tag }: { assetId: number | null | undefined;
       />
     );
   }
-  if (assetId === null) {
+  if (coverId === null) {
     return (
       <CardCover
         url={null}
@@ -140,7 +159,9 @@ function SmartAlbumCover({ assetId, tag }: { assetId: number | null | undefined;
   }
   return (
     <AssetThumb
-      asset={{ id: assetId, kind: "photo", name: tag }}
+      key={coverId}
+      asset={{ id: coverId, kind: "photo", name: tag }}
+      onUnavailable={replaceUnavailable}
       size={ALBUM_COVER_THUMB_SIZE}
       alt=""
       className="h-full w-full"
@@ -931,9 +952,11 @@ export function AlbumTagPage() {
   return (
     <div className="flex h-full flex-col" data-testid="album-tag-page">
       <div className="flex h-11 w-full shrink-0 items-center gap-3 border-b border-edge px-4">
-        <h1 className="shrink-0 text-sm font-semibold text-text-primary">
+        <AlbumBreadcrumbs>
+        <h1 aria-current="page" className="min-w-0 truncate text-sm font-semibold text-text-primary">
           {t("albums.tagTitle", { tag: smartTagLabel(tag) })}
         </h1>
+        </AlbumBreadcrumbs>
         <SemanticQueryInput
           busy={semantic.status === "loading"}
           onRun={(q) => {

@@ -36,8 +36,8 @@
 //!
 //! **登记单管道**（§八-5）：所有登记段（查重判定 + 写库原子段）经
 //! `register_gate` 互斥——增量扫描发现与导入落盘产出串行处理，防双写
-//! 竞争与重复算哈希/缩略图（闸由 ipc 层注入；导入引擎 finish_copy/
-//! finish_reference 的登记段持同一把锁）。
+//! 竞争与重复算哈希/缩略图（闸由 ipc 层注入；导入引擎 finish_copy
+//! 的登记段持同一把锁）。
 //!
 //! 本模块不依赖 ipc/AppState（核心可独立集成测试）；轮询 worker、批量
 //! 任务账本（library_scan_jobs）与让路编排在 `ipc::photo_library`。

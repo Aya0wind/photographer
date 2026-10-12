@@ -38,6 +38,39 @@ impl Db {
         }
     }
 
+    /// 认领一条「缩略图已就绪」的选片任务（blur：输入就是缩略图缓存——
+    /// 门控保证不在缩略图任务之前跑，避免为 1024 档做一次多余的源解码；
+    /// 缩略图永久失败 thumb_state=2 的资产照常认领，按不可用收尾）。
+    pub fn claim_selection_task_after_thumb(
+        &self,
+        kind: &str,
+    ) -> Result<Option<IndexTaskRow>> {
+        let now = now_rfc3339();
+        let mut stmt = self.0.prepare(
+            "UPDATE index_tasks SET state = 'running', updated_at = ?2 \
+             WHERE id = (SELECT t.id FROM index_tasks t JOIN assets a ON a.id = t.asset_id \
+                         WHERE t.state = 'pending' AND t.kind = ?1 AND a.thumb_state != 0 \
+                         ORDER BY t.id LIMIT 1) \
+             RETURNING id, kind, asset_id, state, attempts, created_at, updated_at",
+        )?;
+        let mut rows = stmt.query_map(params![kind, now], map_index_task)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 门控等待中的选片任务数（pending 且缩略图未就绪）：>0 时选片 worker
+    /// 步进间小睡重试而不是退出——缩略图池推进后即可认领。
+    pub fn gated_selection_task_count(&self, kind: &str) -> Result<u64> {
+        let mut stmt = self.0.prepare(
+            "SELECT COUNT(*) FROM index_tasks t JOIN assets a ON a.id = t.asset_id \
+             WHERE t.state = 'pending' AND t.kind = ?1 AND a.thumb_state = 0",
+        )?;
+        let count = stmt.query_row(params![kind], |r| r.get::<_, i64>(0))?;
+        Ok(count as u64)
+    }
+
     /// 批量认领（2026-09-21 语义推理批量化）：一次认领至多 `limit` 条
     /// pending（id 升序）原子置 running——回填 worker 组批单次
     /// session.run 的前提。不足 limit 照常小批，空批返回空 Vec。
@@ -227,6 +260,45 @@ impl Db {
         self.0.execute(
             "UPDATE assets SET thumb_state = ?2 WHERE id = ?1",
             params![id, state],
+        )?;
+        Ok(())
+    }
+
+    /// 资产源文件是否仍在写入（登记 size ≠ 当前盘上 size，或源消失）：
+    /// 解码失败的暂态判定——扫描稳定窗防不住保留源 mtime 的慢速拷贝
+    ///（Windows copy 保留修改时间，10s 冷却窗失效，2026-10-13 真机案例：
+    /// 180MB TIF 拷贝中入库，thumb 连败 3 次烧穿额度永久 failed）。
+    pub fn asset_source_in_flight(&self, asset_id: i64) -> bool {
+        let Ok(path) = self
+            .0
+            .query_row("SELECT path FROM assets WHERE id = ?1", [asset_id], |r| {
+                r.get::<_, String>(0)
+            })
+        else {
+            return false;
+        };
+        let Ok(registered) = self
+            .0
+            .query_row("SELECT size FROM assets WHERE id = ?1", [asset_id], |r| {
+                r.get::<_, i64>(0)
+            })
+        else {
+            return false;
+        };
+        match std::fs::metadata(&path) {
+            Ok(meta) => meta.len() != registered as u64,
+            // 源不存在/不可达不是「写入中」：走正常失败语义（真删除的
+            // 资产要能烧完额度进 failed，不能永挂 pending）
+            Err(_) => false,
+        }
+    }
+
+    /// 暂态失败延迟重试：任务回 pending 且**不烧 attempts**（写入中的源
+    /// 解码必败，烧额度会把暂态变成永久 failed）。worker 侧配合退避。
+    pub fn defer_index_task(&self, id: i64) -> Result<()> {
+        self.0.execute(
+            "UPDATE index_tasks SET state = 'pending', updated_at = ?2 WHERE id = ?1",
+            params![id, now_rfc3339()],
         )?;
         Ok(())
     }

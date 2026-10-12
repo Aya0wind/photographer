@@ -570,6 +570,18 @@ describe("AI tab（M4 实化）", () => {
 // --- 画廊 tab：智能相册显示的标签（M4 二轮，localStorage 简化存储） -------------------
 
 describe("画廊 tab：智能相册标签", () => {
+  it("隐藏跨库重复默认开启，可在设置中关闭并持久化", async () => {
+    const user = userEvent.setup();
+    renderSettingsPage();
+    await switchTab(user, "gallery");
+    const toggle = within(screen.getByTestId("settings-row-hide-duplicates")).getByRole("switch");
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    expect(useSettingsStore.getState().settings.gallery.hideCrossLibraryDuplicates).toBe(false);
+    expect(ipcMock).toHaveBeenCalledWith("settings_set", expect.objectContaining({
+      settings: expect.objectContaining({ gallery: expect.objectContaining({ hideCrossLibraryDuplicates: false }) }),
+    }));
+  });
   it("显示全部预置标签，不使用勾选框", async () => {
     const user = userEvent.setup();
     renderSettingsPage();
@@ -638,18 +650,24 @@ describe("AI tab：索引状态与操作", () => {
     expect(screen.getByTestId("index-count-ai")).toHaveTextContent("45 / 120");
   });
 
-  it("图片索引统一重建四个内部通道，模型未下载时允许处理基础信息", async () => {
-    indexStatusMock.mockResolvedValue({ ...statusOf(), selectionReady:false,
-      image: { pending:2, running:0, done:118, failed:0, total:120 } });
+  it("选片索引独立成行：模型未下载时等待提示在选片行，图片索引不受影响", async () => {
+    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true } } });
+    indexStatusMock.mockResolvedValue({ ...statusOf(), selectionReady:false, selectionEnabled:true,
+      image: { pending:2, running:0, done:118, failed:0, total:120 },
+      selection: { pending:120, running:0, done:0, failed:0, total:120 } });
     indexRebuildMock.mockReset().mockResolvedValue(undefined);
     const user=userEvent.setup();
     renderSettingsPage();
     await switchTab(user,"ai");
     const row=await screen.findByTestId("index-status-image");
     expect(row).toHaveTextContent("图片索引");
-    expect(row).toHaveTextContent("包含缩略图、详细信息和选片分析");
-    expect(row).toHaveTextContent("等待模型下载");
+    expect(row).toHaveTextContent("包含缩略图和详细信息");
+    expect(row).not.toHaveTextContent("等待模型下载");
     expect(row).toHaveTextContent("118 / 120");
+    // 等待模型 + 选片子项（闭眼/清晰度）都在选片行
+    const selectionRow=screen.getByTestId("index-status-selection");
+    expect(selectionRow).toHaveTextContent("选片索引");
+    expect(selectionRow).toHaveTextContent("等待模型下载");
     expect(screen.queryByTestId("index-status-thumb")).not.toBeInTheDocument();
     expect(screen.queryByTestId("index-status-exif")).not.toBeInTheDocument();
     expect(screen.getByTestId("index-kick-image")).toBeEnabled();
@@ -659,17 +677,22 @@ describe("AI tab：索引状态与操作", () => {
   });
 
   it("整图尚未完成时仍显示已完成的子项，避免把零完成误认为没有处理",async()=>{
+    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true } } });
     const c={pending:0,running:0,done:120,failed:0,total:120};
     indexStatusMock.mockResolvedValue({...statusOf(),image:{...c,done:0,pending:120},
-      thumb:c,exif:c,eyes:{...c,done:0,pending:120},blur:c,selectionReady:true});
+      thumb:c,exif:c,eyes:{...c,done:0,pending:120},blur:c,selection:{...c,done:0,pending:120},selectionReady:true,selectionEnabled:true});
     const user=userEvent.setup();renderSettingsPage();await switchTab(user,"ai");
     const row=await screen.findByTestId("index-status-image");
     expect(within(row).getByTestId("index-count-image")).toHaveTextContent("已完成 0 / 120");
     const parts=within(row).getByTestId("image-index-parts");
     expect(parts).toHaveTextContent("缩略图 120 / 120");
     expect(parts).toHaveTextContent("详细信息 120 / 120");
-    expect(parts).toHaveTextContent("闭眼 0 / 120");
-    expect(parts).toHaveTextContent("清晰度 120 / 120");
+    expect(parts).not.toHaveTextContent("闭眼");
+    // 选片子项（闭眼/清晰度）在选片行的分段里
+    const selectionRow=screen.getByTestId("index-status-selection");
+    const selectionParts=within(selectionRow).getByTestId("image-index-parts");
+    expect(selectionParts).toHaveTextContent("闭眼 0 / 120");
+    expect(selectionParts).toHaveTextContent("清晰度 120 / 120");
   });
 
   it("导入尚未结束时，索引追上当前照片显示等待新照片", async () => {

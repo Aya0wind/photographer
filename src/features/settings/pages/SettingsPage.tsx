@@ -313,6 +313,10 @@ export default function SettingsPage() {
                   onChange={(next) => commit({ gallery: { mergeRawJpg: next } })}
                 />
               </SettingRow>
+              <SettingRow label={t("gallery.hideDuplicates")} desc={t("gallery.hideDuplicatesHint")} testId="settings-row-hide-duplicates">
+                <Toggle checked={settings.gallery.hideCrossLibraryDuplicates} label={t("gallery.hideDuplicates")}
+                  onChange={(next) => commit({ gallery: { hideCrossLibraryDuplicates: next } })} />
+              </SettingRow>
               <SectionTitle>{t("settings.section.albums")}</SectionTitle>
               <AlbumTagsSetting />
             </>

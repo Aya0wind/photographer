@@ -325,12 +325,14 @@ impl Default for AppearanceSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct GallerySettings {
     pub merge_raw_jpg: bool,
+    pub hide_cross_library_duplicates: bool,
 }
 
 impl Default for GallerySettings {
     fn default() -> Self {
         Self {
             merge_raw_jpg: true,
+            hide_cross_library_duplicates: true,
         }
     }
 }

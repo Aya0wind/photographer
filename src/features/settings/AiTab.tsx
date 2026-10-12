@@ -712,6 +712,13 @@ function countersText(kind: IndexKind, status: IndexStatus, t: T): string {
       t("settings.ai.index.imageProgress", { done: c.done, total: c.total }),
       c.failed > 0 ? t("settings.ai.index.failed", { count: c.failed }) : null].filter(Boolean).join(" · ");
   }
+  if (kind === "selection") {
+    const c = status.selection;
+    if (!c) return "—";
+    return [t("settings.ai.index.pending", { count: c.pending }),
+      t("settings.ai.index.imageProgress", { done: c.done, total: c.total }),
+      c.failed > 0 ? t("settings.ai.index.failed", { count: c.failed }) : null].filter(Boolean).join(" · ");
+  }
   if (kind === "ai" || kind === "face") {
     const c = kind === "ai" ? status.ai : status.face;
     if (!c) return "—";
@@ -774,7 +781,10 @@ function IndexStatusSection() {
     [kicking, refreshIndexStatus],
   );
 
-  const rows: IndexKind[] = ["image", "ai", "face"];
+  // 选片行仅 AI 开启的库渲染（关闭的库无任务账，计数恒 pending）
+  const rows: IndexKind[] = aiSettings?.enableClip || aiSettings?.enableFace
+    ? ["image", "selection", "ai", "face"]
+    : ["image", "ai", "face"];
 
   return (
     <>
@@ -806,7 +816,7 @@ function IndexStatusSection() {
           const running = kicking.has(kind) || c.running > 0 || (kind !== "image" && c.pending > 0);
           const complete = c.total === 0 || c.done >= c.total;
           const followingImport = importing && complete &&
-            (kind === "image" ||
+            (kind === "image" || kind === "selection" ||
               (kind === "ai" && aiSettings?.enableClip) ||
               (kind === "face" && aiSettings?.enableFace));
           return (
@@ -819,12 +829,14 @@ function IndexStatusSection() {
               <div className="min-w-0">
                 <div className="text-xs text-text-primary">{label}</div>
                 {kind === "image" && <p className="mt-1 text-[11px] text-text-muted">{t("settings.ai.index.imageDescription")}</p>}
-                {kind === "image" && status.selectionReady === false && !complete &&
+                {kind === "selection" && <p className="mt-1 text-[11px] text-text-muted">{t("settings.ai.index.selectionDescription")}</p>}
+                {kind === "selection" && status.selectionReady === false && !complete &&
                   <p className="mt-1 text-[11px] text-amber-400">{t("settings.ai.index.waitingSelectionModels")}</p>}
                 <div className="mt-0.5 font-mono text-[11px] tabular-nums text-text-muted" data-testid={`index-count-${kind}`}>
                   {countersText(kind, status, t)}
                 </div>
-                {kind === "image" && <ImageIndexProgress status={status} />}
+                {kind === "image" && <ImageIndexProgress status={status} scope="image" />}
+                {kind === "selection" && <ImageIndexProgress status={status} scope="selection" />}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <button

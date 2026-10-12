@@ -90,7 +90,8 @@ describe("i18n 初始化", () => {
   it("关键 key 返回中文文案而非 key 本身", () => {
     // 抽查一个具体译文的精确值
     expect(i18n.t("nav.gallery")).toBe("图库");
-    expect(i18n.t("storage.title")).toBe("存储");
+    expect(i18n.t("storage.title")).toBe("照片库");
+    expect(i18n.t("nav.import")).toBe("添加照片");
 
     for (const key of CRITICAL_KEYS) {
       const text = i18n.t(key);

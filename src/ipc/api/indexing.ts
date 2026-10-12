@@ -1,18 +1,22 @@
 import { ipc } from "../index";
 import { type IndexKind, type IndexStatus, type RebuildKind } from "./types";
 
-/** 暂停索引任务（库级后台：缩略图三档/EXIF 深提取）；命令失败静默（后端接线前按钮无副作用） */
-export async function indexTaskPause(): Promise<void> {
+/** 索引池（index_task_pause/resume 的 pool 参数）："index" = 图片索引池
+ *  （thumb/exif/hash/phash），"selection" = 选片索引池（eyes/blur）。 */
+export type IndexPool = "index" | "selection";
+
+/** 暂停索引任务（库级后台）；命令失败静默（后端接线前按钮无副作用） */
+export async function indexTaskPause(pool: IndexPool = "index"): Promise<void> {
   try {
-    await ipc<void>("index_task_pause");
+    await ipc<void>("index_task_pause", { pool });
   } catch {
   }
 }
 
-/** 恢复索引任务（全局闸）；导入让路期间后端拒绝（按钮已禁用，防御性静默） */
-export async function indexTaskResume(): Promise<void> {
+/** 恢复索引任务（池级闸）；导入让路期间后端拒绝（按钮已禁用，防御性静默） */
+export async function indexTaskResume(pool: IndexPool = "index"): Promise<void> {
   try {
-    await ipc<void>("index_task_resume");
+    await ipc<void>("index_task_resume", { pool });
   } catch {
   }
 }

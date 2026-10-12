@@ -6,16 +6,21 @@ pub enum Domain {
     Image,
     Semantic,
     Face,
+    /// 选片索引（eyes/blur，2026-10-12 拆分）：与图片域分离——两池各自
+    /// 满额并行，互不在对方的 FIFO 票序里排队（跨池等待的来源）。
+    Selection,
 }
 
 pub fn budget(domain: Domain) -> Arc<Budget> {
     static IMAGE: OnceLock<Arc<Budget>> = OnceLock::new();
     static SEMANTIC: OnceLock<Arc<Budget>> = OnceLock::new();
     static FACE: OnceLock<Arc<Budget>> = OnceLock::new();
+    static SELECTION: OnceLock<Arc<Budget>> = OnceLock::new();
     let slot = match domain {
         Domain::Image => &IMAGE,
         Domain::Semantic => &SEMANTIC,
         Domain::Face => &FACE,
+        Domain::Selection => &SELECTION,
     };
     slot.get_or_init(|| Arc::new(Budget::dynamic())).clone()
 }
@@ -127,8 +132,16 @@ mod tests {
             &budget(Domain::Semantic)
         ));
         assert!(!Arc::ptr_eq(&budget(Domain::Image), &budget(Domain::Face)));
+        assert!(!Arc::ptr_eq(
+            &budget(Domain::Image),
+            &budget(Domain::Selection)
+        ));
         assert_eq!(
             budget(Domain::Image).limit(),
+            super::super::index_parallelism()
+        );
+        assert_eq!(
+            budget(Domain::Selection).limit(),
             super::super::index_parallelism()
         );
     }

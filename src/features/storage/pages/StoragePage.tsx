@@ -1,6 +1,8 @@
 import ErrorModal from "@/shared/components/ErrorModal";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router";
+import { useNavigate, useLocation } from "react-router";
 
 import {
   openWithSystem,
@@ -108,10 +110,25 @@ function ScanStatusRow({
 
 export default function StoragePage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [initialExistingFolder, setInitialExistingFolder] = useState(false);
   const [libraries, setLibraries] = useState<PhotoLibrary[]>([]);
+  useEffect(() => {
+    if (location.hash.startsWith("#library-")) document.getElementById(location.hash.slice(1))?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [libraries, location.hash]);
   const [status, setStatus] = useState<"loading" | "ready">("loading");
   /** 新建照片库对话框（true=打开；模式在对话框内二选一） */
   const [createOpen, setCreateOpen] = useState(false);
+  useEffect(() => {
+    if (searchParams.get("addExisting") !== "1") return;
+    setInitialExistingFolder(true);
+    setCreateOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("addExisting");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   const [editingLibrary,setEditingLibrary]=useState<PhotoLibrary|null>(null);
   const [openError,setOpenError]=useState<string|null>(null);
   const [removeTarget, setRemoveTarget] = useState<PhotoLibrary | null>(null);
@@ -200,12 +217,15 @@ export default function StoragePage() {
           <div className="ml-auto flex shrink-0 gap-2">
             <button
               type="button"
-              onClick={() => setCreateOpen(true)}
+              onClick={() => { setInitialExistingFolder(false); setCreateOpen(true); }}
               className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
               data-testid="storage-create-library"
             >
               {t("storage.create")}
             </button>
+            <button type="button" onClick={() => { setInitialExistingFolder(true); setCreateOpen(true); }}
+              className="rounded-md border border-edge px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:border-accent"
+              data-testid="storage-add-existing-library">{t("storage.addExisting")}</button>
           </div>
         </header>
 
@@ -245,12 +265,15 @@ export default function StoragePage() {
                 <div className="mt-3 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCreateOpen(true)}
+                    onClick={() => { setInitialExistingFolder(false); setCreateOpen(true); }}
                     className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110"
                     data-testid="storage-empty-create"
                   >
                     {t("storage.create")}
                   </button>
+                  <button type="button" onClick={() => { setInitialExistingFolder(true); setCreateOpen(true); }}
+                    className="rounded-md border border-edge px-3 py-1.5 text-xs text-text-primary hover:border-accent"
+                    data-testid="storage-empty-from-folder">{t("storage.addExisting")}</button>
                 </div>
               </div>
             ) : (
@@ -259,6 +282,7 @@ export default function StoragePage() {
                   key={lib.id}
                   className="rounded-xl border border-edge bg-panel/30 p-4"
                   data-testid="storage-library-card"
+                  id={`library-${lib.id}`}
                   data-id={lib.id}
                   data-status={lib.status}
                 >
@@ -337,9 +361,15 @@ export default function StoragePage() {
       {/* 新建照片库对话框（模式在对话框内二选一：新建 / 从已有文件夹建立） */}
       {(createOpen||editingLibrary) && (
         <CreateLibraryDialog
+          lockMode
+          initialExistingFolder={initialExistingFolder}
           library={editingLibrary??undefined}
           onClose={() => {setCreateOpen(false);setEditingLibrary(null);}}
           onCreated={(library) => {
+            if (initialExistingFolder && !editingLibrary) {
+              navigate("/gallery", { state: { photoAddNotice: t("storage.createdScanning", { name: library.name }) } });
+              return;
+            }
             flash(t("storage.createdScanning", {name:library.name}));
             setCreateOpen(false);
             setEditingLibrary(null);

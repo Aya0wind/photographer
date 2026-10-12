@@ -52,7 +52,7 @@ use crate::settings::DuplicatePolicy;
 
 use dedup::{exact_verdict, loose_hit, ExactVerdict};
 use fsutil::{cleanup_empty_dirs, ensure_directory, follow_sidecar, rfc3339, source_root_of};
-use pipeline::{copy_one, reference_one, CopiedFile, FileOutcome, ReferenceFile};
+use pipeline::{copy_one, CopiedFile, FileOutcome};
 
 /// 进度事件最小间隔（spec：≥100ms）。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -76,8 +76,6 @@ pub enum ImportMode {
     #[default]
     Copy,
     Move,
-    /// Index a local original in place without copying or taking ownership.
-    Reference,
 }
 
 /// F2 双目的地导入的第二目的地：单遍读取同时写第二份（**同一纯时间布局
@@ -392,7 +390,7 @@ impl Engine {
         self.db_dir = Some(db_dir);
     }
 
-    /// 登记段互斥执行（§八-5）的闸在 finish_copy/finish_reference 内直接
+    /// 登记段互斥执行（§八-5）的闸在 finish_copy 内直接
     /// 持有（见 registration_gate 字段注释）。
     pub fn source_id(&self) -> String {
         self.source.id()
@@ -412,12 +410,7 @@ impl Engine {
         }
         if self.plan.mode != ImportMode::Copy && self.source.copy_only() {
             return Err(EngineError::InvalidPlan(
-                "相机或已识别的存储卡仅支持复制导入，不能移动或引用原文件".into(),
-            ));
-        }
-        if self.plan.mode == ImportMode::Reference && self.plan.second_target.is_some() {
-            return Err(EngineError::InvalidPlan(
-                "仅导入不能同时设置第二目的地".into(),
+                "相机或已识别的存储卡仅支持复制导入，不能移动原文件".into(),
             ));
         }
         if self.plan.mode == ImportMode::Move && self.plan.second_target.is_some() {
@@ -447,9 +440,7 @@ impl Engine {
         }
         if self.db.photos_library_organization_pending(&library.id).map_err(EngineError::Db)?{return Err(EngineError::InvalidPlan("请先完成照片库内已有照片的整理，再导入新照片".into()));}
         let library_root = PathBuf::from(&library.root_path);
-        if self.plan.mode != ImportMode::Reference {
-            self.check_nesting(&library_root)?;
-        }
+        self.check_nesting(&library_root)?;
         // 相册存在性校验（纯引用；早失败——相册被删的计划在落库前拒绝）。
         if let Some(album_id) = self.plan.album_id {
             self.db
@@ -461,10 +452,6 @@ impl Engine {
         if self.plan.organization_template.is_none(){self.plan.organization_template=Some(library.organization_template.clone());}
         crate::db::organization::validate_organization_template(self.plan.organization_template.as_deref().unwrap()).map_err(EngineError::InvalidPlan)?;
         let entries = self.filter_included(self.source.list()?)?;
-        if self.plan.mode==ImportMode::Reference{
-            let root=std::fs::canonicalize(&library_root).map_err(|e|EngineError::InvalidPlan(e.to_string()))?;
-            for entry in &entries{let path=self.source.local_path(&entry.id).and_then(|p|std::fs::canonicalize(p).ok()).ok_or_else(||EngineError::InvalidPlan("仅建索引需要可访问的本地文件".into()))?;if !path.starts_with(&root){return Err(EngineError::InvalidPlan("仅建索引的照片必须位于所选照片库内，请先登记源文件夹为照片库".into()));}}
-        }
         let mut base = Counters::default();
         for e in &entries {
             base.total_files += 1;
@@ -540,9 +527,7 @@ impl Engine {
         let library_root = prepared.library_root.clone();
 
         // resume：清除 .part 残留（上次中断的半成品，一律重做）
-        if self.plan.mode != ImportMode::Reference {
-            self.sweep_part_files(&library_root);
-        }
+        self.sweep_part_files(&library_root);
 
         // 待处理队列：resume 需重列源匹配 journal src（list 失败→按设备失联暂停）
         let queue = self.resolve_queue(&prepared);
@@ -580,9 +565,7 @@ impl Engine {
         // 暂存目录只在启动工作线程前创建一次。网络共享盘可能在并发 mkdir
         // 时返回 183，且目录元数据尚未传播；不能让每个文件重复参与创建。
         let part_dir = library_root.join(PART_DIR);
-        let staging_error = if self.plan.mode == ImportMode::Reference {
-            None
-        } else {
+        let staging_error = {
             ensure_directory(&part_dir)
                 .map_err(|e| format!("创建暂存目录失败（{}）: {e}", part_dir.display()))
                 .and_then(|()| {
@@ -635,8 +618,6 @@ impl Engine {
                             entry,
                             error: error.clone(),
                         }
-                    } else if self.plan.mode == ImportMode::Reference {
-                        reference_one(&*source, &entry)
                     } else {
                         copy_one(
                             &*source,
@@ -713,49 +694,6 @@ impl Engine {
             last_done_bytes = counters.done_bytes;
             let window_rate = rate.update(tick_now, counters.done_bytes);
             match outcome {
-                FileOutcome::Referenced(reference) => {
-                    let entry = &reference.entry;
-                    match self.finish_reference(job_id, &reference) {
-                        Ok((FileState::Verified, dst)) => {
-                            counters.done_files += 1;
-                            counters.done_bytes += entry.size;
-                            last_completed_src = entry.rel_path.clone();
-                            self.bus.publish(AppEvent::ImportFileCompleted {
-                                job_id,
-                                src: entry.id.clone(),
-                                dst,
-                                state: FileState::Verified,
-                            });
-                        }
-                        Ok((FileState::Skipped, dst)) => {
-                            counters.skipped += 1;
-                            counters.skipped_bytes += entry.size;
-                            last_completed_src = entry.rel_path.clone();
-                            self.bus.publish(AppEvent::ImportFileCompleted {
-                                job_id,
-                                src: entry.id.clone(),
-                                dst,
-                                state: FileState::Skipped,
-                            });
-                        }
-                        Ok(_) => unreachable!(),
-                        Err(error) => {
-                            counters.failed += 1;
-                            counters.failed_bytes += entry.size;
-                            let _ = self.db.upsert_job_file(&JobFileRow {
-                                job_id,
-                                src: entry.id.clone(),
-                                dst: String::new(),
-                                size: entry.size,
-                                state: FileState::Failed,
-                                error: Some(error.clone()),
-                                xxhash: Some(reference.xxh),
-                                dst2: String::new(),
-                            });
-                            let _ = self.db.append_log("error", Some(job_id), &error);
-                        }
-                    }
-                }
                 FileOutcome::Copied(copied) => {
                     let entry = &copied.entry;
                     match self.finish_copy(job_id, &copied) {
@@ -955,9 +893,7 @@ impl Engine {
         }
 
         // 收尾：清空暂存目录（主 + 第二目的地）+ 终态 + SessionFinished
-        if self.plan.mode != ImportMode::Reference {
-            let _ = fs::remove_dir_all(library_root.join(PART_DIR));
-        }
+        let _ = fs::remove_dir_all(library_root.join(PART_DIR));
         if let Some(second) = &self.plan.second_target {
             let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
         }
@@ -1039,9 +975,6 @@ impl Engine {
                 let (src, size) = (copied.entry.id.clone(), copied.entry.size);
                 self.skip_discard(job_id, &copied);
                 (src, size)
-            }
-            FileOutcome::Referenced(reference) => {
-                (reference.entry.id.clone(), reference.entry.size)
             }
             FileOutcome::Skipped { entry } => (entry.id, entry.size),
             FileOutcome::Failed { entry, .. } => (entry.id, entry.size),
@@ -1137,235 +1070,6 @@ impl Engine {
         }
     }
 
-    fn finish_reference(
-        &self,
-        job_id: i64,
-        reference: &ReferenceFile,
-    ) -> Result<(FileState, String), String> {
-        let entry = &reference.entry;
-        // 登记单管道闸（§八-5）：查重判定与入库同段持闸（同 finish_copy）。
-        let _registration_guard = self
-            .registration_gate
-            .as_ref()
-            .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
-        let path = reference.path.to_string_lossy().into_owned();
-        // 精确复核（§八-1）：skip 仅当在线同哈希；仅命中 missing 同哈希 =
-        // 源目录被移动/改名后重新 reference → 原位接管既有资产行。
-        let exact = if self.plan.skip_imported {
-            Some(
-                exact_verdict(
-                    &self.db,
-                    &self.plan.target_library_id,
-                    entry.size,
-                    reference.xxh,
-                )
-                .map_err(|e| e.to_string())?,
-            )
-        } else {
-            None
-        };
-        // A referenced original can never be renamed to resolve a collision.
-        // 同路径命中 **missing** 行且内容一致（reference 刚读完全文件算出的
-        // 哈希，零成本校验）→ 单纯恢复（§八-1/§五）：清 missing + 刷新
-        // mtime/登记指纹。reference 资产路径在库 root 之外、库扫描永不踏足
-        // ——惰性检测（访问时）标的 missing 只有此处能解，skip 会把它永久
-        // 锁在缺失态。
-        let same_path_row: Option<(i64, bool, i64, i64)> = self
-            .db
-            .0
-            .query_row(
-                "SELECT id, missing, size, xxhash FROM assets WHERE path = ?1",
-                [&path],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get::<_, i64>(1)? != 0,
-                        r.get(2)?,
-                        r.get(3)?,
-                    ))
-                },
-            )
-            .ok();
-        match same_path_row {
-            Some((id, true, size, xxhash))
-                if size == entry.size as i64 && xxhash == reference.xxh as i64 =>
-            {
-                let (volume_serial, file_id) = registration_fingerprint(&reference.path);
-                let restored = self
-                    .db
-                    .0
-                    .execute(
-                        "UPDATE assets SET missing = 0, mtime = ?2, volume_serial = ?3, \
-                         file_id = ?4 WHERE id = ?1 AND missing = 1",
-                        rusqlite::params![id, rfc3339(entry.mtime), volume_serial, file_id],
-                    )
-                    .map(|n| n > 0)
-                    .unwrap_or(false);
-                if restored {
-                    let _ = self.db.append_log(
-                        "info",
-                        Some(job_id),
-                        &format!("missing 资产同路径恢复（§八-1）：{path}"),
-                    );
-                }
-            }
-            _ => {}
-        }
-        if same_path_row.is_some() || exact == Some(ExactVerdict::Skip) {
-            self.db
-                .upsert_job_file(&JobFileRow {
-                    job_id,
-                    src: entry.id.clone(),
-                    dst: String::new(),
-                    size: entry.size,
-                    state: FileState::Skipped,
-                    error: None,
-                    xxhash: Some(reference.xxh),
-                    dst2: String::new(),
-                })
-                .map_err(|e| e.to_string())?;
-            return Ok((FileState::Skipped, String::new()));
-        }
-        if let Some(ExactVerdict::Rebind(asset_id)) = exact {
-            match self.rebind_missing_asset(
-                job_id,
-                asset_id,
-                &reference.path,
-                rfc3339(entry.mtime),
-                entry.size,
-                reference.xxh,
-            ) {
-                RebindOutcome::Rebound => {
-                    self.db
-                        .upsert_job_file(&JobFileRow {
-                            job_id,
-                            src: entry.id.clone(),
-                            dst: path.clone(),
-                            size: entry.size,
-                            state: FileState::Verified,
-                            error: None,
-                            xxhash: Some(reference.xxh),
-                            dst2: String::new(),
-                        })
-                        .map_err(|e| e.to_string())?;
-                    return Ok((FileState::Verified, path));
-                }
-                // 已被并发处理成在线同哈希：按已存在 skip（文件原位未动）
-                RebindOutcome::Online => {
-                    self.db
-                        .upsert_job_file(&JobFileRow {
-                            job_id,
-                            src: entry.id.clone(),
-                            dst: String::new(),
-                            size: entry.size,
-                            state: FileState::Skipped,
-                            error: None,
-                            xxhash: Some(reference.xxh),
-                            dst2: String::new(),
-                        })
-                        .map_err(|e| e.to_string())?;
-                    return Ok((FileState::Skipped, String::new()));
-                }
-                // 行已删：走下方按新资产登记
-                RebindOutcome::Deleted => {}
-            }
-        }
-        let filename = reference
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let meta = &reference.meta;
-        // 登记指纹（§三 两级识别）：reference 资产在原位登记原位指纹。
-        let (volume_serial, file_id) = registration_fingerprint(&reference.path);
-        // 边车读入（§三 reference 登记）：原文件旁的 XMP 边车星级/颜色标签
-        // /关键字随登记进库（边车本体不动）——星级/颜色进 assets 快列，
-        // 关键字落 asset_metadata（§三/§六「星级/颜色/关键字从 XMP 边车
-        // 读入」，与导出方向对称）。
-        let (rating, color_label, keywords) = read_sidecar_tags(&reference.path);
-        self.db
-            .insert_asset_with_album(
-                &AssetRow {
-                    path: path.clone(),
-                    filename,
-                    size: entry.size,
-                    mtime: rfc3339(entry.mtime),
-                    xxhash: reference.xxh,
-                    kind: reference.kind,
-                    captured_at: meta.captured_at.map(rfc3339),
-                    camera: meta.camera.clone(),
-                    source: "imported".into(),
-                    created_at: rfc3339(Utc::now()),
-                    origin: "external".into(),
-                    width: meta.width,
-                    height: meta.height,
-                    iso: meta.iso,
-                    f_number: meta.f_number.clone(),
-                    exposure_time: meta.exposure_time.clone(),
-                    focal_length: meta.focal_length.clone(),
-                    lens: meta.lens.clone(),
-                    pair_asset_id: None,
-                    thumb_state: 0,
-                    orientation: meta.deep.orientation,
-                    flash: meta.deep.flash.clone(),
-                    metering_mode: meta.deep.metering_mode.clone(),
-                    white_balance: meta.deep.white_balance.clone(),
-                    exposure_program: meta.deep.exposure_program.clone(),
-                    software: meta.deep.software.clone(),
-                    artist: meta.deep.artist.clone(),
-                    gps_lat: meta.deep.gps_lat,
-                    gps_lon: meta.deep.gps_lon,
-                    rating,
-                    flagged: 0,
-                    color_label,
-                    rejected: 0,
-                    library_id: Some(self.plan.target_library_id.clone()),
-                    missing: 0,
-                    xmp_dirty: 0,
-                    volume_serial,
-                    file_id,
-                },
-                self.plan.album_id,
-                self.plan.album_subgroup.as_deref(),
-            )
-            .map_err(|e| format!("登记外部照片失败：{e}"))?;
-        // 关键字落 asset_metadata（与 album_export 导出读入方向同一存储；
-        // 失败只告警不判失败——登记本体已成功）。
-        if !keywords.is_empty() {
-            let stored = self
-                .db
-                .asset_id_by_path(&path)
-                .ok()
-                .flatten()
-                .and_then(|id| self.db.merge_asset_keywords(id, &keywords).ok());
-            if stored.is_none() {
-                let _ = self.db.append_log(
-                    "warn",
-                    Some(job_id),
-                    &format!("边车关键字读入失败（{}）", reference.path.display()),
-                );
-            }
-        }
-        self.db
-            .upsert_job_file(&JobFileRow {
-                job_id,
-                src: entry.id.clone(),
-                dst: path.clone(),
-                size: entry.size,
-                state: FileState::Verified,
-                error: None,
-                xxhash: Some(reference.xxh),
-                dst2: String::new(),
-            })
-            .map_err(|e| e.to_string())?;
-        Ok((FileState::Verified, path))
-    }
-
-    /// 双目的地：两路都落位才算成功（任一失败按单文件失败，主路已落位的
-    /// 撤回删除，不留半套拷贝）；journal 双记录（dst + dst2）。
-    /// 返回 (终态, 最终目标路径)。
-    /// 落位后 XMP 边车与本体同名跟随（§三）：源文件旁同名 `.xmp` 复制/
-    /// 移动（move 模式）到本体落位目录，文件名跟随本体重名策略的最终名。
     fn finish_copy(&self, job_id: i64, copied: &CopiedFile) -> Result<(FileState, String), String> {
         let entry = &copied.entry;
 
@@ -1621,7 +1325,7 @@ impl Engine {
     /// missing 资产重绑（§八-1 导入侧；与库扫描 `rebind_asset` 同语义）：
     /// 更新路径 + 清 missing + 记录新位置登记指纹 + 缩略图按内容复用 +
     /// 边车补写新位置（xmp_dirty/有逻辑元数据时）。**调用段须已在登记闸
-    /// 内**（finish_copy/finish_reference 全程持闸，此处不再二次加锁）；
+    /// 内**（finish_copy 全程持闸，此处不再二次加锁）；
     /// 行状态闸内重查，防并发轮次/扫描同时重绑。
     fn rebind_missing_asset(
         &self,
@@ -1796,22 +1500,6 @@ fn resolve_library_root(db: &Db, plan: &ImportPlan) -> Result<PathBuf, EngineErr
     Ok(PathBuf::from(library.root_path))
 }
 
-/// reference 登记时读原文件旁的 XMP 边车（§三「星级/颜色/关键字从 XMP
-/// 边车读入」，LR → Photographer 方向）：星级/颜色由调用方进 assets 快列，
-/// 关键字落 asset_metadata。边车不存在/损坏 → 空值。
-fn read_sidecar_tags(body: &Path) -> (i64, Option<String>, Vec<String>) {
-    let sidecar = crate::metadata::xmp::sidecar_path(body);
-    let Ok(text) = fs::read_to_string(&sidecar) else {
-        return (0, None, Vec::new());
-    };
-    let rating = crate::metadata::xmp::sidecar_rating(&text)
-        .map(i64::from)
-        .unwrap_or(0);
-    let label = crate::metadata::xmp::sidecar_label(&text).map(str::to_string);
-    let keywords = crate::metadata::xmp::sidecar_subject(&text);
-    (rating, label, keywords)
-}
-
 /// 登记指纹（§三 增量扫描两级识别）：卷序列号 + 卷内文件 id（同卷同 id =
 /// 同一物理文件/硬链接，扫描零哈希直跳）。exFAT/FAT 无 file id → None
 ///（走同库哈希去重路径）。
@@ -1826,6 +1514,13 @@ fn registration_fingerprint(path: &Path) -> (Option<i64>, Option<String>) {
 mod rate_tests {
     use super::TransferRate;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn import_mode_accepts_only_copy_and_move() {
+        assert!(serde_json::from_str::<super::ImportMode>("\"reference\"").is_err());
+        assert_eq!(serde_json::from_str::<super::ImportMode>("\"copy\"").unwrap(), super::ImportMode::Copy);
+        assert_eq!(serde_json::from_str::<super::ImportMode>("\"move\"").unwrap(), super::ImportMode::Move);
+    }
 
     /// 跳过阶段（字节平坦）不计入速率分母：60s 无流量后 1s 内拷 100MB，
     /// 速率应是 ~100MB/s 而不是 100MB/61s（总耗时法的稀释 bug）。

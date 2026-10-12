@@ -1,5 +1,6 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { useSettingsStore, DEFAULT_SETTINGS, clone } from "@/stores/settingsStore";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -124,6 +125,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  useSettingsStore.setState({ settings: clone(DEFAULT_SETTINGS) });
   vi.clearAllMocks();
   localStorage.removeItem("photographer.gallery.layout");
   localStorage.removeItem("photographer.gallery.hideCrossLibraryDuplicates");
@@ -487,7 +489,7 @@ describe("相册浏览工具栏与图库一致",()=>{
     assetsPageMock.mockResolvedValue([makeAsset(1),makeAsset(2)]);
     const user=userEvent.setup();renderDetail();
     await screen.findAllByTestId("gallery-tile");
-    for(const id of ["album-detail-filter-toggle","gallery-tile-size","gallery-layout","gallery-hide-duplicates","album-export-start","album-tether-start","album-add-photos","album-cull-start","gallery-import"]){
+    for(const id of ["album-detail-filter-toggle","gallery-tile-size","gallery-layout","album-export-start","album-tether-start","album-add-photos","album-cull-start","gallery-import"]){
       const button=screen.getByTestId(id);
       expect(button.querySelector("svg")).not.toBeNull();
       expect(button.textContent?.trim().length).toBeGreaterThan(0);
@@ -501,14 +503,14 @@ describe("相册浏览工具栏与图库一致",()=>{
     assetsPageMock.mockResolvedValue([first,second]);
     vi.mocked(duplicatesList).mockResolvedValue([{kind:"exact",assets:[first,second]}]);
     const user=userEvent.setup();renderDetail();
-    expect(await screen.findAllByTestId("gallery-tile")).toHaveLength(2);
-    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    await screen.findAllByTestId("gallery-tile");
+    expect(screen.queryByTestId("gallery-hide-duplicates")).not.toBeInTheDocument();
     await waitFor(()=>expect(screen.getAllByTestId("gallery-tile")).toHaveLength(1));
     expect(trashMoveMock).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("gallery-duplicate-badge"));
     expect(await screen.findByTestId("duplicates-dialog")).toBeInTheDocument();
     await user.click(screen.getByTestId("duplicates-dialog-close"));
-    await user.click(screen.getByTestId("gallery-hide-duplicates"));
+    act(() => useSettingsStore.getState().update({ gallery: { hideCrossLibraryDuplicates: false } }));
     await waitFor(()=>expect(screen.getAllByTestId("gallery-tile")).toHaveLength(2));
   });
 });
