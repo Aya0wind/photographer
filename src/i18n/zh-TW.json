@@ -1437,7 +1437,7 @@
   "storage.createDialog.creating": "登記中…",
   "storage.createDialog.unavailable": "後端未連線，暫時無法登記照片庫。",
   "storage.removeDialog.title": "刪除照片庫：{{name}}",
-  "storage.removeDialog.desc": "該照片庫目前登記了 {{count}} 張照片。",
+  "storage.removeDialog.desc": "將把庫內 {{count}} 張照片從圖庫刪除（不經過回收站，無法復原）。",
   "storage.removeDialog.typeHint": "輸入照片庫名稱「{{name}}」確認：",
   "storage.removeDialog.confirmDelete": "確認刪除",
   "storage.removeDialog.deleteFiles": "同時刪除原始檔案",

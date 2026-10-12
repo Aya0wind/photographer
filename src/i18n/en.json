@@ -1454,7 +1454,7 @@
   "storage.createDialog.creating": "Registering…",
   "storage.createDialog.unavailable": "Backend not connected; cannot register a photo library right now.",
   "storage.removeDialog.title": "Delete photo library: {{name}}",
-  "storage.removeDialog.desc": "This photo library currently registers {{count}} photos.",
+  "storage.removeDialog.desc": "This permanently deletes all {{count}} photos from the gallery (skipping the recycle bin).",
   "storage.removeDialog.typeHint": "Type the library name \"{{name}}\" to confirm:",
   "storage.removeDialog.confirmDelete": "Delete now",
   "storage.removeDialog.deleteFiles": "Also delete the original files",

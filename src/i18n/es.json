@@ -1451,7 +1451,7 @@
   "storage.createDialog.creating": "Registrando…",
   "storage.createDialog.unavailable": "Backend no conectado; no se puede registrar una fototeca ahora mismo.",
   "storage.removeDialog.title": "Eliminar fototeca: {{name}}",
-  "storage.removeDialog.desc": "Esta fototeca tiene {{count}} fotos registradas.",
+  "storage.removeDialog.desc": "Elimina definitivamente las {{count}} fotos de la galería (sin pasar por la papelera).",
   "storage.removeDialog.typeHint": "Escribe el nombre de la fototeca \"{{name}}\" para confirmar:",
   "storage.removeDialog.confirmDelete": "Eliminar ahora",
   "storage.removeDialog.deleteFiles": "Eliminar también los archivos originales",

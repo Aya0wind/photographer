@@ -1437,7 +1437,7 @@
   "storage.createDialog.creating": "登録中…",
   "storage.createDialog.unavailable": "バックエンド未接続のため、現在写真ライブラリを登録できません。",
   "storage.removeDialog.title": "写真ライブラリを削除：{{name}}",
-  "storage.removeDialog.desc": "この写真ライブラリには現在 {{count}} 枚の写真が登録されています。",
+  "storage.removeDialog.desc": "ライブラリ内の {{count}} 枚の写真をギャラリーから完全に削除します（ごみ箱を経由せず、元に戻せません）。",
   "storage.removeDialog.typeHint": "確認のためライブラリ名「{{name}}」を入力してください：",
   "storage.removeDialog.confirmDelete": "削除する",
   "storage.removeDialog.deleteFiles": "元のファイルも削除する",
