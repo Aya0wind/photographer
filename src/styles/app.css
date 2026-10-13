@@ -420,3 +420,10 @@ body {
 .ui-switch:checked { background: #F0A83C; }
 .ui-switch:checked::before { transform: translateX(14px); }
 .no-motion .ui-switch::before { transition: none; }
+/* Colour Mixer tracks remain visible instead of the browser's opaque track. */
+.editor-color-slider { appearance: none; cursor: pointer; }
+.editor-color-slider::-webkit-slider-runnable-track { background: transparent; border-radius: 999px; }
+.editor-color-slider::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; border: 2px solid white; border-radius: 50%; background: #555; box-shadow: 0 0 2px #000; }
+.editor-color-slider::-moz-range-track { background: transparent; }
+.editor-color-slider::-moz-range-thumb { width: 10px; height: 10px; border: 2px solid white; border-radius: 50%; background: #555; }
+.editor-color-slider:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 4px; }

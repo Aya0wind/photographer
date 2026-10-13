@@ -52,18 +52,20 @@ fn output(encoded:vec3<f32>)->vec4<f32> {
     let image_uv=(input.uv-view.image_rect.xy)/view.image_rect.zw;
     if any(image_uv<vec2(0.0)) || any(image_uv>vec2(1.0)) {return output(vec3(0.12549));}
     let source_uv=vec2(dot(view.map_x.xyz,vec3(image_uv,1.0)),dot(view.map_y.xyz,vec3(image_uv,1.0)));
-    var working=vec3(1.0);
+    var working=vec3(0.0);
+    var coverage=0.0;
     var clip_pixel=vec4(0.0);
     let before=view.metrics.w>=0.0 && image_uv.x<view.metrics.w;
     if all(source_uv>=vec2(0.0)) && all(source_uv<=vec2(1.0)) {
         var pixel=textureSampleLevel(image,pixel_sampler,source_uv*view.uv.zw+view.uv.xy,0.0);
         if before {pixel=textureSampleLevel(original,pixel_sampler,source_uv*view.uv.zw+view.uv.xy,0.0);}
-        working=mix(vec3(1.0),pixel.rgb,pixel.a);
+        working=pixel.rgb;
+        coverage=pixel.a;
         clip_pixel=pixel;
     }
-    if view.flags.z>0.5 && !before {let annotation=textureSampleLevel(annotations,pixel_sampler,image_uv,0.0);working=mix(working,annotation.rgb,annotation.a);}
+    if view.flags.z>0.5 && !before {let annotation=textureSampleLevel(annotations,pixel_sampler,image_uv,0.0);working=mix(working,annotation.rgb,annotation.a);coverage=max(coverage,annotation.a);}
     let coord=(clamp(working,vec3(0.0),vec3(1.0))*32.0+vec3(0.5))/33.0;
-    var color=textureSampleLevel(display,pixel_sampler,coord,0.0).rgb;
+    var color=mix(vec3(0.12549),textureSampleLevel(display,pixel_sampler,coord,0.0).rgb,coverage);
     // Same channel tests and highlight priority as PhotoCraft histogram::clipping.
     if clip_pixel.a>0.0 && all(clip_pixel.rgb==clip_pixel.rgb) && all(abs(clip_pixel.rgb)<=vec3(65504.0)) {
         if (u32(view.warnings.x)&2u)!=0u && any(clip_pixel.rgb>=vec3(1.0)) {color=vec3(1.0,0.0,0.0);}
@@ -93,8 +95,9 @@ fn output(encoded:vec3<f32>)->vec4<f32> {
         if min(length(p-a),length(p-b))<4.0*view.metrics.z {color=vec3(1.0);}
     }
     if view.metrics.w>=0.0 && abs(image_uv.x-view.metrics.w)*view.image_rect.z*view.metrics.x<view.metrics.z {color=vec3(1.0);}
-    if view.mask_info.z>0.5 {
+    if view.mask_info.z>0.5 || view.mask_info.w>0.5 {
         if view.mask_info.w>0.5 && all(source_uv>=vec2(0.0)) && all(source_uv<=vec2(1.0)) {let mask_uv=select(image_uv,source_uv,view.warnings.y>0.5);let mask=textureSampleLevel(mask_overlay,pixel_sampler,mask_uv,0.0);color=mix(color,vec3(1.0,0.2,0.2),mask.a*0.35);}
+        if view.mask_info.z<0.5 {return output(color);}
         if view.mask_info.z>2.5 {
             if view.warnings.z>0.5 {let dimensions=view.image_rect.zw*view.metrics.xy;let radius=max(view.mask_info.xy*dimensions,vec2(2.0*view.metrics.z));let distance=abs(length((image_uv-view.mask_line.zw)*dimensions/radius)-1.0)*min(radius.x,radius.y);if distance<2.0*view.metrics.z {color=vec3(0.1);if distance<view.metrics.z {color=vec3(1.0);}}}
             return output(color);

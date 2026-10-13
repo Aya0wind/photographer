@@ -44,6 +44,7 @@ export type AdvancedAction = RecipeAction
   | {type:"resetDevelopmentGroup";group:DevelopmentGroup}
   | {type:"maskAdd";mask:EditLocalMask}
   | {type:"maskUpdate";id:string;patch:Partial<Omit<EditLocalMask,"id">>;record?:boolean}
+  | {type:"maskReorder";id:string;targetId:string}
   | {type:"maskRemove";id:string}
   | {type:"maskDuplicate";id:string;newId:string;name:string}
   | {type:"maskResetAdjustmentGroup";id:string;group:AdjustmentGroup}
@@ -79,10 +80,15 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     for(const key of DEVELOPMENT_GROUPS[action.group])Object.assign(development,{[key]:DEFAULT_DEVELOPMENT[key]});
     return {past:appendHistory(state.past,state.present),future:[],present:{...state.present,advanced:{...a,development}}};
   }
-  if (action.type==="maskAdd" || action.type==="maskUpdate" || action.type==="maskRemove" || action.type==="maskDuplicate" || action.type==="maskResetAdjustmentGroup" || action.type==="maskResetDevelopmentGroup") {
+  if (action.type==="maskReorder" || action.type==="maskAdd" || action.type==="maskUpdate" || action.type==="maskRemove" || action.type==="maskDuplicate" || action.type==="maskResetAdjustmentGroup" || action.type==="maskResetDevelopmentGroup") {
     let masks=state.present.masks??[];
     let record=true;
     switch(action.type) {
+      case "maskReorder":{
+        const source=masks.find(m=>m.id===action.id),target=masks.find(m=>m.id===action.targetId);
+        if(!source||!target||source===target)return state;
+        const from=masks.indexOf(source),to=masks.indexOf(target);masks=[...masks];masks.splice(from,1);masks.splice(to,0,source);break;
+      }
       case "maskAdd":if(masks.some(m=>m.id===action.mask.id) || masks.length>=32)return state;masks=[...masks,structuredClone(action.mask)];break;
       case "maskUpdate":record=action.record!==false;masks=masks.map(m=>m.id===action.id?{...m,...action.patch}:m);break;
       case "maskRemove":masks=masks.filter(m=>m.id!==action.id);break;

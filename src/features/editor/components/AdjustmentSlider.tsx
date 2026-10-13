@@ -1,7 +1,8 @@
 import {useEffect,useRef,useState} from "react";
 import {useTranslation} from "react-i18next";
 
-export default function Slider({ label, value, unit, min = -100, max = 100, step = 1, defaultValue = 0, onChange, onSet, onReset, begin, end }: {
+export default function Slider({ label, value, unit, gradient, min = -100, max = 100, step = 1, defaultValue = 0, onChange, onSet, onReset, begin, end }: {
+  gradient?:string;
   label: string; value: number; unit?:string; min?: number; max?: number; step?: number; defaultValue?:number;
   onSet:(value:number)=>void;
   onReset:()=>void;
@@ -61,7 +62,8 @@ export default function Slider({ label, value, unit, min = -100, max = 100, step
         gesture.value=event.key==="Home"?min:event.key==="End"?max:increment(gesture.value,direction*step*factor);
         onChange(gesture.value);
       }} onKeyUp={event=>{if(!keyboard.current||!adjustmentKeys.includes(event.key))return;event.stopPropagation();keyboard.current.keys.delete(event.key);if(!keyboard.current.keys.size)finishKeyboard();}} onChange={(e) => {if(!fineDrag.current)onChange(Number(e.target.value));}}
-      className="block h-4 w-full accent-accent" />
+      style={gradient?{background:gradient}:undefined}
+      className={gradient?"editor-color-slider block h-2 w-full rounded-full":"block h-4 w-full accent-accent"} />
   </div>;
 }
 

@@ -35,7 +35,7 @@ import {
 export type EditorTool = "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
 
 const TEXT_NODE_NAME = "editor-text-layer";
-const STAGE_PADDING = 24;
+const STAGE_PADDING = 6;
 
 /** HTMLImageElement 加载（react-konva 官方 use-image 的等价内联实现，少一个依赖） */
 function useHtmlImage(
@@ -98,7 +98,7 @@ function rotatedImageAttrs(
 interface EditorCanvasProps {
   straightening?:boolean;onStraighten?:(angle:number)=>void;onStraightenCancel?:()=>void;
   onSampleGesture?:(event:SampleGesture)=>void;
-  maskControls?:{mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null;showOverlay?:boolean};
+  maskControls?:{editing?:boolean;mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null;showOverlay?:boolean};
   showOriginal?: boolean;
   compareSplit?:number|null;
   onCompareSplit?:(value:number)=>void;
@@ -106,6 +106,7 @@ interface EditorCanvasProps {
   clippingSrc?:string|null;
   originalClippingSrc?:string|null;
   sampleMode?: boolean;
+  onHoverPixel?: (point:[number,number]|null)=>void;
   onSample?: (x: number, y: number) => void;
   onSampleError?:()=>void;
   src: string | null;
@@ -150,6 +151,7 @@ export default function EditorCanvas({
   clippingSrc=null,originalClippingSrc=null,
   sampleMode = false,
   onSample,
+  onHoverPixel,
   onSampleError,
   adjustedSrc = null,
   sourceSize = null,
@@ -278,7 +280,7 @@ export default function EditorCanvas({
     if (cropTrRef.current === null || cropRectRef.current === null) return;
     cropTrRef.current.nodes([cropRectRef.current]);
     cropTrRef.current.getLayer()?.batchDraw();
-  }, [tool, cropDraft]);
+  }, [tool, cropDraft !== null, image]);
 
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
@@ -385,6 +387,15 @@ export default function EditorCanvas({
   const cropMode = tool === "crop" && cropDraft !== null;
   const cropRect = cropMode ? cropToRectAttrs(cropDraft, canvas) : null;
 
+  function updateCropTransform(e: Konva.KonvaEventObject<Event>) {
+    const node=e.target as Konva.Rect;
+    const width=Math.min(Math.max(node.width()*node.scaleX(),8),dispW);
+    const height=Math.min(Math.max(node.height()*node.scaleY(),8),dispH);
+    node.scaleX(1);node.scaleY(1);node.width(width);node.height(height);
+    node.x(Math.min(Math.max(node.x(),0),dispW-width));node.y(Math.min(Math.max(node.y(),0),dispH-height));
+    onCropDraftChange(rectAttrsToCrop({x:node.x(),y:node.y(),width,height},canvas));
+  }
+
   const cursor =
     sampleMode || tool === "brush" || tool === "text" ? "crosshair" : canPan && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
@@ -408,7 +419,12 @@ export default function EditorCanvas({
         viewport.setPointerCapture(event.pointerId);
         setPanning(true);
       }}
+      onPointerLeave={()=>onHoverPixel?.(null)}
       onPointerMove={(event) => {
+        const rect=event.currentTarget.querySelector<HTMLElement>('[data-testid="editor-canvas-frame"]')?.getBoundingClientRect();
+        const x=rect?.width?(event.clientX-rect.left)/rect.width:-1;
+        const y=rect?.height?(event.clientY-rect.top)/rect.height:-1;
+        onHoverPixel?.(x>=0&&x<=1&&y>=0&&y<=1?[x,y]:null);
         const target=targetRef.current;
         if(target&&target.id===event.pointerId){target.delta+=(target.lastY-event.clientY)/target.height*(event.altKey?0.1:1);target.lastY=event.clientY;target.handler({phase:"move",x:target.x,y:target.y,delta:target.delta});return;}
         const pan = panRef.current;
@@ -420,7 +436,7 @@ export default function EditorCanvas({
     >
       <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter} data-straighten-guide={straightLine?JSON.stringify(straightLine):undefined} data-crop-guide={cropMode&&cropDraft?JSON.stringify([cropDraft.x,cropDraft.y,cropDraft.w,cropDraft.h]):undefined}>
         {tool==="crop"&&straightening&&<><StraightenOverlay width={dispW} height={dispH} onPreview={setStraightLine} onCancel={onStraightenCancel} onCommit={angle=>onStraighten?.(angle)}/>{straightLine&&<svg className="pointer-events-none absolute inset-0 z-10" width={dispW} height={dispH}><line x1={straightLine[0]*dispW} y1={straightLine[1]*dispH} x2={straightLine[2]*dispW} y2={straightLine[3]*dispH} stroke="white" strokeWidth={2}/></svg>}</>}
-        {tool==="mask"&&maskControls&&!sampleMode&&<MaskCanvasControls {...maskControls} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
+        {maskControls&&<MaskCanvasControls {...maskControls} editing={maskControls.editing!==false&&!sampleMode} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
         <Stage
           width={dispW}
           height={dispH}
@@ -466,24 +482,15 @@ export default function EditorCanvas({
                     const node = e.target;
                     node.x(Math.min(Math.max(node.x(), 0), dispW - node.width()));
                     node.y(Math.min(Math.max(node.y(), 0), dispH - node.height()));
+                    onCropDraftChange(rectAttrsToCrop({x:node.x(),y:node.y(),width:node.width(),height:node.height()},canvas));
                   }}
                   onDragEnd={(e) => {
                     const node = e.target;
                     onCropDraftChange(rectAttrsToCrop({ x: node.x(), y: node.y(), width: node.width(), height: node.height() }, canvas));
                   }}
-                  onTransformEnd={(e) => {
-                    const node = e.target;
-                    // Transformer 改写 scale：烘焙回 width/height 并复位
-                    const width = Math.min(Math.max(node.width() * node.scaleX(), 8), dispW);
-                    const height = Math.min(Math.max(node.height() * node.scaleY(), 8), dispH);
-                    node.scaleX(1);
-                    node.scaleY(1);
-                    node.width(width);
-                    node.height(height);
-                    node.x(Math.min(Math.max(node.x(), 0), dispW - width));
-                    node.y(Math.min(Math.max(node.y(), 0), dispH - height));
-                    onCropDraftChange(rectAttrsToCrop({ x: node.x(), y: node.y(), width, height }, canvas));
-                  }}
+                  onTransform={updateCropTransform}
+                  onTransformEnd={updateCropTransform}
+                  /* live transforms keep the DOM crop guide in sync with Konva */
                   data-testid="editor-crop-rect"
                 />
                 <Transformer
@@ -627,9 +634,9 @@ export default function EditorCanvas({
           )}
         </Stage>
         {!nativeDisplay&&clippingSrc&&!showOriginal&&<img src={clippingSrc} alt="" className="pointer-events-none absolute inset-0 h-full w-full"/>}
-        {showOriginal&&nativeGeometry&&!nativeDisplay&&<div className="pointer-events-none absolute inset-0 overflow-hidden bg-white" data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/></div>}
+        {showOriginal&&nativeGeometry&&!nativeDisplay&&<div className="pointer-events-none absolute inset-0 overflow-hidden bg-[#202020]" data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/></div>}
         {compareSplit!==null&&!showOriginal&&onCompareSplit&&<>
-          {!nativeDisplay&&<div className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden bg-white" style={{width:`${compareSplit*100}%`}} data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/>{originalClippingSrc&&<img src={originalClippingSrc} alt="" className="pointer-events-none absolute left-0 top-0 max-w-none" style={{width:dispW,height:dispH}}/>}</div>}
+          {!nativeDisplay&&<div className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden bg-[#202020]" style={{width:`${compareSplit*100}%`}} data-testid="editor-comparison-original"><img src={src??undefined} alt="" draggable={false} style={{position:"absolute",width:baseW,height:baseH,maxWidth:"none",transformOrigin:"0 0",transform:sourceTransform}}/>{originalClippingSrc&&<img src={originalClippingSrc} alt="" className="pointer-events-none absolute left-0 top-0 max-w-none" style={{width:dispW,height:dispH}}/>}</div>}
           <ComparisonOverlay position={compareSplit} onChange={onCompareSplit}/>
         </>}
         {!nativeDisplay&&originalClippingSrc&&showOriginal&&<img src={originalClippingSrc} alt="" className="pointer-events-none absolute inset-0 h-full w-full"/>}

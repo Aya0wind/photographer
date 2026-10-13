@@ -1587,6 +1587,7 @@
   "advancedEditor.ranges.magentas": "Magentas",
   "advancedEditor.preparingOriginal": "Preparing original; editing is available",
   "advancedEditor.originalFailed": "Original preparation failed; the cached preview is still available",
+  "advancedEditor.masks.stackHint": "Drag masks to reorder, or use Alt + ↑ / ↓.",
   "advancedEditor.masks.title": "Masks",
   "advancedEditor.masks.brush": "Brush",
   "advancedEditor.masks.linear": "Linear gradient",

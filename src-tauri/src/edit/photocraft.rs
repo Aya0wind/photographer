@@ -304,7 +304,13 @@ pub(super) fn jpeg_with_timings(
 ) -> Result<(Vec<u8>, DisplayTimings), String> {
     jpeg_with_profile(doc,quality,photocraft_cms::Builtin::Srgb.profile())
 }
+pub(super) fn jpeg_preview(doc:&Document,quality:u8)->Result<(Vec<u8>,DisplayTimings),String>{
+    jpeg_with_matte(doc,quality,photocraft_cms::Builtin::Srgb.profile(),true)
+}
 pub(super) fn jpeg_with_profile(doc:&Document,quality:u8,profile:&photocraft_cms::Profile)->Result<(Vec<u8>,DisplayTimings),String>{
+    jpeg_with_matte(doc,quality,profile,false)
+}
+fn jpeg_with_matte(doc:&Document,quality:u8,profile:&photocraft_cms::Profile,preview:bool)->Result<(Vec<u8>,DisplayTimings),String>{
     let started = std::time::Instant::now();
     let mut timing = DisplayTimings::default();
     let gpu = super::gpu::composite(doc);
@@ -334,6 +340,11 @@ pub(super) fn jpeg_with_profile(doc:&Document,quality:u8,profile:&photocraft_cms
             true,
         )
         .map_err(|e| e.to_string())?;
+    }
+    if preview {
+        use photocraft_engine::doc::{Color,ColorMode};
+        let background=Document::with_background("Preview matte",flat.size,ColorMode::Rgb,flat.depth,Color::rgb(32.0/255.0,32.0/255.0,32.0/255.0));
+        flat.layers.insert(0,background.layers[0].clone());
     }
     timing.profile_ms = phase.elapsed().as_secs_f64() * 1000.0;
     let phase = std::time::Instant::now();
@@ -536,6 +547,22 @@ pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecip
 
 #[cfg(test)]
 mod migration_tests {
+    #[test]
+    fn preview_rotation_padding_is_gray_and_export_remains_white(){
+        use photocraft_engine::doc::{Document,Size,Color,ColorMode,SampleType};
+        let mut base=Document::with_background("Matte",Size::new(64,64),ColorMode::Rgb,SampleType::U8,Color::rgb(0.8,0.4,0.2));
+        // Match source::from_image: an imported photo is not a locked,
+        // opaque PhotoCraft Background layer (which paints rotation padding).
+        base.layers[0].name="Photo".into();base.layers[0].locks.position=false;
+        let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","geometry":{"angle":30}})).unwrap();
+        let doc=super::render_document(&base,&recipe).unwrap();
+        let preview=super::jpeg_preview(&doc,100).unwrap().0;
+        let export=super::jpeg_with_timings(&doc,100).unwrap().0;
+        let p=image::load_from_memory(&preview).unwrap().to_rgb8();
+        let e=image::load_from_memory(&export).unwrap().to_rgb8();
+        for c in p.get_pixel(0,0).0 {assert!((i32::from(c)-32).abs()<4);}
+        for c in e.get_pixel(0,0).0 {assert!(c>250);}
+    }
     use super::*;
     #[test]
     fn native_document_roundtrip_keeps_layers_masks_profile_and_pixels(){

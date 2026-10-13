@@ -9,7 +9,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  editPreviewPick, albumList, assetAlbums, editProjectOpen, editProjectSave, advancedExportFolder, advancedExport, editExportStatus, subscribeAppEvents,
+  assetDetail, editPreviewPick, albumList, assetAlbums, editProjectOpen, editProjectSave, advancedExportFolder, advancedExport, editExportStatus, subscribeAppEvents,
   type AlbumDto, type AssetDto, type EditRecipe, type ExportOptions,
 } from "@/ipc/api";
 import ActionPopover from "@/shared/components/ActionPopover";
@@ -26,6 +26,8 @@ import { useEditorPreview } from "../lib/useEditorPreview";
 import {useMaskOverlay} from "../lib/useMaskOverlay";
 import {useClippingOverlay} from "../lib/useClippingOverlay";
 import {useSchemeTransfer} from "../lib/useSchemeTransfer";
+import {usePixelReadout} from "../lib/usePixelReadout";
+import HistogramPanel from "./HistogramPanel";
 import {useEditorHistogram} from "../lib/useEditorHistogram";
 import {pickerAdjustment} from "../lib/pickerResult";
 import ErrorModal from "@/shared/components/ErrorModal";
@@ -128,8 +130,9 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const maskOverlay=useMaskOverlay(preview.session?.sessionId,recipe,selectedMask,tool==="mask"&&maskEditing&&showMaskOverlay&&!nativeActive,error=>setNotice(String(error)));
+  const maskOverlay=useMaskOverlay(preview.session?.sessionId,recipe,selectedMask,tool==="mask"&&showMaskOverlay&&!compare&&!nativeActive,error=>setNotice(String(error)));
   const [toolModalOpen,setToolModalOpen]=useState(false);
+  const [moreOpen,setMoreOpen]=useState(false);
   const closeAfterTarget=useRef(false);
   const [confirm, setConfirm] = useState<"close" | "reset" | "switch" | null>(null);
   const [albumPicker, setAlbumPicker] = useState(false);
@@ -147,15 +150,19 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const unavailable = libraryChanged || !preview.session || preview.error !== null || projectLoading || projectError !== null;
   const target=useTargetAdjustment({sampleSize,sessionId:preview.session?.sessionId,history,mode:!unavailable&&!compare&&!(tool==="mask"&&!activeMask)&&(picker==="curveTarget"||picker==="hslTarget")?picker:null,maskId:tool==="mask"?activeMask?.id:undefined,channel:targetCurveChannel,axis:targetHslAxis,dispatch,
     onError:error=>setSamplingError(!error?null:error.includes("target-hsl-no-color")?t("advancedEditor.hslNoColor"):error.includes("target-curve-limit")?t("advancedEditor.targetCurveLimit"):error),onSample:(value,range)=>{setSample(value);if(range)setHslRange(range);}});
-  const [histogramOpen,setHistogramOpen]=useState(false);
+  const [histogramOpen,setHistogramOpen]=useState(true);
   const histogram=useEditorHistogram(preview.session?.sessionId,recipe,compare,histogramOpen&&!unavailable);
-  const targetSampling={onHistogramOpen:setHistogramOpen,liveHistogram:histogram.bins,histogramBusy:histogram.busy,sampleSize,setSampleSize:(size:1|3|5|11)=>{setSampleSize(size);setSample(null);setSamplingError(null);},setTargetCurveChannel:(channel:CurveChannel)=>{setTargetCurveChannel(channel);setSample(null);},targetHslAxis,setTargetHslAxis};
+  const readoutRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
+  const pixel=usePixelReadout(preview.session?.sessionId,compare?{...readoutRecipe,adjustments:undefined,advanced:undefined,legacyAdjustments:undefined,masks:[]}:readoutRecipe,histogramOpen&&!unavailable);
+  const [shot,setShot]=useState<{iso?:number|null;aperture?:string|null;shutter?:string|null}|null>(null);
+  useEffect(()=>{let cancelled=false;setShot(null);void assetDetail(asset.id).then(value=>{if(!cancelled)setShot(value);}).catch(()=>{});return()=>{cancelled=true;};},[asset.id]);
+  const targetSampling={sampleSize,setSampleSize:(size:1|3|5|11)=>{setSampleSize(size);setSample(null);setSamplingError(null);},setTargetCurveChannel:(channel:CurveChannel)=>{setTargetCurveChannel(channel);setSample(null);},targetHslAxis,setTargetHslAxis};
   const schemeDisabled=busy||exporting||libraryChanged||!preview.session||projectLoading||projectError!==null||target.active;
   const scheme=useSchemeTransfer({assetId:asset.id,libraryId,name:asset.name,recipe:recipeForPersist(effective),label:t("advancedEditor.schemeFile"),disabled:schemeDisabled,onBusy:value=>{busyRef.current=value;setBusy(value);},onSaved:()=>setNotice(t("advancedEditor.schemeSaved")),onApply:value=>{chooseTool("adjust");dispatch({type:"applyProject",recipe:value});setSelectedMask(null);setSelectedText(null);preview.reload();setNotice(t("advancedEditor.schemeApplied"));}});
 
   const canvasRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,canvasRecipe,nativeHost,
-    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !scheme.error && !histogram.error,
+    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !moreOpen && !scheme.error && !histogram.error,
     compare,preview.session?.sourceUrl,String(zoomVisible),compareSplit,activeClipping);
   const clippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,false,activeClipping,!nativeCanvas&&!compare,error=>setNotice(String(error)));
   const originalClippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,true,activeClipping,!nativeCanvas&&(compare||compareSplit!==null),error=>setNotice(String(error)));
@@ -326,11 +333,12 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (maskGestureOwnsKey(event)) return;
-      if(toolModalOpen||scheme.error||histogram.error) return;
+      if(toolModalOpen||moreOpen||scheme.error||histogram.error) return;
       if(straightening&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.stopImmediatePropagation();setStraightening(false);return;}
       if(target.active&&(event.key==="Escape"||((event.ctrlKey||event.metaKey)&&["z","s"].includes(event.key.toLowerCase())))){event.preventDefault();event.stopImmediatePropagation();if(event.key.toLowerCase()!=="s")target.cancel();return;}
       const input = event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
       if (input) return;
+      if(tool==="mask"&&event.key.toLowerCase()==="o"&&!event.ctrlKey&&!event.metaKey){event.preventDefault();setShowMaskOverlay(v=>!v);return;}
       if(event.key==="Escape"&&gesture.current&&tool!=="crop"){event.preventDefault();event.stopImmediatePropagation();cancelGesture();return;}
       if (event.key === "\\" && !event.ctrlKey && !event.metaKey && !unavailable) { event.preventDefault(); setCompare(true); return; }
       if (event.key === "Escape") {
@@ -363,7 +371,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         if (photo.libraryId === libraryId && Number.isSafeInteger(photo.asset?.id) && photo.asset.id > 0) useAdvancedEditorStore.getState().request(photo);
       } catch { setNotice(t("advancedEditor.dropFailed")); }
     }}>
-    <header className="ui-glass flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-edge px-4 py-2">
+    <header className="ui-glass relative z-50 flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-edge px-4 py-2">
       <div className="min-w-0"><h2 className="text-sm font-semibold text-text-primary">{t("advancedEditor.title")} {dirty && <span className="text-accent">•</span>}</h2><p className="truncate text-[11px] text-text-muted">{asset.name}</p></div>
       <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         <button className={BUTTON} disabled={(!history.past.length&&tool!=="crop") || busy || exporting} onClick={undoEditing} title={t("editor.undo")} aria-label={t("editor.undo")}>↶</button>
@@ -373,7 +381,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         <button className={BUTTON} disabled={busy || unavailable || target.active} aria-pressed={splitEnabled} title={t("advancedEditor.compareSplitHint")} onClick={()=>{setPicker(null);setSplitEnabled(v=>!v);}}>{t("advancedEditor.compareSplit")}</button>
         <button className="ui-primary rounded-xl px-4 py-2 text-xs disabled:opacity-40" disabled={busy || exporting || unavailable || target.active || exportFormat==="pcraft"} onClick={() => void returnToLibrary(undefined, originSubgroup ?? null, true)}>{t("advancedEditor.saveReturn")}</button>
 
-        <ActionPopover label={t("ui.more")} closeOnAction>
+        <ActionPopover label={t("ui.more")} onOpenChange={setMoreOpen} closeOnAction>
           <button className={BUTTON} disabled={busy||exporting||unavailable||target.active} onClick={()=>void scheme.save()}>{t("advancedEditor.schemeSave")}</button>
           <button className={BUTTON} disabled={schemeDisabled} onClick={()=>void scheme.open()}>{t("advancedEditor.schemeOpen")}</button>
           {([1,2] as const).map(flag=><button key={flag} className={BUTTON} disabled={busy||unavailable} aria-pressed={(clipping&flag)!==0} onClick={()=>setClipping(value=>value^flag)}>{t(flag===1?"advancedEditor.clipShadows":"advancedEditor.clipHighlights")}</button>)}
@@ -390,6 +398,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       </nav>
       <main ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
+          onHoverPixel={pixel.hover}
           compareSplit={compareSplit} onCompareSplit={setSplitPosition} nativeDisplay={nativeCanvas}
           clippingSrc={clippingSrc} originalClippingSrc={originalClippingSrc}
           sampleMode={picker !== null && !compare && compareSplit===null} onSample={samplePhoto} onSampleError={()=>setSamplingError(t("advancedEditor.sampleOutside"))}
@@ -399,7 +408,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           onZoom={(factor) => {wakeZoom();setZoom((v) => Math.max(0.25, Math.min(4, v * factor)));}}
           recipe={compare ? { ...recipe, textLayers: [], brushStrokes: [] } : recipe}
           tool={compare || busy || exporting || unavailable ? "view" : tool==="mask"&&!maskEditing?"adjust":tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
-          maskControls={activeMask?{mask:activeMask,brush:maskBrush,overlaySrc:maskOverlay,showOverlay:showMaskOverlay,onCommit:patch=>dispatch({type:"maskUpdate",id:activeMask.id,patch})}:undefined}
+          maskControls={tool==="mask"&&activeMask&&!compare?{editing:maskEditing,mask:activeMask,brush:maskBrush,overlaySrc:maskOverlay,showOverlay:showMaskOverlay,onCommit:patch=>dispatch({type:"maskUpdate",id:activeMask.id,patch})}:undefined}
           straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((recipe.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(recipe,{angle},context.current);setCropDraft(remapDraftCrop(recipe,next,cropDraft,context.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
           brushOptions={{ color, widthRel: brushWidth }} selectedTextId={selectedText} onSelectText={setSelectedText}
           onPlaceText={(pos) => { const id = newLayerId(); dispatch({ type: "textAdd", layer: { id, ...pos, text: "", sizeRel: 0.05, color } }); setSelectedText(id); }}
@@ -415,9 +424,12 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         {(preview.loading || projectLoading) && <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label={t("advancedEditor.loading")}><span className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-accent" /></div>}
 
       </main>
-      <aside className="ui-glass sp-scroll w-72 shrink-0 overflow-y-auto rounded-2xl p-4">
+      <aside className="ui-glass sp-scroll w-80 shrink-0 overflow-y-auto rounded-2xl p-4">
+        <HistogramPanel bins={histogram.bins} onOpen={setHistogramOpen}>
+          <div className="flex justify-between gap-2 text-xs tabular-nums text-text-secondary"><span>{shot?.aperture?`f/${shot.aperture.replace(/^f\/?/i, "")}`:"f/—"}</span><span>{formatEditorShutter(shot?.shutter)}</span><span>ISO {shot?.iso&&shot.iso>0?shot.iso:"—"}</span></div>
+          <div className="flex justify-between gap-1 whitespace-nowrap text-[11px] tabular-nums text-text-muted" aria-live="off"><span>RGB {pixel.rgb?.map(v=>Math.round(v)).join(" · ")??"— · — · —"}</span><span>Lab {pixel.lab?.map(v=>v.toFixed(1)).join(" · ")??"— · — · —"}</span></div>
+        </HistogramPanel>
         {samplingError && <p role="alert" className="mb-2 text-xs text-amber-500">{samplingError}</p>}
-        {preview.session && <p className="mb-2 text-[11px] text-text-muted">{preview.session.sensorRaw ? "RAW · " : ""}{preview.session.bitDepth}</p>}
         {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable || target.active} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
@@ -435,3 +447,5 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     {confirm && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50"><div role="alertdialog" aria-modal="true" aria-labelledby="advanced-confirm-title" className="ui-glass w-96 space-y-4 rounded-2xl p-5"><h3 id="advanced-confirm-title" className="text-sm font-semibold text-text-primary">{t(confirm === "reset" ? "editor.resetConfirmTitle" : "editor.unsavedTitle")}</h3><p className="text-xs text-text-secondary">{t(confirm === "reset" ? "editor.resetConfirmDesc" : "advancedEditor.unsaved")}</p><div className="flex justify-end gap-2"><button className={BUTTON} onClick={() => { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }}>{t("common.cancel")}</button>{confirm !== "reset" && <button className="ui-primary rounded-xl px-4 py-2 text-xs" disabled={busy || unavailable} onClick={() => { const action = confirm; void saveProject().then((ok) => { if (!ok || !mounted.current) return; setConfirm(null); if (action === "close") closeEditor(); else useAdvancedEditorStore.getState().accept(); }); }}>{t("advancedEditor.saveContinue")}</button>}<button className={BUTTON} disabled={busy} onClick={() => { const action = confirm; setConfirm(null); if (action === "close") closeEditor(); else if (action === "switch") useAdvancedEditorStore.getState().accept(); else { dispatch({ type: "reset" }); setProjectError(null); gesture.current = null; setCropDraft(null); setSelectedText(null); setTool("adjust"); } }}>{t(confirm === "reset" ? "editor.resetConfirmGo" : "editor.unsavedDiscard")}</button></div></div></div>}
   </div>;
 }
+
+function formatEditorShutter(value?:string|null){if(!value)return "—";const plain=value.trim().replace(/s$/i, "");const seconds=Number(plain);if(Number.isFinite(seconds)&&seconds>0)return seconds<1?`1/${Math.round(1/seconds)}s`:`${plain}s`;return `${plain}s`;}

@@ -1571,6 +1571,7 @@
   "advancedEditor.ranges.magentas": "洋紅",
   "advancedEditor.preparingOriginal": "正在準備原片，可繼續編輯",
   "advancedEditor.originalFailed": "原片準備失敗，目前仍可使用快取預覽",
+  "advancedEditor.masks.stackHint": "拖曳遮色片調整堆疊順序；Alt + ↑ / ↓ 亦可移動。",
   "advancedEditor.masks.title": "遮色片",
   "advancedEditor.masks.brush": "筆刷",
   "advancedEditor.masks.linear": "線性漸層",

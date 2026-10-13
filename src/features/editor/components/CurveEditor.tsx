@@ -5,9 +5,6 @@ import type { AdvancedAdjustments } from "@/ipc/api";
 import { addCurvePoint, clampTone, curveSamples, IDENTITY, moveCurvePoint, type CurveChannel, type CurvePicker, type CurvePoint, type HslColorRange,type HslAxis } from "../lib/curves";
 
 export interface CurveSampling {
-  liveHistogram?:number[][];
-  histogramBusy?:boolean;
-  onHistogramOpen?:(open:boolean)=>void;
   sampleSize?:1|3|5|11;
   setSampleSize?:(size:1|3|5|11)=>void;
   setTargetCurveChannel?:(channel:CurveChannel)=>void;

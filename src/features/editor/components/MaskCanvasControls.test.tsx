@@ -61,3 +61,14 @@ it("reserves cancel/save shortcuts during a gesture before editor-level capture 
  fireEvent.keyDown(svg,{key:"Escape"});expect(editor).toHaveBeenCalledTimes(1);
  }finally{window.removeEventListener("keydown",capture,true);}
 });
+it("moves an entire gradient without changing its direction or extent",()=>{
+ const {svg,onCommit}=setup("linear");const pin=svg.querySelector('circle[data-mask-handle="move"]')!;
+ fireEvent.pointerDown(pin,{button:0,clientX:240,clientY:160});fireEvent.pointerMove(svg,{clientX:288,clientY:192});
+ const preview=JSON.parse(svg.getAttribute("data-native-mask-preview")!);expect(preview[2]-preview[0]).toBeCloseTo(.6);expect(preview[3]-preview[1]).toBeCloseTo(0);
+ fireEvent.pointerUp(svg);const value=onCommit.mock.calls[0][0];expect(value.from.x).toBeCloseTo(.3);expect(value.to.x).toBeCloseTo(.9);expect(value.from.y).toBeCloseTo(.6);
+});
+it("keeps the red overlay visible while adjusting, without handles or drawing input",()=>{
+ const onCommit=vi.fn();render(<MaskCanvasControls mask={mask} recipe={advancedRecipe()} size={{width:600,height:400}} width={480} height={320} brush={brush} onCommit={onCommit} editing={false} showOverlay overlaySrc="blob:red"/>);
+ const svg=screen.getByTestId("editor-mask-controls");expect(svg.querySelector("image")).toHaveAttribute("href","blob:red");expect(svg.style.pointerEvents).toBe("none");
+ expect(JSON.parse(svg.getAttribute("data-native-mask-guide")!).slice(6)).toEqual([0,1]);fireEvent.pointerDown(svg,{button:0});expect(onCommit).not.toHaveBeenCalled();expect(svg).not.toHaveAttribute("data-mask-gesture");
+});

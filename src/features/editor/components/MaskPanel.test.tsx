@@ -9,7 +9,7 @@ import MaskPanel from "./MaskPanel";
 function Harness(){
  const [history,dispatch]=useReducer((s:RecipeHistory,a:AdvancedAction)=>advancedReducer(s,a,{width:600,height:400}),initRecipeHistory(advancedRecipe()));
  const [selected,onSelect]=useState<string|null>(null),[editing,onEditing]=useState(true),[brush,onBrush]=useState({widthRel:0.05,hardness:1,opacity:1,flow:1,erase:false});
- return <I18nextProvider i18n={i18n}><MaskPanel recipe={history.present} selected={selected} onSelect={onSelect} editing={editing} onEditing={onEditing} brush={brush} onBrush={onBrush} dispatch={dispatch} begin={()=>{}} end={()=>{}} onModalChange={()=>{}}/><output data-testid="recipe">{JSON.stringify(history.present)}</output></I18nextProvider>;
+ return <I18nextProvider i18n={i18n}><MaskPanel recipe={history.present} selected={selected} onSelect={onSelect} editing={editing} onEditing={onEditing} brush={brush} onBrush={onBrush} dispatch={dispatch} begin={()=>{}} end={()=>{}} onModalChange={()=>{}} showOverlay onShowOverlay={()=>{}}/><output data-testid="recipe">{JSON.stringify(history.present)}</output></I18nextProvider>;
 }
 it("creates, duplicates and edits local adjustments without changing global tone",()=>{
  render(<Harness/>);fireEvent.click(screen.getByRole("button",{name:"＋ 画笔"}));
@@ -23,4 +23,11 @@ it("creates, duplicates and edits local adjustments without changing global tone
  recipe=JSON.parse(screen.getByTestId("recipe").textContent!);expect(recipe.masks[1].advanced.exposure).toBe(0);
  fireEvent.click(screen.getByRole("button",{name:"删除"}));
  expect(JSON.parse(screen.getByTestId("recipe").textContent!).masks).toHaveLength(1);
+});
+
+it("offers overlay visibility in local colour mode and keyboard stack reordering",()=>{
+ render(<Harness/>);fireEvent.click(screen.getByRole("button",{name:"＋ 线性渐变"}));fireEvent.click(screen.getByRole("button",{name:"复制"}));
+ const original=JSON.parse(screen.getByTestId("recipe").textContent!).masks;
+ fireEvent.click(screen.getByRole("button",{name:"局部调色"}));expect(screen.getByRole("checkbox",{name:"显示蒙版"})).toBeChecked();
+ const button=screen.getByRole("button",{name:original[1].name});fireEvent.keyDown(button,{key:"ArrowDown",altKey:true});expect(JSON.parse(screen.getByTestId("recipe").textContent!).masks.map((m:{id:string})=>m.id)).toEqual([original[1].id,original[0].id]);
 });

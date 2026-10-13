@@ -3,6 +3,13 @@ import {advancedRecipe,advancedReducer,DEFAULT_DEVELOPMENT,adjustmentGroupChange
 import {initRecipeHistory} from "./recipe";
 import type {EditLocalMask} from "@/ipc/api";
 const context={width:6000,height:4000};
+it("reorders the mask stack as an undoable operation while preserving each mask",()=>{
+ const recipe=advancedRecipe();const base:EditLocalMask={id:"a",name:"First",kind:"linear",enabled:true,inverted:false,density:100,feather:0,from:{x:0,y:0},to:{x:1,y:1},strokes:[]};
+ recipe.masks=[base,{...base,id:"b",name:"Second",advanced:{exposure:1,temperature:0,tint:0,vibrance:0,curves:[]}}];const initial=initRecipeHistory(recipe);
+ const changed=advancedReducer(initial,{type:"maskReorder",id:"a",targetId:"b"},context);
+ expect(changed.present.masks).toEqual([recipe.masks![1],recipe.masks![0]]);expect(advancedReducer(changed,{type:"undo"},context).present).toEqual(recipe);
+ expect(advancedReducer(initial,{type:"maskReorder",id:"missing",targetId:"a"},context)).toBe(initial);
+});
 it("applying a portable scheme is one undoable edit and cancels a temporary crop session",()=>{
  const original=advancedRecipe(),imported=advancedRecipe();imported.advanced!.exposure=2;
  let initial=initRecipeHistory(original);initial=advancedReducer(initial,{type:"cropStart"},context);initial=advancedReducer(initial,{type:"rotate",delta:1},context);

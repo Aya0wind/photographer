@@ -1587,6 +1587,7 @@
   "advancedEditor.ranges.magentas": "Magentas",
   "advancedEditor.preparingOriginal": "Preparando original; puedes seguir editando",
   "advancedEditor.originalFailed": "No se pudo preparar el original; la vista previa en caché sigue disponible",
+  "advancedEditor.masks.stackHint": "Arrastra las máscaras para reordenar, o usa Alt + ↑ / ↓.",
   "advancedEditor.masks.title": "Máscaras",
   "advancedEditor.masks.brush": "Pincel",
   "advancedEditor.masks.linear": "Degradado lineal",

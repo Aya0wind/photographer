@@ -600,6 +600,18 @@ pub async fn edit_preview_pick(
             .get(&session_id)
             .cloned()
             .ok_or("预览会话已关闭")?;
+        if picker=="readout" {
+            // Reuse the proxy and adjustment caches; compose only the hovered pixel.
+            let (base,renderer)={let p=preview.lock().map_err(|_|"预览锁不可用")?;(p.interactive_document.clone(),p.interactive_renderer.clone())};
+            let doc=renderer.lock().map_err(|_|"预览渲染锁不可用")?.readout_document(&base,&recipe)?;
+            let px=(x*f64::from(doc.size.width)).floor().min(f64::from(doc.size.width-1)) as i32;
+            let py=(y*f64::from(doc.size.height)).floor().min(f64::from(doc.size.height-1)) as i32;
+            let mut sample=sample_region(&doc,px,py,1)?;
+            let profile=photocraft_engine::color_cmds::document_profile(&doc);
+            let transform=photocraft_cms::cached(&profile,photocraft_cms::Builtin::Srgb.profile(),photocraft_cms::TransformOptions::default()).map_err(|e|e.to_string())?;
+            transform.apply(&mut sample,3);
+            return Ok(serde_json::json!({"sample":sample.map(|v|v.clamp(0.0,1.0)*255.0)}));
+        }
         let (base,original_size)={let preview=preview.lock().map_err(|_|"预览锁不可用")?;(preview.document.clone(),preview.original_size)};
         let source_scale=(base.size.width.max(base.size.height) as f32/original_size[0].max(original_size[1]).max(1) as f32).min(1.0);
         let (a,mut before,base)=if let Some(id)=&mask_id {

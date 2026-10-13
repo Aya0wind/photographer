@@ -74,7 +74,7 @@ impl View {
             if s.points.is_empty()||s.points.len()>100000||s.points.iter().any(|p|![p.x,p.y].iter().all(|v|v.is_finite()&&(0.0..=1.0).contains(v)))||![s.width_rel,s.hardness,s.opacity,s.flow].iter().all(|v|v.is_finite())||!(0.0001..=1.0).contains(&s.width_rel)||![s.hardness,s.opacity,s.flow].iter().all(|v|(0.0..=1.0).contains(v)){return Err("临时画笔参数无效".into());}
         }
         if self.mask_preview.is_some_and(|p|p.iter().any(|v|!v.is_finite()||!(0.0..=1.0).contains(v))){return Err("临时蒙版坐标无效".into());}
-        if self.mask_id.as_ref().is_some_and(|id|id.is_empty()||id.len()>128)||self.mask_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||v.abs()>1.0e7)||g[4]<0.0||g[5]<0.0||![1.0,2.0,3.0].contains(&g[6])||![0.0,1.0].contains(&g[7])){return Err("蒙版控制线无效".into());}
+        if self.mask_id.as_ref().is_some_and(|id|id.is_empty()||id.len()>128)||self.mask_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||v.abs()>1.0e7)||g[4]<0.0||g[5]<0.0||![0.0,1.0,2.0,3.0].contains(&g[6])||![0.0,1.0].contains(&g[7])){return Err("蒙版控制线无效".into());}
         if self.clipping>3{return Err("曝光提示参数无效".into());}
         if self.compare_split.is_some_and(|v|!v.is_finite()||!(0.0..=1.0).contains(&v)){return Err("对比分割位置无效".into());}
         if self.straighten_guide.is_some_and(|g|g.iter().any(|v|!v.is_finite()||*v<0.0||*v>1.0)){return Err("拉直辅助线无效".into());}

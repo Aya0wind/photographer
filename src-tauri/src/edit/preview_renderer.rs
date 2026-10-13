@@ -34,6 +34,22 @@ pub struct Timings {
 mod native_tests {
     use super::*;
     #[test]
+    fn hover_cache_keeps_geometry_and_updates_after_editing(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Hover",Size::new(8,4),ColorMode::Rgb,SampleType::U8,Color::rgba(0.2,0.3,0.4,1.0));
+        let mut recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","crop":{"x":0,"y":0,"w":0.5,"h":1},"advanced":{"exposure":0}})).unwrap();
+        let mut renderer=Renderer::new(&base);
+        let first=renderer.readout_document(&base,&recipe).unwrap();
+        let again=renderer.readout_document(&base,&recipe).unwrap();
+        assert_eq!(first.size,Size::new(4,4));assert_eq!(first.id,again.id);
+        let rect=photocraft_engine::doc::Rect::from_xywh(1,1,1,1);
+        let before=photocraft_compose::render(&first,rect).px[0];
+        recipe.advanced.as_mut().unwrap().exposure=1.0;
+        let edited=renderer.readout_document(&base,&recipe).unwrap();
+        let after=photocraft_compose::render(&edited,rect).px[0];
+        assert!(after[0]>before[0]);assert_eq!(edited.size,first.size);
+    }
+    #[test]
     #[ignore="fixed proxy gradient preparation timing; run explicitly"]
     fn live_gradient_cpu_prepare_timing(){
         use photocraft_engine::doc::{Document,Size,Color,ColorMode,SampleType};
@@ -289,6 +305,7 @@ pub struct Renderer {
     annotations: Option<AnnotationCache>,
     overlay_template:Option<Document>,
     previous: Option<(DocId, EditRecipe)>,
+    readout: Option<(DocId, EditRecipe, Document)>,
     jpeg: Vec<u8>,
     pub timings: Timings,
 }
@@ -316,6 +333,7 @@ impl Renderer {
             annotations: None,
             overlay_template:None,
             previous: None,
+            readout: None,
             jpeg: Vec::new(),
             timings: Timings::default(),
         }
@@ -549,6 +567,16 @@ impl Renderer {
         Ok(doc)
     }
 
+    /// Hovering must not repeatedly warp the proxy or rebuild local masks.
+    pub(super) fn readout_document(&mut self,base:&Document,recipe:&EditRecipe)->Result<Document,String>{
+        if let Some((id,key,doc))=&self.readout {
+            if *id==base.id && key==recipe {return Ok(doc.clone());}
+        }
+        let doc=self.canvas_document(base,recipe)?;
+        self.readout=Some((base.id,recipe.clone(),doc.clone()));
+        Ok(doc)
+    }
+
     /// Build a separate post-geometry annotation document without warping pixels.
     pub(super) fn canvas_annotations(&mut self,base:&Document,recipe:&EditRecipe)->Result<Option<Document>,String> {
         if recipe.text_layers.iter().all(|l|l.text.trim().is_empty()) && recipe.brush_strokes.is_empty(){return Ok(None);}
@@ -630,7 +658,7 @@ impl Renderer {
         let annotations = self.annotation_layers(&doc, recipe)?;
         doc.layers.extend(annotations);
         self.timings.annotations_ms = phase.elapsed().as_secs_f64() * 1000.0;
-        let (jpeg, display) = photocraft::jpeg_with_timings(&doc, quality)?;
+        let (jpeg, display) = photocraft::jpeg_preview(&doc, quality)?;
         self.timings.composite_ms = display.composite_ms;
         self.timings.profile_ms = display.profile_ms;
         self.timings.encode_ms = display.encode_ms;

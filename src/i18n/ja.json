@@ -1571,6 +1571,7 @@
   "advancedEditor.ranges.magentas": "マゼンタ",
   "advancedEditor.preparingOriginal": "元画像を準備中。編集は続けられます",
   "advancedEditor.originalFailed": "元画像を準備できませんでした。キャッシュのプレビューは利用できます",
+  "advancedEditor.masks.stackHint": "ドラッグ、または Alt + ↑ / ↓ でマスクの順序を変更。",
   "advancedEditor.masks.title": "マスク",
   "advancedEditor.masks.brush": "ブラシ",
   "advancedEditor.masks.linear": "線形グラデーション",
