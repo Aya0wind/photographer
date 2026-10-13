@@ -620,6 +620,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     let ai_bus = state.bus.clone();
     let enable_clip = ai_settings.enable_clip;
     let enable_face = ai_settings.enable_face;
+    let enable_selection = ai_settings.enable_selection;
     let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
     let gate = std::sync::Arc::clone(&state.import_running);
     // 闸在派发前同步置位：调用方拿到 job_id 的瞬间，手动索引触发即被拒
@@ -681,7 +682,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
                 // 闭眼回填（eyes 任务随导入建档；模型未装 kick 内部早退，0021；
                 // AI 关闭时任务不存在也不消费，2026-10-12。blur 消费池已由
                 // 上面的 pipeline::kick(ALL) 唤醒）
-                if enable_clip || enable_face {
+                if enable_selection {
                     crate::ai::selection::kick_eyes_if_ready(
                         index_db_dir.clone(),
                         &ai_manager,

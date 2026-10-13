@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { aiModelDownload } from "@/ipc/api";
@@ -6,32 +6,27 @@ import { useAiStore } from "@/stores/aiStore";
 import {
   gapsForIds,
   normalizeModelId,
-  tierFaceIds,
-  tierSemanticIds,
+  selectedModelPackages,
+  type AiFeatureSelection,
   type QualityTier,
 } from "@/features/settings/lib/qualityTier";
 import { formatBytes } from "@/lib/format";
 
 /**
  * 建库引导 AI 步的模型下载面板（2026-10-10 回归：老引导 download 面直系）。
- * preparing=true 时按档位补缺口：语义组 + 人脸组逐个 aiModelDownload(strict)；
+ * preparing=true 时按档位补齐所选功能的缺口，共用模型去重；
  * 已就绪资源直接复用；2s 轮询 + 下载事件重拉驱动进度。失败给重试（只补缺，
- * 已完成的无需重来）。闭眼检测链路未接线，不在引导下载面内。
+ * 已完成的无需重来）。选片组包含当前档检测模型和 FaceMesh。
  */
-
-function packagesOf(tier: QualityTier) {
-  return [
-    { feature: "semantic", ids: [...tierSemanticIds(tier)] },
-    { feature: "face", ids: [...tierFaceIds(tier)] },
-  ];
-}
 
 export default function AiDownloadPanel({
   qualityTier,
   preparing,
+  features,
 }: {
   qualityTier: QualityTier;
   preparing: boolean;
+  features: AiFeatureSelection;
 }) {
   const { t } = useTranslation();
   const models = useAiStore((s) => s.models);
@@ -39,8 +34,9 @@ export default function AiDownloadPanel({
   const refresh = useAiStore((s) => s.refresh);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const packages = packagesOf(qualityTier);
-  const ids = packages.flatMap((group) => group.ids);
+  const packages = useMemo(() => selectedModelPackages(qualityTier, features),
+    [qualityTier, features.semantic, features.face, features.selection]);
+  const ids = useMemo(() => [...new Set(packages.flatMap((group) => group.ids))], [packages]);
   const key = ids.join(",");
 
   useEffect(() => {

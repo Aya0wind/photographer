@@ -32,6 +32,7 @@ export interface Settings {
   ai: {
     enableClip: boolean;
     enableFace: boolean;
+    enableSelection: boolean;
     enableSceneTags: boolean;
     eyesIncludeSingle?: boolean;
     indexSchedule: "idleOnly" | "afterImport" | "manual";
@@ -91,6 +92,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ai: {
     enableClip: false,
     enableFace: false,
+    enableSelection: false,
     enableSceneTags: false,
     indexSchedule: "idleOnly",
     cpuLimitPercent: 50,

@@ -24,5 +24,5 @@ pub fn kick(
 
 /// AI 开启判定（选片账建档/kick 的统一口径）。
 pub fn selection_enabled(ai: &crate::settings::AiSettings) -> bool {
-    ai.enable_clip || ai.enable_face
+    ai.enable_selection
 }

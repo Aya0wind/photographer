@@ -1,4 +1,9 @@
 {
+  "onboarding.ai.selectFeature": "AI 機能を 1 つ以上選択するか、AI を無効にしてください。",
+  "onboarding.ai.feature.semantic": "写真の内容で検索し、スマートアルバムを作成します。",
+  "onboarding.ai.feature.selection": "鮮明さと目の開閉を分析して写真選別を支援します。",
+  "onboarding.ai.feature.face": "顔を認識し、人物ごとに写真を分類します。",
+  "settings.ai.selection": "写真選別",
   "addPhotos.moveStarted": "バックグラウンドで写真を移動しています。完了した写真から順に表示されます。",
   "addPhotos.copyStarted": "バックグラウンドで写真をコピーしています。完了した写真から順に表示されます。",
   "addPhotos.destination": "保存先：",

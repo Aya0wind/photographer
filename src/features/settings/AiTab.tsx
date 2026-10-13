@@ -23,6 +23,8 @@ import {
   normalizeModelId,
   tierSemanticIds,
   tierFaceIds,
+  tierSelectionIds,
+  gapsForIds,
   tierFaceReady,
   tierModelGaps,
   tierModelsReady,
@@ -782,7 +784,7 @@ function IndexStatusSection() {
   );
 
   // 选片行仅 AI 开启的库渲染（关闭的库无任务账，计数恒 pending）
-  const rows: IndexKind[] = aiSettings?.enableClip || aiSettings?.enableFace
+  const rows: IndexKind[] = aiSettings?.enableSelection
     ? ["image", "selection", "ai", "face"]
     : ["image", "ai", "face"];
 
@@ -816,7 +818,7 @@ function IndexStatusSection() {
           const running = kicking.has(kind) || c.running > 0 || (kind !== "image" && c.pending > 0);
           const complete = c.total === 0 || c.done >= c.total;
           const followingImport = importing && complete &&
-            (kind === "image" || kind === "selection" ||
+            (kind === "image" || (kind === "selection" && aiSettings?.enableSelection) ||
               (kind === "ai" && aiSettings?.enableClip) ||
               (kind === "face" && aiSettings?.enableFace));
           return (
@@ -1096,6 +1098,7 @@ export default function AiTab() {
   const currentTier: QualityTier = settings.ai.qualityTier ?? "normal";
   const semanticReady = tierSemanticReady(currentTier, models);
   const faceReady = tierFaceReady(currentTier, models);
+  const selectionReady = gapsForIds(tierSelectionIds(currentTier), models).length === 0;
 
   // 人脸数据清除：两步强确认
   const [faceConfirm, setFaceConfirm] = useState(false);
@@ -1132,7 +1135,7 @@ export default function AiTab() {
       >
         <Toggle
           checked={settings.ai.enableClip}
-          disabled={!semanticReady}
+          disabled={!semanticReady && !settings.ai.enableClip}
           label={t("settings.ai.semantic")}
           testId="ai-toggle-semantic"
           onChange={(next) => commit({ ai: { enableClip: next } })}
@@ -1144,11 +1147,15 @@ export default function AiTab() {
       >
         <Toggle
           checked={settings.ai.enableFace}
-          disabled={!faceReady}
+          disabled={!faceReady && !settings.ai.enableFace}
           label={t("settings.ai.face")}
           testId="ai-toggle-face"
           onChange={(next) => commit({ ai: { enableFace: next } })}
         />
+      </SettingRow>
+      <SettingRow label={t("settings.ai.selection")} desc={selectionReady ? t("onboarding.ai.feature.selection") : t("settings.ai.gateHint")}>
+        <Toggle checked={settings.ai.enableSelection} disabled={!selectionReady && !settings.ai.enableSelection} label={t("settings.ai.selection")}
+          testId="ai-toggle-selection" onChange={next => commit({ ai: { enableSelection: next } })} />
       </SettingRow>
       <SettingRow label={t("settings.ai.scene")}>
         <Toggle

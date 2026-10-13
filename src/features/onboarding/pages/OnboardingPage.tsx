@@ -10,8 +10,8 @@ import { useAiStore } from "@/stores/aiStore";
 import {
   QUALITY_TIERS,
   gapsForIds,
-  tierFaceIds,
-  tierSemanticIds,
+  selectedModelPackages,
+  type AiFeatureSelection,
   type QualityTier,
 } from "@/features/settings/lib/qualityTier";
 import { useWindowReveal } from "@/lib/windowReveal";
@@ -24,7 +24,7 @@ import AiDownloadPanel from "../steps/AiDownloadPanel";
  * 1. 创建数据库——名称必填 + 位置可选（缺省 = 后端约定路径
  *    `<应用配置目录>/databases/<id>`）；无论注册表状态恒渲染创建表单
  *    （databaseCreate 多库合法，创建即激活），之后一切库内操作作用于它。
- * 2. AI 功能（老引导回归）：开关两卡 + 模型档位三选；「下载并继续」在本页
+ * 2. AI 功能：人脸/选片/语义独立选择 + 模型档位三选；「下载并继续」在本页
  *    下载所选档位的模型（缺口补齐，已就绪复用），可「稍后手动下载」跳过。
  * 3. 完成——写 onboardingCompleted 兼容位并进画廊。照片库不再在引导中
  *    建立，用户之后在「存储」页自建（新建 / 从已有文件夹建立）。
@@ -140,8 +140,8 @@ function DatabaseStep({draft,onNext}:{draft:{name:string;dbDir:string};onNext:(d
 
 /**
  * 第二步（AI 功能）子组件：开关两卡 + 档位三选 + 页内下载。
- * - 「下载并继续」：先落设置（三开关全开 + qualityTier），再在本页下载所选
- *   档位的语义/人脸模型（已就绪资源复用），全部就绪自动进下一步；
+ * - 「下载并继续」：先落设置（独立功能开关 + qualityTier），再在本页下载所选
+ *   档位的所选语义/人脸/选片模型（已就绪资源复用），全部就绪自动进下一步；
  * - 「稍后手动下载」：落设置直接进下一步（逃生门——设置页手动下载）；
  * - 「暂不启用」：三开关全关进下一步。
  */
@@ -149,6 +149,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
   const { t } = useTranslation();
   const models = useAiStore((s) => s.models);
   const [enabled, setEnabled] = useState(true);
+  const [features, setFeatures] = useState<AiFeatureSelection>({ semantic: true, face: true, selection: true });
   const [tier, setTier] = useState<QualityTier>(
     () => (useSettingsStore.getState().settings.ai.qualityTier as QualityTier) ?? "normal",
   );
@@ -156,7 +157,8 @@ function AiStep({ onNext }: { onNext: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const requiredIds = enabled ? [...tierSemanticIds(tier), ...tierFaceIds(tier)] : [];
+  const requiredIds = enabled ? [...new Set(selectedModelPackages(tier, features).flatMap(group => group.ids))] : [];
+  const anySelected = Object.values(features).some(Boolean);
   const ready = requiredIds.length === 0 || gapsForIds(requiredIds, models).length === 0;
 
   // 下载中就绪 → 自动进下一步（含「本来就全就绪」的瞬时路径）
@@ -170,9 +172,10 @@ function AiStep({ onNext }: { onNext: () => void }) {
       ...current,
       ai: {
         ...current.ai,
-        enableClip: next,
-        enableFace: next,
-        enableSceneTags: next,
+        enableClip: next && features.semantic,
+        enableFace: next && features.face,
+        enableSelection: next && features.selection,
+        enableSceneTags: false,
         qualityTier: tierToSave,
       },
     });
@@ -235,7 +238,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
             key={String(value)}
             type="button"
             onClick={() => setEnabled(value)}
-            disabled={downloading}
+            disabled={saving || downloading}
             aria-pressed={enabled === value}
             className={`rounded-lg border p-3 text-left transition-colors ${
               enabled === value
@@ -258,6 +261,18 @@ function AiStep({ onNext }: { onNext: () => void }) {
       </div>
 
       {enabled && (
+        <fieldset disabled={saving || downloading} className="grid grid-cols-3 gap-2" data-testid="onboarding-ai-features">
+          {(["face", "selection", "semantic"] as const).map(feature => <label key={feature}
+            className={`cursor-pointer rounded-lg border p-3 text-xs ${features[feature] ? "border-accent bg-accent/5" : "border-edge"}`}>
+            <span className="flex items-center gap-2 font-medium"><input type="checkbox" checked={features[feature]}
+              onChange={event => setFeatures(previous => ({ ...previous, [feature]: event.target.checked }))}
+              data-testid={`onboarding-ai-feature-${feature}`} />{t(`settings.ai.${feature}`)}</span>
+            <span className="mt-2 block leading-relaxed text-text-secondary">{t(`onboarding.ai.feature.${feature}`)}</span>
+          </label>)}
+        </fieldset>
+      )}
+      {enabled && !anySelected && <p role="status" className="text-xs text-amber-400">{t("onboarding.ai.selectFeature")}</p>}
+      {enabled && (
         <fieldset className="mt-1 flex flex-col gap-2">
           <legend className="text-xs text-text-secondary">{t("onboarding.ai.qualityTier")}</legend>
           <div className="grid grid-cols-3 gap-2" data-testid="onboarding-ai-tiers">
@@ -277,7 +292,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
                     value={option}
                     checked={tier === option}
                     onChange={() => setTier(option)}
-                    disabled={downloading}
+                    disabled={saving || downloading}
                     className="h-3.5 w-3.5 accent-[#F0A83C]"
                   />
                   {t(`settings.ai.tier.${option}`)}
@@ -294,7 +309,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
         </fieldset>
       )}
 
-      {enabled && <AiDownloadPanel qualityTier={tier} preparing={downloading} />}
+      {enabled && <AiDownloadPanel qualityTier={tier} preparing={downloading} features={features} />}
 
       {error !== null && (
         <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="onboarding-ai-error">
@@ -309,7 +324,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
             <button
               type="button"
               onClick={() => void manualLater()}
-              disabled={saving}
+              disabled={saving || !anySelected}
               className="text-xs text-text-muted underline-offset-2 transition-colors hover:text-text-primary hover:underline disabled:opacity-40"
               data-testid="onboarding-ai-later"
             >
@@ -318,7 +333,7 @@ function AiStep({ onNext }: { onNext: () => void }) {
           )}
           <button
             type="button"
-            disabled={saving || downloading}
+            disabled={saving || downloading || (enabled && !anySelected)}
             onClick={() => void (enabled ? downloadAndContinue() : continueDisabled())}
             className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="onboarding-ai-continue"

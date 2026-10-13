@@ -143,7 +143,7 @@ pub fn run() {
                 std::sync::Arc::clone(&supervisor),
             );
             // settings/ai 在 manage(move) 前先取启动自愈所需快照
-            let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
+            let (enable_clip, enable_face, enable_selection) = (settings.ai.enable_clip, settings.ai.enable_face, settings.ai.enable_selection);
             // 缩略图缓存 LRU 上限（M8-③；0 = 不限）
             thumbs::set_thumb_cache_cap_bytes(
                 u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
@@ -222,7 +222,7 @@ pub fn run() {
                 }
                 // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）+ blur
                 // 选片消费池（统一经 pipeline 契约入口，2026-10-12）
-                if enable_clip || enable_face {
+                if enable_selection {
                     ai::selection::kick_eyes_if_ready(
                         db_dir.clone(),
                         &ai_for_kick,

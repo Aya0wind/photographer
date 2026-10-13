@@ -1,4 +1,9 @@
 {
+  "onboarding.ai.selectFeature": "請至少選擇一項 AI 功能，或選擇暫不啟用。",
+  "onboarding.ai.feature.semantic": "依畫面內容搜尋照片並產生智慧相簿。",
+  "onboarding.ai.feature.selection": "分析清晰度和睜閉眼，輔助選片。",
+  "onboarding.ai.feature.face": "辨識人臉並按人物分類。",
+  "settings.ai.selection": "選片分析",
   "addPhotos.moveStarted": "正在背景移動照片，完成的照片會陸續顯示。",
   "addPhotos.copyStarted": "正在背景複製照片，完成的照片會陸續顯示。",
   "addPhotos.destination": "儲存到：",

@@ -384,6 +384,7 @@ impl Default for ImportSettings {
 pub struct AiSettings {
     pub enable_clip: bool,
     pub enable_face: bool,
+    pub enable_selection: bool,
     pub enable_scene_tags: bool,
     pub index_schedule: IndexSchedule,
     pub cpu_limit_percent: u32,
@@ -447,6 +448,7 @@ impl Default for AiSettings {
         Self {
             enable_clip: false,
             enable_face: false,
+            enable_selection: false,
             enable_scene_tags: false,
             index_schedule: IndexSchedule::IdleOnly,
             cpu_limit_percent: 50,

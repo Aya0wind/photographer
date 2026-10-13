@@ -59,9 +59,45 @@ function model(id: string, state: AiModelStatus["state"] = "done"): AiModelStatu
 
 /** 普通档全件（语义三件 + scrfd + arcface）+ 精准档专用件 */
 const ALL_DONE = [
-  "siglip2-visual", "siglip2-text", "siglip2-tokenizer", "scrfd", "arcface",
+  "siglip2-visual", "siglip2-text", "siglip2-tokenizer", "scrfd", "arcface", "facemesh",
   "siglip2-visual-fp16", "siglip2-text-fp16", "scrfd-10g",
 ].map((id) => model(id));
+
+describe("建库 AI 功能独立选择", () => {
+  it.each([1, 2, 3, 4, 5, 6, 7])("组合 %s 只下载所选功能的模型，共用模型仅下载一次", async mask => {
+    const chosen = { face: Boolean(mask & 1), selection: Boolean(mask & 2), semantic: Boolean(mask & 4) };
+    const expected = [...new Set([
+      ...(chosen.face ? ["scrfd", "arcface"] : []),
+      ...(chosen.selection ? ["scrfd", "facemesh"] : []),
+      ...(chosen.semantic ? ["siglip2-visual", "siglip2-text", "siglip2-tokenizer"] : []),
+    ])];
+    modelsMock.mockImplementation(async () => downloadMock.mock.calls.length >= expected.length ? ALL_DONE : ALL_DONE.map(item => model(item.id, "idle")));
+    const user = userEvent.setup();
+    renderOnboarding();
+    await reachAiStep(user);
+    await user.click(screen.getByTestId("onboarding-ai-tier-normal"));
+    for (const feature of ["face", "selection", "semantic"] as const) {
+      if (!chosen[feature]) await user.click(screen.getByTestId(`onboarding-ai-feature-${feature}`));
+    }
+    await user.click(screen.getByTestId("onboarding-ai-continue"));
+    await waitFor(() => expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "done"));
+    expect(downloadMock.mock.calls.map(call => call[0]).sort()).toEqual(expected.sort());
+    const ai = useSettingsStore.getState().settings.ai;
+    expect(ai.enableClip).toBe(chosen.semantic);
+    expect(ai.enableFace).toBe(chosen.face);
+    expect(ai.enableSelection).toBe(chosen.selection);
+  });
+
+  it("开启 AI 时不能空选功能", async () => {
+    const user = userEvent.setup();
+    renderOnboarding();
+    await reachAiStep(user);
+    for (const feature of ["face", "selection", "semantic"]) await user.click(screen.getByTestId(`onboarding-ai-feature-${feature}`));
+    expect(screen.getByTestId("onboarding-ai-continue")).toBeDisabled();
+    expect(screen.getByTestId("onboarding-ai-later")).toBeDisabled();
+    expect(downloadMock).not.toHaveBeenCalled();
+  });
+});
 
 /** 建库成功桩（第一步直通用例共用） */
 function mockDbCreateOk(): void {
@@ -187,7 +223,8 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
     const ai = useSettingsStore.getState().settings.ai;
     expect(ai.enableClip).toBe(true);
     expect(ai.enableFace).toBe(true);
-    expect(ai.enableSceneTags).toBe(true);
+    expect(ai.enableSelection).toBe(true);
+    expect(ai.enableSceneTags).toBe(false);
     expect(ai.qualityTier).toBe("normal");
     // 已就绪资源不重复下载
     expect(downloadMock).not.toHaveBeenCalled();
@@ -242,13 +279,13 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
   });
 
   it("缺口补齐：pending 清单 → 逐个 aiModelDownload → 就绪后自动进完成步", async () => {
-    const pending = ["siglip2-visual", "siglip2-text", "siglip2-tokenizer", "scrfd", "arcface"].map(
+    const pending = ["siglip2-visual", "siglip2-text", "siglip2-tokenizer", "scrfd", "arcface", "facemesh"].map(
       (id) => model(id, "idle"),
     );
     // 挂载即有两次刷新（轮询 effect + 下载 effect）：按下载发起数动态返回，
     // 五件全部发起前恒为 pending——避免 Once 被首次刷新消费造成假就绪
     modelsMock.mockReset().mockImplementation(async () =>
-      downloadMock.mock.calls.length >= 5 ? ALL_DONE : pending,
+      downloadMock.mock.calls.length >= 6 ? ALL_DONE : pending,
     );
     const user = userEvent.setup();
     renderOnboarding();
@@ -259,9 +296,10 @@ describe("OnboardingPage（创建数据库 → AI 功能开关 → 完成）", (
     await user.click(screen.getByTestId("onboarding-ai-continue"));
 
     // 面板下载瞬完成即退场——以结果断言：五个缺件全部发起（strict=true）+ 前进
-    await waitFor(() => expect(downloadMock).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(downloadMock).toHaveBeenCalledTimes(6));
     expect(downloadMock).toHaveBeenCalledWith("siglip2-visual", true);
     expect(downloadMock).toHaveBeenCalledWith("arcface", true);
+    expect(downloadMock).toHaveBeenCalledWith("facemesh", true);
 
     await waitFor(() =>
       expect(screen.getByTestId("onboarding-card")).toHaveAttribute("data-step", "done"),

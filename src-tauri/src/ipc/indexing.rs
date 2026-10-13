@@ -129,7 +129,7 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     }
     let selection_enabled = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
-        settings.ai.enable_clip || settings.ai.enable_face
+        settings.ai.enable_selection
     };
     dto.image = image_index_status(&db)?;
     dto.selection = selection_index_status(&db);
@@ -211,13 +211,16 @@ fn per_asset_status(
 /// 侧自带去重（NOT EXISTS pending/running + ai_indexed_at/face_indexed_at
 /// 时间账）。
 pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), String> {
-    let (enable_clip, enable_face) = {
+    let (enable_clip, enable_face, enable_selection) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
-        (settings.ai.enable_clip, settings.ai.enable_face)
+        (settings.ai.enable_clip, settings.ai.enable_face, settings.ai.enable_selection)
     };
     let db_dir = super::app_database_dir(state)?;
     let db = super::open_library_db(&db_dir)?;
     let supervisor = std::sync::Arc::clone(&state.supervisor);
+    if matches!(kind, "selection" | "eyes" | "blur") && !enable_selection {
+        return Err("选片索引未开启（设置 → AI → 选片分析）".into());
+    }
     match kind {
         "image" => {
             crate::index::scheduler::pause(&db_dir,"index",false)?;
@@ -240,7 +243,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
         // 与缩略图/详细信息索引不绑定。AI 关闭的库不建任务（明确报错，
         // 与语义/人脸通道同款契约）。
         "selection" => {
-            if !(enable_clip || enable_face) {
+            if !enable_selection {
                 return Err("选片索引未开启（设置 → AI）".into());
             }
             crate::index::scheduler::pause(&db_dir,"selection",false)?;
@@ -476,9 +479,9 @@ fn kick_rebuilt_channel(
 /// 重建门槛校验（同步快路径）：语义/人脸需模型就绪 + 开关开启；
 /// thumb/exif 无门槛。通过后调用方再后台执行清理+重排+kick。
 pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> {
-    let (enable_clip, enable_face) = {
+    let (enable_clip, enable_face, enable_selection) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
-        (settings.ai.enable_clip, settings.ai.enable_face)
+        (settings.ai.enable_clip, settings.ai.enable_face, settings.ai.enable_selection)
     };
     match kind {
         "semantic" => {
@@ -504,7 +507,10 @@ pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> 
                 return Err("人脸识别未开启（设置 → AI → 人脸识别）".into());
             }
         }
-        "image" | "thumb" | "exif" | "selection" => {}
+        "selection" => {
+            if !enable_selection { return Err("选片索引未开启（设置 → AI → 选片分析）".into()); }
+        }
+        "image" | "thumb" | "exif" => {}
         other => return Err(format!("未知重建通道: {other}（可选 {REBUILD_KINDS:?}）")),
     }
     Ok(())
@@ -681,7 +687,7 @@ pub fn selection_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
         ai.eyes_ear_closed.to_bits() as u64,
         ai.eyes_ear_maybe.to_bits() as u64,
         u64::from(ai.eyes_include_single),
-        u64::from(ai.enable_clip || ai.enable_face),
+        u64::from(ai.enable_selection),
     ] {
         hash ^= part;
         hash = hash.wrapping_mul(0x100000001b3);

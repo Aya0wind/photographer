@@ -1,4 +1,9 @@
 {
+  "onboarding.ai.selectFeature": "Select at least one AI feature, or leave AI disabled.",
+  "onboarding.ai.feature.semantic": "Search photo content and build smart albums.",
+  "onboarding.ai.feature.selection": "Analyze sharpness and open or closed eyes to help select photos.",
+  "onboarding.ai.feature.face": "Recognize faces and group photos by person.",
+  "settings.ai.selection": "Photo culling",
   "addPhotos.moveStarted": "Moving photos in the background. Completed photos will appear as they are added.",
   "addPhotos.copyStarted": "Copying photos in the background. Completed photos will appear as they are added.",
   "addPhotos.destination": "Save to:",

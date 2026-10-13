@@ -8,5 +8,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", manifest.display());
         println!("cargo:rustc-link-arg-examples=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg-examples=/MANIFESTINPUT:{}", manifest.display());
+        // 测试也会链接原生文件对话框；缺少 Common Controls v6 会在
+        // Windows 加载阶段报 TaskDialogIndirect 入口不存在，尚未进入测试。
+        // rustc-link-arg-tests 不覆盖 lib 单元测试，通用链接参数只补控件依赖，
+        // 不更改 Tauri 自己生成的应用权限声明。
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
     }
 }

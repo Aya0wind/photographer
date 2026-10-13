@@ -1,4 +1,9 @@
 {
+  "onboarding.ai.selectFeature": "请至少选择一项 AI 功能，或选择暂不启用。",
+  "onboarding.ai.feature.semantic": "按画面内容搜索照片并生成智能相册。",
+  "onboarding.ai.feature.selection": "分析清晰度和睁闭眼，辅助选片。",
+  "onboarding.ai.feature.face": "识别人脸并按人物归类。",
+  "settings.ai.selection": "选片分析",
   "addPhotos.moveStarted": "正在后台移动照片，完成的照片会陆续显示。",
   "addPhotos.copyStarted": "正在后台复制照片，完成的照片会陆续显示。",
   "addPhotos.destination": "保存到：",

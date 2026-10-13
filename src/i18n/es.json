@@ -1,4 +1,9 @@
 {
+  "onboarding.ai.selectFeature": "Selecciona al menos una función de IA o deja la IA desactivada.",
+  "onboarding.ai.feature.semantic": "Busca por contenido y crea álbumes inteligentes.",
+  "onboarding.ai.feature.selection": "Analiza nitidez y ojos abiertos o cerrados para ayudar a seleccionar fotos.",
+  "onboarding.ai.feature.face": "Reconoce caras y agrupa fotos por persona.",
+  "settings.ai.selection": "Selección de fotos",
   "addPhotos.moveStarted": "Moviendo fotos en segundo plano. Aparecerán a medida que se añadan.",
   "addPhotos.copyStarted": "Copiando fotos en segundo plano. Aparecerán a medida que se añadan.",
   "addPhotos.destination": "Guardar en:",

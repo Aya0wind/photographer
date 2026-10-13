@@ -52,6 +52,20 @@ export function tierFaceIds(tier: QualityTier): readonly string[] {
   ];
 }
 
+/** 选片只需要人脸检测和眼部关键点，不需要人物聚类或语义模型。 */
+export function tierSelectionIds(tier: QualityTier): readonly string[] {
+  return [...TIER_REQUIRED_MODELS[tier].filter(id => id.startsWith("scrfd")), "facemesh"];
+}
+
+export type AiFeatureSelection = { semantic: boolean; face: boolean; selection: boolean };
+export function selectedModelPackages(tier: QualityTier, features: AiFeatureSelection) {
+  return [
+    { feature: "semantic", ids: [...tierSemanticIds(tier)] },
+    { feature: "face", ids: [...tierFaceIds(tier)] },
+    { feature: "selection", ids: [...tierSelectionIds(tier)] },
+  ].filter(group => features[group.feature as keyof AiFeatureSelection]);
+}
+
 /** 档位缺件：所需模型里 state!=="done" 的条目（清单未收录的 id 也算缺，status=null） */
 export interface TierModelGap {
   /** 契约 id（归一后；发起下载用 gap.status.id 原始清单 id） */

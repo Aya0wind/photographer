@@ -914,7 +914,7 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
                 );
             }
             // 选片通道（eyes/blur）：AI 开启才建档并触发闭眼回填
-            if settings.ai.enable_clip || settings.ai.enable_face {
+            if settings.ai.enable_selection {
                 let _ = db.create_eyes_tasks_for_unindexed();
                 let _ = db.create_blur_tasks_for_unindexed();
                 crate::ai::selection::kick_eyes_if_ready(

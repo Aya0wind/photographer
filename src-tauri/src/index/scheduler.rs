@@ -92,7 +92,7 @@ fn enabled(kind: &str, ai: &AiSettings) -> bool {
     match kind {
         "ai" => ai.enable_clip,
         "face" => ai.enable_face,
-        "eyes" | "blur" => ai.enable_clip || ai.enable_face,
+        "eyes" | "blur" => ai.enable_selection,
         _ => true,
     }
 }
@@ -132,18 +132,14 @@ pub fn configure(path: &Path, manager: &ModelManager, bus: &EventBus, ai: &AiSet
 }
 
 /// Narrow legacy wakeups join the same queue; their algorithms no longer own pools.
-pub fn request_ai(path: &Path, manager: &ModelManager, bus: &EventBus, kind: &str) {
-    let mut config = queue(path)
-        .config
-        .lock()
-        .expect("index config poisoned")
-        .clone();
-    match kind {
-        "ai" => config.ai.enable_clip = true,
-        "face" => config.ai.enable_face = true,
-        _ => {}
-    }
-    configure(path, manager, bus, &config.ai);
+pub fn request_ai(path: &Path, manager: &ModelManager, bus: &EventBus, _kind: &str) {
+    let queue = queue(path);
+    let mut config = queue.config.lock().expect("index config poisoned");
+    // 唤醒不回写开关，避免旧导入回调或模型下载与关闭功能并发时复活通道。
+    if config.manager.is_none() { config.manager = Some(manager.snapshot()); }
+    config.bus = bus.clone();
+    drop(config);
+    notify(path);
 }
 
 fn settings_key(config: &Config, kind: &str) -> String {
@@ -802,6 +798,41 @@ pub fn pause(path: &Path, pool: &str, paused: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_feature_combinations_schedule_only_selected_channels() {
+        for mask in 0..8 {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Db::open(&dir.path().join("library.db")).unwrap();
+            db.0.execute("INSERT INTO assets(id,path,filename,size,mtime,xxhash,kind,source,created_at) VALUES(1,'photo.jpg','photo.jpg',1,'now',0,'photo','scan','now')", []).unwrap();
+            let ai = AiSettings { enable_face: mask & 1 != 0, enable_selection: mask & 2 != 0, enable_clip: mask & 4 != 0, ..AiSettings::default() };
+            for kind in KINDS {
+                db.0.execute("UPDATE index_channels SET enabled=?2 WHERE kind=?1", params![kind, enabled(kind, &ai)]).unwrap();
+            }
+            let config = Config { manager: None, bus: EventBus::new(), ai };
+            reconcile(&db, &config).unwrap();
+            for (kind, expected) in [("face",mask & 1 != 0),("eyes",mask & 2 != 0),("blur",mask & 2 != 0),("ai",mask & 4 != 0)] {
+                let count: i64 = db.0.query_row("SELECT COUNT(*) FROM index_tasks WHERE kind=?1", [kind], |row| row.get(0)).unwrap();
+                assert_eq!(count, i64::from(expected), "mask={mask}, kind={kind}");
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_feature_keeps_old_receipts_without_claiming_or_adding_tasks() {
+        let (_dir, db, config) = fixture(1);
+        let thumb = claim(&db, "thumb", "producer").unwrap().unwrap();
+        finish(&db, &thumb, "producer", true).unwrap();
+        for kind in KINDS {
+            db.0.execute("UPDATE index_channels SET enabled=?2 WHERE kind=?1", params![kind, enabled(kind, &config.ai)]).unwrap();
+        }
+        db.0.execute("INSERT INTO assets(id,path,filename,size,mtime,xxhash,kind,source,created_at) VALUES(2,'new.jpg','new.jpg',1,'now',0,'photo','scan','now')", []).unwrap();
+        reconcile(&db, &config).unwrap();
+        assert!(claim(&db, "blur", "consumer").unwrap().is_none());
+        let (count, attempts): (i64, i64) = db.0.query_row("SELECT COUNT(*),SUM(attempts) FROM index_tasks WHERE kind='blur'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(count, 1, "关闭后不为新照片创建选片任务");
+        assert_eq!(attempts, 0, "已有待办不尝试执行");
+    }
 
     fn fixture(count: i64) -> (tempfile::TempDir, Db, Config) {
         let dir = tempfile::tempdir().unwrap();

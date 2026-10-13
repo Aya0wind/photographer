@@ -538,7 +538,7 @@ describe("AI tab（M4 实化）", () => {
 
     const semanticToggle = await screen.findByTestId("ai-toggle-semantic");
     expect(semanticToggle).toBeDisabled();
-    expect(screen.getByText("先下载模型")).toBeInTheDocument();
+    expect(screen.getAllByText("先下载模型").length).toBeGreaterThan(0);
     expect(screen.getByTestId("ai-toggle-face")).toBeEnabled();
 
     // 全部就绪 → 语义开关可开，开启即存（settings_set payload 带 enableClip=true）
@@ -651,7 +651,7 @@ describe("AI tab：索引状态与操作", () => {
   });
 
   it("选片索引独立成行：模型未下载时等待提示在选片行，图片索引不受影响", async () => {
-    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true } } });
+    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true, enableSelection: true } } });
     indexStatusMock.mockResolvedValue({ ...statusOf(), selectionReady:false, selectionEnabled:true,
       image: { pending:2, running:0, done:118, failed:0, total:120 },
       selection: { pending:120, running:0, done:0, failed:0, total:120 } });
@@ -677,7 +677,7 @@ describe("AI tab：索引状态与操作", () => {
   });
 
   it("整图尚未完成时仍显示已完成的子项，避免把零完成误认为没有处理",async()=>{
-    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true } } });
+    useSettingsStore.setState({ settings: { ...clone(DEFAULT_SETTINGS), ai: { ...clone(DEFAULT_SETTINGS).ai, enableClip: true, enableSelection: true } } });
     const c={pending:0,running:0,done:120,failed:0,total:120};
     indexStatusMock.mockResolvedValue({...statusOf(),image:{...c,done:0,pending:120},
       thumb:c,exif:c,eyes:{...c,done:0,pending:120},blur:c,selection:{...c,done:0,pending:120},selectionReady:true,selectionEnabled:true});
