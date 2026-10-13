@@ -10,7 +10,6 @@ import {
   importJobDelete,
   importJobsPage,
   indexTaskResume,
-  indexKickNow,
   indexTaskPause,
   type IndexCounters,
   type IndexKind,
@@ -335,17 +334,16 @@ function IndexTaskRow({
   const indexStatus = useAiStore((s) => s.indexStatus);
   const pct = total > 0 ? Math.min(100, (counters.done / total) * 100) : 0;
 
+  const paused = counters.paused ?? false;
+
   async function togglePause(): Promise<void> {
     setBusy(true);
     try {
-      const pool = kind === "selection" ? "selection" : "index";
-      if (counters.running > 0) {
-        await indexTaskPause(pool);
-      } else {
+      const pool = kind === "selection" || kind === "ai" || kind === "face" ? kind : "index";
+      if (paused) {
         await indexTaskResume(pool);
-      // A missing-model lane may have no live worker to resume. Unified kick
-      // starts available components and leaves unavailable eye tasks pending.
-        if (kind === "image" || kind === "selection") await indexKickNow(kind);
+      } else {
+        await indexTaskPause(pool);
       }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -369,18 +367,18 @@ function IndexTaskRow({
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
             {t(counters.failed > 0 && counters.running === 0 && counters.pending === 0 ? "jobStatus.failed"
-              : waitingModels ? "settings.ai.index.waitingModels" : "jobStatus.running")}
+              : paused ? "jobStatus.paused" : waitingModels ? "settings.ai.index.waitingModels" : "jobStatus.running")}
           </span>
           <button
             type="button"
             onClick={() => void togglePause()}
             disabled={busy || importActive}
-            aria-label={counters.running > 0 ? t("tasks.pause") : t("tasks.resume")}
-            title={counters.running > 0 ? t("tasks.pause") : t("tasks.resume")}
+            aria-label={!paused ? t("tasks.pause") : t("tasks.resume")}
+            title={!paused ? t("tasks.pause") : t("tasks.resume")}
             className="flex h-5 w-5 items-center justify-center rounded border border-edge text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
             data-testid="taskdrawer-index-toggle"
           >
-            {counters.running > 0 ? <GlyphPause size={10} /> : <GlyphPlay size={10} />}
+            {!paused ? <GlyphPause size={10} /> : <GlyphPlay size={10} />}
           </button>
         </div>
       </div>
@@ -641,16 +639,26 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
   const hasRunning =
     active.length > 0 || indexRows.length > 0;
 
-  /** 全部暂停：运行中导入逐个暂停 + 两个索引池（图片/选片）都暂停 */
+  /** 全部暂停：运行中导入逐个暂停 + 各索引池独立暂停 */
   async function pauseAll(): Promise<void> {
-    for (const job of active) {
-      if (job.status === "running") await pauseJob(job.jobId);
+    try {
+      for (const job of active) {
+        if (job.status === "running") await pauseJob(job.jobId);
+      }
+      if (indexRows.length > 0) {
+        for (const pool of ["index", "selection", "ai", "face"] as const) {
+          await indexTaskPause(pool);
+        }
+      }
+    } catch (failure) {
+      useImportStore.setState({ lastError: {
+        level: "error",
+        message: failure instanceof Error ? failure.message : String(failure),
+        recoverable: true,
+      } });
+    } finally {
+      void useAiStore.getState().refreshIndexStatus();
     }
-    if (indexRows.length > 0) {
-      await indexTaskPause("index");
-      await indexTaskPause("selection");
-    }
-    void useAiStore.getState().refreshIndexStatus();
   }
 
   /** 清除已完成：隐藏本地终态行 + 批量删除历史行（importJobDelete 循环；失败静默跳过） */

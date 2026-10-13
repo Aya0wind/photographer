@@ -686,6 +686,8 @@ export type IndexKind = "image" | "selection" | "thumb" | "exif" | "ai" | "face"
  * 真值；total=可索引资产数（N/M 口径）；failed 仅展示用途。
  */
 export interface IndexCounters {
+  /** Persisted scheduler policy, independent of currently running tasks. */
+  paused?: boolean;
   pending: number;
   running: number;
   done: number;

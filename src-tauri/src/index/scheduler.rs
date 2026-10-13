@@ -280,24 +280,17 @@ fn claim(db: &Db, kind: &str, owner: &str) -> rusqlite::Result<Option<IndexTaskR
 }
 
 fn source_ready(db: &Db, asset: i64) -> bool {
-    let source: Option<(String, i64, String)> =
-        db.0.query_row(
-            "SELECT path,size,mtime FROM assets WHERE id=?1",
-            [asset],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+    // Ledger mtime may describe the camera/original file, not this committed copy.
+    // Eligibility is presence + registered size; source generations are reconciled separately.
+    let source: Option<(String, i64)> =
+        db.0.query_row("SELECT path,size FROM assets WHERE id=?1", [asset], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()
         .ok()
         .flatten();
-    source.is_some_and(|(path, size, mtime)| {
-        std::fs::metadata(path).is_ok_and(|m| {
-            m.len() == size as u64
-                && m.modified().ok().is_some_and(|time| {
-                    chrono::DateTime::<chrono::Utc>::from(time)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                        == mtime
-                })
-        })
+    source.is_some_and(|(path, size)| {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == size as u64)
     })
 }
 
@@ -496,14 +489,12 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                 // The producer owns rebuilding lost/corrupt analysis inputs.
                 // Bound repairs with the consumer's attempts; broken caches cannot loop forever.
                 if task.attempts < 2 {
-                    if let Ok((source, mtime)) = db.0.query_row(
+                    if let Ok((source, _mtime)) = db.0.query_row(
                         "SELECT path,mtime FROM assets WHERE id=?1",
                         [task.asset_id],
                         |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                     ) {
-                        if let Some(file) =
-                            crate::thumbs::cached_for_asset(path, Path::new(&source), 1024, &mtime)
-                        {
+                        if let Some(file) = crate::thumbs::cached(path, Path::new(&source), 1024) {
                             let _ = std::fs::remove_file(file);
                         }
                     }
@@ -671,14 +662,35 @@ pub fn kick(path: PathBuf, supervisor: &Arc<TaskSupervisor>) {
     );
 }
 
-pub fn pause(path: &Path, selection: bool, paused: bool) -> Result<(), String> {
+fn pool_kinds(pool: &str) -> Result<&'static [&'static str], String> {
+    match pool {
+        "index" => Ok(&["thumb", "exif", "phash"]),
+        "selection" => Ok(&["eyes", "blur"]),
+        "ai" => Ok(&["ai"]),
+        "face" => Ok(&["face"]),
+        _ => Err(format!("未知索引池: {pool}")),
+    }
+}
+
+/// Resume wakes desired tasks; it never reclaims a live owner's running receipt.
+pub fn pause(path: &Path, pool: &str, paused: bool) -> Result<(), String> {
+    let kinds = pool_kinds(pool)?;
     let db = crate::ipc::open_library_db(path)?;
-    db.0.execute(
-        "UPDATE index_channels SET paused=?1 WHERE
-        (kind IN ('eyes','blur'))=?2",
-        params![paused, selection],
-    )
-    .map_err(|e| e.to_string())?;
+    let tx = Transaction::new_unchecked(&db.0, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    for kind in kinds {
+        tx.execute(
+            "UPDATE index_channels SET paused=?1 WHERE kind=?2",
+            params![paused, kind],
+        )
+        .map_err(|e| e.to_string())?;
+        if !paused {
+            tx.execute("UPDATE index_tasks SET state='pending',attempts=0 WHERE kind=?1 AND state='failed'",[kind]).map_err(|e|e.to_string())?;
+            tx.execute("UPDATE index_task_context SET retry_at=0,owner=NULL,error=NULL WHERE task_id IN (SELECT id FROM index_tasks WHERE kind=?1 AND state='pending')",[kind]).map_err(|e|e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    log::info!("索引控制 pool={pool} paused={paused}");
     notify(path);
     Ok(())
 }
@@ -702,6 +714,87 @@ mod tests {
         }
         reconcile(&db, &config).unwrap();
         (dir, db, config)
+    }
+
+    #[test]
+    fn committed_source_accepts_registration_time_but_rejects_incomplete_files() {
+        let (dir, db, _) = fixture(1);
+        let source = dir.path().join("received.jpg");
+        std::fs::write(&source, [1]).unwrap();
+        db.0.execute(
+            "UPDATE assets SET path=?1,mtime='2026-10-13T06:50:35.123456789+00:00' WHERE id=1",
+            [source.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        assert!(source_ready(&db, 1));
+        std::fs::write(&source, [1, 2]).unwrap();
+        assert!(!source_ready(&db, 1));
+        std::fs::remove_file(&source).unwrap();
+        assert!(!source_ready(&db, 1));
+    }
+
+    #[test]
+    fn resume_retries_pending_and_failed_receipts_without_reclaiming_live_work() {
+        let (dir, db, _) = fixture(3);
+        let running = claim(&db, "thumb", "live-worker").unwrap().unwrap();
+        db.0.execute(
+            "UPDATE index_tasks SET state='failed',attempts=3 WHERE kind='thumb' AND asset_id=2",
+            [],
+        )
+        .unwrap();
+        db.0.execute("UPDATE index_task_context SET retry_at=9999999999,error='deferred' WHERE task_id IN (SELECT id FROM index_tasks WHERE kind='thumb' AND asset_id IN (2,3))", []).unwrap();
+        pause(dir.path(), "index", true).unwrap();
+        assert!(claim(&db, "thumb", "retry-worker").unwrap().is_none());
+        pause(dir.path(), "index", false).unwrap();
+        let receipt: (String, Option<String>) = db.0.query_row(
+            "SELECT t.state,c.owner FROM index_tasks t JOIN index_task_context c ON c.task_id=t.id WHERE t.id=?1",
+            [running.id], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(receipt, ("running".into(), Some("live-worker".into())));
+        let retried = claim(&db, "thumb", "retry-worker").unwrap().unwrap();
+        assert_eq!(retried.asset_id, 2);
+        finish(&db, &retried, "retry-worker", true).unwrap();
+        assert_eq!(
+            claim(&db, "thumb", "retry-worker")
+                .unwrap()
+                .unwrap()
+                .asset_id,
+            3
+        );
+    }
+
+    #[test]
+    fn pause_policy_is_isolated_by_pool_and_rejects_unknown_pools() {
+        let (dir, db, _) = fixture(1);
+        pause(dir.path(), "ai", true).unwrap();
+        pause(dir.path(), "selection", true).unwrap();
+        for (kind, expected) in [
+            ("ai", true),
+            ("eyes", true),
+            ("blur", true),
+            ("thumb", false),
+            ("exif", false),
+            ("face", false),
+        ] {
+            let paused: bool =
+                db.0.query_row(
+                    "SELECT paused FROM index_channels WHERE kind=?1",
+                    [kind],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(paused, expected, "{kind}");
+        }
+        assert!(pause(dir.path(), "unknown", false).is_err());
+        pause(dir.path(), "ai", false).unwrap();
+        let selection_paused: bool =
+            db.0.query_row(
+                "SELECT paused FROM index_channels WHERE kind='blur'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(selection_paused);
     }
 
     #[test]

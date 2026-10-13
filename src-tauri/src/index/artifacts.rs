@@ -23,8 +23,11 @@ fn source_key(db: &Db, path: &Path, asset: i64) -> Option<String> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok()?;
+    let physical = std::fs::metadata(&source)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|time| (m.len(), time)));
     Some(format!(
-        "{}:{source}:{size}:{mtime}:analysis-1024-v1",
+        "{}:{source}:{size}:{mtime}:{physical:?}:analysis-1024-v1",
         path.display()
     ))
 }
@@ -56,8 +59,13 @@ pub fn analysis(db: &Db, path: &Path, asset: i64) -> Option<Arc<image::RgbImage>
                 })
                 .ok()?;
             let source = PathBuf::from(source);
-            // Never search arbitrary generations. The ledger defines the required input.
-            let file = crate::thumbs::cached_for_asset(path, &source, 1024, &mtime)?;
+            // The producer caches against disk mtime. Camera/import ledger timestamps
+            // can differ from the final file's time; do not wait for a nonexistent key.
+            let file = if source.exists() {
+                crate::thumbs::cached(path, &source, 1024)
+            } else {
+                crate::thumbs::cached_for_asset(path, &source, 1024, &mtime)
+            }?;
             let rgb = image::ImageReader::open(file)
                 .ok()?
                 .decode()
@@ -120,4 +128,34 @@ pub fn faces(
     }
     cache.push_back((key, result.clone()));
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_uses_producer_cache_despite_ledger_time_and_invalidates_disk_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        let source = dir.path().join("received.jpg");
+        std::fs::write(&source, [1]).unwrap();
+        db.0.execute("INSERT INTO assets(id,path,filename,size,mtime,xxhash,kind,source,created_at) VALUES (1,?1,'received.jpg',1,'2026-01-01T00:00:00.000Z',0,'photo','tether','now')", [source.to_string_lossy().as_ref()]).unwrap();
+        let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+        let cache = crate::thumbs::cache_path(dir.path(), &source, 1024, modified);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(32, 24, image::Rgb([100, 120, 140]))
+            .save(&cache)
+            .unwrap();
+        assert_eq!(analysis(&db, dir.path(), 1).unwrap().dimensions(), (32, 24));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.set_times(
+            std::fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+        assert!(analysis(&db, dir.path(), 1).is_none());
+    }
 }

@@ -2,23 +2,16 @@ import { ipc } from "../index";
 import { type IndexKind, type IndexStatus, type RebuildKind } from "./types";
 
 /** 索引池（index_task_pause/resume 的 pool 参数）："index" = 图片索引池
- *  （thumb/exif/hash/phash），"selection" = 选片索引池（eyes/blur）。 */
-export type IndexPool = "index" | "selection";
+ *  （thumb/exif/phash），"selection" = 选片索引池（eyes/blur），ai/face 独立控制。 */
+export type IndexPool = "index" | "selection" | "ai" | "face";
 
-/** 暂停索引任务（库级后台）；命令失败静默（后端接线前按钮无副作用） */
+/** Persisted per-lane controls. Failures must reach the task drawer. */
 export async function indexTaskPause(pool: IndexPool = "index"): Promise<void> {
-  try {
-    await ipc<void>("index_task_pause", { pool });
-  } catch {
-  }
+  await ipc<void>("index_task_pause", { pool });
 }
 
-/** 恢复索引任务（池级闸）；导入让路期间后端拒绝（按钮已禁用，防御性静默） */
 export async function indexTaskResume(pool: IndexPool = "index"): Promise<void> {
-  try {
-    await ipc<void>("index_task_resume", { pool });
-  } catch {
-  }
+  await ipc<void>("index_task_resume", { pool });
 }
 
 /** 索引状态快照；失败/负载异常返回 null（调用方隐藏/降级区块） */

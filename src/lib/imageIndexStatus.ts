@@ -9,5 +9,5 @@ export function imageIndexCounters(status: IndexStatus): IndexCounters {
   const done = Math.min(total, ...parts.map(p => p.done));
   const running = Math.min(total - done, Math.max(...parts.map(p => p.running)));
   const failed = Math.min(total - done - running, Math.max(...parts.map(p => p.failed)));
-  return { total, done, running, failed, pending: Math.max(0, total - done - running - failed) };
+  return { paused: parts.some(p => p.paused), total, done, running, failed, pending: Math.max(0, total - done - running - failed) };
 }

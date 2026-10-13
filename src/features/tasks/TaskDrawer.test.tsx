@@ -402,7 +402,7 @@ describe("任务抽屉：索引通道行", () => {
     await waitFor(() => expect(waiting).toHaveTextContent(i18n.t("settings.ai.index.waitingModels")));
     expect(waiting).toHaveTextContent(i18n.t("backgroundTask.index.selection"));
   });
-  it("索引行暂停（running）/继续（无 running → indexTaskResume 全局恢复）；导入中禁用", async () => {
+  it("索引行按持久化暂停状态恢复，不重复调用旧触发入口；导入中禁用", async () => {
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 1, 7),
       exif: counters(0, 0, 10),
@@ -415,9 +415,9 @@ describe("任务抽屉：索引通道行", () => {
     await user.click((await screen.findByTestId("taskdrawer-index-image")).querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
     await waitFor(() => expect(indexPauseMock).toHaveBeenCalledTimes(1));
 
-    // running=0 的通道：继续 = index_task_resume（全局恢复，2026-09-29 接线）
+    // 持久化暂停状态决定继续按钮，running=0 本身不表示暂停。
     indexStatusMock.mockResolvedValue({
-      thumb: counters(2, 0, 7),
+      thumb: { ...counters(2, 0, 7), paused: true },
       exif: counters(0, 0, 10),
       ai: counters(0, 0, 10),
       face: counters(0, 0, 10),
@@ -425,7 +425,8 @@ describe("任务抽屉：索引通道行", () => {
     await useAiStore.getState().refreshIndexStatus();
     await user.click(screen.getByTestId("taskdrawer-index-image").querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
     await waitFor(() => expect(indexResumeMock).toHaveBeenCalledTimes(1));
-    expect(kickMock).toHaveBeenCalledWith("image");
+    expect(indexResumeMock).toHaveBeenCalledWith("index");
+    expect(kickMock).not.toHaveBeenCalled();
 
     // 导入进行中：让路闸接管，按钮禁用（导入收尾自动恢复）
     emit({ type: "importSessionStarted", jobId: 7, totalFiles: 10, totalBytes: 1000 });
@@ -433,7 +434,42 @@ describe("任务抽屉：索引通道行", () => {
     expect(toggle).toBeDisabled();
   });
 
-  it("全部暂停：运行中导入逐个暂停 + 图片/选片两个索引池都暂停", async () => {
+  it("没有运行任务的待处理通道仍显示暂停，语义恢复只唤醒语义池", async () => {
+    indexStatusMock.mockResolvedValue({
+      thumb: counters(5, 0, 9),
+      exif: counters(5, 0, 9),
+      ai: { ...counters(5, 0, 9), paused: true },
+      face: counters(5, 0, 9),
+    } satisfies IndexStatus);
+    const user = userEvent.setup();
+    renderDrawer();
+    const image = await screen.findByTestId("taskdrawer-index-image");
+    await user.click(image.querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
+    await waitFor(() => expect(indexPauseMock).toHaveBeenCalledWith("index"));
+    expect(indexResumeMock).not.toHaveBeenCalled();
+    const ai = screen.getByTestId("taskdrawer-index-ai");
+    await user.click(ai.querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
+    await waitFor(() => expect(indexResumeMock).toHaveBeenCalledWith("ai"));
+    expect(kickMock).not.toHaveBeenCalled();
+  });
+
+  it("恢复失败时显示后端错误，不静默吞掉", async () => {
+    indexStatusMock.mockResolvedValue({
+      thumb: { ...counters(5, 0, 9), paused: true },
+      exif: counters(5, 0, 9),
+      ai: counters(5, 0, 9),
+      face: counters(5, 0, 9),
+    } satisfies IndexStatus);
+    indexResumeMock.mockRejectedValueOnce(new Error("索引数据库不可用"));
+    const user = userEvent.setup();
+    renderDrawer();
+    const row = await screen.findByTestId("taskdrawer-index-image");
+    await user.click(row.querySelector('[data-testid="taskdrawer-index-toggle"]') as HTMLButtonElement);
+    expect(await screen.findByText("索引数据库不可用")).toBeInTheDocument();
+    expect(kickMock).not.toHaveBeenCalled();
+  });
+
+  it("全部暂停：运行中导入逐个暂停 + 四个索引池都暂停", async () => {
     indexStatusMock.mockResolvedValue({
       thumb: counters(2, 1, 7),
       exif: counters(0, 0, 10),
@@ -452,10 +488,12 @@ describe("任务抽屉：索引通道行", () => {
     await waitFor(() => {
       expect(pauseMock).toHaveBeenCalledWith(7);
       expect(pauseMock).toHaveBeenCalledWith(8);
-      // 两池各暂停一次（pool 参数区分图片索引/选片索引）
-      expect(indexPauseMock).toHaveBeenCalledTimes(2);
+      // 四池各暂停一次，语义和人脸控制不再混入图片池。
+      expect(indexPauseMock).toHaveBeenCalledTimes(4);
       expect(indexPauseMock).toHaveBeenCalledWith("index");
       expect(indexPauseMock).toHaveBeenCalledWith("selection");
+      expect(indexPauseMock).toHaveBeenCalledWith("ai");
+      expect(indexPauseMock).toHaveBeenCalledWith("face");
     });
   });
 });

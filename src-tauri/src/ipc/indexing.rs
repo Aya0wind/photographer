@@ -20,6 +20,8 @@ pub struct IndexKindStatus {
     pub done: u64,
     pub failed: u64,
     pub total: u64,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// 全通道状态（index_status 载荷）。
@@ -109,6 +111,7 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
             done: slots[2],
             failed: slots[3],
             total: total_assets,
+            paused: db.0.query_row("SELECT paused FROM index_channels WHERE kind=?1",[kind],|r|r.get(0)).unwrap_or(false),
         };
     }
     // 缩略图完成态以 assets.thumb_state 为持久真值；旧版本可能清理 done
@@ -130,6 +133,8 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     };
     dto.image = image_index_status(&db)?;
     dto.selection = selection_index_status(&db);
+    dto.image.paused=dto.thumb.paused;
+    dto.selection.paused=dto.blur.paused;
     dto.selection_ready = state.ai.selection_eyes_ready();
     dto.selection_enabled = selection_enabled;
     Ok(dto)
@@ -215,7 +220,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
         "image" => {
-            crate::index::scheduler::pause(&db_dir,false,false)?;
+            crate::index::scheduler::pause(&db_dir,"index",false)?;
             db.create_thumb_tasks_for_unindexed()
                 .map_err(|e| e.to_string())?;
             // 图片域消费的全部通道一起重试失败行（thumb/exif/phash 都在
@@ -238,7 +243,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             if !(enable_clip || enable_face) {
                 return Err("选片索引未开启（设置 → AI）".into());
             }
-            crate::index::scheduler::pause(&db_dir,true,false)?;
+            crate::index::scheduler::pause(&db_dir,"selection",false)?;
             db.create_eyes_tasks_for_unindexed()
                 .map_err(|e| format!("创建闭眼任务失败: {e}"))?;
             db.create_blur_tasks_for_unindexed()
@@ -721,13 +726,15 @@ pub fn check_params_and_rebuild(
 fn as_index_pool(pool: Option<&str>) -> Option<&'static str> {
     match pool {
         Some("selection") => Some("selection"),
+        Some("ai") => Some("ai"),
+        Some("face") => Some("face"),
         Some("index") | None => Some("index"),
         _ => None,
     }
 }
 
-/// 暂停索引类后台任务。pool="index"（thumb/exif/hash/phash 图片索引池）
-/// 或 "selection"（eyes/blur 选片索引池，2026-10-12 拆分）；缺省 "index"。
+/// 暂停索引类后台任务。pool="index"（thumb/exif/phash 图片索引池）
+/// 或 "selection"（eyes/blur）、"ai"、"face"；缺省 "index"。
 /// 软语义：worker 步进间轮询生效。
 #[tauri::command]
 pub async fn index_task_pause(
@@ -739,7 +746,7 @@ pub async fn index_task_pause(
     };
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        crate::index::scheduler::pause(&super::app_database_dir(state)?, pool == "selection", true)?;
+        crate::index::scheduler::pause(&super::app_database_dir(state)?, pool, true)?;
         Ok(())
     })
     .await
@@ -756,8 +763,8 @@ pub async fn index_task_resume(
     };
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-            let path = super::app_database_dir(state)?;
-        crate::index::scheduler::pause(&path, pool == "selection", false)?;
+        let path = super::app_database_dir(state)?;
+        crate::index::scheduler::pause(&path, pool, false)?;
         crate::index::scheduler::kick(path, &state.supervisor);
         Ok(())
     })

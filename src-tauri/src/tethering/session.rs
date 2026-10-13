@@ -1056,7 +1056,11 @@ pub fn ingest(
             path: destination.to_string_lossy().into_owned(),
             filename: filename.clone(),
             size,
-            mtime: now.clone(),
+            mtime: std::fs::metadata(&destination)
+                .and_then(|meta| meta.modified())
+                .map_err(|e| e.to_string())
+                .map(|time| chrono::DateTime::<chrono::Utc>::from(time)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true))?,
             xxhash: hash.digest(),
             kind,
             captured_at: Some(
