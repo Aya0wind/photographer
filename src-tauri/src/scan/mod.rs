@@ -553,6 +553,10 @@ impl<'a> Scanner<'a> {
     /// 批量模式停止判定（幂等：首次触发记下原因，后续直接短路）。检查顺序
     /// = 取消优先于让路（用户显式动作先响）。
     fn should_stop(&mut self) -> bool {
+        if crate::db::lifecycle::is_closed(&self.db_dir.join("library.db")) {
+            self.stopped = Some(BatchOutcome::Yielded);
+            return true;
+        }
         if self.stopped.is_some() {
             return true;
         }

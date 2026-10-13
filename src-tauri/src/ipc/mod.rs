@@ -436,7 +436,6 @@ pub fn app_database_db(state: &AppState) -> Result<Db, String> {
 /// 打开指定目录的数据库连接（library.db；打开即幂等执行单版本建表脚本，
 /// 新库并发首开由 IF NOT EXISTS + busy_timeout 收敛，无迁移锁）。
 pub fn open_library_db(db_dir: &Path) -> Result<Db, String> {
-    std::fs::create_dir_all(db_dir).map_err(|e| format!("库目录不可用: {e}"))?;
     let db = Db::open(&db_dir.join("library.db")).map_err(|e| format!("打开数据库失败: {e}"))?;
     Ok(db)
 }

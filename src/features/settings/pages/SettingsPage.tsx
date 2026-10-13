@@ -1,6 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { useSearchParams, useNavigate } from "react-router";
 import { useTranslation } from "react-i18next";
+import { databaseClose } from "@/ipc/api";
+import ErrorModal from "@/shared/components/ErrorModal";
+import { resetLibrarySession } from "@/lib/librarySession";
 import { APP_LANGUAGES, normalizeLanguage } from "@/i18n";
 
 import ThemePicker from "@/features/settings/components/ThemePicker";
@@ -165,6 +168,19 @@ function AlbumTagsSetting() {
 }
 
 export default function SettingsPage() {
+  const [closingDatabase, setClosingDatabase] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  async function returnToPicker() {
+    if (closingDatabase) return;
+    setClosingDatabase(true);
+    try {
+      await databaseClose();
+      resetLibrarySession();
+      useSettingsStore.getState().setDatabaseChosen(false);
+      navigate("/database-picker");
+    } catch (error) { setCloseError(String(error).replace(/^Error:\s*/, "")); }
+    finally { setClosingDatabase(false); }
+  }
   const navigate=useNavigate();
   const { t } = useTranslation();
   const settings = useSettingsStore((s) => s.settings);
@@ -177,6 +193,7 @@ export default function SettingsPage() {
 
   return (
     <div className="flex h-full flex-col">
+      <ErrorModal message={closeError} onClose={() => setCloseError(null)} />
       <header className="flex h-12 shrink-0 items-center border-b border-edge px-4">
         <h1 className="text-sm font-semibold text-text-primary">{t("pages.settings.title")}</h1>
       </header>
@@ -217,8 +234,9 @@ export default function SettingsPage() {
             <>
               <SectionTitle>{t("settings.section.system")}</SectionTitle>
               <SettingRow label={t("settings.databasePicker")} desc={t("settings.databasePickerDesc")}>
-                <button type="button" className="ui-primary rounded-lg px-4 py-2 text-xs"
-                  onClick={()=>{useSettingsStore.getState().setDatabaseChosen(false);navigate("/database-picker");}}>
+                <button type="button" className="ui-primary inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs" aria-busy={closingDatabase}
+                  disabled={closingDatabase} onClick={() => void returnToPicker()}>
+                  {closingDatabase && <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" aria-hidden="true" />}
                   {t("settings.returnToDatabasePicker")}
                 </button>
               </SettingRow>

@@ -14,7 +14,7 @@ fn selection_stage_timing() {
         .unwrap()
         .parse::<i64>()
         .unwrap();
-    let db = db::Db(
+    let db = db::Db::from_connection(
         rusqlite::Connection::open_with_flags(
             directory.join("library.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

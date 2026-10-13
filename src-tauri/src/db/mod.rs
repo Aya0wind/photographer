@@ -22,6 +22,7 @@ pub mod libraries;
 
 pub mod organization;
 pub mod reorganization;
+pub mod lifecycle;
 
 mod albums;
 mod assets;
@@ -44,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::{AssetKind, FileState};
 
 /// 打开（必要时创建）库文件，并应用连接级 PRAGMA。
-pub struct Db(pub Connection);
+pub struct Db(pub Connection, Option<lifecycle::Lease>);
 
 impl Db {
     /// WAL（读写不互斥）+ foreign_keys + 5s busy_timeout + 单版本 schema。
@@ -53,6 +54,10 @@ impl Db {
     /// schema 全对象 IF NOT EXISTS，重开/并发首开均幂等（每连接一次
     /// execute_batch 的解析开销即可，无需迁移锁与 user_version）。
     pub fn open(path: &Path) -> Result<Self> {
+        let lease = lifecycle::acquire(path, false)?;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|error| Error::ToSqlConversionFailure(error.into()))?;
+        }
         let conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "wal")?;
@@ -60,7 +65,14 @@ impl Db {
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", "on")?;
         conn.execute_batch(schema::SCHEMA)?;
-        Ok(Self(conn))
+        Ok(Self(conn, Some(lease)))
+    }
+    pub fn from_connection(connection: Connection) -> Self { Self(connection, None) }
+    pub fn inspect(path: &Path) -> Result<Self> {
+        let lease = lifecycle::acquire(path, true)?;
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self(conn, Some(lease)))
     }
 }
 

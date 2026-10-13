@@ -65,6 +65,10 @@ export async function databaseSwitch(id: string): Promise<void> {
   await ipc<void>("database_switch", { id });
 }
 
+export async function databaseClose(): Promise<void> {
+  await ipc<void>("database_close");
+}
+
 /**
  * 移除数据库（database_remove）：deleteData=false 仅摘登记（数据目录留在
  * 磁盘）；true 连数据目录删（后端有照片库根重叠安全闸，**绝不删照片库

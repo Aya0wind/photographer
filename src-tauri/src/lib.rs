@@ -331,6 +331,7 @@ pub fn run() {
             ipc::databases::database_list,
             ipc::databases::database_create,
             ipc::databases::database_switch,
+            ipc::databases::database_close,
             ipc::databases::database_remove,
             // 照片库登记表（2026-10-09 单库多照片库；M2a 实装 CRUD；
             // scan_status/scan_cancel 骨架待 M4 登记管道）

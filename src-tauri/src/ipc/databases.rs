@@ -117,7 +117,7 @@ fn collect_all_photo_roots(
         if !db_dir.join("library.db").is_file() {
             continue; // 从未物化/已被清理：无照片库登记可核对
         }
-        let db = match super::open_library_db(db_dir) {
+        let db = match crate::db::Db::inspect(&db_dir.join("library.db")) {
             Ok(db) => db,
             // 读不开：无法核对重叠，返回 None 让调用方拒绝危险动作。
             Err(_) => return Ok(None),
@@ -217,6 +217,7 @@ pub fn fetch_database_create(
         }
     }
     // 物化（建目录 + 建表 + 验证可写）；失败不落注册表。
+    crate::db::lifecycle::resume(&dir.join("library.db"));
     let db=super::open_library_db(&dir).map_err(|e| format!("数据库位置不可用：{e}"))?;
     if db.photos_library_list().map_err(|e|e.to_string())?.is_empty(){
         let initial=initial_library.ok_or("新建数据库必须选择一个照片库文件夹")?;
@@ -298,9 +299,11 @@ pub fn fetch_database_switch(state: &AppState, id: &str) -> Result<(), String> {
             db_file.display()
         ));
     }
+    let was_closed = crate::db::lifecycle::is_closed(&db_file);
+    crate::db::lifecycle::resume(&db_file);
     super::open_library_db(Path::new(&entry.db_dir))
         .map_err(|e| format!("数据库不可用，未切换：{e}"))?;
-    if settings.active_database_id.as_deref() == Some(id) {
+    if settings.active_database_id.as_deref() == Some(id) && !was_closed {
         return Ok(()); // 幂等：切到当前库 no-op（不发事件由命令层判断）
     }
     let (mut global, _) = settings.split();
@@ -367,6 +370,35 @@ pub async fn database_switch(
 ///   不开 → 无法核对重叠 → 拒绝删除（宁可保守）。
 /// 删的是激活库时：切到剩余第一个（注册表序），无剩余则 None（应用回到
 /// 「尚未创建数据库」态，门禁送回引导）。导入在场拒绝（同 switch）。
+pub fn close_database_runtime(state: &AppState, directory: &Path) -> Result<(), String> {
+    crate::db::lifecycle::block(&directory.join("library.db"));
+    let timeout = std::time::Duration::from_secs(15);
+    if !crate::index::scheduler::stop_and_wait(directory, timeout)
+        || !state.thumb_queue.stop_database(directory, timeout)
+        || !crate::db::lifecycle::wait_closed(&directory.join("library.db"), timeout) {
+        return Err("数据库的后台操作尚未结束，请稍后重试关闭数据库".into());
+    }
+    crate::index::artifacts::invalidate(directory);
+    crate::ai::semantic::invalidate_index(directory);
+    crate::ai::face::invalidate_cluster_cache(directory);
+    Ok(())
+}
+
+pub fn fetch_database_close(state: &AppState) -> Result<(), String> {
+    super::ensure_no_import_running(state)?;
+    let directory = state.settings.lock().unwrap().active_database_dir(&state.config_dir).ok();
+    if let Some(directory) = directory { close_database_runtime(state, &directory)?; }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn database_close(state: State<'_, SharedState>) -> Result<(), String> {
+    run_blocking(state.inner().clone(), move |state| {
+        super::super::tethering::session::stop_all();
+        fetch_database_close(state)
+    }).await
+}
+
 pub fn fetch_database_remove(
     state: &AppState,
     id: &str,
@@ -407,9 +439,20 @@ pub fn fetch_database_remove(
                 );
             }
         }
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除数据目录失败（{}）: {e}", entry.db_dir))?;
+        close_database_runtime(state, &dir)?;
+        let file = dir.join("library.db");
+        crate::db::lifecycle::begin_delete(&file);
+        if !crate::db::lifecycle::wait_closed(&file, std::time::Duration::from_secs(15)) {
+            crate::db::lifecycle::cancel_delete(&file);
+            return Err("数据库仍有读取操作，请稍后重试删除".into());
+        }
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            crate::db::lifecycle::cancel_delete(&file);
+            return Err(format!("删除数据目录失败（{}）: {error}", entry.db_dir));
+        }
         data_dirs_deleted = 1;
     }
+    if !delete_data { close_database_runtime(state, Path::new(&entry.db_dir))?; }
     let (mut global, _) = settings.split();
     global.databases.retain(|entry| entry.id != id);
     if global.active_database_id.as_deref() == Some(id) {
@@ -458,4 +501,51 @@ pub async fn database_remove(
         .map_err(|e| e.to_string())?;
     emit_settings_changed(&app, &shared)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    fn fixture(root: &Path) -> AppState {
+        let bus = crate::events::EventBus::new();
+        let supervisor = crate::tasks::TaskSupervisor::new(bus.clone());
+        AppState {
+            settings: Mutex::new(Settings::default()), config_dir: root.to_owned(), bus: bus.clone(),
+            devices: Mutex::new(HashMap::new()), active_import: Mutex::new(None),
+            import_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            register_gate: Arc::new(Mutex::new(())),
+            library_scan_kick: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supervisor: supervisor.clone(), thumb_queue: super::super::thumb::ThumbQueue::new(),
+            ai: crate::ai::ModelManager::new(root.join("models"), bus, supervisor),
+        }
+    }
+
+    #[test]
+    fn open_close_reopen_then_delete_releases_database_and_preserves_photos() {
+        let root = tempfile::tempdir().unwrap();
+        let state = fixture(root.path());
+        let photos = root.path().join("photos");
+        let initial = InitialPhotoLibrary {
+            name: "照片".into(), root_path: photos.to_string_lossy().into_owned(),
+            organization_template: crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE.into(),
+            existing_folder: false, reorganize_existing: false,
+        };
+        let entry = fetch_database_create(&state, "数据库", None, Some(&initial)).unwrap();
+        std::fs::write(photos.join("original.jpg"), b"original photo").unwrap();
+        fetch_database_close(&state).unwrap();
+        assert!(!crate::index::scheduler::is_running(Path::new(&entry.db_dir)));
+        assert!(super::super::open_library_db(Path::new(&entry.db_dir)).is_err());
+        fetch_database_switch(&state, &entry.id).unwrap();
+        assert!(super::super::open_library_db(Path::new(&entry.db_dir)).is_ok());
+        fetch_database_close(&state).unwrap();
+        let removed = fetch_database_remove(&state, &entry.id, true).unwrap();
+        assert_eq!(removed.data_dirs_deleted, 1);
+        assert!(!Path::new(&entry.db_dir).exists());
+        assert!(photos.join("original.jpg").is_file());
+        crate::index::scheduler::kick(PathBuf::from(&entry.db_dir), &state.supervisor);
+        assert!(!Path::new(&entry.db_dir).exists(), "旧任务不能复活已删除的库");
+    }
 }

@@ -42,6 +42,7 @@ pub struct ThumbJob {
 }
 
 struct QueueState {
+    active: HashMap<(i64, u16), PathBuf>,
     pending: VecDeque<ThumbJob>,
     /// 待处理 + 处理中的 (asset,size) 键（去抖）。
     queued: HashSet<(i64, u16)>,
@@ -73,6 +74,7 @@ impl ThumbQueue {
         Self {
             inner: Arc::new(QueueInner {
                 state: Mutex::new(QueueState {
+                    active: HashMap::new(),
                     pending: VecDeque::new(),
                     queued: HashSet::new(),
                     failures: HashMap::new(),
@@ -87,6 +89,7 @@ impl ThumbQueue {
     /// 入队：去抖键命中返回 true（不重复入队）；连续失败 ≥3 次返回 false
     /// （调用方报 Unavailable）；队满丢弃返回 false。
     pub fn push(&self, job: ThumbJob) -> bool {
+        if crate::db::lifecycle::is_closed(&job.db_dir.join("library.db")) { return false; }
         let key = (job.asset_id, job.size);
         let mut state = self.inner.state.lock().expect("thumb queue mutex poisoned");
         if state.queued.contains(&key) {
@@ -109,11 +112,13 @@ impl ThumbQueue {
     fn record_result(inner: &QueueInner, key: (i64, u16), ok: bool) {
         let mut state = inner.state.lock().expect("thumb queue mutex poisoned");
         state.queued.remove(&key);
+        state.active.remove(&key);
         if ok {
             state.failures.remove(&key);
         } else {
             *state.failures.entry(key).or_insert(0) += 1;
         }
+        inner.ready.notify_all();
     }
 
     /// worker 取任务：队列空则阻塞等待；停工返回 None。
@@ -121,6 +126,11 @@ impl ThumbQueue {
         let mut state = inner.state.lock().expect("thumb queue mutex poisoned");
         loop {
             if let Some(job) = state.pending.pop_front() {
+                if crate::db::lifecycle::is_closed(&job.db_dir.join("library.db")) {
+                    state.queued.remove(&(job.asset_id, job.size));
+                    continue;
+                }
+                state.active.insert((job.asset_id, job.size), job.db_dir.clone());
                 return Some(job);
             }
             if state.stop {
@@ -174,6 +184,20 @@ impl ThumbQueue {
     fn permanently_failed(&self, asset_id: i64, size: u16) -> bool {
         self.inner.state.lock().expect("thumb queue mutex poisoned")
             .failures.get(&(asset_id, size)).copied().unwrap_or(0) >= 3
+    }
+
+    pub fn stop_database(&self, db_dir: &std::path::Path, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.inner.state.lock().unwrap();
+        let discarded = state.pending.iter().filter(|job| job.db_dir == db_dir)
+            .map(|job| (job.asset_id, job.size)).collect::<Vec<_>>();
+        state.pending.retain(|job| job.db_dir != db_dir);
+        for key in discarded { state.queued.remove(&key); }
+        while state.active.values().any(|path| path == db_dir) {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else { return false; };
+            state = self.inner.ready.wait_timeout(state, remaining).unwrap().0;
+        }
+        true
     }
 }
 

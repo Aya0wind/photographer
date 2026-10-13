@@ -62,7 +62,7 @@ export default function DatabasePickerPage() {
     setError(null);
     // 切库先清会话态（快照/缩略图缓存/store）——不清=新库看到上一个库的
     // 照片（快照跨库沿用）与张冠李戴的缩略图（assetId 跨库撞号）
-    if (activeId !== database.id) resetLibrarySession();
+    resetLibrarySession();
     try {
       // Save against the current database before switching: AI settings are
       // database-scoped and must not be copied from the old store into the new DB.

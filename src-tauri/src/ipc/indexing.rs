@@ -62,6 +62,9 @@ pub fn fetch_index_status(state: &super::AppState) -> Result<IndexStatusDto, Str
     if no_database {
         return Ok(IndexStatusDto::default());
     }
+    if super::app_database_dir(state).is_ok_and(|path| crate::db::lifecycle::is_closed(&path.join("library.db"))) {
+        return Ok(IndexStatusDto::default());
+    }
     let db = super::app_database_db(state)?;
     let counts = db.index_task_state_counts().map_err(|e| e.to_string())?;
     let (total_assets, thumb_done, ai_done, face_done) =

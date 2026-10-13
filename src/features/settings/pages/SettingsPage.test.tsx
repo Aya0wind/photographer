@@ -17,6 +17,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     databaseList: vi.fn(async () => ({ databases: [], activeId: null })),
+    databaseClose: vi.fn(async () => {}),
     aiModelsStatus: vi.fn(),
     aiModelDownload: vi.fn(),
     aiModelCancel: vi.fn(),
@@ -35,6 +36,7 @@ import {
   aiModelDownload,
   aiModelsStatus,
   burstStats,
+  databaseClose,
   indexKickNow,
   indexRebuild,
   indexStatus,
@@ -1003,4 +1005,28 @@ it("returns to the database picker from general settings",async()=>{
   await userEvent.setup().click(screen.getByRole("button",{name:"回到库选择器"}));
   expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
   expect(useSettingsStore.getState().databaseChosen).toBe(false);
+  expect(databaseClose).toHaveBeenCalled();
+});
+
+it("waits for database closure before navigating to the picker", async () => {
+  let finish = () => {};
+  vi.mocked(databaseClose).mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+  useSettingsStore.setState({ databaseChosen: true });
+  renderSettingsPage();
+  await userEvent.setup().click(screen.getByRole("button", { name: "回到库选择器" }));
+  expect(screen.getByRole("button", { name: "回到库选择器" })).toBeDisabled();
+  expect(useSettingsStore.getState().databaseChosen).toBe(true);
+  expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
+  await act(async () => finish());
+  expect(await screen.findByTestId("picker-probe")).toBeInTheDocument();
+});
+
+it("keeps the current page and reports a failed database close", async () => {
+  vi.mocked(databaseClose).mockRejectedValueOnce(new Error("仍有导入任务运行"));
+  useSettingsStore.setState({ databaseChosen: true });
+  renderSettingsPage();
+  await userEvent.setup().click(screen.getByRole("button", { name: "回到库选择器" }));
+  expect(await screen.findByRole("alertdialog")).toHaveTextContent("仍有导入任务运行");
+  expect(useSettingsStore.getState().databaseChosen).toBe(true);
+  expect(screen.queryByTestId("picker-probe")).not.toBeInTheDocument();
 });

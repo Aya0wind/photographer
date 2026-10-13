@@ -26,6 +26,7 @@ struct Config {
 }
 
 struct Queue {
+    stopped: std::sync::atomic::AtomicBool,
     config: Mutex<Config>,
     signal: Mutex<u64>,
     ready: Condvar,
@@ -49,6 +50,7 @@ fn queue(path: &Path) -> Arc<Queue> {
             ai.enable_clip = false;
             ai.enable_face = false;
             Arc::new(Queue {
+                stopped: std::sync::atomic::AtomicBool::new(false),
                 config: Mutex::new(Config {
                     manager: None,
                     bus: EventBus::new(),
@@ -99,7 +101,9 @@ fn enabled(kind: &str, ai: &AiSettings) -> bool {
 
 /// Every entry point updates the same desired channels, without changing pauses.
 pub fn configure(path: &Path, manager: &ModelManager, bus: &EventBus, ai: &AiSettings) {
+    if crate::db::lifecycle::is_closed(&path.join("library.db")) { return; }
     let queue = queue(path);
+    queue.stopped.store(false, std::sync::atomic::Ordering::SeqCst);
     let barrier = super::image_index_lock(path);
     let _guard = barrier
         .write()
@@ -420,6 +424,8 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
     let mut last_work = std::time::Instant::now();
     loop {
         if controls.is_cancelled()
+            || queue.stopped.load(std::sync::atomic::Ordering::SeqCst)
+            || crate::db::lifecycle::is_closed(&path.join("library.db"))
             || !path.join("library.db").is_file()
             || last_work.elapsed() >= Duration::from_secs(10)
         {
@@ -699,11 +705,13 @@ fn run_workers(path: &Path, queue: &Queue, controls: &TaskControls) {
     });
 }
 
-fn wait_idle(queue: &Queue, controls: &TaskControls, observed: u64) {
+fn wait_idle(path: &Path, queue: &Queue, controls: &TaskControls, observed: u64) {
     let started = std::time::Instant::now();
     let mut signal = queue.signal.lock().expect("index signal poisoned");
     while *signal == observed
         && !controls.is_cancelled()
+        && !queue.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        && !crate::db::lifecycle::is_closed(&path.join("library.db"))
         && started.elapsed() < Duration::from_secs(30)
     {
         signal = queue
@@ -715,7 +723,7 @@ fn wait_idle(queue: &Queue, controls: &TaskControls, observed: u64) {
 }
 
 fn coordinate(path: &Path, queue: &Queue, controls: &TaskControls) {
-    while !controls.is_cancelled() && path.join("library.db").is_file() {
+    while !controls.is_cancelled() && !queue.stopped.load(std::sync::atomic::Ordering::SeqCst) && !crate::db::lifecycle::is_closed(&path.join("library.db")) && path.join("library.db").is_file() {
         let observed = *queue.signal.lock().expect("index signal poisoned");
         if ready_to_run(path, queue) {
             run_workers(path, queue, controls);
@@ -725,11 +733,12 @@ fn coordinate(path: &Path, queue: &Queue, controls: &TaskControls) {
         }
         // Workers have dropped their SQLite connections and stacks. Compare the
         // notification generation under the same lock as notify: no lost wakeup.
-        wait_idle(queue, controls, observed);
+        wait_idle(path, queue, controls, observed);
     }
 }
 
 pub fn kick(path: PathBuf, supervisor: &Arc<TaskSupervisor>) {
+    if crate::db::lifecycle::is_closed(&path.join("library.db")) { return; }
     let queue = queue(&path);
     notify(&path);
     if queue
@@ -760,6 +769,18 @@ pub fn kick(path: PathBuf, supervisor: &Arc<TaskSupervisor>) {
             coordinate(&path, &queue, &controls);
         },
     );
+}
+
+pub fn stop_and_wait(path: &Path, timeout: Duration) -> bool {
+    let queue = queue(path);
+    queue.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    notify(path);
+    let deadline = std::time::Instant::now() + timeout;
+    while queue.started.load(std::sync::atomic::Ordering::SeqCst) {
+        if std::time::Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 fn pool_kinds(pool: &str) -> Result<&'static [&'static str], String> {

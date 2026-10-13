@@ -124,14 +124,14 @@ describe("DatabasePickerPage（达芬奇式启动首屏）", () => {
     expect(switchMock).toHaveBeenCalledWith("db-1");
   });
 
-  it("打开当前激活库：不再清会话（同库重进）", async () => {
+  it("打开当前激活库：关闭后重进也清理旧会话", async () => {
     renderPicker();
     const user = userEvent.setup();
 
     await user.click(await screen.findByTestId("database-picker-open"));
 
     expect(await screen.findByTestId("gallery-probe")).toBeInTheDocument();
-    expect(resetMock).not.toHaveBeenCalled();
+    expect(resetMock).toHaveBeenCalledOnce();
   });
 
   it("切换失败：后端 Err 文案内联展示、留在选择页", async () => {
