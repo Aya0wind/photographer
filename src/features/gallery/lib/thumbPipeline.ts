@@ -106,6 +106,12 @@ function toUrlOrNull(path: string): string | null {
   }
 }
 
+function refreshedResult(result: ThumbResult, token?: string): ThumbResult {
+  if (!token || result.kind !== "url") return result;
+  const separator = result.url.includes("?") ? "&" : "?";
+  return { kind: "url", url: `${result.url}${separator}thumbnailRevision=${token}` };
+}
+
 /** 取库内资产缩略图（命中会话缓存直接返回；priority：high 插队信号量队列，
  *  low 默认）。pending 不写缓存（事件重试自愈）；failed/missing 缓存避免风暴
  *  （缺失是磁盘事实，不会自愈式重试；thumbnailReady 事件按资产整体失效）。 */
@@ -121,21 +127,24 @@ export function fetchAssetThumb(
   if (failed !== undefined) return Promise.resolve(failed);
   const running = thumbInflight.get(key);
   if (running) return running;
-  const promise = (async () => {
+  // acquireSlot always yields before this async body checks its owning promise.
+  let promise!: Promise<ThumbResult>;
+  promise = (async () => {
     await acquireSlot(priority);
-    const gen = cacheGeneration; // 快照会话代：清库后旧结果不落缓存
+    const gen = cacheGeneration;
+    const current = () => gen === cacheGeneration && thumbInflight.get(key) === promise;
     try {
       const result = await assetThumbGet(assetId, size);
       if (result.status === "ready") {
         const converted = toAssetUrl(result.path);
         if (converted.status === "ready") {
-          if (gen === cacheGeneration) remember(thumbCache, key, converted.path);
+          if (current()) remember(thumbCache, key, converted.path);
           return { kind: "url", url: converted.path } as ThumbResult;
         }
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "unavailable") {
-        if (gen === cacheGeneration) remember(failedCache, key, { kind: "failed" });
+        if (current()) remember(failedCache, key, { kind: "failed" });
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "missing") {
@@ -145,14 +154,14 @@ export function fetchAssetThumb(
           kind: "missing",
           url: result.cachedPath ? toUrlOrNull(result.cachedPath) : null,
         } as ThumbResult;
-        if (gen === cacheGeneration) remember(failedCache, key, settled);
+        if (current()) remember(failedCache, key, settled);
         return settled;
       }
       return { kind: "pending" } as ThumbResult; // 排队中：等事件重试
     } catch {
-      return { kind: "failed" } as ThumbResult;
+      return { kind: "pending" } as ThumbResult;
     } finally {
-      thumbInflight.delete(key);
+      if (thumbInflight.get(key) === promise) thumbInflight.delete(key);
       releaseSlot();
     }
   })();
@@ -205,6 +214,10 @@ function invalidateAssetCaches(assetId: number): void {
   }
   for (const key of [...failedCache.keys()]) {
     if (key.startsWith(`${assetId}:`)) failedCache.delete(key);
+  }
+  // Readiness supersedes pre-generation lookups; their results may no longer cache.
+  for (const key of [...thumbInflight.keys()]) {
+    if (key.startsWith(`${assetId}:`)) thumbInflight.delete(key);
   }
 }
 
@@ -264,6 +277,8 @@ export function useAssetThumbUrl(
     }
     let cancelled = false;
     let retryTimer: number | null = null;
+    let requestRevision = 0;
+    let refreshToken: string | undefined;
     setState({ url: null, status: "loading" });
     const apply = (result: ThumbResult) => {
       if (cancelled) return;
@@ -274,8 +289,15 @@ export function useAssetThumbUrl(
       // pending：保持 loading——事件重试之外再排一次周期兜底重拉
       else schedulePendingRetry();
     };
-    const retry = () => {
-      void fetchAssetThumb(assetId, size, priority).then(apply);
+    const retry = (refresh = false) => {
+      const revision = ++requestRevision;
+      if (refresh) refreshToken = `${Date.now()}-${revision}`;
+      void fetchAssetThumb(assetId, size, priority).then((result) => {
+        if (revision !== requestRevision) return;
+        // A regenerated file can have the same path. Change its URL so img error
+        // state and WebView negative responses cannot pin the old failure.
+        apply(refreshedResult(result, refreshToken));
+      });
     };
     const schedulePendingRetry = () => {
       if (retryTimer !== null) return;
@@ -296,7 +318,7 @@ export function useAssetThumbUrl(
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      retry();
+      retry(event.type === "thumbnailReady");
     });
     return () => {
       cancelled = true;

@@ -285,11 +285,10 @@ pub async fn asset_thumb_get(
     size: u16,
 ) -> Result<ThumbOutcome, String> {
     let shared = state.inner().clone();
-    Ok(run_blocking(shared, move |state| {
+    run_blocking(shared, move |state| {
         fetch_asset_thumb(state, asset_id, size)
     })
     .await
-    .unwrap_or(ThumbOutcome::Unavailable))
 }
 
 /// 取缩略图（路径语义，旧通道：导入进度卡等已知路径场景）。同步生成，

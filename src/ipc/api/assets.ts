@@ -311,7 +311,8 @@ export async function assetThumbGet(assetId: number, size: number): Promise<Thum
     }
     return { status: "unavailable" };
   } catch {
-    return { status: "unavailable" };
+    // Transport / database errors are temporary, not proof that a photo cannot decode.
+    return { status: "pending" };
   }
 }
 

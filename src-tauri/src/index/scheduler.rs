@@ -582,6 +582,21 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                     log::warn!("索引结算失败（保留 running 供恢复）: {error}");
                     return;
                 }
+                if ok && task.kind == "thumb" {
+                    let cached_path =
+                        db.0.query_row(
+                            "SELECT path FROM assets WHERE id=?1",
+                            [task.asset_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                        .and_then(|source| crate::thumbs::cached(path, Path::new(&source), 1024));
+                    config.bus.publish(AppEvent::ThumbnailReady {
+                        asset_id: task.asset_id,
+                        size: 1024,
+                        path: cached_path,
+                    });
+                }
                 if ok && matches!(task.kind.as_str(), "exif" | "phash") {
                     queue
                         .aggregates_dirty
@@ -803,6 +818,54 @@ mod tests {
         }
         reconcile(&db, &config).unwrap();
         (dir, db, config)
+    }
+
+    #[test]
+    fn durable_thumbnail_worker_publishes_gallery_readiness_after_generating_cache() {
+        let (dir, db, config) = fixture(1);
+        let source = dir.path().join("indexed.jpg");
+        image::RgbImage::from_pixel(16, 12, image::Rgb([100, 120, 140]))
+            .save(&source)
+            .unwrap();
+        db.0.execute(
+            "UPDATE assets SET path=?1,size=?2 WHERE id=1",
+            params![
+                source.to_string_lossy(),
+                std::fs::metadata(&source).unwrap().len() as i64
+            ],
+        )
+        .unwrap();
+        let queue = queue(dir.path());
+        *queue.config.lock().unwrap() = config.clone();
+        let mut events = config.bus.subscribe();
+        let supervisor = TaskSupervisor::new(config.bus.clone());
+        let path = dir.path().to_path_buf();
+        let handle = supervisor.spawn(
+            "index",
+            "thumbnail-readiness-test".into(),
+            move |controls| worker(&path, &queue, &controls, 0),
+        );
+        let started = std::time::Instant::now();
+        let mut ready = None;
+        while started.elapsed() < Duration::from_secs(5) {
+            if let Ok(AppEvent::ThumbnailReady {
+                asset_id: 1,
+                size: 1024,
+                path,
+            }) = events.try_recv()
+            {
+                ready = path;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.cancel();
+        while !handle.is_done() && started.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_done());
+        assert!(ready.is_some_and(|path| Path::new(&path).is_file()));
+        assert_eq!(db.pending_index_task_count("thumb").unwrap(), 0);
     }
 
     #[test]

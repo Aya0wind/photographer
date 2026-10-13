@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nextProvider } from "react-i18next";
 
 import i18n from "@/i18n";
 import AssetThumb from "./AssetThumb";
-import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
+import { emitAssetEventForTests, resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import { assetThumbGet, type AssetKind } from "@/ipc/api";
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -113,4 +113,18 @@ describe("AssetThumb 源缺失角标（missing）", () => {
     expect(container.querySelector('[data-testid="thumb-photo"]')).not.toBeNull();
     expect(container.querySelector("img")).toBeNull();
   });
+});
+
+it("同路径缩略图重新就绪后，重新挂载图片而不保留旧解码失败", async () => {
+  thumbMock.mockResolvedValue({ status: "ready", path: "same.jpg" });
+  convertMock.mockImplementation(path => `asset://${path}`);
+  renderThumb("photo", "same.jpg", 905);
+  const first = await screen.findByTestId("thumb-img");
+  fireEvent.error(first);
+  expect(screen.queryByTestId("thumb-img")).not.toBeInTheDocument();
+  act(() => emitAssetEventForTests({ type: "thumbnailReady", assetId: 905, size: 1024, path: "same.jpg" }));
+  const repaired = await screen.findByTestId("thumb-img");
+  expect(repaired).toHaveAttribute("src", expect.stringContaining("thumbnailRevision="));
+  fireEvent.load(repaired);
+  expect(repaired.className).toContain("opacity-100");
 });

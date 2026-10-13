@@ -127,6 +127,24 @@ it("thumbnail URL cache evicts old entries instead of growing with the whole lib
   expect(vi.mocked(assetThumbGet).mock.calls.length).toBe(calls+1);
 });
 
+it("临时 IPC 错误不会永久缓存为失败", async () => {
+  thumbMock.mockRejectedValueOnce(new Error("database is locked"))
+    .mockResolvedValueOnce({status:"ready",path:"recovered.jpg"});
+  expect(await fetchAssetThumb(901,512)).toEqual({kind:"pending"});
+  expect(await fetchAssetThumb(901,512)).toEqual({kind:"url",url:"asset://recovered.jpg"});
+});
+
+it("索引就绪事件清除已有的永久失败缓存", async () => {
+  thumbMock.mockResolvedValueOnce({status:"unavailable"})
+    .mockResolvedValueOnce({status:"ready",path:"indexed.jpg"});
+  const {result}=renderHook(()=>useAssetThumbUrl(902,512,true));
+  await act(async()=>{await flush();});
+  expect(result.current.status).toBe("failed");
+  act(()=>emitAssetEventForTests({type:"thumbnailReady",assetId:902,size:1024,path:"indexed.jpg"}));
+  await act(async()=>{await flush();});
+  expect(result.current.status).toBe("ready");
+});
+
 describe("warmImageDecode（解码预热）", () => {
   it("new Image().src 预热 URL；null/undefined 静默跳过", () => {
     const created: Array<{ src: string }> = [];
@@ -224,54 +242,25 @@ describe("useAssetThumbUrl：pending 周期兜底重拉", () => {
     }
   });
 
-  it("事件先于命令响应到达：重查被 in-flight 去重吞并，周期兜底仍到达 ready", async () => {
+  it("就绪事件先于旧失败响应到达：立即重查，旧响应不能覆盖就绪状态或缓存", async () => {
     vi.useFakeTimers();
     try {
       thumbMock.mockReset();
-      // 首请求悬挂（手动放行）：事件到达时首请求未结算，重查共享同一在途 Promise
-      let resolveFirst!: (r: ThumbGetResult) => void;
-      thumbMock
-        .mockImplementationOnce(
-          () => new Promise<ThumbGetResult>((resolve) => (resolveFirst = resolve)),
-        )
-        .mockResolvedValueOnce({ status: "ready", path: "C:\\t\\raw-embed\\703.jpg" });
-
-      const { result } = renderHook(() => useAssetThumbUrl(703, 6000, true, "high"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
+      let resolveFirst!: (result: ThumbGetResult) => void;
+      thumbMock.mockImplementationOnce(() => new Promise<ThumbGetResult>(resolve => { resolveFirst=resolve; }))
+        .mockResolvedValueOnce({status:"ready",path:"new-thumb.jpg"});
+      const {result}=renderHook(()=>useAssetThumbUrl(703,6000,true,"high"));
+      await act(async()=>{await vi.advanceTimersByTimeAsync(0);});
       expect(thumbMock).toHaveBeenCalledTimes(1);
-
-      // 事件先到：触发重查，但被 in-flight 去重吞并（仍只有 1 次后端请求）
-      act(() => {
-        emitAssetEventForTests({
-          type: "thumbnailReady",
-          assetId: 703,
-          size: 2048,
-          path: "C:\\t\\512\\703.jpg",
-        });
-      });
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(thumbMock).toHaveBeenCalledTimes(1);
-
-      // 首请求结算为 pending：旧实现从此无人再问（停滞根因）
-      await act(async () => {
-        resolveFirst({ status: "pending" });
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(result.current.status).toBe("loading");
-
-      // 周期兜底发起新请求 → 命中缓存 → ready
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(PENDING_RETRY_MS);
-      });
-      expect(result.current.status).toBe("ready");
+      act(()=>emitAssetEventForTests({type:"thumbnailReady",assetId:703,size:1024,path:"new-thumb.jpg"}));
+      await act(async()=>{await vi.advanceTimersByTimeAsync(0);});
       expect(thumbMock).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
+      expect(result.current.status).toBe("ready");
+      await act(async()=>{resolveFirst({status:"unavailable"});await vi.advanceTimersByTimeAsync(0);});
+      expect(result.current.status).toBe("ready");
+      expect(await fetchAssetThumb(703,6000)).toEqual({kind:"url",url:"asset://new-thumb.jpg"});
+      expect(thumbMock).toHaveBeenCalledTimes(2);
+    } finally {vi.useRealTimers();}
   });
 
   it("failed 结算即停止重拉；enabled=false 不请求不轮询", async () => {

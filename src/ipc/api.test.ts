@@ -514,7 +514,7 @@ describe("M3 画廊命令", () => {
     await expect(assetDetail(3)).resolves.toBeNull();
   });
 
-  it("assetThumbGet 传 assetId/size；三态 ready/pending/unavailable（含失败与非对象回退）", async () => {
+  it("assetThumbGet 传 assetId/size；三态 ready/pending/unavailable（临时失败可重试、非对象回退）", async () => {
     invokeMock.mockResolvedValueOnce({
       status: "ready",
       path: "I:\\SmartPhoto\\主库\\thumbs\\256\\a1-1234.jpg",
@@ -532,7 +532,7 @@ describe("M3 画廊命令", () => {
     await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "unavailable" });
 
     invokeMock.mockRejectedValueOnce(new Error("nope"));
-    await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "unavailable" });
+    await expect(assetThumbGet(3, 1280)).resolves.toEqual({ status: "pending" });
   });
 
   it("cameraList 返回相机计数清单（camera_list）；失败/非数组回退空数组", async () => {
