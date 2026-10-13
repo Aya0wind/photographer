@@ -1,5 +1,7 @@
 # 高级编辑器 Roadmap
 
+后续共享引擎、LibRaw/Smart Preview、胶片和各端适配统一由 [多形态应用实施方案](../plans/platform-evolution/README.md) 编排。本文件保留高级编辑功能清单与历史接线基线，不将下述历史阶段直接对应到新方案的 M0–M8。
+
 更新时间：2026-10-09。基线：Photographer `dd657ad`；PhotoCraft workspace 0.5.0，固定提交 `3955bf4f1911a69ea08947634b3e2b459feece2f`。
 
 目标是逐步接入 PhotoCraft 中适合照片工作流的全部能力，并利用自有 UI 做好选片、调色、精修、合成和交付之间的衔接。功能多时通过工作区、搜索和上下文操作组织，不把所有按钮同时摆在照片周围。高级编辑继续使用独立原生窗口；简单编辑保留。
