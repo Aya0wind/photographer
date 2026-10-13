@@ -657,9 +657,10 @@ fn has_ready_work(db: &Db, config: &Config) -> bool {
     let Ok(kinds) = statement.query_map([], |row| row.get::<_, String>(0)) else {
         return true;
     };
-    kinds
+    let ready = kinds
         .filter_map(Result::ok)
-        .any(|kind| model_ready(config, &kind))
+        .any(|kind| model_ready(config, &kind));
+    ready
 }
 
 fn aggregates_ready(db: &Db) -> bool {
