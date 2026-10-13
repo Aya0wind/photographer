@@ -1729,5 +1729,10 @@
   "albums.deleteFailed": "アルバムを削除できませんでした。再試行してください。",
   "wizard.selectedCounts": "{{total}} 枚中 {{selected}} 枚を選択",
   "settings.ai.index.selection": "セレクション索引",
-  "settings.ai.index.selectionDescription": "閉眼とシャープネス解析（画像索引とは独立して実行）"
+  "settings.ai.index.selectionDescription": "閉眼とシャープネス解析（画像索引とは独立して実行）",
+  "trash.emptyAll": "ごみ箱を空にする",
+  "trash.emptyAllHint": "未読み込みの項目を含め、このデータベースのごみ箱にある写真の記録をすべて削除します。元ファイルは既定で保持されます。",
+  "trash.deleteSourceFiles": "元ファイルも削除する",
+  "trash.confirmSourceDelete": "元ファイルは完全に削除されます。続行するには「确认删除」と入力してください：",
+  "trash.offlineKept": "写真ライブラリがオフラインのため {{count}} 件を保持しました"
 }

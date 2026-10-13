@@ -11,6 +11,7 @@ import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import {
   assetThumbGet,
   trashList,
+  trashEmpty,
   trashPurge,
   trashRestore,
   type AssetDto,
@@ -19,7 +20,7 @@ import {
 
 /**
  * 回收站页（B1）：trash_list 列表渲染 / 空态 / 多选（复用网格选择机制）/
- * 批量恢复 / 彻底删除两档确认弹窗（保留文件 vs 同时删除文件 + 不可恢复提示）。
+ * 批量恢复 / 共用删除确认（默认保留文件、勾选原文件删除及文字确认）。
  */
 
 vi.mock("@/ipc/api", async (importOriginal) => {
@@ -27,6 +28,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     trashList: vi.fn(),
+    trashEmpty: vi.fn(),
     trashRestore: vi.fn(),
     trashPurge: vi.fn(),
     assetThumbGet: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
 });
 
 const listMock = vi.mocked(trashList);
+const emptyMock = vi.mocked(trashEmpty);
 const restoreMock = vi.mocked(trashRestore);
 const purgeMock = vi.mocked(trashPurge);
 const thumbMock = vi.mocked(assetThumbGet);
@@ -77,6 +80,7 @@ beforeEach(() => {
   listMock.mockReset().mockResolvedValue([makeAsset(1), makeAsset(2), makeAsset(3)]);
   restoreMock.mockReset().mockResolvedValue(true);
   purgeMock.mockReset().mockResolvedValue(purgeResult(0));
+  emptyMock.mockReset().mockResolvedValue(purgeResult(0));
   thumbMock.mockReset().mockResolvedValue({ status: "pending" });
   resetThumbPipelineForTests();
 });
@@ -157,8 +161,10 @@ describe("回收站页：多选与批量操作", () => {
     expect(dialog).toHaveTextContent("将从照片库记录中移除所选 2 项");
     expect(dialog).toHaveTextContent("彻底删除不可恢复");
 
-    await user.click(screen.getByTestId("trash-purge-keep"));
-    await waitFor(() => expect(purgeMock).toHaveBeenCalledWith([1, 2], false));
+    expect(screen.getByTestId("trash-delete-files")).not.toBeChecked();
+    listMock.mockResolvedValue([makeAsset(3)]);
+    await user.click(screen.getByTestId("trash-purge-confirm"));
+    await waitFor(() => expect(purgeMock).toHaveBeenCalledWith([1, 2], false, undefined));
     await waitFor(() => {
       expect(screen.getByTestId("gallery-tile")).toHaveAttribute("data-asset-id", "3");
     });
@@ -166,7 +172,7 @@ describe("回收站页：多选与批量操作", () => {
     expect(screen.queryByTestId("trash-purge-dialog")).not.toBeInTheDocument();
   });
 
-  it("两档：「同时删除文件」→ trash_purge(ids,true)；取消关闭弹窗不动列表", async () => {
+  it("勾选删除原文件必须输入确认删除；取消关闭弹窗不动列表", async () => {
     const user = userEvent.setup();
     renderTrash();
     await screen.findAllByTestId("gallery-tile");
@@ -178,8 +184,16 @@ describe("回收站页：多选与批量操作", () => {
     expect(screen.getAllByTestId("gallery-tile")).toHaveLength(3);
 
     await user.click(await contextItem("purge"));
-    await user.click(screen.getByTestId("trash-purge-files"));
-    await waitFor(() => expect(purgeMock).toHaveBeenCalledWith([2], true));
+    await user.click(screen.getByTestId("trash-delete-files"));
+    expect(screen.getByTestId("trash-purge-confirm")).toBeDisabled();
+    await user.type(screen.getByTestId("trash-delete-confirmation"), "确认");
+    expect(screen.getByTestId("trash-purge-confirm")).toBeDisabled();
+    expect(purgeMock).not.toHaveBeenCalled();
+    await user.type(screen.getByTestId("trash-delete-confirmation"), "删除");
+    purgeMock.mockResolvedValue(purgeResult(1));
+    listMock.mockResolvedValue([makeAsset(1), makeAsset(3)]);
+    await user.click(screen.getByTestId("trash-purge-confirm"));
+    await waitFor(() => expect(purgeMock).toHaveBeenCalledWith([2], true, "确认删除"));
     await waitFor(() => {
       const ids = screen.getAllByTestId("gallery-tile").map((t) => t.getAttribute("data-asset-id"));
       expect(ids).not.toContain("2");
@@ -218,3 +232,44 @@ describe("回收站页：全选/反选", () => {
 
 function selectedCount() { return screen.getAllByTestId("gallery-tile").filter((tile) => tile.getAttribute("data-selected") === "true").length; }
 async function contextItem(key: string) { const tiles = screen.getAllByTestId("gallery-tile"); const target = tiles.find((tile) => tile.getAttribute("data-selected") === "true") ?? tiles[0]; fireEvent.contextMenu(target, { clientX: 100, clientY: 100 }); return screen.findByTestId("trash-context-menu-item-" + key); }
+
+describe("清空回收站", () => {
+  it("清空整个回收站而非仅已加载页，默认保留文件并展示实际删除数量", async () => {
+    const user=userEvent.setup();
+    listMock.mockResolvedValue(Array.from({length:200},(_,id)=>makeAsset(id+1)));
+    emptyMock.mockResolvedValue(purgeResult(250));
+    renderTrash();
+    await screen.findAllByTestId("gallery-tile");
+    await user.click(screen.getByTestId("trash-empty-all"));
+    expect(screen.getByTestId("trash-purge-dialog")).toHaveTextContent("包括尚未加载的项目");
+    expect(screen.getByTestId("trash-delete-files")).not.toBeChecked();
+    listMock.mockResolvedValue([]);
+    await user.click(screen.getByTestId("trash-purge-confirm"));
+    await waitFor(()=>expect(emptyMock).toHaveBeenCalledWith(false,undefined));
+    expect(purgeMock).not.toHaveBeenCalled();
+    expect(await screen.findByTestId("trash-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("trash-toast")).toHaveTextContent("250");
+  });
+
+  it("清空原文件要求文字确认，离线项目保留，重新打开重置危险选项", async () => {
+    const user=userEvent.setup();
+    emptyMock.mockResolvedValue({...purgeResult(2),deletedFiles:2,offlineKept:1,offlineLibraries:["离线库"]});
+    renderTrash();
+    await screen.findAllByTestId("gallery-tile");
+    await user.click(screen.getByTestId("trash-empty-all"));
+    await user.click(screen.getByTestId("trash-delete-files"));
+    await user.type(screen.getByTestId("trash-delete-confirmation"),"确认删除");
+    await user.click(screen.getByTestId("trash-purge-cancel"));
+    await user.click(screen.getByTestId("trash-empty-all"));
+    expect(screen.getByTestId("trash-delete-files")).not.toBeChecked();
+    expect(screen.queryByTestId("trash-delete-confirmation")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("trash-delete-files"));
+    expect(screen.getByTestId("trash-purge-confirm")).toBeDisabled();
+    await user.type(screen.getByTestId("trash-delete-confirmation"),"确认删除");
+    listMock.mockResolvedValue([makeAsset(3)]);
+    await user.click(screen.getByTestId("trash-purge-confirm"));
+    await waitFor(()=>expect(emptyMock).toHaveBeenCalledWith(true,"确认删除"));
+    await waitFor(()=>expect(screen.getAllByTestId("gallery-tile")).toHaveLength(1));
+    expect(screen.getByTestId("trash-toast")).toHaveTextContent("1 项因照片库离线而保留");
+  });
+});

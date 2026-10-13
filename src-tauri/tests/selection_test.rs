@@ -21,7 +21,7 @@ use events::AssetKind;
 use ipc::rating::fetch_asset_rating_set;
 use ipc::selection::{
     fetch_asset_label_set, fetch_asset_reject_set, fetch_asset_trash_move, fetch_trash_list,
-    fetch_trash_purge, fetch_trash_restore,
+    fetch_trash_purge, fetch_trash_restore, fetch_trash_empty,
 };
 use metadata::xmp;
 
@@ -1036,4 +1036,36 @@ fn reject_batch_tolerates_per_file_failures() {
     );
     // 清理目录占位
     std::fs::remove_dir(xmp::sidecar_path(&p2)).unwrap();
+}
+
+#[test]
+fn empty_trash_crosses_page_boundaries_and_preserves_nontrash_assets() {
+    let (dir,state,db)=setup();
+    for n in 0..205 {
+        ins(&db,&dir.path().join(format!("trash-{n}.jpg")).to_string_lossy(),None,AssetKind::Photo);
+    }
+    let active=ins(&db,&dir.path().join("active.jpg").to_string_lossy(),None,AssetKind::Photo);
+    db.0.execute("UPDATE assets SET in_trash=1 WHERE id!=?1",[active]).unwrap();
+    let result=fetch_trash_empty(&state,false).unwrap();
+    assert_eq!(result.deleted_records,205);
+    assert_eq!(result.deleted_files,0);
+    assert!(fetch_trash_list(&state,0,200).unwrap().is_empty());
+    let exists:bool=db.0.query_row("SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1)",[active],|r|r.get(0)).unwrap();
+    assert!(exists);
+}
+
+#[test]
+fn empty_trash_keeps_offline_libraries_and_preserves_files_by_default() {
+    let (_dir,state,_db)=setup();
+    let (_roots,lib_a,root_a,lib_b,root_b)=two_libraries(&state);
+    let db=open_db(&state.config_dir);
+    let (a,file_a)=ins_in_library(&db,&lib_a,&root_a,"online-empty.jpg",true,false);
+    let (b,file_b)=ins_in_library(&db,&lib_b,&root_b,"offline-empty.jpg",true,false);
+    fetch_asset_trash_move(&state,&[a,b]).unwrap();
+    let result=fetch_trash_empty(&state,false).unwrap();
+    assert_eq!(result.deleted_records,1);
+    assert_eq!(result.offline_kept,1);
+    assert!(file_a.is_file());
+    assert!(file_b.is_file());
+    assert_eq!(names(&fetch_trash_list(&state,0,200).unwrap()),vec!["offline-empty.jpg".to_string()]);
 }

@@ -1745,5 +1745,10 @@
   "albums.deleteFailed": "Could not delete the album. Please try again.",
   "wizard.selectedCounts": "Selected {{selected}} of {{total}} photos",
   "settings.ai.index.selection": "Culling index",
-  "settings.ai.index.selectionDescription": "Closed-eye and sharpness analysis (runs independently of the image index)"
+  "settings.ai.index.selectionDescription": "Closed-eye and sharpness analysis (runs independently of the image index)",
+  "trash.emptyAll": "Empty Recycle Bin",
+  "trash.emptyAllHint": "Remove all photo records in this database’s Recycle Bin, including unloaded items. Original files are kept by default.",
+  "trash.deleteSourceFiles": "Also delete original files",
+  "trash.confirmSourceDelete": "Original files will be permanently deleted. Type “确认删除” to continue:",
+  "trash.offlineKept": "{{count}} items kept because their photo libraries are offline"
 }

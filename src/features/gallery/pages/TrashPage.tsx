@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   trashList,
+  trashEmpty,
   trashPurge,
   trashRestore,
   type AssetDto,
@@ -14,19 +15,20 @@ import { useAssetSelection } from "../lib/useAssetSelection";
 import TileSizeSwitch from "../components/TileSizeSwitch";
 import { GALLERY_TILE_PX, useGalleryTileSize } from "../lib/useGalleryTileSize";
 import ContextMenu from "../components/ContextMenu";
+import TrashPurgeDialog from "../components/TrashPurgeDialog";
 
 /**
  * 回收站页（B1）：软删资产的集中管理——
  * - 数据源 trash_list（trashedAt DESC keyset；单页 200，「加载更多」补页）
  * - 网格复用 AssetGrid（readOnly 只读态：隐藏收藏等写入口；多选机制复用——
  *   点击/check 圆钮即切换选中，不打开查看器）
- * - 批量恢复（trash_restore）/ 彻底删除（trash_purge 两档确认：
- *   「从库中移除（保留文件）」deleteFiles=false /「同时删除文件」true，
- *   列出 N 项并提示不可恢复）
+ * - 批量恢复 / 删除所选 / 清空整个回收站；默认保留文件。
+ *   删除原文件通过勾选并输入“确认删除”启用，前后端均校验。
  * - 移入回收站在图库侧完成（多选操作条/右键菜单），此处不做
  */
 
 const TRASH_PAGE_LIMIT = 200;
+const DELETE_CONFIRMATION = "确认删除";
 
 export default function TrashPage() {
   const { t } = useTranslation();
@@ -37,8 +39,10 @@ export default function TrashPage() {
   // 共享选择钩子（Shift 区间 + 锚点；回收站恒多选态，selecting 不用）
   const { selected, setSelected, ctrlSelect } = useAssetSelection();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
-  /** 彻底删除确认弹窗目标（null=关闭；deleteFiles 两档由弹窗内选择） */
-  const [purgeTargets, setPurgeTargets] = useState<number[] | null>(null);
+  /** null=关闭，all=整个回收站，数组=固定选中快照。 */
+  const [purgeTargets, setPurgeTargets] = useState<number[] | "all" | null>(null);
+  const [purging, setPurging] = useState(false);
+  const [purgeError, setPurgeError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   function flash(message: string): void {
@@ -95,21 +99,41 @@ export default function TrashPage() {
     notifyCountsRefresh();
   }
 
-  // --- 彻底删除（两档确认） --------------------------------------------------------------
-  async function purge(deleteFiles: boolean): Promise<void> {
-    if (purgeTargets === null || purgeTargets.length === 0) return;
-    const ids = purgeTargets;
-    setPurgeTargets(null);
+  function openPurge(targets: number[] | "all"): void {
+    if (purging) return;
+    setPurgeError(null);
+    setPurgeTargets(targets);
+  }
+
+  async function reloadTrash(): Promise<void> {
+    const page = await trashList(0, TRASH_PAGE_LIMIT);
+    setAssets(page);
+    setHasMore(page.length >= TRASH_PAGE_LIMIT);
+    setSelected([]);
+  }
+
+  async function purge(deleteFiles: boolean, confirmation: string): Promise<void> {
+    if (purging || purgeTargets === null || (purgeTargets !== "all" && purgeTargets.length === 0)) return;
+    if (deleteFiles && confirmation !== DELETE_CONFIRMATION) return;
+    setPurgeError(null);
+    setPurging(true);
     try {
-      await trashPurge(ids, deleteFiles);
+      const result = purgeTargets === "all"
+        ? await trashEmpty(deleteFiles, deleteFiles ? confirmation : undefined)
+        : await trashPurge(purgeTargets, deleteFiles, deleteFiles ? confirmation : undefined);
+      setPurgeTargets(null);
+      await reloadTrash();
+      const message = t(deleteFiles ? "trash.purgeDoneFiles" : "trash.purgeDone", { count: result.deletedRecords });
+      flash(result.offlineKept > 0 ? `${message} · ${t("trash.offlineKept", { count: result.offlineKept })}` : message);
     } catch {
+      setPurgeError(t("trash.purgeFailed"));
       flash(t("trash.purgeFailed"));
-      return;
+      // A whole-trash operation may have committed earlier batches before an error.
+      await reloadTrash();
+    } finally {
+      notifyCountsRefresh();
+      setPurging(false);
     }
-    removeFromList(ids);
-    flash(deleteFiles ? t("trash.purgeDoneFiles", { count: ids.length }) : t("trash.purgeDone", { count: ids.length }));
-    // 删记录（两档都删）改变库内资产计数——通知侧栏重拉
-    notifyCountsRefresh();
   }
 
   const groups = useMemo(() => groupAssetsByDate(assets), [assets]);
@@ -122,7 +146,10 @@ export default function TrashPage() {
         <div className="flex h-11 shrink-0 items-center gap-3 border-b border-edge">
           <h1 className="text-sm font-semibold text-text-primary">{t("trash.title")}</h1>
           <p className="text-xs text-text-muted">{t("trash.desc")}</p>
-          <div className="ml-auto shrink-0">
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            <button type="button" onClick={() => openPurge("all")} disabled={status !== "ready" || assets.length === 0 || purging}
+              className="rounded-md border border-red-400/60 px-3 py-1.5 text-xs text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+              data-testid="trash-empty-all">{t("trash.emptyAll")}</button>
             <TileSizeSwitch value={tileSize} onChange={setTileSize} />
           </div>
         </div>
@@ -187,7 +214,7 @@ export default function TrashPage() {
 
       {contextMenu && <ContextMenu at={{ x: contextMenu.x, y: contextMenu.y }} onClose={() => setContextMenu(null)} testId="trash-context-menu" entries={[
         { key: "restore", label: t("trash.restore"), onSelect: () => { void restore(contextMenu.ids); } },
-        { key: "purge", label: t("trash.purge"), danger: true, onSelect: () => setPurgeTargets(contextMenu.ids) },
+        { key: "purge", label: t("trash.purge"), danger: true, onSelect: () => openPurge(contextMenu.ids) },
         { key: "select-all", label: t(selected.length === assets.length ? "selection.deselectAll" : "selection.all"), onSelect: () => setSelected(selected.length === assets.length ? [] : assets.map((asset) => asset.id)) },
         { key: "invert", label: t("selection.invert"), onSelect: () => setSelected(assets.filter((asset) => !selected.includes(asset.id)).map((asset) => asset.id)) },
       ]} />}
@@ -201,55 +228,9 @@ export default function TrashPage() {
         </div>
       )}
 
-      {/* 彻底删除两档确认弹窗：列出 N 项 + 不可恢复提示 */}
-      {purgeTargets !== null && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-black/55 p-6"
-          data-testid="trash-purge-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("trash.purgeTitle")}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setPurgeTargets(null);
-          }}
-        >
-          <div className="w-full max-w-md rounded-xl border border-edge bg-surface p-4 shadow-2xl">
-            <h2 className="text-sm font-semibold text-text-primary" data-testid="trash-purge-title">
-              {t("trash.purgeTitle", { count: purgeTargets.length })}
-            </h2>
-            <p className="mt-2 text-xs leading-relaxed text-text-secondary">
-              {t("trash.purgeDesc", { count: purgeTargets.length })}
-            </p>
-            <p className="mt-1 text-xs text-red-400">{t("trash.purgeIrreversible")}</p>
-            <div className="mt-4 flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => void purge(false)}
-                className="rounded-md border border-red-400/60 px-3 py-2 text-xs text-red-400 transition-colors hover:bg-red-400/10"
-                data-testid="trash-purge-keep"
-              >
-                {t("trash.purgeKeep")}
-              </button>
-              <button
-                type="button"
-                onClick={() => void purge(true)}
-                className="rounded-md bg-red-500 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-red-500/85"
-                data-testid="trash-purge-files"
-              >
-                {t("trash.purgeFiles")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setPurgeTargets(null)}
-                className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:bg-panel hover:text-text-primary"
-                data-testid="trash-purge-cancel"
-              >
-                {t("common.cancel")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {purgeTargets !== null && <TrashPurgeDialog key={purgeTargets === "all" ? "all" : purgeTargets.join(",")} targets={purgeTargets} busy={purging} error={purgeError}
+        onConfirm={purge} onCancel={() => setPurgeTargets(null)} />}
+
     </div>
   );
 }

@@ -218,6 +218,36 @@ pub struct TrashPurgeResult {
     pub offline_libraries: Vec<String>,
 }
 
+fn require_file_delete_confirmation(delete_files: bool, confirmation: Option<&str>) -> Result<(), String> {
+    if delete_files && confirmation != Some("确认删除") {
+        return Err("删除原文件前请输入“确认删除”".into());
+    }
+    Ok(())
+}
+
+/// Snapshot the entire trash, independent of frontend pagination; keep existing offline rules.
+pub fn fetch_trash_empty(state: &super::AppState, delete_files: bool) -> Result<TrashPurgeResult, String> {
+    let ids = {
+        let db = super::app_database_db(state)?;
+        let mut statement = db.0.prepare("SELECT id FROM assets WHERE in_trash=1 ORDER BY id").map_err(|e|e.to_string())?;
+        let rows = statement.query_map([], |row| row.get::<_,i64>(0)).map_err(|e|e.to_string())?;
+        let ids = rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        ids
+    };
+    let mut result = TrashPurgeResult { deleted_records:0,deleted_files:0,missing_records_only:0,offline_kept:0,offline_libraries:Vec::new() };
+    for ids in ids.chunks(200) {
+        let batch=fetch_trash_purge(state,ids,delete_files)?;
+        result.deleted_records+=batch.deleted_records;
+        result.deleted_files+=batch.deleted_files;
+        result.missing_records_only+=batch.missing_records_only;
+        result.offline_kept+=batch.offline_kept;
+        for name in batch.offline_libraries {
+            if !result.offline_libraries.contains(&name) { result.offline_libraries.push(name); }
+        }
+    }
+    Ok(result)
+}
+
 /// 永久删除核（回收站「清空」动作；2026-10-09 §五 定案语义）：
 /// - **在线库**：`delete_files=true` 真删本体（外部引用 origin='external'
 ///   仍绝不物理删——文件不在库管辖内）；单文件失败容忍、日志记账。
@@ -416,12 +446,35 @@ pub async fn trash_purge(
     state: State<'_, SharedState>,
     asset_ids: Vec<i64>,
     delete_files: bool,
+    confirmation: Option<String>,
 ) -> Result<TrashPurgeResult, String> {
+    require_file_delete_confirmation(delete_files, confirmation.as_deref())?;
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
         fetch_trash_purge(state, &asset_ids, delete_files)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn trash_empty(
+    state: State<'_, SharedState>, delete_files: bool, confirmation: Option<String>,
+) -> Result<TrashPurgeResult, String> {
+    require_file_delete_confirmation(delete_files, confirmation.as_deref())?;
+    run_blocking(state.inner().clone(),move |state|fetch_trash_empty(state,delete_files)).await
+}
+
+#[cfg(test)]
+mod trash_confirmation_tests {
+    use super::require_file_delete_confirmation;
+    #[test]
+    fn source_deletion_requires_exact_phrase_but_record_only_deletion_does_not() {
+        assert!(require_file_delete_confirmation(false,None).is_ok());
+        for value in [None,Some(""),Some("确认"),Some("确认删除 ")] {
+            assert!(require_file_delete_confirmation(true,value).is_err());
+        }
+        assert!(require_file_delete_confirmation(true,Some("确认删除")).is_ok());
+    }
 }
 
 #[tauri::command]

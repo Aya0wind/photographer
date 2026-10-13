@@ -1745,5 +1745,10 @@
   "albums.deleteFailed": "No se pudo eliminar el álbum. Inténtalo de nuevo.",
   "wizard.selectedCounts": "{{selected}} de {{total}} fotos seleccionadas",
   "settings.ai.index.selection": "Índice de selección",
-  "settings.ai.index.selectionDescription": "Análisis de ojos cerrados y nitidez (se ejecuta con independencia del índice de imágenes)"
+  "settings.ai.index.selectionDescription": "Análisis de ojos cerrados y nitidez (se ejecuta con independencia del índice de imágenes)",
+  "trash.emptyAll": "Vaciar papelera",
+  "trash.emptyAllHint": "Elimina todos los registros de fotos de la papelera de esta base de datos, incluidos los elementos sin cargar. Los originales se conservan por defecto.",
+  "trash.deleteSourceFiles": "Eliminar también los archivos originales",
+  "trash.confirmSourceDelete": "Los originales se eliminarán permanentemente. Escribe «确认删除» para continuar:",
+  "trash.offlineKept": "Se conservaron {{count}} elementos porque sus fototecas están desconectadas"
 }

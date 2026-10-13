@@ -57,8 +57,14 @@ export async function trashRestore(assetIds: number[]): Promise<boolean> {
 export async function trashPurge(
   assetIds: number[],
   deleteFiles: boolean,
+  confirmation?: string,
 ): Promise<TrashPurgeResult> {
-  return ipc<TrashPurgeResult>("trash_purge", { assetIds, deleteFiles });
+  return ipc<TrashPurgeResult>("trash_purge", { assetIds, deleteFiles, ...(confirmation === undefined ? {} : { confirmation }) });
+}
+
+/** Empty the whole trash, including unloaded pages; source deletion requires the exact phrase. */
+export async function trashEmpty(deleteFiles: boolean, confirmation?: string): Promise<TrashPurgeResult> {
+  return ipc<TrashPurgeResult>("trash_empty", { deleteFiles, ...(confirmation === undefined ? {} : { confirmation }) });
 }
 
 /** 清理所有源缺失照片（assets_purge_missing）：扫描库内活跃资产，源文件

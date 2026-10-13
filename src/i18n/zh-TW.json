@@ -1729,5 +1729,10 @@
   "albums.deleteFailed": "刪除相簿失敗，請重試。",
   "wizard.selectedCounts": "已選擇 {{selected}} / {{total}} 張",
   "settings.ai.index.selection": "選片索引",
-  "settings.ai.index.selectionDescription": "閉眼偵測與清晰度分析（獨立於圖片索引執行）"
+  "settings.ai.index.selectionDescription": "閉眼偵測與清晰度分析（獨立於圖片索引執行）",
+  "trash.emptyAll": "清空回收站",
+  "trash.emptyAllHint": "將清空目前資料庫回收站的所有照片記錄，包括尚未載入的項目。預設保留原始檔案。",
+  "trash.deleteSourceFiles": "同時刪除原始檔案",
+  "trash.confirmSourceDelete": "原始檔案將永久刪除。請輸入「确认删除」以繼續：",
+  "trash.offlineKept": "{{count}} 項因照片庫離線而保留"
 }
