@@ -28,6 +28,8 @@ export async function preparePreviewImage(url: string): Promise<void> {
 }
 
 export function releasePreviewImage(url: string): void {
+  const image = images.get(url);
   images.delete(url);
+  if (image) { image.onload = null; image.onerror = null; image.removeAttribute?.("src"); }
   URL.revokeObjectURL(url);
 }

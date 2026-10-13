@@ -1,5 +1,5 @@
 import { assetFixture } from "@/test/fixtures";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AssetDto } from "@/ipc/api";
 import {
@@ -22,6 +22,7 @@ describe("galleryCache：画廊会话快照", () => {
   beforeEach(() => {
     clearGallerySnapshotForTests();
   });
+  afterEach(() => { clearGallerySnapshotForTests(); vi.useRealTimers(); });
 
   it("无快照 → null（首屏走常规 loading）", () => {
     expect(gallerySnapshot()).toBeNull();
@@ -33,7 +34,7 @@ describe("galleryCache：画廊会话快照", () => {
       dates: [{ date: "2026-09-19", count: 2, coverAssetId: 1 }],
       hasMore: false,
       scrollTop: 480,
-      savedAt: 1726700000000,
+      savedAt: Date.now(),
     });
     const snap = gallerySnapshot();
     expect(snap).not.toBeNull();
@@ -49,14 +50,14 @@ describe("galleryCache：画廊会话快照", () => {
       dates: [],
       hasMore: true,
       scrollTop: 0,
-      savedAt: 1,
+      savedAt: Date.now(),
     });
     saveGallerySnapshot({
       assets: [asset(1), asset(2), asset(3)],
       dates: [],
       hasMore: false,
       scrollTop: 960,
-      savedAt: 2,
+      savedAt: Date.now(),
     });
     expect(gallerySnapshot()?.assets).toHaveLength(3);
     expect(gallerySnapshot()?.scrollTop).toBe(960);
@@ -68,9 +69,23 @@ describe("galleryCache：画廊会话快照", () => {
       dates: [],
       hasMore: false,
       scrollTop: 0,
-      savedAt: 1,
+      savedAt: Date.now(),
     });
     clearGallerySnapshotForTests();
     expect(gallerySnapshot()).toBeNull();
   });
+});
+
+it("idle expiry releases snapshots without needing another page visit", () => {
+  vi.useFakeTimers();
+  saveGallerySnapshot({assets:[asset(1)],dates:[],hasMore:false,scrollTop:42,savedAt:Date.now()});
+  expect(gallerySnapshot()).not.toBeNull();
+  vi.advanceTimersByTime(60_000);
+  expect(gallerySnapshot()).toBeNull();
+  vi.useRealTimers();
+});
+it("large snapshots do not retain a hidden copy of the whole library", () => {
+  saveGallerySnapshot({assets:Array(5001).fill(asset(1)),dates:[],hasMore:false,scrollTop:0,savedAt:Date.now()});
+  expect(gallerySnapshot()).toBeNull();
+  clearGallerySnapshotForTests();
 });

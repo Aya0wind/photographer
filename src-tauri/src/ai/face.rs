@@ -111,6 +111,8 @@ fn face_slots() -> &'static Mutex<FaceSlots> {
 
 /// 空闲卸载（ai::idle::release_all 调用；取锁置空，在途推理不受影响）。
 pub fn release() {
+    cache_pool().lock().expect("cluster pool mutex poisoned")
+        .retain(|_,(value,_)|std::sync::Arc::strong_count(value)>1);
     *face_slots().lock().expect("face slots mutex poisoned") = FaceSlots::default();
 }
 
@@ -915,11 +917,17 @@ impl OnlineClusterer {
 // ---------------------------------------------------------------------------
 
 /// 全局簇心缓存池：dbDir → 聚类器（face 通道单 worker，Mutex 足够）。
-fn cache_pool() -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<OnlineClusterer>>>> {
-    static POOL: std::sync::OnceLock<
-        Mutex<HashMap<PathBuf, std::sync::Arc<Mutex<OnlineClusterer>>>>,
-    > = std::sync::OnceLock::new();
+type ClusterEntry = (std::sync::Arc<Mutex<OnlineClusterer>>, std::time::Instant);
+fn cache_pool() -> &'static Mutex<HashMap<PathBuf, ClusterEntry>> {
+    static POOL: std::sync::OnceLock<Mutex<HashMap<PathBuf,ClusterEntry>>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn release_idle_caches() {
+    if let Ok(mut pool) = cache_pool().try_lock() {
+        pool.retain(|_,(value,touched)| touched.elapsed() < std::time::Duration::from_secs(60)
+            || std::sync::Arc::strong_count(value) > 1);
+    }
 }
 
 /// 规范化库根（池键；canonicalize 失败退回原样）。
@@ -935,7 +943,8 @@ fn cluster_cache(
 ) -> Result<std::sync::Arc<Mutex<OnlineClusterer>>, String> {
     let key = pool_key(db_dir);
     let mut pool = cache_pool().lock().expect("cluster pool mutex poisoned");
-    if let Some(hit) = pool.get(&key) {
+    if let Some((hit,touched)) = pool.get_mut(&key) {
+        *touched=std::time::Instant::now();
         return Ok(std::sync::Arc::clone(hit));
     }
     let sums = db
@@ -946,7 +955,12 @@ fn cluster_cache(
         .face_cluster_anchors()
         .map_err(|e| format!("读取参考人脸失败: {e}"))?;
     let clusterer = std::sync::Arc::new(Mutex::new(clusterer));
-    pool.insert(key, std::sync::Arc::clone(&clusterer));
+    if pool.len() >= 4 {
+        let oldest=pool.iter().filter(|(_, (value,_))|std::sync::Arc::strong_count(value)==1)
+            .min_by_key(|(_,(_,touched))|*touched).map(|(key,_)|key.clone());
+        if let Some(key)=oldest {pool.remove(&key);}
+    }
+    pool.insert(key, (std::sync::Arc::clone(&clusterer),std::time::Instant::now()));
     Ok(clusterer)
 }
 
@@ -978,9 +992,9 @@ pub fn seed_cluster_cache_for_test(db_dir: &Path) {
         .expect("cluster pool mutex poisoned")
         .insert(
             key,
-            std::sync::Arc::new(std::sync::Mutex::new(OnlineClusterer::new(
+            (std::sync::Arc::new(std::sync::Mutex::new(OnlineClusterer::new(
                 CLUSTER_COS_THRESHOLD,
-            ))),
+            ))),std::time::Instant::now()),
         );
 }
 
@@ -1362,4 +1376,20 @@ pub fn kick_face_if_ready(
 ) {
     crate::index::scheduler::request_ai(&db_dir, manager, bus, "face");
     crate::index::scheduler::kick(db_dir, supervisor);
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    #[test]
+    fn idle_cluster_eviction_preserves_an_active_owner_until_it_finishes() {
+        let key=PathBuf::from(format!("memory-test-{}",uuid::Uuid::new_v4()));
+        let active=std::sync::Arc::new(Mutex::new(OnlineClusterer::new(CLUSTER_COS_THRESHOLD)));
+        cache_pool().lock().unwrap().insert(key.clone(),(active.clone(),std::time::Instant::now()-std::time::Duration::from_secs(61)));
+        release_idle_caches();
+        assert!(cache_pool().lock().unwrap().contains_key(&key));
+        drop(active);
+        release_idle_caches();
+        assert!(!cache_pool().lock().unwrap().contains_key(&key));
+    }
 }

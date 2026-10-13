@@ -18,7 +18,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
   const enabled = recipe.renderer === "photocraft";
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) { setSession(null); setUrl(null); return; }
     let cancelled = false;
     let id: string | null = null;
     setSession(null); setUrl(null); setError(null);
@@ -32,7 +32,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
 
       }
     }).catch((e: unknown) => { if (!cancelled) setError(String(e)); });
-    return () => { cancelled = true; if (id) void editPreviewClose(id).catch(() => {}); };
+    return () => { cancelled = true; if (openedRequest.current === opening) openedRequest.current = null; if (id) void editPreviewClose(id).catch(() => {}); };
   }, [assetId, libraryId, retry, enabled]);
 
   useEffect(() => {

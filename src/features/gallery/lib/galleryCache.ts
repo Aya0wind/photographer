@@ -20,17 +20,24 @@ export interface GallerySnapshot {
 }
 
 let snapshot: GallerySnapshot | null = null;
+let expiry: ReturnType<typeof setTimeout> | undefined;
 
 export function gallerySnapshot(): GallerySnapshot | null {
+  if (snapshot && Date.now() - snapshot.savedAt > 60_000) clearGallerySnapshot();
   return snapshot;
 }
 
 export function saveGallerySnapshot(next: GallerySnapshot): void {
-  snapshot = next;
+  clearTimeout(expiry);
+  // Keep a recent small snapshot; a huge library stays on disk, not in a hidden page.
+  snapshot = next.assets.length <= 5000 ? next : null;
+  expiry = setTimeout(clearGallerySnapshot, 60_000);
 }
 
 /** 清空会话快照（切库时必须调用——快照不区分库，跨库沿用=看到上一个库的照片） */
 export function clearGallerySnapshot(): void {
+  clearTimeout(expiry);
+  expiry = undefined;
   snapshot = null;
 }
 

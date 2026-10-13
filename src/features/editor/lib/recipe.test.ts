@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { EditRecipe } from "@/ipc/api";
 import {
+  appendHistory,
   defaultRecipe,
   initRecipeHistory,
   newLayerId,
@@ -287,4 +288,13 @@ it("neutral advanced controls do not leave an otherwise reset recipe dirty",()=>
   const base={...defaultRecipe(),renderer:"photocraft" as const};
   const empty={...base,advanced:{exposure:0,temperature:0,tint:0,vibrance:0,curves:[]}};
   expect(recipeForPersist(empty)).toEqual(recipeForPersist(base));
+});
+
+it("undo history retains at most 100 recent steps and an estimated 8 MiB", () => {
+  const recipes = Array.from({length:150}, (_,id) => ({...defaultRecipe(),rotateQuarter:(id % 4) as EditRecipe["rotateQuarter"]}));
+  let past: EditRecipe[] = [];
+  for (const recipe of recipes) past = appendHistory(past,recipe);
+  expect(past).toEqual(recipes.slice(-100));
+  const large = {...defaultRecipe(),textLayers:[{...textLayer(),text:"x".repeat(5 * 1024 * 1024)}]};
+  expect(appendHistory(past,large)).toEqual([]);
 });

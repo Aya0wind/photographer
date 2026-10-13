@@ -117,6 +117,16 @@ describe("三态契约（pending ≠ failed）", () => {
   });
 });
 
+it("thumbnail URL cache evicts old entries instead of growing with the whole library", async () => {
+  vi.mocked(assetThumbGet).mockImplementation(async (id) => ({status:"ready",path:`${id}.jpg`}));
+  for (let id=1; id<=2049; id++) await fetchAssetThumb(id,512);
+  const calls=vi.mocked(assetThumbGet).mock.calls.length;
+  await fetchAssetThumb(2049,512);
+  expect(vi.mocked(assetThumbGet).mock.calls.length).toBe(calls);
+  await fetchAssetThumb(1,512);
+  expect(vi.mocked(assetThumbGet).mock.calls.length).toBe(calls+1);
+});
+
 describe("warmImageDecode（解码预热）", () => {
   it("new Image().src 预热 URL；null/undefined 静默跳过", () => {
     const created: Array<{ src: string }> = [];

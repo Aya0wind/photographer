@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::TensorRef;
 
 use super::ModelManager;
 
@@ -229,7 +229,7 @@ impl ModelManager {
         let use_gpu = self.ai_params().use_gpu;
         // 锁内完成 run + 张量提取（SessionOutputs 借用会话，不可出锁）
         let extract = || -> Result<(Vec<i64>, Vec<f32>), String> {
-            let tensor = Tensor::from_array((input_shape.clone(), data.clone()))
+            let tensor = TensorRef::from_array_view((input_shape.as_slice(), data.as_slice()))
                 .map_err(|e| format!("构造图像张量失败: {e}"))?;
             let mut slots = slots().lock().expect("infer slots mutex poisoned");
             self.ensure_visual(&mut slots)?;
@@ -357,9 +357,9 @@ impl SemanticEmbedder for ModelManager {
         // 故障 → 毒化该模型 DML + 丢弃会话 → 重跑在 CPU 会话上自愈；此前
         // 直跑 session.run 导致设备移除后 text 推理永久失败。
         let extract = || -> Result<Vec<f32>, String> {
-            let ids_t = Tensor::from_array((vec![1i64, seq], ids.clone()))
+            let ids_t = TensorRef::from_array_view(([1i64, seq], ids.as_slice()))
                 .map_err(|e| format!("构造 ids 张量失败: {e}"))?;
-            let mask_t = Tensor::from_array((vec![1i64, seq], mask.clone()))
+            let mask_t = TensorRef::from_array_view(([1i64, seq], mask.as_slice()))
                 .map_err(|e| format!("构造 mask 张量失败: {e}"))?;
             let mut slots = slots().lock().expect("infer slots mutex poisoned");
             self.ensure_text(&mut slots)?;

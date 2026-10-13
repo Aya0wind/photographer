@@ -79,6 +79,7 @@ export function startPreviewScheduler(sessionId: string, getRecipe: () => EditRe
   function close() {
     disposed=true;clearTimeout(timer);
     for(const url of urls) releasePreviewImage(url);
+    urls.length=0;
   }
   wake();
   return {wake,close};

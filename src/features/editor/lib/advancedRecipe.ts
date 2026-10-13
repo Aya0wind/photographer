@@ -1,5 +1,5 @@
 import type { AdvancedAdjustments, DevelopmentAdjustments, EditLocalMask, EditRecipe, EditRecipeTextLayer } from "@/ipc/api";
-import { defaultRecipe, initRecipeHistory, recipeEquals, recipeForPersist, recipeReducer, type RecipeAction, type RecipeContext, type RecipeHistory } from "./recipe";
+import { appendHistory, defaultRecipe, initRecipeHistory, recipeEquals, recipeForPersist, recipeReducer, type RecipeAction, type RecipeContext, type RecipeHistory } from "./recipe";
 
 export const DEFAULT_ADVANCED: AdvancedAdjustments = {
   exposure: 0, temperature: 0, tint: 0, vibrance: 0, curves: [],
@@ -58,7 +58,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
   if(action.type==="applyProject"){
     const before=state.cropSession??state;
     if(recipeEquals(before.present,action.recipe))return before;
-    return {past:[...before.past,before.present],present:action.recipe,future:[]};
+    return {past:appendHistory(before.past,before.present),present:action.recipe,future:[]};
   }
   if(action.type==="cropStart")return state.cropSession?state:{...state,cropSession:{past:state.past,present:state.present,future:state.future}};
   if(action.type==="cropCancel")return state.cropSession??state;
@@ -66,7 +66,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     const before=state.cropSession??{past:state.past,present:state.present,future:state.future};
     const next=recipeReducer({past:[],present:state.present,future:[]},{type:"cropApply",crop:action.crop},context).present;
     if(recipeEquals(recipeForPersist(before.present),recipeForPersist(next)))return before;
-    return {past:[...before.past,before.present],present:next,future:[]};
+    return {past:appendHistory(before.past,before.present),present:next,future:[]};
   }
   if(state.cropSession&&action.type!=="reset"&&action.type!=="loadProject"){
     if(action.type==="undo"||action.type==="redo")return state.cropSession;
@@ -77,7 +77,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     const a=state.present.advanced??DEFAULT_ADVANCED;if(!developmentGroupChanged(a,action.group))return state;
     const development={...DEFAULT_DEVELOPMENT,...a.development};
     for(const key of DEVELOPMENT_GROUPS[action.group])Object.assign(development,{[key]:DEFAULT_DEVELOPMENT[key]});
-    return {past:[...state.past,state.present],future:[],present:{...state.present,advanced:{...a,development}}};
+    return {past:appendHistory(state.past,state.present),future:[],present:{...state.present,advanced:{...a,development}}};
   }
   if (action.type==="maskAdd" || action.type==="maskUpdate" || action.type==="maskRemove" || action.type==="maskDuplicate" || action.type==="maskResetAdjustmentGroup" || action.type==="maskResetDevelopmentGroup") {
     let masks=state.present.masks??[];
@@ -106,7 +106,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     }
     const next={...state.present,masks:masks.length?masks:undefined};
     if(recipeEquals(next,state.present))return state;
-    return {past:record?[...state.past,state.present]:state.past,present:next,future:[]};
+    return {past:record?appendHistory(state.past,state.present):state.past,present:next,future:[]};
   }
   if (action.type === "resetAdjustmentGroup") {
     if(!adjustmentGroupChanged(state.present,action.group)) return state;
@@ -138,7 +138,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     if(legacyAdjustments&&action.group==="color")legacyAdjustments={...legacyAdjustments,saturation:0};
     const next={...present,advanced,adjustments,...(present.legacyAdjustments?{legacyAdjustments}:{})};
     if(recipeEquals(next,present)) return state;
-    return {past:[...state.past,present],present:next,future:[]};
+    return {past:appendHistory(state.past,present),present:next,future:[]};
   }
   if (action.type === "loadProject") return initRecipeHistory(action.recipe);
   if (action.type === "reset") return initRecipeHistory(advancedRecipe());
@@ -149,7 +149,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
   if (action.type === "advanced") {
     const next = { ...state.present, advanced: { ...DEFAULT_ADVANCED, ...state.present.advanced, ...action.patch } };
     if(recipeEquals(next,state.present)) return state;
-    return { past: action.record === false ? state.past : [...state.past, state.present], present: next, future: [] };
+    return { past: action.record === false ? state.past : appendHistory(state.past, state.present), present: next, future: [] };
   }
   return recipeReducer(state, action, context);
 }

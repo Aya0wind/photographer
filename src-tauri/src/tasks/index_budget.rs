@@ -16,6 +16,21 @@ pub fn budget(domain: Domain) -> Arc<Budget> {
     SHARED.get_or_init(|| Arc::new(Budget::dynamic())).clone()
 }
 
+/// Shared transient decode budget, in MiB. Oversized jobs run alone.
+pub fn memory_budget() -> Arc<Budget> {
+    static MEMORY: OnceLock<Arc<Budget>> = OnceLock::new();
+    MEMORY
+        .get_or_init(|| {
+            let mib = std::env::var("PHOTO_HUB_INDEX_MEMORY_MB")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(512)
+                .clamp(64, 8192);
+            Arc::new(Budget::new(mib))
+        })
+        .clone()
+}
+
 #[derive(Default)]
 struct State {
     next: u64,

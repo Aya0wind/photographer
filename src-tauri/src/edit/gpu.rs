@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use photocraft_engine::doc::{ColorMode, Surface};
@@ -23,8 +23,14 @@ struct Request {
     reply: mpsc::Sender<Result<Option<Surface>, String>>,
 }
 
+enum Command {
+    Render(Request),
+    Clear,
+}
+static WORKER: OnceLock<Worker> = OnceLock::new();
+
 struct Worker {
-    sender: mpsc::SyncSender<Request>,
+    sender: mpsc::SyncSender<Command>,
     disabled: Arc<AtomicBool>,
     busy: AtomicBool,
 }
@@ -63,7 +69,8 @@ impl Gpu {
         compositor.set_memory_budget(MEMORY_BUDGET);
         log::warn!(
             "[editor GPU] {} ({:?}), cache budget 256 MiB",
-            info.name, info.backend
+            info.name,
+            info.backend
         );
         Ok(Self {
             device,
@@ -129,33 +136,55 @@ fn process(gpu: &mut Option<Gpu>, request: &Request) -> (Result<Surface, String>
     (result, unsupported)
 }
 
+fn clear_documents(gpu: &mut Option<Gpu>) {
+    if let Some(gpu) = gpu.as_mut() {
+        for id in gpu.documents.drain(..) {
+            gpu.compositor.forget_doc(id);
+        }
+    }
+}
+
+fn render_request(gpu: &mut Option<Gpu>, request: Request, stopped: &AtomicBool) {
+    let (result, unsupported) = process(gpu, &request);
+    if let Err(reason) = &result {
+        log::warn!("[editor GPU] CPU fallback: {reason}");
+        if !unsupported {
+            stopped.store(true, Ordering::Release);
+        }
+    }
+    let _ = request.reply.send(result.map(Some));
+}
+
+fn run(receiver: mpsc::Receiver<Command>, stopped: Arc<AtomicBool>) {
+    let mut gpu = None;
+    let mut last_render = Instant::now();
+    while !stopped.load(Ordering::Acquire) {
+        let timeout = Duration::from_secs(60).saturating_sub(last_render.elapsed());
+        match receiver.recv_timeout(timeout) {
+            Ok(Command::Render(request)) => {
+                render_request(&mut gpu, request, &stopped);
+                last_render = Instant::now();
+            }
+            Ok(Command::Clear) => clear_documents(&mut gpu),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if gpu.is_some() {
+                    log::info!("编辑器 GPU 空闲设备已卸载");
+                }
+                gpu = None;
+                last_render = Instant::now();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 fn start() -> Worker {
-    let (sender, receiver) = mpsc::sync_channel::<Request>(1);
+    let (sender, receiver) = mpsc::sync_channel::<Command>(8);
     let disabled = Arc::new(AtomicBool::new(false));
     let stopped = disabled.clone();
     let spawned = std::thread::Builder::new()
         .name("editor-gpu".into())
-        .spawn(move || {
-            // 收到首次请求才初始化；应用启动不创建 GPU 设备。
-            let mut gpu: Option<Gpu> = None;
-            while let Ok(request) = receiver.recv() {
-                if stopped.load(Ordering::Acquire) {
-                    break;
-                }
-                let (result, unsupported) = process(&mut gpu, &request);
-                if let Err(reason) = &result {
-                    // 文档支持检查失败可仅回退本次；初始化/运行故障永久隔离。
-                    log::warn!("[editor GPU] CPU fallback: {reason}");
-                    if !unsupported {
-                        stopped.store(true, Ordering::Release);
-                    }
-                }
-                let _ = request.reply.send(result.map(Some));
-                if stopped.load(Ordering::Acquire) {
-                    break;
-                }
-            }
-        });
+        .spawn(move || run(receiver, stopped));
     if let Err(error) = spawned {
         log::warn!("[editor GPU] CPU fallback: {error}");
         disabled.store(true, Ordering::Release);
@@ -172,7 +201,6 @@ pub(super) fn composite(doc: &Document) -> Option<Surface> {
     if doc.mode != ColorMode::Rgb {
         return None;
     }
-    static WORKER: OnceLock<Worker> = OnceLock::new();
     let worker = WORKER.get_or_init(start);
     if worker.disabled.load(Ordering::Acquire) {
         return None;
@@ -192,10 +220,10 @@ pub(super) fn composite(doc: &Document) -> Option<Surface> {
     let (reply, receiver) = mpsc::channel();
     worker
         .sender
-        .try_send(Request {
+        .try_send(Command::Render(Request {
             doc: doc.clone(),
             reply,
-        })
+        }))
         .ok()?;
     loop {
         match receiver.recv_timeout(STALL_TIMEOUT) {
@@ -210,5 +238,12 @@ pub(super) fn composite(doc: &Document) -> Option<Surface> {
                 return None;
             }
         }
+    }
+}
+
+/// Nonblocking; queued renders finish before cache ownership is released.
+pub(super) fn release_cached_documents() {
+    if let Some(worker) = WORKER.get() {
+        let _ = worker.sender.try_send(Command::Clear);
     }
 }

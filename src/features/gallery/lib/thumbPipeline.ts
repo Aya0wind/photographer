@@ -56,15 +56,23 @@ function releaseSlot(): void {
  * 不预热解码器——补 new Image().src 让相邻图进入 Chromium 解码缓存，
  * 箭头切换时大概率瞬时显示。fire-and-forget，失败静默。
  */
-export function warmImageDecode(url: string | null | undefined): void {
-  if (!url) return;
+export function warmImageDecode(url: string | null | undefined): () => void {
+  if (!url) return () => {};
   const img = new Image();
+  img.decoding = "async";
   img.src = url;
+  return () => { img.onload = null; img.onerror = null; img.removeAttribute?.("src"); };
 }
 
 /** 会话缓存：`${assetId}:${size}` → asset URL（仅缓存成功结果；pending/
  *  unavailable 不落缓存——事件重试与占位由 hook 状态机管理） */
 const thumbCache = new Map<string, string>();
+const CACHE_LIMIT = 2048;
+function remember<T>(cache: Map<string, T>, key: string, value: T): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+}
 /** in-flight 去重：同 key 并发共享同一 Promise */
 const thumbInflight = new Map<string, Promise<ThumbResult>>();
 /** 会话代数：resetThumbPipeline 递增——清空后旧在途请求结算不再回写缓存
@@ -121,13 +129,13 @@ export function fetchAssetThumb(
       if (result.status === "ready") {
         const converted = toAssetUrl(result.path);
         if (converted.status === "ready") {
-          if (gen === cacheGeneration) thumbCache.set(key, converted.path);
+          if (gen === cacheGeneration) remember(thumbCache, key, converted.path);
           return { kind: "url", url: converted.path } as ThumbResult;
         }
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "unavailable") {
-        if (gen === cacheGeneration) failedCache.set(key, { kind: "failed" });
+        if (gen === cacheGeneration) remember(failedCache, key, { kind: "failed" });
         return { kind: "failed" } as ThumbResult;
       }
       if (result.status === "missing") {
@@ -137,7 +145,7 @@ export function fetchAssetThumb(
           kind: "missing",
           url: result.cachedPath ? toUrlOrNull(result.cachedPath) : null,
         } as ThumbResult;
-        if (gen === cacheGeneration) failedCache.set(key, settled);
+        if (gen === cacheGeneration) remember(failedCache, key, settled);
         return settled;
       }
       return { kind: "pending" } as ThumbResult; // 排队中：等事件重试

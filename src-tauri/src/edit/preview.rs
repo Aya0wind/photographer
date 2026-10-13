@@ -531,10 +531,11 @@ pub async fn edit_preview_render(
 
 #[tauri::command]
 pub fn edit_preview_close(session_id: String) -> Result<(), String> {
-    let preview = sessions()
-        .lock()
-        .map_err(|_| "预览会话锁不可用")?
-        .remove(&session_id);
+    let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
+    let preview = cache.remove(&session_id);
+    if cache.is_empty() { super::gpu::release_cached_documents(); }
+    drop(cache);
+    super::native_canvas::edit_native_close(session_id);
     if let Some(preview) = preview {
         preview
             .lock()
@@ -544,6 +545,26 @@ pub fn edit_preview_close(session_id: String) -> Result<(), String> {
             .store(true, Ordering::Release);
     }
     Ok(())
+}
+
+/// Recovery for dropped windows / failed close IPC. Never wait on a rendering session.
+pub fn release_expired() {
+    if let Ok(mut cache) = sessions().try_lock() {
+        let mut expired = Vec::new();
+        cache.retain(|id, session| {
+            if let Ok(preview) = session.try_lock() {
+                if preview.touched.elapsed() >= IDLE_TTL {
+                    preview.generation.closed.store(true, Ordering::Release);
+                    expired.push(id.clone());
+                    return false;
+                }
+            }
+            true
+        });
+        if cache.is_empty() { super::gpu::release_cached_documents(); }
+        drop(cache);
+        for id in expired { super::native_canvas::edit_native_close(id); }
+    }
 }
 
 /// 原生高位深文档取色和曲线黑/灰/白点；UI 只接收参数，不处理像素。
@@ -812,6 +833,27 @@ pub(super) fn canvas_original_size(session_id:&str)->Result<[u32;2],String> {
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+    #[test]
+    fn background_expiry_fences_closed_sessions_and_preserves_inflight_arcs() {
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Expiry",Size::new(4,4),ColorMode::Rgb,SampleType::U8,Color::rgba(0.5,0.5,0.5,1.0));
+        let generation=Arc::new(Generation::default());
+        let preview=Arc::new(Mutex::new(Preview {
+            original_size:[4,4], document:base.clone(), raw:None, refined:None,
+            interactive_document:base.clone(), interactive_renderer:new_renderer(&base,[4,4]),
+            refined_renderer:new_renderer(&base,[4,4]), open_ms:0.0, native_ready:false,
+            generation:generation.clone(), path:PathBuf::new(),modified:None,length:0,
+            touched:Instant::now()-IDLE_TTL-Duration::from_secs(1),source_checked:Instant::now(),
+        }));
+        let id=format!("expiry-test-{}",uuid::Uuid::new_v4());
+        sessions().lock().unwrap().insert(id.clone(),preview.clone());
+        release_expired();
+        assert!(!sessions().lock().unwrap().contains_key(&id));
+        assert!(generation.closed.load(Ordering::Acquire));
+        assert_eq!(Arc::strong_count(&preview),1);
+        assert!(preview.lock().is_ok());
+    }
+
     #[test]
     fn histogram_uses_upstream_float_bins_and_grayscale_conversion_without_phantom_pixels(){
         let pixels=photocraft_compose::Buffer{rect:photocraft_engine::doc::Rect::from_xywh(0,0,3,1),px:vec![[1.0,0.0,0.0,1.0],[0.0,1.0,0.0,0.0],[f32::NAN,0.0,0.0,1.0]]};

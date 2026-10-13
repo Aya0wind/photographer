@@ -86,9 +86,26 @@ export function rotatedSize(ctx: RecipeContext, quarter: number): { w: number; h
   return swap ? { w: h, h: w } : { w, h };
 }
 
+const historySizes = new WeakMap<EditRecipe, number>();
+/** Preserve recent undo steps without retaining unlimited brush/mask snapshots. */
+export function appendHistory(past: EditRecipe[], recipe: EditRecipe): EditRecipe[] {
+  const result = [...past.slice(-99), recipe];
+  let bytes = 0;
+  for (let i = result.length - 1; i >= 0; i--) {
+    let size = historySizes.get(result[i]);
+    if (size === undefined) {
+      size = JSON.stringify(result[i]).length * 2;
+      historySizes.set(result[i], size);
+    }
+    bytes += size;
+    if (bytes > 8 * 1024 * 1024) return result.slice(i + 1);
+  }
+  return result;
+}
+
 function pushHistory(state: RecipeHistory, next: EditRecipe): RecipeHistory {
   if (next === state.present || recipeEquals(next, state.present)) return state;
-  return { past: [...state.past, state.present], present: next, future: [] };
+  return { past: appendHistory(state.past, state.present), present: next, future: [] };
 }
 
 /** +90° 顺时针：旧旋转图归一化点 (u,v) → 新旋转图 (1-v, u)；-90° 逆时针 → (v, 1-u) */
@@ -242,7 +259,7 @@ export function recipeReducer(
       return { ...state, present: { ...present, output: { ...present.output, ...action.patch } } };
     case "commitFrom":
       // 连续手势（文字拖动）收尾：把手势前快照压入 past（present 已是终态）
-      return { past: [...state.past, action.snapshot], present, future: [] };
+      return { past: appendHistory(state.past, action.snapshot), present, future: [] };
     case "undo": {
       if (state.past.length === 0) return state;
       const previous = state.past[state.past.length - 1];
@@ -257,7 +274,7 @@ export function recipeReducer(
       if (state.future.length === 0) return state;
       const next = state.future[0];
       return {
-        past: [...state.past, present],
+        past: appendHistory(state.past, present),
         present: { ...next, output: present.output },
         future: state.future.slice(1),
       };

@@ -66,6 +66,9 @@ function useHtmlImage(
     img.src = src;
     return () => {
       cancelled = true;
+      img.onload = null;
+      img.onerror = null;
+      img.removeAttribute?.("src");
     };
   }, [src]);
   return image;

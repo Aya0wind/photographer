@@ -140,27 +140,23 @@ export function useViewerImage(asset: AssetDto, group: AssetGroup, index: number
     return () => clearTimeout(timer);
   }, [awaitingImage]);
 
-  // 相邻预取（#7 预加载强化）：前后各 1 张——
-  // a) 512 回退档 URL 高优先预取；b) new Image() 解码预热（photo 的原图 asset URL 也预热），
-  // 让箭头切换时下一张大概率已在解码器缓存里。
+  // Keep only the adjacent screen-sized proxies warm for this viewer session.
+  // Closing / navigating releases held images; late IPC results never decode.
   useEffect(() => {
+    let cancelled = false;
+    const releases: Array<() => void> = [];
     const neighbors = [
       index > 0 ? group.assets[index - 1] : null,
       index < group.assets.length - 1 ? group.assets[index + 1] : null,
     ];
     for (const neighbor of neighbors) {
       if (!neighbor) continue;
-      if (neighbor.kind === "photo") warmImageDecode(safeConvert(neighbor.path));
-      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((r) => {
-        if (r.kind === "url") warmImageDecode(r.url);
+      // Warm a screen-sized proxy. Original/full embedded previews load on demand.
+      void fetchAssetThumb(neighbor.id, VIEWER_THUMB_SIZE, "high").then((result) => {
+        if (!cancelled && result.kind === "url") releases.push(warmImageDecode(result.url));
       });
-      if (neighbor.kind === "raw") {
-        // RAW 相邻预热内嵌全幅直出档（毫秒级 IO，取最大内嵌 JPEG）
-        void fetchAssetThumb(neighbor.id, VIEWER_RAW_EMBED_SIZE, "high").then((r) => {
-          if (r.kind === "url") warmImageDecode(r.url);
-        });
-      }
     }
+    return () => { cancelled = true; for (const release of releases) release(); };
   }, [index, group.assets]);
 
   function sourceKind(src: string): string {

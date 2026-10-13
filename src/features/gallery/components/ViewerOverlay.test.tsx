@@ -112,7 +112,7 @@ function renderViewer(
   const group: AssetGroup = groupAssetsByDate(assets)[0];
   const onNavigate = vi.fn();
   const onClose = vi.fn();
-  render(
+  const view = render(
     <I18nextProvider i18n={i18n}>
       <ViewerOverlay
         asset={assets[index]}
@@ -125,7 +125,7 @@ function renderViewer(
       />
     </I18nextProvider>,
   );
-  return { onNavigate, onClose };
+  return { onNavigate, onClose, unmount: view.unmount };
 }
 
 beforeAll(() => {
@@ -942,27 +942,39 @@ describe("查看器：原子切图与胶片条", () => {
     expect(cell?.className).not.toContain("sp-skeleton");
   });
 
-  it("相邻预取：预热相邻 photo 原图与 512 档 URL 解码（new Image）", async () => {
-    const created: Array<{ src: string }> = [];
+  it("退出后迟到的相邻预加载结果不会继续创建解码图片", async () => {
+    let release: ((value: {status:"ready";path:string}) => void) | undefined;
+    const created = vi.fn();
+    vi.stubGlobal("Image", class {src=""; constructor(){created();}});
+    try {
+      thumbMock.mockImplementation((id: number) => id===3
+        ? new Promise(resolve => {release=resolve;}) : Promise.resolve({status:"pending"}));
+      const view=renderViewer(GROUP_ASSETS,1);
+      await waitFor(() => expect(release).toBeDefined());
+      view.unmount();
+      await act(async () => {release!({status:"ready",path:"late-proxy.jpg"});});
+      expect(created).not.toHaveBeenCalled();
+    } finally {vi.unstubAllGlobals();}
+  });
+
+  it("相邻预取只解码代理图，退出后释放", async () => {
+    const created: Array<{ src: string; removeAttribute: ReturnType<typeof vi.fn> }> = [];
     class FakeImage {
       src = "";
-      constructor() {
-        created.push(this);
-      }
+      removeAttribute = vi.fn();
+      constructor() { created.push(this); }
     }
     vi.stubGlobal("Image", FakeImage);
     try {
       convertMock.mockImplementation((p: string) => `asset://${p}`);
-      thumbMock.mockResolvedValue({ status: "pending" });
-      renderViewer(GROUP_ASSETS, 1);
-
-      await waitFor(() => expect(created.length).toBeGreaterThanOrEqual(2));
-      const srcs = created.map((c) => c.src);
-      expect(srcs).toContain(`asset://${GROUP_ASSETS[0].path}`);
-      expect(srcs).toContain(`asset://${GROUP_ASSETS[2].path}`);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+      thumbMock.mockImplementation(async (id: number) => ({status: "ready", path: `proxy-${id}.jpg`}));
+      const view = renderViewer(GROUP_ASSETS, 1);
+      await waitFor(() => expect(created.length).toBe(2));
+      expect(created.map(image => image.src)).toEqual(expect.arrayContaining(["asset://proxy-1.jpg", "asset://proxy-3.jpg"]));
+      expect(created.map(image => image.src)).not.toContain(`asset://${GROUP_ASSETS[0].path}`);
+      view.unmount();
+      for (const image of created) expect(image.removeAttribute).toHaveBeenCalledWith("src");
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 

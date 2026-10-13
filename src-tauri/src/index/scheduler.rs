@@ -384,6 +384,26 @@ fn finish(db: &Db, task: &IndexTaskRow, owner: &str, ok: bool) -> rusqlite::Resu
     tx.commit()
 }
 
+/// Estimated transient MiB; full decoders need more than their final RGB proxy.
+fn memory_cost(db: &Db, task: &IndexTaskRow, batch: usize) -> usize {
+    if task.kind != "thumb" {
+        return if task.kind == "ai" { 128 } else { 16 } * batch.min(2);
+    }
+    let pixels: Option<i64> =
+        db.0.query_row(
+            "SELECT width * height FROM assets WHERE id=?1",
+            [task.asset_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    pixels
+        .filter(|pixels| *pixels > 0)
+        .map(|pixels| ((pixels as u64).saturating_mul(16) / (1024 * 1024) + 32) as usize)
+        .unwrap_or(256)
+        .max(32)
+}
+
 fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
     let Ok(db) = crate::ipc::open_library_db(path) else {
         return;
@@ -401,8 +421,12 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
     }
     let _claims = Claims(&db, &owner);
     let mut turn = offset;
+    let mut last_work = std::time::Instant::now();
     loop {
-        if controls.is_cancelled() || !path.join("library.db").is_file() {
+        if controls.is_cancelled()
+            || !path.join("library.db").is_file()
+            || last_work.elapsed() >= Duration::from_secs(10)
+        {
             break;
         }
         if controls.is_paused() {
@@ -524,6 +548,12 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                     }
                 }
             }
+            last_work = std::time::Instant::now();
+            let _memory = crate::tasks::index_budget::memory_budget().acquire(memory_cost(
+                &db,
+                &batch[0],
+                batch.len(),
+            ));
             let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::ai::selection::with_parameters(&config.ai, || {
                     if batch[0].kind == "ai" {
@@ -590,7 +620,7 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
             .aggregates_dirty
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            let waiting:bool=db.0.query_row("SELECT EXISTS(SELECT 1 FROM index_tasks t JOIN index_channels c ON c.kind=t.kind JOIN assets a ON a.id=t.asset_id WHERE t.kind IN ('exif','phash') AND t.state IN ('pending','running') AND c.enabled=1 AND c.paused=0 AND a.missing=0 AND a.in_trash=0)",[],|r|r.get(0)).unwrap_or(true);
+            let waiting = !aggregates_ready(&db);
             if !waiting
                 && queue
                     .aggregates_dirty
@@ -622,6 +652,71 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
     }
 }
 
+fn has_ready_work(db: &Db, config: &Config) -> bool {
+    let Ok(mut statement) = db.0.prepare("SELECT DISTINCT t.kind FROM index_tasks t JOIN index_channels c ON c.kind=t.kind JOIN index_task_context x ON x.task_id=t.id JOIN assets a ON a.id=t.asset_id WHERE t.state='pending' AND c.enabled=1 AND c.paused=0 AND x.retry_at<=unixepoch() AND a.missing=0 AND a.in_trash=0 AND NOT EXISTS (SELECT 1 FROM index_dependencies d LEFT JOIN index_tasks p ON p.kind=d.prerequisite AND p.asset_id=t.asset_id WHERE d.kind=t.kind AND (p.id IS NULL OR p.state!='done'))") else { return true; };
+    let Ok(kinds) = statement.query_map([], |row| row.get::<_, String>(0)) else {
+        return true;
+    };
+    kinds
+        .filter_map(Result::ok)
+        .any(|kind| model_ready(config, &kind))
+}
+
+fn aggregates_ready(db: &Db) -> bool {
+    db.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM index_tasks t JOIN index_channels c ON c.kind=t.kind JOIN assets a ON a.id=t.asset_id WHERE t.kind IN ('exif','phash') AND t.state IN ('pending','running') AND c.enabled=1 AND c.paused=0 AND a.missing=0 AND a.in_trash=0)",[],|row|row.get(0)).unwrap_or(false)
+}
+
+fn ready_to_run(path: &Path, queue: &Queue) -> bool {
+    crate::ipc::open_library_db(path)
+        .map(|db| {
+            let config = queue.config.lock().expect("index config poisoned").clone();
+            has_ready_work(&db, &config)
+                || (queue
+                    .aggregates_dirty
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    && aggregates_ready(&db))
+        })
+        .unwrap_or(false)
+}
+
+fn run_workers(path: &Path, queue: &Queue, controls: &TaskControls) {
+    std::thread::scope(|scope| {
+        for n in 0..crate::tasks::index_parallelism() {
+            scope.spawn(move || worker(path, queue, controls, n));
+        }
+    });
+}
+
+fn wait_idle(queue: &Queue, controls: &TaskControls, observed: u64) {
+    let started = std::time::Instant::now();
+    let mut signal = queue.signal.lock().expect("index signal poisoned");
+    while *signal == observed
+        && !controls.is_cancelled()
+        && started.elapsed() < Duration::from_secs(30)
+    {
+        signal = queue
+            .ready
+            .wait_timeout(signal, Duration::from_secs(1))
+            .expect("index idle wait poisoned")
+            .0;
+    }
+}
+
+fn coordinate(path: &Path, queue: &Queue, controls: &TaskControls) {
+    while !controls.is_cancelled() && path.join("library.db").is_file() {
+        let observed = *queue.signal.lock().expect("index signal poisoned");
+        if ready_to_run(path, queue) {
+            run_workers(path, queue, controls);
+        }
+        if ready_to_run(path, queue) {
+            continue;
+        }
+        // Workers have dropped their SQLite connections and stacks. Compare the
+        // notification generation under the same lock as notify: no lost wakeup.
+        wait_idle(queue, controls, observed);
+    }
+}
+
 pub fn kick(path: PathBuf, supervisor: &Arc<TaskSupervisor>) {
     let queue = queue(&path);
     notify(&path);
@@ -650,14 +745,7 @@ pub fn kick(path: PathBuf, supervisor: &Arc<TaskSupervisor>) {
                 }
             }
             let _running = Running(&queue);
-            std::thread::scope(|scope| {
-                for n in 0..crate::tasks::index_parallelism() {
-                    let path = &path;
-                    let queue = &queue;
-                    let controls = &controls;
-                    scope.spawn(move || worker(path, queue, controls, n));
-                }
-            });
+            coordinate(&path, &queue, &controls);
         },
     );
 }
@@ -714,6 +802,37 @@ mod tests {
         }
         reconcile(&db, &config).unwrap();
         (dir, db, config)
+    }
+
+    #[test]
+    fn decode_memory_cost_scales_with_registered_dimensions() {
+        let (_dir, db, _) = fixture(1);
+        let task = claim(&db, "thumb", "memory-worker").unwrap().unwrap();
+        assert_eq!(memory_cost(&db, &task, 1), 256);
+        db.0.execute("UPDATE assets SET width=6000,height=4000 WHERE id=1", [])
+            .unwrap();
+        let large = memory_cost(&db, &task, 1);
+        db.0.execute("UPDATE assets SET width=1000,height=1000 WHERE id=1", [])
+            .unwrap();
+        assert!(large > memory_cost(&db, &task, 1) * 4);
+    }
+
+    #[test]
+    fn coordinator_restarts_only_ready_tasks_and_keeps_paused_or_deferred_work_durable() {
+        let (_dir, db, config) = fixture(1);
+        assert!(has_ready_work(&db, &config));
+        db.0.execute("UPDATE index_channels SET paused=1", [])
+            .unwrap();
+        assert!(!has_ready_work(&db, &config));
+        db.0.execute("UPDATE index_channels SET paused=0", [])
+            .unwrap();
+        db.0.execute("UPDATE index_task_context SET retry_at=9999999999", [])
+            .unwrap();
+        assert!(!has_ready_work(&db, &config));
+        db.0.execute("UPDATE index_task_context SET retry_at=0", [])
+            .unwrap();
+        assert!(has_ready_work(&db, &config));
+        assert!(db.pending_index_task_count("thumb").unwrap() > 0);
     }
 
     #[test]

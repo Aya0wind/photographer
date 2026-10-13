@@ -188,6 +188,8 @@ pub fn run() {
             // 真机修复（2026-09-19）：AI 回填原只挂在「下载完成 watcher +
             // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
+            // Resource maintenance is application-wide, including first-run database creation.
+            ai::idle::spawn_idle_unloader(&supervisor_handle);
             if let Some(db_dir) = active_db_dir {
                 index::scheduler::configure(&db_dir, &ai_for_kick, &bus, &ai_settings_snapshot);
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
@@ -199,9 +201,6 @@ pub fn run() {
                     std::sync::Arc::new(bus.clone()),
                     &supervisor_handle,
                 );
-                // AI 空闲卸载看护（内存审计 2026-09-29）：模型/向量索引
-                // 空闲 10 分钟统一释放，下次使用惰性重载
-                ai::idle::spawn_idle_unloader(&supervisor_handle);
                 // 孤儿导入任务终老（2026-09-21）：进程重启后引擎会话清零，
                 // 遗留 running/paused 是跨会话死任务（任务抽屉挂死 +
                 // import_job_delete 拒删）。统一转 cancelled + 日志；
