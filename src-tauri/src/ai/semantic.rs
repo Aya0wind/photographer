@@ -273,7 +273,7 @@ pub(crate) fn process_ai_batch(
 /// DML：批16 = 24.6 img/s vs 单图 20.0（+23%）；CPU：批16 = 12.5 vs
 /// 单图 14.1（**-12%**，单图 intra-op 已吃满核）→ CPU 走批 1。
 /// 完整矩阵见 tests/dml_bench_test.rs 基准记录。
-pub const AI_BATCH: usize = 16;
+pub const AI_BATCH: usize = 6;
 
 /// Workers and claimed batches obey the environment CPU/2 semantic budget.
 pub fn worker_count_for_ai() -> usize {

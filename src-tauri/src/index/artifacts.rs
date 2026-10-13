@@ -117,10 +117,32 @@ pub fn release_idle() {
     }
 }
 
-type DetectionEntry = (String, Arc<Vec<DetectedFace>>, Instant);
+type DetectionCell = Arc<Mutex<Option<Arc<Vec<DetectedFace>>>>>;
+type DetectionEntry = (String, DetectionCell, Instant);
 fn detections() -> &'static Mutex<VecDeque<DetectionEntry>> {
     static DETECTIONS: OnceLock<Mutex<VecDeque<DetectionEntry>>> = OnceLock::new();
     DETECTIONS.get_or_init(Default::default)
+}
+
+fn cached_detection(key: String, infer: impl FnOnce() -> Result<Vec<DetectedFace>, String>) -> Result<Arc<Vec<DetectedFace>>, String> {
+    let cell = {
+        let mut cache = detections().lock().map_err(|_| "人脸产物缓存不可用")?;
+        if let Some((_, cell, touched)) = cache.iter_mut().find(|(candidate, _, _)| *candidate == key) {
+            *touched = Instant::now();
+            cell.clone()
+        } else {
+            let cell = Arc::new(Mutex::new(None));
+            if cache.len() >= 128 { cache.pop_front(); }
+            cache.push_back((key, cell.clone(), Instant::now()));
+            cell
+        }
+    };
+    // 同一照片只检测一次；不同照片不在整个检测过程中争抢全局缓存锁。
+    let mut cached = cell.lock().map_err(|_| "人脸检测缓存不可用")?;
+    if let Some(result) = cached.as_ref() { return Ok(result.clone()); }
+    let result = Arc::new(infer()?);
+    *cached = Some(result.clone());
+    Ok(result)
 }
 
 pub fn faces(
@@ -138,23 +160,57 @@ pub fn faces(
         params.face_detect_threshold,
         (image.width(), image.height())
     );
-    let mut cache = detections().lock().map_err(|_| "人脸产物缓存不可用")?;
-    if let Some((_, result, touched)) = cache.iter_mut().find(|(candidate, _, _)| *candidate == key)
-    {
-        *touched = Instant::now();
-        return Ok(result.clone());
-    }
-    let result = Arc::new(crate::ai::face::detect_faces(manager, image)?);
-    if cache.len() >= 128 {
-        cache.pop_front();
-    }
-    cache.push_back((key, result.clone(), Instant::now()));
-    Ok(result)
+    cached_detection(key, || crate::ai::face::detect_faces(manager, image))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn different_photos_can_detect_in_parallel() {
+        let prefix = uuid::Uuid::new_v4().to_string();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for i in 0..2 {
+                let key = format!("parallel-{prefix}-{i}");
+                let tx = tx.clone();
+                let release = release.clone();
+                scope.spawn(move || cached_detection(key, || {
+                    tx.send(()).unwrap();
+                    let guard = release.0.lock().unwrap();
+                    let _ = release.1.wait_timeout_while(guard, Duration::from_secs(5), |ready| !*ready).unwrap();
+                    Ok(Vec::new())
+                }).unwrap());
+            }
+            let both_started = rx.recv_timeout(Duration::from_secs(1)).is_ok()
+                && rx.recv_timeout(Duration::from_secs(1)).is_ok();
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            assert!(both_started, "不同照片不能被全局检测缓存锁串行化");
+        });
+    }
+
+    #[test]
+    fn same_photo_is_detected_once_and_transient_errors_can_retry() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let key = format!("single-{}", uuid::Uuid::new_v4());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let key = key.clone();
+                let calls = &calls;
+                scope.spawn(move || cached_detection(key, || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Vec::new())
+                }).unwrap());
+            }
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let key = format!("retry-{}", uuid::Uuid::new_v4());
+        assert!(cached_detection(key.clone(), || Err("temporary error".into())).is_err());
+        assert!(cached_detection(key, || Ok(Vec::new())).is_ok());
+    }
 
     #[test]
     fn idle_eviction_drops_cache_ownership_without_invalidating_active_consumers() {

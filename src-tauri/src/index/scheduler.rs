@@ -14,7 +14,6 @@ use crate::events::{AppEvent, EventBus};
 use crate::settings::AiSettings;
 use crate::tasks::{TaskControls, TaskSupervisor};
 
-static INFERENCE: Mutex<()> = Mutex::new(());
 
 const KINDS: &[&str] = &["thumb", "exif", "phash", "blur", "eyes", "ai", "face"];
 
@@ -385,6 +384,24 @@ fn finish(db: &Db, task: &IndexTaskRow, owner: &str, ok: bool) -> rusqlite::Resu
 }
 
 /// Estimated transient MiB; full decoders need more than their final RGB proxy.
+fn semantic_batch_capacity(config: &Config) -> usize {
+    let pixels = usize::from(config.ai.embed_input_size).pow(2) * 3 * 4;
+    (32 * 1024 * 1024 / pixels.max(1)).clamp(1, crate::ai::semantic::AI_BATCH)
+}
+
+fn compute_cost(kind: &str, config: &Config) -> usize {
+    let native = ModelManager::embed_intra_threads();
+    match kind {
+        "ai" => native.max(semantic_batch_capacity(config)),
+        "face" | "eyes" => native,
+        _ => 1,
+    }
+}
+
+fn claimable(db: &Db, kind: &str) -> bool {
+    db.0.query_row("SELECT EXISTS(SELECT 1 FROM index_tasks t JOIN index_channels c ON c.kind=t.kind JOIN index_task_context x ON x.task_id=t.id JOIN assets a ON a.id=t.asset_id WHERE t.kind=?1 AND t.state='pending' AND c.enabled=1 AND c.paused=0 AND x.retry_at<=unixepoch() AND a.missing=0 AND a.in_trash=0 AND NOT EXISTS(SELECT 1 FROM index_dependencies d LEFT JOIN index_tasks p ON p.kind=d.prerequisite AND p.asset_id=t.asset_id WHERE d.kind=t.kind AND (p.id IS NULL OR p.state!='done')))", [kind], |row| row.get(0)).unwrap_or(false)
+}
+
 fn memory_cost(db: &Db, task: &IndexTaskRow, batch: usize) -> usize {
     if task.kind != "thumb" {
         return if task.kind == "ai" { 128 } else { 16 } * batch.min(2);
@@ -446,51 +463,31 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                 *reconciled = std::time::Instant::now();
             }
         }
+        let config = queue.config.lock().expect("index config poisoned").clone();
+        let candidate = (0..KINDS.len()).find_map(|n| {
+            let position = (turn + n) % KINDS.len();
+            let kind = KINDS[position];
+            (enabled(kind, &config.ai) && model_ready(&config, kind) && claimable(&db, kind))
+                .then_some((position, kind))
+        });
+        // 先获得整批配额再认领，等待配额时既不占运行状态，也不持源文件屏障。
+        let admission = candidate.map(|(_, kind)| crate::tasks::index_budget::budget(
+            crate::tasks::index_budget::Domain::Image).acquire(compute_cost(kind, &config)));
         let barrier = super::image_index_lock(path);
-        let mut permit =
-            crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image)
-                .acquire(1);
-        let mut guard = barrier.read().expect("index barrier poisoned");
-        let mut config = queue.config.lock().expect("index config poisoned").clone();
-        let mut task = None;
-        let mut inference = None;
-        for n in 0..KINDS.len() {
-            let kind = KINDS[(turn + n) % KINDS.len()];
-            if enabled(kind, &config.ai) && model_ready(&config, kind) {
-                if matches!(kind, "ai" | "face" | "eyes") {
-                    match INFERENCE.try_lock() {
-                        Ok(guard) => inference = Some(guard),
-                        Err(_) => continue,
-                    }
-                }
-                match claim(&db, kind, &owner) {
-                    Ok(Some(found)) => {
-                        turn = (turn + n + 1) % KINDS.len();
-                        task = Some(found);
-                        break;
-                    }
-                    Ok(None) => {
-                        inference.take();
-                    }
-                    Err(error) => {
-                        inference.take();
-                        log::warn!("索引认领失败: {error}");
-                        break;
-                    }
-                }
+        let guard = barrier.read().expect("index barrier poisoned");
+        let config = queue.config.lock().expect("index config poisoned").clone();
+        if controls.is_cancelled() || controls.is_paused() || queue.stopped.load(std::sync::atomic::Ordering::SeqCst)
+            || crate::db::lifecycle::is_closed(&path.join("library.db")) { continue; }
+        let task = candidate.and_then(|(position, kind)| {
+            if !enabled(kind, &config.ai) || !model_ready(&config, kind) { return None; }
+            match claim(&db, kind, &owner) {
+                Ok(Some(task)) => { turn = (position + 1) % KINDS.len(); Some(task) }
+                Ok(None) => None,
+                Err(error) => { log::warn!("索引认领失败: {error}"); None }
             }
-        }
-        if let Some(task) = task {
-            if inference.is_some() {
-                // Reserve the session's native CPU threads, including GPU fallback.
-                // Release the source barrier before waiting for a larger permit.
-                drop(guard);
-                drop(permit);
-                permit =
-                    crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image)
-                        .acquire(ModelManager::embed_intra_threads());
-                guard = barrier.read().expect("index barrier poisoned");
-                config = queue.config.lock().expect("index config poisoned").clone();
+        });
+        if let (Some(task), Some(permit)) = (task, admission) {
+            if matches!(task.kind.as_str(), "ai" | "face" | "eyes") {
                 let revision: String =
                     db.0.query_row(
                         "SELECT settings_key FROM index_task_context WHERE task_id=?1",
@@ -532,17 +529,9 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                 continue;
             }
             let mut batch = vec![task];
-            if batch[0].kind == "ai"
-                && config.manager.as_ref().is_some_and(|manager| {
-                    crate::ai::prefer_batch_inference(
-                        manager.ai_params().use_gpu,
-                        crate::ai::semantic_model_ids(manager.ai_params().quality_tier)[0],
-                    )
-                })
-            {
-                let pixels = usize::from(config.ai.embed_input_size).pow(2) * 3 * 4;
-                let cap =
-                    (32 * 1024 * 1024 / pixels.max(1)).clamp(1, crate::ai::semantic::AI_BATCH);
+            if batch[0].kind == "ai" {
+                // 每张认领的照片都占一个计算配额，不能用批量认领绕过并发上限。
+                let cap = semantic_batch_capacity(&config).min(permit.count);
                 while batch.len() < cap {
                     match claim(&db, "ai", &owner) {
                         Ok(Some(task)) => batch.push(task),
@@ -660,7 +649,6 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
             }
         }
         drop(guard);
-        drop(permit);
         let signal = queue.signal.lock().expect("index signal poisoned");
         let _ = queue
             .ready
@@ -819,6 +807,24 @@ pub fn pause(path: &Path, pool: &str, paused: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_semantic_batches_claim_multiple_photos_within_reserved_capacity() {
+        for capacity in [1, 2, 3, 8] {
+            let (_dir, db, config) = fixture(8);
+            db.0.execute("UPDATE index_channels SET enabled=1 WHERE kind='ai'", []).unwrap();
+            reconcile(&db, &config).unwrap();
+            db.0.execute("UPDATE index_tasks SET state='done' WHERE kind='thumb'", []).unwrap();
+            assert!(claimable(&db, "ai"));
+            let gate = Arc::new(crate::tasks::index_budget::Budget::new(capacity));
+            let permit = gate.acquire(compute_cost("ai", &config));
+            let count = semantic_batch_capacity(&config).min(permit.count);
+            for _ in 0..count { assert!(claim(&db, "ai", "cpu-batch").unwrap().is_some()); }
+            let running: usize = db.0.query_row("SELECT COUNT(*) FROM index_tasks WHERE kind='ai' AND state='running'", [], |row| row.get(0)).unwrap();
+            assert_eq!(running, capacity.min(6));
+            assert!(running <= permit.count);
+        }
+    }
 
     #[test]
     fn ai_feature_combinations_schedule_only_selected_channels() {

@@ -105,11 +105,8 @@ impl ModelManager {
     /// 表现为索引"在跑但极慢"）。搜索单查询用同会话，核心数/4 对 256px
     /// 小模型延迟足够。
     pub(crate) fn embed_intra_threads() -> usize {
-        (std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            / 4)
-        .clamp(1, 8)
+        // 留出其他照片的预处理、检测和索引写入配额；避免单次 Run 吃满池。
+        (crate::tasks::index_parallelism() / 4).clamp(1, 2)
     }
 
     /// 惰性加载 vision 会话（模型按当前档位解析 int8/fp16；切档后
