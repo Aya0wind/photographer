@@ -61,7 +61,7 @@ impl Gpu {
         compositor.set_health(health.clone());
         compositor.set_texture_limit(device.limits().max_texture_dimension_2d);
         compositor.set_memory_budget(MEMORY_BUDGET);
-        eprintln!(
+        log::warn!(
             "[editor GPU] {} ({:?}), cache budget 256 MiB",
             info.name, info.backend
         );
@@ -145,7 +145,7 @@ fn start() -> Worker {
                 let (result, unsupported) = process(&mut gpu, &request);
                 if let Err(reason) = &result {
                     // 文档支持检查失败可仅回退本次；初始化/运行故障永久隔离。
-                    eprintln!("[editor GPU] CPU fallback: {reason}");
+                    log::warn!("[editor GPU] CPU fallback: {reason}");
                     if !unsupported {
                         stopped.store(true, Ordering::Release);
                     }
@@ -157,7 +157,7 @@ fn start() -> Worker {
             }
         });
     if let Err(error) = spawned {
-        eprintln!("[editor GPU] CPU fallback: {error}");
+        log::warn!("[editor GPU] CPU fallback: {error}");
         disabled.store(true, Ordering::Release);
     }
     Worker {
@@ -204,7 +204,7 @@ pub(super) fn composite(doc: &Document) -> Option<Surface> {
             Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => return None,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 worker.disabled.store(true, Ordering::Release);
-                eprintln!(
+                log::warn!(
                     "[editor GPU] CPU fallback: GPU stalled for 30s; disabled for this process"
                 );
                 return None;

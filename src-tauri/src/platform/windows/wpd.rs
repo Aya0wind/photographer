@@ -564,7 +564,7 @@ pub(crate) mod com {
         }
         // 「要么完整要么报错」：中途错误已整体上抛；此处只剩受限对象计数
         if skipped > 0 {
-            eprintln!(
+            log::warn!(
                 "WPD 枚举跳过 {skipped} 个受限/无名对象（访问被拒或缺基本属性，                 如播放列表/系统对象），其余完整返回"
             );
         }
@@ -648,7 +648,7 @@ pub(crate) mod com {
     ) -> DeviceResult<()> {
         super::super::timed_worker::checkpoint()?;
         if depth > MAX_DEPTH {
-            eprintln!("WPD 枚举达到深度上限 {MAX_DEPTH}，截断该子树（防御异常设备）");
+            log::warn!("WPD 枚举达到深度上限 {MAX_DEPTH}，截断该子树（防御异常设备）");
             return Ok(());
         }
         // SAFETY: folder 为有效对象 ID；无过滤条件（None = 全部子对象）

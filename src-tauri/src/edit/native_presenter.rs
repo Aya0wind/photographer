@@ -133,7 +133,7 @@ impl Presenter {
         let health = DeviceHealth::watch(&device);
         let watch = health.clone();
         device.on_uncaptured_error(std::sync::Arc::new(move |error| {
-            eprintln!("[editor native GPU] {error:?}");
+            log::warn!("[editor native GPU] {error:?}");
             watch.mark(photocraft_gpu::Fault::Error(format!("{error:?}")));
         }));
         let mut config = surface
@@ -246,7 +246,7 @@ impl Presenter {
         queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&annotation,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},&[0u8;8],wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(8),rows_per_image:Some(1)},wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1});
         let mask_overlay=device.create_texture(&wgpu::TextureDescriptor{label:Some("mask overlay placeholder"),size:wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1},mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Rgba16Float,usage:wgpu::TextureUsages::COPY_DST|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[]});
         queue.write_texture(wgpu::TexelCopyTextureInfo{texture:&mask_overlay,mip_level:0,origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All},&[0u8;8],wgpu::TexelCopyBufferLayout{offset:0,bytes_per_row:Some(8),rows_per_image:Some(1)},wgpu::Extent3d{width:1,height:1,depth_or_array_layers:1});
-        eprintln!(
+        log::warn!(
             "[editor native] {}: direct GPU display, no pixel readback",
             adapter.get_info().name
         );

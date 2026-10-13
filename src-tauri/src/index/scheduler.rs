@@ -125,7 +125,7 @@ pub fn configure(path: &Path, manager: &ModelManager, bus: &EventBus, ai: &AiSet
             );
         }
         if let Err(error) = reconcile(&db, &queue.config.lock().expect("index config poisoned")) {
-            eprintln!("索引目标对账失败: {error}");
+            log::warn!("索引目标对账失败: {error}");
         }
     }
     notify(path);
@@ -354,6 +354,13 @@ fn finish(db: &Db, task: &IndexTaskRow, owner: &str, ok: bool) -> rusqlite::Resu
         } else {
             "pending"
         };
+        if !ok {
+            log::warn!(
+                "索引处理失败 kind={} asset={} attempt={attempts} state={state}",
+                task.kind,
+                task.asset_id
+            );
+        }
         tx.execute(
             "UPDATE index_tasks SET state=?2,attempts=?3,updated_at=?4 WHERE id=?1",
             params![task.id, state, attempts, crate::db::now_rfc3339()],
@@ -415,7 +422,7 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                 let _guard = barrier.read().expect("index reconciliation poisoned");
                 let config = queue.config.lock().expect("index config poisoned").clone();
                 if let Err(error) = reconcile(&db, &config) {
-                    eprintln!("索引对账失败: {error}");
+                    log::warn!("索引对账失败: {error}");
                 }
                 *reconciled = std::time::Instant::now();
             }
@@ -448,7 +455,7 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                     }
                     Err(error) => {
                         inference.take();
-                        eprintln!("索引认领失败: {error}");
+                        log::warn!("索引认领失败: {error}");
                         break;
                     }
                 }
@@ -551,7 +558,7 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
             let completed = results.iter().filter(|ok| **ok).count() as u64;
             for (task, ok) in batch.iter().zip(results) {
                 if let Err(error) = finish(&db, task, &owner, ok) {
-                    eprintln!("索引结算失败（保留 running 供恢复）: {error}");
+                    log::warn!("索引结算失败（保留 running 供恢复）: {error}");
                     return;
                 }
                 if ok && matches!(task.kind.as_str(), "exif" | "phash") {
@@ -609,7 +616,7 @@ fn worker(path: &Path, queue: &Queue, controls: &TaskControls, offset: usize) {
                         queue
                             .aggregates_dirty
                             .store(true, std::sync::atomic::Ordering::SeqCst);
-                        eprintln!("连拍重组失败: {error}");
+                        log::warn!("连拍重组失败: {error}");
                     }
                 }
             }

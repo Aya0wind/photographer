@@ -1257,7 +1257,7 @@ impl Engine {
             self.plan.album_id,
             self.plan.album_subgroup.as_deref(),
         ) {
-            eprintln!(
+            log::warn!(
                 "入库失败（文件已落盘不回滚）: {}: {err}",
                 final_dst.display()
             );

@@ -218,7 +218,7 @@ pub(crate) fn process_ai_batch(
     let mut thumb_failed = vec![false; asset_ids.len()];
     for &(i, path) in &alive {
         if crate::thumbs::thumb_file(db_dir, Path::new(path), 256).is_none() {
-            eprintln!(
+            log::warn!(
                 "语义索引失败 asset_id={}: 缩略图生成失败: {path}",
                 asset_ids[i]
             );
@@ -245,12 +245,12 @@ pub(crate) fn process_ai_batch(
             }
             Err(batch_err) => {
                 // 批失败降级逐图：隔离坏图（解码失败等），其余照常产出向量
-                eprintln!("语义批推理失败，降级逐图: {batch_err}");
+                log::warn!("语义批推理失败，降级逐图: {batch_err}");
                 for &(i, p) in &embeddable {
                     vectors[i] = embedder
                         .embed_image(Path::new(p), db_dir)
                         .map_err(|e| {
-                            eprintln!("语义嵌入失败 asset_id={}: {e}", asset_ids[i]);
+                            log::warn!("语义嵌入失败 asset_id={}: {e}", asset_ids[i]);
                             e
                         })
                         .ok();
@@ -295,14 +295,14 @@ pub fn run_semantic_backfill(
     vision_model: &str,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
-        eprintln!("语义回填：库打开失败（{}），本轮跳过", db_dir.display());
+        log::warn!("语义回填：库打开失败（{}），本轮跳过", db_dir.display());
         return 0;
     };
     // 补种只做幂等兜底；派 worker 与否看存量 pending（修复：此前以「本轮
     // 新建数」为闸——任务已存在时（重复 kick/启动恢复）新建数为 0，worker
     // 从不派出，119 条存量 pending 永远无人消费，点击立即索引假成功）。
     if let Err(e) = db.create_ai_tasks_for_unindexed() {
-        eprintln!("语义回填：补种任务失败: {e}");
+        log::warn!("语义回填：补种任务失败: {e}");
     }
     let pending = db.pending_index_task_count("ai").unwrap_or(0);
     if pending == 0 {
@@ -348,7 +348,7 @@ pub fn run_semantic_backfill(
                         let tasks = match db.claim_index_tasks("ai", batch_size) {
                             Ok(t) => t,
                             Err(e) => {
-                                eprintln!("语义回填：认领任务失败，worker 退出: {e}");
+                                log::warn!("语义回填：认领任务失败，worker 退出: {e}");
                                 break;
                             }
                         };
@@ -359,7 +359,7 @@ pub fn run_semantic_backfill(
                         let results = process_ai_batch(&db, &db_dir, &*embedder, &asset_ids);
                         for (task, result) in tasks.iter().zip(&results) {
                             if let Err(error) = result {
-                                eprintln!("语义索引失败 asset_id={}: {error}", task.asset_id);
+                                log::warn!("语义索引失败 asset_id={}: {error}", task.asset_id);
                             }
                             let ok = result.is_ok();
                             let _ = db.finish_index_task(task.id, ok);

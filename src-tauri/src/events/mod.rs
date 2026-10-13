@@ -465,7 +465,7 @@ fn forward_once(
     emit(&event);
     *forwarded += 1;
     if forwarded.is_multiple_of(100) {
-        eprintln!("事件转发已启动并转发 {forwarded} 条（活性心跳）");
+        log::debug!("事件转发已启动并转发 {forwarded} 条（活性心跳）");
     }
     true
 }
@@ -483,7 +483,7 @@ fn forward_loop(
                 let _ = forward_once(event, emit, &mut forwarded);
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                eprintln!("事件转发落后被裁剪 {n} 条（继续）");
+                log::warn!("事件转发落后被裁剪 {n} 条（继续）");
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }
@@ -515,7 +515,7 @@ pub fn forward_supervised(
                     "未知 panic 载荷".to_string()
                 };
                 let msg = format!("事件转发器 panic（第 {restarts} 次自恢复）: {detail}");
-                eprintln!("{msg}");
+                log::warn!("{msg}");
                 on_panic(msg);
                 std::thread::sleep(std::time::Duration::from_secs(1)); // 退避，防风暴
             }

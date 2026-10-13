@@ -407,7 +407,7 @@ pub(crate) fn run_with_acceleration_fallback<T>(
             let backend = inference_plan(use_gpu, model).backend;
             if backend != crate::platform::InferenceBackend::Cpu {
                 poison_backend(model, backend);
-                eprintln!(
+                log::warn!(
                     "{backend:?} 推理运行时故障（{model}），该模型本进程回落纯 CPU 并重建会话: {err}"
                 );
                 reset();
@@ -503,7 +503,7 @@ fn build_with_cpu_fallback<T>(
         Err(error) if plan.backend == InferenceBackend::Cpu => Err(error),
         Err(acceleration_error) => {
             poison_backend(model_label, plan.backend);
-            eprintln!(
+            log::warn!(
                 "{:?} 模型初始化失败（{model_label}），尝试 CPU: {acceleration_error}",
                 plan.backend
             );
@@ -852,6 +852,7 @@ impl ModelManager {
             .remove(&entry.id);
         let mgr = self.clone();
         let id = entry.id.clone();
+        log::info!("模型下载开始 model={id} bytes={}", entry.bytes_total);
         self.supervisor
             .spawn("ai-model", format!("download-{id}"), move |_| {
                 let outcome = mgr.run_download(&entry);
@@ -905,12 +906,17 @@ impl ModelManager {
             .expect("ai active mutex poisoned")
             .remove(id);
         let (ok, error) = match outcome {
-            DownloadOutcome::Installed => (true, None),
+            DownloadOutcome::Installed => {
+                log::info!("模型下载完成并通过校验 model={id}");
+                (true, None)
+            }
             DownloadOutcome::Cancelled => {
+                log::info!("模型下载取消 model={id}");
                 // 不登记 failed：前端刷新快照后回 idle
                 (false, Some("下载已取消".into()))
             }
             DownloadOutcome::Failed(err) => {
+                log::warn!("模型下载失败 model={id}: {err}");
                 self.failed
                     .lock()
                     .expect("ai failed mutex poisoned")
@@ -953,6 +959,7 @@ impl ModelManager {
                     let _ = fs::remove_file(&part);
                     return DownloadOutcome::Cancelled;
                 }
+                log::info!("模型下载尝试 model={} source={source}", entry.id);
                 match fetch_source(source, &part, entry, &active, &self.bus) {
                     FetchOutcome::Installed => return DownloadOutcome::Installed,
                     FetchOutcome::Cancelled => {
@@ -960,6 +967,7 @@ impl ModelManager {
                         return DownloadOutcome::Cancelled;
                     }
                     FetchOutcome::ShaMismatch => {
+                        log::warn!("模型 SHA256 校验失败 model={}，清理下载并重试", entry.id);
                         let _ = fs::remove_file(&part); // 校验失败不留脏
                         sha_mismatch_this_round = true;
                         break; // 本轮作废（.part 已删），整源重来
@@ -1022,7 +1030,14 @@ fn fetch_source(
         .call();
     let response = match request {
         Ok(resp) if resp.status() == 200 || resp.status() == 206 => resp,
-        _ => return FetchOutcome::Failed,
+        Ok(resp) => {
+            log::warn!("模型下载 HTTP 状态异常 model={} status={}", entry.id, resp.status());
+            return FetchOutcome::Failed;
+        }
+        Err(error) => {
+            log::warn!("模型下载请求失败 model={}: {error}", entry.id);
+            return FetchOutcome::Failed;
+        }
     };
     let append = response.status() == 206 && resume > 0;
     let file = if append {
@@ -1033,7 +1048,10 @@ fn fetch_source(
     };
     let mut file = match file {
         Ok(f) => f,
-        Err(_) => return FetchOutcome::Failed,
+        Err(error) => {
+            log::warn!("模型下载无法打开临时文件 model={}: {error}", entry.id);
+            return FetchOutcome::Failed;
+        }
     };
     let mut reader = response.into_reader();
     let mut buf = vec![0u8; CHUNK];
@@ -1043,7 +1061,8 @@ fn fetch_source(
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if file.write_all(&buf[..n]).is_err() {
+                if let Err(error) = file.write_all(&buf[..n]) {
+                    log::warn!("模型下载写盘失败 model={}: {error}", entry.id);
                     return FetchOutcome::Failed;
                 }
                 written += n as u64;
@@ -1059,10 +1078,14 @@ fn fetch_source(
                     });
                 }
             }
-            Err(_) => return FetchOutcome::Failed, // 中断：保留 .part 续传
+            Err(error) => {
+                log::warn!("模型下载读取中断 model={} bytes={written}: {error}", entry.id);
+                return FetchOutcome::Failed; // 保留 .part 续传
+            }
         }
     }
     if file.flush().is_err() || written != entry.bytes_total {
+        log::warn!("模型下载未完整落盘 model={} bytes={written}/{}", entry.id, entry.bytes_total);
         return FetchOutcome::Failed; // 短读（连接被掐）：保留 .part
     }
     // 校验阶段
@@ -1072,7 +1095,8 @@ fn fetch_source(
         return FetchOutcome::ShaMismatch;
     }
     let final_path = part.with_extension(""); // <id>.onnx.part → <id>.onnx
-    if fs::rename(part, &final_path).is_err() {
+    if let Err(error) = fs::rename(part, &final_path) {
+        log::warn!("模型下载最终落位失败 model={}: {error}", entry.id);
         return FetchOutcome::Failed;
     }
     FetchOutcome::Installed

@@ -506,15 +506,15 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
         return Vec::new();
     }
     let Ok(db_dir) = super::app_database_dir(state) else {
-        eprintln!("[library-scan] 数据库不可用，跳过本轮");
+        log::warn!("[library-scan] 数据库不可用，跳过本轮");
         return Vec::new();
     };
     let Ok(db) = super::open_library_db(&db_dir) else {
-        eprintln!("[library-scan] 数据库不可用，跳过本轮");
+        log::warn!("[library-scan] 数据库不可用，跳过本轮");
         return Vec::new();
     };
     let Ok(libraries) = db.photos_library_list() else {
-        eprintln!("[library-scan] 照片库登记表不可读，跳过本轮");
+        log::warn!("[library-scan] 照片库登记表不可读，跳过本轮");
         return Vec::new();
     };
     let gate = std::sync::Arc::clone(&state.register_gate);
@@ -538,7 +538,7 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
                 registered_total += report.registered;
                 out.push((library.id.clone(), report));
             }
-            Err(error) => eprintln!("[library-scan] 库「{}」扫描失败: {error}", library.name),
+            Err(error) => log::warn!("[library-scan] 库「{}」扫描失败: {error}", library.name),
         }
     }
     // 收尾索引唤醒（审计 P0 断链A）：本轮有新登记才 kick（零动作轮不打扰）
@@ -562,7 +562,7 @@ pub fn spawn_library_scan_worker(
             // 互斥由 register_gate 保证，§八-5）
             run_pending_batch_jobs(&state);
             for (library_id, report) in scan_all_libraries_once(&state) {
-                eprintln!(
+                log::info!(
                     "[library-scan] {library_id}: 登记 {} 跳过 {} 重绑 {} 恢复 {} 重算 {} 标缺 {} 边车 {}",
                     report.registered,
                     report.skipped_event_total(),
@@ -648,15 +648,15 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
         return;
     }
     let Ok(db_dir) = super::app_database_dir(state) else {
-        eprintln!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
+        log::warn!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
         return;
     };
     let Ok(db) = super::open_library_db(&db_dir) else {
-        eprintln!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
+        log::warn!("[library-scan] 数据库不可用，批量登记任务本轮跳过");
         return;
     };
     let Ok(jobs) = db.library_scan_jobs_pickup() else {
-        eprintln!("[library-scan] 批量登记任务表不可读，本轮跳过");
+        log::warn!("[library-scan] 批量登记任务表不可读，本轮跳过");
         return;
     };
     let gate = std::sync::Arc::clone(&state.register_gate);
@@ -745,7 +745,7 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
                         let _ = db.library_scan_job_requeue(&job.library_id);
                     }
                 }
-                eprintln!(
+                log::warn!(
                     "[library-scan] 批量登记「{}」: {:?}（登记 {} 跳过 {}）",
                     library.name, run.outcome, registered, skipped
                 );
@@ -760,7 +760,7 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
                     job.skipped,
                     Some(&error),
                 );
-                eprintln!("[library-scan] 批量登记「{}」失败: {error}", library.name);
+                log::warn!("[library-scan] 批量登记「{}」失败: {error}", library.name);
             }
         }
     }

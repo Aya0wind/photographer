@@ -514,13 +514,13 @@ pub fn app_db_dir(state: &super::AppState) -> Result<std::path::PathBuf, String>
 /// kick 对应 worker。
 pub fn run_rebuild(state: &super::AppState, db_dir: &std::path::Path, kind: &str) {
     let Ok(db) = super::open_library_db(db_dir) else {
-        eprintln!("[rebuild] 库不可用: {}", db_dir.display());
+        log::warn!("[rebuild] 库不可用: {}", db_dir.display());
         return;
     };
     match rebuild_channel_core(&db, db_dir, kind) {
         Ok(pending) => kick_rebuilt_channel(state, db_dir.to_path_buf(), kind, pending),
         Err(error) => {
-            eprintln!("[rebuild] {kind} 重建失败: {error}");
+            log::warn!("[rebuild] {kind} 重建失败: {error}");
             state.bus.publish(crate::events::AppEvent::AppError {
                 level: "error".into(),
                 message: format!("索引重建失败（{kind}）：{error}"),

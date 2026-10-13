@@ -59,7 +59,7 @@ pub fn start_if_supported(bus: crate::events::EventBus) -> Option<HotplugHandle>
     match spawn_hotplug_thread(bus) {
         Ok(handle) => Some(handle),
         Err(error) => {
-            eprintln!("热插拔监视启动失败: {error}");
+            log::warn!("热插拔监视启动失败: {error}");
             None
         }
     }

@@ -3,7 +3,7 @@
 //! 所有长活后台操作（设备扫描、导入引擎、未来的清卡/缩略图/AI）统一经
 //! [`TaskSupervisor::spawn`] 派发，获得：
 //!
-//! - **panic 捕获**：任务体 panic 被 `catch_unwind` 拦下——`eprintln!` 带
+//! - **panic 捕获**：任务体 panic 被 `catch_unwind` 拦下——`log::error!` 带
 //!   任务 kind/name 上下文 + 发布 [`AppEvent::AppError`]，进程绝不因子
 //!   线程 panic 无声死亡（2026-09-18 真机教训：闪退无任何输出）。
 //! - **线程统一命名**：`task-{kind}`（崩溃转储/日志可辨识）。
@@ -306,7 +306,7 @@ impl TaskSupervisor {
                 if let Err(payload) = outcome {
                     // 子线程 panic 绝不带崩进程：日志 + appError 事件（带任务上下文）
                     let detail = panic_message(&payload);
-                    eprintln!("后台任务 panic（task-{kind}/{log_name}）: {detail}");
+                    log::error!("后台任务 panic（task-{kind}/{log_name}）: {detail}");
                     bus.publish(AppEvent::AppError {
                         level: "error".into(),
                         message: format!("后台任务 {kind}/{log_name} 崩溃: {detail}"),
@@ -321,7 +321,7 @@ impl TaskSupervisor {
                 .lock()
                 .expect("supervisor running mutex poisoned")
                 .remove(&id);
-            eprintln!("后台任务线程启动失败（task-{kind}/{name}）: {err}");
+            log::error!("后台任务线程启动失败（task-{kind}/{name}）: {err}");
             self.bus.publish(AppEvent::AppError {
                 level: "error".into(),
                 message: format!("后台任务 {kind}/{name} 无法启动: {err}"),

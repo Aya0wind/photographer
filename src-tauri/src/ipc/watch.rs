@@ -106,11 +106,11 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
     let mut started = Vec::new();
     for folder in folders {
         if !Path::new(&folder).is_dir() {
-            eprintln!("[watch] 目录不可用，跳过本轮: {folder}");
+            log::warn!("[watch] 目录不可用，跳过本轮: {folder}");
             continue;
         }
         let Ok(source) = LocalFolderSource::new(&folder) else {
-            eprintln!("[watch] 打开监视目录失败: {folder}");
+            log::warn!("[watch] 打开监视目录失败: {folder}");
             continue;
         };
         let source: std::sync::Arc<dyn DeviceSource> = std::sync::Arc::new(source);
@@ -139,15 +139,15 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
         // 相册资产众数归属（tethering::session::resolve_tether_library），
         // 维持首库；M4 起按库内监视配置细化；无库跳过本轮）
         let Ok(db) = super::app_database_db(state) else {
-            eprintln!("[watch] 数据库不可用，跳过本轮");
+            log::warn!("[watch] 数据库不可用，跳过本轮");
             continue;
         };
         let Ok(library) = db.photos_library_list() else {
-            eprintln!("[watch] 照片库登记表不可读，跳过本轮");
+            log::warn!("[watch] 照片库登记表不可读，跳过本轮");
             continue;
         };
         let Some(library) = library.into_iter().next() else {
-            eprintln!("[watch] 尚未建立照片库，跳过本轮");
+            log::warn!("[watch] 尚未建立照片库，跳过本轮");
             continue;
         };
         // 新文件预检：0 新文件不建任务（防空任务刷屏）
@@ -181,10 +181,10 @@ pub fn poll_once(state: &super::AppState) -> Vec<(String, u64)> {
         };
         match super::start_import(state, plan) {
             Ok(_job_id) => {
-                eprintln!("[watch] {folder}: {new_files} 个新文件自动入册");
+                log::warn!("[watch] {folder}: {new_files} 个新文件自动入册");
                 started.push((folder, new_files));
             }
-            Err(error) => eprintln!("[watch] 自动入册发起失败（下轮重试）: {error}"),
+            Err(error) => log::warn!("[watch] 自动入册发起失败（下轮重试）: {error}"),
         }
     }
     started

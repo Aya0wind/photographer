@@ -97,7 +97,7 @@ mod win {
                 control.window.store(0, Ordering::SeqCst);
                 return;
             }
-            eprintln!("热插拔窗口已启动（卷广播 + WPD 接口通知/轮询）");
+            log::info!("热插拔窗口已启动（卷广播 + WPD 接口通知/轮询）");
             let mut msg = MSG::default();
             loop {
                 // SAFETY: msg 为本帧合法栈变量
@@ -114,7 +114,7 @@ mod win {
             cleanup(hwnd, notifies);
             control.window.store(0, Ordering::SeqCst);
         } else {
-            eprintln!("热插拔监听启动失败：窗口创建/设备通知注册失败，插拔事件将不可用");
+            log::warn!("热插拔监听启动失败：窗口创建/设备通知注册失败，插拔事件将不可用");
         }
         BUS.with(|b| *b.borrow_mut() = None);
     }
@@ -180,7 +180,7 @@ mod win {
         }
 
         if notifies.is_empty() {
-            eprintln!("WPD 接口通知注册失败，将使用周期枚举；卷广播仍可用");
+            log::warn!("WPD 接口通知注册失败，将使用周期枚举；卷广播仍可用");
         }
         Some((hwnd, notifies))
     }
@@ -249,7 +249,7 @@ mod win {
                 let drives = unitmask_to_drives(vol.dbcv_unitmask);
                 let is_net = vol.dbcv_flags.0 & DBTF_NET != 0;
                 // 每个 DBT 事件一行日志（真机排查到达/移除倒置问题）
-                eprintln!("DBT 事件: {ev_name} 卷 {drives:?}（net={is_net}）");
+                log::info!("DBT 事件: {ev_name} 卷 {drives:?}（net={is_net}）");
                 if is_net {
                     return; // 网络卷忽略
                 }
@@ -274,7 +274,7 @@ mod win {
                     return;
                 }
                 // 每个 DBT 事件一行日志（真机排查到达/移除倒置问题）
-                eprintln!("DBT 事件: {ev_name} WPD 接口 {path}");
+                log::info!("DBT 事件: {ev_name} WPD 接口 {path}");
                 let name = pnp_display_name(&path);
                 publish(event, SourceKind::Mtp, path, name);
             }

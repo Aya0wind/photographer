@@ -164,7 +164,7 @@ fn fetch_export_in_library(
             format!("job-{job_id}"),
             move |_| match crate::ipc::open_library_db(&db_dir) {
                 Ok(worker_db) => export::run_export_job(worker_db, &bus, request),
-                Err(error) => eprintln!("导出任务 {job_id} 无法打开库: {error}"),
+                Err(error) => log::warn!("导出任务 {job_id} 无法打开库: {error}"),
             },
         );
     db.export_job_get(job_id)

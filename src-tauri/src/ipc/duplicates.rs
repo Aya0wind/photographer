@@ -77,7 +77,7 @@ fn fetch_duplicates_similar_core(
     let mut uf = UnionFind::new(rows.iter().map(|r| r.0).collect());
     for (_key, members) in db.similar_bucket_members().map_err(|e| e.to_string())? {
         if members.len() > BUCKET_MEMBER_CAP {
-            eprintln!(
+            log::warn!(
                 "[duplicates] 桶 {:?} 成员 {} 超上限，跳过（病态哈希堆）",
                 _key,
                 members.len()

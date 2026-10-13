@@ -1222,7 +1222,7 @@ fn face_stage1_loop(
                 continue;
             }
             Err(e) => {
-                eprintln!("人脸回填：认领任务失败，worker 退出: {e}");
+                log::warn!("人脸回填：认领任务失败，worker 退出: {e}");
                 gate.settle_one();
                 break;
             }
@@ -1232,7 +1232,7 @@ fn face_stage1_loop(
         })) {
             Ok(p) => p,
             Err(_) => {
-                eprintln!(
+                log::warn!(
                     "人脸回填：任务 asset_id={} 处理 panic，按失败回收",
                     task.asset_id
                 );
@@ -1301,11 +1301,11 @@ pub fn run_face_backfill_with(
     infer: FaceInfer,
 ) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
-        eprintln!("人脸回填：库打开失败（{}），本轮跳过", db_dir.display());
+        log::warn!("人脸回填：库打开失败（{}），本轮跳过", db_dir.display());
         return 0;
     };
     if let Err(e) = db.create_face_tasks_for_unindexed() {
-        eprintln!("人脸回填：补种任务失败: {e}");
+        log::warn!("人脸回填：补种任务失败: {e}");
     }
     let total = db.pending_index_task_count("face").unwrap_or(0);
     if total == 0 {
@@ -1329,7 +1329,7 @@ pub fn run_face_backfill_with(
                 face_stage1_loop(&worker_db, &infer, tx, &gate);
             }) {
             Ok(h) => handles.push(h),
-            Err(e) => eprintln!("人脸回填：worker{n} 派生失败: {e}"),
+            Err(e) => log::warn!("人脸回填：worker{n} 派生失败: {e}"),
         }
     }
     drop(tx); // 全部 worker 退出（sender 清空）后消费循环自然收敛

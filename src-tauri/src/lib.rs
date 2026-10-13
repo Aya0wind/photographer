@@ -57,7 +57,40 @@ pub fn run() {
             // Keep dev's Windows rename; macOS and smoke bundles retain their
             // own configuration namespace and never move another app's data.
             settings::config_directory::prepare(&config_dir)?;
-            devices::diagnostics::init(&config_dir);
+            // One application log across restarts: 8 MiB per file, five archives.
+            // Folder is explicit because LogDir uses LocalAppData on Windows.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::new()
+                    .level(log::LevelFilter::Warn)
+                    .level_for("photographer_lib", log::LevelFilter::Info)
+                    .level_for("photographer", log::LevelFilter::Info)
+                    .targets([tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::Folder {
+                            path: config_dir.join("log"),
+                            file_name: Some("photographer".into()),
+                        },
+                    )])
+                    .max_file_size(8 * 1024 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                    .format(|out, message, record| {
+                        out.finish(format_args!(
+                            "{} [{}] [{}] [{}] {}",
+                            chrono::Local::now().to_rfc3339(),
+                            record.level(),
+                            std::thread::current().name().unwrap_or("unnamed"),
+                            record.target(),
+                            message
+                        ))
+                    })
+                    .build(),
+            )?;
+            let previous_panic_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                log::error!(target: "photographer::panic", "{info}");
+                log::logger().flush();
+                previous_panic_hook(info);
+            }));
+            log::info!("应用启动 version={}", env!("CARGO_PKG_VERSION"));
             edit::lut::init(&config_dir);
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
             // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
@@ -90,7 +123,7 @@ pub fn run() {
             // 全量单文件 → 全局/库级两层），再按激活库合成偏好快照；无
             // 数据库（首次启动引导前）= 七组偏好全默认合成，不报错。
             let settings = SettingsManager::load_composed(&config_dir).unwrap_or_else(|err| {
-                eprintln!("failed to load settings, falling back to defaults: {err}");
+                log::warn!("failed to load settings, falling back to defaults: {err}");
                 Settings::default()
             });
             // 激活数据库目录（多数据库修正，按 activeDatabaseId 解析）：
@@ -180,10 +213,10 @@ pub fn run() {
                             match db.reap_orphan_import_jobs() {
                                 Ok(reaped) => {
                                     for id in reaped {
-                                        eprintln!("启动自愈：孤儿导入任务 {id} 已终老为 cancelled");
+                                        log::info!("启动自愈：孤儿导入任务 {id} 已终老为 cancelled");
                                     }
                                 }
-                                Err(e) => eprintln!("启动自愈：孤儿任务清理失败: {e}"),
+                                Err(e) => log::warn!("启动自愈：孤儿任务清理失败: {e}"),
                             }
                         }
                     });
@@ -495,7 +528,7 @@ fn spawn_event_forwarder(
     let mut rx = bus.subscribe(); // setup 线程内同步订阅：先于一切发布
     let emit_app = app.clone();
     let report_bus = bus.clone();
-    eprintln!("事件转发已启动（app://event 通道就绪）");
+    log::info!("事件转发已启动（app://event 通道就绪）");
     supervisor.spawn("event-forward", "app://event 转发".into(), move |_| {
         let emit: std::sync::Arc<dyn Fn(&AppEvent) + Send + Sync> =
             std::sync::Arc::new(move |event| {

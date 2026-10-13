@@ -254,7 +254,7 @@ pub fn kick_startup_evict(db_dir: PathBuf) {
         .spawn(move || {
             let (deleted, freed) = evict_lru(&db_dir, cap, EVICT_MIN_AGE_SECS, SystemTime::now());
             if deleted > 0 {
-                eprintln!("[thumbs] LRU 启动清理：删 {deleted} 个缓存，释放 {freed} 字节");
+                log::warn!("[thumbs] LRU 启动清理：删 {deleted} 个缓存，释放 {freed} 字节");
             }
         })
         .ok();

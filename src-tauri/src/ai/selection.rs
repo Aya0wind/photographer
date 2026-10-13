@@ -692,7 +692,7 @@ fn run_eyes_backfill_gated(
         // 模型未收录/未就绪：跳过并计数（pending 不动，不空转处理）
         let pending = db.pending_index_task_count("eyes").unwrap_or(0);
         if pending > 0 {
-            eprintln!("闭眼通道：眼部状态模型未收录，{pending} 条任务保持 pending 跳过");
+            log::warn!("闭眼通道：眼部状态模型未收录，{pending} 条任务保持 pending 跳过");
         }
         return 0;
     }
@@ -754,7 +754,7 @@ fn run_eyes_worker(
         })) {
             Ok(ok) => ok,
             Err(_) => {
-                eprintln!(
+                log::warn!(
                     "闭眼回填：任务 asset_id={} 处理 panic，按失败回收",
                     task.asset_id
                 );

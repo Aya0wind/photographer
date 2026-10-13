@@ -930,7 +930,7 @@ mod com {
             let (response, bytes) = execute_with_data_to_read(&device, 0x1001, &[]).unwrap();
             assert_eq!(response, 0x2001);
             let info = mtp::parse_device_info(&bytes).unwrap();
-            eprintln!("Native MTP GetObjectPropList supported: {}; operations={:x?}", info.operations_supported.contains(&0x9805), info.operations_supported);
+            log::warn!("Native MTP GetObjectPropList supported: {}; operations={:x?}", info.operations_supported.contains(&0x9805), info.operations_supported);
             for format in [0u32, 0x3001, 0x3801, 0x3000, 0xb101] {
                 let now = Instant::now();
                 let results = send_command(&device, &WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE, 0x1006, &[u32::MAX, format, 0]).unwrap();
@@ -940,17 +940,17 @@ mod com {
                 unsafe { params.GetAt(0, &mut value as *mut _ as *const _) }.unwrap();
                 let number = unsafe { value.Anonymous.Anonymous.Anonymous.ulVal };
                 let _ = unsafe { PropVariantClear(&mut value) };
-                eprintln!("GetNumObjects format={format:x} response={code:x} count={number} elapsed={:?}", now.elapsed());
+                log::warn!("GetNumObjects format={format:x} response={code:x} count={number} elapsed={:?}", now.elapsed());
             }
             let now = Instant::now();
             let (response, handles) = execute_with_data_limit(&device, 0x1007, &[u32::MAX, 0x3801, 0], 128*1024).unwrap();
-            eprintln!("GetObjectHandles response={response:x} bytes={} elapsed={:?}", handles.len(), now.elapsed());
+            log::warn!("GetObjectHandles response={response:x} bytes={} elapsed={:?}", handles.len(), now.elapsed());
             assert_eq!(response, 0x2001);
             if handles.len() >= 8 {
                 let handle = u32::from_le_bytes(handles[4..8].try_into().unwrap());
                 let now = Instant::now();
                 let (response, data) = execute_with_data_limit(&device, 0x1008, &[handle], 4096).unwrap();
-                eprintln!("GetObjectInfo handle={handle:x} response={response:x} bytes={} elapsed={:?}", data.len(), now.elapsed());
+                log::warn!("GetObjectInfo handle={handle:x} response={response:x} bytes={} elapsed={:?}", data.len(), now.elapsed());
                 assert_eq!(response, 0x2001);
             }
         }
