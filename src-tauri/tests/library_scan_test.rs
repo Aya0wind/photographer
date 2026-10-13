@@ -6,8 +6,8 @@
 mod common;
 
 pub use common::{
-    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform,
-    scan, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, thumbs,
 };
 
 use std::fs;
@@ -93,16 +93,15 @@ fn asset_keywords(db: &db::Db, asset_id: i64) -> Vec<String> {
         #[serde(default)]
         keywords: Vec<String>,
     }
-    db.0
-        .query_row(
-            "SELECT value FROM asset_metadata WHERE asset_id = ?1",
-            [asset_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|text| serde_json::from_str::<KeywordsOnly>(&text).ok())
-        .map(|parsed| parsed.keywords)
-        .unwrap_or_default()
+    db.0.query_row(
+        "SELECT value FROM asset_metadata WHERE asset_id = ?1",
+        [asset_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|text| serde_json::from_str::<KeywordsOnly>(&text).ok())
+    .map(|parsed| parsed.keywords)
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +229,15 @@ fn rebind_after_real_rename_via_file_id_keeps_logic_and_writes_sidecar() {
     assert_eq!(first.missing_marked, 0, "首轮缺席只记账");
     assert_eq!(first.skipped, 1, "新名字先按 file-id 直跳（在线指纹）");
     let report = run(&database, &db_dir, &library.id);
-    assert_eq!(report.rebound, 1, "次轮标缺 + 新位置命中 missing 指纹 → 重绑");
+    assert_eq!(
+        report.rebound, 1,
+        "次轮标缺 + 新位置命中 missing 指纹 → 重绑"
+    );
     let (path, missing, rating, xmp_dirty) = asset_row(&database, id);
-    assert_eq!(path, root.join("2026").join("renamed.jpg").to_string_lossy());
+    assert_eq!(
+        path,
+        root.join("2026").join("renamed.jpg").to_string_lossy()
+    );
     assert_eq!(missing, false);
     assert_eq!(rating, 5, "逻辑元数据保留");
     assert_eq!(xmp_dirty, 0, "边车补写后清标志");
@@ -244,7 +249,7 @@ fn rebind_after_real_rename_via_file_id_keeps_logic_and_writes_sidecar() {
 }
 
 #[test]
-fn rebind_after_copy_via_hash_reuses_thumbnails_by_content() {
+fn rebind_after_copy_with_preserved_metadata_reuses_thumbnails() {
     let (dir, database, library, db_dir) = setup("重绑-copy");
     let root = dir.path().join("photos");
     let a = root.join("a.jpg");
@@ -266,6 +271,18 @@ fn rebind_after_copy_via_hash_reuses_thumbnails_by_content() {
     assert_eq!(asset_row(&database, id).1, true);
     let moved = root.join("moved.jpg");
     fs::write(&moved, jpg(1)).unwrap();
+    let old_mtime: String = database
+        .0
+        .query_row("SELECT mtime FROM assets WHERE id=?1", [id], |r| r.get(0))
+        .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&moved)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(SystemTime::from(
+            chrono::DateTime::parse_from_rfc3339(&old_mtime).unwrap(),
+        )))
+        .unwrap();
 
     let report = run(&database, &db_dir, &library.id);
     assert_eq!(report.rebound, 1);
@@ -338,7 +355,9 @@ fn restore_same_path_new_content_recomputes_index_keeps_logic() {
         .unwrap();
     let old_hash: i64 = database
         .0
-        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     fs::remove_file(&a).unwrap();
@@ -367,9 +386,11 @@ fn restore_same_path_new_content_recomputes_index_keeps_logic() {
     assert_eq!(rating, 4, "逻辑元数据（评分）保留");
     let new_hash: i64 = database
         .0
-        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_ne!(old_hash, new_hash, "内容指纹已按新内容更新");
+    assert_eq!((old_hash, new_hash), (0, 0), "扫描不读取内容计算哈希");
     let (width, thumb_state): (Option<i64>, i64) = database
         .0
         .query_row(
@@ -585,7 +606,9 @@ fn missing_fingerprint_hit_rebinds_without_reading_content() {
     let id = asset_id_by_path(&database, &a.to_string_lossy());
     let registered_hash: i64 = database
         .0
-        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     // 删原件 → 两轮 missing；出现同 (size, mtime) 的复制件（内容不同字节、
@@ -612,10 +635,16 @@ fn missing_fingerprint_hit_rebinds_without_reading_content() {
     let (path, missing, _, _) = asset_row(&database, id);
     assert_eq!(path, copy.to_string_lossy());
     assert_eq!(missing, false);
-    assert_eq!(count_assets(&database), 1, "不产生第二行（未走哈希查重登记）");
+    assert_eq!(
+        count_assets(&database),
+        1,
+        "不产生第二行（未走哈希查重登记）"
+    );
     let hash: i64 = database
         .0
-        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| r.get(0))
+        .query_row("SELECT xxhash FROM assets WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(hash, registered_hash, "内容指纹沿用登记值（零整读）");
 }
@@ -656,7 +685,11 @@ fn presence_changed_event_fires_on_restore_and_rebind() {
     assert_eq!(report.restored, 1);
     let mut presence_ids: Option<Vec<i64>> = None;
     while let Ok(event) = rx.try_recv() {
-        if let events::AppEvent::AssetsPresenceChanged { library_id, asset_ids } = event {
+        if let events::AppEvent::AssetsPresenceChanged {
+            library_id,
+            asset_ids,
+        } = event
+        {
             assert_eq!(library_id, library.id);
             presence_ids = Some(asset_ids);
         }
@@ -796,7 +829,8 @@ fn write_real_jpg(path: &Path, seed: u8) {
 /// 注入口，走生产默认选项）。
 fn backdate(path: &Path) {
     let file = fs::OpenOptions::new().write(true).open(path).unwrap();
-    file.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
 }
 
 #[test]
@@ -856,9 +890,11 @@ fn scan_registration_kicks_index_workers_to_completion() {
     assert_eq!(phash_done, 2, "phash 任务由收尾补差建档并完成");
     let thumb_done: i64 = database
         .0
-        .query_row("SELECT COUNT(*) FROM assets WHERE thumb_state = 1", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE thumb_state = 1",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(thumb_done, 2, "缩略图通道完成");
 }

@@ -104,7 +104,7 @@ impl ModelManager {
     /// semantic::worker_count_for_ai；多 worker × 全核会话会平方级超订阅，
     /// 表现为索引"在跑但极慢"）。搜索单查询用同会话，核心数/4 对 256px
     /// 小模型延迟足够。
-    fn embed_intra_threads() -> usize {
+    pub(crate) fn embed_intra_threads() -> usize {
         (std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -118,7 +118,12 @@ impl ModelManager {
     fn ensure_visual(&self, slots: &mut InferSlots) -> Result<(), String> {
         super::idle::touch();
         let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[0];
-        if slots.visual.is_some() && slots.visual_model.as_deref() == Some(model_id) {
+        let cache_key = format!(
+            "{}:{:?}",
+            self.model_path(model_id).display(),
+            super::inference_plan(self.ai_params().use_gpu, model_id).backend
+        );
+        if slots.visual.is_some() && slots.visual_model.as_deref() == Some(cache_key.as_str()) {
             return Ok(());
         }
         let path = self.model_path(model_id);
@@ -132,7 +137,7 @@ impl ModelManager {
             model_id,
         )?;
         slots.visual = Some(session);
-        slots.visual_model = Some(model_id.to_string());
+        slots.visual_model = Some(cache_key);
         Ok(())
     }
 
@@ -140,7 +145,12 @@ impl ModelManager {
     fn ensure_text(&self, slots: &mut InferSlots) -> Result<(), String> {
         super::idle::touch();
         let model_id = super::semantic_model_ids(self.ai_params().quality_tier)[1];
-        if slots.text.is_none() || slots.text_model.as_deref() != Some(model_id) {
+        let cache_key = format!(
+            "{}:{:?}",
+            self.model_path(model_id).display(),
+            super::inference_plan(self.ai_params().use_gpu, model_id).backend
+        );
+        if slots.text.is_none() || slots.text_model.as_deref() != Some(cache_key.as_str()) {
             let path = self.model_path(model_id);
             if !path.is_file() {
                 return Err(format!("模型 {model_id} 未下载（设置页下载后再试）"));
@@ -152,7 +162,7 @@ impl ModelManager {
                 model_id,
             )?;
             slots.text = Some(session);
-            slots.text_model = Some(model_id.to_string());
+            slots.text_model = Some(cache_key);
         }
         if slots.tokenizer.is_none() {
             let path = self.model_path("siglip2-tokenizer");
@@ -375,8 +385,7 @@ impl SemanticEmbedder for ModelManager {
             let mut slots = slots().lock().expect("infer slots mutex poisoned");
             slots.text = None; // 丢弃 DML 会话：重建走 CPU 分支（毒化位已置）
         };
-        let embedded =
-            super::run_with_acceleration_fallback(use_gpu, text_model, extract, reset)?;
+        let embedded = super::run_with_acceleration_fallback(use_gpu, text_model, extract, reset)?;
         Ok(Self::normalize(embedded))
     }
 }

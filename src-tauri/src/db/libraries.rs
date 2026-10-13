@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Result};
+use rusqlite::{params, Result, OptionalExtension};
 
 use super::{now_rfc3339, strip_root_prefix, Db};
 
@@ -407,6 +407,18 @@ impl Db {
 
     /// 同库同指纹查重的重绑形态（§八-1）：**skip 仅当存在在线同哈希资产**；
     /// 命中 missing 资产 = 移动/改名 → 重绑。在线优先排序兜住同指纹多行。
+    /// Accepted pre-index deduplication policy; no content fingerprint required.
+    pub fn find_asset_brief_by_file_metadata(
+        &self, library_id: &str, filename: &str, size: u64, mtime: &str,
+    ) -> Result<Option<(i64, String, bool)>> {
+        self.0.query_row(
+            "SELECT id,path,missing FROM assets WHERE library_id=?1 AND filename=?2
+             AND size=?3 AND mtime=?4 AND in_trash=0 ORDER BY missing,id LIMIT 1",
+            params![library_id, filename, size as i64, mtime],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()
+    }
+
     pub fn find_asset_brief_by_size_xxh(
         &self,
         library_id: &str,
@@ -679,7 +691,7 @@ impl Db {
         self.0.query_row(
             "SELECT COUNT(*) FROM assets a WHERE a.library_id = ?1 AND a.in_trash = 0 \
                  AND EXISTS (SELECT 1 FROM assets b WHERE b.library_id IS NOT NULL \
-                 AND b.library_id != ?1 AND b.size = a.size AND b.xxhash = a.xxhash)",
+                 AND b.library_id != ?1 AND b.filename = a.filename AND b.size = a.size AND b.mtime = a.mtime)",
             [library_id],
             |r| Ok(r.get::<_, i64>(0)? as u64),
         )
@@ -721,6 +733,21 @@ impl Db {
 #[cfg(test)]
 mod organization_tests {
     use super::*;
+    #[test]
+    fn lightweight_duplicates_use_metadata_and_stay_within_library() {
+        let dir=tempfile::tempdir().unwrap();
+        let db=Db::open(&dir.path().join("library.db")).unwrap();
+        db.0.execute("INSERT INTO assets(path,filename,size,mtime,xxhash,kind,source,created_at,library_id) VALUES ('first.jpg','same.jpg',42,'same-time',123,'photo','scan','now','one')",[]).unwrap();
+        let hit=db.find_asset_brief_by_file_metadata("one","same.jpg",42,"same-time").unwrap();
+        assert_eq!(hit.as_ref().map(|(_,path,missing)| (path.as_str(),*missing)),Some(("first.jpg",false)));
+        assert!(db.find_asset_brief_by_file_metadata("two","same.jpg",42,"same-time").unwrap().is_none());
+        assert!(db.find_asset_brief_by_file_metadata("one","other.jpg",42,"same-time").unwrap().is_none());
+        assert!(db.find_asset_brief_by_file_metadata("one","same.jpg",43,"same-time").unwrap().is_none());
+        assert!(db.find_asset_brief_by_file_metadata("one","same.jpg",42,"other-time").unwrap().is_none());
+        db.0.execute("UPDATE assets SET missing=1",[]).unwrap();
+        assert!(db.find_asset_brief_by_file_metadata("one","same.jpg",42,"same-time").unwrap().unwrap().2);
+    }
+
     #[test]
     fn library_rule_is_saved_and_existing_asset_paths_are_unchanged(){
         let dir=tempfile::tempdir().unwrap();let data=dir.path().join("data");std::fs::create_dir_all(&data).unwrap();let db=Db::open(&data.join("library.db")).unwrap();

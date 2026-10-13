@@ -101,6 +101,7 @@ struct FaceSlots {
     /// normal/accurate=scrfd；不匹配即弃缓存会话重载）。
     det_model: Option<String>,
     rec: Option<Session>,
+    rec_model: Option<String>,
 }
 
 fn face_slots() -> &'static Mutex<FaceSlots> {
@@ -140,7 +141,12 @@ impl ModelManager {
     fn ensure_det(&self, slots: &mut FaceSlots) -> Result<(), String> {
         super::idle::touch();
         let model_id = super::face_detect_model_id(self.ai_params().quality_tier);
-        if slots.det.is_some() && slots.det_model.as_deref() == Some(model_id) {
+        let cache_key = format!(
+            "{}:{:?}",
+            self.model_path(model_id).display(),
+            super::inference_plan(self.ai_params().use_gpu, model_id).backend
+        );
+        if slots.det.is_some() && slots.det_model.as_deref() == Some(cache_key.as_str()) {
             return Ok(());
         }
         let path = self.model_path(model_id);
@@ -149,23 +155,39 @@ impl ModelManager {
         }
         // EP 序列与 embed 共用（use_gpu → [DML, CPU]；DML 失败自动落 CPU）；
         // 毒化位按模型 id 隔离（scrfd 与 scrfd-10g 互不连坐）
-        let session = super::build_session(&path, None, self.ai_params().use_gpu, model_id)?;
+        let session = super::build_session(
+            &path,
+            Some(Self::embed_intra_threads()),
+            self.ai_params().use_gpu,
+            model_id,
+        )?;
         slots.det = Some(session);
-        slots.det_model = Some(model_id.to_string());
+        slots.det_model = Some(cache_key);
         Ok(())
     }
 
     fn ensure_rec(&self, slots: &mut FaceSlots) -> Result<(), String> {
         super::idle::touch();
-        if slots.rec.is_some() {
+        let cache_key = format!(
+            "{}:{:?}",
+            self.model_path("arcface").display(),
+            super::inference_plan(self.ai_params().use_gpu, "arcface").backend
+        );
+        if slots.rec.is_some() && slots.rec_model.as_deref() == Some(cache_key.as_str()) {
             return Ok(());
         }
         let path = self.model_path("arcface");
         if !path.is_file() {
             return Err("模型 arcface 未下载（设置页下载后再试）".into());
         }
-        let session = super::build_session(&path, None, self.ai_params().use_gpu, "arcface")?;
+        let session = super::build_session(
+            &path,
+            Some(Self::embed_intra_threads()),
+            self.ai_params().use_gpu,
+            "arcface",
+        )?;
         slots.rec = Some(session);
+        slots.rec_model = Some(cache_key);
         Ok(())
     }
 }
@@ -629,7 +651,14 @@ impl ModelManager {
         &self,
         img: &RgbImage,
     ) -> Result<Vec<(DetectedFace, Vec<f32>)>, String> {
-        let faces = detect_faces(self, img)?;
+        self.embed_detected(img, detect_faces(self, img)?)
+    }
+
+    pub(crate) fn embed_detected(
+        &self,
+        img: &RgbImage,
+        faces: Vec<DetectedFace>,
+    ) -> Result<Vec<(DetectedFace, Vec<f32>)>, String> {
         let mut out = Vec::with_capacity(faces.len().min(MAX_FACES_PER_IMAGE));
         for face in faces.into_iter().take(MAX_FACES_PER_IMAGE) {
             // 能检测到小人脸不等于能可靠识别身份。几像素的远景框经放大
@@ -1037,13 +1066,11 @@ fn infer_face_payload(
     manager: &ModelManager,
     asset_id: i64,
 ) -> Option<FacePayload> {
-    let (path, _) = db.thumb_info_by_id(asset_id).ok().flatten()?; // 资产已删除（级联清任务前的防御兜底）
-    let thumb = detection_source(db_dir, Path::new(&path))?;
-    let img = image::ImageReader::open(&thumb)
-        .ok()
-        .and_then(|r| r.decode().ok())
-        .map(|d| d.to_rgb8())?;
-    let faces = manager.detect_and_embed(&img).ok()?;
+    let img = crate::index::artifacts::analysis(db, db_dir, asset_id)?;
+    let detected = crate::index::artifacts::faces(db, db_dir, asset_id, manager, &img).ok()?;
+    let faces = manager
+        .embed_detected(&img, detected.as_ref().clone())
+        .ok()?;
     Some(FacePayload {
         src_w: img.width(),
         src_h: img.height(),
@@ -1100,6 +1127,30 @@ fn commit_face_payload(
         }
     }
     db.set_face_indexed(asset_id).is_ok()
+}
+
+/// Native computation reused by the shared dependency scheduler.
+pub(crate) fn process_face_task(
+    db: &Db,
+    db_dir: &Path,
+    manager: &ModelManager,
+    asset_id: i64,
+) -> bool {
+    let Some(payload) = infer_face_payload(db, db_dir, manager, asset_id) else {
+        return false;
+    };
+    static COMMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = COMMIT.lock().unwrap_or_else(|p| p.into_inner());
+    // A retry replaces the asset's evidence instead of appending duplicate faces.
+    if db
+        .0
+        .execute("DELETE FROM faces WHERE asset_id=?1", [asset_id])
+        .is_err()
+    {
+        return false;
+    }
+    invalidate_cluster_cache(db_dir);
+    commit_face_payload(db, db_dir, manager, asset_id, &payload)
 }
 
 /// 在途门闩（认领中 + 已认领未结算的计数）：失败任务由消费者
@@ -1309,16 +1360,6 @@ pub fn kick_face_if_ready(
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    if !manager.face_models_ready() {
-        return;
-    }
-    let manager = std::sync::Arc::new(manager.clone());
-    let bus = bus.clone();
-    let _ = supervisor.spawn_coalesced(
-        "index",
-        format!("face-backfill:{}", db_dir.display()),
-        move |_| {
-            run_face_backfill(&db_dir, Arc::clone(&manager), &bus);
-        },
-    );
+    crate::index::scheduler::request_ai(&db_dir, manager, bus, "face");
+    crate::index::scheduler::kick(db_dir, supervisor);
 }

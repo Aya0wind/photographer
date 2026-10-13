@@ -320,7 +320,7 @@ impl Db {
     /// exif 任务深提取成果落库（gen-3 回填 worker / 导入管线共用）。
     /// 真机发现（2026-09-20）：119 张老库 lens/0004 拍摄参数列全空——旧链
     /// 只在导入时提取，存量永远没人补。gen-3 起一并回填（COALESCE 保留
-    /// 已有值，提取不到不清空）；captured_at/camera 不动（导入已写对）。
+    /// 已有值，提取不到不清空）；扫描登记不读取 EXIF，拍摄时间/相机一并回填。
     pub fn update_asset_deep_exif(
         &self,
         id: i64,
@@ -335,8 +335,8 @@ impl Db {
              focal_length = COALESCE(?8, focal_length), \
              orientation = COALESCE(?9, orientation), flash = ?10, \
              metering_mode = ?11, white_balance = ?12, exposure_program = ?13, \
-             software = ?14, artist = ?15, gps_lat = ?16, gps_lon = ?17 \
-             WHERE id = ?1",
+             software = ?14, artist = ?15, gps_lat = ?16, gps_lon = ?17, \
+             captured_at=COALESCE(?18,captured_at), camera=COALESCE(?19,camera) WHERE id = ?1",
             params![
                 id,
                 meta.lens,
@@ -355,6 +355,8 @@ impl Db {
                 deep.artist,
                 deep.gps_lat,
                 deep.gps_lon,
+                meta.captured_at.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)),
+                meta.camera,
             ],
         )?;
         // Restore explicit metadata, including fields cleared by the user.

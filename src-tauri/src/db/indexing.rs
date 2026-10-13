@@ -217,6 +217,7 @@ impl Db {
                             WHERE kind = ?1 AND state = 'failed' GROUP BY asset_id)",
             params![kind],
         )?;
+        self.0.execute("UPDATE index_task_context SET retry_at=0,error=NULL,owner=NULL WHERE task_id IN (SELECT id FROM index_tasks WHERE kind=?1 AND state='failed')",[kind])?;
         self.0.execute(
             "UPDATE index_tasks SET state = 'pending', attempts = 0, updated_at = ?2 \
              WHERE kind = ?1 AND state = 'failed'",

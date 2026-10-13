@@ -187,6 +187,8 @@ CREATE TABLE IF NOT EXISTS logs (
 
 CREATE INDEX IF NOT EXISTS idx_logs_job_id ON logs (job_id, id);
 
+CREATE INDEX IF NOT EXISTS idx_assets_light_duplicate ON assets(library_id,filename,size,mtime);
+
 -- ===========================================================================
 -- index_tasks：索引任务表（导入/索引任务分离，资产级待办；重启自动恢复）。
 -- kind 通道路由：thumb/exif/hash/phash/blur=CPU 通道，ai/face=AI 推理通道，
@@ -204,6 +206,30 @@ CREATE TABLE IF NOT EXISTS index_tasks (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_index_tasks_kind_asset ON index_tasks (kind, asset_id);
 CREATE INDEX IF NOT EXISTS idx_index_tasks_state ON index_tasks (state, id);
+
+-- Shared task control and execution receipts; additive tables preserve user data.
+CREATE TABLE IF NOT EXISTS index_channels (
+    kind TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    paused INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO index_channels(kind,enabled) VALUES
+    ('thumb',1),('exif',1),('phash',1),('blur',0),('eyes',0),('ai',0),('face',0);
+CREATE TABLE IF NOT EXISTS index_dependencies (
+    kind TEXT NOT NULL,
+    prerequisite TEXT NOT NULL,
+    PRIMARY KEY(kind,prerequisite)
+);
+INSERT OR IGNORE INTO index_dependencies VALUES
+    ('phash','thumb'),('blur','thumb'),('eyes','thumb'),('ai','thumb'),('face','thumb');
+CREATE TABLE IF NOT EXISTS index_task_context (
+    task_id INTEGER PRIMARY KEY REFERENCES index_tasks(id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    settings_key TEXT NOT NULL,
+    owner TEXT,
+    retry_at INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
 
 -- ===========================================================================
 -- faces / people：人脸实例与人物簇（资产删除级联清脸；删簇只解除归属）

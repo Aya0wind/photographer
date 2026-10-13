@@ -94,36 +94,6 @@ pub async fn search_semantic(
 
 /// 模型就绪后读取当前库及设置，触发回填并补跑参数指纹比对。
 /// 三类模型共用 20 分钟等待窗口；各入口保留模型门槛和开关语义。
-fn watch_model_install(
-    state: &SharedState,
-    name: &'static str,
-    ready: fn(&crate::ai::ModelManager) -> bool,
-    backfill: fn(&super::AppState, std::path::PathBuf, &crate::settings::AiSettings),
-) {
-    let shared = std::sync::Arc::clone(state);
-    state
-        .supervisor
-        .spawn("ai-postinstall", name.into(), move |_| {
-            for _ in 0..600 {
-                if ready(&shared.ai) {
-                    let ai_snapshot = shared
-                        .settings
-                        .lock()
-                        .expect("settings mutex poisoned")
-                        .ai
-                        .clone();
-                    let Ok(db_dir) = super::app_database_dir(&shared) else {
-                        eprintln!("[ai-postinstall] 激活数据库不可用，跳过回填");
-                        return;
-                    };
-                    backfill(&shared, db_dir.clone(), &ai_snapshot);
-                    super::indexing::check_params_and_rebuild(&shared, &db_dir, &ai_snapshot);
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        });
-}
 
 /// 模型下载完成后的语义索引自动触发：轮询三件套就绪（后台下载完成）→
 /// enable_clip 时派语义回填 + 补跑参数指纹比对。轮询上限 20 分钟。
@@ -131,23 +101,6 @@ fn watch_model_install(
 /// check_params_and_rebuild 会被 ready 门槛挡下且**不写 marker**——件装好
 /// 后这里补跑一次，让「切档 → 提示下载 → 装好 → 自动重建+回填」闭环
 /// （marker 未动，补跑时指纹仍是旧值 → 正常触发重建；无变更则 no-op）。
-fn spawn_post_install_watch(state: &SharedState) {
-    watch_model_install(
-        state,
-        "semantic-watch",
-        crate::ai::ModelManager::semantic_ready,
-        |state, db_dir, ai| {
-            if ai.enable_clip {
-                crate::ai::semantic::kick_semantic_if_ready(
-                    db_dir,
-                    &state.ai,
-                    &state.bus,
-                    &state.supervisor,
-                );
-            }
-        },
-    );
-}
 
 /// 内置模型清单状态（installed/state/downloadedBytes…）。
 #[tauri::command]
@@ -164,9 +117,6 @@ pub async fn ai_models_status(
 #[tauri::command]
 pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let shared = state.inner().clone();
-    let is_semantic = id.starts_with("siglip2");
-    let is_face = id.starts_with("scrfd") || id == "arcface";
-    let is_selection = id == crate::ai::selection::FACEMESH_MODEL_ID;
     run_blocking(shared.clone(), move |state| {
         let entry = crate::ai::catalog()
             .iter()
@@ -176,15 +126,7 @@ pub async fn ai_model_download(state: State<'_, SharedState>, id: String) -> Res
         state.ai.download(entry)
     })
     .await?;
-    if is_semantic {
-        spawn_post_install_watch(&shared);
-    }
-    if is_face {
-        spawn_face_post_install_watch(&shared);
-    }
-    if is_selection {
-        spawn_eyes_post_install_watch(&shared);
-    }
+    crate::index::scheduler::models_changed();
     Ok(())
 }
 
@@ -199,7 +141,9 @@ pub async fn ai_model_cancel(state: State<'_, SharedState>, id: String) -> Resul
 #[tauri::command]
 pub async fn ai_model_delete(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let shared = state.inner().clone();
-    run_blocking(shared, move |state| state.ai.delete(&id)).await
+    let result = run_blocking(shared, move |state| state.ai.delete(&id)).await;
+    crate::index::scheduler::models_changed();
+    result
 }
 
 /// 一键清除人脸数据核：faces + people 清空、face 通道任务清空、
@@ -217,46 +161,4 @@ pub fn fetch_face_data_clear(state: &super::AppState) -> Result<bool, String> {
 pub async fn ai_face_data_clear(state: State<'_, SharedState>) -> Result<bool, String> {
     let shared = state.inner().clone();
     run_blocking(shared, fetch_face_data_clear).await
-}
-
-/// scrfd/scrfd-10g/arcface 下载完成后的自动触发：轮询当前档位两件套就绪
-/// → enable_face 时派人脸回填 + 补跑参数指纹比对（语义 watch 同款欠账
-/// 闭环：切 fast 时 scrfd-10g 未装 → 指纹被 ready 门槛挡下不写 marker，
-/// 件装好这里补跑）。轮询上限 20 分钟。
-fn spawn_face_post_install_watch(state: &SharedState) {
-    watch_model_install(
-        state,
-        "face-watch",
-        crate::ai::ModelManager::face_models_ready,
-        |state, db_dir, ai| {
-            if ai.enable_face {
-                crate::ai::face::kick_face_if_ready(
-                    db_dir,
-                    &state.ai,
-                    &state.bus,
-                    &state.supervisor,
-                );
-            }
-        },
-    );
-}
-
-/// facemesh 下载完成后的自动触发（0021 eyes 通道，2026-09-28 实装）：
-/// 轮询就绪 → 闭眼回填 + 补跑参数指纹比对（semantic/face watch 同款；
-/// eyes 无 enable 开关——选片分析随任务账自动跑，模型未装时通道本就
-/// 跳过不产出）。轮询上限 20 分钟。
-fn spawn_eyes_post_install_watch(state: &SharedState) {
-    watch_model_install(
-        state,
-        "eyes-watch",
-        crate::ai::ModelManager::selection_eyes_ready,
-        |state, db_dir, _ai| {
-            crate::ai::selection::kick_eyes_if_ready(
-                db_dir,
-                &state.ai,
-                &state.bus,
-                &state.supervisor,
-            );
-        },
-    );
 }

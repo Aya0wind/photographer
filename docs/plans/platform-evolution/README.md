@@ -38,6 +38,7 @@
 
 ## 前期讨论资料
 
+- [索引评估与资产级依赖调度草案](../2026-10-13-index-dag-scheduler.md)：已确认导入与索引并行、索引前轻量去重、已有文件夹流式发现/登记；其余调度设计仍待评审，不自动启动实现。
 - [共享核心与 Web 协作讨论](../2026-10-12-shared-core-web-collaboration.md)
 - [移动端抽象讨论](../2026-10-12-mobile-core-abstractions.md)
 - [LibRaw、Smart Preview 与胶片专项](../2026-10-12-libraw-smart-preview-film.md)

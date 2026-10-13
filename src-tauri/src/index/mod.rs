@@ -1,22 +1,6 @@
-//! 索引任务系统（M3.5，导入/索引任务分离，用户定案 2026-09-19）。
-//!
-//! 导入流水线只做复制/移动+校验+入册（快，不夹杂计算）；「已入册但索引
-//! 不全」的资产由本模块的库级后台 worker 补齐——缩略图三档生成先行，
-//! EXIF/AI 待办预留（kind 路由）。任务持久化在 `index_tasks`（见
-//! db::migrations 0004），程序重启自动恢复：running 复位 pending → 派
-//! worker 续跑。
-//!
-//! ## 通道设计（M4 AI 的接入点，v1 只落 CPU 通道）
-//! - **CPU 通道**（v1）：thumb/exif 任务，worker 数 = 物理核心数全量
-//!   （turbojpeg SIMD 缩放解码近线性扩展）；与按需缩略图队列共享
-//!   `thumbs` 的全局 permit 池——主图兜底并发时天然互让，不超发。
-//! - **GPU 通道**（预留，M4 AI 落地）：`ai` 类任务（CLIP 向量推理）在
-//!   DirectML(ort) 初始化成功时必走 GPU（不是可选），失败自动落 CPU 并
-//!   提示；`settings.ai.use_gpu` = 「允许使用 GPU」（默认 true，关掉强制
-//!   纯 CPU）。GPU 推理与 CPU 缩略图互不抢核（kind 天然分工）。
-//! - 调度：默认 AfterImport+立即（导入完成即刻全速跑完）；IdleOnly/Manual
-//!   保留可选。`ai.cpu_limit_percent` 只约束未来 AI 推理，索引类不受限。
-//! - 优先级：导入 > 主图缩略图兜底 > 索引批量（共享 permit 池天然实现）。
+//! Native indexing algorithms and their shared durable dependency scheduler.
+//! Registration queues targets; committed photos can be indexed during import.
+//! Producer tasks create thumbnails/EXIF; consumers reuse cached analysis inputs.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +10,6 @@ use rusqlite::params;
 
 use crate::db::Db;
 use crate::events::{AppEvent, EventBus};
-use crate::thumbs::SIZE_TIERS;
 
 /// Rebuild excludes active image-task writes. Workers keep their existing
 /// pause/resume controls and continue against the newly queued tasks afterwards.
@@ -45,7 +28,7 @@ pub fn image_index_lock(db_dir: &Path) -> std::sync::Arc<std::sync::RwLock<()>> 
 /// **源缺失**（第三方移动/删除）是暂态：不落 thumb_state、保持 0，按
 /// attempts 策略重试，文件移回后自然完成（2026-09-28 边界修复：此前
 /// 缺失也置 2，真机实证文件移回后永久 unavailable 不自愈）；**文件在盘
-/// 但出不了图**（解码失败）才置 2 永久占位。RAW 只跑 256/512（内嵌
+/// 但出不了图**（解码失败）才置 2 永久占位。RAW 跑 256/512/1024（内嵌
 /// JPEG 源，快）；查看器高清走 raw-embed 直出档（毫秒级 IO），2048
 /// 显影档改为查看器按需兜底——索引期不再为每张 RAW 花 3-8s 去马赛克
 /// （33 张 RAW 的库索引被拖慢数分钟的根因）。
@@ -57,19 +40,15 @@ fn process_thumb_task(db: &Db, db_dir: &Path, asset_id: i64) -> bool {
     if !matches!(kind.as_str(), "photo" | "raw") || !crate::thumbs::is_decodable(Path::new(&path)) {
         // 其他类型/不可解码：永久占位（不占重试额度）。
         let _ = db.set_thumb_state(asset_id, 2);
-        return true;
+        return false;
     }
     let src = PathBuf::from(&path);
-    let tiers: &[u16] = if kind == "raw" {
-        &[256, 512]
-    } else {
-        SIZE_TIERS
-    };
+    let tiers: &[u16] = &[256, 512, 1024];
     // 缺失是暂态（文件可能移回）：任务失败重试即可，不毒化 thumb_state
     let src_missing = !src.exists();
     for tier in tiers {
         if crate::thumbs::thumb_file(db_dir, &src, *tier).is_none() {
-            if !src_missing {
+            if !src_missing && !db.asset_source_in_flight(asset_id) {
                 // 文件在盘仍出不了图（解码失败）：真永久占位
                 let _ = db.set_thumb_state(asset_id, 2);
             }
@@ -91,6 +70,8 @@ fn asset_thumb_target(db: &Db, asset_id: i64) -> Option<(String, String)> {
 }
 
 pub mod pipeline;
+pub mod scheduler;
+pub mod artifacts;
 
 /// 消费一条任务（认领 → 处理 → 收尾）。返回 false 表示队列已空。
 /// 认领优先级：exif（量小且解锁筛选 UI）→ hash（毫秒级，解锁精确查重
@@ -162,9 +143,7 @@ fn process_exif_task(db: &Db, asset_id: i64) -> bool {
     if !matches!(kind.as_str(), "photo" | "raw") {
         return true; // 非图片无 EXIF 深提取可言
     }
-    let Ok(head) = read_head(&path) else {
-        return true; // 文件不可读（外部库被移走等）：不再重试
-    };
+    let Ok(head) = read_head(&path) else { return false; };
     let meta = crate::metadata::exif_lite::parse(&head);
     let deep_ok = db.update_asset_deep_exif(asset_id, &meta).is_ok();
     // LR 存量评分/颜色标签回填（与晚到边车补读同路径，见 backfill_sidecar_tags）
@@ -366,23 +345,7 @@ pub fn import_in_flight() -> bool {
 /// 取消旗（导入开始时 supervisor.pause_kind("index") 让路）。导入在场
 /// （进程级闸）时 no-op——任务留 pending，导入收尾的 kick 兜底。
 pub fn kick(db_dir: PathBuf, supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>) {
-    // 让路统一（§八-5）：一切 kick 唤醒点共享导入在场守卫，导入期间
-    // 不启动索引池（联拍 kick 此前穿透让路闸）。
-    if import_in_flight() {
-        return;
-    }
-    let _ = supervisor.spawn_coalesced(
-        "index",
-        format!("index-worker-pool:{}", db_dir.display()),
-        move |controls| {
-            run_pending_gated(
-                &db_dir,
-                worker_count(),
-                controls.paused_flag(),
-                controls.cancelled_flag(),
-            );
-        },
-    );
+    scheduler::kick(db_dir, supervisor);
 }
 
 /// 启动恢复：复位遗留 running → pending，返回待办数（pending+running）。
@@ -390,7 +353,7 @@ pub fn resume_pending(db_dir: &Path) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         return 0;
     };
-    let _ = db.reclaim_running_index_tasks();
+    if !scheduler::is_running(db_dir) { let _ = db.reclaim_running_index_tasks(); }
     db.pending_index_count().unwrap_or(0)
 }
 
@@ -405,22 +368,12 @@ pub fn resume_and_kick(
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    // 前置同步探测：库文件不在盘 = 无遗留可恢复（被手动清理的目录不
-    // 因恢复钩子复活，切换校验保持「文件在盘才可切」语义）
-    if !db_dir.join("library.db").is_file() {
-        return;
-    }
+    if !db_dir.join("library.db").is_file() { return; }
     if let Ok(db) = crate::ipc::open_library_db(&db_dir) {
-        let _ = db.create_phash_tasks_for_unindexed();
+        let pending = db.pending_index_count().unwrap_or(0);
+        if pending > 0 { bus.publish(AppEvent::IndexTaskResumed { pending }); }
     }
-    let pending = resume_pending(&db_dir);
-    if pending > 0 {
-        bus.publish(AppEvent::IndexTaskResumed { pending });
-        let db_dir = db_dir.clone();
-        supervisor.spawn("index", "index-resume".into(), move |_| {
-            run_pending(&db_dir, worker_count());
-        });
-    }
+    scheduler::kick(db_dir, supervisor);
 }
 
 // 代际回填共用入队、标记和消费流程；各入口保留代际名与后续业务动作。
@@ -430,6 +383,8 @@ fn run_generation_refresh(
     marker: &Path,
     requeue: impl FnOnce(&Db) -> rusqlite::Result<u64>,
 ) {
+    let barrier = image_index_lock(db_dir);
+    let _guard = barrier.write().expect("index generation barrier poisoned");
     let pending = std::fs::create_dir_all(db_dir)
         .ok()
         .and_then(|_| crate::ipc::open_library_db(db_dir).ok())
@@ -438,7 +393,7 @@ fn run_generation_refresh(
     let _ = std::fs::write(marker, b"");
     if pending > 0 {
         bus.publish(AppEvent::IndexTaskResumed { pending });
-        run_pending(db_dir, worker_count());
+        scheduler::notify(db_dir);
     }
 }
 
@@ -497,14 +452,8 @@ pub fn refresh_hash_for_generation(
     bus: &EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    let marker = db_dir.join("hash-gen-1.marker");
-    if marker.is_file() {
-        return;
-    }
-    let bus = bus.clone();
-    supervisor.spawn("index", "hash-gen1-regen".into(), move |_| {
-        run_generation_refresh(&db_dir, &bus, &marker, |db| db.requeue_hash_tasks_for_all());
-    });
+    // Metadata deduplication does not schedule automatic full-file hashing.
+    let _ = (db_dir, bus, supervisor);
 }
 
 /// 选片分析代际自愈（gen-1，0021 配套）：eyes/blur 任务账一次性建档。

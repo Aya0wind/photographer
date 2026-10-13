@@ -475,11 +475,7 @@ pub async fn photo_library_scan_cancel(
 /// 文件夹拷贝期间逐步拾取、最终收敛。
 pub const LIBRARY_SCAN_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
-/// 登记后索引唤醒（2026-10-09 审计 P0 断链A/C）：本轮有新登记
-/// （registered>0）→ pHash 任务幂等补差（登记入库只自动建 thumb/eyes/blur，
-/// phash 通道此前仅手动/代际自愈建档）+ kick 索引 worker（此前扫描登记后
-/// 无人唤醒，任务滞留 pending 直到下一次导入/手动触发）。kick 自带导入
-/// 在场让路守卫——导入竞态期间任务留 pending，导入收尾的 kick 兜底。
+/// Registration already seeds enabled targets; wake the shared queue.
 fn kick_index_after_registration(
     state: &AppState,
     db: &crate::db::Db,
@@ -489,8 +485,9 @@ fn kick_index_after_registration(
     if registered == 0 {
         return;
     }
-    let _ = db.create_phash_tasks_for_unindexed();
-    crate::index::kick(db_dir.to_path_buf(), &state.supervisor);
+    let _ = db;
+    crate::index::scheduler::notify(db_dir);
+    crate::index::scheduler::kick(db_dir.to_path_buf(), &state.supervisor);
 }
 
 /// 单轮全库扫描编排（M2b 数据底座；M4 的进度/取消 UI 挂在同一条线上）：
@@ -523,6 +520,9 @@ pub fn scan_all_libraries_once(state: &AppState) -> Vec<(String, crate::scan::Li
     let gate = std::sync::Arc::clone(&state.register_gate);
     let options = crate::scan::ScanOptions::default();
     let mut out = Vec::new();
+    let ai=state.settings.lock().expect("settings poisoned").ai.clone();
+    crate::index::scheduler::configure(&db_dir,&state.ai,&state.bus,&ai);
+    crate::index::scheduler::kick(db_dir.clone(), &state.supervisor);
     let mut registered_total = 0u64;
     for library in &libraries {
         if db.photos_library_organization_pending(&library.id).unwrap_or(true){continue;}
@@ -660,6 +660,9 @@ pub fn run_pending_batch_jobs_with(state: &AppState, options: &crate::scan::Scan
         return;
     };
     let gate = std::sync::Arc::clone(&state.register_gate);
+    let ai=state.settings.lock().expect("settings poisoned").ai.clone();
+    crate::index::scheduler::configure(&db_dir,&state.ai,&state.bus,&ai);
+    crate::index::scheduler::kick(db_dir.clone(), &state.supervisor);
     let mut registered_total = 0u64;
     for job in jobs {
         if db.photos_library_organization_pending(&job.library_id).unwrap_or(true){continue;}

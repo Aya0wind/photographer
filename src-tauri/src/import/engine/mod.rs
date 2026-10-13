@@ -22,7 +22,7 @@
 //! rename 串行化避免并发 `unique_path` 竞态。
 //!
 //! 查重分层：① skip_imported 时宽松键（size+filename+mtime±2s）预判→跳过；
-//! ② 全量 (size, xxhash) 精确复核→跳过；③ 目标路径冲突→Rename 策略生成
+//! ② 文件名/大小/修改时间复核→跳过；③ 目标路径冲突→Rename 策略生成
 //! `_1`，Skip/Ask 策略→skipped。
 //!
 //! 可靠性：取消为软取消（当前文件完成后停）；`DeviceError::Disconnected`
@@ -50,7 +50,7 @@ use crate::events::{AppEvent, EventBus, FileState, JobStats, Throttle};
 use crate::db::organization::unique_path;
 use crate::settings::DuplicatePolicy;
 
-use dedup::{exact_verdict, loose_hit, ExactVerdict};
+use dedup::{loose_hit, ExactVerdict};
 use fsutil::{cleanup_empty_dirs, ensure_directory, follow_sidecar, rfc3339, source_root_of};
 use pipeline::{copy_one, CopiedFile, FileOutcome};
 
@@ -1081,24 +1081,11 @@ impl Engine {
             .as_ref()
             .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
 
-        // ② 全量 (size, xxhash) 精确复核（**同库范围**，§四 跨库照常登记；
-        // xxh=0 哨兵 = rename 快道未哈希，精确层跳过——hash 通道补算后此层
-        // 对后续导入自动就位）。§八-1：skip 仅当存在**在线**同哈希资产；仅
-        // 命中 missing 同哈希 = 照片曾被移动/改名后重新导入 → 落盘后重绑
-        // 既有资产行（不吞掉——skip 会把照片永久锁在画廊缺失态）。
-        let exact = if self.plan.skip_imported && copied.xxh != 0 {
-            Some(
-                exact_verdict(
-                    &self.db,
-                    &self.plan.target_library_id,
-                    entry.size,
-                    copied.xxh,
-                )
-                .map_err(|e| e.to_string())?,
-            )
-        } else {
-            None
-        };
+        let exact = if self.plan.skip_imported {
+            self.db.find_asset_brief_by_file_metadata(&self.plan.target_library_id,
+                entry.rel_path.rsplit('/').next().unwrap_or(&entry.rel_path),entry.size,&rfc3339(entry.mtime)).map_err(|e|e.to_string())?
+                .map(|(id,_,missing)| if missing { ExactVerdict::Rebind(id) } else { ExactVerdict::Skip })
+        } else { None };
         if exact == Some(ExactVerdict::Skip) {
             self.skip_discard(job_id, copied);
             self.upsert(job_id, entry, "", FileState::Skipped, copied);
@@ -1280,13 +1267,7 @@ impl Engine {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.upsert_dst2(job_id, entry, &dst, &dst2, FileState::Verified, copied);
-        // rename 快道：xxh=0 哨兵 → 登记 hash 后台补算任务（幂等）
-        if copied.fast_moved {
-            let id = self.db.asset_id_by_path(&dst).ok().flatten();
-            if let Some(id) = id {
-                let _ = self.db.create_hash_task_for(id);
-            }
-        }
+        if let Some(path)=&self.db_dir { crate::index::scheduler::notify(path); }
         Ok((FileState::Verified, dst))
     }
 
@@ -1336,6 +1317,8 @@ impl Engine {
         size: u64,
         xxhash: u64,
     ) -> RebindOutcome {
+        let barrier=self.db_dir.as_ref().map(|path| crate::index::image_index_lock(path));
+        let _guard=barrier.as_ref().map(|lock| lock.write().expect("source version barrier poisoned"));
         let row = self.db.0.query_row(
             "SELECT path, missing, xmp_dirty, rating, color_label, rejected \
                  FROM assets WHERE id = ?1",

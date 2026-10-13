@@ -10,13 +10,9 @@
 //! - **文件稳定度冷却窗**（§八-2）：mtime 距今小于冷却窗、两次探测间
 //!   （读前 stat / 读毕 stat）大小或 mtime 变化、写入者持锁打不开 → 本轮
 //!   跳过（大文件夹拷贝期间逐步拾取，最终收敛）；
-//! - **两级识别**（§三）：file-id（卷序列号+文件 id）命中 = 硬链接零哈希
-//!   直跳；否则算哈希，同库同内容去重 skip——**仅当存在在线同哈希资产**
-//!   （§八-1），命中 missing 资产 = 移动/改名 → 重绑路径；
-//! - **missing 哈希重绑**（§八-1）：重绑路径 + 清 missing + 边车补写新
-//!   位置 + 缩略图按内容复用（缓存键换路径、mtime 段保留）；
-//! - **恢复校验**（§八-1）：missing 路径重新在盘 → 校验哈希；不一致 =
-//!   同名不同内容 → 重算索引、保留逻辑元数据并提示；
+//! - **轻量去重**：同路径、文件身份及文件名/大小/修改时间识别，不读图片内容；
+//! - **missing 重绑**：元数据匹配后重绑，保留整理信息与可复用缓存；
+//! - **恢复校验**：元数据变化时重算派生索引，保留评分、相册等用户数据；
 //! - **晚到边车补读**（§八-3）：已登记资产旁出现同名边车且 mtime 晚于
 //!   登记时间 → 触发一次边车读入（与 exif 通道/rating_watch 读入方向
 //!   同路径，DB 已有值不覆盖）；
@@ -49,13 +45,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
-use xxhash_rust::xxh64::Xxh64;
 
 use crate::db::libraries::PhotosLibraryRow;
 use crate::db::{AssetRow, Db};
 use crate::devices::{classify, is_media_ext};
 use crate::events::{AppEvent, AssetKind, EventBus, Throttle};
-use crate::metadata::exif_lite::{self, MetaLite};
+use crate::metadata::exif_lite::MetaLite;
 use crate::platform::file_registration_id;
 
 /// 文件稳定度冷却窗（§八-2「约 10s」）：mtime 距今小于该值 → 本轮跳过。
@@ -139,10 +134,10 @@ pub struct BatchSignals<'a> {
 }
 
 /// 批量登记进度出口（进度入库；ipc 层实现写 library_scan_jobs 行，测试
-/// 以桩收集）。on_total 在预点数完成时一次；on_progress 与事件同节流
+/// 以桩收集）。on_total 随发现推进；on_progress 与事件同节流
 ///（≥100ms）推进。
 pub trait BatchProgressSink {
-    /// 预点数完成（进度分母）。
+    /// 已发现候选总数（无需提前遍历目录）。
     fn on_total(&mut self, total: u64);
     /// 扫描推进（计数为本轮增量，累计基线由实现持有）。
     fn on_progress(&mut self, report: &LibraryScanReport);
@@ -236,16 +231,8 @@ pub fn scan_library_batch<'a>(
     signals: BatchSignals<'a>,
     mut sink: Option<&'a mut dyn BatchProgressSink>,
 ) -> Result<BatchRun, String> {
-    // 预点数（进度分母估算）：与 walk 同一候选口径，先于扫描一遍目录树
-    //（只枚举不读内容；点数与实际处理差异 = 冷却窗/魔数不符等，属估算口径）
-    let mut total_hint = None;
-    if Path::new(&library.root_path).is_dir() {
-        let total = count_candidates(Path::new(&library.root_path));
-        if let Some(sink) = sink.as_deref_mut() {
-            sink.on_total(total);
-        }
-        total_hint = Some(total);
-    }
+    // Stream discovery: no preliminary traversal or original-content reads.
+    let total_hint = None;
     let (report, online, stopped) = run_scan(
         db, db_dir, library, options, gate, bus, signals, sink, total_hint,
     )?;
@@ -398,44 +385,7 @@ fn registered_cross_dup(db: &Db, library_id: &str) -> Option<u64> {
 /// 预点数（批量进度分母）：与 [`Scanner::walk`] 同一候选口径——可识别
 /// 图片扩展名、跳过隐藏/系统目录与符号链接/junction；不读文件内容
 ///（不判冷却/魔数——分母是估算口径，见 LibraryScanStatusDto.total 注释）。
-fn count_candidates(root: &Path) -> u64 {
-    let mut total = 0u64;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue; // 与 walk 同语义：暂不可读的目录本轮放弃
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue; // 不跟随符号链接/junction（§八-7）
-            }
-            if file_type.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if is_ignored_dir_name(&name) || crate::platform::is_hidden_or_system(&entry) {
-                    continue;
-                }
-                stack.push(entry.path());
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            if entry
-                .path()
-                .extension()
-                .map(|e| is_media_ext(&e.to_string_lossy()))
-                .unwrap_or(false)
-            {
-                total += 1;
-            }
-        }
-    }
-    total
-}
+
 
 /// 单轮扫描的行进状态（walk 递归的上下文）。
 struct Scanner<'a> {
@@ -632,12 +582,22 @@ impl<'a> Scanner<'a> {
         }
     }
 
+    /// Source updates follow the registration-gate -> version-barrier lock order.
+    fn registered_update<T>(&self, work: impl FnOnce() -> T) -> T {
+        self.registered(|| {
+            let barrier=crate::index::image_index_lock(self.db_dir);
+            let _guard=barrier.write().expect("source version barrier poisoned");
+            work()
+        })
+    }
+
     fn publish_progress(&mut self) {
         if !self.progress.should_fire() {
             return;
         }
         // 进度入库（批量模式；节流与事件同拍 ≥100ms）
         if let Some(sink) = self.progress_sink.as_mut() {
+            sink.on_total(self.report.registered + self.report.rebound + self.report.skipped_event_total());
             sink.on_progress(&self.report);
         }
         if let Some(bus) = self.bus {
@@ -686,7 +646,8 @@ impl<'a> Scanner<'a> {
                 for asset_path in asset_paths {
                     if let Some(brief) = self.by_path.get(&asset_path).cloned() {
                         if !brief.missing {
-                            self.check_late_sidecar(&brief, Path::new(&asset_path));
+                            let path=Path::new(&asset_path);
+                            if let Ok(meta)=fs::metadata(path) { self.process_file(path,&meta); }
                         }
                     }
                 }
@@ -709,6 +670,8 @@ impl<'a> Scanner<'a> {
             return;
         }
 
+        let fresh_directory=!self.by_dir.contains_key(&dir_key.to_ascii_lowercase());
+        let cooled_before=self.report.cooled;
         let mut files: Vec<(PathBuf, fs::Metadata)> = Vec::new();
         for entry in entries.flatten() {
             let Ok(file_type) = entry.file_type() else {
@@ -739,7 +702,11 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
-                files.push((entry.path(), meta));
+                if fresh_directory {
+                    if self.should_stop() { break; }
+                    self.process_file(&entry.path(),&meta);
+                    self.publish_progress();
+                } else { files.push((entry.path(), meta)); }
             }
         }
 
@@ -789,7 +756,6 @@ impl<'a> Scanner<'a> {
             self.report.missing_marked += 1;
         }
 
-        let cooled_before = self.report.cooled;
         for (path, meta) in files {
             if self.should_stop() {
                 break; // 批量取消/让路：当前目录余下文件留给下轮
@@ -828,6 +794,18 @@ impl<'a> Scanner<'a> {
                     && meta.modified().map(rfc3339).unwrap_or_default() == brief.mtime
                 {
                     return;
+                }
+                if !self.in_cooldown(meta) {
+                    let modified=meta.modified().map(rfc3339).unwrap_or_default();
+                    self.registered_update(|| {
+                        crate::thumbs::remove_src_cache(self.db_dir,path);
+                        self.db.0.execute(
+                        "UPDATE assets SET size=?2,mtime=?3,xxhash=0,thumb_state=0,phash=NULL,
+                         ai_indexed_at=NULL,face_indexed_at=NULL,captured_at=NULL,camera=NULL,
+                         width=NULL,height=NULL,lens=NULL,iso=NULL,f_number=NULL,exposure_time=NULL,
+                         focal_length=NULL,orientation=NULL WHERE id=?1",
+                        rusqlite::params![brief.id,meta.len() as i64,modified]) }).ok();
+                    crate::index::scheduler::notify(self.db_dir);
                 }
                 self.backfill_registration_id(&brief, path);
             }
@@ -868,7 +846,7 @@ impl<'a> Scanner<'a> {
                 return;
             }
         }
-        // 第二级：哈希（同库范围；读毕稳定度复核）
+        // Lightweight registration: filename/size/mtime; content belongs to indexing.
         let Some((kind, file_meta, xxh, size)) = read_stable(path, meta) else {
             self.report.cooled += 1;
             return;
@@ -878,6 +856,7 @@ impl<'a> Scanner<'a> {
         }
         let reg_id = file_registration_id(path).ok();
         self.register_or_skip(path, meta, kind, &file_meta, xxh, size, reg_id);
+        crate::index::scheduler::notify(self.db_dir);
     }
 
     /// mtime 距今小于冷却窗（§八-2）。文件 mtime 在未来（时钟漂移）按
@@ -926,7 +905,7 @@ impl<'a> Scanner<'a> {
             Missing(i64),
         }
         let verdict = self.registered(move || {
-            match db.find_asset_brief_by_size_xxh(&library_id, size, xxh) {
+            match db.find_asset_brief_by_file_metadata(&library_id, &filename, size, &mtime) {
                 Ok(Some((id, _, true))) => Verdict::Missing(id),
                 Ok(Some(_)) => Verdict::Skipped, // 在线同哈希：skip（§八-1）
                 Err(_) | Ok(None) => {
@@ -1001,7 +980,7 @@ impl<'a> Scanner<'a> {
     ) -> bool {
         // 锁内重查（防并发轮次/导入同时重绑）
         let db = self.db;
-        let row = self.registered(move || {
+        let row = self.registered_update(move || {
             db.0.query_row(
                 "SELECT path, missing, xmp_dirty, rating, color_label, rejected \
                      FROM assets WHERE id = ?1",
@@ -1037,7 +1016,7 @@ impl<'a> Scanner<'a> {
             Some((xxh, size)) => (format!(", size = {size}"), format!(", xxhash = {xxh}")),
         };
         let db = self.db;
-        let updated = self.registered(move || {
+        let updated = self.registered_update(move || {
             db.0.execute(
                 &format!(
                     "UPDATE assets SET path = ?2, filename = ?3, mtime = ?4{size_sql}{xxh_sql}, \
@@ -1134,12 +1113,13 @@ impl<'a> Scanner<'a> {
             return; // 内容不可识别：不动资产（missing 保持，下轮再试）
         }
         let reg = file_registration_id(path).ok();
-        let same = size == brief.size && xxh == brief.xxhash;
+        let same = size == brief.size
+            && meta.modified().map(rfc3339).unwrap_or_default() == brief.mtime;
         if same {
             // 单纯恢复：清 missing + 记录新指纹；xmp_dirty → 边车补写
             let mtime = meta.modified().map(rfc3339).unwrap_or_default();
             let db = self.db;
-            let restored = self.registered(move || {
+            let restored = self.registered_update(move || {
                 db.0.execute(
                     "UPDATE assets SET missing = 0, mtime = ?2, volume_serial = ?3, \
                          file_id = ?4 WHERE id = ?1 AND missing = 1",
@@ -1176,7 +1156,7 @@ impl<'a> Scanner<'a> {
         let mtime = meta.modified().map(rfc3339).unwrap_or_default();
         let captured = file_meta.captured_at.map(rfc3339_dt);
         let db = self.db;
-        let updated = self.registered(move || {
+        let updated = self.registered_update(move || {
             db.0.execute(
                 "UPDATE assets SET size = ?2, mtime = ?3, xxhash = ?4, missing = 0, \
                      captured_at = COALESCE(?5, captured_at), camera = ?6, \
@@ -1282,7 +1262,7 @@ impl<'a> Scanner<'a> {
             return;
         }
         let Ok(reg) = file_registration_id(path) else {
-            return; // exFAT/FAT 等无 file id：走哈希路径，无指纹可记
+            return; // exFAT/FAT 等无 file id：走元数据路径，无指纹可记
         };
         let _ = self.db.0.execute(
             "UPDATE assets SET volume_serial = ?2, file_id = ?3 WHERE id = ?1",
@@ -1291,43 +1271,41 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// 稳定读取（§八-2）：open（写入者持锁打不开 → None）→ head 截存（魔数/
-/// EXIF）→ 全量 xxh64 → 读毕复核（两次探测间大小/mtime 变化 → None）。
-/// 返回 (kind, EXIF-lite, xxhash, size)。
+/// Observe a stable file without opening its content. EXIF is a downstream task.
 fn read_stable(path: &Path, first: &fs::Metadata) -> Option<(AssetKind, MetaLite, u64, u64)> {
-    use std::io::Read;
-    const HEAD_MAX: usize = 1024 * 1024;
-    const CHUNK: usize = 8 * 1024 * 1024;
-    let mut file = std::fs::File::open(path).ok()?; // 持锁/权限 → 本轮跳过
-    let expected = first.len();
-    let mut head = vec![0u8; expected.min(HEAD_MAX as u64) as usize];
-    file.read_exact(&mut head).ok()?;
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let kind = classify(&filename, &head);
-    let meta = exif_lite::parse(&head);
-    let mut xxh = Xxh64::new(0);
-    xxh.update(&head);
-    let mut read = head.len() as u64;
-    let mut chunk = vec![0u8; CHUNK];
-    loop {
-        match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                xxh.update(&chunk[..n]);
-                read += n as u64;
-            }
-            Err(_) => return None, // 写入者干扰：不稳定
-        }
-    }
-    if read != expected {
-        return None; // 两次探测间大小变化（§八-2）
-    }
+    let kind = classify(path.file_name()?.to_str()?, &[]);
     let after = fs::metadata(path).ok()?;
-    if after.len() != expected || after.modified().ok()? != first.modified().ok()? {
-        return None; // 读毕仍在写入：下轮再来
+    if after.len() != first.len() || after.modified().ok()? != first.modified().ok()? {
+        return None;
     }
-    Some((kind, meta, xxh.digest(), expected))
+    Some((kind, MetaLite::default(), 0, first.len()))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_accepts_metadata_without_parsing_or_hashing_photo_content() {
+        let dir=tempfile::tempdir().unwrap();
+        let photo=dir.path().join("camera.JPG");
+        // Invalid image data must still be registered; decoding belongs to indexing.
+        fs::write(&photo,b"not an image").unwrap();
+        let metadata=fs::metadata(&photo).unwrap();
+        let (kind,exif,hash,size)=read_stable(&photo,&metadata).unwrap();
+        assert_eq!(kind,AssetKind::Photo);
+        assert_eq!(hash,0);
+        assert_eq!(size,12);
+        assert!(exif.camera.is_none());
+    }
+
+    #[test]
+    fn discovery_defers_a_file_that_changed_after_enumeration() {
+        let dir=tempfile::tempdir().unwrap();
+        let photo=dir.path().join("camera.jpg");
+        fs::write(&photo,b"first").unwrap();
+        let first=fs::metadata(&photo).unwrap();
+        fs::write(&photo,b"second version").unwrap();
+        assert!(read_stable(&photo,&first).is_none());
+    }
 }

@@ -22,6 +22,28 @@ pub const BLUR_ALGO_VERSION: &str = "regional-focus-1024-v8-heuristic";
 static BLUR_SOFT_THRESHOLD_MILLI: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(30_000);
 
+thread_local! {
+    static PARAMETERS: std::cell::RefCell<Option<crate::settings::AiSettings>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_parameters<T>(
+    params: &crate::settings::AiSettings,
+    work: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<crate::settings::AiSettings>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PARAMETERS.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PARAMETERS.with(|slot| slot.replace(Some(params.clone()))));
+    work()
+}
+
+pub(crate) fn task_include_single() -> Option<bool> {
+    PARAMETERS.with(|slot| slot.borrow().as_ref().map(|p| p.eyes_include_single))
+}
+
 /// 刷新 blur 软阈值快照（启动 / settings_set 调用；单位 = 设置原值）。
 pub fn set_blur_soft_threshold(threshold: f32) {
     BLUR_SOFT_THRESHOLD_MILLI.store(
@@ -74,7 +96,9 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
         return false; // 资产已删除（级联清任务前的防御兜底）
     };
     let _ = path;
-    let Some((img, origin)) = super::selection_regions::thumbnail(db, db_dir, asset_id) else {
+    let Some((img, origin)) =
+        crate::index::artifacts::analysis(db, db_dir, asset_id).map(|image| (image, "thumbnail"))
+    else {
         let details =
             serde_json::json!({"reason": "source_unavailable", "regions": [], "calibrated": false});
         return db
@@ -91,53 +115,8 @@ pub fn process_blur_task(db: &Db, db_dir: &Path, asset_id: i64, soft_threshold: 
     let mut evidence = super::selection_regions::evidence(&img, origin);
     evidence.models = vec!["regional-laplacian-sobel-v1-heuristic".into()];
     evidence.parameters = serde_json::json!({"sourceSize":super::selection_regions::ANALYSIS_SIZE,"parameterVersion":8,"softThreshold":soft_threshold});
-    let gray = image::imageops::grayscale(&img);
-    let faces: Vec<(f64, f64, f64, f64)> = {
-        let Ok(mut stmt) = db.0.prepare(
-            "SELECT box_x,box_y,box_w,box_h FROM faces WHERE asset_id=?1 ORDER BY box_w*box_h DESC",
-        ) else {
-            return false;
-        };
-        let Ok(rows) = stmt.query_map([asset_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        }) else {
-            return false;
-        };
-        let Ok(rows) = rows.collect::<Result<Vec<_>, _>>() else {
-            return false;
-        };
-        rows
-    };
-    let largest = faces.first().map(|f| f.2 * f.3).unwrap_or(0.0);
-    for (x, y, w, h) in faces {
-        if [x, y, w, h].iter().any(|n| !n.is_finite()) || w * h < largest * 0.25 {
-            continue;
-        }
-        let px = (x.clamp(0.0, 1.0) * img.width() as f64) as u32;
-        let py = (y.clamp(0.0, 1.0) * img.height() as f64) as u32;
-        if px >= img.width() || py >= img.height() {
-            continue;
-        }
-        let pw = ((w * img.width() as f64) as u32).min(img.width() - px);
-        let ph = ((h * img.height() as f64) as u32).min(img.height() - py);
-        if pw.min(ph) < 48 {
-            continue;
-        }
-        let metric = super::focus_quality::measure(
-            &image::imageops::crop_imm(&gray, px, py, pw, ph).to_image(),
-            soft_threshold,
-        );
-        evidence.regions.push(super::selection_regions::Region {
-            kind: "face".into(),
-            person: 0,
-            side: None,
-            bounds: [x, y, w, h],
-            state: metric.state.into(),
-            reason: metric.reason.map(str::to_owned),
-            raw_score: metric.score,
-            auxiliary_ear: None,
-        });
-    }
+    let gray = image::imageops::grayscale(&*img);
+    // Base clarity never races optional identity indexing; detail regions are independent.
     if !evidence.regions.iter().any(|r| r.raw_score.is_some()) {
         evidence.regions.clear();
         for (bounds, metric) in super::focus_quality::detail_regions(&gray, soft_threshold) {
@@ -267,13 +246,21 @@ pub fn set_eyes_ear_thresholds(closed: f32, maybe: f32) {
 
 /// worker 侧读取：closed 阈（EAR < 此值判闭）。
 pub fn eyes_ear_closed() -> f32 {
-    EYES_EAR_CLOSED_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+    PARAMETERS
+        .with(|slot| slot.borrow().as_ref().map(|p| p.eyes_ear_closed))
+        .unwrap_or_else(|| {
+            EYES_EAR_CLOSED_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+        })
 }
 
 /// worker 侧读取：maybe 阈（closed ≤ EAR < 此值判疑似）。
 #[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
 pub fn eyes_ear_maybe() -> f32 {
-    EYES_EAR_MAYBE_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+    PARAMETERS
+        .with(|slot| slot.borrow().as_ref().map(|p| p.eyes_ear_maybe))
+        .unwrap_or_else(|| {
+            EYES_EAR_MAYBE_MILLI.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+        })
 }
 
 /// EAR = (‖p2−p6‖ + ‖p3−p5‖) / (2‖p1−p4‖)（Soukupová & Čech 2016 六点
@@ -402,8 +389,8 @@ pub const IOD_ROI_RATIO_MAX: f32 = 0.70;
 // ---------------------------------------------------------------------------
 
 /// 惰性会话槽（与 face.rs 同款互斥串行约定；模型件单一无档位切换）。
-fn facemesh_slots() -> &'static Mutex<Option<ort::session::Session>> {
-    static SLOTS: std::sync::OnceLock<Mutex<Option<ort::session::Session>>> =
+fn facemesh_slots() -> &'static Mutex<Option<(String, ort::session::Session)>> {
+    static SLOTS: std::sync::OnceLock<Mutex<Option<(String, ort::session::Session)>>> =
         std::sync::OnceLock::new();
     SLOTS.get_or_init(|| Mutex::new(None))
 }
@@ -464,6 +451,14 @@ impl<'a> FacemeshEarClassifier<'a> {
                 let mut slots = facemesh_slots()
                     .lock()
                     .expect("facemesh slots mutex poisoned");
+                let cache_key = format!(
+                    "{}:{:?}",
+                    self.manager.model_path(FACEMESH_MODEL_ID).display(),
+                    super::inference_plan(use_gpu, FACEMESH_MODEL_ID).backend
+                );
+                if slots.as_ref().is_some_and(|(key, _)| *key != cache_key) {
+                    *slots = None;
+                }
                 if slots.is_none() {
                     let path = self.manager.model_path(FACEMESH_MODEL_ID);
                     if !path.is_file() {
@@ -471,14 +466,17 @@ impl<'a> FacemeshEarClassifier<'a> {
                             "模型 {FACEMESH_MODEL_ID} 未下载（设置页下载后再试）"
                         ));
                     }
-                    *slots = Some(super::build_session(
-                        &path,
-                        None,
-                        use_gpu,
-                        FACEMESH_MODEL_ID,
-                    )?);
+                    *slots = Some((
+                        cache_key,
+                        super::build_session(
+                            &path,
+                            Some(ModelManager::embed_intra_threads()),
+                            use_gpu,
+                            FACEMESH_MODEL_ID,
+                        )?,
+                    ));
                 }
-                let session = slots.as_mut().expect("上文已保证");
+                let session = &mut slots.as_mut().expect("上文已保证").1;
                 let input_name = session
                     .inputs()
                     .first()
@@ -618,11 +616,13 @@ pub fn process_eyes_task(
     };
     let _ = path;
     let size = super::selection_regions::ANALYSIS_SIZE;
-    let Some((img, origin)) = super::selection_regions::thumbnail(db, db_dir, asset_id) else {
+    let Some((img, origin)) =
+        crate::index::artifacts::analysis(db, db_dir, asset_id).map(|image| (image, "thumbnail"))
+    else {
         return db.set_ai_analysis_details(asset_id, "eyes", "unknown", None, EYES_ALGO_VERSION,
             &serde_json::json!({"reason":"source_unavailable", "regions":[], "calibrated":false})).is_ok();
     };
-    let faces = match super::face::detect_faces(manager, &img) {
+    let faces = match crate::index::artifacts::faces(db, db_dir, asset_id, manager, &img) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -645,8 +645,8 @@ pub fn process_eyes_task(
         "includeSingle":super::selection_regions::include_single(),
         "faceDetectThreshold":manager.ai_params().face_detect_threshold,
         "minimumEyeWidth":super::selection_regions::MIN_EYE_DETECTION_PIXELS});
-    for (index, face) in faces.into_iter().enumerate() {
-        match classifier.classify(&img, &face, index + 1) {
+    for (index, face) in faces.iter().enumerate() {
+        match classifier.classify(&img, face, index + 1) {
             Ok(regions) => evidence.regions.extend(regions),
             Err(_) => return false,
         }
@@ -779,18 +779,8 @@ pub fn kick_eyes_if_ready(
     bus: &crate::events::EventBus,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    if !manager.selection_eyes_ready() {
-        return;
-    }
-    let manager = std::sync::Arc::new(manager.clone());
-    let bus = bus.clone();
-    let _ = supervisor.spawn_coalesced(
-        "selection",
-        format!("eyes-backfill:{}", db_dir.display()),
-        move |controls| {
-            run_eyes_backfill_gated(&db_dir, &manager, &bus, Some(&controls));
-        },
-    );
+    crate::index::scheduler::request_ai(&db_dir, manager, bus, "eyes");
+    crate::index::scheduler::kick(db_dir, supervisor);
 }
 
 // ---------------------------------------------------------------------------
@@ -804,10 +794,7 @@ pub fn kick_eyes_if_ready(
 /// ——门控等待中（缩略图池还没做到这张）步进间小睡重试而不是退出，
 /// 缩略图推进后自然接上；嵌入图全程只由缩略图任务读一次。预算用选片
 /// 域（与图片域分离，两池互不排队）。
-fn selection_blur_worker_loop(
-    db_dir: &Path,
-    controls: Option<&crate::tasks::TaskControls>,
-) -> u64 {
+fn selection_blur_worker_loop(db_dir: &Path, controls: Option<&crate::tasks::TaskControls>) -> u64 {
     let Ok(db) = crate::ipc::open_library_db(db_dir) else {
         return 0;
     };
@@ -845,10 +832,7 @@ fn selection_blur_worker_loop(
 }
 
 /// 跑完当前全部选片 blur 待办（supervisor 任务体接线用）。
-fn run_selection_index_gated(
-    db_dir: &Path,
-    controls: Option<&crate::tasks::TaskControls>,
-) -> u64 {
+fn run_selection_index_gated(db_dir: &Path, controls: Option<&crate::tasks::TaskControls>) -> u64 {
     let workers = crate::tasks::index_parallelism();
     let processed = std::sync::atomic::AtomicU64::new(0);
     std::thread::scope(|scope| {
@@ -871,14 +855,5 @@ pub fn kick_selection_index(
     db_dir: PathBuf,
     supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
 ) {
-    if crate::index::import_in_flight() {
-        return;
-    }
-    let _ = supervisor.spawn_coalesced(
-        "selection",
-        format!("selection-index:{}", db_dir.display()),
-        move |controls| {
-            run_selection_index_gated(&db_dir, Some(&controls));
-        },
-    );
+    crate::index::scheduler::kick(db_dir, supervisor);
 }

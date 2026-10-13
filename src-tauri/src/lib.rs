@@ -157,6 +157,7 @@ pub fn run() {
             // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             if let Some(db_dir) = active_db_dir {
+                index::scheduler::configure(&db_dir, &ai_for_kick, &bus, &ai_settings_snapshot);
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);
                 // 拍摄地图：内置数据包首次启动解压一次（config_dir/geo 常驻）
                 // → 后台跑索引管线（加载/入库/回填），幂等
@@ -188,24 +189,6 @@ pub fn run() {
                         }
                     });
                 }
-                // RAW 缩略图源代际升级自愈（v1 取第一段小预览 → v2 取最大段）：
-                // 一次性重排 RAW thumb 任务重建（dbDir 标记文件防重入）
-                index::refresh_raw_thumbs_for_generation(db_dir.clone(), &bus, &supervisor_handle);
-                // EXIF 深提取代际自愈（gen-2 / migration 0008）：存量资产
-                // 补齐方向/闪光/GPS 等 10 列（dbDir 标记文件防重入）
-                index::refresh_exif_for_generation(db_dir.clone(), &bus, &supervisor_handle);
-                // 哈希补算代际自愈（gen-1 / migration 0014）：xxh=0 哨兵补齐
-                index::refresh_hash_for_generation(db_dir.clone(), &bus, &supervisor_handle);
-                // 选片分析代际自愈（gen-1 / migration 0021）：eyes/blur 任务
-                // 账建档（闭眼模型未收录→eyes 通道跳过并计数；blur 始终可用）。
-                // 2026-10-12：AI 功能关闭的库不建档（不写标记——开启后下轮
-                // 启动/指纹重建再补），也不触发闭眼回填
-                index::refresh_selection_for_generation(
-                    db_dir.clone(),
-                    &bus,
-                    &supervisor_handle,
-                    enable_clip || enable_face,
-                );
                 // 闭眼回填钩子（模型未收录恒早退；收录后自动续跑）+ blur
                 // 选片消费池（统一经 pipeline 契约入口，2026-10-12）
                 if enable_clip || enable_face {
@@ -223,14 +206,6 @@ pub fn run() {
                 }
                 // 缩略图缓存 LRU：启动扫一次（超限后台淘汰最旧）
                 thumbs::kick_startup_evict(db_dir.clone());
-                // pHash 代际自愈（gen-1 / migration 0012）：存量资产补算
-                // pHash + 完成后连拍重组
-                index::refresh_phash_for_generation(
-                    db_dir.clone(),
-                    &bus,
-                    &supervisor_handle,
-                    burst_params,
-                );
                 if enable_clip {
                     ai::semantic::kick_semantic_if_ready(
                         db_dir.clone(),

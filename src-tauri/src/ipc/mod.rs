@@ -622,7 +622,6 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     let enable_face = ai_settings.enable_face;
     let burst_params = crate::bursts::BurstParams::from_settings(&ai_settings);
     let gate = std::sync::Arc::clone(&state.import_running);
-    let gate_supervisor = Arc::clone(&index_supervisor);
     // 闸在派发前同步置位：调用方拿到 job_id 的瞬间，手动索引触发即被拒
     // （闭包内才置位有窗口）。闭包 Drop 兜底放行（含 panic 路径）。进程级
     // 镜像旗（index::kick 让路守卫读点）与上面同点翻转——kick 无 state
@@ -632,10 +631,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     let handle = state
         .supervisor
         .spawn("import", format!("job-{job_id}"), move |_| {
-            // 导入让路闸（用户定案 2026-09-29）：在场期间索引一律不跑——
-            // 开场暂停 kind="index" 在跑任务（thumb/exif/hash/phash/blur
-            // 池 + AI 回填池同 kind），收尾恢复；手动触发由
-            // ensure_no_import_running 拒绝。Drop 兜底放行（panic 也不锁死）。
+            // Import retains admission priority; committed photos remain indexable.
             struct ImportGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
             impl Drop for ImportGate {
                 fn drop(&mut self) {
@@ -645,40 +641,19 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
                 }
             }
             let _gate = ImportGate(gate);
-            // 让路闸覆盖两个索引池：index（thumb/exif/hash/phash）+
-            // selection（eyes/blur 选片索引，2026-10-12 拆分后独立池）
-            let paused = gate_supervisor.pause_kind("index")
-                + gate_supervisor.pause_kind("selection");
-            if paused > 0 {
-                eprintln!("导入让路：已暂停 {paused} 个索引任务，导入完成后自动恢复");
-            }
+            crate::index::scheduler::configure(&index_db_dir,&ai_manager,&ai_bus,&ai_settings);
+            crate::index::scheduler::kick(index_db_dir.clone(), &index_supervisor);
             let stats = engine.run();
             // 先放行闸再恢复（M1 单导入串行：下一个导入必在本任务收尾后
             // 才能起跑，不存在互相踩暂停/恢复的交错）。
             drop(_gate);
-            gate_supervisor.resume_kind("index");
-            gate_supervisor.resume_kind("selection");
             // 索引/AI/连拍收尾统一在导入结束后一次性触发，且仅在本轮确有
             // 已落盘文件（done_files>0；全跳过的重复导入不打扰）。取消/
             // 设备失联的会话同样放行——已落盘文件的任务必须被唤醒（journal
             // 行已终结，index 任务只写 index_tasks/assets 派生列，不与收尾
             // 收割竞争）。索引天然增量：worker 只领取 pending 任务行。
             if stats.done_files > 0 {
-                // 导入收尾统一追加分（2026-10-12 管线契约：phash 补差 +
-                // AI 开启库的选片账；缩略图在插入时已播种——见
-                // index::pipeline 模块文档）
-                if let Ok(db) = open_library_db(&index_db_dir) {
-                    crate::index::pipeline::enqueue_import_backlog(
-                        &db,
-                        crate::index::pipeline::selection_enabled(&ai_settings),
-                    );
-                }
-                // 图片 + 选片两池统一唤醒（导入在场让路闸在 kick 内）
-                crate::index::pipeline::kick(
-                    index_db_dir.clone(),
-                    &index_supervisor,
-                    crate::index::pipeline::Pools::ALL,
-                );
+                crate::index::scheduler::notify(&index_db_dir);
                 // 拍摄地图增量回填（2026-09-30）：新照片 GPS 归属随导入完成
                 // 自动入图——指纹不变走 bincode 快路径 + asset_regions 增量
                 crate::geo::install::ensure_installed(

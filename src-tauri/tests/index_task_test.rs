@@ -6,8 +6,8 @@
 mod common;
 
 pub use common::{
-    platform, scan,
-    ai, bursts, db, devices, events, import, index, geo, ipc, metadata, settings, tasks, thumbs,
+    ai, bursts, db, devices, events, geo, import, index, ipc, metadata, platform, scan, settings,
+    tasks, thumbs,
 };
 
 use std::fs;
@@ -62,7 +62,7 @@ fn thumb_state(db: &db::Db, filename: &str) -> i32 {
 }
 
 #[test]
-fn import_creates_thumb_tasks_only_for_photo_and_raw() {
+fn import_seeds_enabled_channels_only_for_photo_and_raw() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
@@ -75,14 +75,16 @@ fn import_creates_thumb_tasks_only_for_photo_and_raw() {
 
     let database = open_db(db_dir.path());
     let tasks = states(&database);
-    // 0021 起导入期为每张照片建 thumb+eyes+blur 三通道任务（eyes 无模型
-    // 保持 pending 属设计：模型收录后 kick 自然续跑）
+    // AI 未开启时，登记原子播种 thumb/exif/phash。
     assert_eq!(tasks.len(), 9, "三通道 × 3 张照片: {tasks:?}");
     assert!(tasks
         .iter()
         .all(|(_, _, state, attempts)| state == "pending" && *attempts == 0));
     assert_eq!(
-        tasks.iter().filter(|(kind, _, _, _)| kind == "thumb").count(),
+        tasks
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "thumb")
+            .count(),
         3,
         "仅图片产生缩略图待办"
     );
@@ -107,7 +109,7 @@ fn worker_completes_tasks_and_generates_three_tiers() {
 
     let processed = index::run_pending(db_dir.path(), index::worker_count());
     // thumb+blur 完成；eyes 无模型被跳过、保持 pending（0021 语义）
-    assert_eq!(processed, 2, "thumb+blur 各一件完成");
+    assert_eq!(processed, 3, "thumb/exif/phash 各一件完成");
 
     let database = open_db(db_dir.path());
     let tasks = states(&database);
@@ -118,16 +120,13 @@ fn worker_completes_tasks_and_generates_three_tiers() {
             .all(|(_, _, state, _)| state == "done"),
         "{tasks:?}"
     );
-    assert!(
-        tasks
-            .iter()
-            .any(|(kind, _, state, _)| kind == "eyes" && state == "pending"),
-        "eyes 无模型保持 pending: {tasks:?}"
-    );
+    assert!(tasks
+        .iter()
+        .all(|(kind, _, _, _)| !matches!(kind.as_str(), "eyes" | "blur")));
     assert_eq!(thumb_state(&database, "IMG_0001.jpg"), 1);
 
     // 三档缓存文件都在 dbDir/thumbs/<tier>/ 下
-    for tier in thumbs::SIZE_TIERS {
+    for tier in [256u16, 512, 1024] {
         let dir = db_dir.path().join("thumbs").join(tier.to_string());
         let count = fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
         assert!(count >= 1, "{tier} 档缓存缺失: {}", dir.display());
@@ -201,19 +200,16 @@ fn corrupt_image_fails_with_attempts_then_failed() {
     // 单 worker 同轮内自动重试到封顶：attempts 1→2→3 落 failed；eyes 无模型
     // 保持 pending、blur 成功 done（0021 三通道）
     assert!(
-        tasks.iter().any(|(kind, _, state, attempts)| kind == "thumb"
-            && state == "failed"
-            && *attempts == 3),
+        tasks
+            .iter()
+            .any(|(kind, _, state, attempts)| kind == "thumb"
+                && state == "failed"
+                && *attempts == 3),
         "{tasks:?}"
     );
-    assert!(
-        tasks.iter().any(|(kind, _, state, _)| kind == "eyes" && state == "pending"),
-        "{tasks:?}"
-    );
-    assert!(
-        tasks.iter().any(|(kind, _, state, _)| kind == "blur" && state == "done"),
-        "{tasks:?}"
-    );
+    assert!(tasks
+        .iter()
+        .all(|(kind, _, _, _)| !matches!(kind.as_str(), "eyes" | "blur")));
 }
 
 #[test]
@@ -234,7 +230,7 @@ fn interrupted_running_tasks_resume_on_startup_path() {
 
     // 启动恢复路径：复位 running → pending，返回待办数（三通道）
     let pending = index::resume_pending(db_dir.path());
-    assert_eq!(pending, 3, "running 应复位为 pending（thumb/eyes/blur）");
+    assert_eq!(pending, 3, "running 应复位为 pending（thumb/exif/phash）");
     let tasks = states(&database);
     assert!(
         tasks.iter().all(|(_, _, state, _)| state == "pending"),

@@ -56,6 +56,9 @@ pub fn apply_runtime_projection(state: &AppState, settings: &Settings) {
         quality_tier: crate::ai::QualityTier::from_setting(&settings.ai.quality_tier)
             .unwrap_or_default(),
     });
+    if let Ok(path) = settings.active_database_dir(&state.config_dir) {
+        crate::index::scheduler::configure(&path, &state.ai, &state.bus, &settings.ai);
+    }
     // 选片分析参数快照刷新（blur 软阈值 + eyes EAR 阈值 worker 侧即时读
     // 新值，0021；EAR 阈值变更经 selection 指纹重排 eyes 任务）
     crate::ai::selection::set_blur_soft_threshold(settings.ai.blur_soft_threshold);

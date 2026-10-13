@@ -27,7 +27,7 @@ use std::time::Duration;
 use crate::events::{AppEvent, EventBus};
 pub mod index_budget;
 
-/// Half the physical cores, respecting a more restrictive process affinity.
+/// Physical cores, respecting a more restrictive process affinity.
 pub fn index_parallelism() -> usize {
     let physical = num_cpus::get_physical();
     let available = std::thread::available_parallelism()
@@ -37,7 +37,7 @@ pub fn index_parallelism() -> usize {
 }
 
 pub fn index_parallelism_for(physical: usize, available: usize) -> usize {
-    (physical.min(available) / 2).max(1)
+    physical.min(available).max(1)
 }
 
 /// 任务控制柄（任务体收到的软控制接口）：pause/resume/cancel 均为原子

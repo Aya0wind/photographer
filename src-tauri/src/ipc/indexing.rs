@@ -206,7 +206,6 @@ fn per_asset_status(
 /// 侧自带去重（NOT EXISTS pending/running + ai_indexed_at/face_indexed_at
 /// 时间账）。
 pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), String> {
-    super::ensure_no_import_running(state)?;
     let (enable_clip, enable_face) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
@@ -216,7 +215,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
     let supervisor = std::sync::Arc::clone(&state.supervisor);
     match kind {
         "image" => {
-            state.supervisor.resume_kind("index");
+            crate::index::scheduler::pause(&db_dir,false,false)?;
             db.create_thumb_tasks_for_unindexed()
                 .map_err(|e| e.to_string())?;
             // 图片域消费的全部通道一起重试失败行（thumb/exif/phash 都在
@@ -239,7 +238,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
             if !(enable_clip || enable_face) {
                 return Err("选片索引未开启（设置 → AI）".into());
             }
-            state.supervisor.resume_kind("selection");
+            crate::index::scheduler::pause(&db_dir,true,false)?;
             db.create_eyes_tasks_for_unindexed()
                 .map_err(|e| format!("创建闭眼任务失败: {e}"))?;
             db.create_blur_tasks_for_unindexed()
@@ -281,11 +280,7 @@ pub fn fetch_index_kick_now(state: &super::AppState, kind: &str) -> Result<(), S
                     db.create_blur_tasks_for_unindexed()
                         .map_err(|e| format!("创建失焦任务失败: {e}"))?;
                 }
-                // M8-②：xxhash=0 哨兵（rename 快道/历史遗留）手动补算入口
-                "hash" => {
-                    db.create_hash_tasks_for_unhashed()
-                        .map_err(|e| format!("创建哈希补算任务失败: {e}"))?;
-                }
+                "hash" => return Err("新索引使用文件元数据去重，不再安排全文件哈希任务".into()),
                 _ => {}
             }
             db.retry_failed_index_tasks(kind)
@@ -363,10 +358,11 @@ pub fn rebuild_channel_core(
     db_dir: &std::path::Path,
     kind: &str,
 ) -> Result<u64, String> {
+    let barrier=crate::index::image_index_lock(db_dir);
+    let _guard=barrier.write().map_err(|e| e.to_string())?;
+    crate::index::artifacts::invalidate(db_dir);
     match kind {
         "image" => {
-            let barrier = crate::index::image_index_lock(db_dir);
-            let _guard = barrier.write().map_err(|e| e.to_string())?;
             // The target is the established cache folder below this library,
             // never the photo root or the library directory itself.
             let cache = db_dir.join("thumbs");
@@ -432,8 +428,6 @@ pub fn rebuild_channel_core(
             // 未收录时其任务保持 pending 空转跳过）。写闸与图片重建同款：
             // 在途选片 worker（持读闸）收尾后才开始清理——旧任务不能在
             // 清理后回写分析产物。
-            let barrier = crate::index::image_index_lock(db_dir);
-            let _guard = barrier.write().map_err(|e| e.to_string())?;
             db.0
                 .execute_batch("DELETE FROM ai_analysis;                                DELETE FROM index_tasks WHERE kind IN ('eyes', 'blur');")
                 .map_err(|e| e.to_string())?;
@@ -477,7 +471,6 @@ fn kick_rebuilt_channel(
 /// 重建门槛校验（同步快路径）：语义/人脸需模型就绪 + 开关开启；
 /// thumb/exif 无门槛。通过后调用方再后台执行清理+重排+kick。
 pub fn rebuild_gates(state: &super::AppState, kind: &str) -> Result<(), String> {
-    super::ensure_no_import_running(state)?;
     let (enable_clip, enable_face) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         (settings.ai.enable_clip, settings.ai.enable_face)
@@ -714,146 +707,14 @@ pub fn burst_params_fingerprint(ai: &crate::settings::AiSettings) -> u64 {
     hash
 }
 
-/// 参数指纹落盘名（dbDir 下）。
-const PARAMS_MARKER: &str = "index-params.marker";
-
-/// 启动 / settings_set 后调用：比对 settings.ai 参数指纹与库标记，不一致
-/// 的通道自动重建（一次性；模型未就绪/开关未开的通道**不写标记**，下一轮
-/// 满足条件时再重建）。手动重建按钮走 [`index_rebuild`]，与此互不冲突
-/// （重建本身幂等：清产物 → 重排）。
+/// Configure immutable per-library parameters and reconcile durable task versions.
 pub fn check_params_and_rebuild(
     state: &super::AppState,
     db_dir: &std::path::Path,
     ai: &crate::settings::AiSettings,
 ) {
-    let (want_sem, want_face, want_burst, want_sel) = (
-        semantic_params_fingerprint(ai),
-        face_params_fingerprint(ai),
-        burst_params_fingerprint(ai),
-        selection_params_fingerprint(ai),
-    );
-    let marker = db_dir.join(PARAMS_MARKER);
-    // 首跑（marker 不存在）：视参数为「一直就是当前值」，只写标记不重建
-    // （真机事故：首跑误判参数变更触发语义重建，与启动回填竞态致 71 条失败）
-    if !marker.is_file() {
-        std::fs::write(
-            &marker,
-            format!(
-                "semantic={want_sem}
-face={want_face}
-burst={want_burst}
-selection={want_sel}
-"
-            ),
-        )
-        .ok();
-        return;
-    }
-    let content = std::fs::read_to_string(&marker).unwrap_or_default();
-    let stored_sem = content
-        .lines()
-        .find_map(|l| l.strip_prefix("semantic="))
-        .and_then(|v| v.parse::<u64>().ok());
-    let stored_face = content
-        .lines()
-        .find_map(|l| l.strip_prefix("face="))
-        .and_then(|v| v.parse::<u64>().ok());
-    let stored_burst = content
-        .lines()
-        .find_map(|l| l.strip_prefix("burst="))
-        .and_then(|v| v.parse::<u64>().ok());
-    // 0021 前的旧 marker 无 selection 行 → None（首次对齐即重排两通道任务，
-    // 分析结果随阈值产出，与 gen-1 建档幂等）
-    let stored_sel = content
-        .lines()
-        .find_map(|l| l.strip_prefix("selection="))
-        .and_then(|v| v.parse::<u64>().ok());
-
-    let mut rebuilt_sem = false;
-    if stored_sem != Some(want_sem) && ai.enable_clip && state.ai.semantic_ready() {
-        eprintln!("[params] 语义参数变更（{stored_sem:?} → {want_sem}），自动重建");
-        run_rebuild(state, db_dir, "semantic");
-        rebuilt_sem = true;
-    }
-    let mut rebuilt_face = false;
-    if stored_face != Some(want_face) && ai.enable_face && state.ai.face_models_ready() {
-        eprintln!("[params] 人脸参数变更（{stored_face:?} → {want_face}），自动重建");
-        run_rebuild(state, db_dir, "face");
-        rebuilt_face = true;
-    }
-    // 连拍参数变更：只重组不重算（pHash 与参数无关）。旧 marker 无 burst 行
-    //（0012 前创建）视作「从未分组」——一次重组后对齐。
-    // 0021 选片参数变更（或旧 marker 升级）：两通道任务重排（清分析产物
-    // 不必须——upsert 覆盖；阈值回退时旧记录随重算覆写）。
-    // 2026-10-12 方向感知：仅 AI 功能开启时建档/重排（开启 = 补建存量；
-    // 关闭 = 不建新任务，存量 pending 由状态计数侧按开关让路）。
-    if stored_sel != Some(want_sel) {
-        let selection_enabled = ai.enable_clip || ai.enable_face;
-        eprintln!(
-            "[params] 选片参数变更（{stored_sel:?} → {want_sel}），AI 功能{} → {}eyes/blur 任务",
-            if selection_enabled { "开" } else { "关" },
-            if selection_enabled { "重排 " } else { "跳过" },
-        );
-        if selection_enabled {
-            if let Ok(db) = super::open_library_db(db_dir) {
-                let _ = db.requeue_eyes_tasks_for_all();
-                let _ = db.requeue_blur_tasks_for_all();
-                let pending = db.pending_index_task_count("blur").unwrap_or(0);
-                if pending > 0 {
-                    crate::index::kick(
-                        db_dir.to_path_buf(),
-                        &std::sync::Arc::clone(&state.supervisor),
-                    );
-                }
-            }
-        }
-    }
-    let mut regrouped_burst = false;
-    if stored_burst != Some(want_burst) {
-        eprintln!("[params] 连拍参数变更（{stored_burst:?} → {want_burst}），重组");
-        let params = crate::bursts::BurstParams::from_settings(ai);
-        let bus = state.bus.clone();
-        let supervisor = std::sync::Arc::clone(&state.supervisor);
-        crate::bursts::regroup_kick(db_dir.to_path_buf(), params, &bus, &supervisor);
-        regrouped_burst = true;
-    }
-    // 只把「已重建或已对齐」的通道写回标记；被门槛挡下的通道保留旧指纹
-    let sem_line = format!(
-        "semantic={}",
-        if rebuilt_sem || stored_sem == Some(want_sem) {
-            want_sem
-        } else {
-            stored_sem.unwrap_or(want_sem)
-        }
-    );
-    let face_line = format!(
-        "face={}",
-        if rebuilt_face || stored_face == Some(want_face) {
-            want_face
-        } else {
-            stored_face.unwrap_or(want_face)
-        }
-    );
-    let burst_line = format!(
-        "burst={}",
-        if regrouped_burst || stored_burst == Some(want_burst) {
-            want_burst
-        } else {
-            stored_burst.unwrap_or(want_burst)
-        }
-    );
-    let sel_line = format!("selection={want_sel}");
-    let _ = std::fs::create_dir_all(db_dir);
-    let _ = std::fs::write(
-        &marker,
-        format!(
-            "{sem_line}
-{face_line}
-{burst_line}
-{sel_line}
-"
-        ),
-    );
+    crate::index::scheduler::configure(db_dir,&state.ai,&state.bus,ai);
+    crate::index::scheduler::kick(db_dir.to_path_buf(),&state.supervisor);
 }
 
 /// 索引池名归一（'static——spawn_blocking 闭包需要）：None/未知 → None。
@@ -878,16 +739,13 @@ pub async fn index_task_pause(
     };
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        let hit = state.supervisor.pause_kind(pool);
-        eprintln!("手动暂停索引（{pool}）：命中 {hit} 个任务");
+        crate::index::scheduler::pause(&super::app_database_dir(state)?, pool == "selection", true)?;
         Ok(())
     })
     .await
 }
 
-/// 恢复索引类后台任务（pool 语义同 [`index_task_pause`]）。导入让路闸
-/// 开着时拒绝（用户定案 2026-09-29：导入完成前无法手动恢复——导入收尾
-/// 会自动恢复并按需触发一轮）。
+/// Resume persisted channel policy; committed photos may run during import.
 #[tauri::command]
 pub async fn index_task_resume(
     state: State<'_, SharedState>,
@@ -898,9 +756,9 @@ pub async fn index_task_resume(
     };
     let shared = state.inner().clone();
     run_blocking(shared, move |state| {
-        super::ensure_no_import_running(state)?;
-        let hit = state.supervisor.resume_kind(pool);
-        eprintln!("手动恢复索引（{pool}）：命中 {hit} 个任务");
+            let path = super::app_database_dir(state)?;
+        crate::index::scheduler::pause(&path, pool == "selection", false)?;
+        crate::index::scheduler::kick(path, &state.supervisor);
         Ok(())
     })
     .await

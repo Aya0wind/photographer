@@ -16,7 +16,7 @@ pub fn set_include_single(value: bool) {
     INCLUDE_SINGLE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 pub fn include_single() -> bool {
-    INCLUDE_SINGLE.load(std::sync::atomic::Ordering::Relaxed)
+    super::selection::task_include_single().unwrap_or_else(|| INCLUDE_SINGLE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 #[allow(dead_code)] // 闭眼检测链路已建未接线；接线后移除。
@@ -62,7 +62,7 @@ pub fn thumbnail(
             break;
         }
     }
-    let generate_tier = if kind == "photo" { 2048 } else { ANALYSIS_SIZE };
+    let generate_tier = ANALYSIS_SIZE;
     let cache =
         cache.or_else(|| crate::thumbs::thumb_file(db_dir, src, generate_tier))?;
     let decoded = image::ImageReader::open(cache).ok()?.decode().ok()?;

@@ -747,8 +747,8 @@ fn insert_asset_on(
     if matches!(a.kind, AssetKind::Photo | AssetKind::Raw) {
         let now = now_rfc3339();
         conn.execute(
-            "INSERT INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
-             VALUES ('thumb', ?1, 'pending', 0, ?2, ?2)",
+            "INSERT OR IGNORE INTO index_tasks (kind, asset_id, state, attempts, created_at, updated_at) \
+             SELECT kind, ?1, 'pending', 0, ?2, ?2 FROM index_channels WHERE enabled=1",
             params![id, now],
         )?;
     } else {
@@ -1329,7 +1329,7 @@ fn map_asset_full(row: &Row<'_>) -> Result<AssetRow> {
     })
 }
 
-fn map_index_task(row: &Row<'_>) -> Result<IndexTaskRow> {
+pub(crate) fn map_index_task(row: &Row<'_>) -> Result<IndexTaskRow> {
     Ok(IndexTaskRow {
         id: row.get(0)?,
         kind: row.get(1)?,

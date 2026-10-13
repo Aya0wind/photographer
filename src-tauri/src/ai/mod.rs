@@ -740,6 +740,13 @@ impl ModelManager {
         *self.params.lock().expect("ai params mutex poisoned")
     }
 
+    /// Downloads remain shared; computations own an immutable parameter snapshot.
+    pub(crate) fn snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.params = Arc::new(Mutex::new(self.ai_params()));
+        snapshot
+    }
+
     /// 参数快照刷新（启动加载 settings / settings_set 落库后调用）。
     pub fn set_ai_params(&self, params: AiIndexParams) {
         *self.params.lock().expect("ai params mutex poisoned") = params;

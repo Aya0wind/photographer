@@ -1,4 +1,4 @@
-//! Independent FIFO budgets for image, semantic and face indexing. A permit is
+//! Shared FIFO compute admission across indexing capabilities. A permit is
 //! held from task claim through persistence, so `running` cannot exceed the cap.
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
@@ -6,23 +6,14 @@ pub enum Domain {
     Image,
     Semantic,
     Face,
-    /// 选片索引（eyes/blur，2026-10-12 拆分）：与图片域分离——两池各自
-    /// 满额并行，互不在对方的 FIFO 票序里排队（跨池等待的来源）。
+    /// Selection uses the same process-wide budget.
     Selection,
 }
 
 pub fn budget(domain: Domain) -> Arc<Budget> {
-    static IMAGE: OnceLock<Arc<Budget>> = OnceLock::new();
-    static SEMANTIC: OnceLock<Arc<Budget>> = OnceLock::new();
-    static FACE: OnceLock<Arc<Budget>> = OnceLock::new();
-    static SELECTION: OnceLock<Arc<Budget>> = OnceLock::new();
-    let slot = match domain {
-        Domain::Image => &IMAGE,
-        Domain::Semantic => &SEMANTIC,
-        Domain::Face => &FACE,
-        Domain::Selection => &SELECTION,
-    };
-    slot.get_or_init(|| Arc::new(Budget::dynamic())).clone()
+    static SHARED: OnceLock<Arc<Budget>> = OnceLock::new();
+    let _ = domain;
+    SHARED.get_or_init(|| Arc::new(Budget::dynamic())).clone()
 }
 
 #[derive(Default)]
@@ -60,7 +51,12 @@ impl Budget {
     }
     fn limit(&self) -> usize {
         if self.dynamic {
-            super::index_parallelism()
+            let capacity = super::index_parallelism();
+            if crate::index::import_in_flight() {
+                (capacity / 2).max(1)
+            } else {
+                capacity
+            }
         } else {
             self.limit
         }
@@ -126,13 +122,13 @@ mod tests {
         assert_eq!(gate.acquire(16).count, 2);
     }
     #[test]
-    fn indexing_domains_have_independent_budgets() {
-        assert!(!Arc::ptr_eq(
+    fn indexing_domains_share_one_budget() {
+        assert!(Arc::ptr_eq(
             &budget(Domain::Image),
             &budget(Domain::Semantic)
         ));
-        assert!(!Arc::ptr_eq(&budget(Domain::Image), &budget(Domain::Face)));
-        assert!(!Arc::ptr_eq(
+        assert!(Arc::ptr_eq(&budget(Domain::Image), &budget(Domain::Face)));
+        assert!(Arc::ptr_eq(
             &budget(Domain::Image),
             &budget(Domain::Selection)
         ));
@@ -149,11 +145,11 @@ mod tests {
     fn concurrency_is_calculated_from_each_environment_not_a_fixed_number() {
         for (cores, available, want) in [
             (1, 1, 1),
-            (4, 8, 2),
-            (12, 24, 6),
-            (16, 32, 8),
-            (32, 64, 16),
-            (12, 4, 2),
+            (4, 8, 4),
+            (12, 24, 12),
+            (16, 32, 16),
+            (32, 64, 32),
+            (12, 4, 4),
         ] {
             assert_eq!(super::super::index_parallelism_for(cores, available), want);
         }

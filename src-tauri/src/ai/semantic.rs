@@ -178,7 +178,7 @@ fn commit_vector(db: &Db, db_dir: &Path, asset_id: i64, vector: &[f32]) -> Resul
     let index = writable_index(db_dir)?;
     let mut idx = index.lock().expect("semantic index mutex poisoned");
     if idx.contains(asset_id as u64) {
-        return db.set_ai_indexed(asset_id).map_err(|e| e.to_string());
+        idx.remove(asset_id as u64).map_err(|e|e.to_string())?;
     }
     let needed = idx.size() + 1;
     ensure_capacity(&mut idx, needed)?;
@@ -198,7 +198,7 @@ fn commit_vector(db: &Db, db_dir: &Path, asset_id: i64, vector: &[f32]) -> Resul
 /// session.run）→ 逐条 commit_vector 入库记账。批推理失败自动降级逐图
 /// 重试——单条坏图（缩略图缺失/解码失败）只废自己，不连坐整批。
 /// 返回批内每条任务的成败（与 tasks 下标对齐）。
-fn process_ai_batch(
+pub(crate) fn process_ai_batch(
     db: &Db,
     db_dir: &Path,
     embedder: &dyn SemanticEmbedder,
@@ -412,25 +412,8 @@ pub fn kick_semantic_if_ready(
     bus: &EventBus,
     supervisor: &std::sync::Arc<TaskSupervisor>,
 ) {
-    if !manager.semantic_ready() {
-        return;
-    }
-    let embedder: Arc<dyn SemanticEmbedder> = Arc::new(manager.clone());
-    let vision_model = super::semantic_model_ids(manager.ai_params().quality_tier)[0].to_string();
-    let bus = bus.clone();
-    let _ = supervisor.spawn_coalesced(
-        "index",
-        format!("semantic-backfill:{}", db_dir.display()),
-        move |_| {
-            run_semantic_backfill(
-                &db_dir,
-                Arc::clone(&embedder),
-                &bus,
-                worker_count_for_ai(),
-                &vision_model,
-            );
-        },
-    );
+    crate::index::scheduler::request_ai(&db_dir, manager, bus, "ai");
+    crate::index::scheduler::kick(db_dir, supervisor);
 }
 
 /// 语义分数显示标定（经验锚点；阈值过滤仍用原始分数，见
