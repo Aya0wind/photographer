@@ -470,7 +470,7 @@ impl<'a> FacemeshEarClassifier<'a> {
                         cache_key,
                         super::build_session(
                             &path,
-                            Some(ModelManager::embed_intra_threads()),
+                            Some(super::ModelManager::embed_intra_threads()),
                             use_gpu,
                             FACEMESH_MODEL_ID,
                         )?,

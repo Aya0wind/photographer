@@ -229,7 +229,7 @@ pub fn scan_library_batch<'a>(
     gate: Option<&'a Arc<Mutex<()>>>,
     bus: Option<&'a EventBus>,
     signals: BatchSignals<'a>,
-    mut sink: Option<&'a mut dyn BatchProgressSink>,
+    sink: Option<&'a mut dyn BatchProgressSink>,
 ) -> Result<BatchRun, String> {
     // Stream discovery: no preliminary traversal or original-content reads.
     let total_hint = None;

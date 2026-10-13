@@ -111,7 +111,6 @@ pub fn run() {
             );
             // settings/ai 在 manage(move) 前先取启动自愈所需快照
             let (enable_clip, enable_face) = (settings.ai.enable_clip, settings.ai.enable_face);
-            let burst_params = crate::bursts::BurstParams::from_settings(&settings.ai);
             // 缩略图缓存 LRU 上限（M8-③；0 = 不限）
             thumbs::set_thumb_cache_cap_bytes(
                 u64::from(settings.storage.thumb_cache_max_gb) * 1024 * 1024 * 1024,
