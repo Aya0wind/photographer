@@ -25,7 +25,9 @@ def stage_builtin_films(destination):
             raise ValueError('Invalid built-in master LUT filename')
         source=upstream/'RawLabMac/Resources/MasterRecipes'/filename
         data=source.read_bytes()
-        header=data.split(b'\n',8)[:8]
+        # Git may check out text LUTs with CRLF on Windows. Normalize only
+        # header line endings; hashing and staging retain the original bytes.
+        header=[line.removesuffix(b'\r') for line in data.split(b'\n',8)[:8]]
         # LUTTransfer::SRGB is 5 in the pinned native core. Refuse a silently
         # changed contract rather than publishing incorrect catalog metadata.
         if b'#Gamma:sRGB to sRGB' not in header or b'LUT_3D_SIZE 65' not in header:

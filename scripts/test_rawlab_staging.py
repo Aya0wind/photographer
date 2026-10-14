@@ -73,6 +73,32 @@ class CachedStagingTests(unittest.TestCase):
             self.assertFalse((Path(directory) / "src-tauri/resources/rawlab").exists())
 
 class BuiltinFilmTests(unittest.TestCase):
+    def test_master_lut_headers_accept_checkout_line_endings_without_changing_bytes(self):
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                upstream = root / "native/rawlab/upstream"
+                recipe = {"lutFileName": "test.cube", "name": "Test", "subtitle": "", "summary": ""}
+                manifest = upstream / "Shared/master-recipes.json"
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(json.dumps([recipe]), encoding="utf-8")
+                source = upstream / "RawLabMac/Resources/MasterRecipes/test.cube"
+                source.parent.mkdir(parents=True)
+                data = newline.join([b"#Gamma:sRGB to sRGB", b"LUT_3D_SIZE 65", b"0 0 0", b""])
+                source.write_bytes(data)
+                destination = root / "staged"
+                with patch.object(build_rawlab, "ROOT", root):
+                    build_rawlab.stage_builtin_films(destination)
+                    catalog = json.loads((destination / "films/catalog.json").read_text(encoding="utf-8"))
+                    identifier = hashlib.sha256(data).hexdigest()
+                    self.assertEqual(catalog[0]["id"], identifier)
+                    self.assertEqual((destination / f"films/{identifier}.cube").read_bytes(), data)
+                    for invalid in (data.replace(b"sRGB to sRGB", b"FLog to sRGB"),
+                                    data.replace(b"LUT_3D_SIZE 65", b"LUT_3D_SIZE 33")):
+                        source.write_bytes(invalid)
+                        with self.assertRaisesRegex(ValueError, "transfer or size changed"):
+                            build_rawlab.stage_builtin_films(destination)
+
     def test_all_upstream_master_films_are_staged_byte_for_byte(self):
         upstream = build_rawlab.ROOT / "native/rawlab/upstream"
         recipes = json.loads((upstream / "Shared/master-recipes.json").read_text(encoding="utf-8"))
