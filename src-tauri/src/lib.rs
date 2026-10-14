@@ -95,7 +95,7 @@ pub fn run() {
             log::info!("应用启动 version={}", env!("CARGO_PKG_VERSION"));
             edit::lut::init(&config_dir);
             edit::film::init(&config_dir);
-            if let Ok(resources)=app.path().resource_dir(){edit::rawlab::init(&resources,&config_dir);}
+            if let Ok(resources)=app.path().resource_dir(){edit::rawlab::init(&resources,&config_dir);edit::film::init_builtins(&resources);}
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
             // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
             {

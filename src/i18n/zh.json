@@ -1,4 +1,6 @@
 {
+  "advancedEditor.film.imported": "已导入胶片",
+  "advancedEditor.film.builtin": "内置大师色彩",
   "onboarding.ai.selectFeature": "请至少选择一项 AI 功能，或选择暂不启用。",
   "onboarding.ai.feature.semantic": "按画面内容搜索照片并生成智能相册。",
   "onboarding.ai.feature.selection": "分析清晰度和睁闭眼，辅助选片。",

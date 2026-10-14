@@ -172,7 +172,6 @@ jobs:
           name: photographer-windows-x64-${{ steps.metadata.outputs.version }}
           path: |
             installer-output/*
-            native/rawlab/build-app/photographer-rawlab-source-win32.tar.gz
           if-no-files-found: error
           retention-days: ${{ github.ref == 'refs/heads/dev' && 3 || 14 }}
 
@@ -185,7 +184,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $assets = @(Get-ChildItem 'installer-output' -File | ForEach-Object FullName)
-          $assets += (Resolve-Path 'native/rawlab/build-app/photographer-rawlab-source-win32.tar.gz').Path
           if ($assets.Count -eq 0) {
             throw 'No installer assets were produced.'
           }

@@ -1,4 +1,6 @@
 {
+  "advancedEditor.film.imported": "インポートしたフィルム",
+  "advancedEditor.film.builtin": "内蔵マスターカラー",
   "onboarding.ai.selectFeature": "AI 機能を 1 つ以上選択するか、AI を無効にしてください。",
   "onboarding.ai.feature.semantic": "写真の内容で検索し、スマートアルバムを作成します。",
   "onboarding.ai.feature.selection": "鮮明さと目の開閉を分析して写真選別を支援します。",

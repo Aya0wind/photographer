@@ -1,4 +1,6 @@
 {
+  "advancedEditor.film.imported": "Películas importadas",
+  "advancedEditor.film.builtin": "Colores maestros integrados",
   "onboarding.ai.selectFeature": "Selecciona al menos una función de IA o deja la IA desactivada.",
   "onboarding.ai.feature.semantic": "Busca por contenido y crea álbumes inteligentes.",
   "onboarding.ai.feature.selection": "Analiza nitidez y ojos abiertos o cerrados para ayudar a seleccionar fotos.",

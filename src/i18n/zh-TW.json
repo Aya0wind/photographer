@@ -1,4 +1,6 @@
 {
+  "advancedEditor.film.imported": "已匯入底片",
+  "advancedEditor.film.builtin": "內建大師色彩",
   "onboarding.ai.selectFeature": "請至少選擇一項 AI 功能，或選擇暫不啟用。",
   "onboarding.ai.feature.semantic": "依畫面內容搜尋照片並產生智慧相簿。",
   "onboarding.ai.feature.selection": "分析清晰度和睜閉眼，輔助選片。",

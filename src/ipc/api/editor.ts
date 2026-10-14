@@ -246,7 +246,7 @@ export const editLutImport=(path:string)=>ipc<EditorLutEntry>("edit_lut_import",
 export const editLutRename=(id:string,name:string)=>ipc<void>("edit_lut_rename",{id,name});
 export const editLutRemove=(id:string)=>ipc<void>("edit_lut_remove",{id});
 
-export interface EditorFilmEntry {id:string;name:string;size:number;inputTransfer:number;outputTransfer:number}
+export interface EditorFilmEntry {id:string;name:string;size:number;inputTransfer:number;outputTransfer:number;builtin?:boolean;subtitle?:string;summary?:string}
 export function editRawlabAvailable(){return ipc<{available:boolean;coreRevision:string}>("edit_rawlab_available");}
 export function editFilmList(){return ipc<EditorFilmEntry[]>("edit_film_list");}
 export function editFilmImport(path:string){return ipc<EditorFilmEntry>("edit_film_import",{path});}

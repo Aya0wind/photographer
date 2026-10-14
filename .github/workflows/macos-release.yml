@@ -239,7 +239,6 @@ jobs:
           name: photographer-macos-arm64-${{ steps.metadata.outputs.version }}
           path: |
             src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-            native/rawlab/build-app/photographer-rawlab-source-darwin.tar.gz
           if-no-files-found: error
           retention-days: ${{ github.ref == 'refs/heads/dev' && 3 || 14 }}
 
@@ -252,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg native/rawlab/build-app/photographer-rawlab-source-darwin.tar.gz)
+          assets=(src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
           if [ ${#assets[@]} -eq 0 ]; then
             echo 'No installer assets were produced.' >&2
             exit 1

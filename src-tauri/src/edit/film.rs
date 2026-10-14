@@ -10,10 +10,14 @@ use std::{
 };
 use tauri::State;
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
+static BUILTIN_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static STORE: Mutex<()> = Mutex::new(());
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) fn init(config: &Path) {
     let _ = ROOT.set(config.join("films"));
+}
+pub(crate) fn init_builtins(resources: &Path) {
+    let _ = BUILTIN_ROOT.set(resources.join("rawlab/films"));
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +27,12 @@ pub struct FilmEntry {
     pub size: u32,
     pub input_transfer: u32,
     pub output_transfer: u32,
+    #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub summary: String,
 }
 fn root() -> Result<&'static PathBuf, String> {
     ROOT.get().ok_or_else(|| "胶片资源目录未初始化".into())
@@ -41,17 +51,42 @@ pub(super) fn validate_id(id: &str) -> Result<(), String> {
 pub(super) fn path(id: &str) -> Result<PathBuf, String> {
     validate_id(id)?;
     let path = root()?.join(format!("{id}.cube"));
-    if !path.is_file() {
-        return Err("胶片资源缺失，请重新导入对应 CUBE".into());
+    if path.is_file() {
+        return Ok(path);
     }
-    Ok(path)
+    if builtin_catalog()?.iter().any(|entry| entry.id == id) {
+        let path = BUILTIN_ROOT
+            .get()
+            .ok_or("内置胶片目录未初始化")?
+            .join(format!("{id}.cube"));
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err("内置胶片资源缺失，请重新安装应用".into());
+    }
+    Err("胶片资源缺失，请重新导入对应 CUBE".into())
 }
-fn catalog() -> Result<Vec<FilmEntry>, String> {
-    match std::fs::read(root()?.join("catalog.json")) {
+fn catalog_at(root: &Path) -> Result<Vec<FilmEntry>, String> {
+    match std::fs::read(root.join("catalog.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(e.to_string()),
     }
+}
+fn builtin_catalog() -> Result<Vec<FilmEntry>, String> {
+    BUILTIN_ROOT
+        .get()
+        .map(|root| catalog_at(root))
+        .unwrap_or_else(|| Ok(vec![]))
+}
+fn catalog() -> Result<Vec<FilmEntry>, String> {
+    let mut entries = builtin_catalog()?;
+    for entry in catalog_at(root()?)? {
+        if !entries.iter().any(|existing| existing.id == entry.id) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
 }
 fn import_bytes(bytes: &[u8], name: &str) -> Result<FilmEntry, String> {
     if bytes.is_empty()
@@ -63,6 +98,9 @@ fn import_bytes(bytes: &[u8], name: &str) -> Result<FilmEntry, String> {
     }
     let _guard = STORE.lock().map_err(|_| "胶片资源锁不可用")?;
     let id = format!("{:x}", Sha256::digest(bytes));
+    if let Some(entry) = builtin_catalog()?.into_iter().find(|entry| entry.id == id) {
+        return Ok(entry);
+    }
     let target = root()?.join(format!("{id}.cube"));
     // Validate the exact content-addressed bytes with core, never reserialize CUBE.
     let created = !target.is_file();
@@ -84,8 +122,11 @@ fn import_bytes(bytes: &[u8], name: &str) -> Result<FilmEntry, String> {
         size: info.size,
         input_transfer: info.input_transfer,
         output_transfer: info.output_transfer,
+        builtin: false,
+        subtitle: String::new(),
+        summary: String::new(),
     };
-    let mut entries = catalog()?;
+    let mut entries = catalog_at(root()?)?;
     if let Some(existing) = entries.iter().find(|e| e.id == entry.id) {
         return Ok(existing.clone());
     }

@@ -2,6 +2,8 @@
 import contextlib
 import importlib.util
 import io
+import hashlib
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -46,7 +48,7 @@ class CachedStagingTests(unittest.TestCase):
                 argv = ["build-rawlab.py", "--skip-build"]
                 if platform == "win32":
                     argv += ["--toolchain", str(root / "vcpkg/scripts/buildsystems/vcpkg.cmake")]
-                with patch.object(build_rawlab, "ROOT", root), patch.object(build_rawlab, "run") as run, \
+                with patch.object(build_rawlab, "ROOT", root), patch.object(build_rawlab, "stage_builtin_films"), patch.object(build_rawlab, "run") as run, \
                         patch.object(build_rawlab.sys, "platform", platform), patch.object(build_rawlab.sys, "argv", argv), \
                         contextlib.redirect_stdout(io.StringIO()):
                     build_rawlab.main()
@@ -69,6 +71,25 @@ class CachedStagingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Native core missing"):
                 build_rawlab.main()
             self.assertFalse((Path(directory) / "src-tauri/resources/rawlab").exists())
+
+class BuiltinFilmTests(unittest.TestCase):
+    def test_all_upstream_master_films_are_staged_byte_for_byte(self):
+        upstream = build_rawlab.ROOT / "native/rawlab/upstream"
+        recipes = json.loads((upstream / "Shared/master-recipes.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(prefix="builtin films ") as directory:
+            destination = Path(directory)
+            build_rawlab.stage_builtin_films(destination)
+            entries = json.loads((destination / "films/catalog.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(entries), 14)
+            self.assertEqual(len({entry["id"] for entry in entries}), 14)
+            for recipe, entry in zip(recipes, entries):
+                original = (upstream / "RawLabMac/Resources/MasterRecipes" / recipe["lutFileName"]).read_bytes()
+                self.assertEqual(entry["id"], hashlib.sha256(original).hexdigest())
+                self.assertEqual((destination / "films" / (entry["id"] + ".cube")).read_bytes(), original)
+                self.assertEqual(entry["name"], recipe["name"])
+                self.assertTrue(entry["builtin"])
+                self.assertEqual((entry["size"], entry["inputTransfer"], entry["outputTransfer"]), (65, 5, 5))
+            self.assertEqual((destination / "films/master-recipes.json").read_bytes(), (upstream / "Shared/master-recipes.json").read_bytes())
 
 
 if __name__ == "__main__":

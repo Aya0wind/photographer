@@ -1,4 +1,6 @@
 {
+  "advancedEditor.film.imported": "Imported films",
+  "advancedEditor.film.builtin": "Built-in master colors",
   "onboarding.ai.selectFeature": "Select at least one AI feature, or leave AI disabled.",
   "onboarding.ai.feature.semantic": "Search photo content and build smart albums.",
   "onboarding.ai.feature.selection": "Analyze sharpness and open or closed eyes to help select photos.",
