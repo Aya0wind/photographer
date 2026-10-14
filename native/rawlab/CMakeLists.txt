@@ -53,6 +53,10 @@ target_include_directories(photographer_raw PRIVATE include upstream/lutools/inc
 target_link_libraries(photographer_raw PRIVATE sony2fuji_core)
 if(MSVC)
     target_compile_definitions(photographer_raw PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    # SDK RGB() expands core constructors to COLORREF. Preserve vendor source.
+    set(rgb_compat "${CMAKE_CURRENT_SOURCE_DIR}/include/windows_rgb_compat.h")
+    target_compile_options(sony2fuji_core PRIVATE "/FI${rgb_compat}")
+    target_compile_options(photographer_raw PRIVATE "/FI${rgb_compat}")
 endif()
 include(CTest)
 if(BUILD_TESTING)
