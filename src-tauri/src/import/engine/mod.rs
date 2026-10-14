@@ -23,7 +23,7 @@
 //!
 //! 查重分层：① skip_imported 时宽松键（size+filename+mtime±2s）预判→跳过；
 //! ② 文件名/大小/修改时间复核→跳过；③ 目标路径冲突→Rename 策略生成
-//! `_1`，Skip/Ask 策略→skipped。
+//! `_1`，Skip/Ask 策略复用文件并补齐图库登记，已有活跃条目才记 skipped。
 //!
 //! 可靠性：取消为软取消（当前文件完成后停）；`DeviceError::Disconnected`
 //! → publish `DeviceUnavailable` + 自动暂停（job 置 paused）并返回部分
@@ -473,7 +473,8 @@ impl Engine {
         let tx = self.db.0.unchecked_transaction()?;
         let mut fresh = Vec::new();
         for entry in entries {
-            let hit = self.plan.skip_imported
+            // 有相册目标时仍需结算引用，不能在预判阶段吞掉。
+            let hit = self.plan.skip_imported && self.plan.album_id.is_none()
                 && loose_hit(&self.db, &self.plan.target_library_id, &entry).unwrap_or(false);
             let state = if hit {
                 FileState::Skipped
@@ -697,7 +698,7 @@ impl Engine {
                 FileOutcome::Copied(copied) => {
                     let entry = &copied.entry;
                     match self.finish_copy(job_id, &copied) {
-                        Ok((FileState::Verified, dst)) => {
+                        Ok((FileState::Verified, dst, transferred)) => {
                             counters.done_files += 1;
                             counters.done_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
@@ -705,7 +706,7 @@ impl Engine {
                             //（删源失败≠导入失败：warn 日志 + 独立计数）。
                             // rename 快道：源已是 .part 并随主路落位——无源
                             // 可删，直接计移动成功。
-                            if self.plan.mode == ImportMode::Move {
+                            if self.plan.mode == ImportMode::Move && transferred {
                                 if copied.fast_moved {
                                     counters.moved += 1;
                                 } else {
@@ -732,7 +733,7 @@ impl Engine {
                                 state: FileState::Verified,
                             });
                         }
-                        Ok((FileState::Skipped, dst)) => {
+                        Ok((FileState::Skipped, dst, _)) => {
                             counters.skipped += 1;
                             counters.skipped_bytes += entry.size;
                             last_completed_src = entry.rel_path.clone();
@@ -767,27 +768,43 @@ impl Engine {
                         }
                     }
                 }
-                // 免下载预跳（见 copy_one）：与 finish_copy 跳过态同款记账，
-                // journal 无哈希（未读全量）。
-                FileOutcome::Skipped { entry } => {
-                    counters.skipped += 1;
-                    counters.skipped_bytes += entry.size;
+                FileOutcome::Existing { entry, dst } => {
+                    let result = self.finish_existing(&dst);
+                    let (state, error) = match result {
+                        Ok(FileState::Verified) => {
+                            counters.done_files += 1;
+                            counters.done_bytes += entry.size;
+                            (FileState::Verified, None)
+                        }
+                        Ok(_) => {
+                            counters.skipped += 1;
+                            counters.skipped_bytes += entry.size;
+                            (FileState::Skipped, None)
+                        }
+                        Err(error) => {
+                            counters.failed += 1;
+                            counters.failed_bytes += entry.size;
+                            let _ = self.db.append_log("error", Some(job_id), &error);
+                            (FileState::Failed, Some(error))
+                        }
+                    };
                     last_completed_src = entry.rel_path.clone();
+                    let dst = dst.to_string_lossy().into_owned();
                     let _ = self.db.upsert_job_file(&JobFileRow {
                         job_id,
                         src: entry.id.clone(),
-                        dst: String::new(),
+                        dst: dst.clone(),
                         size: entry.size,
-                        state: FileState::Skipped,
-                        error: None,
+                        state,
+                        error,
                         xxhash: None,
                         dst2: String::new(),
                     });
                     self.bus.publish(AppEvent::ImportFileCompleted {
                         job_id,
                         src: entry.id,
-                        dst: String::new(),
-                        state: FileState::Skipped,
+                        dst,
+                        state,
                     });
                 }
                 FileOutcome::Failed { entry, error } => {
@@ -976,7 +993,7 @@ impl Engine {
                 self.skip_discard(job_id, &copied);
                 (src, size)
             }
-            FileOutcome::Skipped { entry } => (entry.id, entry.size),
+            FileOutcome::Existing { entry, .. } => (entry.id, entry.size),
             FileOutcome::Failed { entry, .. } => (entry.id, entry.size),
             FileOutcome::Disconnected { entry, .. } => (entry.id, entry.size),
         }
@@ -1070,7 +1087,7 @@ impl Engine {
         }
     }
 
-    fn finish_copy(&self, job_id: i64, copied: &CopiedFile) -> Result<(FileState, String), String> {
+    fn finish_copy(&self, job_id: i64, copied: &CopiedFile) -> Result<(FileState, String, bool), String> {
         let entry = &copied.entry;
 
         // 登记单管道闸（§八-5）：② 查重判定 → ③ 冲突处理 → 原子 rename
@@ -1084,12 +1101,14 @@ impl Engine {
         let exact = if self.plan.skip_imported {
             self.db.find_asset_brief_by_file_metadata(&self.plan.target_library_id,
                 entry.rel_path.rsplit('/').next().unwrap_or(&entry.rel_path),entry.size,&rfc3339(entry.mtime)).map_err(|e|e.to_string())?
-                .map(|(id,_,missing)| if missing { ExactVerdict::Rebind(id) } else { ExactVerdict::Skip })
+                .map(|(id, path, missing)| (if missing { ExactVerdict::Rebind(id) } else { ExactVerdict::Skip }, path))
         } else { None };
-        if exact == Some(ExactVerdict::Skip) {
+        if let Some((ExactVerdict::Skip, path)) = &exact {
+            let result = self.register_existing(Path::new(path));
             self.skip_discard(job_id, copied);
-            self.upsert(job_id, entry, "", FileState::Skipped, copied);
-            return Ok((FileState::Skipped, String::new()));
+            let state = result?;
+            self.upsert(job_id, entry, path, state, copied);
+            return Ok((state, path.clone(), false));
         }
 
         // ③ 目标路径冲突（主/第二目的地各自独立处理）
@@ -1105,9 +1124,12 @@ impl Engine {
                     final_dst = unique_path(&parent, &name);
                 }
                 DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
+                    let result = self.register_existing(&final_dst);
                     self.skip_discard(job_id, copied);
-                    self.upsert(job_id, entry, "", FileState::Skipped, copied);
-                    return Ok((FileState::Skipped, String::new()));
+                    let state = result?;
+                    let dst = final_dst.to_string_lossy().into_owned();
+                    self.upsert(job_id, entry, &dst, state, copied);
+                    return Ok((state, dst, false));
                 }
             }
         }
@@ -1123,9 +1145,10 @@ impl Engine {
                     final_dst2 = Some(unique_path(&parent, &name));
                 }
                 DuplicatePolicy::Skip | DuplicatePolicy::Ask => {
-                    self.skip_discard(job_id, copied);
-                    self.upsert(job_id, entry, "", FileState::Skipped, copied);
-                    return Ok((FileState::Skipped, String::new()));
+                    if let Some(part2) = &copied.part2 {
+                        let _ = fs::remove_file(part2);
+                    }
+                    final_dst2 = None;
                 }
             }
         }
@@ -1169,7 +1192,7 @@ impl Engine {
         // 产物直接接管既有资产行——路径更新、清 missing、登记指纹随新位置、
         // 缩略图按内容复用、边车补写新位置；逻辑元数据（评分/颜色/相册
         // 引用）原样保留，不产生第二行。
-        if let Some(ExactVerdict::Rebind(asset_id)) = exact {
+        if let Some((ExactVerdict::Rebind(asset_id), _)) = exact {
             match self.rebind_missing_asset(
                 job_id,
                 asset_id,
@@ -1184,7 +1207,7 @@ impl Engine {
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     self.upsert_dst2(job_id, entry, &dst, &dst2, FileState::Verified, copied);
-                    return Ok((FileState::Verified, dst));
+                    return Ok((FileState::Verified, dst, true));
                 }
                 // 行已被并发处理成在线同哈希：刚落位的拷贝成冗余——清掉
                 // （仅删本文件刚 rename 的产物，不动既有文件）按 skip 收尾
@@ -1194,81 +1217,163 @@ impl Engine {
                         let _ = fs::remove_file(dst2);
                     }
                     self.upsert(job_id, entry, "", FileState::Skipped, copied);
-                    return Ok((FileState::Skipped, String::new()));
+                    return Ok((FileState::Skipped, String::new(), false));
                 }
                 // 行已删（回收站/移除登记）：走下方按新资产登记兜底
                 RebindOutcome::Deleted => {}
             }
         }
 
-        // 入库（assets 同路径覆盖；第二目的地是备份拷贝，不入 assets）；
-        // album_id 通道：资产与相册引用同事务（相册被并发删除时跳过挂载）
-        let filename = final_dst
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // 登记指纹（§三 两级识别）：落位后新位置的卷序列号+文件 id
-        //（硬链接导出物/同卷改名 id 不变；exFAT/FAT → None 走哈希路径）。
-        let (volume_serial, file_id) = registration_fingerprint(&final_dst);
-        // 入库失败不回滚文件（已落盘的物理事实优先——下次导入靠同路径
-        // 覆盖 upsert 收编），但 stderr 留痕可查：文件在、库没有 = 线索。
-        if let Err(err) = self.db.insert_asset_with_album(
-            // album_subgroup：入册引用带子分组命名层（纯逻辑引用）
-            &AssetRow {
-                path: final_dst.to_string_lossy().into_owned(),
-                filename,
-                size: entry.size,
-                mtime: rfc3339(entry.mtime),
-                xxhash: copied.xxh,
-                kind: copied.kind,
-                captured_at: copied.meta.captured_at.map(rfc3339),
-                camera: copied.meta.camera.clone(),
-                source: "imported".into(),
-                created_at: rfc3339(Utc::now()),
-                origin: "imported".into(),
-                width: copied.meta.width,
-                height: copied.meta.height,
-                iso: copied.meta.iso,
-                f_number: copied.meta.f_number.clone(),
-                exposure_time: copied.meta.exposure_time.clone(),
-                focal_length: copied.meta.focal_length.clone(),
-                lens: copied.meta.lens.clone(),
-                pair_asset_id: None,
-                thumb_state: 0,
-                orientation: copied.meta.deep.orientation,
-                flash: copied.meta.deep.flash.clone(),
-                metering_mode: copied.meta.deep.metering_mode.clone(),
-                white_balance: copied.meta.deep.white_balance.clone(),
-                exposure_program: copied.meta.deep.exposure_program.clone(),
-                software: copied.meta.deep.software.clone(),
-                artist: copied.meta.deep.artist.clone(),
-                gps_lat: copied.meta.deep.gps_lat,
-                gps_lon: copied.meta.deep.gps_lon,
-                rating: 0,
-                flagged: 0,
-                color_label: None,
-                rejected: 0,
-                library_id: Some(self.plan.target_library_id.clone()),
-                missing: 0,
-                xmp_dirty: 0,
-                volume_serial,
-                file_id,
-            },
-            self.plan.album_id,
-            self.plan.album_subgroup.as_deref(),
-        ) {
-            log::warn!(
-                "入库失败（文件已落盘不回滚）: {}: {err}",
-                final_dst.display()
-            );
-        }
+        self.register_asset(&final_dst, entry, copied.kind, &copied.meta, copied.xxh)?;
         let dst = final_dst.to_string_lossy().into_owned();
         let dst2 = final_dst2
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.upsert_dst2(job_id, entry, &dst, &dst2, FileState::Verified, copied);
         if let Some(path)=&self.db_dir { crate::index::scheduler::notify(path); }
-        Ok((FileState::Verified, dst))
+        Ok((FileState::Verified, dst, true))
+    }
+
+    /// 免复制结果仍经过登记闸，与扫描和正常落盘串行。
+    fn finish_existing(&self, path: &Path) -> Result<FileState, String> {
+        let _guard = self
+            .registration_gate
+            .as_ref()
+            .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        self.register_existing(path)
+    }
+
+    /// 复用物理文件，恢复已有行或新建登记；不覆盖评分、相册及派生数据。
+    /// 调用方持登记闸。新行以目标文件实际元数据为准，EXIF/哈希由索引补齐。
+    fn register_existing(&self, path: &Path) -> Result<FileState, String> {
+        let metadata = fs::metadata(path).map_err(|error| format!("读取已有目标失败: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!("已有目标不是文件: {}", path.display()));
+        }
+        let path_string = path.to_string_lossy().into_owned();
+        let state = if let Some(id) = self
+            .db
+            .asset_id_by_path(&path_string)
+            .map_err(|e| e.to_string())?
+        {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.db.0,
+                rusqlite::TransactionBehavior::Immediate,
+            )
+            .map_err(|e| e.to_string())?;
+            let restored = tx.execute(
+                "UPDATE assets SET in_trash=0, trashed_at=NULL, missing=0 WHERE id=?1 AND (in_trash=1 OR missing=1)",
+                [id],
+            ).map_err(|e| e.to_string())?;
+            let added = if let Some(album_id) = self.plan.album_id {
+                tx.execute(
+                    "INSERT OR IGNORE INTO album_item (album_id, asset_id, added_at, subgroup) \
+                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM album WHERE id=?1)",
+                    rusqlite::params![album_id, id, rfc3339(Utc::now()), self.plan.album_subgroup],
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                0
+            };
+            tx.commit().map_err(|e| e.to_string())?;
+            if restored > 0 || added > 0 {
+                FileState::Verified
+            } else {
+                FileState::Skipped
+            }
+        } else {
+            let mtime: chrono::DateTime<Utc> =
+                metadata.modified().map_err(|e| e.to_string())?.into();
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let kind = crate::devices::classify(&filename, &[]);
+            let entry = FileEntry {
+                id: path_string,
+                rel_path: filename,
+                size: metadata.len(),
+                mtime,
+            };
+            self.register_asset(
+                path,
+                &entry,
+                kind,
+                &crate::metadata::exif_lite::MetaLite::default(),
+                0,
+            )?;
+            FileState::Verified
+        };
+        if state == FileState::Verified {
+            if let Some(db_dir) = &self.db_dir {
+                crate::index::scheduler::notify(db_dir);
+            }
+        }
+        Ok(state)
+    }
+
+    fn register_asset(
+        &self,
+        path: &Path,
+        entry: &FileEntry,
+        kind: crate::events::AssetKind,
+        meta: &crate::metadata::exif_lite::MetaLite,
+        xxhash: u64,
+    ) -> Result<(), String> {
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let (volume_serial, file_id) = registration_fingerprint(path);
+        self.db
+            .insert_asset_with_album(
+                // album_subgroup：入册引用带子分组命名层（纯逻辑引用）
+                &AssetRow {
+                    path: path.to_string_lossy().into_owned(),
+                    filename,
+                    size: entry.size,
+                    mtime: rfc3339(entry.mtime),
+                    xxhash,
+                    kind,
+                    captured_at: meta.captured_at.map(rfc3339),
+                    camera: meta.camera.clone(),
+                    source: "imported".into(),
+                    created_at: rfc3339(Utc::now()),
+                    origin: "imported".into(),
+                    width: meta.width,
+                    height: meta.height,
+                    iso: meta.iso,
+                    f_number: meta.f_number.clone(),
+                    exposure_time: meta.exposure_time.clone(),
+                    focal_length: meta.focal_length.clone(),
+                    lens: meta.lens.clone(),
+                    pair_asset_id: None,
+                    thumb_state: 0,
+                    orientation: meta.deep.orientation,
+                    flash: meta.deep.flash.clone(),
+                    metering_mode: meta.deep.metering_mode.clone(),
+                    white_balance: meta.deep.white_balance.clone(),
+                    exposure_program: meta.deep.exposure_program.clone(),
+                    software: meta.deep.software.clone(),
+                    artist: meta.deep.artist.clone(),
+                    gps_lat: meta.deep.gps_lat,
+                    gps_lon: meta.deep.gps_lon,
+                    rating: 0,
+                    flagged: 0,
+                    color_label: None,
+                    rejected: 0,
+                    library_id: Some(self.plan.target_library_id.clone()),
+                    missing: 0,
+                    xmp_dirty: 0,
+                    volume_serial,
+                    file_id,
+                },
+                self.plan.album_id,
+                self.plan.album_subgroup.as_deref(),
+            )
+            .map_err(|error| format!("图库登记失败: {error}"))
     }
 
     fn upsert(
