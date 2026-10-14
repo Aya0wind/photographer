@@ -95,11 +95,10 @@ jobs:
         with:
           workspaces: src-tauri -> target
           shared-key: windows-installers
-          # v1 was populated by the pre-NASM failed build. GitHub cache entries
-          # are immutable, so use a fresh generation and only save successful builds.
+          # Retain completed dependency compilations even if the app fails later.
           key: nasm-3.2.0-v2
           cache-workspace-crates: true
-          cache-on-failure: false
+          cache-on-failure: true
 
       - name: Cache Tauri bundler tools
         uses: actions/cache@v4
@@ -142,11 +141,14 @@ jobs:
           "version=$tauriVersion" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
-      - name: Build bundled RawLab core
+      - name: Build or restore pinned RawLab core
+        uses: ./.github/actions/rawlab-cache
+        with:
+          build-directory: native/rawlab/build-app
+
+      - name: Stage bundled RawLab core and corresponding sources
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/build-rawlab.py --toolchain "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          python scripts/build-rawlab.py --skip-build --toolchain "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build NSIS and MSI installers
         shell: cmd

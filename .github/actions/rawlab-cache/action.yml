@@ -1,0 +1,140 @@
+name: Cached RawLab build
+description: Reuse exact native builds and cache individual C/C++ compilations across source changes
+inputs:
+  build-directory:
+    description: Native build directory, relative to the workspace
+    required: true
+  testing:
+    description: Build native ABI tests
+    default: 'OFF'
+runs:
+  using: composite
+  steps:
+    - name: Verify pinned upstream integrity
+      shell: bash
+      run: python scripts/update-rawlab.py --check
+
+    - name: Set up MSVC for Ninja
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Enable compiler caching
+      shell: bash
+      run: |
+        echo 'SCCACHE_GHA_ENABLED=true' >> "$GITHUB_ENV"
+        echo 'SCCACHE_IGNORE_SERVER_IO_ERROR=1' >> "$GITHUB_ENV"
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: v0.16.0
+
+    - name: Identify native toolchain and sources
+      id: identity
+      shell: bash
+      env:
+        RAWLAB_BUILD_DIRECTORY: ${{ inputs.build-directory }}
+        RAWLAB_TESTING: ${{ inputs.testing }}
+      run: |
+        python - <<'PY'
+        import hashlib
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        def output(*command):
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+            # cl prints its version but exits nonzero when no inputs are supplied.
+            if result.returncode and command[0] != 'cl':
+                raise RuntimeError(f'Toolchain inspection failed: {command[0]}')
+            return result.stdout
+
+        tools = output('cmake', '--version') + output('ninja', '--version')
+        tools += output('cl') if sys.platform == 'win32' else output('c++', '--version')
+        if sys.platform == 'darwin':
+            tools += output('xcrun', '--show-sdk-version')
+        vcpkg = 'none'
+        if sys.platform == 'win32':
+            root = os.environ['VCPKG_INSTALLATION_ROOT']
+            vcpkg = output('git', '-C', root, 'rev-parse', 'HEAD').decode().strip()
+        tools += repr((os.environ.get('ImageOS'), os.environ.get('ImageVersion'),
+                       os.environ.get('VCToolsVersion'), os.environ.get('WindowsSDKVersion'),
+                       vcpkg)).encode()
+        toolchain = hashlib.sha256(tools).hexdigest()[:24]
+        # ls-tree includes the pinned submodule commit, without hashing build output.
+        sources = output('git', 'ls-tree', '-r', 'HEAD', 'native/rawlab')
+        sources += Path('.github/actions/rawlab-cache/action.yml').read_bytes()
+        sources += repr((os.environ['RAWLAB_BUILD_DIRECTORY'], os.environ['RAWLAB_TESTING'])).encode()
+        source_hash = hashlib.sha256(sources).hexdigest()
+        prefix = f"rawlab-v1-{os.environ['RUNNER_OS']}-{os.environ['RUNNER_ARCH']}-{toolchain}"
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as target:
+            target.write(f'key={prefix}-{source_hash}\n')
+            target.write(f'zlib-key=rawlab-zlib-v1-{toolchain}-x64-windows-static-md\n')
+        PY
+
+    - name: Restore vcpkg binary packages
+      if: runner.os == 'Windows'
+      id: zlib
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/rawlab-vcpkg-cache
+        key: ${{ steps.identity.outputs.zlib-key }}
+
+    - name: Prepare Windows zlib from binary cache
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $cache = Join-Path $env:RUNNER_TEMP 'rawlab-vcpkg-cache'
+        New-Item -ItemType Directory -Force $cache | Out-Null
+        $env:VCPKG_BINARY_SOURCES = "clear;files,$cache,readwrite"
+        & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Save vcpkg binary packages
+      if: runner.os == 'Windows' && steps.zlib.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/rawlab-vcpkg-cache
+        key: ${{ steps.identity.outputs.zlib-key }}
+
+    - name: Restore exact RawLab build
+      id: native
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.build-directory }}
+        key: ${{ steps.identity.outputs.key }}
+        # No fallback: CMake paths, toolchain and compiled binaries must match.
+
+    - name: Build native core on cache miss
+      if: steps.native.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        RAWLAB_BUILD_DIRECTORY: ${{ inputs.build-directory }}
+        RAWLAB_TESTING: ${{ inputs.testing }}
+      run: |
+        configure=(cmake -S native/rawlab -B "$RAWLAB_BUILD_DIRECTORY" -G Ninja
+          -DCMAKE_BUILD_TYPE=Release "-DBUILD_TESTING=$RAWLAB_TESTING"
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache)
+        if [ "$RUNNER_OS" = Windows ]; then
+          configure+=("-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
+        elif [ "$RUNNER_OS" = macOS ]; then
+          configure+=("-DCMAKE_OSX_ARCHITECTURES=$(uname -m)")
+        fi
+        "${configure[@]}"
+        cmake --build "$RAWLAB_BUILD_DIRECTORY" --config Release --parallel 2
+
+    - name: Save successful RawLab build immediately
+      if: steps.native.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ inputs.build-directory }}
+        key: ${{ steps.identity.outputs.key }}
+
+    - name: Report compiler cache usage
+      shell: bash
+      run: sccache --show-stats

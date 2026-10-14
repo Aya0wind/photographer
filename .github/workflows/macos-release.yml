@@ -85,6 +85,13 @@ jobs:
         # 不跑 brew update：runner 镜像每日更新，brew update 每次 1-3 分钟纯浪费
         run: brew install cmake libgphoto2
 
+      - name: Restore pinned ONNX Runtime archive
+        id: ort_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/photographer-ort
+          key: ort-coreml-arm64-v1-${{ hashFiles('scripts/prepare-ort-macos.py') }}
+
       - name: Prepare ONNX Runtime CoreML static library
         run: |
           set -euo pipefail
@@ -95,13 +102,20 @@ jobs:
           echo "ORT_LIB_PATH=$ort_lib_dir" >> "$GITHUB_ENV"
           echo "ORT_PREFER_DYNAMIC_LINK=0" >> "$GITHUB_ENV"
 
+      - name: Save verified ONNX Runtime archive
+        if: steps.ort_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/photographer-ort
+          key: ${{ steps.ort_cache.outputs.cache-primary-key }}
+
       - name: Cache Rust build files
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
           shared-key: macos-installers
           cache-workspace-crates: true
-          cache-on-failure: false
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: npm ci
@@ -159,9 +173,14 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security default-keychain -s "$KEYCHAIN_PATH"
 
-      - name: Build bundled RawLab core
+      - name: Build or restore pinned RawLab core
+        uses: ./.github/actions/rawlab-cache
+        with:
+          build-directory: native/rawlab/build-app
+
+      - name: Stage and sign bundled RawLab core
         run: |
-          python3 scripts/build-rawlab.py --arch arm64
+          python3 scripts/build-rawlab.py --skip-build --arch arm64
           if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
             codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/resources/rawlab/libphotographer_raw.dylib
           else

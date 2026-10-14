@@ -8,9 +8,12 @@ on:
       - 'native/rawlab/**'
       - 'src-tauri/examples/rawlab_probe.rs'
       - '.github/workflows/media-core.yml'
+      - '.github/actions/rawlab-cache/**'
       - 'scripts/update-rawlab.py'
+      - 'scripts/build-rawlab.py'
+      - 'scripts/test_rawlab_staging.py'
   pull_request:
-    paths: ['.gitmodules', 'crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml', 'scripts/update-rawlab.py']
+    paths: ['.gitmodules', 'crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml', '.github/actions/rawlab-cache/**', 'scripts/update-rawlab.py', 'scripts/build-rawlab.py', 'scripts/test_rawlab_staging.py']
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,27 +33,25 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: Verify pinned upstream integrity
-        run: python scripts/update-rawlab.py --check
-      - name: Prepare Windows zlib
-        if: runner.os == 'Windows'
-        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md'
-      - name: Build pinned native RAW bridge
-        run: |
-          if [ "${{ runner.os }}" = Windows ]; then
-            cmake -S native/rawlab -B native/rawlab/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-              -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
-              -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
-          else
-            cmake -S native/rawlab -B native/rawlab/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
-          fi
-          cmake --build native/rawlab/build --config Release --parallel 2
+      - name: Cached native packaging regressions
+        run: python -m unittest discover -s scripts -p test_rawlab_staging.py
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/media -> target
+          shared-key: media-core-${{ runner.os }}-${{ runner.arch }}
+          cache-on-failure: true
+      - name: Build or restore pinned native RAW bridge
+        uses: ./.github/actions/rawlab-cache
+        with:
+          build-directory: native/rawlab/build
+          testing: 'ON'
       - name: Native ABI failure regressions
         run: ctest --test-dir native/rawlab/build -C Release --output-on-failure
       - name: Rust color and ABI regressions
         run: |
           case "${{ runner.os }}" in
-            Windows) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/Release/photographer_raw.dll" ;;
+            Windows) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/photographer_raw.dll" ;;
             macOS) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/libphotographer_raw.dylib" ;;
             Linux) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/libphotographer_raw.so" ;;
           esac

@@ -15,16 +15,21 @@ def main():
     parser.add_argument('--toolchain',type=Path)
     parser.add_argument('--triplet',default='x64-windows-static-md')
     parser.add_argument('--arch',default='arm64')
+    parser.add_argument('--skip-build',action='store_true',help='Stage an already built or exactly cache-matched native core')
     args=parser.parse_args()
     run(sys.executable,'scripts/update-rawlab.py','--check')
     build=ROOT/'native/rawlab/build-app'
     configure=['cmake','-S','native/rawlab','-B',build,'-DCMAKE_BUILD_TYPE=Release','-DBUILD_TESTING=OFF']
     if args.toolchain:configure += ['-DCMAKE_TOOLCHAIN_FILE='+str(args.toolchain.resolve()),'-DVCPKG_TARGET_TRIPLET='+args.triplet]
     if sys.platform=='darwin':configure += ['-DCMAKE_OSX_ARCHITECTURES='+args.arch]
-    run(*configure)
-    run('cmake','--build',build,'--config','Release','--parallel','2')
+    if not args.skip_build:
+        run(*configure)
+        run('cmake','--build',build,'--config','Release','--parallel','2')
     name='photographer_raw.dll' if sys.platform=='win32' else 'libphotographer_raw.dylib' if sys.platform=='darwin' else 'libphotographer_raw.so'
     binary=build/'Release'/name if sys.platform=='win32' else build/name
+    # Ninja is single-config and puts Windows binaries at the build root.
+    if sys.platform=='win32' and not binary.is_file():binary=build/name
+    if not binary.is_file():raise RuntimeError('Native core missing; build it before staging')
     destination=ROOT/'src-tauri/resources/rawlab'
     destination.mkdir(parents=True,exist_ok=True)
     shutil.copy2(binary,destination/name)
