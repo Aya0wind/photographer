@@ -7,6 +7,18 @@ include(CTest)
 # Same source/build revisions as the inspected RawLab core. Download only at
 # explicit prototype configure time, never from the desktop build.rs.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/upstream.lock.json" rawlab_lock)
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upstream/.git")
+    message(FATAL_ERROR "RawLab submodule missing; run git submodule update --init --recursive")
+endif()
+find_package(Git REQUIRED)
+execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/upstream"
+    RESULT_VARIABLE rawlab_git_status OUTPUT_VARIABLE rawlab_git_commit
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(JSON rawlab_expected_commit GET "${rawlab_lock}" commit)
+if(NOT rawlab_git_status EQUAL 0 OR NOT rawlab_git_commit STREQUAL rawlab_expected_commit)
+    message(FATAL_ERROR "RawLab submodule differs from upstream.lock.json; initialize the pinned revision")
+endif()
 foreach(dependency libraw librawCmake)
     string(JSON ${dependency}_url GET "${rawlab_lock}" nativeDependencies ${dependency} url)
     string(JSON ${dependency}_sha GET "${rawlab_lock}" nativeDependencies ${dependency} sha256)

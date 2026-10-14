@@ -1,20 +1,39 @@
-# RawLab core snapshot
+# RawLab core submodule
 
-Source repository: https://github.com/dancancer/RawLab.
-Fixed commit: `89cdc5b14402ee9265468f54152c8fb55d661248` (`origin/development`, fetched 2026-10-14).
+Upstream repository: https://github.com/dancancer/RawLab.
+Pinned commit: `89cdc5b14402ee9265468f54152c8fb55d661248` (`development`, selected 2026-10-14).
 
-The machine-readable authority is `upstream.lock.json`, including per-file SHA256, a snapshot hash, tracking ref, and LibRaw/CMake dependency URLs and checksums. CI verifies it before building.
+`native/rawlab/upstream` is a Git submodule. The parent repository's gitlink pins the complete upstream repository to an exact commit; `.gitmodules` declares its GitHub URL and the intended update branch. Builds never advance that branch automatically. `upstream.lock.json` records the same commit plus LibRaw/CMake download URLs and SHA256 values. CI recursively checks out the submodule and verifies its revision, clean working tree and dependency declarations before building.
 
-The `upstream/` tree is a git-archive snapshot of `lutools/{src,include,cmake,third_party,CMakeLists.txt,docs/color-contract.md}`, `LICENSE`, and `docs/licensing.md`. No LUTs, RAW fixtures, client apps, generated builds or scripts/runtime dependencies are included. No upstream files are modified. Photographer's adapter/build/tests live outside that tree. Update by replacing the full snapshot from a reviewed commit, then verify color/ABI/platform regressions; do not hand-patch vendored algorithms.
+Only the `lutools` core target is linked. Having upstream clients, CLI tools or assets in the submodule does not enable or bundle them. Photographer's adapter, build configuration, Windows compatibility header and tests remain outside the submodule. Do not edit upstream algorithms inside this checkout; upstream changes belong in the RawLab repository and are consumed by advancing the parent gitlink.
 
-Windows compatibility is outside the snapshot: MSVC force-includes `include/windows_rgb_compat.h` for core/bridge. It preloads the Windows SDK and undefines its function-like `RGB` macro so `sony2fuji::RGB(...)` remains a C++ constructor. The shim loads Winsock 2 before windows.h and defines WIN32_LEAN_AND_MEAN to avoid the SDK importing incompatible Winsock 1 declarations. This fixes the observed CI COLORREF conversion and socket redefinition errors without rewriting upstream algorithms.
-
-Update from a separate local RawLab checkout (its branch/working tree are untouched):
+## Clone and initialize
 
 ```sh
-python scripts/update-rawlab.py --repo /path/to/RawLab --fetch
-python scripts/update-rawlab.py --repo /path/to/RawLab --ref origin/development --write
+git clone --recurse-submodules https://github.com/Aya0wind/photographer.git
+# Existing Photographer checkout:
+git submodule update --init --recursive
 python scripts/update-rawlab.py --check
 ```
 
-The first command reports a candidate without editing Photographer. `--write` refuses if the current snapshot differs from its lock, replaces the complete selected source tree, removes stale files, and updates the lock. Review the resulting diff, public C++ contracts, CMake capability/dependency changes and license notices before committing. Prefer an integrated upstream branch; unrelated unmerged feature branches are never selected merely because their timestamp is newer. Published app recipes/cache keys must include the resolved core commit, not a moving branch name.
+After switching branches or pulling a parent commit, run `git submodule update --init --recursive` to restore the recorded upstream revision. Do not use `git submodule update --remote` during builds.
+
+## Review and update
+
+```sh
+# Fetch and report the candidate without changing the checked-out revision:
+python scripts/update-rawlab.py --fetch
+# After reviewing the upstream diff, select an integrated revision explicitly:
+python scripts/update-rawlab.py --ref origin/development --write
+# Or use an exact upstream commit instead of the tracking branch.
+python scripts/update-rawlab.py --check
+git diff --submodule=log -- native/rawlab/upstream native/rawlab/upstream.lock.json
+git add native/rawlab/upstream native/rawlab/upstream.lock.json
+# Commit both together, with any required adapter changes and CI validation.
+```
+
+The updater refuses local modifications, detaches the submodule at the selected commit, and updates the dependency lock atomically. If lock publication fails, it restores the previous checkout. Review C++ contracts, color semantics, CMake dependencies and licensing before delivery; the updater does not establish their compatibility. Published recipes/cache keys use the pinned commit rather than the moving branch name.
+
+## Windows compatibility
+
+MSVC force-includes `include/windows_rgb_compat.h` for core/bridge. It loads Winsock 2 before `windows.h`, defines `WIN32_LEAN_AND_MEAN`, and removes the SDK's function-like `RGB` macro so `sony2fuji::RGB(...)` remains a C++ constructor. Both observed CI failures (COLORREF conversion and Winsock type redefinitions) are addressed outside the upstream submodule.

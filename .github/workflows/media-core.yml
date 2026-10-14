@@ -3,13 +3,14 @@ on:
   push:
     branches: [dev, main]
     paths:
+      - '.gitmodules'
       - 'crates/media/**'
       - 'native/rawlab/**'
       - 'src-tauri/examples/rawlab_probe.rs'
       - '.github/workflows/media-core.yml'
       - 'scripts/update-rawlab.py'
   pull_request:
-    paths: ['crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml', 'scripts/update-rawlab.py']
+    paths: ['.gitmodules', 'crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml', 'scripts/update-rawlab.py']
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,6 +27,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify pinned upstream integrity
         run: python scripts/update-rawlab.py --check

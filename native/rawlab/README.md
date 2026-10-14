@@ -1,10 +1,10 @@
 # 固定 RawLab core 的浮点接入原型（M0）
 
-直接复用 RawLab core，**不自行实现 RAW 或胶片算法**。固定版本、未修改源码快照和更新方式见 [UPSTREAM.md](UPSTREAM.md)。Rust 薄封装在 `crates/media/src/rawlab.rs`，PhotoCraft 交接为 `photographer_lib::linear_rgb_document`。尚未替换主编辑器默认后端。
+直接复用 RawLab core，**不自行实现 RAW 或胶片算法**。固定版本、Git submodule和更新方式见 [UPSTREAM.md](UPSTREAM.md)。Rust 薄封装在 `crates/media/src/rawlab.rs`，PhotoCraft 交接为 `photographer_lib::linear_rgb_document`。尚未替换主编辑器默认后端。
 
 ## 构建与使用
 
-需要 C++17、CMake 3.24+、zlib 开发包。Windows CI 使用 `zlib:x64-windows-static-md`，传入 vcpkg toolchain/triplet。从仓库根目录执行：
+需要 C++17、CMake 3.24+、zlib 开发包。Windows CI 使用 `zlib:x64-windows-static-md`，传入 vcpkg toolchain/triplet。先执行 `git submodule update --init --recursive`，再从仓库根目录执行：
 
 ```sh
 cmake -S native/rawlab -B native/rawlab/build -DCMAKE_BUILD_TYPE=Release

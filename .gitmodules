@@ -1,0 +1,4 @@
+[submodule "native/rawlab/upstream"]
+	path = native/rawlab/upstream
+	url = https://github.com/dancancer/RawLab.git
+	branch = development
