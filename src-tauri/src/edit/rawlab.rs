@@ -275,7 +275,9 @@ impl ColorCache {
                 // Export already runs on a blocking host thread, with its own
                 // context and resource lease; preview GPU sessions stay responsive.
                 let backend = backend()?;
-                render_job(&backend, &mut HashMap::new(), &job)?
+                // Sessions borrow the backend and must be dropped before it.
+                let mut sessions = HashMap::new();
+                render_job(&backend, &mut sessions, &job)?
             } else {
                 worker()?.send(job).map_err(|_| "色彩工作线程已退出")?;
                 result.recv().map_err(|_| "色彩工作线程已退出")??
