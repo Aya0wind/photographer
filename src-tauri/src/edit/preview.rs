@@ -930,6 +930,7 @@ mod startup_tests {
             original_size:[4,4], document:base.clone(), raw:None, refined:None,
             interactive_document:base.clone(), interactive_renderer:new_renderer(&base,[4,4]),
             refined_renderer:new_renderer(&base,[4,4]), open_ms:0.0, native_ready:false,
+            pipeline_ready:false, pending_rawlab:None, sensor_raw:false,
             generation:generation.clone(), path:PathBuf::new(),modified:None,length:0,
             touched:Instant::now()-IDLE_TTL-Duration::from_secs(1),source_checked:Instant::now(),
         }));
