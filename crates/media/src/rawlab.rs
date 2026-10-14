@@ -4,6 +4,9 @@
 use libloading::Library;
 use std::{
     ffi::{c_char, c_void, CStr, CString, OsStr},
+    marker::PhantomData,
+    ptr::NonNull,
+    rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 type Cancel = extern "C" fn(*mut c_void) -> i32;
@@ -24,6 +27,16 @@ struct FilmOptions {
     gpu_mode: u32,
     cancelled: Cancel,
     userdata: *mut c_void,
+    exposure_ev: f32,
+    relative_white_balance: [f32; 3],
+}
+#[repr(C)]
+#[derive(Default)]
+pub struct LutInfo {
+    pub size: u32,
+    /// RawLab transfer enum; preserve unknown future values for diagnostics.
+    pub input_transfer: u32,
+    pub output_transfer: u32,
 }
 #[repr(C)]
 struct Output {
@@ -41,12 +54,21 @@ struct Output {
 }
 type Decode = unsafe extern "C" fn(*const c_char, *const Options, *mut Output) -> i32;
 type Render = unsafe extern "C" fn(*const f32, u32, u32, *const FilmOptions, *mut Output) -> i32;
+type CreateSession =
+    unsafe extern "C" fn(*const f32, u32, u32, *mut *mut c_void, *mut Output) -> i32;
+type RenderSession = unsafe extern "C" fn(*mut c_void, *const FilmOptions, *mut Output) -> i32;
+type DestroySession = unsafe extern "C" fn(*mut c_void);
+type InspectLut = unsafe extern "C" fn(*const c_char, *mut LutInfo, *mut Output) -> i32;
 type Free = unsafe extern "C" fn(*mut c_void);
 pub struct Backend {
     _library: Library,
     decode: Decode,
     render: Render,
     free: Free,
+    create_session: CreateSession,
+    render_session: RenderSession,
+    destroy_session: DestroySession,
+    inspect_lut: InspectLut,
 }
 #[derive(Clone, Copy)]
 pub struct DevelopOptions {
@@ -105,7 +127,7 @@ impl Backend {
         let version =
             unsafe { library.get::<unsafe extern "C" fn() -> u32>(b"pc_raw_abi_version\0") }
                 .map_err(|e| e.to_string())?;
-        if unsafe { version() } != 1 {
+        if unsafe { version() } != 2 {
             return Err("Unsupported RawLab bridge ABI".into());
         }
         let decode =
@@ -113,7 +135,20 @@ impl Backend {
         let render =
             *unsafe { library.get::<Render>(b"pc_raw_render\0") }.map_err(|e| e.to_string())?;
         let free = *unsafe { library.get::<Free>(b"pc_raw_free\0") }.map_err(|e| e.to_string())?;
+        let create_session = *unsafe { library.get::<CreateSession>(b"pc_color_session_create\0") }
+            .map_err(|e| e.to_string())?;
+        let render_session = *unsafe { library.get::<RenderSession>(b"pc_color_session_render\0") }
+            .map_err(|e| e.to_string())?;
+        let destroy_session =
+            *unsafe { library.get::<DestroySession>(b"pc_color_session_destroy\0") }
+                .map_err(|e| e.to_string())?;
+        let inspect_lut = *unsafe { library.get::<InspectLut>(b"pc_raw_lut_info\0") }
+            .map_err(|e| e.to_string())?;
         Ok(Self {
+            create_session,
+            render_session,
+            destroy_session,
+            inspect_lut,
             _library: library,
             decode,
             render,
@@ -164,7 +199,9 @@ impl Backend {
             .transpose()
             .map_err(|_| "Film path contains NUL")?;
         let options = FilmOptions {
-            version: 1,
+            version: 2,
+            exposure_ev: 0.0,
+            relative_white_balance: [1.0; 3],
             lut_path: path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
             strength,
             gpu_mode: gpu as u32,
@@ -174,6 +211,43 @@ impl Backend {
         let mut output = empty_output();
         let status = unsafe { (self.render)(rgb.as_ptr(), width, height, &options, &mut output) };
         self.finish(output, status, cancel, Encoding::DisplaySrgb)
+    }
+    /// Copies a linear source once. Its GPU context must stay on this thread.
+    pub fn color_session(
+        &self,
+        rgb: &[f32],
+        dimensions: [u32; 2],
+    ) -> Result<ColorSession<'_>, String> {
+        let [width, height] = dimensions;
+        if (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(3))
+            != Some(rgb.len())
+        {
+            return Err("Invalid linear RGB dimensions".into());
+        }
+        let mut pointer = std::ptr::null_mut();
+        let mut diagnostics = empty_output();
+        let status = unsafe {
+            (self.create_session)(rgb.as_ptr(), width, height, &mut pointer, &mut diagnostics)
+        };
+        // Own any returned context even if a future bridge reports a partial failure.
+        let session = NonNull::new(pointer).map(|pointer| ColorSession {
+            backend: self,
+            pointer,
+            _thread: PhantomData,
+        });
+        diagnostic_status(status, &diagnostics)?;
+        session.ok_or_else(|| "RawLab returned an empty color session".into())
+    }
+    /// Inspect the original CUBE, including upstream Gamma/Gamut declarations.
+    pub fn lut_info(&self, path: &str) -> Result<LutInfo, String> {
+        let path = CString::new(path).map_err(|_| "Film path contains NUL")?;
+        let mut info = LutInfo::default();
+        let mut diagnostics = empty_output();
+        let status = unsafe { (self.inspect_lut)(path.as_ptr(), &mut info, &mut diagnostics) };
+        diagnostic_status(status, &diagnostics)?;
+        Ok(info)
     }
     fn finish<'a>(
         &'a self,
@@ -256,4 +330,81 @@ impl Drop for Image<'_> {
             unsafe { (self.backend.free)(self.output.owner) };
         }
     }
+}
+
+/// Reusable immutable source plus platform device. !Send/!Sync intentionally:
+/// create, render and release on the same dedicated host worker thread.
+///
+/// ```compile_fail
+/// use photographer_media::rawlab::ColorSession;
+/// fn requires_send<T: Send>() {}
+/// requires_send::<ColorSession<'static>>();
+/// ```
+pub struct ColorSession<'a> {
+    backend: &'a Backend,
+    pointer: NonNull<c_void>,
+    _thread: PhantomData<Rc<()>>,
+}
+#[derive(Clone, Copy)]
+pub struct ColorOptions<'a> {
+    pub lut_path: Option<&'a str>,
+    pub strength: f32,
+    pub gpu: GpuMode,
+    pub exposure_ev: f32,
+    /// Relative gains on developed linear sRGB, not sensor Kelvin multipliers.
+    pub relative_white_balance: [f32; 3],
+}
+impl Default for ColorOptions<'_> {
+    fn default() -> Self {
+        Self {
+            lut_path: None,
+            strength: 1.0,
+            gpu: GpuMode::Auto,
+            exposure_ev: 0.0,
+            relative_white_balance: [1.0; 3],
+        }
+    }
+}
+impl<'a> ColorSession<'a> {
+    pub fn render(
+        &mut self,
+        options: ColorOptions<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Image<'a>, String> {
+        let path = options
+            .lut_path
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| "Film path contains NUL")?;
+        let options = FilmOptions {
+            version: 2,
+            lut_path: path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
+            strength: options.strength,
+            gpu_mode: options.gpu as u32,
+            cancelled,
+            userdata: userdata(cancel),
+            exposure_ev: options.exposure_ev,
+            relative_white_balance: options.relative_white_balance,
+        };
+        let mut output = empty_output();
+        let status =
+            unsafe { (self.backend.render_session)(self.pointer.as_ptr(), &options, &mut output) };
+        self.backend
+            .finish(output, status, cancel, Encoding::DisplaySrgb)
+    }
+}
+impl Drop for ColorSession<'_> {
+    fn drop(&mut self) {
+        unsafe { (self.backend.destroy_session)(self.pointer.as_ptr()) };
+    }
+}
+fn diagnostic_status(status: i32, output: &Output) -> Result<(), String> {
+    if status == 0 {
+        return Ok(());
+    }
+    let mut error = output.error;
+    error[255] = 0;
+    Err(unsafe { CStr::from_ptr(error.as_ptr()) }
+        .to_string_lossy()
+        .into_owned())
 }

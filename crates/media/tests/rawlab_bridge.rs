@@ -150,6 +150,10 @@ fn core_film_strength_and_log_input_are_shared_with_gpu_auto() {
     }
     drop(file);
     let path = path.to_str().unwrap();
+    let info = backend.lut_info(path).unwrap();
+    assert_eq!(info.size, 2);
+    assert_ne!(info.input_transfer, 0);
+    assert_ne!(info.output_transfer, 0);
     let cancel = AtomicBool::new(false);
     let rgb = [0.18; 3];
     let neutral = backend
@@ -169,4 +173,79 @@ fn core_film_strength_and_log_input_are_shared_with_gpu_auto() {
         assert!((half.rgb()[i] - (neutral.rgb()[i] + full.rgb()[i]) * 0.5).abs() < 1e-6);
         assert!((auto.rgb()[i] - full.rgb()[i]).abs() < 0.002);
     }
+}
+
+#[test]
+fn reusable_session_preserves_source_and_recovers_after_cancel() {
+    use photographer_media::rawlab::{ColorOptions, GpuMode};
+    let Some(library) = std::env::var_os("PHOTOGRAPHER_RAW_BRIDGE") else {
+        return;
+    };
+    let backend = unsafe { Backend::load(library) }.unwrap();
+    let cancel = AtomicBool::new(false);
+    let source = [0.1, 0.2, 0.3, 0.4, 0.5, 2.0];
+    let mut session = backend.color_session(&source, [2, 1]).unwrap();
+    let neutral = session
+        .render(
+            ColorOptions {
+                gpu: GpuMode::Off,
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .unwrap();
+    let gains = [1.2, 1.0, 0.8];
+    let adjusted = session
+        .render(
+            ColorOptions {
+                gpu: GpuMode::Off,
+                exposure_ev: 1.0,
+                relative_white_balance: gains,
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .unwrap();
+    let expected_source: Vec<_> = source
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v * 2.0 * gains[i % 3])
+        .collect();
+    let expected = backend
+        .render(&expected_source, [2, 1], None, 0.0, GpuMode::Off, &cancel)
+        .unwrap();
+    for (a, b) in adjusted.rgb().iter().zip(expected.rgb()) {
+        assert!((a - b).abs() < 1e-6);
+    }
+    assert!(session
+        .render(ColorOptions::default(), &AtomicBool::new(true))
+        .is_err());
+    assert!(session
+        .render(
+            ColorOptions {
+                relative_white_balance: [0.0; 3],
+                ..Default::default()
+            },
+            &cancel
+        )
+        .is_err());
+    // A failed request and an exposure edit must not mutate the cached source.
+    let restored = session
+        .render(
+            ColorOptions {
+                gpu: GpuMode::Auto,
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .unwrap();
+    for (a, b) in neutral.rgb().iter().zip(restored.rgb()) {
+        assert!((a - b).abs() < 0.002);
+    }
+    drop(session);
+    // Native output owns its own storage, independent of the device/source lease.
+    assert_eq!(neutral.rgb().len(), 6);
+    assert!(backend.color_session(&[f32::NAN; 3], [1, 1]).is_err());
+    assert!(backend.color_session(&source, [1, 1]).is_err());
+    assert!(backend.lut_info("missing-film.cube").is_err());
 }

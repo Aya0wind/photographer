@@ -9,7 +9,7 @@ on:
       - '.github/workflows/media-core.yml'
       - 'scripts/update-rawlab.py'
   pull_request:
-    paths: ['crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml']
+    paths: ['crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml', 'scripts/update-rawlab.py']
   workflow_dispatch:
 permissions:
   contents: read

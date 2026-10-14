@@ -39,8 +39,18 @@ typedef struct {
     uint32_t gpu_mode; // 0 off, 1 auto (CPU fallback), 2 force
     pc_raw_cancel cancelled;
     void *userdata;
+    float exposure_ev;
+    float relative_white_balance[3];
 } pc_film_options;
+typedef struct pc_color_session pc_color_session;
+typedef struct { uint32_t size, input_transfer, output_transfer; } pc_lut_info;
 PC_RAW_API uint32_t pc_raw_abi_version(void);
+// Color sessions copy immutable linear source once, reuse native device/upload,
+// and are created/rendered/destroyed on the same host worker thread.
+PC_RAW_API int pc_color_session_create(const float *rgb, uint32_t width, uint32_t height, pc_color_session **session, pc_raw_result *diagnostics);
+PC_RAW_API int pc_color_session_render(pc_color_session *session, const pc_film_options *options, pc_raw_result *result);
+PC_RAW_API void pc_color_session_destroy(pc_color_session *session);
+PC_RAW_API int pc_raw_lut_info(const char *path, pc_lut_info *info, pc_raw_result *diagnostics);
 // UTF-8 file source: RAWProcessor has no public buffer API at this revision.
 // Source must remain stable during this synchronous call. Free previous owner
 // before reusing result storage. No exception may cross this ABI.
