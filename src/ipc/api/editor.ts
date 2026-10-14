@@ -82,6 +82,8 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
 
 export interface EditorPreviewSession {
   nativeReady?: boolean;
+  rawlabReady?:boolean;
+  previewUrl?:string;
   histogram: number[][];
   sensorRaw: boolean;
   bitDepth: string;
@@ -92,12 +94,12 @@ export interface EditorPreviewSession {
   height: number;
 }
 
-export async function editPreviewOpen(assetId: number, libraryId: string): Promise<EditorPreviewSession> {
-  return ipc<EditorPreviewSession>("edit_preview_open", { assetId: String(assetId), libraryId });
+export async function editPreviewOpen(assetId: number, libraryId: string,rawlab=false): Promise<EditorPreviewSession> {
+  return ipc<EditorPreviewSession>("edit_preview_open", { assetId: String(assetId), libraryId,rawlab });
 }
 
-export function editPreviewPrepare(sessionId:string):Promise<EditorPreviewSession> {
-  return ipc<EditorPreviewSession>("edit_preview_prepare",{sessionId});
+export function editPreviewPrepare(sessionId:string,recipe?:EditRecipe):Promise<EditorPreviewSession> {
+  return ipc<EditorPreviewSession>("edit_preview_prepare",{sessionId,recipe});
 }
 
 /** 返回二进制 JPEG；调用方拥有并负责释放 object URL。 */
@@ -243,3 +245,10 @@ export async function editLutList():Promise<EditorLutEntry[]> {const list=await 
 export const editLutImport=(path:string)=>ipc<EditorLutEntry>("edit_lut_import",{path});
 export const editLutRename=(id:string,name:string)=>ipc<void>("edit_lut_rename",{id,name});
 export const editLutRemove=(id:string)=>ipc<void>("edit_lut_remove",{id});
+
+export interface EditorFilmEntry {id:string;name:string;size:number;inputTransfer:number;outputTransfer:number}
+export function editRawlabAvailable(){return ipc<{available:boolean;coreRevision:string}>("edit_rawlab_available");}
+export function editFilmList(){return ipc<EditorFilmEntry[]>("edit_film_list");}
+export function editFilmImport(path:string){return ipc<EditorFilmEntry>("edit_film_import",{path});}
+
+export function editPreviewActivate(sessionId:string,recipe:EditRecipe){return ipc<EditorPreviewSession>("edit_preview_activate",{sessionId,recipe});}

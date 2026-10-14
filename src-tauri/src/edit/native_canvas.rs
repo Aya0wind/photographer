@@ -419,6 +419,10 @@ mod windows_canvas {
                     let start=Instant::now();
                     let result=(|| {
                         let base=preview::canvas_source(&w.session)?;
+                        if previous.as_ref().is_none_or(|(id,_,_,_)|*id!=base.id){
+                            let size=preview::canvas_original_size(&w.session)?;
+                            renderer.set_source_size(size,&base);overlay_renderer.set_source_size(size,&base);
+                        }
                         let input_changed=previous_input.as_ref().is_none_or(|(recipe,gradient,stroke)|!Arc::ptr_eq(recipe,&frame.recipe)||*gradient!=frame.view.mask_preview||*stroke!=frame.view.mask_stroke);
                         let mask_recipe=if frame.view.mask_preview.is_some()||frame.view.mask_stroke.is_some(){std::borrow::Cow::Owned(crate::edit::native_canvas::mask_preview_recipe(&frame.recipe,&frame.view)?)}else{std::borrow::Cow::Borrowed(frame.recipe.as_ref())};
                         let mut mask_uploads=0;
@@ -429,7 +433,7 @@ mod windows_canvas {
                             if !unchanged {
                             let key=serde_json::json!({"id":id,"kind":mask.kind,"from":mask.from,"to":mask.to,"strokes":mask.strokes,"inverted":mask.inverted,"feather":mask.feather,"quarter":frame.recipe.rotate_quarter,"geometry":frame.recipe.geometry,"crop":frame.recipe.crop});
                             if !previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&*old==key){
-                                let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&base,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&base,&mask_recipe,id)?};
+                                let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&renderer.neutral_document(&base,&frame.recipe)?,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&renderer.neutral_document(&base,&frame.recipe)?,&mask_recipe,id)?};
                                 mask_uploads=gpu.prepare_mask_overlay(&doc)?;previous_mask=Some((base.id,key));
                             }
                             }
@@ -438,7 +442,7 @@ mod windows_canvas {
                         frame.view.mapping=crate::edit::native_geometry::mapping(&frame.recipe,base.size);
                         let overlay_changed=previous_overlay.as_ref().is_none_or(|(id,old,original)|*id!=base.id || *original!=frame.original || !Arc::ptr_eq(old,&frame.recipe)&&(old.text_layers!=frame.recipe.text_layers || old.brush_strokes!=frame.recipe.brush_strokes || old.rotate_quarter!=frame.recipe.rotate_quarter || old.geometry!=frame.recipe.geometry || old.crop!=frame.recipe.crop));
                         if overlay_changed {
-                            annotation_doc=if frame.original {None}else{overlay_renderer.canvas_annotations(&base,&frame.recipe)?};
+                            annotation_doc=if frame.original {None}else{overlay_renderer.canvas_annotations(&renderer.neutral_document(&base,&frame.recipe)?,&frame.recipe)?};
                             previous_overlay=Some((base.id,frame.recipe.clone(),frame.original));
                         }
                         let candidate=if input_changed {let mut value=mask_recipe.as_ref().clone();value.rotate_quarter=0;value.geometry=None;value.crop=None;value.text_layers.clear();value.brush_strokes.clear();Some(value)}else{None};
@@ -446,11 +450,11 @@ mod windows_canvas {
                         if changed {
                             let render_recipe=candidate.or_else(||previous.as_ref().map(|(_,recipe,_,_)|recipe.clone())).ok_or("无绘制配方")?;
                             let id=base.id;
-                            let doc=if frame.original {base.clone()} else {renderer.canvas_document(&base,&render_recipe)?};
+                            let doc=if frame.original {renderer.neutral_document(&base,&frame.recipe)?} else {renderer.canvas_document(&base,&render_recipe)?};
                             previous=Some((id,render_recipe,frame.original,doc));
                         }
                         previous_input=Some((frame.recipe.clone(),frame.view.mask_preview,frame.view.mask_stroke.clone()));
-                        let comparison_uploads=if frame.view.compare_split.is_some(){gpu.prepare_comparison(&base)?}else{0};
+                        let comparison_uploads=if frame.view.compare_split.is_some(){gpu.prepare_comparison(&renderer.neutral_document(&base,&frame.recipe)?)?}else{0};
                         gpu.draw_with_annotations(&previous.as_ref().ok_or("无绘制文档")?.3,&frame.view,changed,annotation_doc.as_ref(),overlay_changed).map(|uploads|uploads+comparison_uploads+mask_uploads)
                     })();
                     match result {

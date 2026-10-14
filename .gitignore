@@ -48,3 +48,7 @@ src-tauri/resources/.gphoto-backup-*/
 scripts/__pycache__/
 native/rawlab/build*/
 crates/media/target/
+
+/src-tauri/resources/rawlab/*
+!/src-tauri/resources/rawlab/.gitkeep
+/native/rawlab/build-app/

@@ -3,6 +3,7 @@ import ExtendedColorPanel from "./ExtendedColorPanel";
 import {DevelopmentControls} from "./DevelopmentPanel";
 import ColorGradingPanel from "./ColorGradingPanel";
 import ParametricCurvePanel from "./ParametricCurvePanel";
+import FilmPanel from "./FilmPanel";
 import LutPanel from "./LutPanel";
 import { useEffect, useState } from "react";
 import CurveEditor, { type CurveSampling } from "./CurveEditor";
@@ -13,7 +14,8 @@ import { DEFAULT_ADVANCED, adjustmentGroupChanged, type AdjustmentGroup,type Dev
 const HSL_RANGES=["reds","yellows","greens","cyans","blues","magentas"] as const;
 function hslGradient(range:typeof HSL_RANGES[number],axis:string){const hue=HSL_RANGES.indexOf(range)*60;return axis==="hue"?`linear-gradient(to right,hsl(${hue-60} 90% 55%),hsl(${hue} 90% 55%),hsl(${hue+60} 90% 55%))`:axis==="saturation"?`linear-gradient(to right,#888,hsl(${hue} 100% 50%))`:`linear-gradient(to right,#111,hsl(${hue} 90% 50%),#fff)`;}
 
-export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, onReset, begin, end, sampling, onModalChange,cancel }: {
+export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, onReset, begin, end, sampling, onModalChange,cancel,onPipeline }: {
+  onPipeline?:(value:EditRecipe["colorPipeline"],record?:boolean)=>void;
   cancel?:()=>void;
   onResetDevelopment?:(group:DevelopmentGroup)=>void;
   onModalChange?:(open:boolean)=>void;
@@ -35,6 +37,7 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
       onClick={event=>{event.preventDefault();event.stopPropagation();onReset(group);}}>{t("editor.reset")}</button>;
   }
   return <div className="space-y-4">
+    {onPipeline&&<FilmPanel value={recipe.colorPipeline} onChange={onPipeline} begin={begin} end={end}/>}
     {sampling.picker&&sampling.sample&&<div role="status" className="space-y-1 text-[11px] text-text-secondary"><span>{t("advancedEditor.sampleReadout")}</span><div className="flex items-center gap-2 tabular-nums"><span className="h-3 w-3 shrink-0 rounded border border-edge" style={{backgroundColor:`rgb(${sampling.sample.join(",")})`}}/><span>RGB {sampling.sample.map(value=>value.toFixed(1)).join(" · ")}</span></div></div>}
     {sampling.available!==false&&sampling.picker&&sampling.setSampleSize&&<label className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.sampleSize")}</span><select aria-label={t("advancedEditor.sampleSize")} value={sampling.sampleSize??1} className="rounded-lg border border-edge bg-bg px-2 py-1.5" onChange={e=>sampling.setSampleSize!(Number(e.target.value) as 1|3|5|11)}>{[1,3,5,11].map(size=><option key={size} value={size}>{size} × {size}</option>)}</select></label>}
     <details open className="space-y-2.5">

@@ -880,6 +880,7 @@ export interface EditRecipe {
   version: 1;
   /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
   renderer?: "photocraft";
+  colorPipeline?:{version:1;backend:"rawlab";coreRevision:string;film?:{id:string;amount:number;enabled:boolean}};
   advanced?: AdvancedAdjustments;
   legacyAdjustments?:EditAdjustments;
   masks?:EditLocalMask[];

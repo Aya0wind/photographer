@@ -63,6 +63,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [nativeActive,setNativeActive]=useState(false);
   const nativeHost=useRef<HTMLElement|null>(null);
   const preview = useEditorPreview(asset.id, tool === "crop" ? { ...recipe, crop: null, textLayers: [], brushStrokes: [] } : recipe, libraryId, nativeActive);
+  useEffect(()=>{if(preview.warning)setNotice(preview.warning);},[preview.warning]);
   const sourceSize = useMemo<Size | null>(() => preview.session ? { width: preview.session.width, height: preview.session.height } : null, [preview.session]);
   context.current = sourceSize ?? { width: 0, height: 0 };
   const [zoom, setZoom] = useState(1);
@@ -163,7 +164,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const canvasRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,canvasRecipe,nativeHost,
     (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !moreOpen && !scheme.error && !histogram.error,
-    compare,preview.session?.sourceUrl,String(zoomVisible),compareSplit,activeClipping);
+    compare,preview.session?`${preview.session.sourceUrl}|${!!preview.session.rawlabReady}`:undefined,String(zoomVisible),compareSplit,activeClipping);
   const clippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,false,activeClipping,!nativeCanvas&&!compare,error=>setNotice(String(error)));
   const originalClippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,true,activeClipping,!nativeCanvas&&(compare||compareSplit!==null),error=>setNotice(String(error)));
   useEffect(() => {setNativeActive(nativeCanvas);},[nativeCanvas]);

@@ -222,6 +222,8 @@ pub fn adjusted_document(base: &Document, recipe: &EditRecipe) -> Result<Documen
     adjusted_document_scaled(base,recipe,1.0)
 }
 pub(super) fn adjusted_document_scaled(base:&Document,recipe:&EditRecipe,scale:f32)->Result<Document,String> {
+    if recipe.color_pipeline.is_some(){let (base,values)=super::rawlab::display(base,recipe)?;return adjusted_document_scaled(&base,&values,scale);}
+
     let mut session = Session::new();
     session.add_document(base.clone(), None);
     adjustments_scaled(&mut session, recipe,scale)?;
@@ -439,9 +441,9 @@ pub fn render_document(base: &Document, recipe: &EditRecipe) -> Result<Document,
     render_document_scaled(base,recipe,1.0)
 }
 pub(super) fn render_document_scaled(base:&Document,recipe:&EditRecipe,scale:f32)->Result<Document,String> {
-    let mut session = Session::new();
-    session.add_document(base.clone(), None);
-    adjustments_scaled(&mut session, recipe,scale)?;
+    let adjusted=adjusted_document_scaled(base,recipe,scale)?;
+    let mut session=Session::new();
+    session.add_document(adjusted,None);
     geometry(&mut session, recipe)?;
     annotations(&mut session, recipe)?;
     active_document(&session)
@@ -507,11 +509,11 @@ pub(super) fn prepare_export_document(
 )->Result<Document,String>{
     prepare_export_document_16(path,recipe,long_edge,progress,false)
 }
-pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),sixteen_bit:bool)->Result<Document,String>{
-    progress("decode");
-    let source = super::source::open(path)?;
+fn export_source(path:&std::path::Path,recipe:&EditRecipe,progress:&dyn Fn(&str))->Result<(Document,EditRecipe),String>{
+    let (base,values)=if recipe.color_pipeline.is_some(){super::rawlab::export_source(path,recipe)?}else{
+    let source=super::source::open(path)?;
     let mut values = recipe.clone();
-    let mut base = if let Some(raw) = source.raw {
+    let base = if let Some(raw) = source.raw {
         let a = recipe.advanced.clone().unwrap_or_default();
         // RAW 显影(曝光/白平衡)必须全分辨率烘焙(rawler 内部并行,这是地板);
         // 显影之外的一切逐像素算子都在缩放后的小图上跑。
@@ -530,6 +532,13 @@ pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecip
     } else {
         source.document
     };
+    (base,values)
+    };
+    Ok((base,values))
+}
+pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),sixteen_bit:bool)->Result<Document,String>{
+    progress("decode");
+    let (mut base,values)=export_source(path,recipe,progress)?;
     if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16 {
         let image=photocraft_io::document_to_image(&base,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
         base=super::source::from_image("16-bit output source",&image)?;

@@ -295,6 +295,8 @@ struct AnnotationCache {
 }
 
 pub struct Renderer {
+    color:super::rawlab::ColorCache,
+    neutral_color:super::rawlab::ColorCache,
     masks: super::masks::MaskCache,
     session: Session,
     camera: Option<(DocId, photocraft_algo::camera_raw::CameraRaw, Document)>,
@@ -312,8 +314,11 @@ pub struct Renderer {
 
 impl Renderer {
     pub(super) fn with_source_size(mut self,original:[u32;2],base:&Document)->Self {
-        self.source_scale=(base.size.width.max(base.size.height) as f32 / original[0].max(original[1]).max(1) as f32).min(1.0);
-        self.masks.set_source_scale(self.source_scale);self
+        self.set_source_size(original,base);self
+    }
+    pub(super) fn set_source_size(&mut self,original:[u32;2],base:&Document){
+        self.source_scale=(base.size.width.max(base.size.height) as f32/original[0].max(original[1]).max(1) as f32).min(1.0);
+        self.masks.set_source_scale(self.source_scale);
     }
     pub(super) fn with_pixel_scale(mut self,scale:f32)->Self{self.source_scale=scale;self.masks.set_source_scale(scale);self}
     pub(super) fn mask_overlay(&mut self,base:&Document,recipe:&EditRecipe,id:&str)->Result<Document,String> {
@@ -323,6 +328,8 @@ impl Renderer {
         let mut session = Session::new();
         session.add_document(base.clone(), None);
         Self {
+            color:Default::default(),
+            neutral_color:Default::default(),
             masks:Default::default(),
             session,
             camera: None,
@@ -339,6 +346,12 @@ impl Renderer {
         }
     }
 
+    pub(super) fn neutral_document(&mut self,base:&Document,recipe:&EditRecipe)->Result<Document,String>{
+        if recipe.color_pipeline.is_none(){return Ok(base.clone());}
+        let mut neutral=recipe.clone();neutral.advanced=None;
+        if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}
+        self.neutral_color.apply(base,&neutral).map(|(doc,_)|doc)
+    }
     /// 更新预览状态不产生第二套 undo/journal，也不让历史快照无限保留代理瓦片。
     fn set_document(&mut self, doc: Document) -> Result<(), String> {
         self.session.journal.clear();
@@ -508,6 +521,10 @@ impl Renderer {
         base: &Document,
         recipe: &EditRecipe,
     ) -> Result<Document, String> {
+        if recipe.color_pipeline.is_some() {
+            let (display, downstream)=self.color.apply(base,recipe)?;
+            return self.canvas_document(&display,&downstream);
+        }
         use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
         use photocraft_engine::doc::{Adjustment, SampleType};
         if base.mode != photocraft_engine::doc::ColorMode::Rgb || base.depth == SampleType::F32 {
@@ -598,7 +615,7 @@ impl Renderer {
         recipe: &EditRecipe,
         quality: u8,
     ) -> Result<Vec<u8>, String> {
-        let result = self.render_inner(base, recipe, quality);
+        let result=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe).and_then(|(display,downstream)|self.render_inner(&display,&downstream,quality))}else{self.render_inner(base,recipe,quality)};
         if result.is_err() {
             // 部分阶段失败后，下一次不能以旧配方判断会话状态仍然有效。
             self.previous = None;

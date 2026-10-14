@@ -243,6 +243,8 @@ pub struct LocalMask {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub color_pipeline:Option<ColorPipeline>,
     /// Retains historical sRGB filter semantics while rendering via native layers.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub legacy_adjustments: Option<Adjustments>,
@@ -269,6 +271,13 @@ pub struct EditRecipe {
     #[serde(default)]
     pub output: OutputPrefs,
 }
+
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct ColorPipeline {pub version:u32,pub backend:ColorBackend,pub core_revision:String,#[serde(default,skip_serializing_if="Option::is_none")] pub film:Option<LutSelection>}
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub enum ColorBackend {Rawlab}
 
 #[derive(Debug,Clone,Default,PartialEq,Serialize,Deserialize)]
 #[serde(default,rename_all="camelCase")]
@@ -409,6 +418,10 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             "编辑配方版本不支持（当前支持 {RECIPE_VERSION}，收到 {}）",
             recipe.version
         ));
+    }
+    if let Some(p)=&mut recipe.color_pipeline {
+        if p.version!=1||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此胶片显影配方的 core 版本或编辑引擎不受支持".into());}
+        if let Some(f)=p.film.as_mut(){super::film::validate_id(&f.id)?;if !f.amount.is_finite(){return Err("胶片强度无效".into());}f.amount=f.amount.clamp(0.0,100.0);}
     }
     if recipe.masks.len()>32 {return Err("蒙版数量超过上限".into());}
     if !recipe.masks.is_empty() && recipe.renderer!=Some(RenderEngine::Photocraft) {

@@ -8,7 +8,7 @@ use tauri::State;
 const MAX_BYTES:u64=96*1024*1024;
 fn validate_size(recipe:&EditRecipe)->Result<(),String>{if serde_json::to_vec(recipe).map_err(|e|e.to_string())?.len()>4*1024*1024{return Err("编辑参数过大".into());}Ok(())}
 #[derive(Serialize,Deserialize)]
-struct Scheme {format:String,version:u32,recipe:serde_json::Value,resources:Vec<lut::PackagedLut>}
+struct Scheme {format:String,version:u32,recipe:serde_json::Value,resources:Vec<lut::PackagedLut>,#[serde(default,skip_serializing_if="Vec::is_empty")] films:Vec<super::film::PackagedFilm>}
 fn references(recipe:&EditRecipe)->BTreeSet<String>{
     recipe.advanced.iter().chain(recipe.masks.iter().filter_map(|m|m.advanced.as_ref())).filter_map(|a|a.lookup.as_ref().map(|l|l.id.clone())).collect()
 }
@@ -16,19 +16,23 @@ fn pack(root:&Path,recipe:EditRecipe)->Result<Vec<u8>,String>{
     validate_size(&recipe)?;
     if recipe.renderer!=Some(RenderEngine::Photocraft){return Err("请使用高级编辑保存方案".into());}
     let resources=lut::package_resources(root,&references(&recipe))?;
-    let bytes=serde_json::to_vec(&Scheme{format:"photographer.edit".into(),version:1,recipe:serde_json::to_value(recipe).map_err(|e|e.to_string())?,resources}).map_err(|e|e.to_string())?;
+    let films=super::film::package(&recipe)?;
+    let bytes=serde_json::to_vec(&Scheme{format:"photographer.edit".into(),version:if recipe.color_pipeline.is_some(){2}else{1},recipe:serde_json::to_value(recipe).map_err(|e|e.to_string())?,resources,films}).map_err(|e|e.to_string())?;
     if bytes.len() as u64>MAX_BYTES{return Err("编辑方案过大".into());}Ok(bytes)
 }
 fn unpack(bytes:&[u8])->Result<(EditRecipe,Vec<lut::PackagedLut>),String>{
     if bytes.len() as u64>MAX_BYTES{return Err("编辑方案过大".into());}
     let scheme:Scheme=serde_json::from_slice(bytes).map_err(|e|format!("编辑方案无效：{e}"))?;
-    if scheme.version!=1||scheme.format!="photographer.edit"{return Err("不支持此编辑方案版本".into());}
+    if !matches!(scheme.version,1|2)||scheme.format!="photographer.edit"{return Err("不支持此编辑方案版本".into());}
     let recipe=parse_recipe(&scheme.recipe)?;
     validate_size(&recipe)?;
     if recipe.renderer!=Some(RenderEngine::Photocraft){return Err("编辑方案引擎无效".into());}
     let required:BTreeSet<_>=references(&recipe).into_iter().filter(|id|!id.starts_with("builtin:")).collect();
     let provided:BTreeSet<_>=scheme.resources.iter().map(|r|r.id.clone()).collect();
     if provided!=required||provided.len()!=scheme.resources.len(){return Err("编辑方案的调色资源缺失或重复".into());}
+    let expected=recipe.color_pipeline.as_ref().and_then(|p|p.film.as_ref()).map(|f|f.id.as_str());
+    if scheme.films.len()!=usize::from(expected.is_some()) || scheme.films.first().map(|f|f.id.as_str())!=expected{return Err("方案胶片资源缺失或重复".into());}
+    for resource in &scheme.films{super::film::validate(resource)?;}
     for resource in &scheme.resources{lut::validate_packaged(resource)?;}
     Ok((recipe,scheme.resources))
 }
@@ -80,7 +84,7 @@ pub async fn edit_scheme_open(state:State<'_,SharedState>,library_id:String,asse
         super::project::resolve(state,&library_id,&asset_id)?;
         let file=std::fs::File::open(&path).map_err(|e|format!("读取编辑方案失败：{e}"))?;
         let mut bytes=Vec::new();file.take(MAX_BYTES+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
-        let (recipe,resources)=unpack(&bytes)?;lut::install_packaged(&state.config_dir.join("luts"),&resources)?;
+        let (recipe,resources)=unpack(&bytes)?;let scheme:Scheme=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;super::film::install(&scheme.films)?;lut::install_packaged(&state.config_dir.join("luts"),&resources)?;
         Ok(recipe)
     }).await
 }

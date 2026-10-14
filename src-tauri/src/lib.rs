@@ -94,6 +94,8 @@ pub fn run() {
             }));
             log::info!("应用启动 version={}", env!("CARGO_PKG_VERSION"));
             edit::lut::init(&config_dir);
+            edit::film::init(&config_dir);
+            if let Ok(resources)=app.path().resource_dir(){edit::rawlab::init(&resources,&config_dir);}
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
             // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
             {
@@ -387,6 +389,9 @@ pub fn run() {
             ipc::thumb::device_thumb_get,
             ipc::device::device_file_sizes,
             ipc::system::open_with_system,
+            edit::rawlab::edit_rawlab_available,
+            edit::film::edit_film_list,
+            edit::film::edit_film_import,
             edit::lut::edit_lut_list,
             edit::lut::edit_lut_import,
             edit::lut::edit_lut_rename,
@@ -444,6 +449,7 @@ pub fn run() {
             edit::native_canvas::edit_native_close,
             edit::preview::edit_preview_open,
             edit::preview::edit_preview_prepare,
+            edit::preview::edit_preview_activate,
             edit::preview::edit_preview_render,
             edit::preview::edit_preview_close,
             edit::preview::edit_preview_pick,

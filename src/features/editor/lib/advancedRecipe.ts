@@ -36,6 +36,7 @@ export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):
 }
 
 export type AdvancedAction = RecipeAction
+  | {type:"colorPipeline";value:EditRecipe["colorPipeline"];record?:boolean}
   | {type:"cropStart"}
   | {type:"cropConfirm";crop:EditRecipe["crop"]}
   | {type:"cropCancel"}
@@ -152,6 +153,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     const updated = recipeReducer(state, { type: "textUpdate", id: action.id, patch: action.patch }, context);
     return { ...updated, past: state.past };
   }
+  if(action.type==="colorPipeline"){const next={...state.present,colorPipeline:action.value};if(recipeEquals(next,state.present))return state;return {past:action.record===false?state.past:appendHistory(state.past,state.present),present:next,future:[]};}
   if (action.type === "advanced") {
     const next = { ...state.present, advanced: { ...DEFAULT_ADVANCED, ...state.present.advanced, ...action.patch } };
     if(recipeEquals(next,state.present)) return state;

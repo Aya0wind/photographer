@@ -142,11 +142,24 @@ jobs:
           "version=$tauriVersion" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
+      - name: Build bundled RawLab core
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/build-rawlab.py --toolchain "$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
       - name: Build NSIS and MSI installers
         shell: cmd
         # dev 只出精简版（online 模式，缺 WebView2 时安装器引导下载）；
         # main 才构建 offline 双产物（dev 产物保留 3 天，全量构建无意义）
         run: scripts\build-installer.cmd --nopause ${{ github.ref == 'refs/heads/dev' && '--online-only' || '' }}
+
+      - name: Native editor color-stage regressions
+        run: |
+          $env:PHOTOGRAPHER_RAW_BRIDGE = (Resolve-Path 'src-tauri/resources/rawlab/photographer_raw.dll').Path
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib edit::rawlab
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib linear_cache::tests
 
       - name: Check media prototype and linear handoff
         run: cargo check --manifest-path src-tauri/Cargo.toml --release --locked --example rawlab_probe --test edit_linear_source_test
@@ -155,7 +168,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: photographer-windows-x64-${{ steps.metadata.outputs.version }}
-          path: installer-output/*
+          path: |
+            installer-output/*
+            native/rawlab/build-app/photographer-rawlab-source-win32.tar.gz
           if-no-files-found: error
           retention-days: ${{ github.ref == 'refs/heads/dev' && 3 || 14 }}
 
@@ -168,6 +183,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $assets = @(Get-ChildItem 'installer-output' -File | ForEach-Object FullName)
+          $assets += (Resolve-Path 'native/rawlab/build-app/photographer-rawlab-source-win32.tar.gz').Path
           if ($assets.Count -eq 0) {
             throw 'No installer assets were produced.'
           }

@@ -159,6 +159,15 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
           security default-keychain -s "$KEYCHAIN_PATH"
 
+      - name: Build bundled RawLab core
+        run: |
+          python3 scripts/build-rawlab.py --arch arm64
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/resources/rawlab/libphotographer_raw.dylib
+          else
+            codesign --force --sign - src-tauri/resources/rawlab/libphotographer_raw.dylib
+          fi
+
       - name: Build Apple Silicon app and DMG
         run: |
           set -euo pipefail
@@ -169,6 +178,12 @@ jobs:
               APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           fi
           npm run tauri:build:macos -- --target aarch64-apple-darwin
+
+      - name: Native editor color-stage regressions
+        run: |
+          export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/src-tauri/resources/rawlab/libphotographer_raw.dylib"
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib edit::rawlab
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib linear_cache::tests
 
       - name: Check media prototype and linear handoff
         run: cargo check --manifest-path src-tauri/Cargo.toml --release --locked --target aarch64-apple-darwin --example rawlab_probe --test edit_linear_source_test
@@ -203,7 +218,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: photographer-macos-arm64-${{ steps.metadata.outputs.version }}
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            native/rawlab/build-app/photographer-rawlab-source-darwin.tar.gz
           if-no-files-found: error
           retention-days: ${{ github.ref == 'refs/heads/dev' && 3 || 14 }}
 
@@ -216,7 +233,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          assets=(src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg native/rawlab/build-app/photographer-rawlab-source-darwin.tar.gz)
           if [ ${#assets[@]} -eq 0 ]; then
             echo 'No installer assets were produced.' >&2
             exit 1

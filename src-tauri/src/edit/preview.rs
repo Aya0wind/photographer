@@ -29,6 +29,9 @@ struct Preview {
     refined_renderer: Arc<Mutex<preview_renderer::Renderer>>,
     open_ms: f64,
     native_ready: bool,
+    pipeline_ready: bool,
+    pending_rawlab:Option<PreparedSource>,
+    sensor_raw: bool,
     generation: Arc<Generation>,
     path: PathBuf,
     modified: Option<SystemTime>,
@@ -147,9 +150,11 @@ fn admit_session(
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Clone,Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewOpened {
+    #[serde(skip_serializing_if="Option::is_none")]
+    preview_url:Option<String>,
     session_id: String,
     source_url: String,
     width: u32,
@@ -159,8 +164,10 @@ pub struct PreviewOpened {
     warnings: Vec<String>,
     histogram: Vec<Vec<u64>>,
     native_ready: bool,
+    rawlab_ready:bool,
 }
 
+#[derive(Clone)]
 struct PreparedSource {
     document: Document,
     interactive_document: Document,
@@ -198,6 +205,7 @@ fn prepare_source_if_current(
     let source_url = jpeg_url(&document)?;
     let histogram = source_histogram(&interactive_document)?;
     let details = PreviewOpened {
+        preview_url:None,
         session_id: uuid::Uuid::new_v4().to_string(),
         source_url,
         width,
@@ -207,6 +215,7 @@ fn prepare_source_if_current(
         warnings,
         histogram,
         native_ready: true,
+        rawlab_ready:false,
     };
     Ok(PreparedSource {
         document,
@@ -254,6 +263,7 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
         std::mem::swap(&mut width, &mut height);
     }
     let details = PreviewOpened {
+        preview_url:None,
         session_id: uuid::Uuid::new_v4().to_string(),
         source_url: format!(
             "data:image/jpeg;base64,{}",
@@ -266,6 +276,7 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
         warnings: Vec::new(),
         histogram,
         native_ready: false,
+        rawlab_ready:false,
     };
     Some(PreparedSource {
         interactive_document: document.clone(),
@@ -275,11 +286,20 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
     })
 }
 
+fn prepare_rawlab_fallback(path:&std::path::Path)->Result<PreparedSource,String>{
+    let source=super::rawlab::open(path,Some(PREVIEW_EDGE),&AtomicBool::new(false))?;
+    let neutral=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":1,"backend":"rawlab","coreRevision":super::rawlab::core_revision()}}))?;
+    let (display,_)=super::rawlab::display(&source.document,&neutral)?;
+    let details=PreviewOpened{preview_url:None,session_id:uuid::Uuid::new_v4().to_string(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw:true,bit_depth:"32 bit linear proxy".into(),warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true};
+    Ok(PreparedSource{interactive_document:source.document.clone(),document:source.document,raw:None,details})
+}
+
 #[tauri::command]
 pub async fn edit_preview_open(
     state: State<'_, SharedState>,
     library_id: String,
     asset_id: String,
+    rawlab:Option<bool>,
 ) -> Result<PreviewOpened, String> {
     run_blocking(state.inner().clone(), move |state| {
         let opened_at = Instant::now();
@@ -293,7 +313,7 @@ pub async fn edit_preview_open(
             details,
         } = prepare_proxy(&crate::ipc::app_database_dir(state)?, &asset)
             .map(Ok)
-            .unwrap_or_else(|| prepare_source(&path))?;
+            .unwrap_or_else(||if rawlab.unwrap_or(false)&&asset.kind==crate::events::AssetKind::Raw {prepare_rawlab_fallback(&path)}else{prepare_source(&path)})?;
         let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
         cache.retain(|_, value| {
             value
@@ -311,6 +331,9 @@ pub async fn edit_preview_open(
                 refined_renderer: new_renderer(&document,[details.width,details.height]),
                 open_ms: opened_at.elapsed().as_secs_f64() * 1000.0,
                 native_ready: details.native_ready,
+                pipeline_ready:details.rawlab_ready,
+                pending_rawlab:None,
+                sensor_raw:details.sensor_raw,
                 generation: Arc::new(Generation::default()),
                 document,
                 raw,
@@ -332,7 +355,9 @@ pub async fn edit_preview_open(
 pub async fn edit_preview_prepare(
     state: State<'_, SharedState>,
     session_id: String,
+    recipe:Option<serde_json::Value>,
 ) -> Result<PreviewOpened, String> {
+    let values=recipe.as_ref().map(recipe::parse_recipe).transpose()?;
     run_blocking(state.inner().clone(), move |_| {
         let preview = sessions()
             .lock()
@@ -340,12 +365,12 @@ pub async fn edit_preview_prepare(
             .get(&session_id)
             .cloned()
             .ok_or("预览会话已关闭")?;
-        let (path, generation, modified, length) = {
+        let (path, generation, modified, length, sensor_raw) = {
             let p = preview.lock().map_err(|_| "预览会话锁不可用")?;
-            if p.native_ready {
+            if if values.as_ref().is_some_and(|r|r.color_pipeline.is_some()){p.pipeline_ready}else{p.native_ready} {
                 return Err("原片已准备完成".into());
             }
-            (p.path.clone(), p.generation.clone(), p.modified, p.length)
+            (p.path.clone(), p.generation.clone(), p.modified, p.length,p.sensor_raw)
         };
         if generation.closed.load(Ordering::Acquire) {
             return Err("预览会话已关闭".into());
@@ -355,7 +380,18 @@ pub async fn edit_preview_prepare(
             interactive_document,
             raw,
             mut details,
-        } = prepare_source_if_current(&path, || !generation.closed.load(Ordering::Acquire))?;
+        } = if values.as_ref().is_some_and(|r|r.color_pipeline.is_some()) {
+            let source=if sensor_raw{super::rawlab::open(&path,Some(PREVIEW_EDGE),&generation.closed)?}else{
+                let p=preview.lock().map_err(|_|"预览会话锁不可用")?;
+                source::Opened{original_size:p.original_size,document:p.document.clone(),raw:None,warnings:vec![]}
+            };
+            let mut neutral=values.clone().ok_or("色彩配方缺失")?;neutral.advanced=None;neutral.adjustments=None;neutral.legacy_adjustments=None;neutral.masks.clear();neutral.crop=None;neutral.rotate_quarter=0;neutral.geometry=None;neutral.text_layers.clear();neutral.brush_strokes.clear();
+            if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}
+            let (display,_)=super::rawlab::display(&source.document,&neutral)?;
+            PreparedSource {interactive_document:source.document.clone(),document:source.document,raw:None,details:PreviewOpened {
+                preview_url:None,session_id:session_id.clone(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw,bit_depth:if sensor_raw{"32 bit linear proxy".into()}else{"RGB preview".into()},warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true,
+            }}
+        } else {prepare_source_if_current(&path, || !generation.closed.load(Ordering::Acquire))?};
         let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
         if metadata.modified().ok() != modified || metadata.len() != length {
             return Err("源文件已改变，请重新打开编辑器".into());
@@ -376,6 +412,19 @@ pub async fn edit_preview_prepare(
                 return Err("RAW 预览缓存预算不足，请关闭其他编辑会话".into());
             }
         }
+        if values.as_ref().is_some_and(|r|r.color_pipeline.is_some()){
+            let mut p=preview.lock().map_err(|_|"预览会话锁不可用")?;
+            if generation.closed.load(Ordering::Acquire){return Err("预览会话已关闭".into());}
+            details.session_id=session_id;
+            p.pending_rawlab=Some(PreparedSource{document,interactive_document,raw,details:details.clone()});
+            return Ok(details);
+        }
+        if let Some(values)=&values {
+            // Produce a complete candidate frame before replacing the public source.
+            let mut candidate=preview_renderer::Renderer::new(&document).with_source_size([details.width,details.height],&document);
+            let jpeg=candidate.render(&document,values,90)?;
+            details.preview_url=Some(format!("data:image/jpeg;base64,{}",base64::engine::general_purpose::STANDARD.encode(jpeg)));
+        }
         let mut p = preview.lock().map_err(|_| "预览会话锁不可用")?;
         if generation.closed.load(Ordering::Acquire) {
             return Err("预览会话已关闭".into());
@@ -387,10 +436,36 @@ pub async fn edit_preview_prepare(
         p.interactive_document = interactive_document;
         p.raw = raw;
         p.native_ready = true;
+        p.pipeline_ready=values.as_ref().is_some_and(|r|r.color_pipeline.is_some());
         details.session_id = session_id;
         Ok(details)
     })
     .await
+}
+
+/// Activate only after development; render with the recipe supplied at this point.
+#[tauri::command]
+pub async fn edit_preview_activate(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value)->Result<PreviewOpened,String>{
+    let values=recipe::parse_recipe(&recipe)?;
+    if values.color_pipeline.is_none(){return Err("未选择胶片显影".into());}
+    run_blocking(state.inner().clone(),move |_|{
+        let preview=sessions().lock().map_err(|_|"预览会话锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
+        let (staged,generation,path,modified,length)={let p=preview.lock().map_err(|_|"预览会话锁不可用")?;
+            (p.pending_rawlab.clone().ok_or("线性代理尚未准备完成")?,p.generation.clone(),p.path.clone(),p.modified,p.length)};
+        if generation.closed.load(Ordering::Acquire){return Err("预览会话已关闭".into());}
+        let mut renderer=preview_renderer::Renderer::new(&staged.document).with_source_size([staged.details.width,staged.details.height],&staged.document);
+        let frame=renderer.render(&staged.document,&values,90)?;
+        let meta=std::fs::metadata(path).map_err(|e|e.to_string())?;
+        if meta.len()!=length||meta.modified().ok()!=modified{return Err("源文件已改变，请重新打开编辑器".into());}
+        let mut p=preview.lock().map_err(|_|"预览会话锁不可用")?;
+        if generation.closed.load(Ordering::Acquire)||p.pending_rawlab.as_ref().is_none_or(|s|s.document.id!=staged.document.id){return Err("代理准备已被更新或关闭".into());}
+        let staged=p.pending_rawlab.take().ok_or("代理准备已被更新")?;
+        let mut details=staged.details;
+        details.preview_url=Some(format!("data:image/jpeg;base64,{}",base64::engine::general_purpose::STANDARD.encode(frame)));
+        p.original_size=[details.width,details.height];p.document=staged.document;p.interactive_document=staged.interactive_document;p.raw=staged.raw;p.refined=None;
+        let renderer=Arc::new(Mutex::new(renderer));p.interactive_renderer=renderer.clone();p.refined_renderer=renderer;p.native_ready=true;p.pipeline_ready=true;p.touched=Instant::now();
+        Ok(details)
+    }).await
 }
 
 type Snapshot = (
@@ -407,6 +482,7 @@ fn refine_source(
 ) -> Result<(Document, recipe::EditRecipe), String> {
     let (mut base, raw, refined) = snapshot;
     let mut values = recipe.clone();
+    if recipe.color_pipeline.is_some(){return Ok((base,values));}
     let Some(raw) = raw.filter(|_| !request.interactive) else {
         return Ok((base, values));
     };
@@ -620,7 +696,7 @@ pub async fn edit_preview_pick(
             let mut below=recipe.clone();below.masks.truncate(index);
             let base=photocraft::adjusted_document_scaled(&base,&below,source_scale)?;
             let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
-            local.legacy_adjustments=None;
+            local.legacy_adjustments=None;local.color_pipeline=None;
             (mask.advanced.clone().unwrap_or_default(),local,base)
         } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
         picker_input_recipe(&mut before,&picker,curve_channel.as_deref());
@@ -745,7 +821,7 @@ fn clipping_overlay(base:&Document,recipe:&recipe::EditRecipe,scale:f32,warnings
 #[tauri::command]
 pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool)->Result<Vec<Vec<u64>>,String>{
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original{recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
+    if original{if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
     run_blocking(state.inner().clone(),move |_|{
         // 拖动期高频调用：交互文档（≤2048）渲染，毫秒级——255 桶显示直方图
         // 不需要全分辨率统计（2026-10-12 实时反馈改造）。
@@ -757,7 +833,7 @@ pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:Strin
 pub async fn edit_preview_clipping(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool,warnings:u8)->Result<tauri::ipc::Response,String>{
     if warnings>3{return Err("曝光提示参数无效".into());}
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original {recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
+    if original {if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
     run_blocking(state.inner().clone(),move |_|{
         use image::ImageEncoder;
         let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;

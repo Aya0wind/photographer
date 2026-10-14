@@ -1740,5 +1740,12 @@
   "trash.emptyAllHint": "將清空目前資料庫回收站的所有照片記錄，包括尚未載入的項目。預設保留原始檔案。",
   "trash.deleteSourceFiles": "同時刪除原始檔案",
   "trash.confirmSourceDelete": "原始檔案將永久刪除。請輸入「确认删除」以繼續：",
-  "trash.offlineKept": "{{count}} 項因照片庫離線而保留"
+  "trash.offlineKept": "{{count}} 項因照片庫離線而保留",
+  "advancedEditor.film.title": "膠片模擬",
+  "advancedEditor.film.enable": "啟用膠片顯影",
+  "advancedEditor.film.unavailable": "此安裝包尚不支援膠片顯影",
+  "advancedEditor.film.select": "膠片風格",
+  "advancedEditor.film.neutral": "中性顯影",
+  "advancedEditor.film.import": "匯入膠片 CUBE",
+  "advancedEditor.film.hint": "請選擇包含 Gamma/Gamut 色彩聲明的膠片 CUBE 檔案。"
 }

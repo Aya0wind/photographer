@@ -1740,5 +1740,12 @@
   "trash.emptyAllHint": "将清空当前数据库回收站的所有照片记录，包括尚未加载的项目。默认保留原文件。",
   "trash.deleteSourceFiles": "同时删除原文件",
   "trash.confirmSourceDelete": "原文件将永久删除。请输入“确认删除”以继续：",
-  "trash.offlineKept": "{{count}} 项因照片库离线而保留"
+  "trash.offlineKept": "{{count}} 项因照片库离线而保留",
+  "advancedEditor.film.title": "胶片模拟",
+  "advancedEditor.film.enable": "启用胶片显影",
+  "advancedEditor.film.unavailable": "此安装包暂不支持胶片显影",
+  "advancedEditor.film.select": "胶片风格",
+  "advancedEditor.film.neutral": "中性显影",
+  "advancedEditor.film.import": "导入胶片 CUBE",
+  "advancedEditor.film.hint": "请选择包含 Gamma/Gamut 色彩声明的胶片 CUBE 文件。"
 }
