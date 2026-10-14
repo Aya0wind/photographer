@@ -3,6 +3,8 @@ mod bursts;
 mod db;
 mod devices;
 mod edit;
+// Narrow media diagnostic seam; the desktop editor module stays internal.
+pub use edit::photocraft::linear_rgb_document;
 mod events;
 mod geo;
 mod import;

@@ -1,6 +1,6 @@
 //! Shared-media/PhotoCraft seam: storage precision and ICC are actual contracts.
 use photocraft_engine::doc::{LayerContent, SampleType};
-use photographer_lib::edit::photocraft::linear_rgb_document;
+use photographer_lib::linear_rgb_document;
 
 #[test]
 fn linear_source_keeps_negative_superwhite_and_matching_icc() {

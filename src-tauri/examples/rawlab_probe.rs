@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let [width, height] = linear.dimensions();
     // Prove the lossless float/ICC handoff without applying display RGB filters
     // directly to a linear document. Further edits follow the display stage.
-    let document = photographer_lib::edit::photocraft::linear_rgb_document(
+    let document = photographer_lib::linear_rgb_document(
         "LibRaw prototype",
         width,
         height,
