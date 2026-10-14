@@ -1,5 +1,6 @@
 #include "sony2fuji/sony2fuji.h"
 #include "sony2fuji/ffi/sony2fuji_c.h"
+#include "agent_commands.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -15,9 +16,13 @@ void printUsage(const char* programName) {
     std::cout << "Sony to Fuji LUT Tool v" << getVersionString() << "\n\n";
     std::cout << "用法:\n";
     std::cout << "  " << programName << " <输入RAW文件> -o <输出文件> [选项]\n\n";
+    std::cout << "  " << programName << " --recipe <编辑JSON文件> [--print-recipe]\n";
+    std::cout << "  " << programName << " --capabilities --json\n";
+    std::cout << "  --json 输出结构化结果和错误 (与 --recipe 配合)\n";
+    std::cout << "  --print-recipe 校验并输出补全默认值的配方，不处理图片\n\n";
     std::cout << "必需参数:\n";
     std::cout << "  <输入RAW文件>        Sony RAW 文件路径 (.ARW)\n";
-    std::cout << "  -o, --output <file>  输出文件路径 (.jpg 或 .png)\n\n";
+    std::cout << "  -o, --output <file>  输出文件路径 (.jpg、.png 或渲染型 .dng)\n\n";
     std::cout << "可选参数:\n";
     std::cout << "  -l, --lut <file>       胶片外观文件路径 (.cube 或 .rlook)\n";
     std::cout << "  --no-lut               不应用 LUT,输出 sRGB 参考图像\n";
@@ -155,16 +160,47 @@ OutputFormat getOutputFormat(const std::string& filename) {
     size_t dotPos = filename.find_last_of('.');
     if (dotPos != std::string::npos) {
         std::string ext = filename.substr(dotPos + 1);
-        if (ext == "jpg" || ext == "jpeg" || ext == "JPG" || ext == "JPEG") {
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (ext == "jpg" || ext == "jpeg") {
             return OutputFormat::JPEG;
-        } else if (ext == "png" || ext == "PNG") {
+        } else if (ext == "png") {
             return OutputFormat::PNG;
+        } else if (ext == "dng") {
+            return OutputFormat::DNG;
         }
     }
     return OutputFormat::JPEG;  // 默认
 }
 
+int processRequest(const sony2fuji_request& request, sony2fuji_raw_exposure_mode exposureMode) {
+    sony2fuji_session* session = nullptr;
+    auto status = sony2fuji_session_create(&session);
+    if (status == SONY2FUJI_STATUS_OK)
+        status = sony2fuji_session_set_raw_exposure_mode(session, exposureMode);
+    if (status == SONY2FUJI_STATUS_OK) status = sony2fuji_process(session, &request, nullptr);
+    sony2fuji_session_destroy(session);
+    if (status != SONY2FUJI_STATUS_OK) {
+        std::cerr << "Processing failed: " << sony2fuji_status_message(status)
+                  << ". Use a declared Fuji F-Log/F-Log2/F-Log2C CUBE with BT.709 output or compiled DCP .rlook.\n";
+        return 1;
+    }
+    std::cout << "Saved: " << request.output_path << '\n';
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--json" || arg == "--capabilities" || (i == 1 && arg == "--recipe"))
+            return runAgentCommands(argc, argv);
+        // Legacy option values may themselves be filenames such as "--json".
+        if (arg == "-o" || arg == "--output" || arg == "-l" || arg == "--lut" ||
+            arg == "-q" || arg == "--quality" || arg == "--raw-exposure" ||
+            arg == "--exposure" || arg == "--brightness") {
+            if (i + 1 < argc) ++i;
+        }
+    }
     Options options;
 
     if (!parseArguments(argc, argv, options)) {
@@ -188,19 +224,11 @@ int main(int argc, char* argv[]) {
     request.intent = SONY2FUJI_INTENT_FINAL;
     request.output_target = SONY2FUJI_TARGET_FILE;
     request.output_path = options.outputFile.c_str();
-    request.output_format = getOutputFormat(options.outputFile) == OutputFormat::PNG ?
-        SONY2FUJI_OUTPUT_PNG : SONY2FUJI_OUTPUT_JPEG;
-    request.jpeg_quality = options.quality;
-    sony2fuji_session* session = nullptr;
-    auto status = sony2fuji_session_create(&session);
-    if (status == SONY2FUJI_STATUS_OK) status = sony2fuji_session_set_raw_exposure_mode(session,options.rawExposure);
-    if (status == SONY2FUJI_STATUS_OK) status = sony2fuji_process(session, &request, nullptr);
-    sony2fuji_session_destroy(session);
-    if (status != SONY2FUJI_STATUS_OK) {
-        std::cerr << "Processing failed: " << sony2fuji_status_message(status)
-                  << ". Use a declared Fuji F-Log/F-Log2/F-Log2C CUBE with BT.709 output or compiled DCP .rlook.\n";
-        return 1;
+    switch (getOutputFormat(options.outputFile)) {
+        case OutputFormat::JPEG: request.output_format = SONY2FUJI_OUTPUT_JPEG; break;
+        case OutputFormat::PNG: request.output_format = SONY2FUJI_OUTPUT_PNG; break;
+        case OutputFormat::DNG: request.output_format = SONY2FUJI_OUTPUT_DNG; break;
     }
-    std::cout << "Saved: " << options.outputFile << '\n';
-    return 0;
+    request.jpeg_quality = options.quality;
+    return processRequest(request, options.rawExposure);
 }

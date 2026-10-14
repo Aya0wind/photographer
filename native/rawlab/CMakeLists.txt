@@ -1,15 +1,19 @@
 cmake_minimum_required(VERSION 3.24)
 project(PhotographerRaw LANGUAGES C CXX)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+set(JPEGXL_ENABLE_LTO OFF CACHE BOOL "" FORCE)
 include(FetchContent)
 include(CTest)
 # Same source/build revisions as the inspected RawLab core. Download only at
 # explicit prototype configure time, never from the desktop build.rs.
-FetchContent_Declare(pc_libraw_source
-    URL https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
-    URL_HASH SHA256=de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa)
-FetchContent_Declare(pc_libraw_cmake
-    URL https://github.com/LibRaw/LibRaw-cmake/archive/eb98e4325aef2ce85d2eb031c2ff18640ca616d3.tar.gz
-    URL_HASH SHA256=3cd218bf6d1254de86e27269541277fbfc5bae57a9002ce0b46fbe2a97088b43)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/upstream.lock.json" rawlab_lock)
+foreach(dependency libraw librawCmake)
+    string(JSON ${dependency}_url GET "${rawlab_lock}" nativeDependencies ${dependency} url)
+    string(JSON ${dependency}_sha GET "${rawlab_lock}" nativeDependencies ${dependency} sha256)
+endforeach()
+FetchContent_Declare(pc_libraw_source URL "${libraw_url}" URL_HASH "SHA256=${libraw_sha}")
+FetchContent_Declare(pc_libraw_cmake URL "${librawCmake_url}" URL_HASH "SHA256=${librawCmake_sha}"
+    SOURCE_SUBDIR photographer-no-autobuild)
 FetchContent_MakeAvailable(pc_libraw_source)
 set(LIBRAW_SOURCE_DIR "${pc_libraw_source_SOURCE_DIR}")
 include(upstream/lutools/cmake/patch-libraw.cmake)
@@ -25,6 +29,14 @@ set(CMAKE_DISABLE_FIND_PACKAGE_JPEG ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 find_package(ZLIB REQUIRED) # compressed DNG must not silently lose its decoder
 FetchContent_MakeAvailable(pc_libraw_cmake)
+option(PHOTOGRAPHER_RAWLAB_JXL "Build upstream JPEG XL DNG support" ON)
+if(PHOTOGRAPHER_RAWLAB_JXL)
+    set(LIBRAW_CMAKE_SOURCE_DIR "${pc_libraw_cmake_SOURCE_DIR}")
+    add_subdirectory(upstream/lutools/cmake/libraw raw-dependencies)
+    set(SONY2FUJI_DNGSDK_TARGET rawlab_dng_sdk)
+else()
+    add_subdirectory("${pc_libraw_cmake_SOURCE_DIR}" raw-dependencies)
+endif()
 # Upstream source is unchanged; only needed capabilities are configured here.
 set(BUILD_TESTING_SAVED "${BUILD_TESTING}")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -37,6 +49,9 @@ option(PHOTOGRAPHER_RAWLAB_GPU "Build upstream platform GPU backends" ON)
 set(SONY2FUJI_ENABLE_GPU "${PHOTOGRAPHER_RAWLAB_GPU}" CACHE BOOL "" FORCE)
 set(SONY2FUJI_ENABLE_CHROMA_DENOISE OFF CACHE BOOL "" FORCE)
 set(SONY2FUJI_ENABLE_WAVELET_DENOISE OFF CACHE BOOL "" FORCE)
+set(SONY2FUJI_BUILD_TIFF_DEPS ON CACHE BOOL "" FORCE)
+set(SONY2FUJI_ENABLE_LENSFUN OFF CACHE BOOL "" FORCE)
+set(SONY2FUJI_ENABLE_DNGSDK "${PHOTOGRAPHER_RAWLAB_JXL}" CACHE BOOL "" FORCE)
 add_subdirectory(upstream/lutools)
 set(BUILD_TESTING "${BUILD_TESTING_SAVED}" CACHE BOOL "" FORCE)
 add_library(photographer_raw SHARED src/photographer_raw.cpp)

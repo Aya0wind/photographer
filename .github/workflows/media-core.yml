@@ -7,6 +7,7 @@ on:
       - 'native/rawlab/**'
       - 'src-tauri/examples/rawlab_probe.rs'
       - '.github/workflows/media-core.yml'
+      - 'scripts/update-rawlab.py'
   pull_request:
     paths: ['crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml']
   workflow_dispatch:
@@ -19,13 +20,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Verify pinned upstream integrity
+        run: python scripts/update-rawlab.py --check
       - name: Prepare Windows zlib
         if: runner.os == 'Windows'
         run: '"$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md'
