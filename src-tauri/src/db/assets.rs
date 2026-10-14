@@ -576,7 +576,7 @@ impl Db {
     ) -> Result<Option<i64>> {
         let mut stmt = self.0.prepare(
             "SELECT id FROM assets WHERE library_id = ?1 AND size = ?2 AND filename = ?3 \
-             AND mtime >= ?4 AND mtime <= ?5 AND missing = 0 LIMIT 1",
+             AND mtime >= ?4 AND mtime <= ?5 AND missing = 0 AND in_trash = 0 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![
             library_id,
@@ -602,7 +602,7 @@ impl Db {
     ) -> Result<Option<i64>> {
         let mut stmt = self.0.prepare(
             "SELECT id FROM assets WHERE size = ?1 AND filename = ?2 \
-             AND mtime >= ?3 AND mtime <= ?4 LIMIT 1",
+             AND mtime >= ?3 AND mtime <= ?4 AND in_trash = 0 LIMIT 1",
         )?;
         let mut rows = stmt.query(params![size as i64, filename, mtime_from, mtime_to])?;
         match rows.next()? {

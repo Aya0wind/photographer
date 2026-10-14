@@ -29,10 +29,11 @@ const HEAD_MAX: usize = 1024 * 1024;
 /// 工作线程产出。
 pub(super) enum FileOutcome {
     Copied(Box<CopiedFile>),
-    /// 免下载预跳（Skip/Ask 策略下目标路径已存在，与收集端 ③ 同判据提前），
-    /// 只读了头段（EXIF 渲染目标路径必需），无 .part/无哈希。
-    Skipped {
+    /// 目标文件已存在：免复制，但收集端仍须登记/恢复图库条目。
+    /// 只读源头段以渲染路径；目标元数据由收集端读取。
+    Existing {
         entry: FileEntry,
+        dst: PathBuf,
     },
     Failed {
         entry: FileEntry,
@@ -238,18 +239,17 @@ pub(super) fn copy_one(
     let filename = original_filename(&entry.rel_path);
     let rel = match crate::db::organization::organized_rel(template,resolve_captured(meta.captured_at,entry.mtime),&filename,meta.camera.as_deref()){Ok(rel)=>rel,Err(error)=>return fail(error)};
     let dst = target_root.join(&rel);
-    // 免下载预跳（2026-09-29 实测重建库全量重导：重复照片被完整拉回
-    // ~600ms/张再丢弃）：Skip/Ask 策略下目标已存在与收集端 ③ 同判据
-    // 提前到这里——只花流打开+头读（EXIF 渲染目标路径必需），不写
-    // .part、不算哈希、不删临时文件；MTP 单 worker 串行下整体吞吐
-    // 量级提升。Rename 策略仍需下载落位，不预跳。
+    // Skip/Ask 复用已有目标：只读源头段，不写 .part、不读全量。
+    // 文件存在不代表图库条目存在；交收集端补登记，不能直接记 skipped。
+    // Rename 策略仍下载并生成新文件。
     if matches!(
         duplicate_policy,
         DuplicatePolicy::Skip | DuplicatePolicy::Ask
     ) && dst.exists()
     {
-        return FileOutcome::Skipped {
+        return FileOutcome::Existing {
             entry: entry.clone(),
+            dst,
         };
     }
     // 第二目的地：同公式、仅根不同
