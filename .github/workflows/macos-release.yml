@@ -168,6 +168,9 @@ jobs:
           fi
           npm run tauri:build:macos -- --target aarch64-apple-darwin
 
+      - name: Check media prototype and linear handoff
+        run: cargo check --manifest-path src-tauri/Cargo.toml --release --locked --target aarch64-apple-darwin --example rawlab_probe --test edit_linear_source_test
+
       - name: Verify packaged gphoto runtime and signatures
         if: ${{ env.APPLE_SIGNING_IDENTITY != '' }}
         run: |

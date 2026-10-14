@@ -9,6 +9,19 @@ use serde_json::json;
 
 use super::recipe::EditRecipe;
 
+/// M0 RAW handoff: retain linear sRGB/D65 in F32 tiles with a matching ICC.
+/// This is a source document, before the neutral/film display stage. Existing
+/// display RGB adjustments must not be run directly on this representation.
+pub fn linear_rgb_document(name: &str, width: u32, height: u32, rgb: &[f32]) -> Result<Document, String> {
+    if !rgb.iter().all(|value| value.is_finite()) {
+        return Err("线性 RAW 数据包含无效数值".into());
+    }
+    let image = photocraft_codecs::Image::from_f32(width, height, photocraft_codecs::ChannelLayout::Rgb, rgb)
+        .map_err(|e| e.to_string())?
+        .with_icc(Some(photocraft_cms::Builtin::LinearSrgb.profile().to_bytes().to_vec()));
+    super::source::from_image(name, &image)
+}
+
 pub(super) fn execute(
     session: &mut Session,
     command: &str,

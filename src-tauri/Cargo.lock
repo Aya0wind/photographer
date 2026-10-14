@@ -5070,6 +5070,7 @@ dependencies = [
  "photocraft-gpu",
  "photocraft-io",
  "photocraft-raw",
+ "photographer-media",
  "pollster",
  "quick-xml",
  "rawler",
@@ -5101,6 +5102,13 @@ dependencies = [
  "windows-core 0.61.2",
  "xxhash-rust",
  "zip",
+]
+
+[[package]]
+name = "photographer-media"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
 ]
 
 [[package]]

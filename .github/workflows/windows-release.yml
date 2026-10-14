@@ -146,6 +146,9 @@ jobs:
         # main 才构建 offline 双产物（dev 产物保留 3 天，全量构建无意义）
         run: scripts\build-installer.cmd --nopause ${{ github.ref == 'refs/heads/dev' && '--online-only' || '' }}
 
+      - name: Check media prototype and linear handoff
+        run: cargo check --manifest-path src-tauri/Cargo.toml --release --locked --example rawlab_probe --test edit_linear_source_test
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:

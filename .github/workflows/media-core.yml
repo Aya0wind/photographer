@@ -1,0 +1,52 @@
+name: Media core prototype
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - 'crates/media/**'
+      - 'native/rawlab/**'
+      - 'src-tauri/examples/rawlab_probe.rs'
+      - '.github/workflows/media-core.yml'
+  pull_request:
+    paths: ['crates/media/**', 'native/rawlab/**', '.github/workflows/media-core.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare Windows zlib
+        if: runner.os == 'Windows'
+        run: '"$VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows-static-md'
+      - name: Build pinned native RAW bridge
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            cmake -S native/rawlab -B native/rawlab/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+              -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+              -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+          else
+            cmake -S native/rawlab -B native/rawlab/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          fi
+          cmake --build native/rawlab/build --config Release --parallel 2
+      - name: Native ABI failure regressions
+        run: ctest --test-dir native/rawlab/build -C Release --output-on-failure
+      - name: Rust color and ABI regressions
+        run: |
+          case "${{ runner.os }}" in
+            Windows) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/Release/photographer_raw.dll" ;;
+            macOS) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/libphotographer_raw.dylib" ;;
+            Linux) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/libphotographer_raw.so" ;;
+          esac
+          test -f "$PHOTOGRAPHER_RAW_BRIDGE"
+          cargo test --manifest-path crates/media/Cargo.toml --locked

@@ -46,3 +46,5 @@ src-tauri/resources/gphoto/*
 src-tauri/resources/.gphoto-stage-*/
 src-tauri/resources/.gphoto-backup-*/
 scripts/__pycache__/
+native/rawlab/build*/
+crates/media/target/
