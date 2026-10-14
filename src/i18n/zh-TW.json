@@ -1,4 +1,7 @@
 {
+  "wizard.dropPhotos": "放開以匯入圖片或資料夾",
+  "wizard.flow.filesDesc": "可選擇一張或多張圖片，也可拖入圖片或資料夾。",
+  "wizard.chooseFiles": "選擇圖片檔案",
   "advancedEditor.film.imported": "已匯入底片",
   "advancedEditor.film.builtin": "內建大師色彩",
   "onboarding.ai.selectFeature": "請至少選擇一項 AI 功能，或選擇暫不啟用。",

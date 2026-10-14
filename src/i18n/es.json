@@ -1,4 +1,7 @@
 {
+  "wizard.dropPhotos": "Suelta para importar imágenes o carpetas",
+  "wizard.flow.filesDesc": "Elige una o varias imágenes, o arrastra imágenes y carpetas.",
+  "wizard.chooseFiles": "Elegir archivos de imagen",
   "advancedEditor.film.imported": "Películas importadas",
   "advancedEditor.film.builtin": "Colores maestros integrados",
   "onboarding.ai.selectFeature": "Selecciona al menos una función de IA o deja la IA desactivada.",

@@ -77,6 +77,7 @@ function KindBadge({ kind }: { kind: FileKind }) {
 /** 源根的文件系统绝对路径（folder=去 FOLDER: 前缀；volume=设备 id；MTP 无路径） */
 export function sourceBasePath(device: DeviceSnapshot | null): string | null {
   if (!device) return null;
+  if (device.id.startsWith("FILES:")) return ""; // Explicit selections carry absolute display paths.
   if (device.kind === "folder") return device.id.slice("FOLDER:".length);
   if (device.kind === "volume") return device.id;
   return null;
@@ -818,7 +819,7 @@ export function FileGridView({
                         selected={selected.has(f.path)}
                         onToggle={onToggleFile}
                         absPath={
-                          basePath !== null ? `${basePath}/${relPathOf(f)}` : null
+                          basePath !== null ? (basePath ? `${basePath}/${relPathOf(f)}` : relPathOf(f)) : null
                         }
                         deviceId={device?.kind === "mtp" ? device.id : undefined}
                         previewReady={Boolean(f.objectId) || device?.kind !== "mtp"}

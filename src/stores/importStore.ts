@@ -15,11 +15,21 @@ import {
   type DeviceKind,
   type DeviceSnapshot,
   type FileKind,
+  type FileEntryDto,
   type ImportMode,
   type ImportStats,
   type JobRow,
 } from "@/ipc/api";
 import { useSettingsStore } from "@/stores/settingsStore";
+
+export function sourceFilesFromEntries(entries: FileEntryDto[]): SourceFile[] {
+  return entries.map(entry => {
+    const slash = entry.relPath.lastIndexOf("/");
+    const name = entry.relPath.slice(slash + 1);
+    return {objectId: entry.id, mtime: entry.mtime, path: entry.relPath,
+      dir: slash < 0 ? "" : entry.relPath.slice(0, slash), name, size: entry.size, kind: kindFromName(name)};
+  });
+}
 
 /**
  * 导入域中心状态：设备列表（deviceScanned 事件驱动）、活跃任务进度
@@ -376,10 +386,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
         set((s) => {
           if (!s.devices.some((d) => d.id === event.id)) return s;
           const files = new Map((s.sourceFiles[event.id] ?? []).map((f) => [f.path, f]));
-          for (const entry of event.files) {
-            const slash = entry.relPath.lastIndexOf("/");
-            const name = entry.relPath.slice(slash + 1);
-            files.set(entry.relPath, { objectId: entry.id, mtime: entry.mtime, path: entry.relPath, dir: slash < 0 ? "" : entry.relPath.slice(0, slash), name, size: entry.size, kind: kindFromName(name) });
+          for (const file of sourceFilesFromEntries(event.files)) {
+            files.set(file.path, file);
           }
           return { sourceFiles: { ...s.sourceFiles, [event.id]: [...files.values()] } };
         });
@@ -554,7 +562,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
     const revision = deviceChanges.get(id);
     const snapshot = await deviceScan(id);
     if (snapshot && revision === deviceChanges.get(id)) {
-      set((s) => ({ devices: upsertDevice(s.devices, { ...snapshot, scanStatus: "ready", scanError: null }) }));
+      set((s) => ({ devices: upsertDevice(s.devices, { ...snapshot, scanStatus: "ready", scanError: null }),
+        sourceFiles: Object.fromEntries(Object.entries(s.sourceFiles).filter(([key]) => key !== id)) }));
     }
   },
 

@@ -80,6 +80,16 @@ it("sends split changes as view parameters and temporarily disables the split fo
  rerender({split:0.8,original:true});await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({original:true,view:expect.objectContaining({compareSplit:null})})));
  expect(vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_open")).toHaveLength(1);
 });
+it("keeps the native child viewport when film settings and the prepared source change", async () => {
+ const {rerender}=renderHook(({value,source})=>useNativeEditorCanvas("session",value,host,true,false,source),{initialProps:{value:recipe,source:"proxy"}});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe})));
+ const film={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ rerender({value:film,source:"linear-raw"});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe:film})));
+ rerender({value:recipe,source:"linear-raw"});
+ expect(vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_open")).toHaveLength(1);
+ expect(vi.mocked(ipc).mock.calls.some(([command])=>command==="edit_native_close"||command==="edit_native_hide")).toBe(false);
+});
 beforeEach(()=>{
   vi.clearAllMocks();
   vi.mocked(ipc).mockImplementation(async (command)=>["edit_native_open","edit_native_frame"].includes(command)?true:undefined as never);

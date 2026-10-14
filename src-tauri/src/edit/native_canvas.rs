@@ -295,11 +295,17 @@ mod windows_canvas {
         app.run_on_main_thread(move || {
             let result = (|| -> Result<Arc<Window>, String> {
                 let child = tauri::WindowBuilder::new(&app_clone, label)
-                    .parent(&owner)
-                    .map_err(|e| e.to_string())?
+                    // parent() means an owned top-level window on Windows.
+                    // Create WS_CHILD through the runtime so focus/style updates
+                    // retain child semantics instead of restoring window chrome.
+                    .parent_raw(owner.hwnd().map_err(|e| e.to_string())?)
                     .decorations(false)
                     .shadow(false)
                     .resizable(false)
+                    .minimizable(false)
+                    .maximizable(false)
+                    .closable(false)
+                    .title("")
                     .skip_taskbar(true)
                     .focusable(false)
                     .focused(false)
@@ -312,8 +318,6 @@ mod windows_canvas {
                     .map_err(|e| e.to_string())?;
                 let hwnd = child.hwnd().map_err(|e| e.to_string())?;
                 unsafe {
-                    SetParent(hwnd, Some(owner.hwnd().map_err(|e| e.to_string())?))
-                        .map_err(|e| e.to_string())?;
                     SetLayeredWindowAttributes(
                         hwnd,
                         windows::Win32::Foundation::COLORREF(0),
@@ -336,7 +340,7 @@ mod windows_canvas {
                         hwnd,
                         GWL_STYLE,
                         (style
-                            & !((WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME).0
+                            & !((WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0
                                 as isize))
                             | WS_CHILD.0 as isize,
                     );

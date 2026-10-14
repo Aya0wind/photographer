@@ -1,4 +1,7 @@
 {
+  "wizard.dropPhotos": "Drop to import images or folders",
+  "wizard.flow.filesDesc": "Choose one or more images, or drag in images and folders.",
+  "wizard.chooseFiles": "Choose image files",
   "advancedEditor.film.imported": "Imported films",
   "advancedEditor.film.builtin": "Built-in master colors",
   "onboarding.ai.selectFeature": "Select at least one AI feature, or leave AI disabled.",

@@ -2,9 +2,9 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { deviceFiles, deviceCopyOnly, platformCapabilities, kindFromName, albumList, albumSubgroups, folderScan, albumCreate,
-  importStart, photoLibraryList, type AlbumDto, type ImportMode, type ImportPlan, type PhotoLibrary, type PlatformCapabilities } from "@/ipc/api";
-import { useImportStore, seedDevicesFromBackend, type RecentSource } from "@/stores/importStore";
+import { deviceFiles, deviceCopyOnly, platformCapabilities, albumList, albumSubgroups, folderScan, localPathsScan, albumCreate,
+  importStart, photoLibraryList, type AlbumDto, type ImportMode, type ImportPlan, type PhotoLibrary, type PlatformCapabilities, type DeviceSnapshot } from "@/ipc/api";
+import { useImportStore, seedDevicesFromBackend, sourceFilesFromEntries, type RecentSource } from "@/stores/importStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { importRootOf, timeLayoutPreview } from "@/features/onboarding/onboardingConfig";
 import { groupByDir, type DirGroup } from "../SourceFileViews";
@@ -84,12 +84,7 @@ export function useImportWizard() {
       if (!entries) return; // IPC 失败/不可用：保持空态（预览模式）
       setSourceFiles(
         selectedId,
-        entries.map((e) => {
-          const slash = e.relPath.lastIndexOf("/");
-          const dir = slash >= 0 ? e.relPath.slice(0, slash) : "";
-          const name = slash >= 0 ? e.relPath.slice(slash + 1) : e.relPath;
-          return { objectId: e.id, mtime: e.mtime, path: e.relPath, dir, name, size: e.size, kind: kindFromName(name) };
-        }),
+        sourceFilesFromEntries(entries),
       );
     });
     return () => {
@@ -299,17 +294,22 @@ export function useImportWizard() {
   }
 
   /** 选中文件夹为源：folderScan 成快照则入库并显式选中；失败（IPC 不可用等）提示并保持原源 */
-  async function selectFolder(path: string): Promise<boolean> {
+  async function selectLocalSource(path: string, scan: () => Promise<DeviceSnapshot | null>): Promise<boolean> {
     if (!mounted.current) return false;
     const request = ++folderRequest.current;
     setScanningFolder(path);
     setSourceError(null);
     try {
-      const snapshot = await folderScan(path, true);
+      const snapshot = await scan();
       if (request !== folderRequest.current) return false;
       if (!snapshot) { setSourceError(t("wizard.fs.scanFailed", { dir: path })); return false; }
+      // A new snapshot must replace the old listing even when its ID is unchanged.
+      const entries = await deviceFiles(snapshot.id);
+      if (request !== folderRequest.current) return false;
+      if (!entries) throw new Error(t("wizard.fs.scanFailed", {dir: path}));
+      setSourceFiles(snapshot.id, sourceFilesFromEntries(entries));
       addDevice(snapshot);
-      recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
+      if (snapshot.id.startsWith("FOLDER:")) recordRecentSource({ id: snapshot.id, name: snapshot.name, kind: snapshot.kind });
       setExplicitId(snapshot.id);
       setSearchParams({ device: snapshot.id });
       setStep("photos");
@@ -320,6 +320,23 @@ export function useImportWizard() {
     } finally {
       if (request === folderRequest.current) setScanningFolder(null);
     }
+  }
+
+  function selectFolder(path: string): Promise<boolean> {
+    return selectLocalSource(path, () => folderScan(path, true));
+  }
+
+  function selectPaths(paths: string[]): Promise<boolean> {
+    if (paths.length === 0) return Promise.resolve(false);
+    return selectLocalSource(paths[0], () => localPathsScan(paths));
+  }
+
+  async function browseFiles(): Promise<void> {
+    try {
+      const paths = await openDialog({multiple: true, directory: false, filters: [{name: t("wizard.chooseFiles"),
+        extensions: ["jpg","jpeg","png","heic","heif","avif","tif","tiff","bmp","gif","webp","jxl","cr2","cr3","nef","arw","raf","dng","orf","rw2","r3d","iiq","pef","srw","x3f","nev"]}]});
+      if (paths) await selectPaths(typeof paths === "string" ? [paths] : paths);
+    } catch (error) { setSourceError(String(error)); }
   }
 
   /** 选中文件夹后扫描并进入挑选页；取消系统选择器不改变现有来源。 */
@@ -455,7 +472,7 @@ export function useImportWizard() {
 
   return {
     step, setStep, scanningFolder, selectedId, device, visibleDevices, recentSources, platformCaps,
-    selectDevice, browseFolder, selectRecent, filesLoading, files, selected, selectedCount, selectedBytes,
+    selectDevice, browseFolder, browseFiles, selectPaths, selectRecent, filesLoading, files, selected, selectedCount, selectedBytes,
     viewMode, setViewMode, tileSize, setTileSize, selectAll, clearSelection, invertSelection, refreshDevice,
     groups, collapsed, toggleFile, toggleGroup, toggleCollapse, canReview, blockedReason, canStart, starting,
     startImport, targetLibrary,photoLibraries,targetLibraryId,setTargetLibraryId, albumChoice, setAlbumChoice, albumId, setAlbumId, albums, newAlbumName,

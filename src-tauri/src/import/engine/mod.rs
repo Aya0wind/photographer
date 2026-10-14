@@ -1004,9 +1004,11 @@ impl Engine {
     /// 导入会把自己的产出再枚举进来。目标目录可能尚未创建——先建再比较；
     /// 任一侧 canonicalize 失败则跳过（folder 源枚举层还有排除子树防御）。
     fn check_nesting(&self, library_root: &Path) -> Result<(), EngineError> {
-        let Some(source_root) = source_root_of(self.source.as_ref()) else {
-            return Ok(()); // MTP 无文件系统语义
-        };
+        let mut source_roots = self.source.local_roots();
+        source_roots.extend(source_root_of(self.source.as_ref()));
+        if source_roots.is_empty() {
+            return Ok(());
+        }
         let mut roots = vec![library_root.to_path_buf()];
         if let Some(second) = &self.plan.second_target {
             roots.push(second.target_root.clone());
@@ -1015,22 +1017,24 @@ impl Engine {
         if let Some(second) = &self.plan.second_target {
             let _ = ensure_directory(&second.target_root);
         }
-        let Ok(source_canon) = fs::canonicalize(&source_root) else {
-            return Ok(());
-        };
-        for root in roots {
-            let Ok(target_canon) = fs::canonicalize(&root) else {
-                continue;
-            };
-            if source_canon == target_canon
-                || target_canon.starts_with(&source_canon)
-                || source_canon.starts_with(&target_canon)
-            {
-                return Err(EngineError::InvalidPlan(format!(
-                    "源目录与目标目录互相嵌套（源 {}，目标 {}），已拒绝导入",
-                    crate::devices::folder::strip_verbatim(&source_canon),
-                    crate::devices::folder::strip_verbatim(&target_canon),
-                )));
+        for source_canon in source_roots
+            .into_iter()
+            .filter_map(|root| fs::canonicalize(root).ok())
+        {
+            for root in &roots {
+                let Ok(target_canon) = fs::canonicalize(root) else {
+                    continue;
+                };
+                if source_canon == target_canon
+                    || target_canon.starts_with(&source_canon)
+                    || source_canon.starts_with(&target_canon)
+                {
+                    return Err(EngineError::InvalidPlan(format!(
+                        "源目录与目标目录互相嵌套（源 {}，目标 {}），已拒绝导入",
+                        crate::devices::folder::strip_verbatim(&source_canon),
+                        crate::devices::folder::strip_verbatim(&target_canon),
+                    )));
+                }
             }
         }
         Ok(())

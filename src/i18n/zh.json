@@ -1,4 +1,7 @@
 {
+  "wizard.dropPhotos": "松开以导入图片或文件夹",
+  "wizard.flow.filesDesc": "可选择一张或多张图片，也可拖入图片或文件夹。",
+  "wizard.chooseFiles": "选择图片文件",
   "advancedEditor.film.imported": "已导入胶片",
   "advancedEditor.film.builtin": "内置大师色彩",
   "onboarding.ai.selectFeature": "请至少选择一项 AI 功能，或选择暂不启用。",

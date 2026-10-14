@@ -131,6 +131,11 @@ pub async fn folder_scan(
     run_blocking(shared, move |state| super::scan_folder(state, &path)).await
 }
 
+#[tauri::command]
+pub async fn local_paths_scan(state: State<'_, SharedState>, paths: Vec<String>) -> Result<DeviceSnapshot, String> {
+    run_blocking(state.inner().clone(), move |state| super::scan_local_paths(state, &paths)).await
+}
+
 /// 列出指定设备的全部媒体文件（导入向导源树/勾选表）。
 /// WPD/大目录枚举秒级以上，后台线程执行（真机 1161 文件清单即此路径）。
 #[tauri::command]

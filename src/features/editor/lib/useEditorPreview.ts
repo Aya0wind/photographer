@@ -19,7 +19,6 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
   const closeScheduler=useRef<(()=>void)|null>(null);
   const enabled = recipe.renderer === "photocraft";
   const rawlab = !!recipe.colorPipeline;
-  const openedMode=useRef<boolean|null>(null);
   const [prepareError,setPrepareError]=useState<string|null>(null);
 
   useEffect(() => {
@@ -27,21 +26,22 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
     let cancelled = false;
     let id: string | null = null;
     setSession(null); setUrl(null); setError(null);setPrepareError(null);
-    openedMode.current=null;
-    const opening = editPreviewOpen(assetId, libraryId,rawlab);
+    // Pipeline toggles change the recipe/source in this session. Reopening it
+    // would discard the displayed frame and rebuild the native child viewport.
+    const opening = editPreviewOpen(assetId, libraryId,!!latest.current.colorPipeline);
     openedRequest.current = opening;
     void opening.then((value) => {
       id = value.sessionId;
       if (cancelled) void editPreviewClose(id).catch(() => {});
       else {
-        openedMode.current=rawlab;setSession(value);
+        setSession(value);
 
       }
     }).catch((e: unknown) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; if (openedRequest.current === opening) openedRequest.current = null; if (id) void editPreviewClose(id).catch(() => {}); };
-  }, [assetId, libraryId, retry, enabled,rawlab]);
+  }, [assetId, libraryId, retry, enabled]);
 
-  useSmartPreview({session,enabled:rawlab&&openedMode.current===rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
+  useSmartPreview({session,enabled:rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
 
   useEffect(() => {
     if (!session || nativeCanvas) { setPending(false); return; }

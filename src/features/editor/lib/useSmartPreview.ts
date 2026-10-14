@@ -7,6 +7,7 @@ export function useSmartPreview({session,enabled,latest,onPrepared,onError}:{ses
   useEffect(()=>{
     if(!enabled||!session||session.rawlabReady||prepared.current===session.sessionId)return;
     let cancelled=false;
+    let completed=false;
     let candidate:string|null=null;
     prepared.current=session.sessionId;
     const captured=latest.current;
@@ -26,9 +27,9 @@ export function useSmartPreview({session,enabled,latest,onPrepared,onError}:{ses
         releasePreviewImage(frame);frame=next;candidate=frame;await preparePreviewImage(frame);
       }
       if(cancelled){releasePreviewImage(frame);return;}
-      image.current=frame;candidate=null;callbacks.current.onPrepared({frame,session:value});
+      completed=true;image.current=frame;candidate=null;callbacks.current.onPrepared({frame,session:value});
     }).catch(e=>{if(candidate)releasePreviewImage(candidate);if(!cancelled)callbacks.current.onError(String(e));});
-    return ()=>{cancelled=true;if(image.current){releasePreviewImage(image.current);image.current=null;}};
+    return ()=>{cancelled=true;if(!completed&&prepared.current===session.sessionId)prepared.current=null;if(image.current){releasePreviewImage(image.current);image.current=null;}};
   },[session?.sessionId,enabled]);
 
 }

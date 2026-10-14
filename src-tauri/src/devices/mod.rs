@@ -8,6 +8,7 @@ pub mod hotplug;
 pub mod lifecycle;
 pub mod orchestrator;
 pub mod present;
+pub mod selection;
 #[cfg(any(windows, test))]
 pub mod timed_worker;
 pub mod volume;
@@ -114,6 +115,10 @@ pub trait DeviceSource: Send + Sync {
     /// 返回 None → 引擎走流式复制。
     fn local_path(&self, _id: &str) -> Option<std::path::PathBuf> {
         None
+    }
+    /// Additional selected filesystem roots for import nesting checks.
+    fn local_roots(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
     }
     /// 设备提供的缩略资源；不支持时返回 None，不能为预览传输整个原文件。
     fn thumbnail(&self, _id: &str) -> DeviceResult<Option<Vec<u8>>> {

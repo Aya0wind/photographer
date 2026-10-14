@@ -137,7 +137,7 @@ pub(crate) fn strip_verbatim(path: &Path) -> String {
 /// 与尾部分隔符（幂等）；保留盘符/UNC/符号链接的用户输入形态
 /// （canonicalize 会把映射盘 `Y:\` 解析成 `\\?\UNC\server\share\`——
 /// id 与前端展示都必须保留盘符形态，canonical 仅用于内部一致性比对）。
-fn absolutize(path: &Path) -> PathBuf {
+pub(super) fn absolutize(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

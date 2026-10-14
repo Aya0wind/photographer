@@ -5,6 +5,7 @@ import type { Event } from "@tauri-apps/api/event";
 
 import {
   deviceList,
+  deviceScan,
   importCancel,
   importJobsPage,
   importPause,
@@ -22,6 +23,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     deviceList: vi.fn(),
+    deviceScan: vi.fn(),
     importJobsPage: vi.fn(),
     importPause: vi.fn(),
     importResume: vi.fn(),
@@ -37,6 +39,17 @@ const resumeMock = vi.mocked(importResume);
 const cancelMock = vi.mocked(importCancel);
 const retryMock = vi.mocked(importRetryFailed);
 const listenMock = vi.mocked(listen);
+
+it("invalidates folder file listings after an explicit refresh and preserves them after a failed scan", async () => {
+  const folder = {...snapshot("FOLDER:/photos"), kind: "folder" as const};
+  useImportStore.setState({devices: [folder], sourceFiles: {[folder.id]: [{path: "old.jpg", dir: "", name: "old.jpg", size: 10, kind: "photo"}]}});
+  vi.mocked(deviceScan).mockResolvedValue(null);
+  await useImportStore.getState().refreshDevice(folder.id);
+  expect(useImportStore.getState().sourceFiles[folder.id]).toHaveLength(1);
+  vi.mocked(deviceScan).mockResolvedValue(folder);
+  await useImportStore.getState().refreshDevice(folder.id);
+  expect(useImportStore.getState().sourceFiles[folder.id]).toBeUndefined();
+});
 
 function snapshot(id: string, name = "SD 卡", newFiles = 12): DeviceSnapshot {
   return {

@@ -61,7 +61,7 @@ function deviceBadge(d: DeviceSnapshot, t: (key: string) => string): string {
   return total > 0 ? `${total.toLocaleString(getIntlLocale())} ${t("wizard.deviceFiles")}` : t(deviceKindLabelKey(d));
 }
 
-export default function ImportSourcePicker({ devices, recentSources, selectedId, scanningPath, nativeUnavailable, onDevice, onFolder, onRecent }: {
+export default function ImportSourcePicker({ devices, recentSources, selectedId, scanningPath, nativeUnavailable, onDevice, onFolder, onFiles, onRecent }: {
   devices: DeviceSnapshot[];
   recentSources: RecentSource[];
   selectedId: string | null;
@@ -69,6 +69,7 @@ export default function ImportSourcePicker({ devices, recentSources, selectedId,
   nativeUnavailable: boolean;
   onDevice: (id: string) => void;
   onFolder: () => void;
+  onFiles: () => void;
   onRecent: (entry: RecentSource) => void;
 }) {
   const { t } = useTranslation();
@@ -81,6 +82,10 @@ export default function ImportSourcePicker({ devices, recentSources, selectedId,
           <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-accent/10 text-accent"><FolderGlyph size={25} /></span>
           <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-text-primary">{t("wizard.chooseFolder")}</span><span className="mt-1 block text-xs leading-relaxed text-text-muted">{t("wizard.flow.folderDesc")}</span></span>
           {scanningPath !== null ? <span className="h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-edge border-t-accent" aria-hidden="true" /> : <span className="text-lg text-text-muted" aria-hidden="true">→</span>}
+        </button>
+        <button type="button" onClick={onFiles} disabled={scanningPath !== null} className="ui-glass flex w-full items-center gap-4 rounded-2xl border p-5 text-left hover:border-accent disabled:cursor-wait" data-testid="wizard-choose-files">
+          <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-text-primary">{t("wizard.chooseFiles")}</span><span className="mt-1 block text-xs text-text-muted">{t("wizard.flow.filesDesc")}</span></span>
+          <span className="text-lg text-text-muted" aria-hidden="true">→</span>
         </button>
         {scanningPath !== null && <p role="status" className="break-all rounded-xl bg-panel/50 px-4 py-3 text-xs leading-relaxed text-text-secondary">{t("wizard.flow.folderScanning", { path: scanningPath })}</p>}
         <div><h3 className="mb-3 text-xs font-semibold text-text-secondary">{t("wizard.section.devices")}</h3>

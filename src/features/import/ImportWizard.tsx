@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useLocation, useSearchParams } from "react-router";
 import { open } from "@tauri-apps/plugin-dialog";
 import CreateLibraryDialog from "@/features/storage/components/CreateLibraryDialog";
 import AddPhotosChoice from "./components/AddPhotosChoice";
@@ -19,6 +19,13 @@ export type { WizardViewMode } from "./lib/useImportLayout";
 export default function ImportWizard() {
   const { t } = useTranslation();
   const flow = useImportWizard();
+  const location = useLocation();
+  useEffect(() => {
+    const paths: unknown = location.state?.importPaths;
+    if (Array.isArray(paths) && paths.every(path => typeof path === "string")) void flow.selectPaths(paths);
+    // Consume each navigation's dropped paths once, independently of scan state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key]);
   const [params] = useSearchParams();
   const [transfer, setTransfer] = useState(() => params.has("device") || params.has("album") || params.get("flow") === "import");
   useEffect(() => {
@@ -50,7 +57,7 @@ export default function ImportWizard() {
       </header>
       {!transfer ? <AddPhotosChoice onImport={() => setTransfer(true)} onExisting={() => void addExisting()} busy={pickingExisting} /> : step === "source" ? <ImportSourcePicker devices={visibleDevices} recentSources={recentSources} selectedId={selectedId} scanningPath={scanningFolder}
         nativeUnavailable={Boolean(platformCaps && !platformCaps.volumeDevices && !platformCaps.portableDevices)}
-        onDevice={selectDevice} onFolder={() => void browseFolder()} onRecent={selectRecent} /> : <ImportPhotoPicker flow={flow} />}
+        onDevice={selectDevice} onFolder={() => void browseFolder()} onFiles={() => void flow.browseFiles()} onRecent={selectRecent} /> : <ImportPhotoPicker flow={flow} />}
 
       {transfer && step === "review" && <ImportReviewDrawer busy={starting} onBack={() => setStep("photos")} footer={<div data-testid="wizard-import-summary">
         <div className="mb-3 flex items-baseline justify-between text-sm font-semibold"><span>{t("wizard.readyCount", { count: selectedCount })}</span><span className="text-xs font-normal text-text-secondary">{formatBytes(selectedBytes)}</span></div>

@@ -412,6 +412,9 @@ impl DeviceSource for ArcSource {
     fn local_path(&self, id: &str) -> Option<std::path::PathBuf> {
         self.0.local_path(id)
     }
+    fn local_roots(&self) -> Vec<std::path::PathBuf> {
+        self.0.local_roots()
+    }
     fn delete(&self, id: &str) -> crate::devices::DeviceResult<()> {
         self.0.delete(id)
     }
@@ -527,6 +530,18 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
 pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, String> {
     let source: Arc<dyn DeviceSource> =
         Arc::new(LocalFolderSource::new(path).map_err(|e| format!("文件夹不可用: {e}"))?);
+    scan_local_source(state, source)
+}
+
+pub fn scan_local_paths(state: &AppState, paths: &[String]) -> Result<DeviceSnapshot, String> {
+    if let [path] = paths {
+        if Path::new(path).is_dir() { return scan_folder(state, path); }
+    }
+    let source = crate::devices::selection::LocalPathsSource::new(paths).map_err(|e| e.to_string())?;
+    scan_local_source(state, Arc::new(source))
+}
+
+fn scan_local_source(state: &AppState, source: Arc<dyn DeviceSource>) -> Result<DeviceSnapshot, String> {
     let id = source.id();
     state
         .devices
@@ -537,7 +552,7 @@ pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, Strin
             DeviceEntry {
                 scan: DeviceScan::Ready,
                 files: None,
-                source,
+                source: Arc::clone(&source),
                 snapshot: DeviceSnapshot {
                     id: id.clone(),
                     name: String::new(),
@@ -552,11 +567,10 @@ pub fn scan_folder(state: &AppState, path: &str) -> Result<DeviceSnapshot, Strin
         Ok(snapshot) => Ok(snapshot),
         Err(err) => {
             // 扫描失败不留死条目
-            state
-                .devices
-                .lock()
-                .expect("devices mutex poisoned")
-                .remove(&id);
+            let mut devices = state.devices.lock().expect("devices mutex poisoned");
+            if devices.get(&id).is_some_and(|entry| Arc::ptr_eq(&entry.source, &source)) {
+                devices.remove(&id);
+            }
             Err(err)
         }
     }

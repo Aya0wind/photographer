@@ -78,3 +78,33 @@ it("drops prepared work when the editor closes",async()=>{
  await act(async()=>{finish(proxy);});
  expect(editPreviewActivate).not.toHaveBeenCalled();expect(editPreviewClose).toHaveBeenCalledWith("session");
 });
+
+it("retains the session and displayed frame across film toggles and prepares the RAW source only once", async () => {
+ const ready={...proxy,rawlabReady:true,nativeReady:true,sourceUrl:"neutral-raw",previewUrl:"prepared-frame"};
+ vi.mocked(editPreviewPrepare).mockResolvedValue(ready);vi.mocked(editPreviewActivate).mockResolvedValue(ready);
+ const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos",true),{initialProps:{value:recipe}});
+ await waitFor(()=>expect(result.current.session).toBe(proxy));
+ const linear={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ rerender({value:linear});
+ expect(result.current.session?.sessionId).toBe("session");expect(result.current.url).not.toBeNull();
+ await waitFor(()=>expect(result.current.session).toBe(ready));
+ rerender({value:recipe});rerender({value:linear});
+ expect(result.current.session).toBe(ready);expect(result.current.url).toBe("prepared-frame");
+ expect(editPreviewOpen).toHaveBeenCalledTimes(1);expect(editPreviewClose).not.toHaveBeenCalled();
+ expect(editPreviewPrepare).toHaveBeenCalledTimes(1);
+});
+
+it("allows preparation again when film was disabled before its candidate was ready", async () => {
+ let finish!:(value:EditorPreviewSession)=>void;
+ const ready={...proxy,rawlabReady:true,nativeReady:true,previewUrl:"prepared-frame"};
+ vi.mocked(editPreviewPrepare).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;})).mockResolvedValue(ready);
+ vi.mocked(editPreviewActivate).mockResolvedValue(ready);
+ const linear={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos"),{initialProps:{value:recipe}});
+ await waitFor(()=>expect(result.current.session).toBe(proxy));
+ rerender({value:linear});await waitFor(()=>expect(editPreviewPrepare).toHaveBeenCalledTimes(1));
+ rerender({value:recipe});await act(async()=>finish(ready));
+ expect(editPreviewActivate).not.toHaveBeenCalled();rerender({value:linear});
+ await waitFor(()=>expect(result.current.session).toBe(ready));
+ expect(editPreviewPrepare).toHaveBeenCalledTimes(2);expect(editPreviewOpen).toHaveBeenCalledTimes(1);
+});

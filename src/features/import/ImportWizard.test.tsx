@@ -21,6 +21,7 @@ import {
   deviceFiles,
   deviceList,
   folderScan,
+  localPathsScan,
   importStart,
   photoLibraryList,
   photoLibraryCreate,
@@ -45,6 +46,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     ...actual,
     importStart: vi.fn(),
     folderScan: vi.fn(),
+    localPathsScan: vi.fn(),
     fsListDirs: vi.fn(),
     deviceFiles: vi.fn(),
     deviceList: vi.fn(),
@@ -168,10 +170,10 @@ function StorageProbe() {
   return <div data-testid="storage-probe">STORAGE_PAGE</div>;
 }
 
-function renderWizard(query = "?flow=import") {
+function renderWizard(query = "?flow=import", state?: {importPaths: string[]}) {
   return render(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter initialEntries={[`/import${query}`]}>
+      <MemoryRouter initialEntries={[{pathname: "/import", search: query, state}]}>
         <Routes>
           <Route path="/import" element={<ImportWizard />} />
           <Route path="/tasks" element={<TasksProbe />} />
@@ -257,6 +259,7 @@ beforeEach(() => {
   scanMock.mockReset().mockResolvedValue(null);
   openMock.mockReset();
   deviceFilesMock.mockReset().mockResolvedValue(null);
+  vi.mocked(localPathsScan).mockReset();
   deviceListMock.mockReset().mockImplementation(async () => useImportStore.getState().devices);
   // 默认无照片库（「未选库」用例的默认态）；有用例经 seedSession 指定目标库
   photoLibraryListMock.mockReset().mockResolvedValue([]);
@@ -460,6 +463,7 @@ describe("选择文件夹与最近使用", () => {
     useImportStore.setState({ devices: [volumeDevice(), mtpDevice()] });
     openMock.mockResolvedValue("D:\\老照片");
     scanMock.mockResolvedValue(folderSnapshot());
+    deviceFilesMock.mockResolvedValue([{id: "A.JPG", relPath: "A.JPG", size: 10, mtime: "2026-10-14T00:00:00Z"}]);
     const user = userEvent.setup();
     renderWizard();
 
@@ -476,6 +480,46 @@ describe("选择文件夹与最近使用", () => {
     expect(recent).toHaveTextContent("老照片");
     await user.click(within(recent).getByTestId("wizard-recent-item"));
     expect(scanMock).toHaveBeenCalledWith("D:\\老照片", true);
+  });
+
+  it("reselecting a recent folder replaces its cached listing and discovers manually added files", async () => {
+    openMock.mockResolvedValue("D:\\老照片");
+    scanMock.mockResolvedValue(folderSnapshot());
+    const first = {id: "A.JPG", relPath: "A.JPG", size: 10, mtime: "2026-10-14T00:00:00Z"};
+    deviceFilesMock.mockResolvedValueOnce([first]).mockResolvedValue([first, {...first, id: "NEW.JPG", relPath: "NEW.JPG"}]);
+    const user = userEvent.setup(); renderWizard();
+    await user.click(await screen.findByTestId("wizard-choose-folder"));
+    expect(await screen.findByText("A.JPG")).toBeInTheDocument();
+    await user.click(screen.getByTestId("wizard-source-toggle"));
+    await user.click(within(await screen.findByTestId("wizard-recent")).getByTestId("wizard-recent-item"));
+    expect(await screen.findByText("NEW.JPG")).toBeInTheDocument();
+    expect(deviceFilesMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 2");
+  });
+
+  it("chooses individual image files from multiple directories without importing their siblings", async () => {
+    const paths = ["D:/one/A.JPG", "E:/two/B.NEF"];
+    openMock.mockResolvedValue(paths);
+    vi.mocked(localPathsScan).mockResolvedValue({...folderSnapshot(), id: "FILES:selection", name: "Selected images"});
+    deviceFilesMock.mockResolvedValue(paths.map((relPath, index) => ({id: `${index}/image`, relPath, size: 10, mtime: "2026-10-14T00:00:00Z"})));
+    const user = userEvent.setup(); renderWizard();
+    await user.click(screen.getByTestId("wizard-choose-files"));
+    expect(openMock).toHaveBeenCalledWith(expect.objectContaining({multiple: true, directory: false}));
+    expect(vi.mocked(localPathsScan)).toHaveBeenCalledWith(paths);
+    expect(await screen.findByText("A.JPG")).toBeInTheDocument();
+    expect(screen.getByText("B.NEF")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 2 / 2");
+    expect(useImportStore.getState().recentSources).toHaveLength(0);
+  });
+
+  it("opens the image picker for an external file/folder drop carried by navigation", async () => {
+    const paths = ["D:/one/A.JPG", "E:/two"];
+    vi.mocked(localPathsScan).mockResolvedValue({...folderSnapshot(), id: "FILES:selection"});
+    deviceFilesMock.mockResolvedValue([{id: "0/A.JPG", relPath: "D:/one/A.JPG", size: 10, mtime: "2026-10-14T00:00:00Z"}]);
+    renderWizard("?flow=import", {importPaths: paths});
+    expect(await screen.findByText("A.JPG")).toBeInTheDocument();
+    expect(vi.mocked(localPathsScan)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(localPathsScan)).toHaveBeenCalledWith(paths);
   });
 });
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import {useTranslation} from "react-i18next";
 import { Outlet, useLocation, useNavigate } from "react-router";
 import { motion } from "motion/react";
 
@@ -15,6 +16,7 @@ import { useNativeBehaviorGuard } from "@/features/gallery/lib/nativeBehaviorGua
 import { isMacPlatform } from "@/lib/platform";
 import { invalidateLibraryContentCaches } from "@/lib/librarySession";
 import { subscribeAppEvents } from "@/ipc/api";
+import {useExternalImportDrop} from "@/features/import/lib/useExternalImportDrop";
 
 /**
  * 应用主壳：整窗顶部一条自绘标题栏（TitleBar：应用标识 + 全局搜索框 +
@@ -41,6 +43,8 @@ const CTRL_NAV: Record<string, string> = {
 
 export default function AppShell() {
   const navigate = useNavigate();
+  const {t} = useTranslation();
+  const importingDrop = useExternalImportDrop(paths => navigate("/import?flow=import", {state: {importPaths: paths}}));
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const motionOn = useMotionOn();
@@ -150,6 +154,7 @@ export default function AppShell() {
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 导入完成总结弹窗（全局：任何页面弹出；此前在任务页） */}
       <SummaryModalHost />
+      {importingDrop && <div className="pointer-events-none fixed inset-3 z-[200] flex items-center justify-center rounded-2xl border-2 border-dashed border-accent bg-bg/90 text-lg font-semibold text-accent" role="status">{t("wizard.dropPhotos")}</div>}
     </div>
   );
 }

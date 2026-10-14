@@ -1,4 +1,7 @@
 {
+  "wizard.dropPhotos": "画像やフォルダーをドロップしてインポート",
+  "wizard.flow.filesDesc": "1 枚または複数の画像を選択するか、画像やフォルダーをドラッグしてください。",
+  "wizard.chooseFiles": "画像ファイルを選択",
   "advancedEditor.film.imported": "インポートしたフィルム",
   "advancedEditor.film.builtin": "内蔵マスターカラー",
   "onboarding.ai.selectFeature": "AI 機能を 1 つ以上選択するか、AI を無効にしてください。",

@@ -74,6 +74,10 @@ export async function folderScan(path: string, strict = false): Promise<DeviceSn
   }
 }
 
+export function localPathsScan(paths: string[]): Promise<DeviceSnapshot> {
+  return ipc<DeviceSnapshot>("local_paths_scan", {paths});
+}
+
 /** 懒加载目录列表：parent 省略 = 盘符根；失败/不可用/非数组默认返回 []；strict 时透传平台错误 */
 export async function fsListDirs(parent?: string, strict = false): Promise<FsDirEntry[]> {
   try {
