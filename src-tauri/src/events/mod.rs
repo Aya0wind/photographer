@@ -5,6 +5,9 @@
 //! Rust 内部用 tokio::sync::broadcast 分发；tauri 启动后由转发任务
 //! 把 `AppEvent` 序列化 emit 给前端（`app://event`），IPC 层负责接线。
 
+/// Interrupted files are terminal failures and excluded from resume/retry.
+pub const LOST_IMPORT_FILE_PREFIX: &str = "文件丢失，不再恢复：";
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

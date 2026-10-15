@@ -145,7 +145,7 @@ impl LiveViewFrame {
 }
 
 /// 拍摄产出的新对象（OBJECT_ADDED 事件的富化结果）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CapturedObject {
     /// WPD 会话对象 ID（瞬态；不落库，仅诊断）。
     pub object_id: String,
@@ -396,9 +396,8 @@ fn supports_tethering(caps: Capabilities) -> bool {
 /// 铁律：
 /// - 探测复用既有 connect 语义（GetDeviceInfo/能力交叉），不触发快门、
 ///   不改设置；
-/// - 存在未 Acknowledge 收据的相机禁止切换后端路径——账本里未确认收据
-///   记录的产生后端（`pending.backend`）之外的后端一律跳过；该后端自身
-///   连不上则返回 Err 说明；
+/// - 已完整下载、尚未入库的收据固定原后端以便补收；未完成或已消失
+///   的收据记为丢失，不能阻塞后续连接；
 /// - 未选中的已连接端点必须 disconnect（不能并留两份设备句柄）。
 pub fn establish_backend(
     backends: &[std::sync::Arc<dyn CameraBackend>],
@@ -418,8 +417,8 @@ pub fn establish_backend(
         };
         // §E：未确认收据把相机钉在产生收据的后端上。
         if let Some(dir) = receipts_dir {
-            let unacked =
-                super::receipts_store::ReceiptsStore::open(dir, &info.physical_key()).unacked();
+            let ledger = super::receipts_store::ReceiptsStore::open(dir, &info.physical_key());
+            let unacked = super::staging::retire_incomplete(&ledger);
             let pinned: HashSet<String> = unacked
                 .iter()
                 .map(|receipt| receipt.backend.clone())
@@ -736,41 +735,18 @@ mod tests {
     }
 
     #[test]
-    fn unacked_receipts_pin_the_backend_path() {
+    fn incomplete_receipts_do_not_pin_an_unavailable_backend() {
         let dir = tempfile::tempdir().unwrap();
-        // 收据产生于 "pinned" 后端、相机 serial:s-pinned（与桩对齐）。
-        let ledger =
-            super::super::receipts_store::ReceiptsStore::open(dir.path(), "serial:s-pinned");
+        let ledger = super::super::receipts_store::ReceiptsStore::open(dir.path(), "serial:s-pinned");
         ledger.record_pending("pinned", "o1", 1, "t");
         let capable = selecting_backend(
-            "capable",
-            Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE),
-            true,
-            "s-pinned",
+            "capable", Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE), true, "s-pinned",
         );
-        let pinned_dead = selecting_backend(
-            "pinned",
-            Capabilities::FILE_TRANSFER.union(Capabilities::STANDARD_CAPTURE),
-            false, // 产生收据的后端连不上
-            "s-pinned",
-        );
-        let backends: Vec<std::sync::Arc<dyn CameraBackend>> =
-            vec![capable.clone(), pinned_dead.clone()];
-        let err = establish_backend(&backends, "cam", Some(dir.path()))
-            .map(|_| ())
-            .unwrap_err();
-        assert!(err.contains("未确认"), "{err}");
-        assert!(err.contains("pinned"), "{err}");
-        // 有能力但非收据后端的端点必须被断开（不并留设备句柄）。
-        assert_eq!(
-            capable.disconnects.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        // 收据后端可用时：即使只有文件传输能力也直接选它（恢复优先）。
-        let pinned_alive = selecting_backend("pinned", Capabilities::FILE_TRANSFER, true, "s-pinned");
-        let backends: Vec<std::sync::Arc<dyn CameraBackend>> =
-            vec![capable.clone(), pinned_alive.clone()];
+        let pinned_dead = selecting_backend("pinned", Capabilities::FILE_TRANSFER, false, "s-pinned");
+        let backends: Vec<std::sync::Arc<dyn CameraBackend>> = vec![capable.clone(), pinned_dead];
         let (selected, _) = establish_backend(&backends, "cam", Some(dir.path())).unwrap();
-        assert_eq!(selected.id(), "pinned");
+        assert_eq!(selected.id(), "capable");
+        assert!(ledger.unacked().is_empty(), "未完成对象记为丢失，不阻塞新会话");
+        assert_eq!(capable.disconnects.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

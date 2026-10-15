@@ -39,7 +39,9 @@ export async function importPause(jobId: number): Promise<void> {
 export async function importResume(jobId: number): Promise<void> {
   try {
     await ipc<void>("import_resume", { jobId });
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!INVOKE_UNAVAILABLE_PATTERN.test(message)) throw error;
   }
 }
 

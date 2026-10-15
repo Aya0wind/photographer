@@ -206,10 +206,7 @@ pub fn run() {
                     std::sync::Arc::new(bus.clone()),
                     &supervisor_handle,
                 );
-                // 孤儿导入任务终老（2026-09-21）：进程重启后引擎会话清零，
-                // 遗留 running/paused 是跨会话死任务（任务抽屉挂死 +
-                // import_job_delete 拒删）。统一转 cancelled + 日志；
-                // journal 保留，设备回连后 resume 仍可手动续传。
+                // 进程重启后把未结束导入转为暂停，保留任务抽屉恢复入口。
                 {
                     let db_dir = db_dir.clone();
                     supervisor_handle.spawn("import", "orphan-jobs-reap".into(), move |_| {
@@ -217,7 +214,7 @@ pub fn run() {
                             match db.reap_orphan_import_jobs() {
                                 Ok(reaped) => {
                                     for id in reaped {
-                                        log::info!("启动自愈：孤儿导入任务 {id} 已终老为 cancelled");
+                                        log::info!("启动自愈：孤儿导入任务 {id} 已暂停，可恢复未开始文件");
                                     }
                                 }
                                 Err(e) => log::warn!("启动自愈：孤儿任务清理失败: {e}"),

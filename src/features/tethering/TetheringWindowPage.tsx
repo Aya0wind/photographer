@@ -19,6 +19,7 @@ import {
   tetheringSettingSet,
   tetheringSettings,
   tetheringStop,
+  tetheringStart,
   assetsByIds,
   type AssetDto,
   type TetherCameraSetting,
@@ -399,6 +400,7 @@ export default function TetheringWindowPage() {
 
   const [session, setSession] = useState<TetherSessionDto | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const [fps, setFps] = useState<number>(loadStoredFps);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -635,6 +637,25 @@ export default function TetheringWindowPage() {
       openAsset(rep);
     } catch {
       /* 照片已删除/库不可访问：不打开 */
+    }
+  }
+
+  async function reconnect(): Promise<void> {
+    if (session === null || reconnecting) return;
+    setReconnecting(true);
+    setCaptureError(null);
+    try {
+      await tetheringStop(sessionId);
+      const result = await tetheringStart(session.albumId, session.camera.pnpId);
+      if (!result.ok) {
+        setCaptureError(result.error ?? t("tether.reconnectFailed"));
+        return;
+      }
+      await getCurrentWindow().close();
+    } catch (error) {
+      setCaptureError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setReconnecting(false);
     }
   }
 
@@ -901,6 +922,10 @@ export default function TetheringWindowPage() {
       {!connected && (
         <div className="border-b border-amber-400/30 bg-amber-400/10 px-3 py-1.5 text-[11px] text-amber-300" data-testid="tether-disconnect-banner">
           {t("tether.disconnected")}
+          <button type="button" disabled={reconnecting} onClick={() => void reconnect()}
+            className="ml-3 rounded border border-amber-400/40 px-2 py-0.5 disabled:opacity-40">
+            {t(reconnecting ? "tether.reconnecting" : "tether.reconnect")}
+          </button>
         </div>
       )}
 

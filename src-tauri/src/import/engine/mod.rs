@@ -27,7 +27,7 @@
 //!
 //! 可靠性：取消为软取消（当前文件完成后停）；`DeviceError::Disconnected`
 //! → publish `DeviceUnavailable` + 自动暂停（job 置 paused）并返回部分
-//! stats；每文件状态实时落 journal；`.part` 残留在 resume 时清除重做。
+//! stats；每文件状态实时落 journal；中断的文件记为丢失，恢复只处理尚未开始的文件。
 
 mod dedup;
 mod fsutil;
@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{AssetRow, Db, JobFileRow};
 use crate::devices::{DeviceError, DeviceSource, FileEntry, SourceKind};
-use crate::events::{AppEvent, EventBus, FileState, JobStats, Throttle};
+use crate::events::{AppEvent, EventBus, FileState, JobStats, Throttle, LOST_IMPORT_FILE_PREFIX};
 use crate::db::organization::unique_path;
 use crate::settings::DuplicatePolicy;
 
@@ -64,6 +64,11 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 const PAUSE_POLL: Duration = Duration::from_millis(10);
 /// `.part` 集中暂存目录名（各目标根下，点前缀）。
 const PART_DIR: &str = ".photographer-part";
+
+enum WorkerMessage {
+    Starting(FileEntry, mpsc::SyncSender<bool>),
+    Finished(FileOutcome),
+}
 
 /// 删库软停的 journal 失败文案（2026-10-09 审计 P0：目标库被移除登记）。
 const LIBRARY_REMOVED_ERROR: &str = "目标照片库已被删除，导入已中止";
@@ -145,6 +150,7 @@ pub enum EngineError {
 pub struct EngineControls {
     paused: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    user_cancelled: Arc<AtomicBool>,
     device_lost: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
 }
@@ -159,6 +165,7 @@ impl EngineControls {
     }
 
     pub fn cancel(&self) {
+        self.user_cancelled.store(true, Ordering::SeqCst);
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
@@ -306,7 +313,7 @@ impl Engine {
         Self::with_controls(db, bus, source, plan, None)
     }
 
-    /// 从 journal 重建：verified/skipped 计入统计基线跳过，pending/failed 重做。
+    /// 从 journal 重建：已结束条目计入统计基线；中断文件不重传，其他 pending/failed 可恢复。
     /// 目标照片库在重建时重新解析（root 失踪/被移除登记 → InvalidPlan）。
     pub fn resume(
         db: Db,
@@ -330,12 +337,24 @@ impl Engine {
                     base.skipped += 1;
                     base.skipped_bytes += row.size;
                 }
-                FileState::Pending | FileState::Failed | FileState::Copying => {
-                    resume_srcs.push(row.src.clone());
+                FileState::Copying => {
+                    let mut lost = row.clone();
+                    lost.state = FileState::Failed;
+                    lost.error = Some(format!("{LOST_IMPORT_FILE_PREFIX}上次传输未完成"));
+                    db.upsert_job_file(&lost)?;
+                    let _ = db.append_log("warn", Some(job_id), &format!("{}: {}", row.src, lost.error.as_deref().unwrap_or_default()));
+                    base.failed += 1;
+                    base.failed_bytes += row.size;
                 }
+                FileState::Failed if row.error.as_deref().is_some_and(|e| e.starts_with(LOST_IMPORT_FILE_PREFIX)) => {
+                    base.failed += 1;
+                    base.failed_bytes += row.size;
+                }
+                FileState::Pending | FileState::Failed => resume_srcs.push(row.src.clone()),
             }
         }
         let library_root = resolve_library_root(&db, &plan)?;
+        db.0.execute("UPDATE jobs SET status = 'running', finished_at = NULL WHERE id = ?1", [job_id])?;
         Ok(Self::with_controls(
             db,
             bus,
@@ -366,6 +385,7 @@ impl Engine {
             controls: EngineControls {
                 paused: Arc::new(AtomicBool::new(false)),
                 cancelled: Arc::new(AtomicBool::new(false)),
+                user_cancelled: Arc::new(AtomicBool::new(false)),
                 device_lost: Arc::new(AtomicBool::new(false)),
                 done: Arc::new(AtomicBool::new(false)),
             },
@@ -394,6 +414,12 @@ impl Engine {
     /// 持有（见 registration_gate 字段注释）。
     pub fn source_id(&self) -> String {
         self.source.id()
+    }
+
+    pub fn source_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.source.local_roots();
+        roots.extend(self.source.local_path(""));
+        roots
     }
 
     /// 建新任务：计划校验 → 照片库解析 → 自我嵌套守卫 → 枚举源 →
@@ -472,6 +498,10 @@ impl Engine {
         // 宽松预判（§查重①；同库范围）+ journal 批量落 pending/skipped
         let tx = self.db.0.unchecked_transaction()?;
         let mut fresh = Vec::new();
+        for root in self.source.local_roots() {
+            tx.execute("INSERT OR IGNORE INTO import_source_roots (job_id, path) VALUES (?1, ?2)",
+                rusqlite::params![job_id, root.to_string_lossy()])?;
+        }
         for entry in entries {
             // 有相册目标时仍需结算引用，不能在预判阶段吞掉。
             let hit = self.plan.skip_imported && self.plan.album_id.is_none()
@@ -487,6 +517,10 @@ impl Engine {
             tx.execute(
                 "INSERT INTO job_files (job_id, src, dst, size, state) VALUES (?1, ?2, '', ?3, ?4)",
                 rusqlite::params![job_id, entry.id, entry.size as i64, state],
+            )?;
+            tx.execute(
+                "INSERT INTO import_file_identity (job_id, src, rel_path, size) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![job_id, entry.id, entry.rel_path, entry.size as i64],
             )?;
         }
         tx.commit()?;
@@ -527,31 +561,25 @@ impl Engine {
         let job_id = prepared.job_id;
         let library_root = prepared.library_root.clone();
 
-        // resume：清除 .part 残留（上次中断的半成品，一律重做）
+        // resume：清除 .part 残留（上次中断的半成品不重传）
         self.sweep_part_files(&library_root);
 
-        // 待处理队列：resume 需重列源匹配 journal src（list 失败→按设备失联暂停）
-        let queue = self.resolve_queue(&prepared);
         let mut counters = prepared.base;
         let mut device_lost = false;
-        if resume_has_pending(&prepared) && queue.is_none() {
-            self.bus.publish(AppEvent::DeviceUnavailable {
-                id: self.source.id(),
-            });
-            // 循环未起步，无活跃时间可言
-            let stats = counters.into_stats(started.elapsed(), Duration::ZERO);
-            let _ = self.db.finish_job(
-                job_id,
-                "paused",
-                &serde_json::to_string(&stats).unwrap_or_default(),
-            );
-            let _ = self
-                .db
-                .append_log("warn", Some(job_id), "恢复导入时设备不可用，保持暂停");
-            self.controls.done.store(true, Ordering::SeqCst);
-            return stats;
-        }
-        let queue = queue.unwrap_or_default();
+        let queue = match self.prepare_queue(&prepared, &mut counters) {
+            Ok(queue) => queue,
+            Err(error) => {
+                self.bus.publish(AppEvent::ImportPaused { job_id });
+                self.bus.publish(AppEvent::AppError {
+                    level: "warn".into(), message: format!("恢复导入已暂停: {error}"), recoverable: true,
+                });
+                let stats = counters.into_stats(started.elapsed(), Duration::ZERO);
+                let _ = self.db.finish_job(job_id, "paused", &serde_json::to_string(&stats).unwrap_or_default());
+                let _ = self.db.append_log("warn", Some(job_id), &error.to_string());
+                self.controls.done.store(true, Ordering::SeqCst);
+                return stats;
+            }
+        };
 
         let worker_count = worker_count(self.source.kind(), self.plan.streams);
         let (work_tx, work_rx) = mpsc::channel::<FileEntry>();
@@ -560,7 +588,7 @@ impl Engine {
         }
         drop(work_tx);
         let work_rx = Arc::new(Mutex::new(work_rx));
-        let (result_tx, result_rx) = mpsc::channel::<FileOutcome>();
+        let (result_tx, result_rx) = mpsc::channel::<WorkerMessage>();
         let part_seq = Arc::new(AtomicU64::new(0));
 
         // 暂存目录只在启动工作线程前创建一次。网络共享盘可能在并发 mkdir
@@ -613,6 +641,13 @@ impl Engine {
                         Ok(entry) => entry,
                         Err(_) => break, // 队列已空/关闭
                     };
+                    // Journal the start before touching the source. SQLite stays on
+                    // the collector thread; a crash cannot turn a half copy into pending.
+                    let (ack_tx, ack_rx) = mpsc::sync_channel(0);
+                    if result_tx.send(WorkerMessage::Starting(entry.clone(), ack_tx)).is_err()
+                        || ack_rx.recv() != Ok(true) {
+                        break;
+                    }
                     let seq = part_seq.fetch_add(1, Ordering::Relaxed);
                     let outcome = if let Some(error) = &staging_error {
                         FileOutcome::Failed {
@@ -632,7 +667,7 @@ impl Engine {
                             second.as_deref(),
                         )
                     };
-                    if result_tx.send(outcome).is_err() {
+                    if result_tx.send(WorkerMessage::Finished(outcome)).is_err() {
                         break; // 收集端已退出
                     }
                 }
@@ -653,7 +688,14 @@ impl Engine {
         // 产出）journal 一律落 failed，会话以明确错误中止。
         let mut library_gone = false;
 
-        for outcome in result_rx {
+        for message in result_rx {
+            let outcome = match message {
+                WorkerMessage::Starting(entry, ack) => {
+                    let _ = ack.send(self.admit_file(job_id, &entry));
+                    continue;
+                }
+                WorkerMessage::Finished(outcome) => outcome,
+            };
             // 每文件处理前（登记前）点查目标库仍在册：微秒级主键查询，
             // 文件拷贝耗时面前可忽略。发现删库只置位一次（软停 workers
             // 不再领新文件），余量在下方统一按失败结算。
@@ -812,7 +854,7 @@ impl Engine {
                     counters.failed_bytes += entry.size;
                     let _ = self.db.upsert_job_file(&JobFileRow {
                         job_id,
-                        src: entry.id,
+                        src: entry.id.clone(),
                         dst: String::new(),
                         size: entry.size,
                         state: FileState::Failed,
@@ -820,19 +862,27 @@ impl Engine {
                         xxhash: None,
                         dst2: String::new(),
                     });
-                    let _ = self.db.append_log("error", Some(job_id), &error);
+                    self.bus.publish(AppEvent::ImportFileCompleted {
+                        job_id, src: entry.id, dst: String::new(), state: FileState::Failed,
+                    });
+                    let _ = self.db.append_log("error", Some(job_id), &format!("{}: {error}", entry.rel_path));
                 }
                 FileOutcome::Disconnected { entry, error } => {
-                    // 拔线：journal 回 pending（resume 续传），停工 + 设备不可用事件
+                    counters.failed += 1;
+                    counters.failed_bytes += entry.size;
+                    // 已开始的传输记丢失；未开始的 journal 保持 pending。
                     let _ = self.db.upsert_job_file(&JobFileRow {
                         job_id,
-                        src: entry.id,
+                        src: entry.id.clone(),
                         dst: String::new(),
                         size: entry.size,
-                        state: FileState::Pending,
-                        error: Some(error),
+                        state: FileState::Failed,
+                        error: Some(format!("{LOST_IMPORT_FILE_PREFIX}{error}")),
                         xxhash: None,
                         dst2: String::new(),
+                    });
+                    self.bus.publish(AppEvent::ImportFileCompleted {
+                        job_id, src: entry.id, dst: String::new(), state: FileState::Failed,
                     });
                     let newly_lost = self.controls.mark_device_lost();
                     self.controls.cancelled.store(true, Ordering::SeqCst);
@@ -844,7 +894,7 @@ impl Engine {
                         let _ = self.db.append_log(
                             "warn",
                             Some(job_id),
-                            "设备失联，导入已自动暂停（可恢复续传）",
+                            "设备失联，已暂停；未完成的传输已记为丢失，其余文件可恢复",
                         );
                     }
                 }
@@ -868,6 +918,7 @@ impl Engine {
             let _ = worker.join();
         }
 
+        library_gone |= !self.target_library_alive();
         // 删库软停收尾（审计 P0）：软取消后 workers 未领完的余量（journal
         // 停在 pending/copying）一并落 failed——会话以明确错误中止，不让
         // 余量留在「看似可续跑」的假象里（目标库已不在，resume 也会拒绝）。
@@ -914,7 +965,9 @@ impl Engine {
         if let Some(second) = &self.plan.second_target {
             let _ = fs::remove_dir_all(second.target_root.join(PART_DIR));
         }
-        let status = if device_lost || self.controls.is_device_lost() {
+        let status = if self.controls.user_cancelled.load(Ordering::SeqCst) {
+            "cancelled"
+        } else if device_lost || self.controls.is_device_lost() {
             "paused"
         } else if library_gone {
             "failed"
@@ -946,10 +999,11 @@ impl Engine {
         let _ = self
             .db
             .photos_library_refresh_stats(&self.plan.target_library_id);
-        self.bus.publish(AppEvent::ImportSessionFinished {
-            job_id,
-            stats: stats.clone(),
-        });
+        if status == "paused" {
+            self.bus.publish(AppEvent::ImportPaused { job_id });
+        } else {
+            self.bus.publish(AppEvent::ImportSessionFinished { job_id, stats: stats.clone() });
+        }
         self.controls.done.store(true, Ordering::SeqCst);
         stats
     }
@@ -1040,25 +1094,110 @@ impl Engine {
         Ok(())
     }
 
-    /// resume：journal src → 源条目匹配；新任务直接用 begin 的队列。
-    /// 返回 None 表示源 list 失败（设备不可用）。
-    fn resolve_queue(&self, prepared: &Prepared) -> Option<Vec<FileEntry>> {
-        match &prepared.resume_srcs {
-            None => Some(prepared.fresh.clone()),
-            Some(srcs) => {
-                let entries = self.source.list().ok()?;
-                let by_id: HashMap<String, FileEntry> =
-                    entries.into_iter().map(|e| (e.id.clone(), e)).collect();
-                Some(
-                    srcs.iter()
-                        .filter_map(|src| by_id.get(src).cloned())
-                        .collect(),
-                )
+    /// The collector admits each worker only after its Copying journal is durable.
+    fn admit_file(&self, job_id: i64, entry: &FileEntry) -> bool {
+        if self.controls.is_cancelled() { return false; }
+        if !self.target_library_alive() {
+            self.controls.cancelled.store(true, Ordering::SeqCst);
+            return false;
+        }
+        match self.db.0.execute(
+            "UPDATE job_files SET state = 'copying', error = NULL WHERE job_id = ?1 AND src = ?2",
+            rusqlite::params![job_id, entry.id],
+        ) {
+            Ok(1) => true,
+            _ => {
+                self.controls.cancelled.store(true, Ordering::SeqCst);
+                let _ = self.db.append_log("error", Some(job_id), "无法记录文件传输状态，导入已停止");
+                false
             }
         }
     }
 
-    /// 清除各目标根暂存目录的所有 `.part` 残留（重做语义）。
+    fn prepare_queue(&self, prepared: &Prepared, counters: &mut Counters) -> Result<Vec<FileEntry>, EngineError> {
+        let job_id = prepared.job_id;
+        if prepared.resume_srcs.is_some() {
+            self.bus.publish(AppEvent::ImportSessionStarted {
+                job_id, total_files: counters.total_files, total_bytes: counters.total_bytes,
+            });
+            self.bus.publish(AppEvent::ImportResumed { job_id });
+            self.bus.publish(AppEvent::ImportFileProgress {
+                job_id, done_files: counters.done_files, done_bytes: counters.done_bytes,
+                settled_bytes: counters.settled_bytes(), current_file: String::new(), bytes_per_sec: 0.0,
+            });
+        }
+        let (queue, missing) = self.resolve_queue(prepared)?;
+        for mut row in missing {
+            row.state = FileState::Failed;
+            row.error = Some(format!("{LOST_IMPORT_FILE_PREFIX}重连后源文件缺失或无法唯一匹配"));
+            self.db.upsert_job_file(&row)?;
+            counters.failed += 1;
+            counters.failed_bytes += row.size;
+            self.bus.publish(AppEvent::ImportFileCompleted {
+                job_id, src: row.src.clone(), dst: String::new(), state: FileState::Failed,
+            });
+            let _ = self.db.append_log("warn", Some(job_id), &format!("{}: {}", row.src, row.error.as_deref().unwrap_or_default()));
+        }
+        Ok(queue)
+    }
+
+    /// resume：journal src → 源条目匹配；新任务直接用 begin 的队列。
+    /// 不可用的源/日志显式报错；缺失条目由调用方记录丢失。
+    fn resolve_queue(&self, prepared: &Prepared) -> Result<(Vec<FileEntry>, Vec<JobFileRow>), EngineError> {
+        let Some(srcs) = &prepared.resume_srcs else {
+            return Ok((prepared.fresh.clone(), Vec::new()));
+        };
+        if srcs.is_empty() { return Ok((Vec::new(), Vec::new())); }
+        let entries = self.source.list()?;
+        let rows = self.db.all_job_files(prepared.job_id)?;
+        let mut stmt = self.db.0.prepare(
+            "SELECT src, rel_path, size FROM import_file_identity WHERE job_id = ?1",
+        )?;
+        let identities: HashMap<String, (String, u64)> = stmt.query_map(
+            [prepared.job_id], |row| Ok((row.get(0)?, (row.get(1)?, row.get::<_, i64>(2)? as u64))),
+        )?.collect::<Result<_, _>>()?;
+        let by_id: HashMap<_, _> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
+        let pending: HashSet<&str> = srcs.iter().map(String::as_str).collect();
+        let mut by_path: HashMap<(&str, u64), Vec<&FileEntry>> = HashMap::new();
+        for entry in &entries {
+            by_path.entry((&entry.rel_path, entry.size)).or_default().push(entry);
+        }
+        let mut used = HashSet::new();
+        let mut queue = Vec::new();
+        let mut missing = Vec::new();
+        for row in rows.into_iter().filter(|row| pending.contains(row.src.as_str())) {
+            let identity = identities.get(&row.src);
+            let agrees = |entry: &&FileEntry| entry.size == row.size && identity
+                .is_none_or(|(path, size)| entry.rel_path == *path && entry.size == *size);
+            let exact = by_id.get(row.src.as_str()).copied().filter(agrees);
+            let found = exact.or_else(|| {
+                let (path, size) = identity?;
+                let candidates = by_path.get(&(path.as_str(), *size))?;
+                (candidates.len() == 1).then(|| candidates[0])
+            });
+            let Some(entry) = found.filter(|entry| !used.contains(&entry.id)) else {
+                missing.push(row);
+                continue;
+            };
+            if entry.id != row.src {
+                // Rebind both records atomically; never reuse an ambiguous object ID.
+                let tx = self.db.0.unchecked_transaction()?;
+                if tx.execute("UPDATE job_files SET src = ?3 WHERE job_id = ?1 AND src = ?2",
+                    rusqlite::params![prepared.job_id, row.src, entry.id]).is_err()
+                    || tx.execute("UPDATE import_file_identity SET src = ?3 WHERE job_id = ?1 AND src = ?2",
+                    rusqlite::params![prepared.job_id, row.src, entry.id]).is_err() {
+                    missing.push(row);
+                    continue;
+                }
+                tx.commit()?;
+            }
+            used.insert(entry.id.clone());
+            queue.push(entry.clone());
+        }
+        Ok((queue, missing))
+    }
+
+    /// 清除各目标根暂存目录的所有 `.part` 残留（丢弃未完成传输）。
     fn sweep_part_files(&self, library_root: &Path) {
         let _ = fs::remove_dir_all(library_root.join(PART_DIR));
         if let Some(second) = &self.plan.second_target {
@@ -1571,13 +1710,6 @@ fn worker_count(kind: SourceKind, streams: u32) -> usize {
         SourceKind::Mtp => 1,
         SourceKind::Volume | SourceKind::Folder => 4.min(streams.max(1) as usize),
     }
-}
-
-fn resume_has_pending(prepared: &Prepared) -> bool {
-    prepared
-        .resume_srcs
-        .as_ref()
-        .is_some_and(|srcs| !srcs.is_empty())
 }
 
 /// 目标照片库 root 解析（begin/resume 共用）：photos_libraries 行失踪 →

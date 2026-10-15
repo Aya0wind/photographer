@@ -175,6 +175,25 @@ CREATE TABLE IF NOT EXISTS job_files (
     PRIMARY KEY (job_id, src)
 );
 
+-- Commit the download receipt together with the captured asset. Keep the
+-- receipt even after an asset is deleted, so recovery cannot resurrect it.
+CREATE TABLE IF NOT EXISTS tethering_committed_receipts (
+    receipt TEXT PRIMARY KEY NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS import_source_roots (
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    PRIMARY KEY (job_id, path)
+);
+-- Source identity survives camera object-ID changes after reconnect.
+CREATE TABLE IF NOT EXISTS import_file_identity (
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    src TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (job_id, src)
+);
 CREATE INDEX IF NOT EXISTS idx_job_files_state ON job_files (job_id, state);
 
 CREATE TABLE IF NOT EXISTS logs (

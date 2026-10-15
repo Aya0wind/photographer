@@ -34,6 +34,25 @@ fn command() -> Result<Command, TetherError> {
     crate::platform::configure_background_command(&mut cmd);
     Ok(cmd)
 }
+fn enqueue_download(
+    value: &Value, root: &std::path::Path,
+    queue: &Mutex<VecDeque<CapturedObject>>, errors: &Mutex<Option<String>>,
+) {
+    let Some(path) = value["path"].as_str() else { return; };
+    let path = PathBuf::from(path);
+    let object = CapturedObject {
+        object_id: path.to_string_lossy().into_owned(),
+        object_name: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        object_size: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+    };
+    if let Err(error) = super::staging::seal(root, &object) {
+        *errors.lock().unwrap() = Some(error.to_string());
+    }
+    // The SDK event means download completed. Receipt failure must not stop
+    // normal ingestion; only cross-session recovery requires its manifest.
+    queue.lock().unwrap().push_back(object);
+}
+
 struct Transport {
     child: Child,
     input: ChildStdin,
@@ -45,6 +64,7 @@ struct Connection {
     connected: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
     incoming: PathBuf,
+    recovery: super::staging::Recovery,
 }
 impl Connection {
     fn spawn() -> Result<Self, TetherError> {
@@ -64,6 +84,7 @@ impl Connection {
         let flag = connected.clone();
         let error = Arc::new(Mutex::new(None));
         let errors = error.clone();
+        let receipt_root = incoming.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -76,18 +97,7 @@ impl Connection {
                         }
                     }
                     Some("photo") => {
-                        if let Some(path) = value["path"].as_str() {
-                            let name = PathBuf::from(path)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                            queue.lock().unwrap().push_back(CapturedObject {
-                                object_id: path.into(),
-                                object_name: name,
-                                object_size: size,
-                            });
-                        }
+                        enqueue_download(&value, &receipt_root, &queue, &errors);
                     }
                     Some("disconnected") => {
                         flag.store(false, Ordering::Release);
@@ -115,6 +125,7 @@ impl Connection {
             connected,
             error,
             incoming,
+            recovery: super::staging::Recovery::default(),
         })
     }
     fn request(&self, request: &str) -> Result<Value, TetherError> {
@@ -282,14 +293,32 @@ impl CameraBackend for SonyBackend {
     }
     fn poll_objects(&self, id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         let connection = self.connection(id)?;
+        let mut objects = connection.recovery.take();
+        objects.extend(connection.objects.lock().unwrap().drain(..));
+        if !objects.is_empty() { return Ok(objects); }
         if !connection.connected.load(Ordering::Acquire) {
             return Err(TetherError::Disconnected);
         }
         if let Some(error) = connection.error.lock().unwrap().take() {
             return Err(TetherError::Other(error));
         }
-        let objects = connection.objects.lock().unwrap().drain(..).collect();
         Ok(objects)
+    }
+    fn request_objects(&self, id: &str, ids: &[String]) -> Result<Vec<String>, TetherError> {
+        let connection = self.connection(id)?;
+        Ok(connection.recovery.request(&connection.incoming, ids))
+    }
+    fn acknowledge_captured(&self, id: &str, object: &CapturedObject) -> Result<(), TetherError> {
+        let connection = self.connection(id)?;
+        let root = connection.recovery.root(&connection.incoming, object);
+        let path = std::fs::canonicalize(&object.object_id).map_err(|e| TetherError::Other(e.to_string()))?;
+        let root = std::fs::canonicalize(root).map_err(|e| TetherError::Other(e.to_string()))?;
+        if !path.starts_with(root) { return Err(TetherError::AccessDenied); }
+        std::fs::remove_file(&path).map_err(|e| TetherError::Other(e.to_string()))?;
+        let mut manifest = path.as_os_str().to_owned();
+        manifest.push(".photographer-receipt.json");
+        let _ = std::fs::remove_file(PathBuf::from(manifest));
+        Ok(())
     }
     fn open_captured(
         &self,
@@ -297,8 +326,10 @@ impl CameraBackend for SonyBackend {
         object: &CapturedObject,
     ) -> Result<Box<dyn Read + Send>, TetherError> {
         let connection = self.connection(id)?;
-        let path = PathBuf::from(&object.object_id);
-        if !path.starts_with(&connection.incoming) {
+        let path = std::fs::canonicalize(&object.object_id).map_err(|e| TetherError::Other(e.to_string()))?;
+        let root = std::fs::canonicalize(connection.recovery.root(&connection.incoming, object))
+            .map_err(|e| TetherError::Other(e.to_string()))?;
+        if !path.starts_with(root) {
             return Err(TetherError::AccessDenied);
         }
         std::fs::File::open(path)

@@ -76,6 +76,7 @@ pub struct ActiveImport {
     pub job_id: i64,
     /// Pinned at launch: changing the selected library must not change source identity.
     pub source_id: String,
+    pub source_roots: Vec<PathBuf>,
     pub controls: EngineControls,
     /// supervisor 任务句柄（panic 捕获/命名；软控制走 controls，同构接口）。
     /// 持有以防提前丢弃（TaskHandle drop 不取消任务，仅保语义显式）。
@@ -140,14 +141,10 @@ pub fn mark_import_device_unavailable(state: &AppState, device_id: &str) {
     }
     let source_id = crate::devices::normalize_device_id(&current.source_id);
     let device_id = crate::devices::normalize_device_id(device_id);
-    // A user-selected folder on an ejected volume is also an affected source.
-    let matches_source = source_id == device_id
-        || source_id
-            .strip_prefix(FOLDER_ID_PREFIX)
-            .is_some_and(|folder| {
-                let mount = Path::new(&device_id);
-                mount.is_absolute() && Path::new(folder).starts_with(mount)
-            });
+    let mut roots = current.source_roots.clone();
+    if let Some(folder) = source_id.strip_prefix(FOLDER_ID_PREFIX) { roots.push(folder.into()); }
+    let matches_source = source_id == device_id || roots.iter()
+        .any(|root| source_path_on_volume(root, &device_id));
     if !matches_source {
         return;
     }
@@ -161,6 +158,19 @@ pub fn mark_import_device_unavailable(state: &AppState, device_id: &str) {
             job_id: current.job_id,
         });
     }
+}
+
+/// Compare normalized path components, including Windows `E:` mount IDs.
+fn source_path_on_volume(path: &Path, volume: &str) -> bool {
+    let normalize = |value: &str| value.replace('\\', "/").trim_start_matches("//?/")
+        .trim_end_matches('/').to_string();
+    let mut path = normalize(&path.to_string_lossy());
+    let mut volume = normalize(volume);
+    if volume.as_bytes().get(1) == Some(&b':') {
+        path.make_ascii_lowercase();
+        volume.make_ascii_lowercase();
+    } else if !volume.starts_with('/') { return false; }
+    !volume.is_empty() && (path == volume || path.starts_with(&format!("{volume}/")))
 }
 
 /// 设备文件条目 DTO：唯一定义在 events 层（事件载荷与 IPC 共享），此处重导出
@@ -585,18 +595,14 @@ fn import_source(
     device_id: &str,
     library_root: &std::path::Path,
 ) -> Result<ArcSource, String> {
-    let registered = state
-        .devices
-        .lock()
-        .expect("devices mutex poisoned")
-        .get(device_id)
-        .map(|entry| Arc::clone(&entry.source))
-        .ok_or_else(|| format!("设备 {device_id} 不在线"))?;
     if let Some(root) = device_id.strip_prefix(FOLDER_ID_PREFIX) {
-        if let Ok(folder_source) = LocalFolderSource::with_exclude(root, Some(library_root)) {
-            return Ok(ArcSource(Arc::new(folder_source)));
-        }
+        let folder_source = LocalFolderSource::with_exclude(root, Some(library_root))
+            .map_err(|error| error.to_string())?;
+        return Ok(ArcSource(Arc::new(folder_source)));
     }
+    let registered = state.devices.lock().expect("devices mutex poisoned")
+        .get(device_id).map(|entry| Arc::clone(&entry.source))
+        .ok_or_else(|| format!("设备 {device_id} 不在线"))?;
     Ok(ArcSource(registered))
 }
 
@@ -616,6 +622,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     engine.set_registration_gate(std::sync::Arc::clone(&state.register_gate));
     let controls = engine.controls();
     let source_id = engine.source_id();
+    let source_roots = engine.source_roots();
     let (index_db_dir, geo_config_dir, ai_settings) = {
         let settings = state.settings.lock().expect("settings mutex poisoned");
         // app_database_dir 内部会再锁 settings——此处持锁，直接同式解析。
@@ -711,6 +718,7 @@ fn launch_import(state: &AppState, mut engine: Engine, job_id: i64) -> Result<Ac
     Ok(ActiveImport {
         job_id,
         source_id,
+        source_roots,
         controls,
         handle: Some(handle),
     })
@@ -781,14 +789,26 @@ pub fn resume_import(state: &AppState, job_id: i64) -> Result<(), String> {
 
     let db = app_database_db(state)?;
     let (device_id, plan) = load_job_plan(&db, job_id)?;
-    let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
+    let source = restore_import_source(state, &db, &device_id, &library_root_of(state, &plan)?, job_id)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, job_id)
         .map_err(|e| format!("恢复任务失败: {e}"))?;
     *active = Some(launch_import(state, engine, job_id)?);
-    state
-        .bus
-        .publish(crate::events::AppEvent::ImportResumed { job_id });
     Ok(())
+}
+
+/// Reconstruct remembered local selections after restart; source listing stays
+/// inside the worker so a disconnected source remains a paused, resumable job.
+fn restore_import_source(state: &AppState, db: &Db, device_id: &str, library_root: &Path, job_id: i64) -> Result<ArcSource, String> {
+    if !device_id.starts_with("FILES:") || state.devices.lock().expect("devices mutex poisoned").contains_key(device_id) {
+        return import_source(state, device_id, library_root);
+    }
+    let mut stmt = db.0.prepare("SELECT path FROM import_source_roots WHERE job_id = ?1 ORDER BY path")
+        .map_err(|e| e.to_string())?;
+    let paths = stmt.query_map([job_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let paths: Vec<_> = paths.into_iter().filter(|path| Path::new(path).exists()).collect();
+    let source = crate::devices::selection::LocalPathsSource::new(&paths).map_err(|e| e.to_string())?;
+    Ok(ArcSource(Arc::new(source)))
 }
 
 /// 读取任务的 (device_id, plan)。
@@ -834,6 +854,17 @@ pub fn cancel_import(state: &AppState, job_id: i64) -> Result<(), String> {
         .active_import
         .lock()
         .expect("active import mutex poisoned");
+    if active.as_ref().is_none_or(|current| current.job_id != job_id || current.controls.is_done()) {
+        let db = app_database_db(state)?;
+        let changed = db.0.execute(
+            "UPDATE jobs SET status = 'cancelled', finished_at = ?2 WHERE id = ?1 AND kind = 'import' AND status = 'paused'",
+            rusqlite::params![job_id, chrono::Utc::now().to_rfc3339()],
+        ).map_err(|e| e.to_string())?;
+        if changed == 1 {
+            state.bus.publish(crate::events::AppEvent::ImportCancelled { job_id });
+            return Ok(());
+        }
+    }
     let current = active.as_ref().ok_or("没有进行中的导入任务")?;
     if current.job_id != job_id {
         return Err("任务 ID 与当前活跃导入不一致".into());
@@ -883,7 +914,7 @@ pub fn retry_failed(state: &AppState, job_id: i64) -> Result<i64, String> {
 
     let db = app_database_db(state)?;
     let (device_id, plan) = load_job_plan(&db, new_id)?;
-    let source = import_source(state, &device_id, &library_root_of(state, &plan)?)?;
+    let source = restore_import_source(state, &db, &device_id, &library_root_of(state, &plan)?, new_id)?;
     let engine = Engine::resume(db, state.bus.clone(), Box::new(source), plan, new_id)
         .map_err(|e| format!("重试任务失败: {e}"))?;
     *active = Some(launch_import(state, engine, new_id)?);

@@ -30,6 +30,11 @@ enum Record {
         seq: u64,
         ts: String,
     },
+    Lost {
+        id: String,
+        ts: String,
+        reason: String,
+    },
     Acked {
         id: String,
         ts: String,
@@ -175,6 +180,11 @@ impl ReceiptsStore {
         });
     }
 
+    /// Interrupted transfers are terminal; they must not pin the next session.
+    pub fn record_lost(&self, id: &str, reason: &str, ts: &str) {
+        self.append(&Record::Lost { id: id.into(), reason: reason.into(), ts: ts.into() });
+    }
+
     fn remember(&self, kind: char, id: &str) -> bool {
         self.recorded
             .lock()
@@ -198,7 +208,7 @@ impl ReceiptsStore {
                 Record::Pending { id, backend, seq, .. } => {
                     last.insert(id.clone(), UnackedReceipt { id, backend, seq });
                 }
-                Record::Acked { id, .. } => {
+                Record::Acked { id, .. } | Record::Lost { id, .. } => {
                     last.remove(&id);
                 }
                 Record::Failed { id, .. } => {

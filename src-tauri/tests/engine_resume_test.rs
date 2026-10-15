@@ -1,5 +1,5 @@
 //! 断点恢复语义：软取消返回部分统计、暂停恢复无损续跑、中断后 resume
-//! 只重做 pending（`.part` 残留清扫）、启动时孤儿 running/paused 任务终老。
+//! 只重做 pending（`.part` 残留清扫）、启动时 running 转 paused，保留恢复入口。
 
 mod common;
 
@@ -95,7 +95,7 @@ fn pause_resume_completes_without_loss() {
 }
 
 #[test]
-fn resume_after_interruption_redoes_pending_only() {
+fn resume_discards_copying_and_completes_pending_only() {
     let src = tempfile::tempdir().unwrap();
     let db_dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
@@ -131,6 +131,10 @@ fn resume_after_interruption_redoes_pending_only() {
     // 会话二：resume 重建（verified 跳过，pending 重做；plan 从 journal
     // 重建——与 ipc::resume_import 同构，布局公式由 plan.album_id 派生）
     let db2 = open_db(db_dir.path());
+    let interrupted = db2.all_job_files(job_id).unwrap().into_iter()
+        .find(|row| row.state == FileState::Pending).unwrap();
+    db2.0.execute("UPDATE job_files SET state = 'copying' WHERE job_id = ?1 AND src = ?2",
+        rusqlite::params![job_id, interrupted.src]).unwrap();
     let plan2: import::engine::ImportPlan =
         serde_json::from_str(&db2.job_plan_json(job_id).unwrap().unwrap()).unwrap();
     let engine = Engine::resume(
@@ -143,27 +147,25 @@ fn resume_after_interruption_redoes_pending_only() {
     .unwrap();
     let stats = engine.run();
 
-    assert_eq!(stats.done_files, 12, "续传后无遗漏");
-    assert_eq!(stats.failed_files, 0);
-    assert_eq!(count_assets(&open_db(db_dir.path())), 12, "无重复入库");
+    assert_eq!(stats.done_files, 11, "仅丢弃上次未完成的一个文件");
+    assert_eq!(stats.failed_files, 1);
+    assert_eq!(count_assets(&open_db(db_dir.path())), 11, "未完成文件不入库");
 
     // .part 无残留：暂存目录已清除
     assert!(!part_dir.exists(), "resume 后暂存目录应清除");
     assert!(find_part_files(target.path()).is_empty());
 
-    // journal 全 verified，job 终态 done
-    assert!(journal_states(&open_db(db_dir.path()), job_id)
-        .into_iter()
-        .all(|s| s == FileState::Verified));
+    let db = open_db(db_dir.path());
+    let lost = db.all_job_files(job_id).unwrap().into_iter().find(|row| row.src == interrupted.src).unwrap();
+    assert_eq!(lost.state, FileState::Failed);
+    assert!(lost.error.unwrap().starts_with(events::LOST_IMPORT_FILE_PREFIX));
+    assert!(db.retry_failed_into_new_job(job_id).unwrap().is_none(), "丢失文件不参加失败重试");
     assert_eq!(job_status(&open_db(db_dir.path()), job_id), "done");
 }
 
-/// 启动自愈（2026-09-21 bug②）：进程重启后引擎会话清零，jobs 表遗留的
-/// running/paused 是跨会话死任务（真库 job 18 running 挂 3 天、任务抽屉
-/// 删不掉）——启动核对无活跃引擎会话即终老为 cancelled + 日志；journal
-/// 保留（设备回连后 resume 仍可续传）；幂等；终态任务不动。
+/// 重启后 running 自动暂停，paused/终态保持，恢复入口仍可用。
 #[test]
-fn startup_reaps_orphan_running_and_paused_jobs() {
+fn startup_pauses_running_and_keeps_paused_jobs() {
     let db_dir = tempfile::tempdir().unwrap();
     let db = open_db(db_dir.path());
 
@@ -189,18 +191,18 @@ fn startup_reaps_orphan_running_and_paused_jobs() {
     )
     .unwrap();
 
-    // 启动核对：无活跃引擎会话（进程刚起，天然没有）→ 孤儿终老
+    // 启动核对：仅 running 转 paused。
     let reaped = db.reap_orphan_import_jobs().unwrap();
-    assert_eq!(reaped.len(), 2, "running + paused 各一：{reaped:?}");
-    assert_eq!(job_status(&db, running), "cancelled");
-    assert_eq!(job_status(&db, paused), "cancelled");
+    assert_eq!(reaped, vec![running]);
+    assert_eq!(job_status(&db, running), "paused");
+    assert_eq!(job_status(&db, paused), "paused");
     assert_eq!(job_status(&db, done), "done", "终态任务不得被改动");
 
-    // 每个终老任务落一行 warn 日志（可观测性：任务抽屉能解释去向）
+    // 自动暂停记录一行日志。
     let logged: i64 =
         db.0.query_row(
             "SELECT COUNT(*) FROM logs WHERE job_id = ?1 AND level = 'warn' \
-             AND message LIKE '%孤儿任务%'",
+             AND message LIKE '%进程重启%'",
             [running],
             |r| r.get(0),
         )
@@ -217,7 +219,9 @@ fn startup_reaps_orphan_running_and_paused_jobs() {
     // 幂等：二次启动无孤儿
     assert!(db.reap_orphan_import_jobs().unwrap().is_empty());
 
-    // 任务抽屉的可删性恢复（bug② 直接痛点：running 态 import_job_delete 拒删）
+    // 暂停任务仍保留恢复数据，必须显式取消才能删除历史。
+    assert!(db.delete_job_history(running).unwrap().is_err());
+    db.finish_job(running, "cancelled", "{}").unwrap();
     assert!(matches!(db.delete_job_history(running).unwrap(), Ok(true)));
 }
 

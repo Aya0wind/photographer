@@ -246,7 +246,7 @@ impl Db {
 
     /// Tethered captures must keep their chosen album; deletion is an error rather
     /// than silently registering an ungrouped photo. Check and insert share a lock.
-    pub fn insert_captured_asset(&self, asset: &AssetRow, album_id: i64) -> Result<()> {
+    pub fn insert_captured_asset(&self, asset: &AssetRow, album_id: i64, receipt: Option<&str>) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.0,
             rusqlite::TransactionBehavior::Immediate,
@@ -259,6 +259,9 @@ impl Db {
             return Err(Error::QueryReturnedNoRows);
         }
         insert_asset_on(&tx, asset, Some(album_id), None)?;
+        if let Some(receipt) = receipt {
+            tx.execute("INSERT INTO tethering_committed_receipts (receipt) VALUES (?1)", [receipt])?;
+        }
         tx.commit()
     }
 

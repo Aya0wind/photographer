@@ -722,10 +722,7 @@ pub fn start(state: SharedState, album_id: i64, camera_id: &str) -> Result<Sessi
     Ok(dto)
 }
 
-/// §B1 崩溃/重连恢复：从磁盘账本载入未确认收据（最后一态非 acked），
-/// 通过 `request_objects` 优先按对象 id 主动收取——后端把仍存在的对象
-/// 重新入收片队列，poller 随后走正常收片路径；后端不支持按需收取
-///（返回空）或对象已消失（瞬态 id）则退回事件驱动等待，账本保留。
+/// Requeue completed local downloads only. An interrupted camera transfer is lost.
 fn recover_unacked(session: &Session) {
     let Some(ledger) = session.ledger.as_ref() else {
         return;
@@ -746,10 +743,16 @@ fn recover_unacked(session: &Session) {
         .request_objects(&session.camera.pnp_id, &ids)
     {
         Ok(requeued) => {
+            let ts = chrono::Utc::now().to_rfc3339();
+            for receipt in &unacked {
+                if !requeued.contains(&receipt.id) {
+                    ledger.record_lost(&receipt.id, "对象已消失或没有完整下载收据", &ts);
+                }
+            }
             crate::devices::diagnostics::record(format!(
                 "tethering recovery requeued={} dropped={}",
                 requeued.len(),
-                ids.len() - requeued.len()
+                ids.len().saturating_sub(requeued.len())
             ));
         }
         Err(error) => {
@@ -847,6 +850,7 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
     }
     let result: Result<(), String> = (|| {
         let db = crate::ipc::app_database_db(state)?;
+        if acknowledge_committed(&db, session, object)? { return Ok(()); }
         // 删库软停（2026-10-09 审计 P0）：ingest 前查 pin 的照片库仍在册，
         // 不在 → 结束会话（request_stop 软信号——poller 线程此刻持操作锁，
         // 直接 stop() 会同线程重入死锁；循环顶检测 cancelled 后收尾断开），
@@ -934,11 +938,31 @@ fn receive(state: &SharedState, session: &Session, object: &CapturedObject) -> R
         let ts = chrono::Utc::now().to_rfc3339();
         match &result {
             Ok(()) => ledger.record_acked(&object.object_id, &ts),
+            Err(error) if error.starts_with(crate::events::LOST_IMPORT_FILE_PREFIX) => {
+                ledger.record_lost(&object.object_id, error, &ts);
+                session.seen.lock().unwrap().insert(object.object_id.clone());
+                let _ = session.backend.acknowledge_captured(&session.camera.pnp_id, object);
+            }
             Err(error) => ledger.record_failed(&object.object_id, error, &ts),
         }
     }
     session.receiving.store(false, Ordering::Release);
     result
+}
+
+/// Local download UUIDs are committed with the asset, so a crash between DB
+/// commit and ledger acknowledgement cannot ingest that receipt twice.
+fn acknowledge_committed(db: &Db, session: &Session, object: &CapturedObject) -> Result<bool, String> {
+    if !matches!(session.backend.id(), "sony-sdk" | "gphoto") { return Ok(false); }
+    let committed: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tethering_committed_receipts WHERE receipt = ?1)",
+        [&object.object_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if committed {
+        let _ = session.backend.acknowledge_captured(&session.camera.pnp_id, object);
+        session.seen.lock().unwrap().insert(object.object_id.clone());
+    }
+    Ok(committed)
 }
 
 fn ingest_from_backend(
@@ -952,7 +976,7 @@ fn ingest_from_backend(
 ) -> Result<(TetherPhoto, Option<String>), String> {
     let mut source = backend
         .open_captured(camera_id, object)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{}无法读取拍摄文件: {e}", crate::events::LOST_IMPORT_FILE_PREFIX))?;
     let photo = ingest(
         db,
         library,
@@ -961,6 +985,7 @@ fn ingest_from_backend(
         object.object_size,
         &mut source,
         gate,
+        matches!(backend.id(), "sony-sdk" | "gphoto").then_some(object.object_id.as_str()),
     )?;
     drop(source); // Windows cannot remove the local receipt while still open.
     let cleanup_error = backend
@@ -978,6 +1003,7 @@ fn ingest_from_backend(
 /// 入库）持 `register_gate`（§八-5 单管道）——与库扫描/导入的登记段
 /// 互斥串行；未注入（引擎级测试形态）跳过。查重不设：新拍照片语义上
 /// 就是新资产。
+#[allow(clippy::too_many_arguments)]
 pub fn ingest(
     db: &Db,
     library: &TetherLibrary,
@@ -986,6 +1012,7 @@ pub fn ingest(
     expected_size: u64,
     source: &mut dyn Read,
     gate: Option<&std::sync::Arc<std::sync::Mutex<()>>>,
+    receipt: Option<&str>,
 ) -> Result<TetherPhoto, String> {
     let filename = name
         .rsplit(['/', '\\'])
@@ -1016,7 +1043,8 @@ pub fn ingest(
         let mut size = 0;
         let mut hash = xxhash_rust::xxh64::Xxh64::new(0);
         loop {
-            let n = source.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = source.read(&mut buf).map_err(|e|
+                format!("{}拍摄文件读取中断: {e}", crate::events::LOST_IMPORT_FILE_PREFIX))?;
             if n == 0 {
                 break;
             }
@@ -1027,7 +1055,7 @@ pub fn ingest(
             head.extend_from_slice(&buf[..take]);
         }
         if size == 0 || (expected_size > 0 && size != expected_size) {
-            return Err("拍摄照片传输不完整，源文件已保留".into());
+            return Err(format!("{}拍摄照片传输不完整", crate::events::LOST_IMPORT_FILE_PREFIX));
         }
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
@@ -1108,7 +1136,7 @@ pub fn ingest(
                 destination.display()
             ));
         }
-        db.insert_captured_asset(&row, album_id)
+        db.insert_captured_asset(&row, album_id, receipt)
             .map_err(|e| e.to_string())?;
         let id = db
             .asset_id_by_path(&row.path)
@@ -1814,6 +1842,7 @@ mod tests {
                     bytes.len() as u64,
                     &mut cursor,
                     Some(&gate),
+                    None,
                 )
             })
         };
@@ -1960,7 +1989,7 @@ mod receipt_tests {
 
     /// 崩溃形态：磁盘账本有未确认收据（一台相机两条），重启后新会话
     /// 建立 → 恢复路径必须调用 request_objects；可恢复对象走正常
-    /// receive/ingest 后账本落 Acked，消失对象保持未确认。
+    /// receive/ingest 后账本落 Acked，消失对象记丢失。
     #[test]
     fn session_recovery_requests_unacked_and_acks_ledger_after_ingest() {
         let root = tempfile::tempdir().unwrap();
@@ -2018,15 +2047,13 @@ mod receipt_tests {
         receive(&state, &session, &retained).unwrap();
         assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 1);
         let unacked = ledger.unacked();
-        assert_eq!(unacked.len(), 1, "只剩消失对象的未确认条目");
-        assert_eq!(unacked[0].id, "object-gone");
+        assert!(unacked.is_empty(), "消失对象记为丢失，不阻塞后续联拍");
         assert!(!Path::new(&retained.object_id).exists(), "暂存已确认清理");
     }
 
-    /// 后端不支持按需收取（trait 默认返回空）→ 恢复退回事件驱动等待，
-    /// 账本条目保留（不删除、不阻断会话）。
+    /// 后端返回空：旧对象记为丢失，不再无限等待。
     #[test]
-    fn recovery_without_backend_support_falls_back_to_event_driven() {
+    fn recovery_without_backend_support_marks_missing_lost() {
         let root = tempfile::tempdir().unwrap();
         let receipts_dir = root.path().join("receipts");
         let ledger = Arc::new(ReceiptsStore::open(&receipts_dir, "serial:SN-2"));
@@ -2042,14 +2069,14 @@ mod receipt_tests {
         recover_unacked(&session); // 不 panic、不报错
         assert_eq!(
             ledger.unacked().len(),
-            1,
-            "默认后端无法按需收取 → 账本保留待事件驱动"
+            0,
+            "无法收回的对象记为丢失"
         );
     }
 
-    /// ingest 失败 → 账本记 Failed 且保持未确认（重试语义与 pending 同）。
+    /// 半文件记为丢失，不参与重连补收。
     #[test]
-    fn failed_ingestion_records_failed_state_in_ledger() {
+    fn truncated_ingestion_records_terminal_loss_in_ledger() {
         let root = tempfile::tempdir().unwrap();
         let db_dir = root.path().join("db");
         std::fs::create_dir_all(&db_dir).unwrap();
@@ -2091,7 +2118,6 @@ mod receipt_tests {
         truncated.object_size += 1; // 传输不完整 → ingest 失败
         assert!(receive(&state, &session, &truncated).is_err());
         let unacked = ledger.unacked();
-        assert_eq!(unacked.len(), 1, "失败保持未确认（可重试）");
-        assert_eq!(unacked[0].id, truncated.object_id);
+        assert!(unacked.is_empty(), "传输不完整的照片记为丢失，不重传");
     }
 }

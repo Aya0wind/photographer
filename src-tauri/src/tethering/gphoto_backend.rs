@@ -542,6 +542,7 @@ struct GphotoConnection {
     camera: *mut gpt::Camera,
     /// 收片暂存目录（下载落盘 + open_captured 白名单根）。
     incoming: PathBuf,
+    recovery: super::staging::Recovery,
     /// 确认设备消失后置否；短暂 busy/timeout 不等于断开。
     connected: AtomicBool,
     settings_revision: AtomicU64,
@@ -1192,6 +1193,7 @@ impl CameraBackend for GphotoBackend {
                         let conn = Arc::new(GphotoConnection {
                             camera,
                             incoming,
+                            recovery: super::staging::Recovery::default(),
                             connected: AtomicBool::new(true),
                             settings_revision: AtomicU64::new(0),
                             mode_revision: AtomicU64::new(0),
@@ -1385,6 +1387,8 @@ impl CameraBackend for GphotoBackend {
     fn poll_objects(&self, pnp_id: &str) -> Result<Vec<CapturedObject>, TetherError> {
         let _guard = self.lock_camera()?;
         let conn = self.connection(pnp_id)?;
+        let recovered = conn.recovery.take();
+        if !recovered.is_empty() { return Ok(recovered); }
         if !conn.connected.load(Ordering::Acquire) {
             return Err(TetherError::Disconnected);
         }
@@ -1444,13 +1448,18 @@ impl CameraBackend for GphotoBackend {
         }
     }
 
+    fn request_objects(&self, pnp_id: &str, ids: &[String]) -> Result<Vec<String>, TetherError> {
+        let conn = self.connection(pnp_id)?;
+        Ok(conn.recovery.request(&conn.incoming, ids))
+    }
+
     fn open_captured(
         &self,
         pnp_id: &str,
         object: &CapturedObject,
     ) -> Result<Box<dyn std::io::Read + Send>, TetherError> {
         let conn = self.connection(pnp_id)?;
-        let path = super::staging::validated_path(&conn.incoming, object)?;
+        let path = super::staging::validated_path(&conn.recovery.root(&conn.incoming, object), object)?;
         std::fs::File::open(path)
             .map(|f| Box::new(f) as Box<dyn std::io::Read + Send>)
             .map_err(|e| TetherError::Other(e.to_string()))
@@ -1472,7 +1481,7 @@ impl CameraBackend for GphotoBackend {
         object: &CapturedObject,
     ) -> Result<(), TetherError> {
         let conn = self.connection(pnp_id)?;
-        super::staging::acknowledge(&conn.incoming, object)
+        super::staging::acknowledge(&conn.recovery.root(&conn.incoming, object), object)
     }
 
     fn capture_still(
@@ -1686,6 +1695,7 @@ mod lock_tests {
             // No FFI call is permitted while the camera lock is busy.
             camera: std::ptr::null_mut(),
             incoming: incoming.path().to_owned(),
+            recovery: super::super::staging::Recovery::default(),
             connected: AtomicBool::new(true),
             settings_revision: AtomicU64::new(0),
             mode_revision: AtomicU64::new(0),

@@ -43,6 +43,7 @@ fn removal_uses_pinned_folder_source_and_rejects_premature_resume() {
     *state.active_import.lock().unwrap() = Some(ipc::ActiveImport {
         job_id,
         source_id: source_id.clone(),
+        source_roots: engine.source_roots(),
         controls: controls.clone(),
         handle: None,
     });

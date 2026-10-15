@@ -456,8 +456,12 @@ function HistoryRow({
   row,
   onDelete,
   onOpenLogs,
+  onResume,
+  onCancel,
 }: {
   row: JobRow;
+  onResume: (jobId: number) => void;
+  onCancel: (jobId: number) => void;
   onDelete: (jobId: number) => void;
   onOpenLogs: (jobId: number) => void;
 }) {
@@ -502,6 +506,12 @@ function HistoryRow({
           )}
         </p>
       </div>
+      {row.kind === "import" && row.status === "paused" && <>
+        <button type="button" onClick={() => onResume(row.id)}
+          className="rounded-md border border-edge px-2 py-1 text-[10px] text-accent">{t("tasks.resume")}</button>
+        <button type="button" onClick={() => onCancel(row.id)}
+          className="rounded-md border border-edge px-2 py-1 text-[10px] text-text-muted">{t("tasks.cancel")}</button>
+      </>}
       <button
         type="button"
         onClick={() => onOpenLogs(row.id)}
@@ -512,6 +522,7 @@ function HistoryRow({
       </button>
       <button
         type="button"
+        disabled={row.status === "running" || row.status === "paused"}
         onClick={() => onDelete(row.id)}
         aria-label={t("taskdrawer.deleteJob")}
         title={t("taskdrawer.deleteJob")}
@@ -808,6 +819,8 @@ export function TaskDrawerPanel({ open, onClose }: { open: boolean; onClose: () 
                         row={row}
                         onDelete={(id) => void deleteJob(id)}
                         onOpenLogs={setLogJobId}
+                        onResume={(id) => void useImportStore.getState().resumeJob(id)}
+                        onCancel={(id) => void useImportStore.getState().cancelJob(id).then(() => history.loadFirst())}
                       />
                     ))}
                   </AnimatePresence>

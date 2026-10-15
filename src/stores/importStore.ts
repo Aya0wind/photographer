@@ -416,7 +416,8 @@ export const useImportStore = create<ImportState>((set, get) => ({
       case "importSessionStarted": {
         set((s) => {
           // idle→running：重复 start（任务已存在）属非法转移，忽略
-          if (s.activeJobs[event.jobId]) return s;
+          const existing = s.activeJobs[event.jobId];
+          if (existing?.status === "running" || existing?.status === "paused") return s;
           const activeJobs = { ...s.activeJobs };
           activeJobs[event.jobId] = {
             jobId: event.jobId,
@@ -636,7 +637,11 @@ export const useImportStore = create<ImportState>((set, get) => ({
   },
 
   resumeJob: async (jobId) => {
-    await importResume(jobId);
+    try {
+      await importResume(jobId);
+    } catch (error) {
+      set({ lastError: error instanceof Error ? error.message : String(error) });
+    }
   },
 
   cancelJob: async (jobId) => {

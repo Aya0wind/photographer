@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use xxhash_rust::xxh64::Xxh64;
 
 use crate::devices::{classify, DeviceError, DeviceSource, FileEntry};
-use crate::events::AssetKind;
+use crate::events::{AssetKind, LOST_IMPORT_FILE_PREFIX};
 use crate::db::organization::resolve_captured;
 use crate::metadata::exif_lite::{self, MetaLite};
 use crate::settings::DuplicatePolicy;
@@ -77,10 +77,19 @@ impl CopiedFile {
 /// 单遍双写暂存：主/第二目的地的 `.part` 文件对，同一读流同遍写双侧；
 /// 任一侧写/校验失败即双侧清盘（不留半套拷贝）。
 struct PartSink {
-    out: File,
+    out: Option<File>,
     part: PathBuf,
     out2: Option<File>,
     part2: Option<PathBuf>,
+    finished: bool,
+}
+
+impl Drop for PartSink {
+    fn drop(&mut self) {
+        drop(self.out.take());
+        drop(self.out2.take());
+        if !self.finished { self.discard(); }
+    }
 }
 
 impl PartSink {
@@ -91,23 +100,30 @@ impl PartSink {
         let (out2, part2) = match second_dir {
             Some(dir) => {
                 let part2 = dir.join(format!("{seq}.part"));
-                let out2 =
-                    File::create(&part2).map_err(|e| format!("创建第二目的地临时文件失败: {e}"))?;
+                let out2 = match File::create(&part2) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        drop(out);
+                        let _ = fs::remove_file(&part);
+                        return Err(format!("创建第二目的地临时文件失败: {error}"));
+                    }
+                };
                 (Some(out2), Some(part2))
             }
             None => (None, None),
         };
         Ok(Self {
-            out,
+            out: Some(out),
             part,
             out2,
             part2,
+            finished: false,
         })
     }
 
     /// 写双侧 + xxh64 单遍更新；失败清双侧半成品。
     fn write(&mut self, buf: &[u8], xxh: &mut Xxh64) -> Result<(), String> {
-        if let Err(e) = self.out.write_all(buf) {
+        if let Err(e) = self.out.as_mut().expect("open part").write_all(buf) {
             self.discard();
             return Err(format!("写盘失败: {e}"));
         }
@@ -123,7 +139,7 @@ impl PartSink {
 
     /// flush + 关闭句柄（Windows rename 前必须）+ 双侧长度校验。
     fn finish(mut self, expected: u64) -> Result<(PathBuf, Option<PathBuf>), String> {
-        if let Err(e) = self.out.flush() {
+        if let Err(e) = self.out.as_mut().expect("open part").flush() {
             self.discard();
             return Err(format!("刷盘失败: {e}"));
         }
@@ -142,7 +158,7 @@ impl PartSink {
             };
             if len != expected {
                 return Err(format!(
-                    "{label}长度校验失败: 期望 {expected} 字节，实得 {len}"
+                    "{LOST_IMPORT_FILE_PREFIX}{label}长度校验失败: 期望 {expected} 字节，实得 {len}"
                 ));
             }
             Ok(())
@@ -158,7 +174,8 @@ impl PartSink {
             }
         }
         // 双侧写句柄随 self 在返回时 drop（Windows：rename 前必须关闭）
-        Ok((self.part, self.part2))
+        self.finished = true;
+        Ok((self.part.clone(), self.part2.take()))
     }
 
     /// 清双侧半成品（best-effort）。
@@ -204,16 +221,21 @@ pub(super) fn copy_one(
         error,
     };
     let io_err = |e: std::io::Error| {
-        if e.kind() == std::io::ErrorKind::ConnectionAborted {
+        if matches!(e.kind(), std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe)
+            || cfg!(windows) && matches!(e.raw_os_error(), Some(21 | 55 | 433 | 995 | 1117 | 1167))
+            || cfg!(unix) && matches!(e.raw_os_error(), Some(6 | 19)) {
             disconnect(format!("传输中断: {e}"))
         } else {
-            fail(format!("读取失败: {e}"))
+            fail(format!("{LOST_IMPORT_FILE_PREFIX}读取失败: {e}"))
         }
     };
 
     let mut reader = match source.stream(&entry.id) {
         Ok(reader) => reader,
         Err(DeviceError::Disconnected) => return disconnect("设备连接中断".into()),
+        Err(DeviceError::Io(error)) => return io_err(error),
         Err(err) => return fail(err.to_string()),
     };
 
