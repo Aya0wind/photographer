@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from "react";
+import {useEffect,useLayoutEffect,useRef,useState} from "react";
 import {useTranslation} from "react-i18next";
 
 export default function Slider({ label, value, unit, gradient, min = -100, max = 100, step = 1, defaultValue = 0, onChange, onSet, onReset, begin, end }: {
@@ -18,7 +18,8 @@ export default function Slider({ label, value, unit, gradient, min = -100, max =
   function increment(value:number,amount:number){return Math.max(min,Math.min(max,Number((value+amount).toFixed(10))));}
   function finishKeyboard(){if(keyboard.current){keyboard.current=null;end();}}
   function finishPointer(){fineDrag.current=null;end();}
-  useEffect(()=>{if(keyboard.current&&keyboard.current.value!==value)keyboard.current=null;if(fineDrag.current&&fineDrag.current.value!==value)fineDrag.current=null;},[value]);
+  // Passive effects can see a newer pointer/key ref than the committed value.
+  useLayoutEffect(()=>{if(keyboard.current&&keyboard.current.value!==value)keyboard.current=null;if(fineDrag.current&&fineDrag.current.value!==value)fineDrag.current=null;},[value]);
   useEffect(()=>{if(!editing) setDraft(String(value));},[value,editing]);
   function commitNumber() {
     setEditing(false);

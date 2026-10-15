@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import CurveCoordinates from "./CurveCoordinates";
 import type { AdvancedAdjustments } from "@/ipc/api";
@@ -35,7 +35,12 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
   const histogram = sampling.histogram;
   const drag = useRef<{ id: number; index: number; points: CurvePoint[]; x: number; y: number } | null>(null);
   const raw = channel === "rgb" ? adjustments.curves : adjustments.channelCurves?.[channel];
-  useEffect(()=>{if(drag.current&&raw!==drag.current.points)drag.current=null;},[raw]);
+  // Reconcile before the next pointer event can advance the gesture ref.
+  // Parents may copy equal coordinates without cancelling the current drag.
+  useLayoutEffect(()=>{
+    const current=drag.current;
+    if(current&&!(raw?.length===current.points.length&&raw.every(([x,y],i)=>x===current.points[i][0]&&y===current.points[i][1])))drag.current=null;
+  },[raw]);
   const points = raw?.length ? raw : IDENTITY;
   const samples = curveSamples(points);
   const apply = (curve: CurvePoint[], record = true) => onChange(channel === "rgb" ? { curves: curve }

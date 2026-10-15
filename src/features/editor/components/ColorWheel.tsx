@@ -1,8 +1,9 @@
-import {useEffect,useRef} from "react";
+import {useLayoutEffect,useRef} from "react";
 export interface WheelValue{hue:number;sat:number;lum:number}
 export default function ColorWheel({label,value,onChange,begin,end,cancel}:{label:string;value:WheelValue;onChange:(value:WheelValue,record?:boolean)=>void;begin:()=>void;end:()=>void;cancel?:()=>void}){
  const active=useRef<{id:number;initial:WheelValue;last:WheelValue}|null>(null);
- useEffect(()=>{if(active.current&&active.current.last!==value)active.current=null;},[value]);
+ // Flush external-value reconciliation before another movement updates last.
+ useLayoutEffect(()=>{const last=active.current?.last;if(last&&(last.hue!==value.hue||last.sat!==value.sat||last.lum!==value.lum))active.current=null;},[value]);
  function move(e:React.PointerEvent<HTMLDivElement>){const g=active.current;if(!g)return;const rect=e.currentTarget.getBoundingClientRect();const radius=Math.min(rect.width,rect.height)/2;const x=e.clientX-rect.left-rect.width/2,y=e.clientY-rect.top-rect.height/2;
   let hue=Math.hypot(x,y)<0.01?g.initial.hue:(Math.atan2(y,x)*180/Math.PI+360)%360,sat=Math.min(100,Math.hypot(x,y)/radius*100);
   if(e.shiftKey)hue=g.initial.hue;
