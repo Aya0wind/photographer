@@ -706,9 +706,8 @@ mod com {
         let (code, bytes) = execute_with_data_to_read(&device, 0x1001, &[])?;
         if code != 0x2001 { return Ok(None); }
         let info = mtp::parse_device_info(&bytes).map_err(|error| DeviceError::Other(error.to_string()))?;
-        // Sony's ARW format was verified on hardware. Other vendors keep the
-        // general enumerator until their raw format/count contract is verified.
-        if !info.manufacturer.to_ascii_lowercase().contains("sony") || !info.operations_supported.contains(&0x1006) { return Ok(None); }
+        if !info.operations_supported.contains(&0x1006) { return Ok(None); }
+        let sony = info.manufacturer.to_ascii_lowercase().contains("sony");
         let count = |format: u32| -> DeviceResult<Option<u64>> {
             let results = send_command(&device, &WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE, 0x1006, &[u32::MAX, format, 0])?;
             if response_code(&results)? != 0x2001 { return Ok(None); }
@@ -720,7 +719,8 @@ mod com {
             Ok(number)
         };
         let started = Instant::now();
-        let (Some(all), Some(folders), Some(jpg), Some(raw)) = (count(0)?, count(0x3001)?, count(0x3801)?, count(0xb101)?) else { return Ok(None); };
+        let (Some(all), Some(folders), Some(jpg)) = (count(0)?, count(0x3001)?, count(0x3801)?) else { return Ok(None); };
+        let raw = if sony { let Some(raw) = count(0xb101)? else { return Ok(None); }; raw } else { 0 };
         if all.checked_sub(folders) != jpg.checked_add(raw) { return Ok(None); }
         crate::devices::diagnostics::record(format!("WPD fast count: jpg={jpg} raw={raw}; elapsed={:?}", started.elapsed()));
         Ok(Some(std::collections::BTreeMap::from([(crate::events::AssetKind::Photo, jpg), (crate::events::AssetKind::Raw, raw)])))

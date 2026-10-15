@@ -80,32 +80,37 @@ impl DeviceSource for LocalFolderSource {
     }
 
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        let files = self.inner.list()?;
-        match &self.exclude_rel {
-            None => Ok(files),
-            // 相对路径比对：不做逐文件 canonicalize（万级文件 × NAS = 网络
-            // 往返灾难）；rel_path 与 exclude_rel 均为 `/` 分隔
-            Some(exclude) => Ok(files
-                .into_iter()
-                .filter(|f| !Path::new(&f.rel_path).starts_with(Path::new(exclude)))
-                .collect()),
-        }
+        self.inner
+            .enumerate(true, self.exclude_rel.as_deref(), None)
+    }
+
+    fn file_sizes(&self, ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> {
+        self.inner.file_sizes(ids)
     }
 
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {
         self.inner.open_head(id, max)
     }
 
+    fn fast_file_counts(
+        &self,
+    ) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+        self.inner
+            .count_files(self.exclude_rel.as_deref())
+            .map(Some)
+    }
+
     fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
-        let files = self.inner.list_names()?;
-        Ok(files
-            .into_iter()
-            .filter(|file| {
-                self.exclude_rel.as_ref().is_none_or(|exclude| {
-                    !Path::new(&file.rel_path).starts_with(Path::new(exclude))
-                })
-            })
-            .collect())
+        self.inner
+            .enumerate(false, self.exclude_rel.as_deref(), None)
+    }
+
+    fn list_names_with_progress(
+        &self,
+        callback: super::FileBatchCallback,
+    ) -> DeviceResult<Vec<FileEntry>> {
+        self.inner
+            .enumerate(false, self.exclude_rel.as_deref(), Some(callback))
     }
 
     fn stream(&self, id: &str) -> DeviceResult<Box<dyn std::io::Read + Send>> {

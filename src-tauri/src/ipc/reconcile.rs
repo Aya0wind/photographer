@@ -121,28 +121,11 @@ fn spawn_scan(state: &SharedState, id: String, source: Arc<dyn DeviceSource>, tr
     let state = Arc::clone(state);
     let trigger = trigger.to_owned();
     supervisor.spawn("scan", source.name(), move |_| {
-        crate::devices::diagnostics::record(format!("scan begin: {id}; opening library"));
-        let progress_state = Arc::clone(&state);
-        let progress_source = Arc::clone(&source);
-        let progress_id = id.clone();
-        let on_batch: crate::devices::FileBatchCallback = Arc::new(move |files| {
-            let mut registry = progress_state
-                .devices
-                .lock()
-                .expect("devices mutex poisoned");
-            if let Some(entry) = registry.get_mut(&progress_id)
-                .filter(|entry| Arc::ptr_eq(&entry.source, &progress_source)) {
-                entry.files.get_or_insert_with(Vec::new).extend(files.iter().cloned());
-                progress_state.bus.publish(AppEvent::DeviceFilesProgress {
-                    id: progress_id.clone(),
-                    files: files.iter().map(super::FileEntryDto::from).collect(),
-                });
-            }
-        });
+        crate::devices::diagnostics::record(format!("count begin: {id}"));
         // Panic 也完成扫描状态转换，不能永远占着“扫描中”。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::devices::diagnostics::record(format!("scan media begin: {id}"));
-            scan_device_with_progress(&*source, None, false, Some(on_batch))
+            scan_device_with_progress(&*source, None, false, None)
                 .map_err(|err| err.to_string())
         }))
         .unwrap_or_else(|_| Err("设备扫描异常，请重试".into()));

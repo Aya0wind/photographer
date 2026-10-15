@@ -27,6 +27,7 @@ pub use super::wpd_helpers::*;
 pub struct WpdSource {
     pnp_id: String,
     friendly_name: String,
+    discovery_files: std::sync::Mutex<Option<Vec<FileEntry>>>,
 }
 
 impl WpdSource {
@@ -34,6 +35,7 @@ impl WpdSource {
         Self {
             pnp_id: pnp_id.into(),
             friendly_name: friendly_name.into(),
+            discovery_files: std::sync::Mutex::new(None),
         }
     }
 }
@@ -100,15 +102,27 @@ impl DeviceSource for WpdSource {
         worker::list(&self.pnp_id, None, false)
     }
     fn fast_file_counts(&self) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
-        if !self.friendly_name.to_ascii_lowercase().contains("sony") && !self.friendly_name.contains("ILCE") { return Ok(None); }
+        // A refresh must invalidate names collected by an earlier scan.
+        *self.discovery_files.lock().unwrap() = None;
         match super::super::tethering::wpd_backend::fast_media_counts(&self.pnp_id) {
-            Err(DeviceError::Disconnected) => Err(DeviceError::Disconnected),
-            Err(error) => { super::diagnostics::record(format!("fast count unavailable: {error}")); Ok(None) },
-            result => result,
+            Ok(Some(counts)) => return Ok(Some(counts)),
+            Err(DeviceError::Disconnected) => return Err(DeviceError::Disconnected),
+            Err(error) => super::diagnostics::record(format!("fast count unavailable: {error}")),
+            Ok(None) => {},
         }
+        // Some cameras cannot count by format. Enumerate only their minimal
+        // name/type properties once, retaining names for the later photo page.
+        let files = worker::list(&self.pnp_id, None, true)?;
+        let mut counts = std::collections::BTreeMap::new();
+        for file in &files {
+            *counts.entry(super::classify(&file.rel_path, &[])).or_insert(0) += 1;
+        }
+        *self.discovery_files.lock().unwrap() = Some(files);
+        Ok(Some(counts))
     }
 
     fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        if let Some(files) = self.discovery_files.lock().unwrap().as_ref() { return Ok(files.clone()); }
         worker::list(&self.pnp_id, None, true)
     }
     fn file_sizes(&self, ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> {
@@ -120,6 +134,8 @@ impl DeviceSource for WpdSource {
     }
 
     fn list_names_with_progress(&self, on_batch: super::FileBatchCallback) -> DeviceResult<Vec<FileEntry>> {
+        let cached = self.discovery_files.lock().unwrap().clone();
+        if let Some(files) = cached { on_batch(files.clone()); return Ok(files); }
         worker::list(&self.pnp_id, Some(on_batch), true)
     }
 
@@ -569,7 +585,7 @@ pub(crate) mod com {
             );
         }
         super::super::diagnostics::record(format!("WPD list complete: {} files; elapsed={:?}; bulk_batches={}; single_queries={}", out.len(), started.elapsed(), progress.bulk_batches, progress.single_queries));
-        out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        if !names_only { out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path)); }
         Ok(out)
     }
 
@@ -780,7 +796,7 @@ pub(crate) mod com {
             }
             // SAFETY: 属性键为静态常量
             let size = data.size.unwrap_or(0);
-            let mtime = data.mtime.unwrap_or_else(Utc::now);
+            let mtime = data.mtime.unwrap_or(chrono::DateTime::UNIX_EPOCH);
             let id = data.persistent_id.unwrap_or_else(|| obj_id.to_string());
             out.push(FileEntry {
                 id,

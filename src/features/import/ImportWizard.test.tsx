@@ -28,6 +28,7 @@ import {
   platformCapabilities,
   thumbGet,
   deviceThumbGet,
+  deviceFileSizes,
   type ImportPlan,
   type PhotoLibrary,
 } from "@/ipc/api";
@@ -54,6 +55,7 @@ vi.mock("@/ipc/api", async (importOriginal) => {
     platformCapabilities: vi.fn(),
     thumbGet: vi.fn(),
     deviceThumbGet: vi.fn(),
+    deviceFileSizes: vi.fn(),
     albumList: vi.fn(),
     albumSubgroups: vi.fn(),
     albumCreate: vi.fn(),
@@ -255,6 +257,7 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem(VIEW_MODE_STORAGE_KEY, "list");
   deviceThumbMock.mockReset().mockResolvedValue(null);
+  vi.mocked(deviceFileSizes).mockReset().mockResolvedValue(null);
   startMock.mockReset().mockResolvedValue({ ok: false, error: null });
   scanMock.mockReset().mockResolvedValue(null);
   openMock.mockReset();
@@ -597,19 +600,16 @@ describe("挑选步：列表与网格", () => {
     expect(screen.getByTestId("wizard-table-stats")).toHaveTextContent("已选 4 / 4");
   });
 
-  it("默认缩略图网格（无偏好时）；切列表持久化偏好", async () => {
+  it("每次进入默认列表，不因旧网格偏好自动请求缩略图", async () => {
     seedSession();
-    localStorage.removeItem(VIEW_MODE_STORAGE_KEY);
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
     renderWizard("?device=E:");
-    const user = userEvent.setup();
-
-    expect(await screen.findByTestId("wizard-file-grid")).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-file-list")).not.toBeInTheDocument();
-
-    await user.click(screen.getByTestId("wizard-view-list"));
-    expect(screen.getByTestId("wizard-file-list")).toBeInTheDocument();
+    expect(await screen.findByTestId("wizard-file-list")).toBeInTheDocument();
     expect(screen.queryByTestId("wizard-file-grid")).not.toBeInTheDocument();
-    expect(localStorage.getItem(VIEW_MODE_STORAGE_KEY)).toBe("list");
+    expect(thumbMock).not.toHaveBeenCalled();
+    expect(deviceThumbMock).not.toHaveBeenCalled();
+    await userEvent.setup().click(screen.getByTestId("wizard-view-grid"));
+    expect(screen.getByTestId("wizard-file-grid")).toBeInTheDocument();
   });
 
   it("缩略图网格：占位块渲染、点击块切换勾选、统计变化、全选恢复", async () => {
@@ -704,18 +704,39 @@ describe("挑选步：列表与网格", () => {
     );
   });
 
-  it("MTP 已发现文件即读取可见缩略图，不等待整卡扫描完成", async () => {
+  it("MTP 扫描中即使选择网格也不取缩略图和大小，完成后才取可见文件", async () => {
     seedSession();
     useImportStore.setState({ devices: [{ ...mtpDevice(), scanStatus: "scanning" }], sourceFiles: {
-      "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 42, kind: "raw", objectId: "persistent-42", mtime: "today" }],
+      "MTP:CAM": [{ path: "DCIM/A.NEF", dir: "DCIM", name: "A.NEF", size: 0, kind: "raw", objectId: "persistent-42", mtime: "today" }],
     } });
-    localStorage.setItem(VIEW_MODE_STORAGE_KEY, "grid");
     deviceThumbMock.mockResolvedValue("C:\\thumbCache\\mtp.jpg");
     convertMock.mockImplementation((path) => `asset://${path}`);
     renderWizard("?device=MTP:CAM");
+    await userEvent.setup().click(await screen.findByTestId("wizard-view-grid"));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    expect(deviceThumbMock).not.toHaveBeenCalled();
+    expect(deviceFileSizes).not.toHaveBeenCalled();
+    expect(screen.queryByRole("img", {name: "A.NEF"})).not.toBeInTheDocument();
+    act(() => useImportStore.setState({devices: [{...mtpDevice(), scanStatus: "ready"}]}));
     expect(await screen.findByRole("img", { name: "A.NEF" })).toHaveAttribute("src", "asset://C:\\thumbCache\\mtp.jpg");
-    expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:42", 256);
+    expect(deviceThumbMock).toHaveBeenCalledWith("MTP:CAM", "persistent-42", "today:0", 256);
+    await waitFor(() => expect(deviceFileSizes).toHaveBeenCalledWith("MTP:CAM", ["persistent-42"]));
     expect(thumbMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["volume", "folder"] as const)("%s 扫描中暂停本地缩略图请求", async kind => {
+    seedSession();
+    const device = kind === "volume" ? volumeDevice() : folderSnapshot();
+    useImportStore.setState({devices: [{...device, scanStatus: "scanning"}], sourceFiles: {[device.id]: files()}});
+    thumbMock.mockResolvedValue("C:\\thumbCache\\photo.jpg");
+    renderWizard(`?device=${encodeURIComponent(device.id)}`);
+    await userEvent.setup().click(await screen.findByTestId("wizard-view-grid"));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 180)); });
+    expect(thumbMock).not.toHaveBeenCalled();
+    expect(deviceThumbMock).not.toHaveBeenCalled();
+    expect(deviceFileSizes).not.toHaveBeenCalled();
+    act(() => useImportStore.setState({devices: [{...device, scanStatus: "ready"}]}));
+    await waitFor(() => expect(thumbMock).toHaveBeenCalled());
   });
 
   it("没有对象 ID 的旧 MTP 清单保持明确占位，不错误请求本地路径", async () => {

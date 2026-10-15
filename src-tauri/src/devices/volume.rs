@@ -50,38 +50,96 @@ impl VolumeSource {
 }
 
 impl VolumeSource {
-    fn enumerate(&self) -> DeviceResult<Vec<FileEntry>> {
-        let mut out = Vec::new();
-        let walker = WalkDir::new(&self.root)
-            .into_iter()
-            .filter_entry(|e| !is_ignored_dir(e));
+    fn walk_media(
+        &self,
+        exclude: Option<&str>,
+        mut visit: impl FnMut(walkdir::DirEntry) -> DeviceResult<()>,
+    ) -> DeviceResult<()> {
+        let walker = WalkDir::new(&self.root).into_iter().filter_entry(|entry| {
+            !is_ignored_dir(entry)
+                && !exclude.is_some_and(|excluded| {
+                    entry
+                        .path()
+                        .strip_prefix(&self.root)
+                        .is_ok_and(|relative| relative.starts_with(excluded))
+                })
+        });
         for entry in walker {
-            let entry = entry.map_err(|e| DeviceError::Io(e.into()))?;
-            if !entry.file_type().is_file() {
-                continue;
+            let entry = entry.map_err(|error| DeviceError::Io(error.into()))?;
+            if entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| is_media_ext(&ext.to_string_lossy()))
+            {
+                visit(entry)?;
             }
-            let ext = entry
+        }
+        Ok(())
+    }
+
+    pub(super) fn count_files(
+        &self,
+        exclude: Option<&str>,
+    ) -> DeviceResult<std::collections::BTreeMap<crate::events::AssetKind, u64>> {
+        let mut counts = std::collections::BTreeMap::new();
+        self.walk_media(exclude, |entry| {
+            *counts
+                .entry(super::classify(&entry.file_name().to_string_lossy(), &[]))
+                .or_insert(0) += 1;
+            Ok(())
+        })?;
+        Ok(counts)
+    }
+
+    pub(super) fn enumerate(
+        &self,
+        detailed: bool,
+        exclude: Option<&str>,
+        on_batch: Option<super::FileBatchCallback>,
+    ) -> DeviceResult<Vec<FileEntry>> {
+        let mut out = Vec::new();
+        let mut sent = 0;
+        let mut emitted = std::time::Instant::now();
+        self.walk_media(exclude, |entry| {
+            let rel = entry
                 .path()
-                .extension()
-                .map(|e| e.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if !is_media_ext(&ext) {
-                continue;
-            }
-            let rel = match entry.path().strip_prefix(&self.root) {
-                Ok(rel) => rel,
-                Err(_) => continue, // 理论不可达：walkdir 条目均以 root 为前缀
-            };
+                .strip_prefix(&self.root)
+                .map_err(|error| DeviceError::Other(error.to_string()))?;
             let rel_path = normalize_rel_path(&rel.to_string_lossy());
-            let metadata = entry.metadata().map_err(|e| DeviceError::Io(e.into()))?;
+            // Names and counts must never stat each photo or open its contents.
+            let (size, mtime) = if detailed {
+                let metadata = entry
+                    .metadata()
+                    .map_err(|error| DeviceError::Io(error.into()))?;
+                (metadata.len(), metadata.modified()?.into())
+            } else {
+                (0, chrono::DateTime::UNIX_EPOCH)
+            };
             out.push(FileEntry {
-                mtime: metadata.modified().map_err(DeviceError::Io)?.into(),
-                size: metadata.len(),
                 id: rel_path.clone(),
                 rel_path,
+                size,
+                mtime,
             });
+            if let Some(callback) = &on_batch {
+                if sent == 0 || emitted.elapsed() >= std::time::Duration::from_millis(150) {
+                    callback(out[sent..].to_vec());
+                    sent = out.len();
+                    emitted = std::time::Instant::now();
+                }
+            }
+            Ok(())
+        })?;
+        if let Some(callback) = on_batch {
+            if sent < out.len() || out.is_empty() {
+                callback(out[sent..].to_vec());
+            }
         }
-        out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        // The UI groups/sorts after names finish. Import's detailed list stays sorted.
+        if detailed {
+            out.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        }
         Ok(out)
     }
 }
@@ -106,10 +164,29 @@ impl DeviceSource for VolumeSource {
     }
 
     fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        self.enumerate()
+        self.enumerate(true, None, None)
     }
     fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
-        self.enumerate()
+        self.enumerate(false, None, None)
+    }
+
+    fn fast_file_counts(
+        &self,
+    ) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+        self.count_files(None).map(Some)
+    }
+    fn list_names_with_progress(
+        &self,
+        callback: super::FileBatchCallback,
+    ) -> DeviceResult<Vec<FileEntry>> {
+        self.enumerate(false, None, Some(callback))
+    }
+
+    fn file_sizes(&self, ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> {
+        ids.iter()
+            .map(|id| Ok((id.clone(), fs::metadata(self.resolve(id)?)?.len())))
+            .collect::<DeviceResult<Vec<_>>>()
+            .map(Some)
     }
 
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {

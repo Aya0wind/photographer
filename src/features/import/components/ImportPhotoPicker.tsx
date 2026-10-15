@@ -58,6 +58,7 @@ function ViewControls({
 export default function ImportPhotoPicker({ flow }: { flow: ImportWizardFlow }) {
   const { t } = useTranslation();
   const { setStep, device, filesLoading, files, selected, selectedCount, selectedBytes, groups, collapsed, toggleFile, toggleGroup, toggleCollapse, clearSelection, selectAll, invertSelection, refreshDevice, viewMode, setViewMode, tileSize, setTileSize, canReview, blockedReason } = flow;
+  const scanComplete = flow.scanningFolder === null && !filesLoading && device?.scanStatus !== "scanning" && device?.scanStatus !== "failed";
   return <>
         <div className="flex shrink-0 flex-wrap items-center gap-3 px-5 py-4" data-testid="wizard-table-stats">
           <button type="button" className="ui-glass flex min-w-0 max-w-md items-center gap-3 rounded-xl border px-3 py-2 text-left" onClick={() => setStep("source")} data-testid="wizard-source-toggle">
@@ -77,8 +78,8 @@ export default function ImportPhotoPicker({ flow }: { flow: ImportWizardFlow }) 
             {filesLoading || device?.scanStatus === "scanning" ? <span className="h-8 w-8 animate-spin rounded-full border-2 border-edge border-t-accent" aria-hidden="true" /> : <FolderGlyph size={40} className="text-text-muted" />}
             <p className="max-w-md text-sm leading-relaxed text-text-secondary">{filesLoading || device?.scanStatus === "scanning" ? t("wizard.tableLoading") : !device ? t("wizard.flow.sourceLost") : device.scanStatus === "failed" ? t("wizard.deviceScanFailed") : t("wizard.tableEmpty")}</p>
             {!device && <button type="button" className="ui-primary rounded-xl px-4 py-2 text-xs" onClick={() => setStep("source")}>{t("wizard.chooseSource")}</button>}
-          </div> : viewMode === "list" ? <FileListView deviceId={device?.kind === "mtp" ? device.id : undefined} groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} rootDirLabel={t("wizard.rootDir")} /> :
-            <FileGridView groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} basePath={sourceBasePath(device)} rootDirLabel={t("wizard.rootDir")} tile={TILE_SIZE_SPECS[tileSize]} device={device} />}
+          </div> : viewMode === "list" ? <FileListView scanComplete={scanComplete} deviceId={device?.id} groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} rootDirLabel={t("wizard.rootDir")} /> :
+            <FileGridView scanComplete={scanComplete} groups={groups} collapsed={collapsed} selected={selected} onToggleFile={toggleFile} onToggleGroup={toggleGroup} onToggleCollapse={toggleCollapse} basePath={sourceBasePath(device)} rootDirLabel={t("wizard.rootDir")} tile={TILE_SIZE_SPECS[tileSize]} device={device} />}
         </section>
         <footer className="ui-glass flex shrink-0 items-center gap-4 border-t border-edge px-5 py-4">
           <div className="min-w-0 flex-1"><p className="text-sm font-medium text-text-primary">{t("wizard.readyCount", { count: selectedCount })}{selectedBytes > 0 && <span className="ml-3 text-xs font-normal text-text-muted">{formatBytes(selectedBytes)}</span>}</p><p className="mt-1 text-xs text-text-muted">{canReview ? t("wizard.flow.nextHint") : blockedReason}</p></div>

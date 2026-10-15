@@ -560,10 +560,19 @@ export const useImportStore = create<ImportState>((set, get) => ({
 
   refreshDevice: async (id) => {
     const revision = deviceChanges.get(id);
-    const snapshot = await deviceScan(id);
-    if (snapshot && revision === deviceChanges.get(id)) {
-      set((s) => ({ devices: upsertDevice(s.devices, { ...snapshot, scanStatus: "ready", scanError: null }),
-        sourceFiles: Object.fromEntries(Object.entries(s.sourceFiles).filter(([key]) => key !== id)) }));
+    const previous = get().devices.find(device => device.id === id);
+    if (previous?.scanStatus === "scanning") return;
+    set(s => ({devices: s.devices.map(device => device.id === id ? {...device, scanStatus: "scanning", scanError: null} : device)}));
+    try {
+      const snapshot = await deviceScan(id);
+      if (snapshot && revision === deviceChanges.get(id)) {
+        set((s) => ({ devices: upsertDevice(s.devices, { ...snapshot, scanStatus: "ready", scanError: null }),
+          sourceFiles: Object.fromEntries(Object.entries(s.sourceFiles).filter(([key]) => key !== id)) }));
+      }
+    } finally {
+      if (previous && revision === deviceChanges.get(id)) {
+        set(s => ({devices: s.devices.map(device => device.id === id && device.scanStatus === "scanning" ? previous : device)}));
+      }
     }
   },
 

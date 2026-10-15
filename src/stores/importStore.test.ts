@@ -51,6 +51,18 @@ it("invalidates folder file listings after an explicit refresh and preserves the
   expect(useImportStore.getState().sourceFiles[folder.id]).toBeUndefined();
 });
 
+it("marks manual refresh as scanning until it finishes and restores the prior state on failure", async () => {
+  const device = {...snapshot("camera"), scanStatus: "ready" as const};
+  useImportStore.setState({devices: [device]});
+  let finish!: (value: DeviceSnapshot | null) => void;
+  vi.mocked(deviceScan).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const refreshing = useImportStore.getState().refreshDevice(device.id);
+  expect(useImportStore.getState().devices[0].scanStatus).toBe("scanning");
+  finish(null);
+  await refreshing;
+  expect(useImportStore.getState().devices[0]).toEqual(device);
+});
+
 function snapshot(id: string, name = "SD 卡", newFiles = 12): DeviceSnapshot {
   return {
     id,

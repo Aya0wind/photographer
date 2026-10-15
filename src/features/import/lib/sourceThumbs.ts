@@ -86,3 +86,16 @@ export function resetThumbCacheForTests(): void {
   thumbUrlCache.clear();
   thumbInflight.clear();
 }
+
+// Name-only discovery has no mtime/size fingerprint. Scope its cache to the
+// immutable listing entry so refreshing the same path cannot reuse an old image.
+const discoveryVersions = new WeakMap<object, number>();
+let nextDiscoveryVersion = 0;
+export function sourceFileVersion(file: {mtime?: string; size: number}): string {
+  if (file.mtime?.startsWith("1970-01-01T00:00:00")) {
+    let version = discoveryVersions.get(file);
+    if (version === undefined) { version = ++nextDiscoveryVersion; discoveryVersions.set(file, version); }
+    return `discovery:${version}`;
+  }
+  return `${file.mtime ?? ""}:${file.size}`;
+}

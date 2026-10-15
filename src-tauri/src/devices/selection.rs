@@ -120,37 +120,48 @@ impl DeviceSource for LocalPathsSource {
             })
             .collect()
     }
-    fn list(&self) -> DeviceResult<Vec<FileEntry>> {
-        let mut files = Vec::new();
-        let mut seen = HashSet::new();
+    fn fast_file_counts(
+        &self,
+    ) -> DeviceResult<Option<std::collections::BTreeMap<crate::events::AssetKind, u64>>> {
+        let roots = self.local_roots();
+        let mut counts = std::collections::BTreeMap::new();
         for (index, location) in self.locations.iter().enumerate() {
-            let entries = if let Some(file) = &location.file {
-                let metadata = fs::metadata(location.root.join(file))?;
-                vec![FileEntry {
-                    id: file.clone(),
-                    rel_path: file.clone(),
-                    size: metadata.len(),
-                    mtime: metadata.modified()?.into(),
-                }]
-            } else {
-                location.source.list_names()?
-            };
-            for mut entry in entries {
-                let path = location
-                    .source
-                    .local_path(&entry.id)
-                    .ok_or_else(|| DeviceError::Other("文件路径不可用".into()))?;
-                if !seen.insert(path.clone()) {
-                    continue;
+            // Overlap is resolved from the selected roots, without building a
+            // complete per-file deduplication set just to obtain a count.
+            if self.locations.iter().enumerate().any(|(other, parent)| {
+                other != index && parent.file.is_none() && roots[index].starts_with(&parent.root)
+            }) {
+                continue;
+            }
+            if let Some(file) = &location.file {
+                *counts.entry(super::classify(file, &[])).or_insert(0) += 1;
+            } else if let Some(child) = location.source.fast_file_counts()? {
+                for (kind, count) in child {
+                    *counts.entry(kind).or_insert(0) += count;
                 }
-                entry.id = format!("{index}/{}", entry.id);
-                entry.rel_path = path.to_string_lossy().replace('\\', "/");
-                files.push(entry);
             }
         }
-        files.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        Ok(files)
+        Ok(Some(counts))
     }
+
+    fn list(&self) -> DeviceResult<Vec<FileEntry>> {
+        self.enumerate(true)
+    }
+    fn list_names(&self) -> DeviceResult<Vec<FileEntry>> {
+        self.enumerate(false)
+    }
+    fn file_sizes(&self, ids: &[String]) -> DeviceResult<Option<Vec<(String, u64)>>> {
+        ids.iter()
+            .map(|id| {
+                let path = self
+                    .local_path(id)
+                    .ok_or_else(|| DeviceError::Other("文件路径不可用".into()))?;
+                Ok((id.clone(), fs::metadata(path)?.len()))
+            })
+            .collect::<DeviceResult<Vec<_>>>()
+            .map(Some)
+    }
+
     fn open_head(&self, id: &str, max: u64) -> DeviceResult<Vec<u8>> {
         let (source, id) = self.resolve(id)?;
         source.open_head(id, max)
@@ -210,5 +221,50 @@ mod tests {
         assert!(source.delete("0/other.jpg").is_err());
         assert!(source.local_path("0/../other.jpg").is_none());
         assert!(other.is_file());
+    }
+}
+
+impl LocalPathsSource {
+    fn enumerate(&self, detailed: bool) -> DeviceResult<Vec<FileEntry>> {
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        for (index, location) in self.locations.iter().enumerate() {
+            let entries = if let Some(file) = &location.file {
+                let (size, mtime) = if detailed {
+                    let metadata = fs::metadata(location.root.join(file))?;
+                    (metadata.len(), metadata.modified()?.into())
+                } else {
+                    (0, chrono::DateTime::UNIX_EPOCH)
+                };
+                vec![FileEntry {
+                    id: file.clone(),
+                    rel_path: file.clone(),
+                    size,
+                    mtime,
+                }]
+            } else {
+                if detailed {
+                    location.source.list()?
+                } else {
+                    location.source.list_names()?
+                }
+            };
+            for mut entry in entries {
+                let path = location
+                    .source
+                    .local_path(&entry.id)
+                    .ok_or_else(|| DeviceError::Other("文件路径不可用".into()))?;
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                entry.id = format!("{index}/{}", entry.id);
+                entry.rel_path = path.to_string_lossy().replace('\\', "/");
+                files.push(entry);
+            }
+        }
+        if detailed {
+            files.sort_unstable_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        }
+        Ok(files)
     }
 }

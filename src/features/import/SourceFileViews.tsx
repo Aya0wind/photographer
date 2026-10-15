@@ -3,7 +3,7 @@ import { type FileKind, type DeviceSnapshot, deviceThumbGet, type FsDirEntry } f
 import { useTranslation } from "react-i18next";
 import { type TileSizeSpec } from "./lib/useImportLayout";
 import { useState, useRef, useEffect, useMemo } from "react";
-import { fetchThumbUrl, cachedThumbUrl, THUMB_SIZE, thumbUrlCache } from "./lib/sourceThumbs";
+import { fetchThumbUrl, cachedThumbUrl, THUMB_SIZE, thumbUrlCache, sourceFileVersion } from "./lib/sourceThumbs";
 import { formatBytes } from "@/lib/format";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useVisibleFileSizes } from "./lib/useVisibleFileSizes";
@@ -156,7 +156,7 @@ function FileTile({
   const settledRef = useRef(false);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
-  const version = `${file.mtime ?? ""}:${file.size}`;
+  const version = sourceFileVersion(file);
   const previewKey = absPath ? JSON.stringify([absPath, version])
     : deviceId && file.objectId ? JSON.stringify([deviceId, file.objectId, version]) : null;
 
@@ -592,6 +592,7 @@ export function FileListView({
   onToggleCollapse,
   rootDirLabel,
   deviceId,
+  scanComplete = true,
 }: {
   groups: DirGroup[];
   collapsed: Set<string>;
@@ -601,6 +602,7 @@ export function FileListView({
   onToggleCollapse: (dir: string) => void;
   rootDirLabel: string;
   deviceId?: string;
+  scanComplete?: boolean;
 }) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -622,7 +624,7 @@ export function FileListView({
   });
 
   const visibleFiles = virtualizer.getVirtualItems().flatMap(item => { const row = rows[item.index]; return row.type === "file" ? [row.file] : []; });
-  const { sizes, supported } = useVisibleFileSizes(deviceId, visibleFiles);
+  const { sizes, supported } = useVisibleFileSizes(scanComplete ? deviceId : undefined, visibleFiles);
   const hasSizes = groups.some(group => group.files.some(file => file.size > 0)) || (!!deviceId && supported !== false);
   const columns = hasSizes ? "32px minmax(0,1fr) 80px 72px" : "32px minmax(0,1fr) 72px";
 
@@ -722,6 +724,7 @@ export function FileGridView({
   rootDirLabel,
   tile,
   device,
+  scanComplete = true,
 }: {
   groups: DirGroup[];
   collapsed: Set<string>;
@@ -733,6 +736,7 @@ export function FileGridView({
   rootDirLabel: string;
   tile: TileSizeSpec;
   device: DeviceSnapshot | null;
+  scanComplete?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
@@ -774,7 +778,7 @@ export function FileGridView({
   });
   useEffect(() => { virtualizer.measure(); }, [columns, tileRowH]);
   const visibleFiles = virtualizer.getVirtualItems().flatMap(item => { const row = rows[item.index]; return row.type === "tiles" ? row.files : []; });
-  const { sizes } = useVisibleFileSizes(device?.kind === "mtp" ? device.id : undefined, visibleFiles);
+  const { sizes } = useVisibleFileSizes(scanComplete ? device?.id : undefined, visibleFiles);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="wizard-file-grid">
@@ -822,7 +826,7 @@ export function FileGridView({
                           basePath !== null ? (basePath ? `${basePath}/${relPathOf(f)}` : relPathOf(f)) : null
                         }
                         deviceId={device?.kind === "mtp" ? device.id : undefined}
-                        previewReady={Boolean(f.objectId) || device?.kind !== "mtp"}
+                        previewReady={scanComplete && (Boolean(f.objectId) || device?.kind !== "mtp")}
                         size={tile}
                       />
                     ))}

@@ -71,7 +71,7 @@ export function useImportWizard() {
   // 扫描中由文件增量填充；仅已完成且没有缓存的源使用兼容读取。
   const [filesLoading, setFilesLoading] = useState(false);
   useEffect(() => {
-    if (!selectedId || device?.mediaPresent === false || device?.scanStatus === "scanning" || device?.scanStatus === "failed") {
+    if (step !== "photos" || !selectedId || device?.mediaPresent === false || device?.scanStatus === "scanning" || device?.scanStatus === "failed") {
       setFilesLoading(false);
       return;
     }
@@ -92,7 +92,7 @@ export function useImportWizard() {
     };
     // sourceFilesMap[selectedId] 变为存在即触发跳过分支，无需进依赖
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, device?.mediaPresent, device?.scanStatus, sourceFilesMap[selectedId ?? ""]]);
+  }, [step, selectedId, device?.mediaPresent, device?.scanStatus, sourceFilesMap[selectedId ?? ""]]);
 
   const files = useMemo(
     () => (selectedId ? sourceFilesMap[selectedId] ?? [] : []).filter((file) => file.kind === "photo" || file.kind === "raw"),
@@ -214,6 +214,7 @@ export function useImportWizard() {
   const policyPending = Boolean(device && sourcePolicy?.id !== device.id);
   useEffect(() => { if (copyOnly) setMode("copy"); }, [copyOnly]);
   const { viewMode, setViewMode, tileSize, setTileSize } = useImportLayout();
+  useEffect(() => { setViewMode("list"); }, [selectedId]);
 
   // 设备初值补拉：后端启动枚举的 deviceScanned 事件早于 webview 订阅，
   // 错过事件的在位设备（如已连接的相机）从这里直接出现

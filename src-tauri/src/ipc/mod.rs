@@ -342,11 +342,17 @@ pub fn files_by_id_with_progress(state: &SharedState, id: &str) -> Result<Vec<Fi
             state.bus.publish(crate::events::AppEvent::DeviceFilesProgress { id: progress_key.clone(), files: batch.iter().map(FileEntryDto::from).collect() });
         }
     });
+    let started = std::time::Instant::now();
     let result = source.list_names_with_progress(callback).map_err(|error| error.to_string());
     let mut registry = state.devices.lock().unwrap();
     let entry = registry.get_mut(&key).filter(|entry| Arc::ptr_eq(&entry.source, &source)).ok_or("设备已重新连接")?;
     match result {
         Ok(files) => {
+            crate::devices::diagnostics::record(format!("device names complete: {key}; {} files; elapsed={:?}", files.len(), started.elapsed()));
+            entry.snapshot.files_by_kind.clear();
+            for file in &files {
+                *entry.snapshot.files_by_kind.entry(crate::devices::classify(&file.rel_path, &[])).or_insert(0) += 1;
+            }
             entry.files = Some(files.clone());
             entry.scan = DeviceScan::Ready;
             state.bus.publish(crate::events::AppEvent::DeviceScanned { id: key, name: entry.snapshot.name.clone(), kind: entry.snapshot.kind, snapshot: entry.snapshot.clone() });
@@ -479,13 +485,8 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
         entry.files = None;
         Arc::clone(&entry.source)
     };
-    let files = Arc::new(Mutex::new(None::<Vec<crate::devices::FileEntry>>));
-    let pending = Arc::clone(&files);
-    let callback: crate::devices::FileBatchCallback = Arc::new(move |batch| {
-        pending.lock().unwrap().get_or_insert_with(Vec::new).extend(batch);
-    });
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        orchestrator::scan_device_with_progress(&*source, None, false, Some(callback))
+        orchestrator::scan_device_with_progress(&*source, None, false, None)
             .map_err(|e| format!("扫描设备失败: {e}"))
     }))
     .unwrap_or_else(|_| Err("设备扫描异常，请重试".into()));
@@ -512,7 +513,7 @@ pub fn scan_by_id(state: &AppState, id: &str) -> Result<DeviceSnapshot, String> 
     };
     entry.snapshot = snapshot.clone();
     entry.scan = DeviceScan::Ready;
-    entry.files = files.lock().unwrap().take();
+    entry.files = None;
     if snapshot.kind != SourceKind::Folder {
         state.bus.publish(crate::events::AppEvent::DeviceScanned {
             id: snapshot.id.clone(),

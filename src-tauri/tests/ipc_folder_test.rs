@@ -36,8 +36,10 @@ fn folder_scan_registers_source_then_files_and_move_import_work() {
     let expected_root = folder.path().to_path_buf();
     assert_eq!(snapshot.id, format!("FOLDER:{}", expected_root.display()));
     assert_eq!(snapshot.kind, devices::SourceKind::Folder);
-    assert_eq!(snapshot.new_files, 3, "空库应全部为新文件");
-    assert!(snapshot.bytes_total > 0);
+    assert_eq!(snapshot.files_by_kind.values().sum::<u64>(), 3);
+    assert_eq!(snapshot.new_files, 0, "发现阶段不查重");
+    assert_eq!(snapshot.bytes_total, 0, "发现阶段不读取文件大小");
+    assert!(state.devices.lock().unwrap()[&snapshot.id].files.is_none(), "计数阶段不构建文件清单");
 
     // 路径变体（尾部 /.）→ 同一 id（幂等注册，不重复建条目）
     let variant = folder.path().join(".");

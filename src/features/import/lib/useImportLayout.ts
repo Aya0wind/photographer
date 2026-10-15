@@ -1,26 +1,10 @@
 import { useState } from "react";
 
-// --- 查看方式（缩略图默认 / 列表），localStorage 持久化 ---------------------------
+// --- 查看方式：每次打开默认列表，缩略图由用户主动选择 ---------------------------
 
 export type WizardViewMode = "list" | "grid";
 
 export const VIEW_MODE_STORAGE_KEY = "photographer.import.viewMode";
-
-function loadViewMode(): WizardViewMode {
-  try {
-    return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid";
-  } catch {
-    return "grid";
-  }
-}
-
-function saveViewMode(mode: WizardViewMode): void {
-  try {
-    localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
-  } catch {
-    // 存储不可用时仅内存态生效
-  }
-}
 
 // --- 展示尺寸；旧三栏存储键仅保留导出，不再读取旧布局 ---------------------
 
@@ -66,12 +50,11 @@ function saveTileSize(size: TileSizeKey): void {
 }
 
 export function useImportLayout() {
-  const [viewMode, updateViewMode] = useState<WizardViewMode>(loadViewMode);
+  const [viewMode, updateViewMode] = useState<WizardViewMode>("list");
   const [tileSize, updateTileSize] = useState<TileSizeKey>(loadTileSize);
 
   function setViewMode(mode: WizardViewMode): void {
     updateViewMode(mode);
-    saveViewMode(mode);
   }
   function setTileSize(size: TileSizeKey): void {
     updateTileSize(size);
