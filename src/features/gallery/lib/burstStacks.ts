@@ -15,6 +15,7 @@ export interface BurstCollapse {
   assets: AssetDto[];
   /** 封面 assetId → 连拍张数 N（含封面；仅成组项） */
   badges: Map<number, number>;
+  members: Map<number, AssetDto[]>;
   /** 折叠前的真实照片数（组头计数口径） */
   totalCount: number;
 }
@@ -26,6 +27,7 @@ export interface BurstCollapse {
 export function collapseBursts(assets: AssetDto[]): BurstCollapse {
   const display: AssetDto[] = [];
   const badges = new Map<number, number>();
+  const members = new Map<number, AssetDto[]>();
 
   let runStart = 0;
   const flushRun = (endExclusive: number): void => {
@@ -38,6 +40,7 @@ export function collapseBursts(assets: AssetDto[]): BurstCollapse {
         : run.length;
       display.push(cover);
       badges.set(cover.id, count);
+      members.set(cover.id, run);
     } else {
       display.push(...run);
     }
@@ -59,5 +62,20 @@ export function collapseBursts(assets: AssetDto[]): BurstCollapse {
   }
   flushRun(assets.length);
 
-  return { assets: display, badges, totalCount: assets.length };
+  return { assets: display, badges, members, totalCount: assets.length };
+}
+
+/** Expand only collapsed cards, preserving ordinary single-photo operations. */
+export async function burstActionTargets(targets: AssetDto[], members: ReadonlyMap<number, AssetDto[]>,
+  fetchMembers: (ids:number[])=>Promise<AssetDto[]>): Promise<AssetDto[]> {
+  const covers = targets.filter(asset=>members.has(asset.id)).map(asset=>asset.id);
+  if (!covers.length) return targets;
+  const complete = await fetchMembers(covers);
+  if (!Array.isArray(complete)) throw new Error("无法读取连拍组，请重试");
+  const resolved=new Set(complete.map(asset=>asset.id));
+  if(covers.some(id=>!resolved.has(id)))throw new Error("连拍组已改变，请刷新后重试");
+  const expanded = new Map<number, AssetDto>();
+  for (const asset of targets) for (const member of members.get(asset.id)??[asset]) expanded.set(member.id,member);
+  for (const asset of complete) expanded.set(asset.id,asset);
+  return [...expanded.values()];
 }

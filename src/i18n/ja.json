@@ -988,7 +988,7 @@
   "editor.export": "書き出し",
   "editor.exportRunning": "エクスポート中...",
   "editor.exportPhase.render": "レンダリング画像",
-  "editor.exportPhase.encode": "エンコーディング JPEG",
+  "editor.exportPhase.encode": "出力画像をエンコード",
   "editor.exportPhase.write": "ファイルへの書き込み",
   "editor.exportPhase.register": "登録する",
   "editor.exportDoneFolder": "エクスポート済み: {{path}}",
@@ -1745,5 +1745,18 @@
   "trash.emptyAllHint": "未読み込みの項目を含め、このデータベースのごみ箱にある写真の記録をすべて削除します。元ファイルは既定で保持されます。",
   "trash.deleteSourceFiles": "元ファイルも削除する",
   "trash.confirmSourceDelete": "元ファイルは完全に削除されます。続行するには「确认删除」と入力してください：",
-  "trash.offlineKept": "写真ライブラリがオフラインのため {{count}} 件を保持しました"
+  "trash.offlineKept": "写真ライブラリがオフラインのため {{count}} 件を保持しました",
+  "editor.cancelExport": "書き出しをキャンセル",
+  "editor.exportCancelling": "キャンセル中…",
+  "editor.forceExit": "強制終了",
+  "editor.forceExitWarning": "アプリを強制終了しますか？未保存の編集は失われます。",
+  "editor.forceExitConfirm": "強制終了を確認",
+  "editor.exportStageProgress": "書き出し段階の進捗",
+  "editor.exportStageHint": "処理段階ごとの進捗です。大きな画像の現像やエンコードには時間がかかる場合があります。",
+  "editor.exportCloseHint": "書き出しをキャンセルするか、進捗欄の強制終了を使用してください。",
+  "editor.exportPhase.queued": "書き出しプロセスを待機中",
+  "editor.exportPhase.decode": "元画像をデコード",
+  "editor.exportPhase.develop": "RAW 現像",
+  "editor.exportPhase.film": "フィルム現像",
+  "editor.exportPhase.resize": "出力サイズを調整"
 }

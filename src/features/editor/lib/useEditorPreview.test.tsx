@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { editPreviewOpen, editPreviewPrepare, editPreviewClose, editPreviewRender, editPreviewActivate, type EditorPreviewSession } from "@/ipc/api";
+import { editPreviewOpen, editPreviewPrepare, editPreviewClose, editPreviewRender, editPreviewActivate, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
 import { useEditorPreview } from "./useEditorPreview";
 import { advancedRecipe } from "./advancedRecipe";
 import {startPreviewScheduler} from "./previewScheduler";
@@ -107,4 +107,19 @@ it("allows preparation again when film was disabled before its candidate was rea
  expect(editPreviewActivate).not.toHaveBeenCalled();rerender({value:linear});
  await waitFor(()=>expect(result.current.session).toBe(ready));
  expect(editPreviewPrepare).toHaveBeenCalledTimes(2);expect(editPreviewOpen).toHaveBeenCalledTimes(1);
+});
+
+it("adopts a source committed while film development was switched off and renders current settings",async()=>{
+ let finish!:(value:EditorPreviewSession)=>void;
+ const ready={...proxy,rawlabReady:true,nativeReady:true,sourceUrl:"neutral-raw",previewUrl:"film-frame"};
+ vi.mocked(editPreviewPrepare).mockResolvedValue(ready);
+ vi.mocked(editPreviewActivate).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+ vi.mocked(editPreviewRender).mockResolvedValue("disabled-frame");
+ const film={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos",true),{initialProps:{value:film as EditRecipe}});
+ await waitFor(()=>expect(editPreviewActivate).toHaveBeenCalledOnce());
+ rerender({value:recipe});await act(async()=>finish(ready));
+ await waitFor(()=>expect(result.current.session).toBe(ready));
+ expect(editPreviewRender).toHaveBeenCalledWith("session",recipe);expect(result.current.url).toBe("disabled-frame");
+ rerender({value:film});expect(editPreviewPrepare).toHaveBeenCalledOnce();expect(editPreviewActivate).toHaveBeenCalledOnce();
 });

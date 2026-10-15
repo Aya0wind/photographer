@@ -171,3 +171,9 @@ it("sends crop guides and pixel scale without a JPEG request",async()=>{
  renderHook(()=>useNativeEditorCanvas("session",recipe,host,true,false,"source"));
  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({view:expect.objectContaining({cropGuide:[0.1,0.2,0.7,0.6],scale:1})})));
 });
+it("resends the full recipe when only the prepared source changes",async()=>{
+ const {rerender}=renderHook(({source})=>useNativeEditorCanvas("session",recipe,host,true,false,source),{initialProps:{source:"proxy"}});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe})));
+ vi.mocked(ipc).mockClear();rerender({source:"linear"});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe})));
+});

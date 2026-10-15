@@ -660,3 +660,13 @@ pub async fn assets_by_ids(
     let shared = state.inner().clone();
     run_blocking(shared, move |state| fetch_assets_by_ids(state, &ids)).await
 }
+
+#[tauri::command]
+pub async fn asset_burst_members(state: State<'_, SharedState>, ids: Vec<i64>) -> Result<Vec<AssetDto>, String> {
+    run_blocking(state.inner().clone(), move |state| {
+        let db = super::app_database_db(state)?;
+        let mut dtos: Vec<_> = db.burst_members(&ids).map_err(|e| e.to_string())?.into_iter().map(page_row_to_dto).collect();
+        attach_burst_counts(&db, &mut dtos);
+        Ok(dtos)
+    }).await
+}

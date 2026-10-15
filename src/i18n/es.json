@@ -988,7 +988,7 @@
   "editor.export": "Exportar",
   "editor.exportRunning": "Exportando...",
   "editor.exportPhase.render": "Renderizar imagen",
-  "editor.exportPhase.encode": "Codificación JPEG",
+  "editor.exportPhase.encode": "Codificando imagen de salida",
   "editor.exportPhase.write": "Escribir en archivo",
   "editor.exportPhase.register": "Registrarse",
   "editor.exportDoneFolder": "Exportado: {{path}}",
@@ -1761,5 +1761,18 @@
   "trash.emptyAllHint": "Elimina todos los registros de fotos de la papelera de esta base de datos, incluidos los elementos sin cargar. Los originales se conservan por defecto.",
   "trash.deleteSourceFiles": "Eliminar también los archivos originales",
   "trash.confirmSourceDelete": "Los originales se eliminarán permanentemente. Escribe «确认删除» para continuar:",
-  "trash.offlineKept": "Se conservaron {{count}} elementos porque sus fototecas están desconectadas"
+  "trash.offlineKept": "Se conservaron {{count}} elementos porque sus fototecas están desconectadas",
+  "editor.cancelExport": "Cancelar exportación",
+  "editor.exportCancelling": "Cancelando…",
+  "editor.forceExit": "Forzar salida",
+  "editor.forceExitWarning": "¿Forzar la salida? Se perderán las ediciones sin guardar.",
+  "editor.forceExitConfirm": "Confirmar salida forzada",
+  "editor.exportStageProgress": "Progreso por etapas",
+  "editor.exportStageHint": "El progreso sigue las etapas de procesamiento. Las imágenes grandes pueden tardar en revelarse o codificarse.",
+  "editor.exportCloseHint": "Cancela la exportación o usa Forzar salida en el panel de progreso.",
+  "editor.exportPhase.queued": "Esperando el proceso de exportación",
+  "editor.exportPhase.decode": "Decodificar original",
+  "editor.exportPhase.develop": "Revelar RAW",
+  "editor.exportPhase.film": "Revelado de película",
+  "editor.exportPhase.resize": "Ajustar tamaño"
 }

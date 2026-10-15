@@ -510,7 +510,7 @@ pub(super) fn prepare_export_document(
     prepare_export_document_16(path,recipe,long_edge,progress,false)
 }
 fn export_source(path:&std::path::Path,recipe:&EditRecipe,progress:&dyn Fn(&str))->Result<(Document,EditRecipe),String>{
-    let (base,values)=if recipe.color_pipeline.is_some(){super::rawlab::export_source(path,recipe)?}else{
+    let (base,values)=if recipe.color_pipeline.is_some(){progress("film");super::rawlab::export_source(path,recipe)?}else{
     let source=super::source::open(path)?;
     let mut values = recipe.clone();
     let base = if let Some(raw) = source.raw {

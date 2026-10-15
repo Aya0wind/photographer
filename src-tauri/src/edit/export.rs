@@ -19,10 +19,10 @@
 //! 源资产）。导出件就是普通资产——无原片/成片关系语义（用户定案已移除
 //! 该概念）；album/subgroup 只是逻辑引用，不影响落位（§一）。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -135,6 +135,7 @@ pub struct ExportTaskDto {
     pub status: String,
     pub result: Option<ExportResultDto>,
     pub error: Option<String>,
+    pub phase: Option<String>,
 }
 
 impl From<ExportJobRow> for ExportTaskDto {
@@ -144,7 +145,7 @@ impl From<ExportJobRow> for ExportTaskDto {
             id: row.id,
             asset_id: row.asset_id,
             mode: row.mode,
-            status: row.status,
+            status: if row.status == "error" && row.error.as_deref() == Some("导出已取消") { "cancelled".into() } else { row.status },
             result: row
                 .output_path
                 .as_deref()
@@ -156,6 +157,7 @@ impl From<ExportJobRow> for ExportTaskDto {
                     bytes: row.bytes.unwrap_or(0),
                     asset_id: row.new_asset_id,
                 }),
+            phase: job_phase(row.id),
             error: row.error,
         }
     }
@@ -223,7 +225,7 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
 }
 
 /// 校验后的选项（folder/album 二选一已定）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatedOptions {
     pub format:ExportFormat,
     pub color_space:ExportColorSpace,
@@ -244,17 +246,31 @@ pub struct ValidatedOptions {
 
 /// 进程级活跃任务集合（孤儿收尸对照；guard 保证 panic 也能摘除）。
 /// 以任务 id 为键——单活跃库前提下 id 唯一（多库并行导出不在 v1 语义内）。
-fn live_jobs() -> &'static Mutex<HashSet<i64>> {
-    static LIVE: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
-    LIVE.get_or_init(|| Mutex::new(HashSet::new()))
+#[derive(Default)]
+struct ExportControl { cancelled: bool, committing: bool, phase: String }
+fn live_jobs() -> &'static Mutex<HashMap<i64, Arc<Mutex<ExportControl>>>> {
+    static LIVE: OnceLock<Mutex<HashMap<i64, Arc<Mutex<ExportControl>>>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
+pub fn cancel_job(id: i64) -> Result<(), String> {
+    let jobs = live_jobs().lock().map_err(|_| "导出任务锁不可用")?;
+    let control = jobs.get(&id).ok_or("导出任务已结束")?;
+    let mut control = control.lock().map_err(|_| "导出任务锁不可用")?;
+    if control.committing { return Err("正在完成文件登记，请稍候".into()); }
+    control.cancelled = true;
+    Ok(())
+}
+pub fn job_phase(id: i64) -> Option<String> {
+    let control = live_jobs().lock().ok()?.get(&id)?.clone();
+    let phase = control.lock().ok()?.phase.clone();
+    Some(phase)
+}
 /// 当前活跃（本进程内正在跑）的导出任务 id 快照。
 pub fn live_job_ids() -> Vec<i64> {
     live_jobs()
         .lock()
         .expect("export live jobs mutex poisoned")
-        .iter()
+        .keys()
         .copied()
         .collect()
 }
@@ -271,16 +287,16 @@ pub fn reap_orphan_jobs(db: &Db) {
 }
 
 /// 活跃集合守卫（Drop 摘除——worker 正常/出错/panic 三态都收回）。
-struct LiveGuard(i64);
+pub(crate) struct LiveGuard(i64);
 
 impl LiveGuard {
     /// 构造即登记（防忘记插入的旁路构造）。
     #[allow(dead_code)] // 仅供 run_export_job 与测试构造
-    fn new(id: i64) -> Self {
+    pub(crate) fn new(id: i64) -> Self {
         live_jobs()
             .lock()
             .expect("export live jobs mutex poisoned")
-            .insert(id);
+            .entry(id).or_insert_with(|| Arc::new(Mutex::new(ExportControl::default())));
         Self(id)
     }
 }
@@ -315,8 +331,11 @@ pub struct ExportJobRequest {
 /// 决定线程（IPC 层 supervisor / 集成测试直调）。
 pub fn run_export_job(db: Db, bus: &EventBus, request: ExportJobRequest) {
     let _live = LiveGuard::new(request.job_id);
+    let control = live_jobs().lock().expect("export jobs lock").get(&request.job_id).cloned().expect("registered export");
+    let cancelled = || control.lock().map(|c| c.cancelled).unwrap_or(true);
     let asset_id = request.asset_id;
     let progress = |phase: &str| {
+        if let Ok(mut value) = control.lock() { value.phase = phase.to_owned(); }
         bus.publish(AppEvent::ExportTaskProgress {
             job_id: request.job_id,
             asset_id,
@@ -337,7 +356,12 @@ pub fn run_export_job(db: Db, bus: &EventBus, request: ExportJobRequest) {
         });
     };
     let _ = db.export_job_set_status(request.job_id, "running");
-    match execute(&db, &request, &progress) {
+    match execute(&db, &request, &progress, &cancelled, &|| {
+        let mut value = control.lock().map_err(|_| "导出任务锁不可用")?;
+        if value.cancelled { return Err("导出已取消".into()); }
+        value.committing = true;
+        Ok(())
+    }) {
         Ok(result) => {
             let _ = db.export_job_finish(
                 request.job_id,
@@ -361,6 +385,8 @@ fn execute(
     db: &Db,
     request: &ExportJobRequest,
     progress: &dyn Fn(&str),
+    cancelled: &dyn Fn() -> bool,
+    begin_commit: &dyn Fn() -> Result<(), String>,
 ) -> Result<ExportResultDto, String> {
     let asset = &request.asset;
     let src = PathBuf::from(&asset.path);
@@ -368,45 +394,9 @@ fn execute(
         return Err(format!("源文件不在盘: {}", asset.path));
     }
 
-    // ① 渲染（解码/转正/旋转/裁剪/标注/只缩不放）
-    progress("render");
-    let long_edge = request
-        .options
-        .long_edge
-        .or(request.recipe.output.long_edge);
-    let quality = request
-        .options
-        .quality
-        .unwrap_or(request.recipe.output.quality)
-        .clamp(1, 100);
-    let source_head = meta::source_exif(&src).or_else(||read_head(&src,2*1024*1024));
-    let meta_opts = MetaOptions {remove_gps:request.options.remove_gps,copyright:request.options.copyright.clone(),author:request.options.author.clone(),keywords:request.options.keywords.clone()};
-    let (jpeg, width, height) =
-        if request.options.format==ExportFormat::Pcraft {
-            if request.recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("可编辑文档需要高级编辑处理方案".into());}
-            let doc=super::photocraft::prepare_export_document(&src,&request.recipe,None,progress)?;progress("encode");
-            (super::photocraft::native_document_with_metadata(&doc,source_head.as_deref(),&meta_opts)?,doc.size.width,doc.size.height)
-        }else if request.options.format!=ExportFormat::Jpeg {
-            if request.recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
-            let doc=super::photocraft::prepare_export_document_16(&src,&request.recipe,long_edge,progress,true)?;progress("encode");
-            (super::photocraft::lossless_with_profile(&doc,request.options.format.extension(),source_head.as_deref(),&meta_opts,request.options.color_space.profile())?,doc.size.width,doc.size.height)
-        }else if request.recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
-            let doc=super::photocraft::prepare_export_document(&src,&request.recipe,long_edge,progress)?;progress("encode");
-            (super::photocraft::jpeg_with_profile(&doc,quality,request.options.color_space.profile())?.0,doc.size.width,doc.size.height)
-        } else {
-            if request.options.color_space!=ExportColorSpace::Srgb{return Err("此色彩空间需要高级编辑处理方案".into());}
-            let rendered = render::render_recipe(&src, &request.recipe, long_edge)?;
-            progress("encode");
-            (
-                render::encode_jpeg(&rendered.image, quality)?,
-                rendered.image.width(),
-                rendered.image.height(),
-            )
-        };
-
-    // ③ 元数据（源 EXIF 尽量保留 + removeGps + 版权/作者/关键词）
-    let jpeg = if request.options.format==ExportFormat::Jpeg{meta::apply_metadata_for_color_image(jpeg, source_head.as_deref(), &meta_opts,width,height,request.options.color_space==ExportColorSpace::Srgb)}else{jpeg};
-
+    if cancelled() { return Err("导出已取消".into()); }
+    let (jpeg, width, height) = super::export_worker::render(&src, &request.recipe, &request.options, progress, cancelled)?;
+    begin_commit()?;
     // ④ 落位 + 登记
     match request.options.mode {
         ExportMode::Folder => {
@@ -445,6 +435,48 @@ fn execute(
             })
         }
     }
+}
+
+pub(super) fn encode_output(src: &Path, recipe: &EditRecipe, options: &ValidatedOptions, progress: &dyn Fn(&str)) -> Result<(Vec<u8>, u32, u32), String> {
+    // ① 渲染（解码/转正/旋转/裁剪/标注/只缩不放）
+    progress("decode");
+    let long_edge = options
+        .long_edge
+        .or(recipe.output.long_edge);
+    let quality = options
+        .quality
+        .unwrap_or(recipe.output.quality)
+        .clamp(1, 100);
+    let source_head = meta::source_exif(&src).or_else(||read_head(&src,2*1024*1024));
+    let meta_opts = MetaOptions {remove_gps:options.remove_gps,copyright:options.copyright.clone(),author:options.author.clone(),keywords:options.keywords.clone()};
+    let (jpeg, width, height) =
+        if options.format==ExportFormat::Pcraft {
+            if recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("可编辑文档需要高级编辑处理方案".into());}
+            let doc=super::photocraft::prepare_export_document(&src,&recipe,None,progress)?;progress("encode");
+            (super::photocraft::native_document_with_metadata(&doc,source_head.as_deref(),&meta_opts)?,doc.size.width,doc.size.height)
+        }else if options.format!=ExportFormat::Jpeg {
+            if recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
+            let doc=super::photocraft::prepare_export_document_16(&src,&recipe,long_edge,progress,true)?;progress("encode");
+            (super::photocraft::lossless_with_profile(&doc,options.format.extension(),source_head.as_deref(),&meta_opts,options.color_space.profile())?,doc.size.width,doc.size.height)
+        }else if recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
+            let doc=super::photocraft::prepare_export_document(&src,&recipe,long_edge,progress)?;progress("encode");
+            (super::photocraft::jpeg_with_profile(&doc,quality,options.color_space.profile())?.0,doc.size.width,doc.size.height)
+        } else {
+            if options.color_space!=ExportColorSpace::Srgb{return Err("此色彩空间需要高级编辑处理方案".into());}
+            progress("render");
+            let rendered = render::render_recipe(&src, &recipe, long_edge)?;
+            progress("encode");
+            (
+                render::encode_jpeg(&rendered.image, quality)?,
+                rendered.image.width(),
+                rendered.image.height(),
+            )
+        };
+
+    // ③ 元数据（源 EXIF 尽量保留 + removeGps + 版权/作者/关键词）
+    let jpeg = if options.format==ExportFormat::Jpeg{meta::apply_metadata_for_color_image(jpeg, source_head.as_deref(), &meta_opts,width,height,options.color_space==ExportColorSpace::Srgb)}else{jpeg};
+
+    Ok((jpeg, width, height))
 }
 
 /// 读文件头至多 `limit` 字节（EXIF 提取用；JPEG APP1 / TIFF IFD 链都在头
@@ -630,7 +662,7 @@ mod atomic_output_tests {
         let asset:AssetRow=serde_json::from_value(serde_json::json!({"path":path.to_string_lossy(),"filename":"source.tif","size":original.len(),"mtime":"2026-09-01T00:00:00Z","xxhash":0,"kind":"photo","source":"test","createdAt":"2026-09-01T00:00:00Z"})).unwrap();db.insert_asset(&asset).unwrap();let id=db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap();
         let mut options:ExportOptions=serde_json::from_value(serde_json::json!({"format":"pcraft","colorSpace":"displayP3","mode":"folder","folder":{"outputDir":dir.path().join("outputs"),"fileName":"edited.pcraft"},"longEdge":16,"quality":1})).unwrap();
         let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","output":{"longEdge":16,"quality":1},"advanced":{"exposure":0.2}})).unwrap();
-        let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe,options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{}).unwrap();assert_eq!((result.width,result.height),(120,80));assert!(result.asset_id.is_none());
+        let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe,options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert_eq!((result.width,result.height),(120,80));assert!(result.asset_id.is_none());
         let document=photocraft_io::import(&result.output_path,&std::fs::read(&result.output_path).unwrap()).unwrap().document;assert_eq!(document.depth,photocraft_engine::doc::SampleType::U16);assert!(!document.layers.is_empty());// 显影类(cameraRaw)调整烘焙进像素层(文档模型无非破坏性载体,且线性光数学与 Exposure 图层不等价——改图层会与预览/JPEG 分叉);曲线/蒙版等才追加图层,多图层语义由 photocraft::native_document_roundtrip 测试覆盖。assert_eq!(std::fs::read(&path).unwrap(),original);
         options.mode=ExportMode::Album;assert!(validate_options(&db,&options).unwrap_err().contains("不能作为照片"));
     }
@@ -649,7 +681,7 @@ mod atomic_output_tests {
         for format in [ExportFormat::Png,ExportFormat::Tiff]{for mode in [ExportMode::Folder,ExportMode::Album]{
             let color_space=if format==ExportFormat::Png{ExportColorSpace::DisplayP3}else{ExportColorSpace::ProPhotoRgb};
             let options=ExportOptions{format,color_space,mode,folder:Some(ExportFolderTarget{output_dir:dir.path().join("outputs").to_string_lossy().into_owned(),file_name:format!("edited.{}",format.extension())}),album:Some(ExportAlbumTarget{album_id:album.id.to_string(),subgroup:None}),long_edge:Some(12),quality:None,remove_gps:true,copyright:Some("Rights".into()),author:Some("Artist".into()),keywords:vec!["Photo".into()]};
-            let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe:recipe.clone(),options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{}).unwrap();assert!(result.output_path.ends_with(format.extension()));let decoded=image::open(&result.output_path).unwrap();assert_eq!((decoded.width(),decoded.height()),(12,8));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));if mode==ExportMode::Album{assert!(result.asset_id.is_some());}
+            let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe:recipe.clone(),options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert!(result.output_path.ends_with(format.extension()));let decoded=image::open(&result.output_path).unwrap();assert_eq!((decoded.width(),decoded.height()),(12,8));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));if mode==ExportMode::Album{assert!(result.asset_id.is_some());}
             let bytes=std::fs::read(&result.output_path).unwrap();let output=photocraft_io::import(&result.output_path,&bytes).unwrap();assert_eq!(output.document.icc_profile.unwrap(),color_space.profile().to_bytes());
         }}assert_eq!(std::fs::read(path).unwrap(),original);
     }
@@ -666,5 +698,22 @@ mod atomic_output_tests {
         let jobs:Vec<_>=[b"first complete photo".as_slice(),b"second complete photo".as_slice()].into_iter().map(|bytes|{let dst=dst.clone();let barrier=barrier.clone();std::thread::spawn(move||{barrier.wait();atomic_write(&dst,bytes).is_ok()})}).collect();
         let successes=jobs.into_iter().filter_map(|job|job.join().ok()).filter(|ok|*ok).count();assert_eq!(successes,1);
         let actual=std::fs::read(dst).unwrap();assert!(actual==b"first complete photo"||actual==b"second complete photo");assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(),1);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn queued_export_can_cancel_but_publication_cannot() {
+        let id = -90001;
+        let _live = LiveGuard::new(id);
+        cancel_job(id).unwrap();
+        let control = live_jobs().lock().unwrap().get(&id).unwrap().clone();
+        assert!(control.lock().unwrap().cancelled);
+        { let mut value = control.lock().unwrap(); value.cancelled = false; value.committing = true; value.phase = "register".into(); }
+        assert!(cancel_job(id).is_err());
+        assert_eq!(job_phase(id).as_deref(), Some("register"));
+        assert!(!control.lock().unwrap().cancelled);
     }
 }

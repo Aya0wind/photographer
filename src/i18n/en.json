@@ -994,7 +994,7 @@
   "editor.export": "Export",
   "editor.exportRunning": "Exporting...",
   "editor.exportPhase.render": "Render image",
-  "editor.exportPhase.encode": "Encoding JPEG",
+  "editor.exportPhase.encode": "Encoding output image",
   "editor.exportPhase.write": "Write to file",
   "editor.exportPhase.register": "Register",
   "editor.exportDoneFolder": "Exported: {{path}}",
@@ -1768,5 +1768,18 @@
   "advancedEditor.film.select": "Film look",
   "advancedEditor.film.neutral": "Neutral development",
   "advancedEditor.film.import": "Import film CUBE",
-  "advancedEditor.film.hint": "Choose a film CUBE with Gamma/Gamut color declarations."
+  "advancedEditor.film.hint": "Choose a film CUBE with Gamma/Gamut color declarations.",
+  "editor.cancelExport": "Cancel export",
+  "editor.exportCancelling": "Cancelling export…",
+  "editor.forceExit": "Force quit",
+  "editor.forceExitWarning": "Force quit the application? Unsaved edits will be lost.",
+  "editor.forceExitConfirm": "Confirm force quit",
+  "editor.exportStageProgress": "Export stage progress",
+  "editor.exportStageHint": "Progress follows processing stages. Large-image development or encoding may take time.",
+  "editor.exportCloseHint": "Cancel the export first, or use Force quit in the export progress panel.",
+  "editor.exportPhase.queued": "Waiting for export worker",
+  "editor.exportPhase.decode": "Decode original",
+  "editor.exportPhase.develop": "Develop RAW",
+  "editor.exportPhase.film": "Film development",
+  "editor.exportPhase.resize": "Resize output"
 }

@@ -332,7 +332,8 @@ describe("画廊：日期分组照片墙", () => {
       });
     });
     const img = await screen.findByRole("img", { name: "IMG_0001.JPG" });
-    expect(img).toHaveAttribute("src", "asset://C:\\thumbs\\256\\img1.jpg");
+    expect(img.getAttribute("src")?.split("?")[0]).toBe("asset://C:\\thumbs\\256\\img1.jpg");
+    expect(img.getAttribute("src")).toContain("thumbnailRevision=");
     // RAW 仍未就绪：占位 + 水印
     expect(screen.getByTestId("thumb-raw")).toBeInTheDocument();
     expect(screen.getByTestId("thumb-raw-badge")).toBeInTheDocument();

@@ -531,3 +531,23 @@ fn burst_fingerprint_change_triggers_regroup_only() {
         .unwrap();
     assert_eq!(phash_tasks, 0, "未建重算任务");
 }
+
+#[test]
+fn batch_burst_members_include_unloaded_photos_and_exclude_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_db(dir.path());
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let path = format!("X:/burst/{i}.jpg");
+        db.insert_asset(&asset(&path, AssetKind::Photo, Some("2026-10-15T10:00:00Z"))).unwrap();
+        ids.push(db.asset_id_by_path(&path).unwrap().unwrap());
+    }
+    db.write_bursts(&[ids[..3].iter().map(|id| (*id, Some("2026-10-15T10:00:00Z".into()))).collect()]).unwrap();
+    let mut members = db.burst_members(&[ids[0], ids[1]]).unwrap().into_iter().map(|row| row.id).collect::<Vec<_>>();
+    members.sort_unstable();
+    assert_eq!(members, ids[..3]);
+    db.assets_trash_move(&[ids[1]]).unwrap();
+    let members = db.burst_members(&[ids[0]]).unwrap().into_iter().map(|row| row.id).collect::<Vec<_>>();
+    assert_eq!(members, vec![ids[2], ids[0]]);
+    assert!(db.burst_members(&[ids[3]]).unwrap().is_empty());
+}

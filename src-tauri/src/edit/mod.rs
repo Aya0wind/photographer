@@ -40,6 +40,7 @@
 //! 归一避免笔迹随画布纵横比变形）；文字锚点=文本框左上角，左对齐。
 
 pub mod export;
+pub(crate) mod export_worker;
 mod gpu;
 mod grading;
 mod parametric;

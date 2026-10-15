@@ -45,6 +45,23 @@ impl Db {
         Ok(())
     }
 
+    /// Resolve complete, non-trashed burst members beyond the loaded gallery page.
+    pub fn burst_members(&self, asset_ids: &[i64]) -> Result<Vec<AssetPageRow>> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for ids in asset_ids.chunks(200) {
+            if ids.is_empty() { continue; }
+            let slots = std::iter::repeat_n("?", ids.len()).collect::<Vec<_>>().join(",");
+            let sql = format!("SELECT {ASSET_PAGE_COLS} FROM assets WHERE trashed_at IS NULL AND burst_id IN (SELECT burst_id FROM assets WHERE trashed_at IS NULL AND id IN ({slots})) ORDER BY id DESC");
+            let mut statement = self.0.prepare(&sql)?;
+            for row in statement.query_map(rusqlite::params_from_iter(ids), map_asset_page)? {
+                let row = row?;
+                if seen.insert(row.id) { out.push(row); }
+            }
+        }
+        Ok(out)
+    }
+
     /// 连拍统计（设置页/调试）：(组数, 入组资产数)。
     pub fn burst_stats(&self) -> Result<(u64, u64)> {
         let (groups, photos): (i64, i64) = self.0.query_row(

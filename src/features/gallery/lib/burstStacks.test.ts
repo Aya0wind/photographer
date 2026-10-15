@@ -2,7 +2,7 @@ import { assetFixture } from "@/test/fixtures";
 import { describe, expect, it } from "vitest";
 
 import type { AssetDto } from "@/ipc/api";
-import { collapseBursts } from "./burstStacks";
+import { collapseBursts, burstActionTargets } from "./burstStacks";
 
 function asset(id: number, burst?: { burstId: number; burstCount?: number }): AssetDto {
   return assetFixture(id, {
@@ -79,6 +79,7 @@ describe("collapseBursts（连拍堆叠折叠）", () => {
     expect(collapseBursts([])).toEqual({
       assets: [],
       badges: new Map(),
+      members: new Map(),
       totalCount: 0,
     });
 
@@ -102,4 +103,27 @@ describe("collapseBursts（连拍堆叠折叠）", () => {
     expect(collapsed.badges.get(1)).toBe(4);
     expect(collapsed.totalCount).toBe(4);
   });
+});
+
+it("batch operations expand collapsed bursts, including unloaded members, without duplicates",async()=>{
+  const photos=[asset(1,{burstId:9,burstCount:3}),asset(2,{burstId:9,burstCount:3}),asset(4)];
+  const collapsed=collapseBursts(photos);
+  const targets=await burstActionTargets(collapsed.assets,collapsed.members,async ids=>{
+    expect(ids).toEqual([1]);return [photos[0],photos[1],asset(3,{burstId:9,burstCount:3})];
+  });
+  expect(targets.map(photo=>photo.id).sort()).toEqual([1,2,3,4]);
+});
+it("single-photo actions do not expand an uncollapsed member",async()=>{
+  const photos=[asset(1,{burstId:9}),asset(2,{burstId:9})];
+  const result=await burstActionTargets([photos[1]],collapseBursts(photos).members,async()=>{throw new Error("unexpected query");});
+  expect(result).toEqual([photos[1]]);
+});
+it("a failed burst lookup prevents partial batch operations",async()=>{
+  const photos=[asset(1,{burstId:9}),asset(2,{burstId:9})];
+  await expect(burstActionTargets([photos[0]],collapseBursts(photos).members,async()=>{throw new Error("offline");})).rejects.toThrow("offline");
+});
+
+it("refuses stale or incomplete burst lookups instead of applying a partial selection",async()=>{
+ const photos=[asset(1,{burstId:9}),asset(2,{burstId:9})];
+ await expect(burstActionTargets([photos[0]],collapseBursts(photos).members,async()=>[])).rejects.toThrow("连拍组已改变");
 });

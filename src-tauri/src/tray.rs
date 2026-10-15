@@ -11,7 +11,8 @@ use tauri::{
 pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let force_item = MenuItem::with_id(app, "force-quit", "强制退出（丢弃未保存编辑）", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item, &force_item])?;
 
     TrayIconBuilder::with_id("photographer")
         .icon(
@@ -25,6 +26,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => app.exit(0),
+            "force-quit" => crate::edit::ipc::app_force_exit(),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { editPreviewClose, editPreviewOpen, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
 
+import {releasePreviewImage} from "./previewImages";
 import {useSmartPreview} from "./useSmartPreview";
 import { startPreviewScheduler } from "./previewScheduler";
 
@@ -9,6 +10,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
   const [retry, setRetry] = useState(0);
   const [session, setSession] = useState<EditorPreviewSession | null>(null);
   const [url, setUrl] = useState<string | null>(null);
+  useEffect(()=>()=>{if(url)releasePreviewImage(url);},[url]);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const latest = useRef(recipe);

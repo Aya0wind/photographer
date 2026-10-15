@@ -252,3 +252,6 @@ export function editFilmList(){return ipc<EditorFilmEntry[]>("edit_film_list");}
 export function editFilmImport(path:string){return ipc<EditorFilmEntry>("edit_film_import",{path});}
 
 export function editPreviewActivate(sessionId:string,recipe:EditRecipe){return ipc<EditorPreviewSession>("edit_preview_activate",{sessionId,recipe});}
+
+export const editExportCancel=(assetId:number,libraryId:string,jobId:number)=>ipc<void>("edit_export_cancel",{assetId:String(assetId),libraryId,jobId});
+export const appForceExit=()=>ipc<void>("app_force_exit");

@@ -931,7 +931,8 @@ export interface ExportTask {
   id: number;
   assetId: number;
   mode: string;
-  status: "queued" | "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "error" | "cancelled";
+  phase?: string | null;
   result: ExportResultDto | null;
   error: string | null;
 }

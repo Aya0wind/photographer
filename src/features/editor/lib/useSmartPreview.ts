@@ -1,35 +1,69 @@
 import {useEffect,useRef,type MutableRefObject} from "react";
 import {editPreviewPrepare,editPreviewActivate,editPreviewRender,type EditRecipe,type EditorPreviewSession} from "@/ipc/api";
 import {preparePreviewImage,releasePreviewImage} from "./previewImages";
-export function useSmartPreview({session,enabled,latest,onPrepared,onError}:{session:EditorPreviewSession|null;enabled:boolean;latest:MutableRefObject<EditRecipe>;onPrepared:(value:{session:EditorPreviewSession;frame:string})=>void;onError:(error:string)=>void}){
- const prepared=useRef<string|null>(null),image=useRef<string|null>(null);
- const callbacks=useRef({onPrepared,onError});callbacks.current={onPrepared,onError};
+
+type PreparedFrame = {session:EditorPreviewSession;frame:string};
+interface Options {
+  session:EditorPreviewSession|null;
+  enabled:boolean;
+  latest:MutableRefObject<EditRecipe>;
+  onPrepared:(value:PreparedFrame)=>void;
+  onError:(error:string)=>void;
+}
+
+async function prepareFrame(sessionId:string,latest:MutableRefObject<EditRecipe>,current:()=>boolean,
+  beginActivation:()=>boolean,onActivated:(session:EditorPreviewSession)=>void):Promise<PreparedFrame|null> {
+  await editPreviewPrepare(sessionId,latest.current);
+  if(!beginActivation())return null;
+  const requested=latest.current;
+  const session=await editPreviewActivate(sessionId,requested);
+  onActivated(session);
+  if(!current())return null;
+  let frame=session.previewUrl??session.sourceUrl;
+  let used=JSON.stringify(requested);
+  try {
+    await preparePreviewImage(frame);
+    // Activation commits the backend source. Even if film was switched off
+    // during IPC, adopt that source and render the current settings before swap.
+    while(current()&&used!==JSON.stringify(latest.current)) {
+      const recipe=latest.current;used=JSON.stringify(recipe);
+      const next=await editPreviewRender(sessionId,recipe);
+      releasePreviewImage(frame);frame=next;
+      await preparePreviewImage(frame);
+    }
+    if(!current()){releasePreviewImage(frame);return null;}
+    return {frame,session};
+  } catch(error) {releasePreviewImage(frame);throw error;}
+}
+
+export function useSmartPreview({session,enabled,latest,onPrepared,onError}:Options) {
+  const prepared=useRef<string|null>(null),image=useRef<string|null>(null);
+  const live=useRef(true),currentSession=useRef(session?.sessionId);
+  currentSession.current=session?.sessionId;
+  const callbacks=useRef({onPrepared,onError});callbacks.current={onPrepared,onError};
+  useEffect(()=>{live.current=true;return()=>{live.current=false;};},[]);
+  useEffect(()=>()=>{if(image.current){releasePreviewImage(image.current);image.current=null;}},[session?.sessionId]);
   useEffect(()=>{
     if(!enabled||!session||session.rawlabReady||prepared.current===session.sessionId)return;
-    let cancelled=false;
-    let completed=false;
-    let candidate:string|null=null;
+    let cancelled=false,completed=false,activating=false;
+    let activated:EditorPreviewSession|null=null;
+    const current=()=>live.current&&currentSession.current===session.sessionId;
+    const beginActivation=()=>{if(cancelled)return false;activating=true;return true;};
     prepared.current=session.sessionId;
-    const captured=latest.current;
-    void editPreviewPrepare(session.sessionId,captured).then(async ()=>{
-      if(cancelled)return;
-      const requested=latest.current;
-      const value=await editPreviewActivate(session.sessionId,requested);
-      if(cancelled)return;
-      let frame=value.previewUrl??value.sourceUrl;candidate=frame;
-      let used=JSON.stringify(requested);
-      // Keep the old frame visible until the prepared source has a frame for
-      // the current recipe, including edits made during RAW development.
-      await preparePreviewImage(frame);
-      while(!cancelled && used!==JSON.stringify(latest.current)){
-        const current=latest.current;used=JSON.stringify(current);
-        const next=await editPreviewRender(session.sessionId,current);
-        releasePreviewImage(frame);frame=next;candidate=frame;await preparePreviewImage(frame);
-      }
-      if(cancelled){releasePreviewImage(frame);return;}
-      completed=true;image.current=frame;candidate=null;callbacks.current.onPrepared({frame,session:value});
-    }).catch(e=>{if(candidate)releasePreviewImage(candidate);if(!cancelled)callbacks.current.onError(String(e));});
-    return ()=>{cancelled=true;if(!completed&&prepared.current===session.sessionId)prepared.current=null;if(image.current){releasePreviewImage(image.current);image.current=null;}};
+    void prepareFrame(session.sessionId,latest,current,beginActivation,value=>{activated=value;}).then(result=>{
+      if(!result)return;
+      if(!current()){releasePreviewImage(result.frame);return;}
+      completed=true;
+      if(image.current&&image.current!==result.frame)releasePreviewImage(image.current);
+      image.current=result.frame;
+      callbacks.current.onPrepared(result);
+    }).catch(error=>{
+      if(!current()||(cancelled&&!activating))return;
+      prepared.current=null;
+      // Keep frontend/backend source ownership aligned after a render error.
+      if(activated)callbacks.current.onPrepared({frame:image.current??activated.sourceUrl,session:activated});
+      callbacks.current.onError(String(error));
+    });
+    return ()=>{cancelled=true;if(!completed&&!activating&&prepared.current===session.sessionId)prepared.current=null;};
   },[session?.sessionId,enabled]);
-
 }

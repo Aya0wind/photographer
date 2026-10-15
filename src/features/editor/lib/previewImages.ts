@@ -30,6 +30,8 @@ export async function preparePreviewImage(url: string): Promise<void> {
 export function releasePreviewImage(url: string): void {
   const image = images.get(url);
   images.delete(url);
-  if (image) { image.onload = null; image.onerror = null; image.removeAttribute?.("src"); }
+  // Konva/DOM may still display this decoded image during a source handoff.
+  // Evict our reference without clearing the pixels of existing consumers.
+  if (image) { image.onload = null; image.onerror = null; }
   URL.revokeObjectURL(url);
 }

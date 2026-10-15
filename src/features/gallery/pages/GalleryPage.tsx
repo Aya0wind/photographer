@@ -15,6 +15,7 @@ import {
   assetsPage,
   assetsPurgeMissing,
   assetTrashMove,
+  assetBurstMembers,
   cullSessionCreate,
   duplicatesList,
   isIpcAvailable,
@@ -32,7 +33,7 @@ import {
   formatDateLabel,
 } from "../lib/assetGroups";
 import { usePhotoCards } from "../lib/usePhotoCards";
-import { collapseBursts } from "../lib/burstStacks";
+import { collapseBursts, burstActionTargets } from "../lib/burstStacks";
 import {
   gallerySnapshot,
   saveGallerySnapshot,
@@ -546,17 +547,19 @@ export default function GalleryPage() {
   // 连拍堆叠折叠（M6）：仅画廊资产管线（语义结果不折叠）；查看器/胶片条仍用
   // 未折叠全量组（点击堆叠卡打开封面，胶片条天然顺序翻完整组）。折叠在
   // RAW+JPG 合并之后——判定用合并后代表资产的 burstId。
-  const { displayGroups, burstBadges } = useMemo(() => {
-    if (semanticMode) return { displayGroups: semanticGroups, burstBadges: undefined };
+  const { displayGroups, burstBadges, burstMembers } = useMemo(() => {
+    if (semanticMode) return { displayGroups: semanticGroups, burstBadges: undefined, burstMembers: new Map<number,AssetDto[]>() };
     const badges = new Map<number, number>();
+    const members = new Map<number, AssetDto[]>();
     const display = groups.map((group) => {
       const collapsed = collapseBursts(group.assets);
+      for(const [coverId, run] of collapsed.members)members.set(coverId,run);
       for (const [coverId, count] of collapsed.badges) badges.set(coverId, count);
       return collapsed.totalCount === collapsed.assets.length
         ? group
         : { ...group, assets: collapsed.assets, totalCount: collapsed.totalCount };
     });
-    return { displayGroups: display, burstBadges: badges.size > 0 ? badges : undefined };
+    return { displayGroups: display, burstBadges: badges.size > 0 ? badges : undefined, burstMembers: members };
   }, [groups, semanticGroups, semanticMode]);
 
   // 查看器/选中查找用全量组；网格/视口/吸顶用折叠展示组
@@ -602,9 +605,23 @@ export default function GalleryPage() {
 
   /** 瓦片右键目标集：非多选=该资产；多选+已选瓦片=全部选中；
    *  多选+未选瓦片=先切换选中集为该图（Windows 语义），再作用于它。 */
-  function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
-    setCtxMenu({ ...at, assets: contextTargets(asset, assetsById) });
+  const [batchError,setBatchError]=useState<string|null>(null);
+  const batchRequest=useRef(0);
+  async function resolveBatch(targets:AssetDto[],apply:(items:AssetDto[])=>void) {
+    const request=++batchRequest.current;
+    setBatchError(null);
+    try {
+      const items=await burstActionTargets(targets,burstMembers,assetBurstMembers);
+      if(request===batchRequest.current)apply(items);
+    } catch(error) {if(request===batchRequest.current)setBatchError(String(error));}
   }
+  function handleTileContextMenu(asset: AssetDto, at: { x: number; y: number }): void {
+    void resolveBatch(contextTargets(asset,assetsById),items=>setCtxMenu({...at,assets:items}));
+  }
+  const selectedAssets=selected.flatMap(id=>assetsById.get(id)?[assetsById.get(id)!]:[]);
+  const selectedPhotoCount=new Set(selectedAssets.flatMap(asset=>(burstMembers.get(asset.id)??[asset]).map(item=>item.id))).size
+    + selectedAssets.reduce((extra,asset)=>extra+Math.max(0,(burstBadges?.get(asset.id)??0)-(burstMembers.get(asset.id)?.length??0)),0);
+
 
 
   const handleFavoriteChange = useCallback((asset: AssetDto, favorite: boolean) => {
@@ -677,8 +694,8 @@ export default function GalleryPage() {
    *  画廊可见资产——跨库重复折叠时隐藏副本不进窗口，操作只作用于可见资产） */
   const windowIds = useMemo(
     () =>
-      semanticMode ? semantic.assets.map((a) => a.id) : visibleAssets.map((a) => a.id),
-    [semanticMode, semantic.assets, visibleAssets],
+      semanticMode ? semantic.assets.map((a) => a.id) : displayGroups.flatMap(group=>group.assets.map(asset=>asset.id)),
+    [semanticMode, semantic.assets, displayGroups],
   );
 
   /** 「移入回收站」确认目标（多选操作条/右键菜单共用；null=弹窗关闭） */
@@ -995,9 +1012,10 @@ export default function GalleryPage() {
 
       </div>
 
-      {selecting && <SelectionDock count={selected.length} onClear={exitSelection}
-        onMove={() => setAddToAlbumTargets(Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }))}
-        onMore={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setCtxMenu({ x: rect.left, y: rect.top, assets: Array.from(selected).flatMap((id) => { const item = assetsById.get(id); return item ? [item] : []; }) }); }} />}
+      {batchError&&<div role="alert" className="fixed bottom-20 left-1/2 z-50 rounded bg-panel p-3 text-danger">{batchError}</div>}
+      {selecting && <SelectionDock count={selectedPhotoCount} onClear={exitSelection}
+        onMove={() => void resolveBatch(selectedAssets,setAddToAlbumTargets)}
+        onMore={(event) => { const rect = event.currentTarget.getBoundingClientRect(); void resolveBatch(selectedAssets,items=>setCtxMenu({ x: rect.left, y: rect.top, assets: items })); }} />}
 
       {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含色标/拒绝/加入相册/移入回收站） */}
       {ctxMenu && (

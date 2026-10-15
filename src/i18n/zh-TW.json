@@ -988,7 +988,7 @@
   "editor.export": "匯出",
   "editor.exportRunning": "正在導出…",
   "editor.exportPhase.render": "渲染圖像",
-  "editor.exportPhase.encode": "編碼 JPEG",
+  "editor.exportPhase.encode": "編碼輸出影像",
   "editor.exportPhase.write": "寫入檔案",
   "editor.exportPhase.register": "登記入冊",
   "editor.exportDoneFolder": "已導出：{{path}}",
@@ -1752,5 +1752,18 @@
   "advancedEditor.film.select": "膠片風格",
   "advancedEditor.film.neutral": "中性顯影",
   "advancedEditor.film.import": "匯入膠片 CUBE",
-  "advancedEditor.film.hint": "請選擇包含 Gamma/Gamut 色彩聲明的膠片 CUBE 檔案。"
+  "advancedEditor.film.hint": "請選擇包含 Gamma/Gamut 色彩聲明的膠片 CUBE 檔案。",
+  "editor.cancelExport": "取消匯出",
+  "editor.exportCancelling": "正在取消匯出…",
+  "editor.forceExit": "強制結束",
+  "editor.forceExitWarning": "強制結束整個應用程式？未儲存的編輯將遺失。",
+  "editor.forceExitConfirm": "確認強制結束",
+  "editor.exportStageProgress": "匯出階段進度",
+  "editor.exportStageHint": "依處理階段顯示進度；大圖顯影或編碼可能需要較長時間。",
+  "editor.exportCloseHint": "請先取消匯出，或使用匯出進度列中的強制結束。",
+  "editor.exportPhase.queued": "等待匯出程序",
+  "editor.exportPhase.decode": "解碼原圖",
+  "editor.exportPhase.develop": "RAW 顯影",
+  "editor.exportPhase.film": "膠片顯影",
+  "editor.exportPhase.resize": "調整輸出尺寸"
 }

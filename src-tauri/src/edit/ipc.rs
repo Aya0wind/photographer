@@ -133,6 +133,7 @@ fn fetch_export_in_library(
     let job_id = db
         .export_job_create(asset_id, validated.mode.as_str())
         .map_err(|e| e.to_string())?;
+    let live = export::LiveGuard::new(job_id);
 
     // worker 自带库连接 + 事件总线（后台任务资源所有权规则：线程内获取释放）。
     // album 模式落位锚点 = 源资产所属照片库 root（§一 静态归属；无归属的
@@ -157,20 +158,25 @@ fn fetch_export_in_library(
         options: validated,
         library_root,
     };
+    let task = db.export_job_get(job_id).map_err(|e| e.to_string())?
+        .map(ExportTaskDto::from).ok_or("导出任务建档后无法读回")?;
     state
         .supervisor
         .spawn(
             "export",
             format!("job-{job_id}"),
-            move |_| match crate::ipc::open_library_db(&db_dir) {
-                Ok(worker_db) => export::run_export_job(worker_db, &bus, request),
-                Err(error) => log::warn!("导出任务 {job_id} 无法打开库: {error}"),
+            move |_| {
+                let _live = live;
+                match crate::ipc::open_library_db(&db_dir) {
+                    Ok(worker_db) => export::run_export_job(worker_db, &bus, request),
+                    Err(error) => {
+                        let _ = db.export_job_fail(job_id, &error);
+                        bus.publish(crate::events::AppEvent::ExportTaskFinished { job_id, asset_id, ok: false, output_path: None, new_asset_id: None, error: Some(error) });
+                    }
+                }
             },
         );
-    db.export_job_get(job_id)
-        .map_err(|e| e.to_string())?
-        .map(ExportTaskDto::from)
-        .ok_or_else(|| "导出任务建档后无法读回".to_string())
+    Ok(task)
 }
 
 // ---------------------------------------------------------------------------
@@ -332,4 +338,22 @@ pub async fn edit_export_status(
         Ok(ExportTaskDto::from(job))
     })
     .await
+}
+
+#[tauri::command]
+pub async fn edit_export_cancel(state: State<'_, SharedState>, library_id: String, asset_id: String, job_id: i64) -> Result<(), String> {
+    run_blocking(state.inner().clone(), move |state| {
+        super::project::resolve(state, &library_id, &asset_id)?;
+        let db = crate::ipc::app_database_db(state)?;
+        let job = db.export_job_get(job_id).map_err(|e| e.to_string())?.ok_or("导出任务不存在")?;
+        if job.asset_id != parse_asset_id(&asset_id)? { return Err("导出任务与照片不匹配".into()); }
+        export::cancel_job(job_id)
+    }).await
+}
+
+/// Explicit emergency action; bypass native teardown and a blocked worker runtime.
+#[tauri::command]
+pub fn app_force_exit() {
+    super::export_worker::kill_all();
+    std::process::exit(0);
 }

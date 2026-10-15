@@ -333,3 +333,5 @@ export async function assetFlagSet(assetId: number, flagged: boolean): Promise<v
     // 静默
   }
 }
+
+export const assetBurstMembers=(ids:number[])=>ipc<AssetDto[]>("asset_burst_members",{ids});

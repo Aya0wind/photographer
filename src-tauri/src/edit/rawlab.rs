@@ -360,56 +360,38 @@ pub(super) fn open(
     }
     open_inner(path, edge, cancel)
 }
-pub(super) fn export_source(
-    path: &Path,
-    recipe: &EditRecipe,
-) -> Result<(Document, EditRecipe), String> {
+pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Document, EditRecipe), String> {
     let cancel = &AtomicBool::new(false);
-    let _cpu =
-        crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
+    let _cpu = crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
     let _memory = crate::tasks::index_budget::memory_budget().acquire(512);
-    if cancel.load(Ordering::Acquire) {
-        return Err("RAW 准备已取消".into());
-    }
+    let backend = backend()?;
     if !is_raw_path(path) {
         let opened = source::open(path)?;
-        return display(&opened.document, recipe);
+        let input = linear(&opened.document)?;
+        let rendered = export_color(&backend, &input.rgb, input.size, recipe, cancel)?;
+        let mut document = display_document(rendered.rgb(), input.size, input.alpha.as_deref())?;
+        document.metadata = opened.document.metadata.clone();
+        document.resolution_dpi = opened.document.resolution_dpi;
+        return Ok((document, downstream_recipe(recipe)));
     }
-    let backend = backend()?;
-    let linear = backend.develop(
-        path.to_str().ok_or("RAW 路径不是 UTF-8")?,
-        DevelopOptions::default(),
-        cancel,
-    )?;
+    let linear = backend.develop(path.to_str().ok_or("RAW 路径不是 UTF-8")?, DevelopOptions::default(), cancel)?;
     let size = linear.dimensions();
-    let key = color_key(recipe)?;
-    let film = key
-        .film
-        .as_ref()
-        .map(|id| super::film::path(id))
-        .transpose()?;
-    let film_path = film
-        .as_ref()
-        .map(|p| p.to_str().ok_or("胶片路径不是 UTF-8"))
-        .transpose()?;
-    let mut session = backend.color_session(linear.rgb(), size)?;
-    let rendered = session.render(
-        ColorOptions {
-            lut_path: film_path,
-            strength: key.strength,
-            gpu: GpuMode::Auto,
-            exposure_ev: key.exposure,
-            relative_white_balance: key.wb,
-        },
-        cancel,
-    )?;
-    drop(session);
+    let rendered = export_color(&backend, linear.rgb(), size, recipe, cancel)?;
     drop(linear);
-    Ok((
-        display_document(rendered.rgb(), size, None)?,
-        downstream_recipe(recipe),
-    ))
+    Ok((display_document(rendered.rgb(), size, None)?, downstream_recipe(recipe)))
 }
+fn export_color<'a>(backend: &'a Backend, rgb: &[f32], size: [u32;2], recipe: &EditRecipe,
+    cancel: &AtomicBool) -> Result<photographer_media::rawlab::Image<'a>, String> {
+    let key = color_key(recipe)?;
+    let film = key.film.as_ref().map(|id| super::film::path(id)).transpose()?;
+    let film_path = film.as_ref().map(|p| p.to_str().ok_or("胶片路径不是 UTF-8")).transpose()?;
+    let mut session = backend.color_session(rgb, size)?;
+    // Full-resolution exports run in a killable process. CPU avoids driver
+    // readback stalls and keeps the interactive GPU/context dedicated to preview.
+    session.render(ColorOptions { lut_path: film_path, strength: key.strength,
+        gpu: GpuMode::Off, exposure_ev: key.exposure, relative_white_balance: key.wb }, cancel)
+}
+
 fn open_inner(
     path: &Path,
     edge: Option<u32>,

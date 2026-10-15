@@ -30,6 +30,7 @@ use crate::ipc::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if edit::export_worker::run_if_requested() { return; }
     let app = tauri::Builder::default()
         // single-instance 必须第一个注册：二次启动时显示并聚焦已有主窗口。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -95,7 +96,7 @@ pub fn run() {
             log::info!("应用启动 version={}", env!("CARGO_PKG_VERSION"));
             edit::lut::init(&config_dir);
             edit::film::init(&config_dir);
-            if let Ok(resources)=app.path().resource_dir(){edit::rawlab::init(&resources,&config_dir);edit::film::init_builtins(&resources);}
+            if let Ok(resources)=app.path().resource_dir(){edit::export_worker::init(&resources,&config_dir);edit::rawlab::init(&resources,&config_dir);edit::film::init_builtins(&resources);}
             // 启动画面安全网（2026-09-29）：主窗 visible=false 由前端 reveal
             // （lib/windowReveal）；前端极端卡死时 8s 后强制显示，避免不可见窗口
             {
@@ -385,6 +386,7 @@ pub fn run() {
             ipc::assets::lens_list,
             ipc::assets::format_list,
             ipc::assets::assets_by_ids,
+            ipc::assets::asset_burst_members,
             ipc::thumb::asset_thumb_get,
             ipc::thumb::thumb_get_by_path,
             ipc::thumb::device_thumb_get,
@@ -466,6 +468,8 @@ pub fn run() {
             edit::ipc::edit_advanced_export,
             edit::ipc::edit_advanced_export_folder,
             edit::ipc::edit_export_status,
+            edit::ipc::edit_export_cancel,
+            edit::ipc::app_force_exit,
             ipc::watch::watch_folders_list,
             ipc::watch::watch_folder_add,
             ipc::watch::watch_folder_remove,
@@ -511,6 +515,7 @@ fn handle_app_event(app: &AppHandle, event: tauri::RunEvent) {
     if !matches!(event, tauri::RunEvent::Exit) {
         return;
     }
+    edit::export_worker::kill_all();
     let Some(monitor) = app.try_state::<Mutex<Option<hotplug::HotplugHandle>>>() else {
         return;
     };

@@ -15,13 +15,13 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
   const hiddenThrough=useRef(0);
   const send=useRef<(()=>void)|null>(null);
   const recipeSignature=useMemo(()=>JSON.stringify(recipe),[recipe]);
-  const latest=useRef({recipe,recipeSignature,enabled,original,compareSplit,clipping});latest.current={recipe,recipeSignature,enabled,original,compareSplit,clipping};
+  const latest=useRef({recipe,recipeSignature,enabled,original,compareSplit,clipping,sourceVersion});latest.current={recipe,recipeSignature,enabled,original,compareSplit,clipping,sourceVersion};
   const signature=JSON.stringify({recipeSignature,enabled,original,overlayVersion,compareSplit,clipping});
   useEffect(() => {
     if (!sessionId || !isTauri()) return;
     let disposed=false,failed=false,ready=false,scheduled=0;
     let inFlight=false,queued=false;
-    let acknowledged:{signature:string;version:number}|null=null;
+    let acknowledged:{signature:string;version:number;sourceVersion:string|undefined}|null=null;
     let release:(()=>void)|undefined;
     let observer:ResizeObserver|undefined;
     let mutation:MutationObserver|undefined;
@@ -65,10 +65,10 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
         uv:[0,0,1,1],image:[(picture.left-viewport.left)/viewport.width,(picture.top-viewport.top)/viewport.height,picture.width/viewport.width,picture.height/viewport.height]};
       const frameRevision=++revision.current;
       try {
-        const cached=acknowledged?.signature===value.recipeSignature;
+        const cached=acknowledged?.signature===value.recipeSignature&&acknowledged.sourceVersion===value.sourceVersion;
         const recipeRevision=cached?acknowledged!.version:frameRevision;
         const reusable=await ipc<boolean|null>("edit_native_frame",{sessionId,recipe:cached?null:value.recipe,recipeRevision,view,revision:frameRevision,original:value.original});
-        if(!disposed)acknowledged=reusable===true?{signature:value.recipeSignature,version:recipeRevision}:null;
+        if(!disposed)acknowledged=reusable===true?{signature:value.recipeSignature,version:recipeRevision,sourceVersion:value.sourceVersion}:null;
       }
       catch(error) {if(frameRevision>hiddenThrough.current&&latest.current.enabled)fail(error);}
     }

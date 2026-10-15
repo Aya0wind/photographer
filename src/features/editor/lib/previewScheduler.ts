@@ -40,6 +40,7 @@ export function startPreviewScheduler(sessionId: string, getRecipe: () => EditRe
   let disposed=false, running=false, dirty=false, revision=0, changedAt=0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const urls:string[]=[];
+  let displayed:string|undefined;
   async function pump() {
     timer=undefined;
     if (disposed || running || !dirty) return;
@@ -47,7 +48,7 @@ export function startPreviewScheduler(sessionId: string, getRecipe: () => EditRe
     const version=revision, requestedAt=changedAt;
     const recipe=getRecipe();
     if(sourceUrl && isNeutral(recipe)) {
-      running=false;callbacks.setUrl(sourceUrl);callbacks.setError(null);callbacks.setPending(false);return;
+      running=false;displayed=sourceUrl;callbacks.setUrl(sourceUrl);callbacks.setError(null);callbacks.setPending(false);return;
     }
     callbacks.setPending(true);
     try {
@@ -56,7 +57,7 @@ export function startPreviewScheduler(sessionId: string, getRecipe: () => EditRe
       // Display each completed frame while a newer gesture is pending. Dropping
       // every in-flight result starves the preview during continuous dragging.
       if (disposed || (version!==revision && sourceUrl && isNeutral(getRecipe()))) { releasePreviewImage(next); return; }
-      urls.push(next); callbacks.setUrl(next); callbacks.setError(null);
+      urls.push(next); displayed=next;callbacks.setUrl(next); callbacks.setError(null);
       if (urls.length>3) releasePreviewImage(urls.shift()!);
       measure("editor.preview.interactive.frame-ready",requestedAt);
       if (import.meta.env.DEV) void editPreviewStats(sessionId).then(stats => {
@@ -78,7 +79,8 @@ export function startPreviewScheduler(sessionId: string, getRecipe: () => EditRe
   }
   function close() {
     disposed=true;clearTimeout(timer);
-    for(const url of urls) releasePreviewImage(url);
+    // The preview hook owns the displayed frame until replacement/unmount.
+    for(const url of urls) if(url!==displayed)releasePreviewImage(url);
     urls.length=0;
   }
   wake();

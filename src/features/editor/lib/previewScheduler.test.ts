@@ -123,3 +123,12 @@ it("recognizes extended color edits while skipping disabled black-white settings
  await vi.advanceTimersByTimeAsync(16);expect(editPreviewRender).toHaveBeenCalledTimes(2);
  scheduler.close();
 });
+
+it("preserves the displayed frame URL when handing rendering to the native canvas",async()=>{
+ vi.mocked(editPreviewRender).mockResolvedValue("blob:displayed");
+ const callbacks={setUrl:vi.fn(),setError:vi.fn(),setPending:vi.fn()};
+ const scheduler=startPreviewScheduler("session",advancedRecipe,callbacks);
+ await vi.advanceTimersByTimeAsync(20);
+ expect(callbacks.setUrl).toHaveBeenLastCalledWith("blob:displayed");
+ scheduler.close();expect(releasePreviewImage).not.toHaveBeenCalledWith("blob:displayed");
+});

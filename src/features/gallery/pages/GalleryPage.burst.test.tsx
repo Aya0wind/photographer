@@ -1,7 +1,7 @@
 import { assetFixture } from "@/test/fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -12,6 +12,8 @@ import { resetThumbPipelineForTests } from "../lib/thumbPipeline";
 import { clearGallerySnapshotForTests } from "../lib/galleryCache";
 import {
   assetGroupDates,
+  assetBurstMembers,
+  assetTrashMove,
   assetThumbGet,
   assetsPage,
   isIpcAvailable,
@@ -23,6 +25,8 @@ vi.mock("@/ipc/api", async (importOriginal) => {
   return {
     ...actual,
     assetsPage: vi.fn(),
+    assetBurstMembers: vi.fn(),
+    assetTrashMove: vi.fn(),
     assetGroupDates: vi.fn(),
     assetThumbGet: vi.fn(),
     isIpcAvailable: vi.fn(() => true),
@@ -220,4 +224,22 @@ describe("画廊：连拍堆叠卡", () => {
     // 组头计数仍为 3
     expect(screen.getByTestId("gallery-group")).toHaveTextContent("3 张");
   });
+});
+
+it("selected burst moves every member to trash, including photos beyond the loaded page",async()=>{
+  const user=userEvent.setup();
+  const loaded=[makeAsset(11,{burstId:9,burstCount:3}),makeAsset(10,{burstId:9,burstCount:3}),makeAsset(8)];
+  assetsPageMock.mockResolvedValue(loaded);
+  vi.mocked(assetBurstMembers).mockResolvedValue([...loaded.slice(0,2),makeAsset(9,{burstId:9,burstCount:3})]);
+  vi.mocked(assetTrashMove).mockResolvedValue();
+  renderGallery();
+  const cover=(await screen.findByTestId("gallery-burst-badge")).closest("[data-testid='gallery-tile']")!;
+  fireEvent.click(cover,{ctrlKey:true});
+  fireEvent.contextMenu(cover,{clientX:100,clientY:100});
+  const action=await screen.findByRole("menuitem",{name:"移入回收站（3 张）"});
+  expect(assetBurstMembers).toHaveBeenCalledWith([11]);
+  await user.click(action);
+  const dialog=await screen.findByTestId("trash-move-dialog");
+  await user.click(within(dialog).getByTestId("trash-move-accept"));
+  await waitFor(()=>expect(assetTrashMove).toHaveBeenCalledWith([11,10,9]));
 });

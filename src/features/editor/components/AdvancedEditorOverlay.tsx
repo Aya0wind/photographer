@@ -15,6 +15,7 @@ import {
 import ActionPopover from "@/shared/components/ActionPopover";
 import EditorCanvas, { type EditorTool } from "./EditorCanvas";
 import ExportAlbumPicker from "./ExportAlbumPicker";
+import EditorExportProgress from "./EditorExportProgress";
 import AdvancedToolPanel from "./AdvancedToolPanel";
 import MaskPanel from "./MaskPanel";
 import {maskGestureOwnsKey,type MaskBrush} from "./MaskCanvasControls";
@@ -141,6 +142,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [sourceAlbums, setSourceAlbums] = useState<AlbumDto[]>([]);
   const albumCloseAfter = useRef(false);
   const [exporting, setExporting] = useState(false);
+  const [exportPhase,setExportPhase]=useState("queued");
   const job = useRef<number | null>(null);
   const gesture = useRef<RecipeHistory | null>(null);
   const mounted = useRef(true);
@@ -183,6 +185,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     let cancelled = false;
     let off: (() => void) | null = null;
     void subscribeAppEvents((event) => {
+      if (event.type === "exportTaskProgress" && event.jobId === job.current) setExportPhase(event.phase);
       if (event.type === "exportTaskFinished" && event.jobId === job.current) {
         job.current = null;
         setExporting(false);
@@ -204,7 +207,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       try {
         const task = await editExportStatus(asset.id, libraryId, id);
         if (cancelled || job.current !== id) return;
-        if (task.status === "done" || task.status === "error") {
+        if(task.phase)setExportPhase(task.phase);
+        if (task.status === "done" || task.status === "error" || task.status === "cancelled") {
           job.current = null; setExporting(false);
           setNotice(task.status === "done" ? t("advancedEditor.exported") : task.error ?? t("editor.exportFailed"));
           if (task.status === "done" && returnAfterExport.current) closeEditor();
@@ -276,7 +280,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   function cancelCrop(){gesture.current=null;dispatch({type:"cropCancel"});setCropDraft(null);setCropRatio(null);setStraightening(false);setTool("adjust");}
   function undoEditing(){if(tool==="crop")cancelCrop();else{endGesture();dispatch({type:"undo"});}}
   function redoEditing(){if(tool==="crop")cancelCrop();else dispatch({type:"redo"});}
-  function requestClose() {if(target.active){closeAfterTarget.current=true;target.cancel();return;} if (!toolModalOpen && !busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }
+  function requestClose() {if(exporting){setNotice(t("editor.exportCloseHint"));return;}if(target.active){closeAfterTarget.current=true;target.cancel();return;} if (!toolModalOpen && !busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }
   useEffect(()=>{if(!target.active&&closeAfterTarget.current){closeAfterTarget.current=false;requestClose();}},[target.active]);
 
   async function saveProject(): Promise<boolean> {
@@ -304,7 +308,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       const task = await advancedExport(asset.id, libraryId, snapshot, preview.session!.sessionId, albumId, subgroup,exportFormat,exportColorSpace);
       if (!mounted.current) return;
       job.current = task.id; returnAfterExport.current = closeAfter;
-      setExporting(true); setNotice(t("advancedEditor.exporting"));
+      setExportPhase("queued");setExporting(true); setNotice(t("advancedEditor.exporting"));
     } catch (e: unknown) { if (mounted.current) setNotice(String(e)); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   }
@@ -317,7 +321,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         removeGps: false, copyright: "", author: "", keywords: [],
       });
       if (!mounted.current) return;
-      job.current = result.id; setExporting(true); setNotice(t("advancedEditor.exporting"));
+      job.current = result.id; setExportPhase("queued");setExporting(true); setNotice(t("advancedEditor.exporting"));
     } catch (e: unknown) { if (mounted.current) setNotice(String(e)); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   }
@@ -393,6 +397,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         <button className={BUTTON} disabled={busy || exporting} onClick={requestClose}>{t("editor.close")}</button>
       </div>
     </header>
+    {exporting&&job.current!==null&&<EditorExportProgress key={job.current} assetId={asset.id} libraryId={libraryId} jobId={job.current} phase={exportPhase} onError={setNotice}/>}
     <div className="flex min-h-0 flex-1 gap-2 p-2">
       <nav role="tablist" aria-orientation="vertical" aria-label={t("editor.tools")} className="ui-glass flex w-14 shrink-0 flex-col items-center gap-1 rounded-2xl py-2">
         {TOOLS.map(({ id, label, icon }) => <button key={id} role="tab" aria-selected={tool === id} aria-label={t(label)} title={t(label)} disabled={busy || exporting || unavailable} onClick={() => chooseTool(id)} className={`flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${tool === id ? "bg-accent/15 text-accent" : "text-text-secondary hover:bg-panel"}`}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg></button>)}
