@@ -1774,5 +1774,7 @@
   "editor.exportPhase.decode": "Decodificar original",
   "editor.exportPhase.develop": "Revelar RAW",
   "editor.exportPhase.film": "Revelado de película",
-  "editor.exportPhase.resize": "Ajustar tamaño"
+  "editor.exportPhase.resize": "Ajustar tamaño",
+  "editor.exportPhase.gpu": "Procesamiento de película en GPU",
+  "editor.exportPhase.cpuFallback": "GPU no disponible o agotó el tiempo; reintentando en CPU"
 }

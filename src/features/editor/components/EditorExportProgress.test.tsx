@@ -25,3 +25,7 @@ it("allows retry when cancellation fails and requires explicit force-quit confir
  await user.click(screen.getByRole("button",{name:"确认强制退出"}));expect(appForceExit).toHaveBeenCalledOnce();
 });
 it("protects the short publication/registration step from cancellation",()=>{view("register");expect(screen.getByRole("button",{name:"取消导出"})).toBeDisabled();expect(screen.getByRole("button",{name:"强制退出"})).toBeEnabled();});
+it("shows GPU processing and CPU retry phases without hiding cancellation",()=>{
+ const {unmount}=view("gpu");expect(screen.getByRole("status")).toHaveTextContent("GPU 胶片处理");expect(screen.getByRole("progressbar")).toHaveAttribute("value","40");unmount();
+ view("cpuFallback");expect(screen.getByRole("status")).toHaveTextContent("改用 CPU 重试");expect(screen.getByRole("button",{name:"取消导出"})).toBeEnabled();
+});

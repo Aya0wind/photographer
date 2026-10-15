@@ -1758,5 +1758,7 @@
   "editor.exportPhase.decode": "元画像をデコード",
   "editor.exportPhase.develop": "RAW 現像",
   "editor.exportPhase.film": "フィルム現像",
-  "editor.exportPhase.resize": "出力サイズを調整"
+  "editor.exportPhase.resize": "出力サイズを調整",
+  "editor.exportPhase.gpu": "GPU フィルム処理",
+  "editor.exportPhase.cpuFallback": "GPU が利用不可またはタイムアウトのため CPU で再試行"
 }

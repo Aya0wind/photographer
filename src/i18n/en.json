@@ -1781,5 +1781,7 @@
   "editor.exportPhase.decode": "Decode original",
   "editor.exportPhase.develop": "Develop RAW",
   "editor.exportPhase.film": "Film development",
-  "editor.exportPhase.resize": "Resize output"
+  "editor.exportPhase.resize": "Resize output",
+  "editor.exportPhase.gpu": "GPU film processing",
+  "editor.exportPhase.cpuFallback": "GPU unavailable or timed out; retrying on CPU"
 }

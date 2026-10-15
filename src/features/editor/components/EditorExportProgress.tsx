@@ -2,7 +2,7 @@ import {useState} from "react";
 import {useTranslation} from "react-i18next";
 import {appForceExit, editExportCancel} from "@/ipc/api";
 
-const STAGES:Record<string,number>={queued:2,decode:10,develop:25,film:40,resize:55,render:65,encode:80,write:95,register:95};
+const STAGES:Record<string,number>={queued:2,decode:10,develop:25,film:40,gpu:40,cpuFallback:40,resize:55,render:65,encode:80,write:95,register:95};
 /** Stage progress: never invent per-pixel percentages during native calls. */
 export default function EditorExportProgress({assetId,libraryId,jobId,phase,onError}:{assetId:number;libraryId:string;jobId:number;phase:string;onError:(message:string)=>void}) {
   const {t}=useTranslation();

@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc, Arc, OnceLock,
     },
     time::{Duration, Instant},
@@ -360,6 +360,11 @@ pub(super) fn open(
     }
     open_inner(path, edge, cancel)
 }
+// Direct test callers retain Auto; isolated application workers select Force/Off.
+static EXPORT_GPU: AtomicU8 = AtomicU8::new(1);
+pub(super) fn configure_export_gpu(cpu_only: bool) {
+    EXPORT_GPU.store(if cpu_only { 0 } else { 2 }, Ordering::Release);
+}
 pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Document, EditRecipe), String> {
     let cancel = &AtomicBool::new(false);
     let _cpu = crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
@@ -385,11 +390,14 @@ fn export_color<'a>(backend: &'a Backend, rgb: &[f32], size: [u32;2], recipe: &E
     let key = color_key(recipe)?;
     let film = key.film.as_ref().map(|id| super::film::path(id)).transpose()?;
     let film_path = film.as_ref().map(|p| p.to_str().ok_or("胶片路径不是 UTF-8")).transpose()?;
+    let gpu = match EXPORT_GPU.load(Ordering::Acquire) { 0 => GpuMode::Off, 2 => GpuMode::Force, _ => GpuMode::Auto };
+    if !matches!(gpu, GpuMode::Off) { super::export_worker::begin_gpu()?; }
     let mut session = backend.color_session(rgb, size)?;
-    // Full-resolution exports run in a killable process. CPU avoids driver
-    // readback stalls and keeps the interactive GPU/context dedicated to preview.
-    session.render(ColorOptions { lut_path: film_path, strength: key.strength,
-        gpu: GpuMode::Off, exposure_ev: key.exposure, relative_white_balance: key.wb }, cancel)
+    let rendered = session.render(ColorOptions { lut_path: film_path, strength: key.strength,
+        gpu, exposure_ev: key.exposure, relative_white_balance: key.wb }, cancel)?;
+    drop(session);
+    if !matches!(gpu, GpuMode::Off) { super::export_worker::end_gpu()?; }
+    Ok(rendered)
 }
 
 fn open_inner(

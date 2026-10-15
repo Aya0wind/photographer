@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -20,6 +20,8 @@ struct Environment {
     resources: PathBuf,
     config: PathBuf,
 }
+const GPU_TIMEOUT: Duration = Duration::from_secs(30);
+static WORK_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static ENVIRONMENT: OnceLock<Environment> = OnceLock::new();
 pub(crate) fn init(resources: &Path, config: &Path) {
@@ -34,6 +36,7 @@ struct Request {
     source: PathBuf,
     recipe: EditRecipe,
     options: ValidatedOptions,
+    cpu_only: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Output {
@@ -88,22 +91,87 @@ pub(super) fn render(
         .tempdir()
         .map_err(|e| e.to_string())?;
     let root = directory.path();
-    let request = Request {
+    let mut request = Request {
         environment,
         source: source.into(),
         recipe: recipe.clone(),
         options: options.clone(),
+        cpu_only: false,
     };
-    std::fs::write(
-        root.join("request.json"),
-        serde_json::to_vec(&request).map_err(|e| e.to_string())?,
+    gpu_first(
+        |cpu_only| {
+            request.cpu_only = cpu_only;
+            attempt(root, &request, progress, cancelled)
+        },
+        progress,
+        cancelled,
     )
-    .map_err(|e| e.to_string())?;
-    progress("queued");
-    let child = spawn(root, cancelled)?;
-    monitor(child.0, root, progress, cancelled)?;
+}
+
+#[derive(Debug)]
+struct AttemptFailure {
+    message: String,
+    gpu: bool,
+}
+impl From<String> for AttemptFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            gpu: false,
+        }
+    }
+}
+fn gpu_first<T>(
+    mut attempt: impl FnMut(bool) -> Result<T, AttemptFailure>,
+    progress: &dyn Fn(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<T, String> {
+    let result = attempt(false);
     if cancelled() {
         return Err("导出已取消".into());
+    }
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if error.gpu && !cancelled() && !STOPPING.load(Ordering::Acquire) => {
+            log::warn!(
+                "RawLab GPU export failed; retrying on CPU: {}",
+                error.message
+            );
+            progress("cpuFallback");
+            let result = attempt(true);
+            if cancelled() {
+                return Err("导出已取消".into());
+            }
+            result.map_err(|cpu| format!("GPU: {}; CPU: {}", error.message, cpu.message))
+        }
+        Err(error) => Err(error.message),
+    }
+}
+fn attempt(
+    root: &Path,
+    request: &Request,
+    progress: &dyn Fn(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(Vec<u8>, u32, u32), AttemptFailure> {
+    for file in ["phase", "error", "gpu-active", "image.bin", "result.json"] {
+        match std::fs::remove_file(root.join(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string().into()),
+        }
+    }
+    std::fs::write(
+        root.join("request.json"),
+        serde_json::to_vec(request).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if !request.cpu_only {
+        progress("queued");
+    }
+    let child = spawn(root, cancelled)?;
+    monitor(child.0, root, progress, cancelled, GPU_TIMEOUT)?;
+    if cancelled() {
+        return Err("导出已取消".to_string().into());
     }
     let output: Output = serde_json::from_slice(
         &std::fs::read(root.join("result.json")).map_err(|e| e.to_string())?,
@@ -152,11 +220,13 @@ fn monitor(
     root: &Path,
     progress: &dyn Fn(&str),
     cancelled: &dyn Fn() -> bool,
-) -> Result<(), String> {
+    gpu_timeout: Duration,
+) -> Result<(), AttemptFailure> {
+    let mut gpu_started: Option<Instant> = None;
     let mut phase = String::new();
     loop {
         if cancelled() {
-            return Err("导出已取消".into());
+            return Err("导出已取消".to_string().into());
         }
         if let Ok(next) = std::fs::read_to_string(root.join("phase")) {
             if !next.is_empty() && next != phase {
@@ -166,20 +236,43 @@ fn monitor(
         }
         let status = children()
             .lock()
-            .map_err(|_| "导出进程锁不可用")?
+            .map_err(|_| "导出进程锁不可用".to_string())?
             .get_mut(&id)
-            .ok_or("导出进程已退出")?
+            .ok_or_else(|| "导出进程已退出".to_string())?
             .try_wait()
             .map_err(|e| e.to_string())?;
         if let Some(status) = status {
             if !status.success() {
-                return Err(std::fs::read_to_string(root.join("error"))
-                    .unwrap_or_else(|_| format!("导出进程异常退出: {status}")));
+                return Err(AttemptFailure {
+                    message: std::fs::read_to_string(root.join("error"))
+                        .unwrap_or_else(|_| format!("导出进程异常退出: {status}")),
+                    gpu: root.join("gpu-active").exists(),
+                });
             }
             return Ok(());
         }
+        check_gpu_deadline(root, &mut gpu_started, gpu_timeout)?;
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+// Count only the marked native GPU interval; decoding and encoding have no deadline.
+fn check_gpu_deadline(
+    root: &Path,
+    started: &mut Option<Instant>,
+    timeout: Duration,
+) -> Result<(), AttemptFailure> {
+    if !root.join("gpu-active").exists() {
+        *started = None;
+        return Ok(());
+    }
+    if started.get_or_insert_with(Instant::now).elapsed() >= timeout {
+        return Err(AttemptFailure {
+            message: format!("RawLab GPU 处理超过 {} 秒", timeout.as_secs()),
+            gpu: true,
+        });
+    }
+    Ok(())
 }
 
 /// Called before Tauri, plugins, single-instance registration or background pools.
@@ -198,11 +291,27 @@ pub(crate) fn run_if_requested() -> bool {
     // Exit without waiting for native GPU helper threads or async-runtime teardown.
     std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
+/// Marker covers native session allocation/upload/render/readback, never decode/encode.
+pub(super) fn begin_gpu() -> Result<(), String> {
+    if let Some(root) = WORK_DIRECTORY.get() {
+        std::fs::write(root.join("gpu-active"), b"active").map_err(|e| e.to_string())?;
+        std::fs::write(root.join("phase"), "gpu").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+pub(super) fn end_gpu() -> Result<(), String> {
+    if let Some(root) = WORK_DIRECTORY.get() {
+        std::fs::remove_file(root.join("gpu-active")).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 fn run(root: &Path) -> Result<(), String> {
     let request: Request = serde_json::from_slice(
         &std::fs::read(root.join("request.json")).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    let _ = WORK_DIRECTORY.set(root.to_path_buf());
+    super::rawlab::configure_export_gpu(request.cpu_only);
     super::lut::init(&request.environment.config);
     super::film::init(&request.environment.config);
     super::film::init_builtins(&request.environment.resources);
@@ -228,6 +337,99 @@ fn run(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gpu_failure_retries_cpu_once_and_other_failures_do_not_retry() {
+        let mut modes = Vec::new();
+        let result = gpu_first(
+            |cpu| {
+                modes.push(cpu);
+                if cpu {
+                    Ok("done")
+                } else {
+                    Err(AttemptFailure {
+                        message: "GPU OOM".into(),
+                        gpu: true,
+                    })
+                }
+            },
+            &|_| {},
+            &|| false,
+        );
+        assert_eq!(result.unwrap(), "done");
+        assert_eq!(modes, [false, true]);
+        let mut calls = 0;
+        let result: Result<(), _> = gpu_first(
+            |_| {
+                calls += 1;
+                Err("decode failed".to_string().into())
+            },
+            &|_| {},
+            &|| false,
+        );
+        assert!(result.unwrap_err().contains("decode failed"));
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn gpu_success_is_not_retried_and_cancellation_prevents_cpu_fallback() {
+        let mut modes = Vec::new();
+        let result = gpu_first(
+            |cpu| {
+                modes.push(cpu);
+                Ok("GPU")
+            },
+            &|_| {},
+            &|| false,
+        );
+        assert_eq!(result.unwrap(), "GPU");
+        assert_eq!(modes, [false]);
+        let mut modes = Vec::new();
+        let result: Result<(), _> = gpu_first(
+            |cpu| {
+                modes.push(cpu);
+                Err(AttemptFailure {
+                    message: "GPU failed".into(),
+                    gpu: true,
+                })
+            },
+            &|_| {},
+            &|| true,
+        );
+        assert_eq!(result.unwrap_err(), "导出已取消");
+        assert_eq!(modes, [false]);
+    }
+    #[test]
+    fn cpu_failure_ends_the_job_without_another_retry() {
+        let mut modes = Vec::new();
+        let result: Result<(), _> = gpu_first(
+            |cpu| {
+                modes.push(cpu);
+                Err(AttemptFailure {
+                    message: "failed".into(),
+                    gpu: !cpu,
+                })
+            },
+            &|_| {},
+            &|| false,
+        );
+        assert!(result.unwrap_err().contains("CPU"));
+        assert_eq!(modes, [false, true]);
+    }
+    #[test]
+    fn cancellation_during_fallback_keeps_the_cancelled_terminal_reason() {
+        let cancelled = std::cell::Cell::new(false);
+        let result: Result<(), _> = gpu_first(
+            |cpu| {
+                cancelled.set(cpu);
+                Err(AttemptFailure {
+                    message: "GPU failed".into(),
+                    gpu: true,
+                })
+            },
+            &|_| {},
+            &|| cancelled.get(),
+        );
+        assert_eq!(result.unwrap_err(), "导出已取消");
+    }
     #[test]
     #[ignore = "subprocess fixture, launched explicitly by blocked_child_is_reaped"]
     fn blocked_process() {
@@ -260,6 +462,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(ready.exists(), "child did not enter the blocked stage");
+        // No marker: decoding is not governed by the GPU deadline.
+        let start = Instant::now();
+        let error = monitor(
+            id,
+            root.path(),
+            &|_| {},
+            &|| start.elapsed() > Duration::from_millis(120),
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(!error.gpu);
+        assert_eq!(error.message, "导出已取消");
+        std::fs::write(root.path().join("gpu-active"), b"active").unwrap();
+        let error = monitor(
+            id,
+            root.path(),
+            &|_| {},
+            &|| false,
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert!(error.gpu);
         let start = std::time::Instant::now();
         drop(guard);
         assert!(start.elapsed() < Duration::from_secs(3));

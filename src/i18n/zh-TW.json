@@ -1765,5 +1765,7 @@
   "editor.exportPhase.decode": "解碼原圖",
   "editor.exportPhase.develop": "RAW 顯影",
   "editor.exportPhase.film": "膠片顯影",
-  "editor.exportPhase.resize": "調整輸出尺寸"
+  "editor.exportPhase.resize": "調整輸出尺寸",
+  "editor.exportPhase.gpu": "GPU 膠片處理",
+  "editor.exportPhase.cpuFallback": "GPU 無法使用或逾時，改用 CPU 重試"
 }

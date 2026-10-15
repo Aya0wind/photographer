@@ -1765,5 +1765,7 @@
   "editor.exportPhase.decode": "解码原图",
   "editor.exportPhase.develop": "RAW 显影",
   "editor.exportPhase.film": "胶片显影",
-  "editor.exportPhase.resize": "调整输出尺寸"
+  "editor.exportPhase.resize": "调整输出尺寸",
+  "editor.exportPhase.gpu": "GPU 胶片处理",
+  "editor.exportPhase.cpuFallback": "GPU 不可用或超时，改用 CPU 重试"
 }
