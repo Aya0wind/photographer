@@ -49,6 +49,7 @@ jobs:
       - name: Native ABI failure regressions
         run: ctest --test-dir native/rawlab/build -C Release --output-on-failure
       - name: Rust color and ABI regressions
+        if: runner.os != 'Windows'
         run: |
           case "${{ runner.os }}" in
             Windows) export PHOTOGRAPHER_RAW_BRIDGE="$GITHUB_WORKSPACE/native/rawlab/build/photographer_raw.dll" ;;
@@ -57,3 +58,17 @@ jobs:
           esac
           test -f "$PHOTOGRAPHER_RAW_BRIDGE"
           cargo test --manifest-path crates/media/Cargo.toml --locked
+      - name: Rust color and ABI regressions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Git Bash ships a different link.exe. Bind Rust to the MSVC linker.
+          $compiler = (Get-Command cl.exe -CommandType Application -ErrorAction Stop).Source
+          $msvcBin = Split-Path -Parent $compiler
+          $env:PATH = "$msvcBin;$env:PATH"
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $msvcBin 'link.exe'
+          $env:PHOTOGRAPHER_RAW_BRIDGE = Join-Path $env:GITHUB_WORKSPACE 'native/rawlab/build/photographer_raw.dll'
+          if (!(Test-Path -LiteralPath $env:PHOTOGRAPHER_RAW_BRIDGE -PathType Leaf)) { throw 'RAW bridge missing' }
+          cargo test --manifest-path crates/media/Cargo.toml --locked
+          exit $LASTEXITCODE

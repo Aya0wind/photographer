@@ -22,7 +22,7 @@ runs:
           brew install glib pkgconf ninja
         else
           sudo apt-get update
-          sudo apt-get install -y liblensfun-dev pkg-config ninja-build zlib1g-dev
+          sudo apt-get install -y liblensfun-dev libglib2.0-dev pkg-config ninja-build zlib1g-dev
         fi
 
     - name: Set up MSVC for Ninja

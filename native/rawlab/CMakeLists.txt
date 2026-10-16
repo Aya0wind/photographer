@@ -68,6 +68,11 @@ if(WIN32)
 elseif(APPLE)
     # Build the same pinned Lensfun against GLib supplied by the host toolchain.
     include(cmake/lensfun-macos.cmake)
+elseif(UNIX)
+    # Lensfun's pkg-config metadata also needs the GLib development package.
+    # Fail at configure time rather than compiling without its include paths.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LENSFUN REQUIRED IMPORTED_TARGET GLOBAL lensfun>=0.3.4)
 endif()
 set(SONY2FUJI_ENABLE_LENSFUN ON CACHE BOOL "" FORCE)
 set(SONY2FUJI_ENABLE_DNGSDK "${PHOTOGRAPHER_RAWLAB_JXL}" CACHE BOOL "" FORCE)
