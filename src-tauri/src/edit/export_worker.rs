@@ -35,7 +35,9 @@ struct Request {
     environment: Environment,
     source: PathBuf,
     recipe: EditRecipe,
-    options: ValidatedOptions,
+    options: Option<ValidatedOptions>,
+    #[serde(default)]
+    detail:bool,
     cpu_only: bool,
 }
 #[derive(Serialize, Deserialize)]
@@ -95,7 +97,8 @@ pub(super) fn render(
         environment,
         source: source.into(),
         recipe: recipe.clone(),
-        options: options.clone(),
+        options: Some(options.clone()),
+        detail:false,
         cpu_only: false,
     };
     gpu_first(
@@ -106,6 +109,44 @@ pub(super) fn render(
         progress,
         cancelled,
     )
+}
+
+pub(super) fn inspect(source:&Path,recipe:&EditRecipe,job:&super::detail::Control)->Result<(),String>{
+    let environment=ENVIRONMENT.get().ok_or("细节资源目录未初始化")?.clone();
+    let directory=tempfile::Builder::new().prefix("photographer-detail-").tempdir().map_err(|e|e.to_string())?;
+    let root=directory.path();
+    let mut request=Request{environment,source:source.into(),recipe:recipe.clone(),options:None,detail:true,cpu_only:false};
+    gpu_first(|cpu_only|{
+        request.cpu_only=cpu_only;
+        for file in ["phase","error","gpu-active","ready.json","frame.json","view.json"]{let _=std::fs::remove_file(root.join(file));}
+        std::fs::write(root.join("request.json"),serde_json::to_vec(&request).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        std::fs::write(root.join("heartbeat"),b"alive").map_err(|e|e.to_string())?;
+        let child=spawn(root,&||job.stopped())?;
+        monitor_detail(child.0,root,job)
+    },&|phase|job.phase(phase),&||job.stopped())
+}
+fn monitor_detail(id:u32,root:&Path,job:&super::detail::Control)->Result<(),AttemptFailure>{
+    let mut gpu_started=None;let mut ready=false;let mut sent=0;let mut received=0;
+    let mut heartbeat=Instant::now();
+    loop{
+        if job.stopped()||STOPPING.load(Ordering::Acquire){return Ok(());}
+        if heartbeat.elapsed()>=Duration::from_secs(1){std::fs::write(root.join("heartbeat"),b"alive").map_err(|e|e.to_string())?;heartbeat=Instant::now();}
+        if let Ok(phase)=std::fs::read_to_string(root.join("phase")){job.phase(&phase);}
+        if !ready{
+            if let Some(size)=std::fs::read(root.join("ready.json")).ok().and_then(|b|serde_json::from_slice::<super::detail::Ready>(&b).ok()){job.ready(size.width,size.height);ready=true;}
+        }
+        if ready{
+            let view=job.view.lock().map_err(|_|"细节视口锁不可用".to_string())?.clone();
+            if let Some(view)=view.filter(|v|v.revision>sent){super::lut::atomic_write(&root.join("view.json"),&serde_json::to_vec(&view).map_err(|e|e.to_string())?)?;sent=view.revision;}
+            if let Some(frame)=std::fs::read(root.join("frame.json")).ok().and_then(|b|serde_json::from_slice::<super::detail::Frame>(&b).ok()).filter(|f|f.revision>received){
+                if let Ok(bytes)=std::fs::read(root.join(format!("frame-{}.png",frame.revision))){job.image(frame.revision,bytes);received=frame.revision;}
+            }
+        }
+        let status=children().lock().map_err(|_|"细节进程锁不可用".to_string())?.get_mut(&id).ok_or("细节进程已退出".to_string())?.try_wait().map_err(|e|e.to_string())?;
+        if let Some(status)=status{return Err(AttemptFailure{message:std::fs::read_to_string(root.join("error")).unwrap_or_else(|_|format!("细节进程退出：{status}")),gpu:root.join("gpu-active").exists()});}
+        check_gpu_deadline(root,&mut gpu_started,GPU_TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(80));
+    }
 }
 
 #[derive(Debug)]
@@ -319,10 +360,11 @@ fn run(root: &Path) -> Result<(), String> {
     let progress = |phase: &str| {
         let _ = std::fs::write(root.join("phase"), phase);
     };
+    if request.detail{return super::detail::worker(&request.source,&request.recipe,root,&progress);}
     let (bytes, width, height) = export::encode_output(
         &request.source,
         &request.recipe,
-        &request.options,
+        request.options.as_ref().ok_or("导出选项缺失")?,
         &progress,
     )?;
     std::fs::write(root.join("image.bin"), bytes).map_err(|e| e.to_string())?;

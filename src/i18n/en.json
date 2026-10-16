@@ -1995,5 +1995,12 @@
   "advancedEditor.pointColor.remove": "Delete current color",
   "advancedEditor.pointColor.hint": "Soft selection by hue, saturation and lightness distance. Up to eight colors, processed in saved order. This manual algorithm does not promise Lightroom matching.",
   "advancedEditor.primaries.title": "RGB primary adjustments",
-  "advancedEditor.primaries.hint": "A creative RGB mixing matrix preserving the neutral axis. This is not a camera calibration matrix and does not replace RAW camera calibration."
+  "advancedEditor.primaries.hint": "A creative RGB mixing matrix preserving the neutral axis. This is not a camera calibration matrix and does not replace RAW camera calibration.",
+  "advancedEditor.detailInspector.title": "Full-size detail inspection",
+  "advancedEditor.detailInspector.edges": "Inspect edges",
+  "advancedEditor.detailInspector.position": "Click to choose a region",
+  "advancedEditor.detailInspector.hint": "Prepares the current full-resolution result once in an isolated process, then composites only selected regions. At 100%, one image pixel maps to one physical display pixel. The main canvas keeps using its proxy. Closing or cancelling terminates the detail process.",
+  "advancedEditor.detailInspector.loading": "Preparing details",
+  "advancedEditor.detailInspector.region": "Reading region pixels",
+  "advancedEditor.detailInspector.edgesHint": "Shows smoothed luminance edges of the current result for inspecting sharpness, noise and spots. This is not the sharpening operator’s internal mask."
 }

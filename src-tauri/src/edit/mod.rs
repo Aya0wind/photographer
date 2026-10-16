@@ -71,3 +71,4 @@ mod source;
 pub mod style_preview;
 mod groups;
 mod point_color;
+pub mod detail;

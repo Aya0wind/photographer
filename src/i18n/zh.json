@@ -1979,5 +1979,12 @@
   "advancedEditor.pointColor.remove": "删除当前颜色",
   "advancedEditor.pointColor.hint": "按色相、饱和度、明度距离柔和选色，最多 8 色，按保存顺序处理。为本应用的手动选色算法，不保证复现 Lightroom。",
   "advancedEditor.primaries.title": "RGB 原色调色",
-  "advancedEditor.primaries.hint": "创意 RGB 混色矩阵，保持中性轴；不是相机色彩矩阵，不替换 RAW 机型校准。"
+  "advancedEditor.primaries.hint": "创意 RGB 混色矩阵，保持中性轴；不是相机色彩矩阵，不替换 RAW 机型校准。",
+  "advancedEditor.detailInspector.title": "原尺寸细节检查",
+  "advancedEditor.detailInspector.edges": "边缘检查",
+  "advancedEditor.detailInspector.position": "点击选择局部区域",
+  "advancedEditor.detailInspector.hint": "首次在独立进程准备当前完整原尺寸成片，随后只合成所选局部区域。100% 为一个图像像素对应一个显示器物理像素。适屏画布继续使用代理；关闭或取消会终止细节进程。",
+  "advancedEditor.detailInspector.loading": "正在准备细节",
+  "advancedEditor.detailInspector.region": "读取局部像素",
+  "advancedEditor.detailInspector.edgesHint": "显示当前成片的平滑亮度边缘，便于检查锐化、噪点和污点；这不是锐化算子的内部蒙版。"
 }

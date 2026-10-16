@@ -269,3 +269,10 @@ export async function editPreviewProof(sessionId:string,recipe:EditRecipe,option
 export const editVersionRead=(assetId:number,libraryId:string,id:string)=>ipc<EditRecipe>("edit_version_read",{assetId:String(assetId),libraryId,id});
 
 export async function editPreviewStyle(sessionId:string,recipe:EditRecipe):Promise<string>{const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_style",{sessionId,recipe});return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/jpeg"}));}
+
+export interface EditorDetailStatus {id:string;phase:string;width:number;height:number;revision:number;busy:boolean;error:string|null;cancelled:boolean}
+export const editDetailOpen=(assetId:number,libraryId:string,recipe:EditRecipe)=>ipc<EditorDetailStatus>("edit_detail_open",{assetId:String(assetId),libraryId,recipe});
+export const editDetailStatus=(jobId:string)=>ipc<EditorDetailStatus>("edit_detail_status",{jobId});
+export const editDetailView=(jobId:string,x:number,y:number,edge:number,edges:boolean)=>ipc<number>("edit_detail_view",{jobId,x,y,edge,edges});
+export const editDetailClose=(jobId:string)=>ipc<void>("edit_detail_close",{jobId});
+export async function editDetailImage(jobId:string,revision:number):Promise<string>{const bytes=await ipc<ArrayBuffer|number[]>("edit_detail_image",{jobId,revision});return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));}

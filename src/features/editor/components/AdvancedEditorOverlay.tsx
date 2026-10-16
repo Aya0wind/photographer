@@ -1,3 +1,4 @@
+import EditorDetailDialog from "./EditorDetailDialog";
 import RetouchPanel, {type RetouchBrush} from "./RetouchPanel";
 import EditorReferenceDialog from "./EditorReferenceDialog";
 import EditorProofDialog from "./EditorProofDialog";
@@ -157,6 +158,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const maskOverlay=useMaskOverlay(preview.session?.sessionId,recipe,selectedMask,tool==="mask"&&showMaskOverlay&&!compare&&!nativeActive,error=>setNotice(String(error)));
   const [referenceOpen,setReferenceOpen]=useState(false);
   const [proofOpen,setProofOpen]=useState(false);
+  const [detailOpen,setDetailOpen]=useState(false),[detailZoom,setDetailZoom]=useState(1);
   const [toolModalOpen,setToolModalOpen]=useState(false);
   const [moreOpen,setMoreOpen]=useState(false);
   const closeAfterTarget=useRef(false);
@@ -201,7 +203,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
 
   const canvasRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,canvasRecipe,nativeHost,
-    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !proofOpen && !referenceOpen && !moreOpen && !scheme.error && !histogram.error && selectedComponent===null,
+    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !proofOpen && !referenceOpen && !detailOpen && !moreOpen && !scheme.error && !histogram.error && selectedComponent===null,
     compare,preview.session?`${preview.session.sourceUrl}|${!!preview.session.rawlabReady}`:undefined,String(zoomVisible),compareSplit,activeClipping);
   const clippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,false,activeClipping,!nativeCanvas&&!compare,error=>setNotice(String(error)));
   const originalClippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,true,activeClipping,!nativeCanvas&&(compare||compareSplit!==null),error=>setNotice(String(error)));
@@ -348,7 +350,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,baseProfile:value}});
   }
   function chooseZoom(mode:"fit"|"100"|"200") {
-    setZoomMode(mode);setZoom(mode==="fit"?1:(mode==="100"?1:2)/Math.max(fitScale,0.0001));wakeZoom();
+    if(mode!=="fit"){if(unavailable||busy||exporting)return;setDetailZoom(mode==="100"?1:2);setDetailOpen(true);return;}
+    setZoomMode("fit");setZoom(1);wakeZoom();
   }
   useEffect(()=>{if(zoomMode!=="custom")setZoom(zoomMode==="fit"?1:(zoomMode==="100"?1:2)/Math.max(fitScale,0.0001));},[fitScale,zoomMode]);
   async function toggleFullscreen(){
@@ -390,7 +393,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (maskGestureOwnsKey(event)) return;
-      if(toolModalOpen||proofOpen||referenceOpen||moreOpen||scheme.error||histogram.error) return;
+      if(toolModalOpen||proofOpen||referenceOpen||detailOpen||moreOpen||scheme.error||histogram.error) return;
       if(straightening&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.stopImmediatePropagation();setStraightening(false);return;}
       if(target.active&&(event.key==="Escape"||((event.ctrlKey||event.metaKey)&&["z","s"].includes(event.key.toLowerCase())))){event.preventDefault();event.stopImmediatePropagation();if(event.key.toLowerCase()!=="s")target.cancel();return;}
       const input = event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
@@ -445,6 +448,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           <button className={BUTTON} disabled={schemeDisabled} onClick={()=>void scheme.open()}>{t("advancedEditor.schemeOpen")}</button>
           {([1,2] as const).map(flag=><button key={flag} className={BUTTON} disabled={busy||unavailable} aria-pressed={(clipping&flag)!==0} onClick={()=>setClipping(value=>value^flag)}>{t(flag===1?"advancedEditor.clipShadows":"advancedEditor.clipHighlights")}</button>)}
           <button className={BUTTON} disabled={unavailable||busy||exporting||target.active} onClick={()=>setReferenceOpen(true)}>{t("advancedEditor.reference.title")}</button>
+          <button className={BUTTON} disabled={unavailable||busy||exporting||target.active} onClick={()=>{setDetailZoom(1);setDetailOpen(true);}}>{t("advancedEditor.detailInspector.title")}</button>
           <button className={BUTTON} disabled={unavailable||busy||exporting||target.active} onClick={()=>setProofOpen(true)}>{t("advancedEditor.proof.title")}</button>
           <button className={BUTTON} aria-pressed={fullscreen} onClick={()=>void toggleFullscreen()}>{t("advancedEditor.layout.fullscreen")}</button>
           <button className={BUTTON} onClick={()=>updatePreferences({leftOpen:false,rightOpen:false})}>{t("advancedEditor.layout.hidePanels")}</button>
@@ -523,6 +527,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     {autosave.error&&<div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-amber-500"><span>{autosave.error}</span><button className={BUTTON} onClick={()=>void saveProject()}>{t("advancedEditor.autosave.retry")}</button></div>}
     <EditorFilmstrip savedRevision={baseline} asset={asset} recipe={recipeForPersist(effective)} disabled={busy||exporting||unavailable||target.active||!!confirm||toolModalOpen} save={saveProject} onApply={value=>{chooseTool("adjust");dispatch({type:"applyProject",recipe:value});}}/>
     <footer className="flex h-8 shrink-0 items-center gap-3 px-4 text-[11px] text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? t("advancedEditor.projectHint")}</span>{preview.session?.rawlabReady&&<span className="ml-auto truncate" title={t("advancedEditor.preview.proxy")}>{t("advancedEditor.preview.rawReady")} · {t("advancedEditor.preview.proxy")}</span>}</footer>
+    {detailOpen&&<EditorDetailDialog assetId={asset.id} libraryId={libraryId} recipe={recipe} preview={preview.url??preview.session?.sourceUrl??null} initialZoom={detailZoom} onClose={()=>setDetailOpen(false)}/>}
     {referenceOpen&&<EditorReferenceDialog asset={asset} libraryId={libraryId} recipe={recipe} current={preview.url??preview.session?.sourceUrl??null} quick={preview.quickUrl} onClose={()=>setReferenceOpen(false)}/>}
     {proofOpen&&preview.session&&<EditorProofDialog sessionId={preview.session.sessionId} assetId={asset.id} libraryId={libraryId} recipe={recipe} original={preview.url??preview.session.sourceUrl} onClose={()=>setProofOpen(false)}/>}
     <ErrorModal message={scheme.error??histogram.error} onClose={scheme.error?scheme.closeError:histogram.closeError}/>
