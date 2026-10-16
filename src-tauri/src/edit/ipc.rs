@@ -117,6 +117,9 @@ fn fetch_export_in_library(
     options: &ExportOptions,
     expected_library: Option<&str>,
 ) -> Result<ExportTaskDto, String> {
+    fetch_export_operation(state,asset_id,value,options,expected_library,None)
+}
+pub(super) fn fetch_export_operation(state:&crate::ipc::AppState,asset_id:i64,value:&serde_json::Value,options:&ExportOptions,expected_library:Option<&str>,composition:Option<super::composition::Operation>)->Result<ExportTaskDto,String>{
     let db = crate::ipc::app_database_db(state)?;
     export::reap_orphan_jobs(&db);
     let asset = db
@@ -154,6 +157,7 @@ fn fetch_export_in_library(
         job_id,
         asset_id,
         asset,
+        composition,
         recipe,
         options: validated,
         library_root,
@@ -261,9 +265,6 @@ pub async fn edit_advanced_export_folder(
     request: AdvancedFolderExport,
 ) -> Result<ExportTaskDto, String> {
     run_blocking(state.inner().clone(), move |state| {
-        if request.options.mode != super::export::ExportMode::Folder {
-            return Err("导出目标无效".into());
-        }
         let id = parse_asset_id(&request.asset_id)?;
         let (_, asset) = super::project::resolve(state, &request.library_id, &request.asset_id)?;
         super::preview::validate_source(&request.session_id, std::path::Path::new(&asset.path))?;
@@ -296,6 +297,8 @@ pub async fn edit_advanced_export(
         let (_, asset) = super::project::resolve(state, &library_id, &asset_id)?;
         super::preview::validate_source(&session_id, std::path::Path::new(&asset.path))?;
         let options = ExportOptions {
+            file_name:None,
+            finish:Default::default(),
             format:format.unwrap_or_default(),
             color_space:color_space.unwrap_or_default(),
             mode: super::export::ExportMode::Album,

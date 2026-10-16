@@ -523,4 +523,12 @@ CREATE TABLE IF NOT EXISTS editor_workspace (
     asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
     active_id TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS editor_external (
+    id INTEGER PRIMARY KEY REFERENCES export_job(id) ON DELETE CASCADE,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    baseline TEXT,
+    imported_asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_editor_external_asset ON editor_external(asset_id,id);
 "#;

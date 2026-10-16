@@ -81,6 +81,7 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
 }
 
 export interface EditorPreviewSession {
+  sourceAvailable?:boolean;
   nativeReady?: boolean;
   rawlabReady?:boolean;
   previewUrl?:string;
@@ -281,3 +282,14 @@ export const editLensAutoscale=(settings:import("./types").EditorLensSettings,wi
 
 export interface EditorLensCatalog {state:string;profileId:string;cameraMake:string;cameraModel:string;lensMake:string;lensModel:string;focalLength:number;aperture:number;profiles:{id:string;maker:string;model:string;distortion:boolean;tca:boolean;matched:boolean}[]}
 export const editLensProfiles=(assetId:number,libraryId:string,settings?:import("./types").EditorLensProfileSettings)=>ipc<EditorLensCatalog>("edit_lens_profiles",{assetId:String(assetId),libraryId,settings:settings??null});
+
+export const editPreviewSourceAvailable=(sessionId:string)=>ipc<boolean>("edit_preview_source_available",{sessionId});
+export interface CompositionRequest {assetIds:number[];libraryId:string;kind:string;layout:string;bracketSize:number;removeGhosts:boolean;preview:boolean;longEdge:number|null}
+export const editCompositionStart=(request:CompositionRequest)=>ipc<ExportTask>("edit_composition_start",{request});
+export interface ExternalEditorSession {id:number;path:string;status:string;importedAssetId:number|null;error:string|null}
+export const editExternalList=(assetId:number,libraryId:string)=>ipc<ExternalEditorSession[]>("edit_external_list",{assetId:String(assetId),libraryId});
+export const editExternalPrepare=(assetId:number,libraryId:string,sessionId:string,recipe:EditRecipe,colorSpace:ExportOptions["colorSpace"])=>ipc<ExportTask>("edit_external_prepare",{assetId:String(assetId),libraryId,sessionId,recipe,colorSpace});
+export const editExternalLaunch=(assetId:number,libraryId:string,jobId:number,program:string)=>ipc<void>("edit_external_launch",{assetId:String(assetId),libraryId,jobId,program});
+export const editExternalImport=(assetId:number,libraryId:string,jobId:number)=>ipc<import("./types").ExportResultDto>("edit_external_import",{assetId:String(assetId),libraryId,jobId});
+
+export const editAnnotationFonts=()=>ipc<string[]>("edit_annotation_fonts");

@@ -153,6 +153,7 @@ fn admit_session(
 #[derive(Clone,Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewOpened {
+    pub source_available:bool,
     #[serde(skip_serializing_if="Option::is_none")]
     preview_url:Option<String>,
     session_id: String,
@@ -205,6 +206,7 @@ fn prepare_source_if_current(
     let source_url = jpeg_url(&document)?;
     let histogram = source_histogram(&interactive_document)?;
     let details = PreviewOpened {
+        source_available:true,
         preview_url:None,
         session_id: uuid::Uuid::new_v4().to_string(),
         source_url,
@@ -263,6 +265,7 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
         std::mem::swap(&mut width, &mut height);
     }
     let details = PreviewOpened {
+        source_available:true,
         preview_url:None,
         session_id: uuid::Uuid::new_v4().to_string(),
         source_url: format!(
@@ -290,7 +293,7 @@ fn prepare_rawlab_fallback(path:&std::path::Path)->Result<PreparedSource,String>
     let source=super::rawlab::open(path,Some(PREVIEW_EDGE),&AtomicBool::new(false))?;
     let neutral=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":2,"backend":"rawlab","coreRevision":super::rawlab::core_revision(),"baseProfile":"standard"}}))?;
     let (display,_)=super::rawlab::display(&source.document,&neutral)?;
-    let details=PreviewOpened{preview_url:None,session_id:uuid::Uuid::new_v4().to_string(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw:true,bit_depth:"32 bit linear proxy".into(),warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true};
+    let details=PreviewOpened{source_available:true,preview_url:None,session_id:uuid::Uuid::new_v4().to_string(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw:true,bit_depth:"32 bit linear proxy".into(),warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true};
     Ok(PreparedSource{interactive_document:source.document.clone(),document:source.document,raw:None,details})
 }
 
@@ -305,15 +308,17 @@ pub async fn edit_preview_open(
         let opened_at = Instant::now();
         let (_, asset) = super::project::resolve(state, &library_id, &asset_id)?;
         let path = PathBuf::from(&asset.path);
-        let metadata = std::fs::metadata(&path).map_err(|e| format!("源文件不可用: {e}"))?;
+        let metadata = std::fs::metadata(&path).ok();
         let PreparedSource {
             document,
             interactive_document,
             raw,
-            details,
+            mut details,
         } = prepare_proxy(&crate::ipc::app_database_dir(state)?, &asset)
             .map(Ok)
             .unwrap_or_else(||if rawlab.unwrap_or(false)&&asset.kind==crate::events::AssetKind::Raw {prepare_rawlab_fallback(&path)}else{prepare_source(&path)})?;
+        details.source_available=metadata.is_some();
+        if metadata.is_none(){details.warnings.push("原片离线：正在编辑缓存预览；完整质量导出需恢复原片".into());}
         let mut cache = sessions().lock().map_err(|_| "预览会话锁不可用")?;
         cache.retain(|_, value| {
             value
@@ -340,8 +345,8 @@ pub async fn edit_preview_open(
                 refined: None,
                 interactive_document,
                 path,
-                modified: metadata.modified().ok(),
-                length: metadata.len(),
+                modified: metadata.as_ref().and_then(|m|m.modified().ok()),
+                length: metadata.as_ref().map_or(0,|m|m.len()),
                 touched: Instant::now(),
                 source_checked: Instant::now(),
             })),
@@ -388,7 +393,7 @@ pub async fn edit_preview_prepare(
             let mut neutral=values.clone().ok_or("色彩配方缺失")?;neutral.advanced=None;neutral.adjustments=None;neutral.masks.clear();neutral.crop=None;neutral.rotate_quarter=0;neutral.geometry=None;neutral.text_layers.clear();neutral.brush_strokes.clear();
             if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}
             let (display,_)=super::rawlab::display(&source.document,&neutral)?;
-            PreparedSource {interactive_document:source.document.clone(),document:source.document,raw:None,details:PreviewOpened {
+            PreparedSource {interactive_document:source.document.clone(),document:source.document,raw:None,details:PreviewOpened {source_available:true,
                 preview_url:None,session_id:session_id.clone(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw,bit_depth:if sensor_raw{"32 bit linear proxy".into()}else{"RGB preview".into()},warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true,
             }}
         } else {prepare_source_if_current(&path, || !generation.closed.load(Ordering::Acquire))?};
@@ -517,6 +522,16 @@ struct PreviewInput {
     request: PreviewRequest,
 }
 
+fn check_cached_source(p:&mut Preview)->Result<(),String>{
+    if p.source_checked.elapsed() >= Duration::from_secs(1) {
+        if let Ok(meta)=std::fs::metadata(&p.path){
+            if meta.len()!=p.length||meta.modified().ok()!=p.modified{return Err("源文件已改变或恢复，请重新载入预览".into());}
+        }
+        p.source_checked = Instant::now();
+    }
+    Ok(())
+}
+
 fn preview_input(
     preview: &Mutex<Preview>,
     interactive: bool,
@@ -528,13 +543,7 @@ fn preview_input(
     }
     // SMB metadata requests must not run on every slider frame. Export still
     // performs an unconditional source identity check before producing a file.
-    if p.source_checked.elapsed() >= Duration::from_secs(1) {
-        let meta = std::fs::metadata(&p.path).map_err(|e| format!("源文件不可用: {e}"))?;
-        if meta.len() != p.length || meta.modified().ok() != p.modified {
-            return Err("源文件已改变，请重新打开编辑器".into());
-        }
-        p.source_checked = Instant::now();
-    }
+    check_cached_source(&mut p)?;
     p.touched = Instant::now();
     let base = if interactive {
         p.interactive_document.clone()
@@ -1114,4 +1123,11 @@ pub async fn edit_preview_auto_levels(state:State<'_,SharedState>,session_id:Str
         if white-black<2.0{return Err("图像动态范围不足，无法自动设置黑白点".into());}
         Ok(super::recipe::Levels{black:black.min(253.0),white,gamma:1.0})
     }).await
+}
+
+#[tauri::command]
+pub async fn edit_preview_source_available(session_id:String)->Result<bool,String>{
+    let value=sessions().lock().map_err(|_|"预览会话锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
+    let path=value.lock().map_err(|_|"预览会话锁不可用")?.path.clone();
+    tauri::async_runtime::spawn_blocking(move ||path.is_file()).await.map_err(|e|e.to_string())
 }

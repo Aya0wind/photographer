@@ -81,12 +81,6 @@ fn write_json(path:&Path,value:&impl Serialize)->Result<(),String>{super::lut::a
 /// This runs before Tauri initialization in the isolated worker process.
 pub(super) fn worker(path:&Path,recipe:&super::recipe::EditRecipe,root:&Path,progress:&dyn Fn(&str))->Result<(),String>{
     let heartbeat=root.join("heartbeat");
-    // A crashed parent must not leave a persistent inspector holding a full RAW.
-    let watchdog=heartbeat.clone();std::thread::spawn(move ||loop{
-        std::thread::sleep(Duration::from_secs(2));
-        let alive=std::fs::metadata(&watchdog).ok().and_then(|m|m.modified().ok()).and_then(|t|t.elapsed().ok()).is_some_and(|age|age<Duration::from_secs(15));
-        if !alive{std::process::exit(0);}
-    });
     let effective=super::groups::effective(recipe);let recipe=effective.as_ref().unwrap_or(recipe);
     let doc=super::photocraft::prepare_export_document(path,recipe,None,progress)?;
     write_json(&root.join("ready.json"),&Ready{width:doc.size.width,height:doc.size.height})?;

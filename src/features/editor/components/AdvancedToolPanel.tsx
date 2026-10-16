@@ -1,3 +1,4 @@
+import AnnotationControls from "./AnnotationControls";
 import type {ReactNode} from "react";
 import CropAspectControls from "./CropAspectControls";
 import GeometryPanel from "./GeometryPanel";
@@ -16,6 +17,8 @@ import type { AdvancedAction } from "../lib/advancedRecipe";
 
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
 interface ToolPanelProps {
+  brushSettings?:{erase:boolean;opacity:number};
+  onBrushSettings?:(value:{erase:boolean;opacity:number})=>void;
   exportExtras?:ReactNode;
   exportFormat:NonNullable<ExportOptions["format"]>;
   setExportFormat:(value:NonNullable<ExportOptions["format"]>)=>void;
@@ -49,7 +52,7 @@ interface ToolPanelProps {
   exportAlbum:()=>void;
 }
 
-export default function AdvancedToolPanel({ previewSessionId,exportExtras,cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({brushSettings,onBrushSettings, previewSessionId,exportExtras,cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
   selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportAlbum,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
   const { t } = useTranslation();
@@ -75,6 +78,7 @@ export default function AdvancedToolPanel({ previewSessionId,exportExtras,cancel
             {tool === "brush" && <label className="block text-xs text-text-secondary">{t("advancedEditor.brushSize")}<input className="mt-1 block h-4 w-full accent-accent" type="range" min={0.001} max={0.05} step={0.001} value={brushWidth} onChange={(e) => setBrushWidth(Number(e.target.value))} /></label>}
             {tool === "text" && <><p className="text-xs text-text-muted">{t("advancedEditor.textHint")}</p>{selectedLayer && <><textarea className="w-full rounded-xl border border-edge bg-bg p-3 text-xs text-text-primary" value={selectedLayer.text} onFocus={beginGesture} onBlur={endGesture} onChange={(e) => dispatch({ type: "textUpdateLive", id: selectedLayer.id, patch: { text: e.target.value } })} /><button className={BUTTON} onClick={() => { dispatch({ type: "textRemove", id: selectedLayer.id }); setSelectedText(null); }}>{t("advancedEditor.removeText")}</button></>}</>}
           </div>}
+          {(tool==="text"||tool==="brush")&&<AnnotationControls recipe={recipe} selected={selectedText} onSelect={setSelectedText} dispatch={dispatch} begin={beginGesture} end={endGesture} mode={tool} brush={brushSettings} onBrush={onBrushSettings}/>}
           {tool === "output" && <div className="space-y-4">
             {exportExtras}
             <label className="block space-y-2 text-xs text-text-secondary"><span>{t("advancedEditor.outputFormat")}</span><select aria-label={t("advancedEditor.outputFormat")} className="w-full rounded-xl border border-edge bg-bg p-2" value={exportFormat} onChange={e=>setExportFormat(e.target.value as NonNullable<ExportOptions["format"]>)}>{["jpeg","png","tiff","pcraft"].map(format=><option key={format} value={format}>{t(`advancedEditor.outputFormats.${format}`)}</option>)}</select></label>

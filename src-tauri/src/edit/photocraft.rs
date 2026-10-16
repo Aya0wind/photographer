@@ -299,14 +299,22 @@ pub(super) fn native_document_with_metadata(doc:&Document,source_head:Option<&[u
     if xmp.is_some(){document.metadata.xmp=xmp;}
     photocraft_io::export(&document,"pcraft",&photocraft_io::ExportOptions::default()).map(|output|output.bytes).map_err(|e|e.to_string())
 }
+#[cfg(test)]
 pub(super) fn lossless_with_profile(doc:&Document,extension:&str,source_head:Option<&[u8]>,meta:&super::meta::MetaOptions,profile:&photocraft_cms::Profile)->Result<Vec<u8>,String>{
+    lossless_with_options(doc,extension,source_head,meta,profile,&super::output_finish::Options::default())
+}
+pub(super) fn lossless_with_options(doc:&Document,extension:&str,source_head:Option<&[u8]>,meta:&super::meta::MetaOptions,profile:&photocraft_cms::Profile,finish:&super::output_finish::Options)->Result<Vec<u8>,String>{
     if !["png","tif"].contains(&extension){return Err("无损输出格式无效".into());}
-    let image=photocraft_io::document_to_image(doc,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
+    let image=photocraft_io::document_to_image(doc,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::F32);
     let mut flat=super::source::from_image("Output",&image)?;
     photocraft_engine::color_cmds::convert_document(&mut flat,profile,photocraft_cms::Intent::RelativeColorimetric,true).map_err(|e|e.to_string())?;
+    let sample=if finish.bit_depth==8{photocraft_codecs::SampleType::U8}else{photocraft_codecs::SampleType::U16};
+    let image=photocraft_io::document_to_image(&flat,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,sample);
+    flat=super::source::from_image("Output",&image)?;
     let (exif,xmp)=super::meta::flat_metadata_with_color_space(source_head,meta,flat.size.width,flat.size.height,profile.to_bytes()==photocraft_cms::Builtin::Srgb.profile().to_bytes())?;
     flat.metadata.exif=Some(std::sync::Arc::new(exif.clone()));flat.metadata.xmp=xmp;
-    let bytes=photocraft_io::export(&flat,extension,&photocraft_io::ExportOptions::default()).map(|output|output.bytes).map_err(|e|e.to_string())?;
+    let mut options=photocraft_io::ExportOptions::default();options.encode.tiff_compression=finish.tiff_compression.native();
+    let bytes=photocraft_io::export(&flat,extension,&options).map(|output|output.bytes).map_err(|e|e.to_string())?;
     if extension=="tif"{super::tiff_metadata::embed(bytes,&exif)}else{Ok(bytes)}
 }
 
@@ -405,20 +413,8 @@ pub(super) fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<
     let width = f64::from(doc.doc.size.width);
     let height = f64::from(doc.doc.size.height);
     let dpi = f64::from(doc.doc.resolution_dpi);
-    for layer in &recipe.text_layers {
-        if layer.text.trim().is_empty() {
-            continue;
-        }
-        execute(
-            session,
-            "type.create",
-            json!({"text": layer.text, "color": layer.color,
-            "box": [layer.x * width, layer.y * height, ((1.0 - layer.x) * width).max(1.0), ((1.0 - layer.y) * height).max(1.0)],
-            "size": (layer.size_rel * width * 72.0 / dpi).clamp(0.1, 1296.0), "name": layer.id}),
-        )?;
-    }
+    if !recipe.brush_strokes.is_empty(){execute(session,"layer.new.layer",json!({"name":"Brush annotations"}))?;}
     for stroke in &recipe.brush_strokes {
-        execute(session, "layer.new.layer", json!({"name": stroke.id}))?;
         let points: Vec<_> = stroke
             .points
             .iter()
@@ -427,9 +423,22 @@ pub(super) fn annotations(session: &mut Session, recipe: &EditRecipe) -> Result<
         execute(
             session,
             "paint.stroke",
-            json!({"points": points, "color": stroke.color, "size": stroke.width_rel * width,
+            json!({"points": points, "color": stroke.color,"erase":stroke.erase,"opacity":stroke.opacity, "size": stroke.width_rel * width,
             "brush": {"hardness": 1.0, "spacing": 0.1}, "seed": 0}),
         )?;
+    }
+    for layer in &recipe.text_layers {
+        if layer.text.trim().is_empty() {
+            continue;
+        }
+        execute(
+            session,
+            "type.create",
+            json!({"text": layer.text, "color": layer.color,"font":layer.font,"align":layer.align,
+            "box": [layer.x * width, layer.y * height, ((1.0 - layer.x) * width).max(1.0), ((1.0 - layer.y) * height).max(1.0)],
+            "size": (layer.size_rel * width * 72.0 / dpi).clamp(0.1, 1296.0), "name": layer.id}),
+        )?;
+        execute(session,"layer.setProps",json!({"opacity":layer.opacity}))?;
     }
     Ok(())
 }
@@ -473,7 +482,7 @@ fn pre_resize_long_edge(base: &Document, recipe: &EditRecipe, long_edge: Option<
     Some((f64::from(w.max(h)) * scale).round().max(1.0) as u32)
 }
 
-/// 无进度回调便捷版：lib 内仅测试使用（导出任务走 with_progress）。
+/// 无进度回调便捷版：仅供现有渲染断言使用，正式导出走 encode_output。
 #[cfg(test)]
 pub fn export_native(
     path: &std::path::Path,
@@ -481,22 +490,8 @@ pub fn export_native(
     long_edge: Option<u32>,
     quality: u8,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    export_native_with_progress(path, recipe, long_edge, quality, &|_| {})
-}
-
-/// 阶段回调版(develop/resize/render/encode):导出任务的 UI 进度直达显影
-/// 这段剩余长耗时,不再是大黑盒。
-#[allow(dead_code)] // Compatibility wrapper for existing editor callers.
-pub fn export_native_with_progress(
-    path: &std::path::Path,
-    recipe: &EditRecipe,
-    long_edge: Option<u32>,
-    quality: u8,
-    progress: &dyn Fn(&str),
-) -> Result<(Vec<u8>, u32, u32), String> {
-    let doc=prepare_export_document(path,recipe,long_edge,progress)?;
-    progress("encode");
-    Ok((jpeg(&doc, quality)?, doc.size.width, doc.size.height))
+    let doc=prepare_export_document(path,recipe,long_edge,&|_|{})?;
+    Ok((jpeg(&doc,quality)?,doc.size.width,doc.size.height))
 }
 /// Codec-independent full-source output. Previews never enter this path.
 /// All file encoders must consume this same rendered document so RAW
@@ -717,4 +712,9 @@ mod migration_tests {
         assert_ne!(image::load_from_memory(&before).unwrap().to_rgb8(),image::load_from_memory(&after).unwrap().to_rgb8());
         assert_eq!(std::fs::read(path).unwrap(),original);
     }
+}
+
+#[tauri::command]
+pub async fn edit_annotation_fonts()->Result<Vec<String>,String>{
+ tauri::async_runtime::spawn_blocking(||{let value=Session::new().execute("type.fonts",json!({})).map_err(|e|e.to_string())?;serde_json::from_value(value["families"].clone()).map_err(|e|e.to_string())}).await.map_err(|e|e.to_string())?
 }

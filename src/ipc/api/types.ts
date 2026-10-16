@@ -811,6 +811,7 @@ export interface EditRecipeCrop {
 
 /** 文字图层（多行用 \n；sizeRel=字高/画布宽） */
 export interface EditRecipeTextLayer {
+  font?:string;align?:"left"|"center"|"right";opacity?:number;
   id: string;
   x: number;
   y: number;
@@ -821,6 +822,7 @@ export interface EditRecipeTextLayer {
 
 /** 画笔笔迹（widthRel=笔宽/画布宽；points 为裁剪后画布归一化折线） */
 export interface EditRecipeBrushStroke {
+  erase?:boolean;opacity?:number;
   id: string;
   color: string;
   widthRel: number;
@@ -909,8 +911,11 @@ export interface EditRecipeState {
   updatedAt: string | null;
 }
 
-/** 导出选项（folder 模式必填 folder；album 模式必填 album，文件名后端自动生成） */
+/** 导出选项（folder 模式必填 folder；album 可选目标相册，fileName 控制入库文件名） */
+export interface ExportFinishing {bitDepth:8|16;tiffCompression:"none"|"lzw"|"deflate"|"packBits";sharpen:number;watermark?:{text:string;opacity:number;sizeRel:number;position:"topLeft"|"topRight"|"bottomLeft"|"bottomRight"}}
 export interface ExportOptions {
+  fileName?:string;
+  finish?:ExportFinishing;
   format?:"jpeg"|"png"|"tiff"|"pcraft";
   colorSpace?:"srgb"|"displayP3"|"adobeRgb"|"proPhotoRgb";
   mode: "folder" | "album";

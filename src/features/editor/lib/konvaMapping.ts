@@ -123,7 +123,7 @@ export function rectAttrsToCrop(
 
 /** 文字层 → 节点 → 文字层 往返（id 保留；归一化值容差 1e-9 由调用方断言） */
 export function roundTripTextLayer(layer: EditRecipeTextLayer, canvas: Size): EditRecipeTextLayer {
-  return nodeAttrsToTextLayer(textLayerToNodeAttrs(layer, canvas), canvas, layer.id);
+  return {...layer,...nodeAttrsToTextLayer(textLayerToNodeAttrs(layer, canvas), canvas, layer.id)};
 }
 
 /** 笔迹 → Line points → 笔迹 往返 */

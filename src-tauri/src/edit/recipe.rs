@@ -33,6 +33,12 @@ pub struct CropRect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextLayer {
+    #[serde(default="default_font")]
+    pub font:String,
+    #[serde(default="default_alignment")]
+    pub align:String,
+    #[serde(default="default_opacity")]
+    pub opacity:f64,
     pub id: String,
     pub x: f64,
     pub y: f64,
@@ -46,11 +52,19 @@ pub struct TextLayer {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrushStroke {
+    #[serde(default)]
+    pub erase:bool,
+    #[serde(default="default_opacity")]
+    pub opacity:f64,
     pub id: String,
     pub color: String,
     pub width_rel: f64,
     pub points: Vec<NormPoint>,
 }
+
+fn default_font()->String{"Inter".into()}
+fn default_alignment()->String{"left".into()}
+fn default_opacity()->f64{1.0}
 
 /// 输出偏好（导出时 options 可覆盖）。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -562,7 +576,9 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             return Err("裁剪区域为空（w/h 夹取后为 0）".into());
         }
     }
+    if recipe.text_layers.len()>128||recipe.brush_strokes.len()>2048||recipe.brush_strokes.iter().map(|s|s.points.len()).sum::<usize>()>200_000{return Err("标注图层或点数超过上限".into());}
     for layer in &mut recipe.text_layers {
+        if layer.font.len()>200||layer.text.len()>32000||!layer.opacity.is_finite()||!(0.0..=1.0).contains(&layer.opacity)||!["left","center","right"].contains(&layer.align.as_str()){return Err("文字字体、对齐或不透明度无效".into());}
         layer.x = clamp01(layer.x);
         layer.y = clamp01(layer.y);
         layer.size_rel = clamp01(layer.size_rel);
@@ -574,6 +590,7 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
         }
     }
     for stroke in &mut recipe.brush_strokes {
+        if !stroke.opacity.is_finite()||!(0.0..=1.0).contains(&stroke.opacity){return Err("画笔不透明度无效".into());}
         stroke.width_rel = clamp01(stroke.width_rel);
         if stroke.width_rel <= 0.0 {
             return Err(format!("笔迹 {} 宽度为 0", stroke.id));

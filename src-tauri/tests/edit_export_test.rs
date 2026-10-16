@@ -184,6 +184,8 @@ fn ins_photo(db: &db::Db, dir: &Path, name: &str, bytes: &[u8], captured: Option
 
 fn folder_options(dir: &Path, name: &str) -> edit::export::ExportOptions {
     edit::export::ExportOptions {
+            file_name:None,
+            finish:Default::default(),
         format: edit::export::ExportFormat::Jpeg,
         color_space: edit::export::ExportColorSpace::Srgb,
         mode: edit::export::ExportMode::Folder,
@@ -203,6 +205,8 @@ fn folder_options(dir: &Path, name: &str) -> edit::export::ExportOptions {
 
 fn album_options(album_id: i64, subgroup: Option<&str>) -> edit::export::ExportOptions {
     edit::export::ExportOptions {
+            file_name:None,
+            finish:Default::default(),
         format: edit::export::ExportFormat::Jpeg,
         color_space: edit::export::ExportColorSpace::Srgb,
         mode: edit::export::ExportMode::Album,
@@ -234,6 +238,7 @@ fn run_job(
         .export_job_create(asset_id, validated.mode.as_str())
         .unwrap();
     let request = edit::export::ExportJobRequest {
+        composition:None,
         job_id,
         asset_id,
         asset: database.asset_by_id(asset_id).unwrap().unwrap(),
@@ -427,6 +432,7 @@ fn folder_export_target_exists_errors_without_overwrite() {
     let validated = edit::export::validate_options(&database, &folder_options(&out_dir, "taken.jpg")).unwrap();
     let job_id = database.export_job_create(id, "folder").unwrap();
     let request = edit::export::ExportJobRequest {
+        composition:None,
         job_id,
         asset_id: id,
         asset: database.asset_by_id(id).unwrap().unwrap(),

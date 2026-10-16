@@ -73,3 +73,9 @@ mod groups;
 mod point_color;
 pub mod detail;
 pub mod lens;
+
+pub mod output_finish;
+
+pub mod composition;
+
+pub mod external_editor;

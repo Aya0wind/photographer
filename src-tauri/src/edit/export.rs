@@ -74,6 +74,10 @@ pub struct ExportAlbumTarget {
 #[serde(rename_all = "camelCase")]
 pub struct ExportOptions {
     #[serde(default)]
+    pub file_name:Option<String>,
+    #[serde(default)]
+    pub finish:super::output_finish::Options,
+    #[serde(default)]
     pub format:ExportFormat,
     #[serde(default)]
     pub color_space:ExportColorSpace,
@@ -164,7 +168,9 @@ impl From<ExportJobRow> for ExportTaskDto {
 
 /// 选项语义校验（结构由 serde 保证；这里管跨字段与目标合法性）。
 pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOptions, String> {
+    super::output_finish::validate(&options.finish)?;
     if options.format==ExportFormat::Pcraft&&options.mode!=ExportMode::Folder{return Err("可编辑文档请导出到文件夹，不能作为照片加入相册".into());}
+    if let Some(name)=&options.file_name { validate_file_name(name.trim(), options.format)?; }
     let mode = options.mode;
     let (folder, album) = match mode {
         ExportMode::Folder => {
@@ -176,15 +182,7 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
                 return Err("输出目录不能为空".into());
             }
             let name = folder.file_name.trim();
-            let extension=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
-            let matches=match options.format{ExportFormat::Jpeg=>["jpg","jpeg"].contains(&extension.as_str()),ExportFormat::Png=>extension=="png",ExportFormat::Tiff=>["tif","tiff"].contains(&extension.as_str()),ExportFormat::Pcraft=>extension=="pcraft"};
-            if !matches{return Err("文件扩展名与输出格式不一致".into());}
-            if name.is_empty() {
-                return Err("输出文件名不能为空".into());
-            }
-            if name.contains('/') || name.contains('\\') {
-                return Err("输出文件名不能包含路径分隔符".into());
-            }
+            validate_file_name(name, options.format)?;
             (Some((folder.output_dir.clone(), name.to_string())), None)
         }
         ExportMode::Album => {
@@ -209,6 +207,8 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
         }
     };
     Ok(ValidatedOptions {
+        file_name:options.file_name.as_ref().map(|s|s.trim().to_owned()),
+        finish:options.finish.clone(),
         format:options.format,
         color_space:options.color_space,
         mode,
@@ -223,9 +223,21 @@ pub fn validate_options(db: &Db, options: &ExportOptions) -> Result<ValidatedOpt
     })
 }
 
+fn validate_file_name(name:&str,format:ExportFormat)->Result<(),String>{
+    if name.is_empty() || name.len()>240 || name.chars().any(|c|c.is_control()||"<>:\"/\\|?*".contains(c)) || (name.ends_with(' ') || name.ends_with('.')) {
+        return Err("输出文件名无效".into());
+    }
+    let extension=Path::new(name).extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let matches=match format{ExportFormat::Jpeg=>["jpg","jpeg"].contains(&extension.as_str()),ExportFormat::Png=>extension=="png",ExportFormat::Tiff=>["tif","tiff"].contains(&extension.as_str()),ExportFormat::Pcraft=>extension=="pcraft"};
+    if !matches{return Err("文件扩展名与输出格式不一致".into());}
+    Ok(())
+}
+
 /// 校验后的选项（folder/album 二选一已定）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatedOptions {
+    pub file_name:Option<String>,
+    pub finish:super::output_finish::Options,
     pub format:ExportFormat,
     pub color_space:ExportColorSpace,
     pub mode: ExportMode,
@@ -315,6 +327,7 @@ impl Drop for LiveGuard {
 
 /// 单任务执行请求（IPC 层组装；worker 线程消费）。
 pub struct ExportJobRequest {
+    pub composition:Option<super::composition::Operation>,
     pub job_id: i64,
     pub asset_id: i64,
     /// 源资产行快照（启动时读取；文件路径以行为准）。
@@ -394,7 +407,9 @@ fn execute(
     }
 
     if cancelled() { return Err("导出已取消".into()); }
-    let (jpeg, width, height) = super::export_worker::render(&src, &request.recipe, &request.options, progress, cancelled)?;
+    if let Some(operation)=&request.composition{operation.check_sources()?;}
+    let (jpeg, width, height) = super::export_worker::render(&src, &request.recipe, &request.options,request.composition.as_ref(), progress, cancelled)?;
+    if let Some(operation)=&request.composition{operation.check_sources()?;}
     begin_commit()?;
     // ④ 落位 + 登记
     match request.options.mode {
@@ -414,10 +429,12 @@ fn execute(
             progress("register");
             let (album_id, subgroup) = request.options.album.clone()
                 .map(|(id, subgroup)| (Some(id), subgroup)).unwrap_or((None, None));
+            let mut output_asset=asset.clone();
+            if let Some(operation)=&request.composition{output_asset.filename=format!("{}_{}.tif",Path::new(&asset.filename).file_stem().unwrap_or_default().to_string_lossy(),operation.kind);}
             let (dst, new_asset_id) = place_in_album(
                 db,
                 &jpeg,
-                asset,
+                &output_asset,
                 &request.options,
                 &request.library_root,
                 width,
@@ -456,10 +473,12 @@ pub(super) fn encode_output(src: &Path, recipe: &EditRecipe, options: &Validated
             (super::photocraft::native_document_with_metadata(&doc,source_head.as_deref(),&meta_opts)?,doc.size.width,doc.size.height)
         }else if options.format!=ExportFormat::Jpeg {
             if recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
-            let doc=super::photocraft::prepare_export_document_16(&src,&recipe,long_edge,progress,true)?;progress("encode");
-            (super::photocraft::lossless_with_profile(&doc,options.format.extension(),source_head.as_deref(),&meta_opts,options.color_space.profile())?,doc.size.width,doc.size.height)
+            let doc=super::photocraft::prepare_export_document_16(&src,&recipe,long_edge,progress,true)?;
+            let doc=super::output_finish::apply(doc,&options.finish)?;progress("encode");
+            (super::photocraft::lossless_with_options(&doc,options.format.extension(),source_head.as_deref(),&meta_opts,options.color_space.profile(),&options.finish)?,doc.size.width,doc.size.height)
         }else{
-            let doc=super::photocraft::prepare_export_document(src,recipe,long_edge,progress)?;progress("encode");
+            let doc=super::photocraft::prepare_export_document(src,recipe,long_edge,progress)?;
+            let doc=super::output_finish::apply(doc,&options.finish)?;progress("encode");
             (super::photocraft::jpeg_with_profile(&doc,quality,options.color_space.profile())?.0,doc.size.width,doc.size.height)
         };
 
@@ -492,7 +511,7 @@ fn write_folder(jpeg: &[u8], dir: &str, name: &str) -> Result<PathBuf, String> {
 
 /// album 模式落位 + 登记（导入引擎同款路径）。
 #[allow(clippy::too_many_arguments)]
-fn place_in_album(
+pub(super) fn place_in_album(
     db: &Db,
     jpeg: &[u8],
     source: &AssetRow,
@@ -512,7 +531,7 @@ fn place_in_album(
     // 与导入引擎同一纯时间布局公式（§三：`{拍摄年}/{拍摄月}/`，EXIF 缺失
     // 回退 mtime——captured_or_fallback 同口径）；相册/子组只是逻辑引用
     //（§一），不影响落位。同一资产的导出件与导入件同月份目录平铺。
-    let name = format!("{}_edit.{}", sanitize_component(&stem),options.format.extension());
+    let name = options.file_name.clone().unwrap_or_else(||format!("{}_edit.{}", sanitize_component(&stem),options.format.extension()));
     let libraries=db.photos_library_list().map_err(|e|e.to_string())?;
     let template=libraries.iter().find(|library|Path::new(&library.root_path)==library_root).map(|library|library.organization_template.as_str()).unwrap_or(crate::db::organization::DEFAULT_ORGANIZATION_TEMPLATE);
     let relative=crate::db::organization::organized_rel(template,captured_at,&name,source.camera.as_deref())?;
@@ -652,7 +671,7 @@ mod atomic_output_tests {
         let asset:AssetRow=serde_json::from_value(serde_json::json!({"path":path.to_string_lossy(),"filename":"source.tif","size":original.len(),"mtime":"2026-09-01T00:00:00Z","xxhash":0,"kind":"photo","source":"test","createdAt":"2026-09-01T00:00:00Z"})).unwrap();db.insert_asset(&asset).unwrap();let id=db.asset_id_by_path(&path.to_string_lossy()).unwrap().unwrap();
         let mut options:ExportOptions=serde_json::from_value(serde_json::json!({"format":"pcraft","colorSpace":"displayP3","mode":"folder","folder":{"outputDir":dir.path().join("outputs"),"fileName":"edited.pcraft"},"longEdge":16,"quality":1})).unwrap();
         let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","output":{"longEdge":16,"quality":1},"advanced":{"exposure":0.2}})).unwrap();
-        let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe,options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert_eq!((result.width,result.height),(120,80));assert!(result.asset_id.is_none());
+        let request=ExportJobRequest{composition:None,job_id:0,asset_id:id,asset:asset.clone(),recipe,options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert_eq!((result.width,result.height),(120,80));assert!(result.asset_id.is_none());
         let document=photocraft_io::import(&result.output_path,&std::fs::read(&result.output_path).unwrap()).unwrap().document;assert_eq!(document.depth,photocraft_engine::doc::SampleType::U16);assert!(!document.layers.is_empty());// 显影类(cameraRaw)调整烘焙进像素层(文档模型无非破坏性载体,且线性光数学与 Exposure 图层不等价——改图层会与预览/JPEG 分叉);曲线/蒙版等才追加图层,多图层语义由 photocraft::native_document_roundtrip 测试覆盖。assert_eq!(std::fs::read(&path).unwrap(),original);
         options.mode=ExportMode::Album;assert!(validate_options(&db,&options).unwrap_err().contains("不能作为照片"));
     }
@@ -670,8 +689,8 @@ mod atomic_output_tests {
         let recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":0.2}})).unwrap();
         for format in [ExportFormat::Png,ExportFormat::Tiff]{for mode in [ExportMode::Folder,ExportMode::Album]{
             let color_space=if format==ExportFormat::Png{ExportColorSpace::DisplayP3}else{ExportColorSpace::ProPhotoRgb};
-            let options=ExportOptions{format,color_space,mode,folder:Some(ExportFolderTarget{output_dir:dir.path().join("outputs").to_string_lossy().into_owned(),file_name:format!("edited.{}",format.extension())}),album:Some(ExportAlbumTarget{album_id:album.id.to_string(),subgroup:None}),long_edge:Some(12),quality:None,remove_gps:true,copyright:Some("Rights".into()),author:Some("Artist".into()),keywords:vec!["Photo".into()]};
-            let request=ExportJobRequest{job_id:0,asset_id:id,asset:asset.clone(),recipe:recipe.clone(),options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert!(result.output_path.ends_with(format.extension()));let decoded=image::open(&result.output_path).unwrap();assert_eq!((decoded.width(),decoded.height()),(12,8));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));if mode==ExportMode::Album{assert!(result.asset_id.is_some());}
+            let options=ExportOptions{file_name:None,finish:Default::default(),format,color_space,mode,folder:Some(ExportFolderTarget{output_dir:dir.path().join("outputs").to_string_lossy().into_owned(),file_name:format!("edited.{}",format.extension())}),album:Some(ExportAlbumTarget{album_id:album.id.to_string(),subgroup:None}),long_edge:Some(12),quality:None,remove_gps:true,copyright:Some("Rights".into()),author:Some("Artist".into()),keywords:vec!["Photo".into()]};
+            let request=ExportJobRequest{composition:None,job_id:0,asset_id:id,asset:asset.clone(),recipe:recipe.clone(),options:validate_options(&db,&options).unwrap(),library_root:dir.path().join("photos")};let result=execute(&db,&request,&|_|{},&||false,&||Ok(())).unwrap();assert!(result.output_path.ends_with(format.extension()));let decoded=image::open(&result.output_path).unwrap();assert_eq!((decoded.width(),decoded.height()),(12,8));assert!(matches!(decoded.color(),image::ColorType::Rgb16|image::ColorType::Rgba16));if mode==ExportMode::Album{assert!(result.asset_id.is_some());}
             let bytes=std::fs::read(&result.output_path).unwrap();let output=photocraft_io::import(&result.output_path,&bytes).unwrap();assert_eq!(output.document.icc_profile.unwrap(),color_space.profile().to_bytes());
         }}assert_eq!(std::fs::read(path).unwrap(),original);
     }

@@ -25,10 +25,25 @@ static WORK_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static ENVIRONMENT: OnceLock<Environment> = OnceLock::new();
 pub(crate) fn init(resources: &Path, config: &Path) {
+    if ENVIRONMENT.get().is_some() { return; }
+    clean_abandoned(config);
     let _ = ENVIRONMENT.set(Environment {
         resources: resources.into(),
         config: config.into(),
     });
+}
+fn clean_abandoned(config:&Path){
+    let root=config.join("render-jobs");
+    if let Ok(entries)=std::fs::read_dir(&root){for entry in entries.flatten(){
+        if entry.file_type().is_ok_and(|t|t.is_dir())&&entry.file_name().to_string_lossy().starts_with("photographer-"){
+            if let Err(error)=std::fs::remove_dir_all(entry.path()){crate::devices::diagnostics::record(format!("stale render cleanup failed: {error}"));}
+        }
+    }}
+}
+fn work_directory(prefix:&str)->Result<tempfile::TempDir,String>{
+    let root=ENVIRONMENT.get().ok_or("渲染资源目录未初始化")?.config.join("render-jobs");
+    std::fs::create_dir_all(&root).map_err(|e|e.to_string())?;
+    tempfile::Builder::new().prefix(prefix).tempdir_in(root).map_err(|e|e.to_string())
 }
 #[derive(Serialize, Deserialize)]
 struct Request {
@@ -38,6 +53,8 @@ struct Request {
     options: Option<ValidatedOptions>,
     #[serde(default)]
     detail:bool,
+    #[serde(default)]
+    composition:Option<super::composition::Operation>,
     cpu_only: bool,
 }
 #[derive(Serialize, Deserialize)]
@@ -80,18 +97,16 @@ pub(super) fn render(
     source: &Path,
     recipe: &EditRecipe,
     options: &ValidatedOptions,
+    composition:Option<&super::composition::Operation>,
     progress: &dyn Fn(&str),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     // Unit/integration test binaries have no application worker entry point.
     if cfg!(test) {
-        return export::encode_output(source, recipe, options, progress);
+        return if let Some(operation)=composition{super::composition::worker(operation,options,progress)}else{export::encode_output(source, recipe, options, progress)};
     }
     let environment = ENVIRONMENT.get().ok_or("导出资源目录未初始化")?.clone();
-    let directory = tempfile::Builder::new()
-        .prefix("photographer-export-")
-        .tempdir()
-        .map_err(|e| e.to_string())?;
+    let directory = work_directory("photographer-export-")?;
     let root = directory.path();
     let mut request = Request {
         environment,
@@ -99,6 +114,7 @@ pub(super) fn render(
         recipe: recipe.clone(),
         options: Some(options.clone()),
         detail:false,
+        composition:composition.cloned(),
         cpu_only: false,
     };
     gpu_first(
@@ -113,9 +129,9 @@ pub(super) fn render(
 
 pub(super) fn inspect(source:&Path,recipe:&EditRecipe,job:&super::detail::Control)->Result<(),String>{
     let environment=ENVIRONMENT.get().ok_or("细节资源目录未初始化")?.clone();
-    let directory=tempfile::Builder::new().prefix("photographer-detail-").tempdir().map_err(|e|e.to_string())?;
+    let directory=work_directory("photographer-detail-")?;
     let root=directory.path();
-    let mut request=Request{environment,source:source.into(),recipe:recipe.clone(),options:None,detail:true,cpu_only:false};
+    let mut request=Request{environment,source:source.into(),recipe:recipe.clone(),options:None,detail:true,composition:None,cpu_only:false};
     gpu_first(|cpu_only|{
         request.cpu_only=cpu_only;
         for file in ["phase","error","gpu-active","ready.json","frame.json","view.json"]{let _=std::fs::remove_file(root.join(file));}
@@ -125,12 +141,19 @@ pub(super) fn inspect(source:&Path,recipe:&EditRecipe,job:&super::detail::Contro
         monitor_detail(child.0,root,job)
     },&|phase|job.phase(phase),&||job.stopped())
 }
+fn refresh_heartbeat(root:&Path, last:&mut Instant)->Result<(),String>{
+    if last.elapsed()>=Duration::from_secs(1){
+        std::fs::write(root.join("heartbeat"), b"alive").map_err(|e|e.to_string())?;
+        *last=Instant::now();
+    }
+    Ok(())
+}
 fn monitor_detail(id:u32,root:&Path,job:&super::detail::Control)->Result<(),AttemptFailure>{
     let mut gpu_started=None;let mut ready=false;let mut sent=0;let mut received=0;
     let mut heartbeat=Instant::now();
     loop{
         if job.stopped()||STOPPING.load(Ordering::Acquire){return Ok(());}
-        if heartbeat.elapsed()>=Duration::from_secs(1){std::fs::write(root.join("heartbeat"),b"alive").map_err(|e|e.to_string())?;heartbeat=Instant::now();}
+        refresh_heartbeat(root, &mut heartbeat)?;
         if let Ok(phase)=std::fs::read_to_string(root.join("phase")){job.phase(&phase);}
         if !ready{
             if let Some(size)=std::fs::read(root.join("ready.json")).ok().and_then(|b|serde_json::from_slice::<super::detail::Ready>(&b).ok()){job.ready(size.width,size.height);ready=true;}
@@ -245,6 +268,7 @@ fn spawn(root: &Path, cancelled: &dyn Fn() -> bool) -> Result<ChildGuard, String
             return Err("应用正在退出".into());
         }
         if running.is_empty() {
+            std::fs::write(root.join("heartbeat"),b"alive").map_err(|e|e.to_string())?;
             let child = command
                 .spawn()
                 .map_err(|e| format!("启动导出进程失败: {e}"))?;
@@ -265,7 +289,9 @@ fn monitor(
 ) -> Result<(), AttemptFailure> {
     let mut gpu_started: Option<Instant> = None;
     let mut phase = String::new();
+    let mut heartbeat=Instant::now();
     loop {
+        refresh_heartbeat(root, &mut heartbeat)?;
         if cancelled() {
             return Err("导出已取消".to_string().into());
         }
@@ -352,6 +378,12 @@ fn run(root: &Path) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let _ = WORK_DIRECTORY.set(root.to_path_buf());
+    let heartbeat=root.join("heartbeat");
+    std::thread::spawn(move ||loop{
+        std::thread::sleep(Duration::from_secs(2));
+        let alive=std::fs::metadata(&heartbeat).ok().and_then(|m|m.modified().ok()).and_then(|t|t.elapsed().ok()).is_some_and(|age|age<Duration::from_secs(15));
+        if !alive{std::process::exit(3);}
+    });
     super::rawlab::configure_export_gpu(request.cpu_only);
     super::lut::init(&request.environment.config);
     super::film::init(&request.environment.config);
@@ -361,12 +393,12 @@ fn run(root: &Path) -> Result<(), String> {
         let _ = std::fs::write(root.join("phase"), phase);
     };
     if request.detail{return super::detail::worker(&request.source,&request.recipe,root,&progress);}
-    let (bytes, width, height) = export::encode_output(
+    let (bytes, width, height) = if let Some(operation)=&request.composition{super::composition::worker(operation,request.options.as_ref().ok_or("合成输出选项缺失")?,&progress)?}else{export::encode_output(
         &request.source,
         &request.recipe,
         request.options.as_ref().ok_or("导出选项缺失")?,
         &progress,
-    )?;
+    )?};
     std::fs::write(root.join("image.bin"), bytes).map_err(|e| e.to_string())?;
     std::fs::write(
         root.join("result.json"),

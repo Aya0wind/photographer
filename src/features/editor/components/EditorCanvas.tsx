@@ -130,7 +130,7 @@ interface EditorCanvasProps {
   fallbackSize: Size | null;
   recipe: EditRecipe;
   tool: EditorTool;
-  brushOptions: { color: string; widthRel: number };
+  brushOptions: { color: string; widthRel: number;erase?:boolean;opacity?:number };
   /** 裁剪预设比例（keepRatio）；null=自由 */
   cropRatio: number | null;
   cropDraft: EditRecipeCrop | null;
@@ -582,6 +582,7 @@ export default function EditorCanvas({
                       key={stroke.id}
                       points={strokeToLinePoints(stroke, canvas)}
                       stroke={stroke.color}
+                      opacity={stroke.opacity??1} globalCompositeOperation={stroke.erase?"destination-out":"source-over"}
                       strokeWidth={strokeWidthPx(stroke.widthRel, canvas)}
                       lineCap="round"
                       lineJoin="round"
@@ -593,13 +594,15 @@ export default function EditorCanvas({
                       y={stroke.points[0].y * canvas.height}
                       radius={strokeWidthPx(stroke.widthRel, canvas) / 2}
                       fill={stroke.color}
+                      opacity={stroke.opacity??1} globalCompositeOperation={stroke.erase?"destination-out":"source-over"}
                     />
                   ) : null,
                 )}
                 {drawingPoints !== null && drawingPoints.length >= 2 && (
                   <Line
                     points={drawingPoints}
-                    stroke={brushOptions.color}
+                    stroke={brushOptions.erase?"#FFFFFF":brushOptions.color}
+                    opacity={brushOptions.opacity??1} dash={brushOptions.erase?[4,4]:undefined}
                     strokeWidth={brushWidthPx}
                     lineCap="round"
                     lineJoin="round"
@@ -614,12 +617,13 @@ export default function EditorCanvas({
                   return (
                     <KonvaText
                       key={layer.id}
-                      opacity={nativeAnnotations ? 0 : 1}
+                      opacity={nativeAnnotations ? 0 : layer.opacity??1}
                       name={TEXT_NODE_NAME}
                       x={attrs.x}
                       y={attrs.y}
                       text={isEditing ? "" : layer.text === "" ? " " : layer.text}
                       fontSize={attrs.fontSize}
+                      fontFamily={layer.font??"Inter"} align={layer.align??"left"} width={Math.max(1,(1-layer.x)*canvas.width)}
                       fill={layer.color}
                       lineHeight={1.25}
                       visible={!isEditing}
