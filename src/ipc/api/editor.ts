@@ -263,3 +263,7 @@ export const editVersionApply=(assetId:number,libraryId:string,id:string)=>ipc<E
 export const editVersionDelete=(assetId:number,libraryId:string,id:string)=>ipc<void>("edit_version_delete",{assetId:String(assetId),libraryId,id});
 
 export const editPreviewAutoLevels=(sessionId:string,recipe:EditRecipe)=>ipc<NonNullable<NonNullable<EditRecipe["advanced"]>["levels"]>>("edit_preview_auto_levels",{sessionId,recipe});
+
+export interface ProofOptions {profile:"srgb"|"displayP3"|"adobeRgb"|"proPhotoRgb"|"custom";path:string|null;intent:"relative"|"perceptual"|"absolute"|"saturation";bpc:boolean;simulatePaper:boolean;gamut:boolean}
+export async function editPreviewProof(sessionId:string,recipe:EditRecipe,options:ProofOptions):Promise<string>{const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_proof",{sessionId,recipe,options});return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));}
+export const editVersionRead=(assetId:number,libraryId:string,id:string)=>ipc<EditRecipe>("edit_version_read",{assetId:String(assetId),libraryId,id});

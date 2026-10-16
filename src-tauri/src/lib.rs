@@ -467,6 +467,8 @@ pub fn run() {
             edit::versions::edit_version_create,
             edit::versions::edit_version_apply,
             edit::versions::edit_version_delete,
+            edit::versions::edit_version_read,
+            edit::proof::edit_preview_proof,
             edit::ipc::edit_advanced_export,
             edit::ipc::edit_advanced_export_folder,
             edit::ipc::edit_export_status,

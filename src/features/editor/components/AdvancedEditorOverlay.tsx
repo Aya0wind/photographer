@@ -1,3 +1,5 @@
+import EditorReferenceDialog from "./EditorReferenceDialog";
+import EditorProofDialog from "./EditorProofDialog";
 import EditorExportSettings from "./EditorExportSettings";
 import {DEFAULT_EXPORT_SETTINGS,exportName,exportMetadata} from "../lib/exportSettings";
 import EditorFilmstrip from "./EditorFilmstrip";
@@ -151,6 +153,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const busyRef = useRef(false);
   const [notice, setNotice] = useState<string | null>(null);
   const maskOverlay=useMaskOverlay(preview.session?.sessionId,recipe,selectedMask,tool==="mask"&&showMaskOverlay&&!compare&&!nativeActive,error=>setNotice(String(error)));
+  const [referenceOpen,setReferenceOpen]=useState(false);
+  const [proofOpen,setProofOpen]=useState(false);
   const [toolModalOpen,setToolModalOpen]=useState(false);
   const [moreOpen,setMoreOpen]=useState(false);
   const closeAfterTarget=useRef(false);
@@ -195,7 +199,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
 
   const canvasRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,canvasRecipe,nativeHost,
-    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !moreOpen && !scheme.error && !histogram.error && selectedComponent===null,
+    (["adjust","view","output","crop","mask"].includes(tool)) && !confirm && !albumPicker && !toolModalOpen && !proofOpen && !referenceOpen && !moreOpen && !scheme.error && !histogram.error && selectedComponent===null,
     compare,preview.session?`${preview.session.sourceUrl}|${!!preview.session.rawlabReady}`:undefined,String(zoomVisible),compareSplit,activeClipping);
   const clippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,false,activeClipping,!nativeCanvas&&!compare,error=>setNotice(String(error)));
   const originalClippingSrc=useClippingOverlay(preview.session?.sessionId,recipe,true,activeClipping,!nativeCanvas&&(compare||compareSplit!==null),error=>setNotice(String(error)));
@@ -400,7 +404,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (maskGestureOwnsKey(event)) return;
-      if(toolModalOpen||moreOpen||scheme.error||histogram.error) return;
+      if(toolModalOpen||proofOpen||referenceOpen||moreOpen||scheme.error||histogram.error) return;
       if(straightening&&(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.stopImmediatePropagation();setStraightening(false);return;}
       if(target.active&&(event.key==="Escape"||((event.ctrlKey||event.metaKey)&&["z","s"].includes(event.key.toLowerCase())))){event.preventDefault();event.stopImmediatePropagation();if(event.key.toLowerCase()!=="s")target.cancel();return;}
       const input = event.target instanceof HTMLElement && (event.target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName));
@@ -454,6 +458,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           <button className={BUTTON} disabled={busy||exporting||unavailable||target.active} onClick={()=>void scheme.save()}>{t("advancedEditor.schemeSave")}</button>
           <button className={BUTTON} disabled={schemeDisabled} onClick={()=>void scheme.open()}>{t("advancedEditor.schemeOpen")}</button>
           {([1,2] as const).map(flag=><button key={flag} className={BUTTON} disabled={busy||unavailable} aria-pressed={(clipping&flag)!==0} onClick={()=>setClipping(value=>value^flag)}>{t(flag===1?"advancedEditor.clipShadows":"advancedEditor.clipHighlights")}</button>)}
+          <button className={BUTTON} disabled={unavailable||busy||exporting||target.active} onClick={()=>setReferenceOpen(true)}>{t("advancedEditor.reference.title")}</button>
+          <button className={BUTTON} disabled={unavailable||busy||exporting||target.active} onClick={()=>setProofOpen(true)}>{t("advancedEditor.proof.title")}</button>
           <button className={BUTTON} aria-pressed={fullscreen} onClick={()=>void toggleFullscreen()}>{t("advancedEditor.layout.fullscreen")}</button>
           <button className={BUTTON} onClick={()=>updatePreferences({leftOpen:false,rightOpen:false})}>{t("advancedEditor.layout.hidePanels")}</button>
           <label className="text-xs">{t("advancedEditor.layout.background")}<select value={preferences.background} onChange={event=>updatePreferences({background:event.target.value as typeof preferences.background})} className="ml-2 rounded border border-edge bg-bg p-1">{["#101010","#202020","#404040"].map(color=><option key={color} value={color}>{color}</option>)}</select></label>
@@ -530,6 +536,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     {autosave.error&&<div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-amber-500"><span>{autosave.error}</span><button className={BUTTON} onClick={()=>void saveProject()}>{t("advancedEditor.autosave.retry")}</button></div>}
     <EditorFilmstrip savedRevision={baseline} asset={asset} recipe={recipeForPersist(effective)} disabled={busy||exporting||unavailable||target.active||!!confirm||toolModalOpen} save={saveProject} onApply={value=>{chooseTool("adjust");dispatch({type:"applyProject",recipe:value});}}/>
     <footer className="flex h-8 shrink-0 items-center gap-3 px-4 text-[11px] text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? t("advancedEditor.projectHint")}</span>{preview.session?.rawlabReady&&<span className="ml-auto truncate" title={t("advancedEditor.preview.proxy")}>{t("advancedEditor.preview.rawReady")} · {t("advancedEditor.preview.proxy")}</span>}</footer>
+    {referenceOpen&&<EditorReferenceDialog asset={asset} libraryId={libraryId} recipe={recipe} current={preview.url??preview.session?.sourceUrl??null} quick={preview.quickUrl} onClose={()=>setReferenceOpen(false)}/>}
+    {proofOpen&&preview.session&&<EditorProofDialog sessionId={preview.session.sessionId} assetId={asset.id} libraryId={libraryId} recipe={recipe} original={preview.url??preview.session.sourceUrl} onClose={()=>setProofOpen(false)}/>}
     <ErrorModal message={scheme.error??histogram.error} onClose={scheme.error?scheme.closeError:histogram.closeError}/>
     {albumPicker && <ExportAlbumPicker albums={albums} onCancel={() => setAlbumPicker(false)} onConfirm={(albumId, subgroup) => { setAlbumPicker(false); void returnToLibrary(albumId, subgroup, albumCloseAfter.current); }} />}
     {confirm && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50"><div role="alertdialog" aria-modal="true" aria-labelledby="advanced-confirm-title" className="ui-glass w-96 space-y-4 rounded-2xl p-5"><h3 id="advanced-confirm-title" className="text-sm font-semibold text-text-primary">{t(confirm === "reset" ? "editor.resetConfirmTitle" : "editor.unsavedTitle")}</h3><p className="text-xs text-text-secondary">{t(confirm === "reset" ? "editor.resetConfirmDesc" : "advancedEditor.unsaved")}</p><div className="flex justify-end gap-2"><button className={BUTTON} onClick={() => { setConfirm(null); useAdvancedEditorStore.getState().cancel(); }}>{t("common.cancel")}</button>{confirm !== "reset" && <button className="ui-primary rounded-xl px-4 py-2 text-xs" disabled={busy || unavailable} onClick={() => { const action = confirm; void saveProject().then((ok) => { if (!ok || !mounted.current) return; setConfirm(null); if (action === "close") closeEditor(); else useAdvancedEditorStore.getState().accept(); }); }}>{t("advancedEditor.saveContinue")}</button>}<button className={BUTTON} disabled={busy} onClick={() => { const action = confirm; setConfirm(null); if (action === "close") closeEditor(); else if (action === "switch") useAdvancedEditorStore.getState().accept(); else { dispatch({ type: "reset" }); setProjectError(null); gesture.current = null; setCropDraft(null); setSelectedText(null); setTool("adjust"); } }}>{t(confirm === "reset" ? "editor.resetConfirmGo" : "editor.unsavedDiscard")}</button></div></div></div>}

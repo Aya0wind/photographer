@@ -66,6 +66,7 @@ mod proxy_cache;
 mod linear_cache;
 pub mod project;
 pub mod versions;
+pub mod proof;
 pub mod portable;
 pub mod recipe;
 pub mod render;

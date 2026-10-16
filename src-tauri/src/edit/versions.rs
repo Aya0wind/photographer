@@ -85,3 +85,13 @@ pub async fn edit_version_delete(state:State<'_,SharedState>,library_id:String,a
         if changed==0{return Err("当前版本或原版不能删除".into());}Ok(())
     }).await
 }
+
+/// Reading a reference never changes the active virtual copy.
+#[tauri::command]
+pub async fn edit_version_read(state:State<'_,SharedState>,library_id:String,asset_id:String,id:String)->Result<EditRecipe,String>{
+    run_blocking(state.inner().clone(),move |state|{
+        let (_,asset)=project::resolve(state,&library_id,&asset_id)?;let db=crate::ipc::app_database_db(state)?;
+        let text:String=db.0.query_row("SELECT recipe FROM editor_version WHERE asset_id=?1 AND id=?2",params![asset.id,id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        parse_recipe(&serde_json::from_str::<serde_json::Value>(&text).map_err(|e|e.to_string())?)
+    }).await
+}
