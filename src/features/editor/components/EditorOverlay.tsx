@@ -46,6 +46,9 @@ import EditorCanvas, { type EditorTool } from "./EditorCanvas";
 import ExportAlbumPicker from "./ExportAlbumPicker";
 import MetadataFields from "./MetadataFields";
 
+/** Tools exposed by the basic editor; the shared canvas also serves advanced editing. */
+type BasicEditorTool = Extract<EditorTool, "view" | "crop" | "adjust" | "filters" | "text" | "brush" | "metadata" | "output">;
+
 /**
  * 全屏编辑浮层（阶段 D 前端）：
  * - 非破坏：所有编辑只改配方状态；「保存配方」写 DB（editRecipeSave）；
@@ -139,7 +142,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     [asset.width, asset.height],
   );
   // --- 工具与选项 ---------------------------------------------------------------------
-  const [tool, setTool] = useState<EditorTool>("adjust");
+  const [tool, setTool] = useState<BasicEditorTool>("adjust");
   const [cropRatio, setCropRatio] = useState<number | null>(null);
   const [cropDraft, setCropDraft] = useState<Parameters<typeof clampCrop>[0] | null>(null);
   const [straightening,setStraightening]=useState(false);
@@ -161,7 +164,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   }, [baseSize, present.rotateQuarter, present.geometry]);
 
   const selectTool = useCallback(
-    (next: EditorTool) => {
+    (next: BasicEditorTool) => {
       if (next === tool) return;
       if (tool === "crop" && cropDraft && next !== "crop") {
         const crop = clampCrop(cropDraft,1e-6);
@@ -457,8 +460,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   const canUndo = history.past.length > 0 || tool==="crop";
   const canRedo = history.future.length > 0 && tool!=="crop";
 
-  const TOOL_ICONS: Record<EditorTool, React.ReactNode> = {
-    mask:null,
+  const TOOL_ICONS: Record<BasicEditorTool, React.ReactNode> = {
     view: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m4 17 5-5 4 4 3-3 4 4" /></>,
     crop: <><path d="M6 3v15h15M3 6h15v15" /></>,
     adjust: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2" /></>,
@@ -468,7 +470,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     metadata: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7h.01" /></>,
     output: <><path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" /></>,
   };
-  const toolButton = (id: EditorTool, label: string, testId: string) => (
+  const toolButton = (id: BasicEditorTool, label: string, testId: string) => (
     <button type="button" role="tab" aria-selected={tool === id} aria-label={label} onClick={() => selectTool(id)} title={label}
       className={`flex h-14 min-w-14 flex-col items-center justify-center gap-1 rounded-xl px-3 text-[11px] transition-colors ${tool === id ? "bg-panel text-accent" : "text-text-secondary hover:bg-panel/40 hover:text-text-primary"}`}
       data-testid={testId} data-active={tool === id}>
