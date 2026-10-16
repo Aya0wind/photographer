@@ -63,7 +63,8 @@
 .advanced-editor .editor-left-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 2px; border-radius: 6px; background: var(--color-bg); }
 .advanced-editor .editor-left-tabs button { min-width: 0; padding: 0 4px; border-color: transparent; font-size: 11px; }
 .advanced-editor .editor-canvas { margin: 12px; border-radius: 6px; }
-.advanced-editor .editor-right-panel { width: var(--editor-panel-width); max-width: 420px; border-radius: 0; border-left: 1px solid var(--color-edge); padding: 0; }
+.advanced-editor .editor-right-panel { width: var(--editor-panel-width); max-width: 480px; border-radius: 0; border-left: 1px solid var(--color-edge); padding: 0; }
+.advanced-editor [data-native-overlay] { border-radius: var(--editor-radius); }
 .advanced-editor .editor-right-panel > fieldset { min-width: 0; padding: 0 16px 16px; }
 .advanced-editor .editor-panel-title { display: flex; align-items: center; height: 42px; margin: 0; font-size: 12px; letter-spacing: .03em; }
 .advanced-editor .editor-adjustments { display: flex; flex-direction: column; gap: 0; }
