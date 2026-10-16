@@ -26,7 +26,7 @@ pub async fn edit_preview_proof(state:State<'_,SharedState>,session_id:String,re
         let doc=super::photocraft::render_document(&base,&recipe)?;
         let source=photocraft_engine::color_cmds::document_profile(&doc);if source.channels()!=3{return Err("软打样目前需要 RGB 文档".into());}let proof=profile(&options)?;
         let intent=match options.intent.as_str(){"relative"=>photocraft_cms::Intent::RelativeColorimetric,"perceptual"=>photocraft_cms::Intent::Perceptual,"absolute"=>photocraft_cms::Intent::AbsoluteColorimetric,"saturation"=>photocraft_cms::Intent::Saturation,_=>return Err("校样意图无效".into())};
-        let key=format!("{:x}:{:x}:{}",sha2::Sha256::digest(source.to_bytes()),sha2::Sha256::digest(proof.to_bytes()),serde_json::to_string(&options).map_err(|e|e.to_string())?);
+        let key=format!("{:x}:{:x}:{}",sha2::Sha256::digest(source.to_bytes().as_slice()),sha2::Sha256::digest(proof.to_bytes().as_slice()),serde_json::to_string(&options).map_err(|e|e.to_string())?);
         let cached=cache().lock().map_err(|_|"校样缓存不可用")?.iter().find(|(k,_,_)|k==&key).cloned();
         let (_,transform,gamut)=if let Some(value)=cached{value}else{
             let transform=Arc::new(photocraft_cms::Transform::proof(&source,&proof,photocraft_cms::Builtin::Srgb.profile(),intent,options.bpc,options.simulate_paper).map_err(|e|e.to_string())?);

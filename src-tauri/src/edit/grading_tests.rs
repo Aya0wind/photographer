@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 #[test]
 fn sampled_grading_matches_upstream_pixels_and_reuses_the_lookup(){
  let g:ColorGrading=serde_json::from_value(serde_json::json!({"shadows":{"hue":220,"sat":35,"lum":-10},"midtones":{"hue":40,"sat":15,"lum":10},"highlights":{"hue":55,"sat":20,"lum":5},"global":{"hue":120,"sat":5,"lum":0},"blending":65,"balance":-20})).unwrap();

@@ -46,6 +46,9 @@ mod recipe {
 #[path="../src/edit/native_geometry.rs"]
 mod native_geometry;
 #[cfg(windows)]
+#[path="../src/edit/pixel_lookup.rs"]
+mod pixel_lookup;
+#[cfg(windows)]
 #[path="../src/edit/grading.rs"]
 mod grading;
 #[cfg(windows)]

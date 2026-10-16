@@ -90,8 +90,12 @@ pub fn release_all() {
 }
 
 /// 启动空闲看护线程（app setup 时挂一次；每 10 秒检查）。
-pub fn spawn_idle_unloader(supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>) {
-    supervisor.spawn("ai", "model-idle-unloader".into(), |controls| {
+/// The app supplies editor maintenance so AI can also compile in isolated test harnesses.
+pub fn spawn_idle_unloader(
+    supervisor: &std::sync::Arc<crate::tasks::TaskSupervisor>,
+    release_editor_caches: impl Fn() + Send + 'static,
+) {
+    supervisor.spawn("ai", "model-idle-unloader".into(), move |controls| {
         while !controls.is_cancelled() {
             std::thread::sleep(Duration::from_secs(10));
             if controls.is_cancelled() {
@@ -99,7 +103,7 @@ pub fn spawn_idle_unloader(supervisor: &std::sync::Arc<crate::tasks::TaskSupervi
             }
             super::face::release_idle_caches();
             crate::index::artifacts::release_idle();
-            crate::edit::preview::release_expired();
+            release_editor_caches();
             if should_unload() {
                 release_all();
             }

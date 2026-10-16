@@ -4,6 +4,17 @@
 
 ## 构建与使用
 
+桌面应用需要先构建并装配引擎资源，单独运行 `npm run tauri -- build --no-bundle` 不会编译 C++ 引擎。初始化子模块后，在配置好 CMake/MSVC 和 zlib 的环境中运行：
+
+```sh
+python scripts/build-rawlab.py
+# Windows 使用 vcpkg 时：
+python scripts/build-rawlab.py --toolchain <vcpkg>/scripts/buildsystems/vcpkg.cmake
+npm run tauri -- build --no-bundle
+```
+
+已有 `native/rawlab/build-app` 完整构建时，可用 `python scripts/build-rawlab.py --skip-build` 重新装配。资源落在 `src-tauri/resources/rawlab/`，Tauri 会复制到应用资源目录；Windows 本地 Release 运行时对应 `src-tauri/target/release/rawlab/`，不能只移动 EXE。Release 构建会检查引擎库、固定版本记录、胶片和镜头数据库，缺失时停止并提示装配步骤。
+
 需要 C++17、CMake 3.24+、zlib 开发包。Windows CI 使用 `zlib:x64-windows-static-md`，传入 vcpkg toolchain/triplet。先执行 `git submodule update --init --recursive`，再从仓库根目录执行：
 
 ```sh

@@ -194,7 +194,7 @@ pub fn run() {
             // 导入收尾」，存量资产在模型就位前导入则永远无人补触发——启动
             // 即自愈（幂等：回填只处理 *_indexed_at IS NULL）。
             // Resource maintenance is application-wide, including first-run database creation.
-            ai::idle::spawn_idle_unloader(&supervisor_handle);
+            ai::idle::spawn_idle_unloader(&supervisor_handle, edit::preview::release_expired);
             if let Some(db_dir) = active_db_dir {
                 index::scheduler::configure(&db_dir, &ai_for_kick, &bus, &ai_settings_snapshot);
                 index::resume_and_kick(db_dir.clone(), &bus, &supervisor_handle);

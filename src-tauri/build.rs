@@ -1,4 +1,20 @@
+#[path = "build_support/rawlab.rs"]
+mod rawlab_resources;
+
 fn main() {
+    let rawlab = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("resources/rawlab");
+    println!("cargo:rerun-if-changed={}", rawlab.display());
+    println!("cargo:rerun-if-changed=../native/rawlab/upstream.lock.json");
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        rawlab_resources::validate(
+            &rawlab,
+            &std::env::var("CARGO_CFG_TARGET_OS").unwrap(),
+            include_bytes!("../native/rawlab/upstream.lock.json"),
+        ).unwrap_or_else(|error| panic!(
+            "{error}. Build and stage the native engine first: python scripts/build-rawlab.py (see native/rawlab/README.md)."
+        ));
+    }
     tauri_build::build();
     // Tauri embeds the GUI manifest in the app binary, but not in diagnostic
     // examples. Native window probes need Common Controls v6 as well.
