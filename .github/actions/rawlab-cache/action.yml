@@ -90,7 +90,8 @@ runs:
             lens_sources += Path('native/rawlab/cmake/lensfun-macos.cmake').read_bytes()
             lens_sources += os.environ['RAWLAB_BUILD_DIRECTORY'].encode()
             lens_key = hashlib.sha256(lens_sources).hexdigest()[:24]
-            target.write(f'lens-key=rawlab-lens-v1-{os.environ["RUNNER_OS"]}-{toolchain}-{lens_key}\n')
+            lens_revision = 2 if sys.platform == 'win32' else 1
+            target.write(f'lens-key=rawlab-lens-v{lens_revision}-{os.environ["RUNNER_OS"]}-{toolchain}-{lens_key}\n')
             target.write(f'zlib-key=rawlab-zlib-v1-{toolchain}-x64-windows-static-md\n')
         PY
 
@@ -141,8 +142,41 @@ runs:
           ${{ inputs.build-directory }}/_deps/pc_lensfun-subbuild
         key: ${{ steps.identity.outputs.lens-key }}
 
-    - name: Build native core on cache miss
-      if: steps.native.outputs.cache-hit != 'true'
+    - name: Build Windows native core on cache miss
+      if: runner.os == 'Windows' && steps.native.outputs.cache-hit != 'true'
+      shell: pwsh
+      env:
+        RAWLAB_BUILD_DIRECTORY: ${{ inputs.build-directory }}
+        RAWLAB_TESTING: ${{ inputs.testing }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # Meson invokes the MSVC linker by name. Git Bash can put Git's unrelated
+        # link.exe ahead of it even when CMake found cl.exe by absolute path.
+        $compiler = (Get-Command cl.exe -CommandType Application -ErrorAction Stop).Source
+        $msvcBin = Split-Path -Parent $compiler
+        $linker = Join-Path $msvcBin 'link.exe'
+        $archiver = Join-Path $msvcBin 'lib.exe'
+        foreach ($tool in @($linker, $archiver)) {
+          if (!(Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing MSVC tool: $tool" }
+        }
+        $env:PATH = "$msvcBin;$env:PATH"
+        $env:VSLANG = '1033'
+        Write-Host "MSVC compiler: $compiler"
+        Write-Host "MSVC linker: $((Get-Command link.exe -CommandType Application).Source)"
+        $configure = @('-S', 'native/rawlab', '-B', $env:RAWLAB_BUILD_DIRECTORY, '-G', 'Ninja',
+          '-DCMAKE_BUILD_TYPE=Release', "-DBUILD_TESTING=$env:RAWLAB_TESTING",
+          "-DCMAKE_C_COMPILER=$compiler", "-DCMAKE_CXX_COMPILER=$compiler",
+          "-DCMAKE_LINKER=$linker", "-DCMAKE_AR=$archiver",
+          '-DCMAKE_C_COMPILER_LAUNCHER=sccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake",
+          '-DVCPKG_TARGET_TRIPLET=x64-windows-static-md')
+        & cmake @configure
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & cmake --build $env:RAWLAB_BUILD_DIRECTORY --config Release --parallel 2
+        exit $LASTEXITCODE
+
+    - name: Build Unix native core on cache miss
+      if: runner.os != 'Windows' && steps.native.outputs.cache-hit != 'true'
       shell: bash
       env:
         RAWLAB_BUILD_DIRECTORY: ${{ inputs.build-directory }}
@@ -151,14 +185,40 @@ runs:
         configure=(cmake -S native/rawlab -B "$RAWLAB_BUILD_DIRECTORY" -G Ninja
           -DCMAKE_BUILD_TYPE=Release "-DBUILD_TESTING=$RAWLAB_TESTING"
           -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache)
-        if [ "$RUNNER_OS" = Windows ]; then
-          configure+=("-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
-        elif [ "$RUNNER_OS" = macOS ]; then
+        if [ "$RUNNER_OS" = macOS ]; then
           configure+=("-DCMAKE_OSX_ARCHITECTURES=$(uname -m)")
         fi
         "${configure[@]}"
         cmake --build "$RAWLAB_BUILD_DIRECTORY" --config Release --parallel 2
+
+    - name: Show native configuration failure logs
+      if: failure()
+      shell: python
+      env:
+        RAWLAB_BUILD_DIRECTORY: ${{ inputs.build-directory }}
+      run: |
+        import os
+        from pathlib import Path
+        root = Path(os.environ['RAWLAB_BUILD_DIRECTORY'])
+        for pattern in ('**/meson-logs/meson-log.txt', '**/CMakeFiles/CMakeError.log'):
+            for path in sorted(root.glob(pattern)):
+                print(f'::group::{path}', flush=True)
+                print(path.read_text(encoding='utf-8', errors='replace'), flush=True)
+                print('::endgroup::', flush=True)
+
+    - name: Preserve native failure diagnostics
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: rawlab-build-logs-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}
+        path: |
+          ${{ inputs.build-directory }}/**/meson-logs/meson-log.txt
+          ${{ inputs.build-directory }}/**/CMakeFiles/CMakeConfigureLog.yaml
+          ${{ inputs.build-directory }}/**/CMakeFiles/CMakeError.log
+          ${{ inputs.build-directory }}/**/CMakeFiles/CMakeOutput.log
+          ${{ inputs.build-directory }}/lens-dependencies/cross.ini
+        if-no-files-found: ignore
+        retention-days: 7
 
     - name: Save Lensfun build dependencies
       if: runner.os != 'Linux' && steps.native.outputs.cache-hit != 'true' && steps.lens.outputs.cache-hit != 'true'
