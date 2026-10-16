@@ -232,6 +232,7 @@ pub fn adjusted_document(base: &Document, recipe: &EditRecipe) -> Result<Documen
 pub(super) fn adjusted_document_scaled(base:&Document,recipe:&EditRecipe,scale:f32)->Result<Document,String> {
     if recipe.color_pipeline.is_some(){let (base,values)=super::rawlab::display(base,recipe)?;return adjusted_document_scaled(&base,&values,scale);}
 
+    if !recipe.retouch.is_empty(){let repaired=super::retouch::RetouchCache::default().apply(base,&recipe.retouch)?;let mut values=recipe.clone();values.retouch.clear();return adjusted_document_scaled(&repaired,&values,scale);}
     let mut session = Session::new();
     session.add_document(base.clone(), None);
     adjustments_scaled(&mut session, recipe,scale)?;

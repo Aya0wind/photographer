@@ -715,7 +715,7 @@ pub async fn edit_preview_pick(
             let mut below=recipe.clone();below.masks.truncate(index);
             let base=photocraft::adjusted_document_scaled(&base,&below,source_scale)?;
             let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
-            local.legacy_adjustments=None;local.color_pipeline=None;
+            local.legacy_adjustments=None;local.color_pipeline=None;local.retouch.clear();
             (mask.advanced.clone().unwrap_or_default(),local,base)
         } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
         picker_input_recipe(&mut before,&picker,curve_channel.as_deref());
@@ -846,7 +846,7 @@ fn clipping_overlay(base:&Document,recipe:&recipe::EditRecipe,scale:f32,warnings
 #[tauri::command]
 pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool)->Result<Vec<Vec<u64>>,String>{
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original{if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
+    if original{recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
     run_blocking(state.inner().clone(),move |_|{
         // 拖动期高频调用：交互文档（≤2048）渲染，毫秒级——255 桶显示直方图
         // 不需要全分辨率统计（2026-10-12 实时反馈改造）。
@@ -858,7 +858,7 @@ pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:Strin
 pub async fn edit_preview_clipping(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool,warnings:u8)->Result<tauri::ipc::Response,String>{
     if warnings>3{return Err("曝光提示参数无效".into());}
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original {if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
+    if original {recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
     run_blocking(state.inner().clone(),move |_|{
         use image::ImageEncoder;
         let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;

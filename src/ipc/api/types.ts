@@ -879,7 +879,9 @@ export interface EditLocalMask {
   advanced?:AdvancedAdjustments;
 }
 
+export interface EditRetouchStroke {id:string;kind:"clone"|"heal"|"redEye";source:{x:number;y:number};points:{x:number;y:number}[];widthRel:number;hardness:number;opacity:number}
 export interface EditRecipe {
+  retouch?:EditRetouchStroke[];
   version: 1;
   /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
   renderer?: "photocraft";

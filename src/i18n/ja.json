@@ -1918,5 +1918,20 @@
   "advancedEditor.reference.hint": "Reference versions are read-only and do not switch the active branch. Both use the current crop and geometry, with linked scrolling. Zoom uses proxy detail.",
   "advancedEditor.reference.quickHint": "The initial quick preview may include camera styling. It retains its initial framing and does not represent the current RAW recipe.",
   "advancedEditor.reference.left": "Reference",
-  "advancedEditor.reference.right": "Current edit"
+  "advancedEditor.reference.right": "Current edit",
+  "advancedEditor.retouch.title": "Clone and heal",
+  "advancedEditor.retouch.mode": "Tool",
+  "advancedEditor.retouch.clone": "Clone stamp",
+  "advancedEditor.retouch.heal": "Healing brush",
+  "advancedEditor.retouch.redEye": "Red eye",
+  "advancedEditor.retouch.redEyeHint": "Click a red pupil. No detection leaves the image unchanged. Pet eyes are not supported.",
+  "advancedEditor.retouch.hint": "Alt-click to choose a source, then drag. Release to commit; Esc cancels the stroke. Healing blends after release.",
+  "advancedEditor.retouch.source": "Source",
+  "advancedEditor.retouch.chooseSource": "Alt-click to choose a source first",
+  "advancedEditor.retouch.widthRel": "Brush diameter",
+  "advancedEditor.retouch.hardness": "Hardness",
+  "advancedEditor.retouch.opacity": "Opacity / red-eye darkening",
+  "advancedEditor.retouch.count": "{{count}} saved strokes (maximum 256)",
+  "advancedEditor.retouch.delete": "Delete stroke {{index}}",
+  "advancedEditor.transfer.retouch": "Clone and heal"
 }

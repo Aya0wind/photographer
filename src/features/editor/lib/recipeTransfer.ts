@@ -1,6 +1,6 @@
 import type {EditRecipe} from "@/ipc/api";
 import {DEFAULT_ADVANCED,DEFAULT_DEVELOPMENT} from "./advancedRecipe";
-export const TRANSFER_GROUPS=["light","color","curves","hsl","grading","detail","effects","profile","geometry","masks","annotations","output"] as const;
+export const TRANSFER_GROUPS=["light","color","curves","hsl","grading","detail","effects","profile","geometry","masks","annotations","retouch","output"] as const;
 export type TransferGroup=typeof TRANSFER_GROUPS[number];
 const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hsl","hslEight"],grading:["colorGrading","lookup"]} as const;
 const DEVELOPMENT={light:["highlights","shadows","whites","blacks"],detail:["sharpenAmount","sharpenRadius","sharpenDetail","sharpenMasking","noiseLuminance","noiseLuminanceDetail","noiseColor","noiseColorDetail"],effects:["texture","clarity","dehaze","grainAmount","grainSize","grainRoughness","vignetteAmount","vignetteMidpoint","vignetteRoundness","vignetteFeather","vignetteHighlights","vignetteStyle"]} as const;
@@ -15,6 +15,7 @@ export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:Transf
   if(group==="geometry"){value.crop=structuredClone(source.crop);value.rotateQuarter=source.rotateQuarter;value.geometry=structuredClone(source.geometry);}
   if(group==="masks")value.masks=structuredClone(source.masks);
   if(group==="annotations"){value.textLayers=structuredClone(source.textLayers);value.brushStrokes=structuredClone(source.brushStrokes);}
+  if(group==="retouch")value.retouch=structuredClone(source.retouch);
   if(group==="output")value.output=structuredClone(source.output);
  }
  // Keep basic and legacy exposure/saturation controls in the chosen group.

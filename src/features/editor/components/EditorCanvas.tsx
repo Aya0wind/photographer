@@ -1,3 +1,6 @@
+import RetouchCanvasControls from "./RetouchCanvasControls";
+import type {RetouchBrush} from "./RetouchPanel";
+import type {EditRetouchStroke} from "@/ipc/api";
 import {geometrySize,planeToSource,sourceToPlane} from "../lib/geometry";
 import ComparisonOverlay from "./ComparisonOverlay";
 import MaskCanvasControls,{type MaskBrush} from "./MaskCanvasControls";
@@ -32,7 +35,7 @@ import {
  * - 所有提交都经 konvaMapping 换算回归一化 recipe 字段。
  */
 
-export type EditorTool = "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
+export type EditorTool = "retouch" | "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
 
 const TEXT_NODE_NAME = "editor-text-layer";
 const STAGE_PADDING = 6;
@@ -98,6 +101,7 @@ function rotatedImageAttrs(
 interface EditorCanvasProps {
   straightening?:boolean;onStraighten?:(angle:number)=>void;onStraightenCancel?:()=>void;
   onSampleGesture?:(event:SampleGesture)=>void;
+  retouchControls?:{brush:RetouchBrush;onBrush:(value:RetouchBrush)=>void;onCommit:(value:EditRetouchStroke)=>void};
   maskControls?:{editing?:boolean;mask:EditLocalMask;brush:MaskBrush;onCommit:(patch:Partial<EditLocalMask>)=>void;overlaySrc?:string|null;showOverlay?:boolean};
   showOriginal?: boolean;
   compareSplit?:number|null;
@@ -160,7 +164,7 @@ export default function EditorCanvas({
   nativeGeometry = false,
   nativeAnnotations = false,
   zoom = 1,
-  onZoom,onFitScale,
+  onZoom,onFitScale,retouchControls,
   fallbackSize,
   recipe,
   tool,
@@ -185,7 +189,7 @@ export default function EditorCanvas({
   useEffect(()=>{if(!straightening)setStraightLine(null);},[straightening]);
   function stopTarget(cancelled:boolean){const g=targetRef.current;targetRef.current=null;if(g)g.handler({phase:cancelled?"cancel":"end",x:g.x,y:g.y,delta:g.delta});}
   const [hand,setHand]=useState(false);
-  const canPan=hand||!sampleMode && !["crop","brush","text","mask"].includes(tool);
+  const canPan=hand||!sampleMode && !["crop","brush","text","mask","retouch"].includes(tool);
   const [panning, setPanning] = useState(false);
   function stopPanning(): void {
     const pan = panRef.current;
@@ -482,6 +486,7 @@ export default function EditorCanvas({
           </g>)}
         </svg>}
         {tool==="crop"&&straightening&&<><StraightenOverlay width={dispW} height={dispH} onPreview={setStraightLine} onCancel={onStraightenCancel} onCommit={angle=>onStraighten?.(angle)}/>{straightLine&&<svg className="pointer-events-none absolute inset-0 z-10" width={dispW} height={dispH}><line x1={straightLine[0]*dispW} y1={straightLine[1]*dispH} x2={straightLine[2]*dispW} y2={straightLine[3]*dispH} stroke="white" strokeWidth={2}/></svg>}</>}
+        {retouchControls&&tool==="retouch"&&<RetouchCanvasControls recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH} src={adjustedSrc??src} {...retouchControls}/>}
         {maskControls&&<MaskCanvasControls {...maskControls} editing={maskControls.editing!==false&&!sampleMode} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
         <Stage
           width={dispW}

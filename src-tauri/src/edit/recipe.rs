@@ -252,9 +252,15 @@ pub struct LocalMask {
     pub advanced: Option<AdvancedAdjustments>,
 }
 
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct RetouchStroke {pub id:String,pub kind:String,pub source:NormPoint,pub points:Vec<NormPoint>,pub width_rel:f64,pub hardness:f64,pub opacity:f64}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub retouch:Vec<RetouchStroke>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub color_pipeline:Option<ColorPipeline>,
     /// Retains historical sRGB filter semantics while rendering via native layers.
@@ -501,6 +507,7 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
         if (p.version==2)!=p.base_profile.is_some(){return Err("基础色彩配置与显影版本不匹配".into());}
         if let Some(f)=p.film.as_mut(){super::film::validate_id(&f.id)?;if !f.amount.is_finite(){return Err("胶片强度无效".into());}f.amount=f.amount.clamp(0.0,100.0);}
     }
+    super::retouch::normalize(&mut recipe.retouch,recipe.renderer)?;
     if recipe.masks.len()>32 {return Err("蒙版数量超过上限".into());}
     if !recipe.masks.is_empty() && recipe.renderer!=Some(RenderEngine::Photocraft) {
         return Err("局部蒙版需要使用高级编辑引擎".into());

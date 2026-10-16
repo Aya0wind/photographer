@@ -1925,5 +1925,20 @@
   "advancedEditor.reference.hint": "参考版本只读，不切换当前分支；使用当前裁剪与几何对齐，两侧同步滚动。放大仍是代理图。",
   "advancedEditor.reference.quickHint": "快速预览可能包含相机风格。它保留打开时的构图，不作为当前 RAW 配方的颜色依据。",
   "advancedEditor.reference.left": "参考",
-  "advancedEditor.reference.right": "当前编辑"
+  "advancedEditor.reference.right": "当前编辑",
+  "advancedEditor.retouch.title": "仿制与修复",
+  "advancedEditor.retouch.mode": "工具",
+  "advancedEditor.retouch.clone": "仿制图章",
+  "advancedEditor.retouch.heal": "修复笔刷",
+  "advancedEditor.retouch.redEye": "红眼修正",
+  "advancedEditor.retouch.redEyeHint": "点击红色瞳孔。未检测到红眼时保留原图；当前工具不处理宠物眼。",
+  "advancedEditor.retouch.hint": "按住 Alt 点击设置来源，再拖动绘制。松开提交一笔；Esc 取消当前笔迹。修复融合在提交后显示。",
+  "advancedEditor.retouch.source": "来源位置",
+  "advancedEditor.retouch.chooseSource": "请先 Alt 点击选择来源位置",
+  "advancedEditor.retouch.widthRel": "笔刷直径",
+  "advancedEditor.retouch.hardness": "硬度",
+  "advancedEditor.retouch.opacity": "不透明度 / 红眼暗化",
+  "advancedEditor.retouch.count": "已保存 {{count}} 笔（最多 256）",
+  "advancedEditor.retouch.delete": "删除第 {{index}} 笔",
+  "advancedEditor.transfer.retouch": "仿制与修复"
 }

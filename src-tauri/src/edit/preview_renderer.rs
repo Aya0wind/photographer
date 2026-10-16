@@ -295,6 +295,7 @@ struct AnnotationCache {
 }
 
 pub struct Renderer {
+    retouch:super::retouch::RetouchCache,
     color:super::rawlab::ColorCache,
     neutral_color:super::rawlab::ColorCache,
     masks: super::masks::MaskCache,
@@ -328,6 +329,7 @@ impl Renderer {
         let mut session = Session::new();
         session.add_document(base.clone(), None);
         Self {
+            retouch:Default::default(),
             color:Default::default(),
             neutral_color:Default::default(),
             masks:Default::default(),
@@ -525,6 +527,7 @@ impl Renderer {
             let (display, downstream)=self.color.apply(base,recipe)?;
             return self.canvas_document(&display,&downstream);
         }
+        if !recipe.retouch.is_empty(){let base=self.retouch.apply(base,&recipe.retouch)?;let mut values=recipe.clone();values.retouch.clear();return self.canvas_document(&base,&values);}
         use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
         use photocraft_engine::doc::{Adjustment, SampleType};
         let float_display = base.depth == SampleType::F32
@@ -618,7 +621,11 @@ impl Renderer {
         recipe: &EditRecipe,
         quality: u8,
     ) -> Result<Vec<u8>, String> {
-        let result=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe).and_then(|(display,downstream)|self.render_inner(&display,&downstream,quality))}else{self.render_inner(base,recipe,quality)};
+        let result=(||{
+            let (base,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
+            let base=self.retouch.apply(&base,&values.retouch)?;values.retouch.clear();
+            self.render_inner(&base,&values,quality)
+        })();
         if result.is_err() {
             // 部分阶段失败后，下一次不能以旧配方判断会话状态仍然有效。
             self.previous = None;
