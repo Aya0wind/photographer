@@ -509,4 +509,18 @@ CREATE TABLE IF NOT EXISTS library_organization_moves (
     done INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(library_id,seq)
 );
+-- Non-destructive editor versions. Deleting an asset removes its edit branches.
+CREATE TABLE IF NOT EXISTS editor_version (
+    id TEXT PRIMARY KEY,
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('original','copy','snapshot','history')),
+    name TEXT NOT NULL,
+    recipe TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_editor_version_asset ON editor_version(asset_id,kind,updated_at);
+CREATE TABLE IF NOT EXISTS editor_workspace (
+    asset_id INTEGER PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    active_id TEXT NOT NULL
+);
 "#;

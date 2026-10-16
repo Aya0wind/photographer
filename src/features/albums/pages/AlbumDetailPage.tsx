@@ -631,7 +631,7 @@ export default function AlbumDetailPage() {
             </div>
           ) : (
             <AssetGrid
-              editorOrigin={{ albumId, subgroup }}
+              editorOrigin={{ albumId, subgroup,assetIds:assets.filter(item=>item.kind==="photo"||item.kind==="raw").map(item=>item.id) }}
               timelineDates={timeline.dates}
               onTimelineJump={timeline.jump}
               onNearTop={timeline.prepend}
@@ -668,7 +668,7 @@ export default function AlbumDetailPage() {
       {/* 瓦片右键菜单 */}
       {ctxMenu && (
         <AssetContextMenu
-          editorOrigin={{ albumId, subgroup }}
+          editorOrigin={{ albumId, subgroup,assetIds:assets.filter(item=>item.kind==="photo"||item.kind==="raw").map(item=>item.id) }}
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
           assets={ctxMenu.assets}
           onClose={() => setCtxMenu(null)}
@@ -753,7 +753,7 @@ export default function AlbumDetailPage() {
       {/* 全屏查看器 */}
       {viewer && (
         <ViewerOverlay
-          editorOrigin={{ albumId, subgroup }}
+          editorOrigin={{ albumId, subgroup,assetIds:assets.filter(item=>item.kind==="photo"||item.kind==="raw").map(item=>item.id) }}
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}

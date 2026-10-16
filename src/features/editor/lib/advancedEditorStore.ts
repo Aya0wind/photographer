@@ -4,7 +4,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import i18n from "@/i18n";
 
 export const ASSET_DRAG_TYPE = "application/x-photographer-asset";
-export interface EditorOrigin { albumId?: number; subgroup?: string | null; }
+export interface EditorOrigin { albumId?: number; subgroup?: string | null; assetIds?: number[]; }
 export interface EditorPhoto extends EditorOrigin { asset: AssetDto; libraryId: string; }
 interface EditorState {
   current: EditorPhoto | null;
@@ -18,7 +18,9 @@ export const useAdvancedEditorStore = create<EditorState>((set, get) => ({
   current: null, pending: null,
   request: (photo) => {
     const current = get().current;
-    if (current?.asset.id === photo.asset.id && current.libraryId === photo.libraryId) return;
+    if (current?.asset.id === photo.asset.id && current.libraryId === photo.libraryId) {
+      if(photo.assetIds)set({current:{...current,...photo}});return;
+    }
     set(current ? { pending: photo } : { current: photo, pending: null });
   },
   accept: () => { const pending = get().pending; if (pending) set({ current: pending, pending: null }); },

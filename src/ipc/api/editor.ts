@@ -255,3 +255,9 @@ export function editPreviewActivate(sessionId:string,recipe:EditRecipe){return i
 
 export const editExportCancel=(assetId:number,libraryId:string,jobId:number)=>ipc<void>("edit_export_cancel",{assetId:String(assetId),libraryId,jobId});
 export const appForceExit=()=>ipc<void>("app_force_exit");
+
+export interface EditorEdition {id:string;kind:"original"|"copy"|"snapshot"|"history";name:string;updatedAt:number;active:boolean}
+export const editVersionsList=(assetId:number,libraryId:string)=>ipc<EditorEdition[]>("edit_versions_list",{assetId:String(assetId),libraryId});
+export const editVersionCreate=(assetId:number,libraryId:string,kind:"snapshot"|"copy",name:string,recipe:EditRecipe)=>ipc<void>("edit_version_create",{assetId:String(assetId),libraryId,kind,name,recipe});
+export const editVersionApply=(assetId:number,libraryId:string,id:string)=>ipc<EditRecipe>("edit_version_apply",{assetId:String(assetId),libraryId,id});
+export const editVersionDelete=(assetId:number,libraryId:string,id:string)=>ipc<void>("edit_version_delete",{assetId:String(assetId),libraryId,id});

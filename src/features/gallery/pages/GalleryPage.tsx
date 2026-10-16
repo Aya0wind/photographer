@@ -1020,6 +1020,7 @@ export default function GalleryPage() {
       {/* 瓦片右键菜单（自定义；多选态作用于全部选中；含色标/拒绝/加入相册/移入回收站） */}
       {ctxMenu && (
         <AssetContextMenu
+          editorOrigin={{assetIds:(semanticMode?semantic.assets:visibleAssets).filter(item=>item.kind==="photo"||item.kind==="raw").map(item=>item.id)}}
           at={{ x: ctxMenu.x, y: ctxMenu.y }}
           assets={ctxMenu.assets}
           onClose={() => setCtxMenu(null)}
@@ -1102,6 +1103,7 @@ export default function GalleryPage() {
       {/* 全屏查看器 */}
       {viewer && (
         <ViewerOverlay
+          editorOrigin={{assetIds:(semanticMode?semantic.assets:visibleAssets).filter(item=>item.kind==="photo"||item.kind==="raw").map(item=>item.id)}}
           asset={viewer.asset}
           group={viewer.group}
           index={viewer.index}

@@ -1,3 +1,8 @@
+import EditorExportSettings from "./EditorExportSettings";
+import {DEFAULT_EXPORT_SETTINGS,exportName,exportMetadata} from "../lib/exportSettings";
+import EditorFilmstrip from "./EditorFilmstrip";
+import EditorVersionsPanel from "./EditorVersionsPanel";
+import {editVersionCreate} from "@/ipc/api";
 import CanvasNavigator from "./CanvasNavigator";
 import BaseProfilePanel from "./BaseProfilePanel";
 import {useEditorPreferences,type BaseProfile} from "../lib/editorPreferences";
@@ -13,7 +18,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  editRawlabAvailable, assetDetail, editPreviewPick, albumList, assetAlbums, editProjectOpen, advancedExportFolder, advancedExport, editExportStatus, subscribeAppEvents,
+  editRawlabAvailable, assetDetail, editPreviewPick, albumList, assetAlbums, editProjectOpen, advancedExportFolder, editExportStatus, subscribeAppEvents,
   type AlbumDto, type AssetDto, type EditRecipe, type ExportOptions,
 } from "@/ipc/api";
 import ActionPopover from "@/shared/components/ActionPopover";
@@ -51,7 +56,7 @@ const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-second
 export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId, originSubgroup, onClose }: { asset: AssetDto; libraryId: string; originAlbumId?: number; originSubgroup?: string | null; onClose: () => void }) {
   const { t } = useTranslation();
   const {preferences,update:updatePreferences}=useEditorPreferences();
-  const [leftTab,setLeftTab]=useState<"profiles"|"history">("profiles");
+  const [leftTab,setLeftTab]=useState<"profiles"|"history"|"versions">("profiles");
   // 大一统:无「活动库切换」,编辑期间资产归属不可变;仅防御资产数据异常
   const libraryChanged = asset.libraryId != null && asset.libraryId !== libraryId;
   const context = useRef<RecipeContext>({ width: 0, height: 0 });
@@ -77,6 +82,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [fitScale,setFitScale]=useState(1);
   const [zoomMode,setZoomMode]=useState<"fit"|"100"|"200"|"custom">("fit");
   const [fullscreen,setFullscreen]=useState(false);
+  const [exportSettings,setExportSettings]=useState(DEFAULT_EXPORT_SETTINGS);
   const [exportFormat,setExportFormat]=useState<NonNullable<ExportOptions["format"]>>("jpeg");
   const [exportColorSpace,setExportColorSpace]=useState<NonNullable<ExportOptions["colorSpace"]>>("srgb");
   const {visible:zoomVisible,wake:wakeZoom}=useZoomIndicator(zoom);
@@ -326,6 +332,8 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     try {
       const backend=await editRawlabAvailable();
       if(!backend.available)throw new Error(t("advancedEditor.baseColor.unavailable"));
+      if(!await saveProject())return;
+      await editVersionCreate(asset.id,libraryId,"snapshot",t("advancedEditor.versions.beforeUpgrade"),recipeForPersist(recipe));
       dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,version:2,backend:"rawlab",coreRevision:backend.coreRevision,baseProfile:preferences.defaultProfile}});
     } catch(error){setNotice(String(error));}
   }
@@ -342,19 +350,12 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   }
   async function returnToLibrary(albumId = originAlbumId ?? (sourceAlbums.length === 1 ? sourceAlbums[0].id : undefined), subgroup: string | null = originSubgroup??null, closeAfter = false) {
     if (exporting || busyRef.current || unavailable) return;
-    if (albumId === undefined && sourceAlbums.length > 1) {
+    if (albumId === undefined) {
       albumCloseAfter.current = closeAfter; setAlbumPicker(true); return;
     }
-    const snapshot = recipeForPersist(effective);
-    if (!await saveProject() || !mounted.current) return;
-    busyRef.current = true; setBusy(true);
-    try {
-      const task = await advancedExport(asset.id, libraryId, snapshot, preview.session!.sessionId, albumId, subgroup,exportFormat,exportColorSpace);
-      if (!mounted.current) return;
-      job.current = task.id; returnAfterExport.current = closeAfter;
-      setExportPhase("queued");setExporting(true); setNotice(t("advancedEditor.exporting"));
-    } catch (e: unknown) { if (mounted.current) setNotice(String(e)); }
-    finally { busyRef.current = false; if (mounted.current) setBusy(false); }
+    if(!await saveProject()||!mounted.current)return;
+    returnAfterExport.current=closeAfter;
+    await startExport({mode:"album",album:{albumId:String(albumId),subgroup}});
   }
   async function startExport(target: Pick<ExportOptions, "mode" | "folder" | "album">) {
     if (busyRef.current || exporting || unavailable) return;
@@ -362,7 +363,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     try {
       const result = await advancedExportFolder({ assetId: asset.id, libraryId, sessionId: preview.session!.sessionId }, recipeForPersist(effective), {
         ...target,format:exportFormat,colorSpace:exportColorSpace, longEdge: recipe.output.longEdge, quality: recipe.output.quality,
-        removeGps: false, copyright: "", author: "", keywords: [],
+        ...exportMetadata(exportSettings),
       });
       if (!mounted.current) return;
       job.current = result.id; setExportPhase("queued");setExporting(true); setNotice(t("advancedEditor.exporting"));
@@ -374,7 +375,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     try {
       const path = await open({ directory: true, multiple: false });
       if (typeof path === "string" && mounted.current) await startExport({ mode: "folder",
-        folder: { outputDir: path, fileName: `${asset.name.replace(/\.[^.]+$/, "")}_advanced.${exportFormat==="jpeg"?"jpg":exportFormat==="tiff"?"tif":exportFormat}` } });
+        folder: { outputDir: path, fileName: exportName(asset.name,exportFormat,exportSettings) } });
     } catch (e: unknown) { if (mounted.current) setNotice(String(e)); }
   }
 
@@ -450,10 +451,10 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         {TOOLS.map(({ id, label, icon }) => <button key={id} role="tab" aria-selected={tool === id} aria-label={t(label)} title={t(label)} disabled={busy || exporting || unavailable} onClick={() => chooseTool(id)} className={`flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${tool === id ? "bg-accent/15 text-accent" : "text-text-secondary hover:bg-panel"}`}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg></button>)}
       </nav>
       {preferences.leftOpen&&<aside aria-label={t("advancedEditor.layout.left")} style={{width:preferences.leftWidth}} className="ui-glass sp-scroll shrink-0 space-y-4 overflow-y-auto rounded-2xl p-3">
-        <div className="flex gap-2">{(["profiles","history"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
+        <div className="flex gap-2">{(["profiles","history","versions"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
         {leftTab==="profiles"?<BaseProfilePanel recipe={recipe} isRaw={asset.kind==="raw"} defaultProfile={preferences.defaultProfile}
           onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} onUpgrade={()=>void upgradeColor()} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
-          :<><p className="text-[11px] text-text-muted">{t("advancedEditor.sidebar.historyHint")}</p><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
+          :leftTab==="versions"?<EditorVersionsPanel onBusy={value=>{busyRef.current=value;setBusy(value);}} assetId={asset.id} libraryId={libraryId} recipe={recipeForPersist(effective)} revision={baseline} disabled={busy||exporting||unavailable||tool==="crop"||target.active} save={saveProject} onApply={(value,branch)=>{dispatch({type:branch?"loadProject":"applyProject",recipe:value});setBaseline(value);setSelectedMask(null);setSelectedText(null);}}/>:<><p className="text-[11px] text-text-muted">{t("advancedEditor.sidebar.historyHint")}</p><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
           {history.past.map((_,index)=><button key={index} disabled={unavailable||busy||target.active||tool==="crop"} className={`${BUTTON} w-full`} onClick={()=>dispatch({type:"restoreHistory",history:{past:history.past.slice(0,index+1),present:history.past[index+1]??recipe,future:[...history.past.slice(index+2),...(index+1<history.past.length?[recipe]:[]),...history.future]}})}>{t("advancedEditor.sidebar.step",{count:index+1})}</button>)}</>}
         <label className="block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.leftWidth")} type="range" min={180} max={340} value={preferences.leftWidth} onChange={event=>updatePreferences({leftWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
       </aside>}
@@ -501,7 +502,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         <fieldset disabled={busy || exporting || compare || unavailable || target.active} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
           {tool==="mask"?<MaskPanel cancel={cancelGesture} recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
-            showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{...targetSampling,picker,setPicker,sample,hslRange,busy:samplingBusy||target.busy,histogram:[]}}/>:<AdvancedToolPanel cancelGesture={cancelGesture} straightening={straightening} setStraightening={setStraightening} onModalChange={setToolModalOpen} sampling={{...targetSampling, picker, setPicker, sample, hslRange, busy:samplingBusy||target.busy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
+            showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{...targetSampling,picker,setPicker,sample,hslRange,busy:samplingBusy||target.busy,histogram:[]}}/>:<AdvancedToolPanel exportExtras={<EditorExportSettings value={exportSettings} onChange={setExportSettings}/>} cancelGesture={cancelGesture} straightening={straightening} setStraightening={setStraightening} onModalChange={setToolModalOpen} sampling={{...targetSampling, picker, setPicker, sample, hslRange, busy:samplingBusy||target.busy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} onCancelCrop={cancelCrop} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}
             brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportAlbum={()=>{albumCloseAfter.current=false;setAlbumPicker(true);}} exportFolder={exportFolder} exportFormat={exportFormat} setExportFormat={setExportFormat} exportColorSpace={exportColorSpace} setExportColorSpace={setExportColorSpace} />}
@@ -509,6 +510,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       </aside>}
     </div>
     {autosave.error&&<div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-amber-500"><span>{autosave.error}</span><button className={BUTTON} onClick={()=>void saveProject()}>{t("advancedEditor.autosave.retry")}</button></div>}
+    <EditorFilmstrip savedRevision={baseline} asset={asset} recipe={recipeForPersist(effective)} disabled={busy||exporting||unavailable||target.active||!!confirm||toolModalOpen} save={saveProject} onApply={value=>{chooseTool("adjust");dispatch({type:"applyProject",recipe:value});}}/>
     <footer className="flex h-8 shrink-0 items-center gap-3 px-4 text-[11px] text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? t("advancedEditor.projectHint")}</span>{preview.session?.rawlabReady&&<span className="ml-auto truncate" title={t("advancedEditor.preview.proxy")}>{t("advancedEditor.preview.rawReady")} · {t("advancedEditor.preview.proxy")}</span>}</footer>
     <ErrorModal message={scheme.error??histogram.error} onClose={scheme.error?scheme.closeError:histogram.closeError}/>
     {albumPicker && <ExportAlbumPicker albums={albums} onCancel={() => setAlbumPicker(false)} onConfirm={(albumId, subgroup) => { setAlbumPicker(false); void returnToLibrary(albumId, subgroup, albumCloseAfter.current); }} />}

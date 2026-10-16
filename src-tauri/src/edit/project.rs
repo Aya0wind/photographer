@@ -108,7 +108,7 @@ pub async fn edit_project_save(
         if bytes.len() as u64 > MAX_PROJECT_BYTES {
             return Err("编辑状态过大".into());
         }
-        super::ipc::fetch_edit_recipe_save(&crate::ipc::app_database_db(state)?,id,&value)?;
+        super::versions::save(&crate::ipc::app_database_db(state)?,id,&value)?;
         Ok(())
     })
     .await

@@ -1,3 +1,4 @@
+import type {ReactNode} from "react";
 import CropAspectControls from "./CropAspectControls";
 import GeometryPanel from "./GeometryPanel";
 import CropDimensions from "./CropDimensions";
@@ -15,6 +16,7 @@ import type { AdvancedAction } from "../lib/advancedRecipe";
 
 const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:opacity-40";
 interface ToolPanelProps {
+  exportExtras?:ReactNode;
   exportFormat:NonNullable<ExportOptions["format"]>;
   setExportFormat:(value:NonNullable<ExportOptions["format"]>)=>void;
   exportColorSpace:NonNullable<ExportOptions["colorSpace"]>;
@@ -46,7 +48,7 @@ interface ToolPanelProps {
   exportAlbum:()=>void;
 }
 
-export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({ exportExtras,cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
   selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportAlbum,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
   const { t } = useTranslation();
@@ -73,6 +75,7 @@ export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straighte
             {tool === "text" && <><p className="text-xs text-text-muted">{t("advancedEditor.textHint")}</p>{selectedLayer && <><textarea className="w-full rounded-xl border border-edge bg-bg p-3 text-xs text-text-primary" value={selectedLayer.text} onFocus={beginGesture} onBlur={endGesture} onChange={(e) => dispatch({ type: "textUpdateLive", id: selectedLayer.id, patch: { text: e.target.value } })} /><button className={BUTTON} onClick={() => { dispatch({ type: "textRemove", id: selectedLayer.id }); setSelectedText(null); }}>{t("advancedEditor.removeText")}</button></>}</>}
           </div>}
           {tool === "output" && <div className="space-y-4">
+            {exportExtras}
             <label className="block space-y-2 text-xs text-text-secondary"><span>{t("advancedEditor.outputFormat")}</span><select aria-label={t("advancedEditor.outputFormat")} className="w-full rounded-xl border border-edge bg-bg p-2" value={exportFormat} onChange={e=>setExportFormat(e.target.value as NonNullable<ExportOptions["format"]>)}>{["jpeg","png","tiff","pcraft"].map(format=><option key={format} value={format}>{t(`advancedEditor.outputFormats.${format}`)}</option>)}</select></label>
             {exportFormat!=="pcraft"&&<label className="block space-y-2 text-xs text-text-secondary"><span>{t("editor.output.longEdge")}</span><input className="w-full rounded-xl border border-edge bg-bg p-2" type="number" min={1} value={recipe.output.longEdge ?? ""} placeholder={t("editor.output.longEdgePlaceholder")} onChange={(e) => { const value = Number(e.target.value); if (e.target.value === "" || (Number.isInteger(value) && value > 0)) dispatch({ type: "setOutput", patch: { longEdge: e.target.value === "" ? null : value } }); }} /></label>}
             {exportFormat!=="pcraft"&&<label className="block space-y-2 text-xs text-text-secondary"><span>{t("advancedEditor.outputColorSpace")}</span><select aria-label={t("advancedEditor.outputColorSpace")} className="w-full rounded-xl border border-edge bg-bg p-2" value={exportColorSpace} onChange={e=>setExportColorSpace(e.target.value as NonNullable<ExportOptions["colorSpace"]>)}>{(["srgb","displayP3","adobeRgb","proPhotoRgb"] as const).map(space=><option key={space} value={space}>{t(`advancedEditor.outputColorSpaces.${space}`)}</option>)}</select><p className="text-[11px] leading-relaxed text-text-muted">{t("advancedEditor.outputColorHint")}</p></label>}

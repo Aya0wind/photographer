@@ -63,6 +63,7 @@ mod preview_renderer;
 mod proxy_cache;
 mod linear_cache;
 pub mod project;
+pub mod versions;
 pub mod portable;
 pub mod recipe;
 pub mod render;
