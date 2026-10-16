@@ -640,7 +640,11 @@ export const useImportStore = create<ImportState>((set, get) => ({
     try {
       await importResume(jobId);
     } catch (error) {
-      set({ lastError: error instanceof Error ? error.message : String(error) });
+      set({ lastError: {
+        level: "error",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      } });
     }
   },
 
