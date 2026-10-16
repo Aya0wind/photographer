@@ -726,7 +726,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
         {/* 右侧栏：工具选项 + 输出设置 */}
         {["text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
-          {tool==="filters" && <LutPanel onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
+          {tool==="filters" && <LutPanel preview={preview.session?{sessionId:preview.session.sessionId,recipe:present}:undefined} onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);
             setExportDraft((draft) => ({ ...draft, author: value.author, copyright: value.copyright, keywords: value.keywords.join(", "), removeGps: value.gpsLat === null && value.gpsLon === null }));

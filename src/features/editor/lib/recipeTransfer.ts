@@ -25,5 +25,8 @@ export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:Transf
   if(groups.includes("color"))patch.saturation=source[field]?.saturation??0;
   value[field]=patch;
  }
- value.advanced=advanced;return value;
+ const disabled=new Set(advanced.disabledGroups??[]),sourceDisabled=new Set(source.advanced?.disabledGroups??[]);
+ const switches:Partial<Record<TransferGroup,string[]>>={light:["light"],color:["color","colorBalance","blackWhite","selectiveColor"],curves:["curves","parametricCurve","levels"],hsl:["hsl"],grading:["colorGrading"],detail:["detail"],effects:["effects"]};
+ for(const group of groups)for(const key of switches[group]??[]){if(sourceDisabled.has(key))disabled.add(key);else disabled.delete(key);}
+ advanced.disabledGroups=[...disabled];value.advanced=advanced;return value;
 }

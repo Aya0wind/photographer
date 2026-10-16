@@ -523,6 +523,7 @@ impl Renderer {
         base: &Document,
         recipe: &EditRecipe,
     ) -> Result<Document, String> {
+        if let Some(value)=super::groups::effective(recipe){return self.canvas_document(base,&value);}
         if recipe.color_pipeline.is_some() {
             let (display, downstream)=self.color.apply(base,recipe)?;
             return self.canvas_document(&display,&downstream);
@@ -622,6 +623,7 @@ impl Renderer {
         recipe: &EditRecipe,
         quality: u8,
     ) -> Result<Vec<u8>, String> {
+        if let Some(value)=super::groups::effective(recipe){return self.render(base,&value,quality);}
         let result=(||{
             let (base,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
             let base=self.retouch.apply(&base,&values.retouch)?;values.retouch.clear();self.masks.set_source(&base);

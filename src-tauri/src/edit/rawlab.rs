@@ -72,6 +72,7 @@ struct ColorKey {
     wb: [f32; 3],
 }
 fn color_key(recipe: &EditRecipe) -> Result<ColorKey, String> {
+    let effective=super::groups::effective(recipe);let recipe=effective.as_ref().unwrap_or(recipe);
     let pipeline = recipe
         .color_pipeline
         .as_ref()

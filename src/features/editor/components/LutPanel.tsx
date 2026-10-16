@@ -1,3 +1,4 @@
+import StyleCatalog,{type StylePreviewContext} from "./StyleCatalog";
 import {createPortal} from "react-dom";
 import Slider from "./AdjustmentSlider";
 import {useEffect,useLayoutEffect,useState} from "react";
@@ -8,7 +9,7 @@ import ErrorModal from "@/shared/components/ErrorModal";
 
 type Lookup=NonNullable<AdvancedAdjustments["lookup"]>;
 const BUTTON="rounded-lg border border-edge px-2 py-1.5 text-xs text-text-secondary hover:border-accent hover:text-accent disabled:opacity-30";
-export default function LutPanel({value,onChange,begin,end,onModalChange}:{onModalChange?:(open:boolean)=>void;value:Lookup|undefined;onChange:(lookup:Lookup|undefined,record?:boolean)=>void;begin:()=>void;end:()=>void}) {
+export default function LutPanel({value,onChange,begin,end,onModalChange,preview}:{preview?:StylePreviewContext;onModalChange?:(open:boolean)=>void;value:Lookup|undefined;onChange:(lookup:Lookup|undefined,record?:boolean)=>void;begin:()=>void;end:()=>void}) {
   const {t}=useTranslation();
   const [entries,setEntries]=useState<EditorLutEntry[]>([]);
   const [catalogRevision,setCatalogRevision]=useState(0);
@@ -51,6 +52,7 @@ export default function LutPanel({value,onChange,begin,end,onModalChange}:{onMod
         {value && !current && <option value={value.id}>{t("advancedEditor.lut.archived")}</option>}
         {entries.map(entry=><option key={entry.id} value={entry.id}>{entryName(entry)}</option>)}
       </select>
+      <StyleCatalog kind="lut" entries={entries.map(entry=>({...entry,name:entryName(entry)}))} value={value?.id} disabled={busy} preview={preview} onSelect={id=>onChange({id,amount:value?.amount??100,enabled:true})}/>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={BUTTON} disabled={busy} onClick={()=>void importLut()}>{t("advancedEditor.lut.import")}</button>
         <button type="button" className={BUTTON} disabled={busy||!current||current.builtin} onClick={()=>{if(current){setEditing(current);setName(current.name);}}}>{t("advancedEditor.lut.rename")}</button>

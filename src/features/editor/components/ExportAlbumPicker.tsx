@@ -17,6 +17,10 @@ interface ExportAlbumPickerProps {
 
 export default function ExportAlbumPicker({ albums, onCancel, onConfirm }: ExportAlbumPickerProps) {
   const { t } = useTranslation();
+  const [query,setQuery]=useState("");
+  const [recent,setRecent]=useState<number[]>(()=>{try{const rows=JSON.parse(localStorage.getItem("photographer.editor.recent-export-albums.v1")??"[]");return Array.isArray(rows)?rows.filter((n):n is number=>typeof n==="number"&&Number.isSafeInteger(n)).slice(0,8):[];}catch{return [];}});
+  function confirm(id:number,group:string|null){try{const next=[id,...recent.filter(n=>n!==id)].slice(0,8);localStorage.setItem("photographer.editor.recent-export-albums.v1",JSON.stringify(next));setRecent(next);}catch{/* Destination history is optional; exporting must remain available. */}onConfirm(id,group);}
+  const visible=albums.filter(album=>album.name.toLocaleLowerCase().includes(query.toLocaleLowerCase())).sort((a,b)=>{const ai=recent.indexOf(a.id),bi=recent.indexOf(b.id);return (ai<0?1000:ai)-(bi<0?1000:bi);});
   const [selectedId, setSelectedId] = useState<number | null>(albums[0]?.id ?? null);
   const [subgroup, setSubgroup] = useState("");
   const [subgroups, setSubgroups] = useState<string[]>([]);
@@ -54,7 +58,7 @@ export default function ExportAlbumPicker({ albums, onCancel, onConfirm }: Expor
       setCreateError(created.error ?? t("albums.createFailed"));
       return;
     }
-    onConfirm(created.album.id, null);
+    confirm(created.album.id, null);
   }
 
   return (
@@ -86,6 +90,8 @@ export default function ExportAlbumPicker({ albums, onCancel, onConfirm }: Expor
           </button>
         </div>
 
+        <input type="search" aria-label={t("advancedEditor.exportAlbums.search")} placeholder={t("advancedEditor.exportAlbums.search")} value={query} onChange={e=>setQuery(e.target.value)} className="mx-4 my-2 rounded border border-edge bg-bg p-2 text-xs"/>
+        <p className="px-4 pb-1 text-[11px] text-text-muted">{t("advancedEditor.exportAlbums.recent")}</p>
         {/* 已有相册单选列表 */}
         <div className="sp-scroll min-h-0 flex-1 overflow-y-auto p-2" data-testid="export-album-list">
           {albums.length === 0 ? (
@@ -93,7 +99,7 @@ export default function ExportAlbumPicker({ albums, onCancel, onConfirm }: Expor
               {t("editor.albumPicker.empty")}
             </p>
           ) : (
-            albums.map((album) => (
+            visible.map((album) => (
               <label
                 key={album.id}
                 className="flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 transition-colors hover:bg-panel/40"
@@ -185,7 +191,7 @@ export default function ExportAlbumPicker({ albums, onCancel, onConfirm }: Expor
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(selectedId as number, subgroup.trim() === "" ? null : subgroup.trim())}
+            onClick={() => confirm(selectedId as number, subgroup.trim() === "" ? null : subgroup.trim())}
             disabled={selectedId === null}
             className="rounded-md bg-accent px-4 py-1.5 text-xs font-medium text-black transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="export-album-confirm"

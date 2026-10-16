@@ -27,6 +27,7 @@ interface ToolPanelProps {
   onModalChange?:(open:boolean)=>void;
   sampling: CurveSampling;
   tool: EditorTool;
+  previewSessionId?:string;
   recipe: EditRecipe;
   dispatch: (action: AdvancedAction) => void;
   beginGesture: () => void;
@@ -48,14 +49,14 @@ interface ToolPanelProps {
   exportAlbum:()=>void;
 }
 
-export default function AdvancedToolPanel({ exportExtras,cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
+export default function AdvancedToolPanel({ previewSessionId,exportExtras,cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
   selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportAlbum,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
   const { t } = useTranslation();
   const selectedLayer = recipe.textLayers.find((layer) => layer.id === selectedText);
   function rotateCrop(delta:1|-1){endGesture();const next=recipeReducer(initRecipeHistory(recipe),{type:"rotate",delta},context.current).present;setCropDraft(remapDraftCrop(recipe,next,cropDraft,context.current)??{x:0,y:0,w:1,h:1});setCropRatio(null);dispatch({type:"rotate",delta});}
   return <>
-          {tool === "adjust" && <AdvancedAdjustmentPanel onPipeline={(value,record)=>dispatch({type:"colorPipeline",value,record})} cancel={cancelGesture} onModalChange={onModalChange} sampling={sampling} recipe={recipe} onResetDevelopment={group=>{endGesture();dispatch({type:"resetDevelopmentGroup",group});}} onReset={(group)=>{endGesture();dispatch({type:"resetAdjustmentGroup",group});}} begin={beginGesture} end={endGesture} onBasic={(patch, record=false) => dispatch({ type: "adjust", patch, record })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
+          {tool === "adjust" && <AdvancedAdjustmentPanel previewSessionId={previewSessionId} onPipeline={(value,record)=>dispatch({type:"colorPipeline",value,record})} cancel={cancelGesture} onModalChange={onModalChange} sampling={sampling} recipe={recipe} onResetDevelopment={group=>{endGesture();dispatch({type:"resetDevelopmentGroup",group});}} onReset={(group)=>{endGesture();dispatch({type:"resetAdjustmentGroup",group});}} begin={beginGesture} end={endGesture} onBasic={(patch, record=false) => dispatch({ type: "adjust", patch, record })} onAdvanced={(patch, record) => dispatch({ type: "advanced", patch, record })} />}
           {tool === "view" && <p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.viewHint")}</p>}
           {tool === "crop" && <div className="space-y-4">
             <div className="flex gap-2"><button className={BUTTON} onClick={() => rotateCrop(-1)}>{t("editor.rotateCcw")}</button><button className={BUTTON} onClick={() => rotateCrop(1)}>{t("editor.rotateCw")}</button></div>

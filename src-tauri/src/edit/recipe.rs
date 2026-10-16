@@ -95,6 +95,8 @@ fn default_renderer()->Option<RenderEngine>{Some(RenderEngine::Photocraft)}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AdvancedAdjustments {
+    #[serde(skip_serializing_if="Vec::is_empty")]
+    pub disabled_groups:Vec<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub parametric_curve:Option<ParametricCurve>,
     #[serde(skip_serializing_if="Option::is_none")]
@@ -353,6 +355,7 @@ fn validate_curve(curves: &[[f64; 2]]) -> Result<(), String> {
 }
 
 fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
+    if a.disabled_groups.len()>12||a.disabled_groups.iter().any(|v|!super::groups::NAMES.contains(&v.as_str())){return Err("调整组开关无效".into());}
     fn numbers(values:&mut [f64],min:f64,max:f64)->Result<(),String>{
         for v in values {if !v.is_finite(){return Err("调色数值无效".into());}*v=v.clamp(min,max);}Ok(())
     }

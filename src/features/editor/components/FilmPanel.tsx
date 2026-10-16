@@ -1,3 +1,4 @@
+import StyleCatalog,{type StylePreviewContext} from "./StyleCatalog";
 import {useEffect,useState} from "react";
 import {useTranslation} from "react-i18next";
 import {open} from "@tauri-apps/plugin-dialog";
@@ -15,7 +16,7 @@ function FilmOptions({entries}:{entries:EditorFilmEntry[]}){
   {group.items.map(entry=><option key={entry.id} value={entry.id}>{[entry.name,entry.subtitle].filter(Boolean).join(" · ")}</option>)}
  </optgroup>)}</>;
 }
-export default function FilmPanel({value,onChange,begin,end}:{value:Pipeline;onChange:(value:Pipeline,record?:boolean)=>void;begin:()=>void;end:()=>void}){
+export default function FilmPanel({value,onChange,begin,end,preview}:{preview?:StylePreviewContext;value:Pipeline;onChange:(value:Pipeline,record?:boolean)=>void;begin:()=>void;end:()=>void}){
  const {t}=useTranslation();const [available,setAvailable]=useState(false),[coreRevision,setCoreRevision]=useState(""),[entries,setEntries]=useState<EditorFilmEntry[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
  useEffect(()=>{let closed=false;void Promise.all([editRawlabAvailable(),editFilmList()]).then(([ok,list])=>{if(!closed){setAvailable(ok.available);setCoreRevision(ok.coreRevision);setEntries(list);}}).catch(e=>{if(!closed)setError(String(e));});return()=>{closed=true;};},[]);
  const film=value?.film;
@@ -30,6 +31,7 @@ export default function FilmPanel({value,onChange,begin,end}:{value:Pipeline;onC
   {(available||value)&&<><select aria-label={t("advancedEditor.film.select")} value={film?.id??""} disabled={!available||busy} className="w-full rounded-lg border border-edge bg-bg p-2 text-xs" onChange={e=>onChange(withFilm(value,coreRevision,e.target.value?{id:e.target.value,amount:film?.amount??100,enabled:true}:undefined))}>
    <option value="">{t("advancedEditor.film.neutral")}</option>{film&&!entries.some(e=>e.id===film.id)&&<option value={film.id}>{t("advancedEditor.lut.archived")}</option>}
    <FilmOptions entries={entries}/></select>
+   <StyleCatalog kind="film" entries={entries} value={film?.id} disabled={!available||busy} preview={preview} onSelect={id=>onChange(withFilm(value,coreRevision,{id,amount:film?.amount??100,enabled:true}))}/>
    {selected?.summary&&<p className="text-xs text-text-muted">{selected.summary}</p>}
    {film&&<><fieldset disabled={!film.enabled||busy}><Slider label={t("advancedEditor.lut.strength")} unit="%" value={film.amount} min={0} max={100} defaultValue={100} onChange={amount=>onChange(withFilm(value,coreRevision,{...film,amount}),false)} onSet={amount=>onChange(withFilm(value,coreRevision,{...film,amount}))} onReset={()=>onChange(withFilm(value,coreRevision,{...film,amount:100}))} begin={begin} end={end}/></fieldset></>}
   </>}

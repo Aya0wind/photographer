@@ -437,6 +437,7 @@ fn execute(
 }
 
 pub(super) fn encode_output(src: &Path, recipe: &EditRecipe, options: &ValidatedOptions, progress: &dyn Fn(&str)) -> Result<(Vec<u8>, u32, u32), String> {
+    let effective=super::groups::effective(recipe);let recipe=effective.as_ref().unwrap_or(recipe);
     // ① 渲染（解码/转正/旋转/裁剪/标注/只缩不放）
     progress("decode");
     let long_edge = options
