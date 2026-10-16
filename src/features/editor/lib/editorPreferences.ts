@@ -11,7 +11,7 @@ export interface EditorPreferences {
   background:"#202020"|"#101010"|"#404040";
 }
 const KEY="photographer.editor.preferences.v1";
-const defaults:EditorPreferences={defaultProfile:"standard",leftOpen:true,rightOpen:true,leftWidth:224,rightWidth:320,background:"#202020"};
+const defaults:EditorPreferences={defaultProfile:"standard",leftOpen:false,rightOpen:true,leftWidth:224,rightWidth:336,background:"#202020"};
 
 function read():EditorPreferences {
   try {
@@ -19,10 +19,10 @@ function read():EditorPreferences {
     if(!value||typeof value!=="object")return defaults;
     return {
       defaultProfile:["standard","soft","neutral"].includes(value.defaultProfile)?value.defaultProfile:"standard",
-      leftOpen:typeof value.leftOpen==="boolean"?value.leftOpen:true,
+      leftOpen:typeof value.leftOpen==="boolean"?value.leftOpen:false,
       rightOpen:typeof value.rightOpen==="boolean"?value.rightOpen:true,
       leftWidth:Number.isFinite(value.leftWidth)?Math.max(180,Math.min(340,value.leftWidth)):224,
-      rightWidth:Number.isFinite(value.rightWidth)?Math.max(280,Math.min(480,value.rightWidth)):320,
+      rightWidth:Number.isFinite(value.rightWidth)?Math.max(280,Math.min(480,value.rightWidth)):336,
       background:["#202020","#101010","#404040"].includes(value.background)?value.background:"#202020",
     };
   } catch {return defaults;}

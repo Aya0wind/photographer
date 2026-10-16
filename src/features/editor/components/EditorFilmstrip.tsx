@@ -8,7 +8,7 @@ import {useEditorPreferences} from "../lib/editorPreferences";
 import {advancedRecipe} from "../lib/advancedRecipe";
 import {TRANSFER_GROUPS,transferRecipe,type TransferGroup} from "../lib/recipeTransfer";
 
-const BUTTON="rounded border border-edge px-2 py-1 text-xs disabled:opacity-30";
+const BUTTON="editor-button";
 export default function EditorFilmstrip({asset,recipe,disabled,save,onApply,savedRevision}:{asset:AssetDto;recipe:EditRecipe;savedRevision:EditRecipe;disabled:boolean;save:()=>Promise<boolean>;onApply:(value:EditRecipe)=>void}) {
  const {t}=useTranslation();const {preferences}=useEditorPreferences();const current=useAdvancedEditorStore(s=>s.current);
  const ids=useMemo(()=>Array.from(new Set(current?.assetIds?.length?current.assetIds:[asset.id])),[current?.assetIds,asset.id]);
@@ -55,8 +55,8 @@ export default function EditorFilmstrip({asset,recipe,disabled,save,onApply,save
  function copySettings(){try{localStorage.setItem("photographer.editor.clipboard.v1",JSON.stringify({version:1,recipe,groups}));setMessage(t("advancedEditor.strip.copied"));}catch(e){setMessage(String(e));}}
  function pasteSettings(){try{const stored=localStorage.getItem("photographer.editor.clipboard.v1");if(!stored||stored.length>4*1024*1024)throw new Error(t("advancedEditor.strip.noClipboard"));const value=JSON.parse(stored);if(value.version!==1||value.recipe?.version!==1||value.recipe?.renderer!=="photocraft")throw new Error(t("advancedEditor.strip.noClipboard"));onApply(transferRecipe(value.recipe,recipe,groups));}catch(e){setMessage(String(e));}}
  const active=rows.find(row=>row.id===asset.id)??asset;
- return <section className="shrink-0 border-t border-edge bg-panel px-3 py-2" aria-label={t("advancedEditor.strip.title")}>
-  <fieldset disabled={disabled||busy} className="flex flex-wrap items-center gap-2">
+ return <section className="editor-filmstrip shrink-0 border-t border-edge" aria-label={t("advancedEditor.strip.title")}>
+  <fieldset disabled={disabled||busy} className="editor-filmstrip-toolbar flex items-center">
    <button type="button" className={BUTTON} aria-expanded={expanded} onClick={()=>setExpanded(value=>!value)}>{t("advancedEditor.strip.title")} {position+1}/{ids.length}</button>
    <button type="button" className={BUTTON} disabled={position<=0} onClick={()=>void navigate(ids[position-1])}>←</button><button type="button" className={BUTTON} disabled={position<0||position>=ids.length-1} onClick={()=>void navigate(ids[position+1])}>→</button>
    <select aria-label={t("advancedEditor.strip.rating")} className={`${BUTTON} bg-bg`} value={active.rating??0} onChange={e=>void mark({rating:Number(e.target.value)})}>{[0,1,2,3,4,5].map(value=><option key={value} value={value}>{value?"★".repeat(value):t("advancedEditor.strip.unrated")}</option>)}</select>
@@ -71,7 +71,7 @@ export default function EditorFilmstrip({asset,recipe,disabled,save,onApply,save
    <button type="button" className={BUTTON} onClick={copySettings}>{t("advancedEditor.strip.copy")}</button><button type="button" className={BUTTON} onClick={pasteSettings}>{t("advancedEditor.strip.paste")}</button>
    <button type="button" className={BUTTON} disabled={position<=0||!groups.length} onClick={()=>void previousSettings()}>{t("advancedEditor.strip.previousSettings")}</button>
   </fieldset>}
-  {expanded&&<div className="sp-scroll mt-2 flex gap-2 overflow-x-auto">{rows.map(row=><div key={row.id} className={`relative w-20 shrink-0 rounded border p-1 ${row.id===asset.id?"border-accent":"border-edge"}`}>
+  {expanded&&<div className="editor-filmstrip-photos sp-scroll flex overflow-x-auto">{rows.map(row=><div key={row.id} data-active={row.id===asset.id} className={`editor-filmstrip-photo relative shrink-0 border ${row.id===asset.id?"border-accent":"border-edge"}`}>
    <button type="button" disabled={disabled||busy} aria-label={row.name} aria-current={row.id===asset.id?"true":undefined} className="block h-14 w-full overflow-hidden rounded" onClick={()=>void navigate(row.id)}><AssetThumb asset={row} size={128} className="h-full w-full"/></button>
    <span className="block truncate text-[10px]" title={row.name}>{row.name}</span>
    {row.id!==asset.id&&<input type="checkbox" disabled={disabled||busy} aria-label={t("advancedEditor.strip.select",{name:row.name})} className="absolute right-1 top-1" checked={selected.includes(row.id)} onChange={e=>setSelected(value=>e.target.checked?[...value,row.id]:value.filter(id=>id!==row.id))}/>}

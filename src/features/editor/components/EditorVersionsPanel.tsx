@@ -15,7 +15,7 @@ export default function EditorVersionsPanel({assetId,libraryId,recipe,disabled,r
   await run(async()=>{await editVersionCreate(assetId,libraryId,kind,name.trim(),recipe);setName("");});
  }
  return <section className="space-y-3">
-  <p className="text-[11px] text-text-muted">{t("advancedEditor.versions.hint")}</p>
+
   <fieldset disabled={disabled||busy} className="space-y-2">
    <input aria-label={t("advancedEditor.versions.name")} value={name} maxLength={120} onChange={e=>setName(e.target.value)} className="w-full rounded border border-edge bg-bg p-2 text-xs" placeholder={t("advancedEditor.versions.name")}/>
    <div className="flex gap-1">{(["snapshot","copy"] as const).map(kind=><button key={kind} type="button" disabled={!name.trim()} onClick={()=>void create(kind)} className="flex-1 rounded border border-edge p-2 text-xs disabled:opacity-40">＋ {t(`advancedEditor.versions.${kind}`)}</button>)}</div>

@@ -52,6 +52,6 @@ export default function StyleCatalog({kind,entries,value,onSelect,preview,disabl
     </div>)}</div>
     {!matching.length&&<p className="text-xs text-text-muted">{t("advancedEditor.styleCatalog.empty")}</p>}
     {matching.length>12&&<div className="flex justify-between text-xs"><button type="button" disabled={page===0} onClick={()=>setPage(v=>Math.max(0,v-1))}>←</button><span>{page+1} / {Math.ceil(matching.length/12)}</span><button type="button" disabled={(page+1)*12>=matching.length} onClick={()=>setPage(v=>v+1)}>→</button></div>}
-    {preview&&<p className="text-[11px] text-text-muted">{t("advancedEditor.styleCatalog.hint")}</p>}{error&&<p role="alert" className="text-xs text-red-400">{error}</p>}
+    {error&&<p role="alert" className="text-xs text-red-400">{error}</p>}
   </details>;
 }

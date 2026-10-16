@@ -30,7 +30,7 @@ export default function MaskPanel({sessionId,selectedComponent=null,onSelectComp
  return <div className="space-y-4">
   <div className="flex flex-wrap gap-1">{(["brush","linear","radial","range"] as const).map(kind=><button key={kind} type="button" className={BUTTON} disabled={masks.length>=32} onClick={()=>add(kind)}>＋ {t(`advancedEditor.masks.${kind}`)}</button>)}</div>
   {!masks.length&&<p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.masks.empty")}</p>}
-  <p className="text-[11px] text-text-muted">{t("advancedEditor.masks.stackHint")}</p>
+
   <div className="space-y-1">{[...masks].reverse().map(item=><div key={item.id} draggable onDragStart={e=>{setDragged(item.id);e.dataTransfer.setData("application/x-photo-mask",item.id);e.dataTransfer.effectAllowed="move";}} onDragEnd={()=>setDragged(null)} onDragOver={e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";}}} onDrop={e=>{e.preventDefault();e.stopPropagation();if(dragged&&dragged!==item.id){end();dispatch({type:"maskReorder",id:dragged,targetId:item.id});}setDragged(null);}} className={`flex items-center gap-2 rounded-xl border p-2 ${selected===item.id?"border-accent bg-accent/10":"border-edge bg-bg"} ${dragged===item.id?"opacity-40":""}`}>
    <span aria-hidden="true" className="cursor-grab text-text-muted">⠿</span>
    <MaskThumbnail sessionId={sessionId} recipe={recipe} mask={item}/>

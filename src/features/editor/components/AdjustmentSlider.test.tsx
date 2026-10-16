@@ -15,6 +15,17 @@ function Harness(){
  return <I18nextProvider i18n={i18n}><Slider label="Exposure" value={value} min={-5} max={5} step={0.1} onChange={exposure=>dispatch({type:"advanced",patch:{exposure},record:false})} onSet={exposure=>dispatch({type:"advanced",patch:{exposure}})} onReset={()=>dispatch({type:"advanced",patch:{exposure:0}})} begin={()=>{snapshot.current??=history;}} end={()=>{if(snapshot.current&&!recipeEquals(snapshot.current.present,history.present))dispatch({type:"commitFrom",snapshot:snapshot.current.present});snapshot.current=null;}}/><button onClick={()=>dispatch({type:"undo"})}>Undo</button><button onClick={()=>{if(snapshot.current)dispatch({type:"restoreHistory",history:snapshot.current});snapshot.current=null;}}>Cancel</button><output data-testid="state">{JSON.stringify(history)}</output></I18nextProvider>;
 }
 const state=()=>JSON.parse(screen.getByTestId("state").textContent!) as RecipeHistory;
+it("centers an asymmetric range and exposes real values to input and keyboard users",()=>{
+ const change=vi.fn();
+ render(<I18nextProvider i18n={i18n}><Slider label="Exposure" value={0} min={-5} max={7} step={.1} onChange={change} onSet={vi.fn()} onReset={vi.fn()} begin={vi.fn()} end={vi.fn()}/></I18nextProvider>);
+ const range=screen.getByRole("slider");
+ expect(range).toHaveValue("1");
+ expect(range).toHaveAttribute("aria-valuenow","0");
+ expect(screen.getByRole("spinbutton")).toHaveValue(0);
+ fireEvent.change(range,{target:{value:"7"}});expect(change).toHaveBeenLastCalledWith(7);
+ fireEvent.change(range,{target:{value:"-5"}});expect(change).toHaveBeenLastCalledWith(-5);
+ fireEvent.keyDown(range,{key:"ArrowRight"});expect(change).toHaveBeenLastCalledWith(.1);
+});
 function pointerRange(){const range=screen.getByRole("slider");range.getBoundingClientRect=()=>({left:0,top:0,width:100,height:16} as DOMRect);range.setPointerCapture=vi.fn();return range;}
 it("supports fine pointer dragging and changing Alt without a value jump",()=>{
  render(<Harness/>);const range=pointerRange();fireEvent.pointerDown(range,{button:0,clientX:20,altKey:true});expect(state().present.advanced!.exposure).toBe(0);

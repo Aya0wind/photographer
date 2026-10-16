@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "../features/editor/editor.css";
 
 @theme {
   --color-bg: #0E0F12;

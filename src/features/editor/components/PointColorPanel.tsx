@@ -28,6 +28,6 @@ export default function PointColorPanel({value,onChange,sampling,begin,end}:{val
       {(["hueRange","saturationRange","luminanceRange","hue","saturation","luminance"] as const).map(key=><Slider key={key} label={t(`advancedEditor.pointColor.${key}`)} value={point[key]} min={key.endsWith("Range")?1:key==="hue"?-180:-100} max={key==="hueRange"||key==="hue"?180:100} unit={key==="hueRange"||key==="hue"?"°":"%"} onChange={value=>update({[key]:value},false)} onSet={value=>update({[key]:value})} onReset={()=>update({[key]:key==="hueRange"?30:key.endsWith("Range")?40:0})} begin={begin} end={end}/>)}
       <button type="button" className="text-xs text-accent" onClick={()=>{end();onChange(points.filter(p=>p.id!==point.id));setSelected(null);}}>{t("advancedEditor.pointColor.remove")}</button>
     </>}
-    <p className="text-[11px] text-text-muted">{t("advancedEditor.pointColor.hint")}</p>
+
   </details>;
 }

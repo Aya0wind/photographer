@@ -1,5 +1,6 @@
-import {useEffect,useLayoutEffect,useRef,useState} from "react";
+import {useEffect,useLayoutEffect,useRef,useState,type CSSProperties} from "react";
 import {useTranslation} from "react-i18next";
+import {sliderPosition,sliderParameter} from "../lib/sliderScale";
 
 export default function Slider({ label, value, unit, gradient, min = -100, max = 100, step = 1, defaultValue = 0, onChange, onSet, onReset, begin, end }: {
   gradient?:string;
@@ -27,9 +28,12 @@ export default function Slider({ label, value, unit, gradient, min = -100, max =
     if(!cancelled.current && Number.isFinite(parsed)) onSet(Math.max(min,Math.min(max,parsed)));
     cancelled.current=false;setDraft(String(value));
   }
-  return <div className="grid gap-0.5">
-    <span className="flex items-center justify-between text-[11px] leading-[14px] text-text-secondary"><span>{label}</span><span className="flex items-center gap-1"><input type="number" aria-label={label} min={min} max={max} step={step} value={draft}
-      className="w-14 rounded border border-transparent bg-transparent px-1 text-right tabular-nums text-text-muted focus:border-accent focus:text-text-primary"
+  const position=sliderPosition(value,min,max);
+  const zero=min<0&&max>0?50:0;
+  const percent=(position-min)/(max-min)*100;
+  return <div className="editor-slider" data-bipolar={min<0&&max>0}>
+    <span className="editor-slider-heading"><span className="editor-slider-label">{label}</span><span className="editor-slider-value"><input type="number" aria-label={label} min={min} max={max} step={step} value={draft}
+      className="editor-slider-number"
       onFocus={()=>setEditing(true)} onChange={event=>setDraft(event.target.value)} onBlur={commitNumber}
       onKeyDown={event=>{
         if(event.key==="ArrowUp"||event.key==="ArrowDown"){
@@ -39,9 +43,10 @@ export default function Slider({ label, value, unit, gradient, min = -100, max =
         if(event.key==="Enter" || event.key==="Escape") {event.preventDefault();event.stopPropagation();cancelled.current=event.key==="Escape";event.currentTarget.blur();}
       }} />{unit&&<span className="text-text-muted">{unit}</span>}<button type="button" disabled={value===defaultValue}
       aria-label={t("advancedEditor.resetParameter",{parameter:label})} title={t("advancedEditor.resetParameter",{parameter:label})}
-      className="h-5 w-5 rounded text-text-muted hover:bg-accent/10 hover:text-accent disabled:opacity-20"
+      className="editor-slider-reset"
       onClick={event=>{event.preventDefault();event.stopPropagation();onReset();}}>↺</button></span></span>
-    <input type="range" aria-label={label} title={t("advancedEditor.parameterStepHint")} min={min} max={max} step={step/10} value={value}
+    <span className="editor-slider-track" style={{"--slider-start":`${Math.min(zero,percent)}%`,"--slider-end":`${Math.max(zero,percent)}%`,"--slider-gradient":gradient??"none"} as CSSProperties}>
+    <input type="range" aria-label={label} aria-valuenow={value} aria-valuetext={`${value}${unit??""}`} title={t("advancedEditor.parameterStepHint")} min={min} max={max} step="any" value={position}
       onPointerDown={event=>{
         if(event.button!==0)return;
         if(event.altKey){event.preventDefault();event.currentTarget.focus();}
@@ -62,9 +67,8 @@ export default function Slider({ label, value, unit, gradient, min = -100, max =
         const factor=event.altKey?0.1:event.shiftKey||event.key==="PageUp"||event.key==="PageDown"?10:1;
         gesture.value=event.key==="Home"?min:event.key==="End"?max:increment(gesture.value,direction*step*factor);
         onChange(gesture.value);
-      }} onKeyUp={event=>{if(!keyboard.current||!adjustmentKeys.includes(event.key))return;event.stopPropagation();keyboard.current.keys.delete(event.key);if(!keyboard.current.keys.size)finishKeyboard();}} onChange={(e) => {if(!fineDrag.current)onChange(Number(e.target.value));}}
-      style={gradient?{background:gradient}:undefined}
-      className={gradient?"editor-color-slider block h-2 w-full rounded-full":"block h-4 w-full accent-accent"} />
+      }} onKeyUp={event=>{if(!keyboard.current||!adjustmentKeys.includes(event.key))return;event.stopPropagation();keyboard.current.keys.delete(event.key);if(!keyboard.current.keys.size)finishKeyboard();}} onChange={(e) => {if(!fineDrag.current){const actual=sliderParameter(Number(e.target.value),min,max);onChange(increment(0,Math.round(actual/(step/10))*(step/10)));}}}
+      className="editor-range" />
+    </span>
   </div>;
 }
-

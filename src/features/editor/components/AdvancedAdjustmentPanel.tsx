@@ -9,7 +9,7 @@ import ColorGradingPanel from "./ColorGradingPanel";
 import ParametricCurvePanel from "./ParametricCurvePanel";
 import FilmPanel from "./FilmPanel";
 import LutPanel from "./LutPanel";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import CurveEditor, { type CurveSampling } from "./CurveEditor";
 import { useTranslation } from "react-i18next";
 import type { AdvancedAdjustments, EditAdjustments, EditRecipe } from "@/ipc/api";
@@ -18,7 +18,9 @@ import { DEFAULT_ADVANCED, adjustmentGroupChanged, type AdjustmentGroup,type Dev
 const HSL_RANGES=["reds","oranges","yellows","greens","cyans","blues","purples","magentas"] as const;
 function hslGradient(range:typeof HSL_RANGES[number],axis:string){const hue=[0,30,60,120,180,240,270,300][HSL_RANGES.indexOf(range)];return axis==="hue"?`linear-gradient(to right,hsl(${hue-60} 90% 55%),hsl(${hue} 90% 55%),hsl(${hue+60} 90% 55%))`:axis==="saturation"?`linear-gradient(to right,#888,hsl(${hue} 100% 50%))`:`linear-gradient(to right,#111,hsl(${hue} 90% 50%),#fff)`;}
 
-export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBasic, onAdvanced, onReset, begin, end, sampling, onModalChange,cancel,onPipeline }: {
+export default function AdvancedAdjustmentPanel({ lensPanel,onLensOpenChange,recipe, previewSessionId,onBasic, onAdvanced, onReset, begin, end, sampling, onModalChange,cancel,onPipeline }: {
+  lensPanel?:ReactNode;
+  onLensOpenChange?:(open:boolean)=>void;
   previewSessionId?:string;
   onPipeline?:(value:EditRecipe["colorPipeline"],record?:boolean)=>void;
   cancel?:()=>void;
@@ -36,15 +38,14 @@ export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBas
   const hsl = { hue: 0, saturation: 0, lightness: 0, ...a.hslEight?.[range] };
   const [curveMode,setCurveMode]=useState<"point"|"parametric">("point");
   const levels = a.levels ?? { black: 0, white: 255, gamma: 1 };
+  useEffect(()=>()=>onLensOpenChange?.(false),[onLensOpenChange]);
   useEffect(()=>{if((sampling.picker==="hsl"||sampling.picker==="hslTarget") && sampling.hslRange) setRange(sampling.hslRange);},[sampling.picker,sampling.hslRange,sampling.sample]);
   function resetButton(group:AdjustmentGroup,label:string,changed:boolean) {
     return <button type="button" disabled={!changed} aria-label={t("advancedEditor.resetGroup",{group:label})}
       className="rounded-md px-2 py-1 text-[11px] text-accent hover:bg-accent/10 disabled:opacity-30"
       onClick={event=>{event.preventDefault();event.stopPropagation();onReset(group);}}>{t("editor.reset")}</button>;
   }
-  return <div className="space-y-4">
-    <AdjustmentGroupSwitches recipe={recipe} onChange={patch=>{end();onAdvanced(patch);}}/>
-    {onPipeline&&<FilmPanel preview={previewSessionId?{sessionId:previewSessionId,recipe}:undefined} value={recipe.colorPipeline} onChange={onPipeline} begin={begin} end={end}/>}
+  return <div className="editor-adjustments">
     {sampling.picker&&sampling.sample&&<div role="status" className="space-y-1 text-[11px] text-text-secondary"><span>{t("advancedEditor.sampleReadout")}</span><div className="flex items-center gap-2 tabular-nums"><span className="h-3 w-3 shrink-0 rounded border border-edge" style={{backgroundColor:`rgb(${sampling.sample.join(",")})`}}/><span>RGB {sampling.sample.map(value=>value.toFixed(1)).join(" · ")}</span></div></div>}
     {sampling.available!==false&&sampling.picker&&sampling.setSampleSize&&<label className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.sampleSize")}</span><select aria-label={t("advancedEditor.sampleSize")} value={sampling.sampleSize??1} className="rounded-lg border border-edge bg-bg px-2 py-1.5" onChange={e=>sampling.setSampleSize!(Number(e.target.value) as 1|3|5|11)}>{[1,3,5,11].map(size=><option key={size} value={size}>{size} × {size}</option>)}</select></label>}
     <details open className="space-y-2.5">
@@ -58,10 +59,12 @@ export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBas
       {(["temperature", "tint", "vibrance"] as const).map((key) => <Slider key={key} gradient={key==="temperature"?"linear-gradient(to right,#4285f4,#aaa,#fbbf24)":key==="tint"?"linear-gradient(to right,#4ade80,#aaa,#e879f9)":undefined} label={t(`advancedEditor.${key}`)} value={a[key]} onSet={value=>onAdvanced({[key]:value})} onReset={()=>onAdvanced({[key]:0})} onChange={(value) => onAdvanced({ [key]: value }, false)} begin={begin} end={end} />)}
       <Slider label={t("editor.adjust.saturation")} value={basic.saturation} onSet={saturation=>onBasic({saturation},true)} onReset={()=>onBasic({saturation:0},true)} onChange={(saturation) => onBasic({ saturation })} begin={begin} end={end} />
     </details>
-    <div role="tablist" aria-label={t("advancedEditor.curves")} className="flex gap-2 border-t border-edge pt-3">{(["point","parametric"] as const).map(mode=><button key={mode} type="button" role="tab" aria-selected={curveMode===mode} className="flex-1 rounded-lg border border-edge py-2 text-xs aria-selected:border-accent aria-selected:text-accent" onClick={()=>{end();setCurveMode(mode);}}>{t(`advancedEditor.curve.${mode}`)}</button>)}</div>
-    {curveMode==="point"&&<CurveEditor onModalChange={onModalChange} onReset={()=>onReset("curves")} adjustments={a} onChange={onAdvanced} begin={begin} end={end} sampling={sampling} />}
+    <details className="editor-section"><summary>{t("advancedEditor.curves")}</summary>
+    <div role="tablist" aria-label={t("advancedEditor.curves")} className="editor-segments my-3">{(["point","parametric"] as const).map(mode=><button key={mode} type="button" role="tab" aria-selected={curveMode===mode} className="flex-1 rounded-lg border border-edge py-2 text-xs aria-selected:border-accent aria-selected:text-accent" onClick={()=>{end();setCurveMode(mode);}}>{t(`advancedEditor.curve.${mode}`)}</button>)}</div>
+    {curveMode==="point"&&<CurveEditor embedded onModalChange={onModalChange} onReset={()=>onReset("curves")} adjustments={a} onChange={onAdvanced} begin={begin} end={end} sampling={sampling} />}
     {curveMode==="parametric"&&<ParametricCurvePanel value={a.parametricCurve} onChange={(parametricCurve,record)=>onAdvanced({parametricCurve},record)} onReset={()=>onReset("parametricCurve")} begin={begin} end={end} onModalChange={onModalChange}/>}
     <CurvePresetManager value={a} onChange={patch=>{end();onAdvanced(patch);}}/>
+    </details>
     <details className="space-y-2.5 border-t border-edge pt-3">
       <summary className="flex cursor-pointer items-center justify-between text-xs font-semibold"><span>{t("advancedEditor.levels")}</span>{resetButton("levels",t("advancedEditor.levels"),!!a.levels)}</summary>
       <Slider label={t("advancedEditor.blackLevel")} value={levels.black} onSet={value=>onAdvanced({levels:{...levels,black:value}})} onReset={()=>onAdvanced({levels:{...levels,black:0}})} min={0} max={levels.white - 2} onChange={(black) => onAdvanced({ levels: { ...levels, black } }, false)} begin={begin} end={end} />
@@ -76,7 +79,7 @@ export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBas
         {t("advancedEditor.hslPicker")}
       </button>}
       {sampling.available!==false&&sampling.setTargetHslAxis&&<div className="flex gap-2"><div className="flex min-w-0 flex-1 rounded-lg bg-bg p-0.5">{(["hue","saturation","lightness"] as const).map(key=><button key={key} type="button" aria-pressed={(sampling.targetHslAxis??"lightness")===key} onClick={()=>sampling.setTargetHslAxis!(key)} className="flex-1 rounded-md px-1 py-1.5 text-[11px] text-text-secondary aria-pressed:bg-panel aria-pressed:text-accent">{t(`advancedEditor.hslLabels.${key}`)}</button>)}</div><button type="button" disabled={sampling.busy} className="rounded-lg border border-edge px-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" aria-pressed={sampling.picker==="hslTarget"} onClick={()=>sampling.setPicker(sampling.picker==="hslTarget"?null:"hslTarget")}>{t("advancedEditor.targetHsl")}</button></div>}
-      {sampling.picker==="hslTarget"&&<p className="text-[11px] text-text-muted">{t("advancedEditor.targetHint")}</p>}
+
       {sampling.busy&&<p role="status" className="text-xs text-text-muted">{t("advancedEditor.sampling")}</p>}
       {sampling.picker==="hsl" && <p role="status" className="text-[11px] text-text-muted">{t("advancedEditor.hslPickerHint")}</p>}
       <label className="grid gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.colorRange")} · {t(`advancedEditor.ranges.${range}`)}</span><input type="range" aria-label={t("advancedEditor.colorRange")} aria-valuetext={t(`advancedEditor.ranges.${range}`)} min={0} max={7} step={1} value={HSL_RANGES.indexOf(range)} onChange={e=>{end();setRange(HSL_RANGES[Number(e.target.value)]);}} className="editor-color-slider h-3 w-full rounded-full" style={{background:"linear-gradient(to right,#ef4444,#f97316,#facc15,#22c55e,#22d3ee,#3b82f6,#9333ea,#d946ef)"}}/></label>
@@ -92,6 +95,9 @@ export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBas
       {group==="effects"&&<DevelopmentControls group="presence" adjustments={a} onChange={onAdvanced} begin={begin} end={end}/>}
       <DevelopmentControls group={group} adjustments={a} onChange={onAdvanced} begin={begin} end={end}/>
     </details>)}
+    {lensPanel&&<details className="editor-section" onToggle={e=>{onLensOpenChange?.(e.currentTarget.open);if(!e.currentTarget.open)end();}}><summary>{t("advancedEditor.lens.title")}</summary>{lensPanel}</details>}
+    {onPipeline&&<FilmPanel preview={previewSessionId?{sessionId:previewSessionId,recipe}:undefined} value={recipe.colorPipeline} onChange={onPipeline} begin={begin} end={end}/>}
     <LutPanel preview={previewSessionId?{sessionId:previewSessionId,recipe}:undefined} onModalChange={onModalChange} value={a.lookup} onChange={(lookup,record)=>onAdvanced({lookup},record)} begin={begin} end={end}/>
+    <AdjustmentGroupSwitches recipe={recipe} onChange={patch=>{end();onAdvanced(patch);}}/>
   </div>;
 }

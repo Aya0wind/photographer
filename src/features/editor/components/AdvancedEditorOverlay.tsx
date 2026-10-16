@@ -1,3 +1,4 @@
+import EditorIcon from "./EditorIcon";
 import EditorCompositionDialog from "./EditorCompositionDialog";
 import EditorExternalDialog from "./EditorExternalDialog";
 import LensPanel from "./LensPanel";
@@ -21,7 +22,7 @@ import type { CurvePicker, HslColorRange,CurveChannel,HslAxis } from "../lib/cur
 import {useTargetAdjustment} from "../lib/useTargetAdjustment";
 import {changeGeometry} from "../lib/geometry";
 import {remapDraftCrop} from "../lib/cropPixels";
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -51,16 +52,15 @@ import ErrorModal from "@/shared/components/ErrorModal";
 import { ASSET_DRAG_TYPE, useAdvancedEditorStore, type EditorPhoto } from "../lib/advancedEditorStore";
 
 const TOOLS: { id: EditorTool; icon: string; label: string }[] = [
-  {id:"lens",icon:"M4 4h16v16H4zM8 4v16M16 4v16M4 8h16M4 16h16",label:"advancedEditor.lens.title"},
+  { id: "adjust", icon: "M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6", label: "editor.tool.adjust" },
   { id:"retouch",icon:"M4 15 15 4l5 5-11 11H4v-5Z",label:"advancedEditor.retouch.title" },
   { id: "crop", icon: "M6 3v15h15M3 6h15v15", label: "editor.tool.cropRotate" },
-  { id: "adjust", icon: "M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6", label: "editor.tool.adjust" },
   { id: "text", icon: "M5 5h14M12 5v14M8 19h8", label: "editor.tool.text" },
   { id: "brush", icon: "m5 15 10-11 5 5-11 10H4zM13 6l5 5", label: "editor.tool.brush" },
   { id:"mask",icon:"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 0v18",label:"advancedEditor.masks.title" },
   { id: "output", icon: "M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5", label: "editor.tool.output" },
 ];
-const BUTTON = "rounded-xl border border-edge px-3 py-2 text-xs text-text-secondary transition-colors hover:border-accent hover:text-accent aria-pressed:border-accent aria-pressed:bg-accent/10 aria-pressed:text-accent disabled:opacity-40";
+const BUTTON = "editor-button";
 
 export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId, originSubgroup, onClose }: { asset: AssetDto; libraryId: string; originAlbumId?: number; originSubgroup?: string | null; onClose: () => void }) {
   const { t } = useTranslation();
@@ -76,9 +76,11 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const recipe = history.present;
   const [workflow,setWorkflow]=useState<"merge"|"external"|null>(null);
   const [exportResult,setExportResult]=useState<ExportResultDto|null>(null);
-  const [lensAxis,setLensAxis]=useState<LensGuide["axis"]|null>(null),[lensGuides,setLensGuides]=useState<LensGuide[]>([]),[lensGrid,setLensGrid]=useState(true);
+  const [lensAxis,setLensAxis]=useState<LensGuide["axis"]|null>(null),[lensGuides,setLensGuides]=useState<LensGuide[]>([]),[lensGrid,setLensGrid]=useState(false);
+  const [lensOpen,setLensOpen]=useState(false);
   const [retouchBrush,setRetouchBrush]=useState<RetouchBrush>({kind:"clone",source:null,widthRel:0.02,hardness:0.5,opacity:1});
   const [tool, setTool] = useState<EditorTool>("adjust");
+  const lensActive=tool==="adjust"&&lensOpen;
   useEffect(()=>{setLensGuides([]);},[recipe.lens]);
   const [selectedComponent,setSelectedComponent]=useState<number|null>(null);
   const [selectedMask,setSelectedMask]=useState<string|null>(null);
@@ -322,6 +324,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   }
   function cancelGesture(){const snapshot=gesture.current;gesture.current=null;if(snapshot)dispatch({type:"restoreHistory",history:snapshot});}
   function chooseTool(next: EditorTool) {
+    if(next!=="adjust")setLensOpen(false);
     target.cancel();
     endGesture();
     setCompare(false); setPicker(null);setSample(null);
@@ -431,7 +434,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     return () => window.removeEventListener("keydown", key, true);
   });
 
-  return <div ref={rootRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t("advancedEditor.title")} className="fixed inset-0 flex flex-col bg-bg outline-none" data-testid="advanced-editor-overlay"
+  return <div ref={rootRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={t("advancedEditor.title")} className="advanced-editor fixed inset-0 flex flex-col bg-bg outline-none" data-testid="advanced-editor-overlay"
     onDragOver={(e) => { if (e.dataTransfer.types.includes(ASSET_DRAG_TYPE)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } }}
     onDrop={(e) => {
       e.preventDefault();
@@ -443,19 +446,19 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         if (photo.libraryId === libraryId && Number.isSafeInteger(photo.asset?.id) && photo.asset.id > 0) useAdvancedEditorStore.getState().request(photo);
       } catch { setNotice(t("advancedEditor.dropFailed")); }
     }}>
-    <header className="ui-glass relative z-50 flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-edge px-4 py-2">
+    <header className="editor-toolbar ui-glass relative z-50 flex shrink-0 items-center border-b border-edge">
       <button className={BUTTON} disabled={busy||exporting} onClick={requestClose}>{t("advancedEditor.returnLibrary")}</button>
-      <div className="min-w-0"><h2 className="text-sm font-semibold text-text-primary">{t("advancedEditor.title")} {dirty && <span className="text-accent">•</span>}</h2><p className="truncate text-[11px] text-text-muted">{asset.name} · <span role="status">{t(autosave.status==="saving"?"advancedEditor.autosave.saving":autosave.status==="error"?"advancedEditor.autosave.failed":dirty?"advancedEditor.autosave.pending":"advancedEditor.autosave.saved")}</span></p></div>
-      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-        <button className={BUTTON} disabled={(!history.past.length&&tool!=="crop") || busy || exporting} onClick={undoEditing} title={t("editor.undo")} aria-label={t("editor.undo")}>↶</button>
-        <button className={BUTTON} disabled={!history.future.length || tool==="crop" || busy || exporting} onClick={redoEditing} title={t("editor.redo")} aria-label={t("editor.redo")}>↷</button>
-        <button className={BUTTON} disabled={busy || unavailable} aria-pressed={compare} title={t("advancedEditor.compareHold")} onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); setCompare(true); }} onPointerUp={() => setCompare(false)} onPointerCancel={() => setCompare(false)} onLostPointerCapture={() => setCompare(false)} onBlur={() => setCompare(false)} onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); setCompare(true); } }} onKeyUp={() => setCompare(false)}>{t("advancedEditor.compare")}</button>
-        <button className={BUTTON} disabled={busy||exporting||unavailable||target.active||tool==="crop"} onClick={()=>void autoLevels()}>{t("advancedEditor.autoLevels")}</button>
-        <button className={BUTTON} disabled={busy || unavailable || target.active} onClick={() => void saveProject()}>{t("advancedEditor.saveChanges")}</button>
-        <button className={BUTTON} disabled={busy || unavailable || target.active} aria-pressed={splitEnabled} title={t("advancedEditor.compareSplitHint")} onClick={()=>{setPicker(null);setSplitEnabled(v=>!v);}}>{t("advancedEditor.compareSplit")}</button>
-        <button className="ui-primary rounded-xl px-4 py-2 text-xs disabled:opacity-40" disabled={busy || exporting || unavailable || target.active} onClick={() => chooseTool("output")}>{t("editor.export")}</button>
+      <div className="editor-toolbar-title min-w-0"><h2 className="text-sm font-semibold text-text-primary">{t("advancedEditor.title")} {dirty && <span className="text-accent">•</span>}</h2><p className="truncate text-[11px] text-text-muted">{asset.name} · <span role="status">{t(autosave.status==="saving"?"advancedEditor.autosave.saving":autosave.status==="error"?"advancedEditor.autosave.failed":dirty?"advancedEditor.autosave.pending":"advancedEditor.autosave.saved")}</span></p></div>
+      <div className="editor-toolbar-actions ml-auto flex items-center justify-end">
+        <button className={`${BUTTON} editor-icon-button`} disabled={(!history.past.length&&tool!=="crop") || busy || exporting} onClick={undoEditing} title={t("editor.undo")} aria-label={t("editor.undo")}><EditorIcon name="undo"/></button>
+        <button className={`${BUTTON} editor-icon-button`} disabled={!history.future.length || tool==="crop" || busy || exporting} onClick={redoEditing} title={t("editor.redo")} aria-label={t("editor.redo")}><EditorIcon name="redo"/></button>
+        <button className={BUTTON} disabled={busy || unavailable} aria-pressed={compare} aria-label={t("advancedEditor.compare")} title={t("advancedEditor.compareHold")} onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); setCompare(true); }} onPointerUp={() => setCompare(false)} onPointerCancel={() => setCompare(false)} onLostPointerCapture={() => setCompare(false)} onBlur={() => setCompare(false)} onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); setCompare(true); } }} onKeyUp={() => setCompare(false)}><EditorIcon name="compare"/><span className="editor-button-label">{t("advancedEditor.compare")}</span></button>
+        <button className={`${BUTTON} editor-toolbar-secondary`} disabled={busy||exporting||unavailable||target.active||tool==="crop"} aria-label={t("advancedEditor.autoLevels")} onClick={()=>void autoLevels()}><EditorIcon name="auto"/><span className="editor-button-label">{t("advancedEditor.autoLevels")}</span></button>
+        <button className={BUTTON} disabled={busy || unavailable || target.active} aria-label={t("advancedEditor.saveChanges")} onClick={() => void saveProject()}><EditorIcon name="save"/><span className="editor-button-label">{t("advancedEditor.saveChanges")}</span></button>
+        <button className={`${BUTTON} editor-toolbar-secondary`} disabled={busy || unavailable || target.active} aria-pressed={splitEnabled} aria-label={t("advancedEditor.compareSplit")} title={t("advancedEditor.compareSplitHint")} onClick={()=>{setPicker(null);setSplitEnabled(v=>!v);}}><EditorIcon name="split"/><span className="editor-button-label">{t("advancedEditor.compareSplit")}</span></button>
 
-        <ActionPopover label={t("ui.more")} onOpenChange={setMoreOpen} closeOnAction>
+
+        <ActionPopover label={t("ui.more")} onOpenChange={setMoreOpen} closeOnAction panelClassName="editor-popover">
           <button className={BUTTON} disabled={busy||exporting||unavailable||target.active||preview.offline} onClick={()=>void saveProject().then(ok=>{if(ok)setWorkflow("merge");})}>{t("advancedEditor.merge.title")}</button>
           <button className={BUTTON} disabled={busy||exporting||unavailable||target.active||preview.offline} onClick={()=>void saveProject().then(ok=>{if(ok)setWorkflow("external");})}>{t("advancedEditor.external.title")}</button>
           <button className={BUTTON} disabled={busy||exporting||unavailable||target.active} onClick={()=>void scheme.save()}>{t("advancedEditor.schemeSave")}</button>
@@ -467,28 +470,31 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           <button className={BUTTON} aria-pressed={fullscreen} onClick={()=>void toggleFullscreen()}>{t("advancedEditor.layout.fullscreen")}</button>
           <button className={BUTTON} onClick={()=>updatePreferences({leftOpen:false,rightOpen:false})}>{t("advancedEditor.layout.hidePanels")}</button>
           <label className="text-xs">{t("advancedEditor.layout.background")}<select value={preferences.background} onChange={event=>updatePreferences({background:event.target.value as typeof preferences.background})} className="ml-2 rounded border border-edge bg-bg p-1">{["#101010","#202020","#404040"].map(color=><option key={color} value={color}>{color}</option>)}</select></label>
+        <label className="block text-[11px] text-text-muted">{t("advancedEditor.layout.left")}<input aria-label={t("advancedEditor.layout.leftWidth")} type="range" min={180} max={340} value={preferences.leftWidth} onChange={event=>updatePreferences({leftWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
+        <label className="mb-3 block text-[11px] text-text-muted">{t("advancedEditor.layout.right")}<input aria-label={t("advancedEditor.layout.rightWidth")} type="range" min={280} max={480} value={preferences.rightWidth} onChange={event=>updatePreferences({rightWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
           <button className={BUTTON} disabled={busy || exporting} onClick={() => setConfirm("reset")}>{t("editor.reset")}</button>
         </ActionPopover>
-        <button className={BUTTON} aria-pressed={preferences.leftOpen} onClick={()=>updatePreferences({leftOpen:!preferences.leftOpen})}>{t("advancedEditor.layout.left")}</button>
-        <button className={BUTTON} aria-pressed={preferences.rightOpen} onClick={()=>updatePreferences({rightOpen:!preferences.rightOpen})}>{t("advancedEditor.layout.right")}</button>
+        <button className={`${BUTTON} editor-icon-button`} aria-label={t("advancedEditor.layout.left")} title={t("advancedEditor.layout.left")} aria-pressed={preferences.leftOpen} onClick={()=>updatePreferences({leftOpen:!preferences.leftOpen})}><EditorIcon name="left"/></button>
+        <button className={`${BUTTON} editor-icon-button`} aria-label={t("advancedEditor.layout.right")} title={t("advancedEditor.layout.right")} aria-pressed={preferences.rightOpen} onClick={()=>updatePreferences({rightOpen:!preferences.rightOpen})}><EditorIcon name="right"/></button>
+        <button className="editor-button editor-primary" disabled={busy || exporting || unavailable || target.active} onClick={() => chooseTool("output")}><EditorIcon name="export"/>{t("editor.export")}</button>
       </div>
     </header>
     {exporting&&job.current!==null&&<EditorExportProgress key={job.current} assetId={asset.id} libraryId={libraryId} jobId={job.current} phase={exportPhase} onError={setNotice}/>}
-    <div className="flex min-h-0 flex-1 gap-2 p-2">
-      <nav role="tablist" aria-orientation="vertical" aria-label={t("editor.tools")} className="ui-glass flex w-14 shrink-0 flex-col items-center gap-1 rounded-2xl py-2">
+    <div className="editor-workspace flex min-h-0 flex-1">
+      <nav role="tablist" aria-orientation="vertical" aria-label={t("editor.tools")} className="editor-tool-rail ui-glass flex shrink-0 flex-col items-center">
         {TOOLS.map(({ id, label, icon }) => <button key={id} role="tab" aria-selected={tool === id} aria-label={t(label)} title={t(label)} disabled={busy || exporting || unavailable} onClick={() => chooseTool(id)} className={`flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${tool === id ? "bg-accent/15 text-accent" : "text-text-secondary hover:bg-panel"}`}><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={icon} /></svg></button>)}
       </nav>
-      {preferences.leftOpen&&<aside aria-label={t("advancedEditor.layout.left")} style={{width:preferences.leftWidth}} className="ui-glass sp-scroll shrink-0 space-y-4 overflow-y-auto rounded-2xl p-3">
-        <div className="flex gap-2">{(["profiles","history","versions"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
+      {preferences.leftOpen&&<aside aria-label={t("advancedEditor.layout.left")} style={{width:preferences.leftWidth}} className="editor-left-panel ui-glass sp-scroll shrink-0 space-y-4 overflow-y-auto">
+        <div className="editor-left-tabs">{(["profiles","history","versions"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
         {leftTab==="profiles"?<BaseProfilePanel recipe={recipe} isRaw={asset.kind==="raw"} defaultProfile={preferences.defaultProfile}
           begin={beginGesture} end={endGesture} rawReady={!!preview.session?.rawlabReady&&!preview.preparingWhiteBalance} onWhiteBalance={(rawWhiteBalance,record)=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,rawWhiteBalance,relativeWhiteBalance:undefined},record});}} onWhiteBalancePicker={()=>{chooseTool("adjust");setPicker("rawWhiteBalance");}} onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
-          :leftTab==="versions"?<EditorVersionsPanel onBusy={value=>{busyRef.current=value;setBusy(value);}} assetId={asset.id} libraryId={libraryId} recipe={recipeForPersist(effective)} revision={baseline} disabled={busy||exporting||unavailable||tool==="crop"||target.active} save={saveProject} onApply={(value,branch)=>{dispatch({type:branch?"loadProject":"applyProject",recipe:value});setBaseline(value);setSelectedMask(null);setSelectedText(null);}}/>:<><p className="text-[11px] text-text-muted">{t("advancedEditor.sidebar.historyHint")}</p><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
+          :leftTab==="versions"?<EditorVersionsPanel onBusy={value=>{busyRef.current=value;setBusy(value);}} assetId={asset.id} libraryId={libraryId} recipe={recipeForPersist(effective)} revision={baseline} disabled={busy||exporting||unavailable||tool==="crop"||target.active} save={saveProject} onApply={(value,branch)=>{dispatch({type:branch?"loadProject":"applyProject",recipe:value});setBaseline(value);setSelectedMask(null);setSelectedText(null);}}/>:<><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
           {history.past.map((_,index)=><button key={index} disabled={unavailable||busy||target.active||tool==="crop"} className={`${BUTTON} w-full`} onClick={()=>dispatch({type:"restoreHistory",history:{past:history.past.slice(0,index+1),present:history.past[index+1]??recipe,future:[...history.past.slice(index+2),...(index+1<history.past.length?[recipe]:[]),...history.future]}})}>{t("advancedEditor.sidebar.step",{count:index+1})}</button>)}</>}
-        <label className="block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.leftWidth")} type="range" min={180} max={340} value={preferences.leftWidth} onChange={event=>updatePreferences({leftWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
+
       </aside>}
-      <main ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" style={{backgroundColor:preferences.background}} data-theme="dark">
+      <main ref={nativeHost} data-native-canvas-host className="editor-canvas relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#202020]" style={{backgroundColor:preferences.background}} data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
-          lensControls={tool==="lens"?{axis:recipe.lens?.enabled?lensAxis:null,lines:lensGuides,grid:lensGrid,onCommit:line=>setLensGuides(lines=>[...lines.filter(g=>g.axis!==line.axis),...lines.filter(g=>g.axis===line.axis).slice(-1),line])}:undefined}
+          lensControls={lensActive?{axis:recipe.lens?.enabled?lensAxis:null,lines:lensGuides,grid:lensGrid,onCommit:line=>setLensGuides(lines=>[...lines.filter(g=>g.axis!==line.axis),...lines.filter(g=>g.axis===line.axis).slice(-1),line])}:undefined}
           retouchControls={tool==="retouch"?{brush:retouchBrush,onBrush:setRetouchBrush,onCommit:stroke=>{if((recipe.retouch?.length??0)<256)dispatch({type:"applyProject",recipe:{...recipe,retouch:[...(recipe.retouch??[]),stroke]}});}}:undefined}
           onFitScale={setFitScale}
           onHoverPixel={pixel.hover}
@@ -500,7 +506,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           sourceSize={sourceSize} nativeGeometry nativeAnnotations backendAdjustments fallbackSize={sourceSize} zoom={zoom}
           onZoom={(factor) => {wakeZoom();setZoomMode("custom");setZoom((v) => Math.max(0.1, Math.min(Math.max(4,2/Math.max(fitScale,0.0001)), v * factor)));}}
           recipe={compare ? { ...recipe, textLayers: [], brushStrokes: [] } : recipe}
-          tool={compare || busy || exporting || unavailable ? "view" : tool==="mask"&&!maskEditing?"adjust":tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
+          tool={compare || busy || exporting || unavailable ? "view" : lensActive ? "lens" : tool==="mask"&&!maskEditing?"adjust":tool} cropRatio={cropRatio} cropDraft={cropDraft} onCropDraftChange={setCropDraft}
           maskControls={tool==="mask"&&activeMask&&!compare?{editing:maskEditing,mask:selectedComponent===null?activeMask:activeMask.components?.[selectedComponent]?.mask??activeMask,brush:maskBrush,overlaySrc:maskOverlay,showOverlay:showMaskOverlay,onCommit:patch=>dispatch({type:"maskUpdate",id:activeMask.id,patch:selectedComponent===null?patch:{components:activeMask.components?.map((component,index)=>index===selectedComponent?{...component,mask:{...component.mask,...patch}}:component)}})}:undefined}
           straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((recipe.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(recipe,{angle},context.current);setCropDraft(remapDraftCrop(recipe,next,cropDraft,context.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
           brushOptions={{ color, widthRel: brushWidth,...annotationBrush }} selectedTextId={selectedText} onSelectText={setSelectedText}
@@ -521,18 +527,18 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         {(preview.loading || projectLoading) && <div className="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label={t("advancedEditor.loading")}><span className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-accent" /></div>}
 
       </main>
-      {preferences.rightOpen&&<aside style={{width:preferences.rightWidth}} className="ui-glass sp-scroll shrink-0 overflow-y-auto rounded-2xl p-4">
-        <label className="mb-3 block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.rightWidth")} type="range" min={280} max={480} value={preferences.rightWidth} onChange={event=>updatePreferences({rightWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
+      {preferences.rightOpen&&<aside aria-label={t("editor.tool.adjust")} style={{"--editor-panel-width":`${preferences.rightWidth}px`} as CSSProperties} className="editor-right-panel ui-glass sp-scroll shrink-0 overflow-y-auto">
+
         <HistogramPanel onToneGesture={!unavailable&&!busy&&!exporting&&!compare&&!target.active&&tool!=="crop"?dragHistogram:undefined} bins={histogram.bins} onOpen={setHistogramOpen}>
-          <div className="flex justify-between gap-2 text-xs tabular-nums text-text-secondary"><span>{shot?.aperture?`f/${shot.aperture.replace(/^f\/?/i, "")}`:"f/—"}</span><span>{formatEditorShutter(shot?.shutter)}</span><span>ISO {shot?.iso&&shot.iso>0?shot.iso:"—"}</span></div>
+          <div className="editor-histogram-readout flex justify-between gap-2 tabular-nums text-text-secondary"><span>{shot?.aperture?`f/${shot.aperture.replace(/^f\/?/i, "")}`:"f/—"}</span><span>{formatEditorShutter(shot?.shutter)}</span><span>ISO {shot?.iso&&shot.iso>0?shot.iso:"—"}</span></div>
           <div className="flex justify-between gap-1 whitespace-nowrap text-[11px] tabular-nums text-text-muted" aria-live="off"><span>RGB {pixel.rgb?.map(v=>Math.round(v)).join(" · ")??"— · — · —"}</span><span>Lab {pixel.lab?.map(v=>v.toFixed(1)).join(" · ")??"— · — · —"}</span></div>
         </HistogramPanel>
-        {samplingError && <p role="alert" className="mb-2 text-xs text-amber-500">{samplingError}</p>}
-        {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
+        {samplingError && <p role="alert" className="editor-inline-error text-xs text-amber-500">{samplingError}</p>}
+        {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="editor-inline-error text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable || target.active} className="space-y-3">
-          <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
-          {tool==="lens"?<LensPanel assetId={asset.id} libraryId={libraryId} isRaw={asset.kind==="raw"} preparing={preview.preparingWhiteBalance} onProfile={lensCorrection=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,lensCorrection}});}} recipe={recipe} value={recipe.lens} onChange={(lens,record=true)=>{const next={...recipe,lens};if(record)dispatch({type:"applyProject",recipe:next});else dispatch({type:"lens",value:lens,record:false});}} size={context.current} axis={lensAxis} onAxis={setLensAxis} lines={lensGuides} onLines={setLensGuides} grid={lensGrid} onGrid={setLensGrid} begin={beginGesture} end={endGesture}/>:tool==="retouch"?<RetouchPanel recipe={recipe} brush={retouchBrush} onBrush={setRetouchBrush} onChange={retouch=>dispatch({type:"applyProject",recipe:{...recipe,retouch}})}/>:tool==="mask"?<MaskPanel sessionId={preview.session?.sessionId} selectedComponent={selectedComponent} onSelectComponent={setSelectedComponent} cancel={cancelGesture} recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
-            showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{...targetSampling,picker,setPicker,sample,hslRange,busy:samplingBusy||target.busy,histogram:[]}}/>:<AdvancedToolPanel brushSettings={annotationBrush} onBrushSettings={setAnnotationBrush} previewSessionId={preview.session?.sessionId} exportExtras={<><EditorExportSettings output={{format:exportFormat,colorSpace:exportColorSpace,longEdge:recipe.output.longEdge,quality:recipe.output.quality}} onOutputChange={value=>{setExportFormat(value.format);setExportColorSpace(value.colorSpace);dispatch({type:"setOutput",patch:{longEdge:value.longEdge,quality:value.quality}});}} value={exportSettings} onChange={setExportSettings}/>{exportResult&&<div className="flex flex-wrap gap-2 text-xs"><button className={BUTTON} onClick={()=>void revealInExplorer([exportResult.outputPath]).catch(e=>setNotice(String(e)))}>{t("advancedEditor.exportFinish.reveal")}</button><button className={BUTTON} onClick={()=>void openWithSystem(exportResult.outputPath).catch(e=>setNotice(String(e)))}>{t("advancedEditor.exportFinish.open")}</button></div>}</>} cancelGesture={cancelGesture} straightening={straightening} setStraightening={setStraightening} onModalChange={setToolModalOpen} sampling={{...targetSampling, picker, setPicker, sample, hslRange, busy:samplingBusy||target.busy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
+          <h3 className="editor-panel-title font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
+          {tool==="retouch"?<RetouchPanel recipe={recipe} brush={retouchBrush} onBrush={setRetouchBrush} onChange={retouch=>dispatch({type:"applyProject",recipe:{...recipe,retouch}})}/>:tool==="mask"?<MaskPanel sessionId={preview.session?.sessionId} selectedComponent={selectedComponent} onSelectComponent={setSelectedComponent} cancel={cancelGesture} recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
+            showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{...targetSampling,picker,setPicker,sample,hslRange,busy:samplingBusy||target.busy,histogram:[]}}/>:<AdvancedToolPanel lensPanel={<LensPanel assetId={asset.id} libraryId={libraryId} isRaw={asset.kind==="raw"} preparing={preview.preparingWhiteBalance} onProfile={lensCorrection=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,lensCorrection}});}} recipe={recipe} value={recipe.lens} onChange={(lens,record=true)=>{const next={...recipe,lens};if(record)dispatch({type:"applyProject",recipe:next});else dispatch({type:"lens",value:lens,record:false});}} size={context.current} axis={lensAxis} onAxis={setLensAxis} lines={lensGuides} onLines={setLensGuides} grid={lensGrid} onGrid={setLensGrid} begin={beginGesture} end={endGesture}/>} onLensOpenChange={setLensOpen} brushSettings={annotationBrush} onBrushSettings={setAnnotationBrush} previewSessionId={preview.session?.sessionId} exportExtras={<><EditorExportSettings output={{format:exportFormat,colorSpace:exportColorSpace,longEdge:recipe.output.longEdge,quality:recipe.output.quality}} onOutputChange={value=>{setExportFormat(value.format);setExportColorSpace(value.colorSpace);dispatch({type:"setOutput",patch:{longEdge:value.longEdge,quality:value.quality}});}} value={exportSettings} onChange={setExportSettings}/>{exportResult&&<div className="flex flex-wrap gap-2 text-xs"><button className={BUTTON} onClick={()=>void revealInExplorer([exportResult.outputPath]).catch(e=>setNotice(String(e)))}>{t("advancedEditor.exportFinish.reveal")}</button><button className={BUTTON} onClick={()=>void openWithSystem(exportResult.outputPath).catch(e=>setNotice(String(e)))}>{t("advancedEditor.exportFinish.open")}</button></div>}</>} cancelGesture={cancelGesture} straightening={straightening} setStraightening={setStraightening} onModalChange={setToolModalOpen} sampling={{...targetSampling, picker, setPicker, sample, hslRange, busy:samplingBusy||target.busy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} onCancelCrop={cancelCrop} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}
             brushWidth={brushWidth} setBrushWidth={setBrushWidth} exporting={exporting} exportAlbum={()=>{albumCloseAfter.current=false;setAlbumPicker(true);}} exportFolder={exportFolder} exportFormat={exportFormat} setExportFormat={setExportFormat} exportColorSpace={exportColorSpace} setExportColorSpace={setExportColorSpace} />}
@@ -541,7 +547,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     </div>
     {autosave.error&&<div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-amber-500"><span>{autosave.error}</span><button className={BUTTON} onClick={()=>void saveProject()}>{t("advancedEditor.autosave.retry")}</button></div>}
     <EditorFilmstrip savedRevision={baseline} asset={asset} recipe={recipeForPersist(effective)} disabled={busy||exporting||unavailable||target.active||!!confirm||toolModalOpen} save={saveProject} onApply={value=>{chooseTool("adjust");dispatch({type:"applyProject",recipe:value});}}/>
-    <footer className="flex h-8 shrink-0 items-center gap-3 px-4 text-[11px] text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? t("advancedEditor.projectHint")}</span>{preview.session?.rawlabReady&&<span className="ml-auto truncate" title={t("advancedEditor.preview.proxy")}>{t("advancedEditor.preview.rawReady")} · {t("advancedEditor.preview.proxy")}</span>}</footer>
+    <footer className="editor-status-bar flex shrink-0 items-center text-text-muted"><span>{sourceSize ? `${sourceSize.width} × ${sourceSize.height}` : t("advancedEditor.loading")}</span><span className="truncate" role="status">{notice ?? ""}</span>{preview.session?.rawlabReady&&<span className="ml-auto truncate" title={t("advancedEditor.preview.proxy")}>{t("advancedEditor.preview.rawReady")}</span>}</footer>
     {workflow==="merge"&&<EditorCompositionDialog asset={asset} libraryId={libraryId} onClose={()=>setWorkflow(null)}/>}
     {workflow==="external"&&preview.session&&<EditorExternalDialog assetId={asset.id} libraryId={libraryId} sessionId={preview.session.sessionId} recipe={recipeForPersist(effective)} onClose={()=>setWorkflow(null)}/>}
     {detailOpen&&<EditorDetailDialog assetId={asset.id} libraryId={libraryId} recipe={recipe} preview={preview.url??preview.session?.sourceUrl??null} initialZoom={detailZoom} onClose={()=>setDetailOpen(false)}/>}

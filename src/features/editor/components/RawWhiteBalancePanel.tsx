@@ -11,6 +11,6 @@ export default function RawWhiteBalancePanel({value,onChange,onPicker,ready,disa
   <div className="flex flex-wrap gap-1">{[[2856,"tungsten"],[4000,"fluorescent"],[5500,"daylight"],[6500,"cloudy"],[7500,"shade"]].map(([kelvin,name])=><button type="button" key={name} className="rounded border border-edge p-1 text-[11px]" onClick={()=>onChange({mode:"temperature",kelvin:Number(kelvin),tint:0})}>{t(`advancedEditor.rawWb.${name}`)}</button>)}</div>
   {mode==="temperature"&&<><Slider label={t("advancedEditor.rawWb.kelvin")} unit="K" min={2000} max={50000} step={50} value={temperature.kelvin} defaultValue={6500} onChange={kelvin=>onChange({...temperature,kelvin},false)} onSet={kelvin=>onChange({...temperature,kelvin})} onReset={()=>onChange({...temperature,kelvin:6500})} begin={begin} end={end}/><Slider label={t("advancedEditor.rawWb.tint")} min={-150} max={150} value={temperature.tint} onChange={tint=>onChange({...temperature,tint},false)} onSet={tint=>onChange({...temperature,tint})} onReset={()=>onChange({...temperature,tint:0})} begin={begin} end={end}/></>}
   <button type="button" disabled={!ready} onClick={onPicker} className="w-full rounded border border-edge p-2 text-xs disabled:opacity-30">{t("advancedEditor.rawWb.picker")}</button>
-  <p className="text-[11px] text-text-muted">{t("advancedEditor.rawWb.hint")}</p>
+
  </fieldset>;
 }

@@ -22,8 +22,9 @@ beforeEach(() => {
 
 it("offers built-in master colors without importing or first enabling the pipeline", async () => {
   const change = vi.fn();
-  render(<I18nextProvider i18n={i18n}><FilmPanel value={undefined} onChange={change} begin={vi.fn()} end={vi.fn()}/></I18nextProvider>);
-  const select = await screen.findByRole("combobox");
+  const view=render(<I18nextProvider i18n={i18n}><FilmPanel value={undefined} onChange={change} begin={vi.fn()} end={vi.fn()}/></I18nextProvider>);
+  view.container.querySelector("details")!.open=true;
+  const select = await screen.findByRole("combobox",{name:i18n.t("advancedEditor.film.select")});
   expect(screen.getByRole("group", {name: "内置大师色彩"})).toBeInTheDocument();
   expect(screen.getByRole("group", {name: "已导入胶片"})).toBeInTheDocument();
   fireEvent.change(select, {target: {value: id}});
@@ -31,12 +32,13 @@ it("offers built-in master colors without importing or first enabling the pipeli
     film: {id, amount: 100, enabled: true}});
 });
 
-it("shows the built-in description and retains the saved film strength", async () => {
+it("keeps descriptions in a tooltip and retains the saved film strength", async () => {
   const change = vi.fn();
-  render(<I18nextProvider i18n={i18n}><FilmPanel value={{version: 2, backend: "rawlab", coreRevision: "pinned", baseProfile:"standard",
+  const view=render(<I18nextProvider i18n={i18n}><FilmPanel value={{version: 2, backend: "rawlab", coreRevision: "pinned", baseProfile:"standard",
     film: {id, amount: 40, enabled: true}}} onChange={change} begin={vi.fn()} end={vi.fn()}/></I18nextProvider>);
-  expect(await screen.findByText("柔和日光")).toBeInTheDocument();
-  fireEvent.change(screen.getByRole("combobox"), {target: {value: "b".repeat(64)}});
+  view.container.querySelector("details")!.open=true;
+  expect(await screen.findByTitle("柔和日光")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox",{name:i18n.t("advancedEditor.film.select")}), {target: {value: "b".repeat(64)}});
   expect(change).toHaveBeenCalledWith({version: 2, backend: "rawlab", coreRevision: "pinned", baseProfile:"standard",
     film: {id: "b".repeat(64), amount: 40, enabled: true}});
 });
