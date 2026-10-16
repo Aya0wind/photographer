@@ -1,6 +1,6 @@
 import {useLayoutEffect,useRef} from "react";
 export interface WheelValue{hue:number;sat:number;lum:number}
-export default function ColorWheel({label,value,onChange,begin,end,cancel}:{label:string;value:WheelValue;onChange:(value:WheelValue,record?:boolean)=>void;begin:()=>void;end:()=>void;cancel?:()=>void}){
+export default function ColorWheel({label,value,onChange,begin,end,cancel,compact=false}:{label:string;value:WheelValue;onChange:(value:WheelValue,record?:boolean)=>void;begin:()=>void;end:()=>void;cancel?:()=>void;compact?:boolean}){
  const active=useRef<{id:number;initial:WheelValue;last:WheelValue}|null>(null);
  // Flush external-value reconciliation before another movement updates last.
  useLayoutEffect(()=>{const last=active.current?.last;if(last&&(last.hue!==value.hue||last.sat!==value.sat||last.lum!==value.lum))active.current=null;},[value]);
@@ -13,7 +13,7 @@ export default function ColorWheel({label,value,onChange,begin,end,cancel}:{labe
  }
  function finish(){if(active.current){active.current=null;end();}}
  const angle=value.hue*Math.PI/180,r=value.sat/100*50;
- return <div role="application" aria-label={label} tabIndex={0} className="relative mx-auto aspect-square w-44 max-w-full cursor-crosshair touch-none rounded-full border border-edge outline-none focus:ring-2 focus:ring-accent"
+ return <div role="application" aria-label={label} tabIndex={0} className={`relative mx-auto aspect-square ${compact?"w-20":"w-44"} max-w-full cursor-crosshair touch-none rounded-full border border-edge outline-none focus:ring-2 focus:ring-accent`}
   style={{background:"radial-gradient(circle,white 0%,transparent 70%),conic-gradient(from 90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)"}}
   onPointerDown={e=>{if(e.button!==0)return;e.preventDefault();e.currentTarget.focus();e.currentTarget.setPointerCapture(e.pointerId);begin();active.current={id:e.pointerId,initial:value,last:value};move(e);}}
   onPointerMove={e=>{if(active.current?.id===e.pointerId)move(e);}}

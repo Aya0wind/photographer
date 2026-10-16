@@ -118,6 +118,7 @@ interface EditorCanvasProps {
   nativeAnnotations?: boolean;
   zoom?: number;
   onZoom?: (factor: number) => void;
+  onFitScale?:(value:number)=>void;
   /** naturalWidth/Height 为 0 时的兜底尺寸（EXIF 宽高；jsdom 测试路径） */
   fallbackSize: Size | null;
   recipe: EditRecipe;
@@ -159,7 +160,7 @@ export default function EditorCanvas({
   nativeGeometry = false,
   nativeAnnotations = false,
   zoom = 1,
-  onZoom,
+  onZoom,onFitScale,
   fallbackSize,
   recipe,
   tool,
@@ -183,7 +184,8 @@ export default function EditorCanvas({
   const [straightLine,setStraightLine]=useState<[number,number,number,number]|null>(null);
   useEffect(()=>{if(!straightening)setStraightLine(null);},[straightening]);
   function stopTarget(cancelled:boolean){const g=targetRef.current;targetRef.current=null;if(g)g.handler({phase:cancelled?"cancel":"end",x:g.x,y:g.y,delta:g.delta});}
-  const canPan=!sampleMode && !["crop","brush","text","mask"].includes(tool);
+  const [hand,setHand]=useState(false);
+  const canPan=hand||!sampleMode && !["crop","brush","text","mask"].includes(tool);
   const [panning, setPanning] = useState(false);
   function stopPanning(): void {
     const pan = panRef.current;
@@ -195,6 +197,17 @@ export default function EditorCanvas({
     stopPanning();
     stopTarget(true);
   }, [tool, src, sampleMode,onSampleGesture]);
+  useEffect(()=>{
+    const down=(event:KeyboardEvent)=>{
+      const target=event.target;
+      if(target instanceof HTMLElement&&(target.isContentEditable||["INPUT","TEXTAREA","SELECT","BUTTON"].includes(target.tagName)))return;
+      if(event.code==="Space"){event.preventDefault();setHand(true);}
+    };
+    const release=()=>{setHand(false);stopPanning();};
+    const up=(event:KeyboardEvent)=>{if(event.code==="Space")release();};
+    window.addEventListener("keydown",down);window.addEventListener("keyup",up);window.addEventListener("blur",release);
+    return()=>{window.removeEventListener("keydown",down);window.removeEventListener("keyup",up);window.removeEventListener("blur",release);};
+  },[]);
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
   useEffect(() => {
@@ -282,6 +295,22 @@ export default function EditorCanvas({
     cropTrRef.current.getLayer()?.batchDraw();
   }, [tool, cropDraft !== null, image]);
 
+  const sourceW=sourceSize?.width||image?.naturalWidth||fallbackSize?.width||1;
+  const sourceH=sourceSize?.height||image?.naturalHeight||fallbackSize?.height||1;
+  const fitGeometry=geometrySize({width:sourceW,height:sourceH},recipe);
+  const fitCrop=tool==="crop"?{w:1,h:1}:recipe.crop??{w:1,h:1};
+  const fitScale=Math.min(Math.max(60,avail.width-STAGE_PADDING*2)/(fitGeometry.w*fitCrop.w),Math.max(60,avail.height-STAGE_PADDING*2)/(fitGeometry.h*fitCrop.h));
+  useEffect(()=>{onFitScale?.(fitScale);},[fitScale,onFitScale]);
+  const previousZoom=useRef(zoom);
+  useEffect(()=>{
+    const view=containerRef.current;
+    if(view&&previousZoom.current!==zoom){
+      const ratio=zoom/previousZoom.current;
+      view.scrollLeft=(view.scrollLeft+view.clientWidth/2)*ratio-view.clientWidth/2;
+      view.scrollTop=(view.scrollTop+view.clientHeight/2)*ratio-view.clientHeight/2;
+    }
+    previousZoom.current=zoom;
+  },[zoom]);
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
   const baseW = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 1;
@@ -327,6 +356,7 @@ export default function EditorCanvas({
   function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>): void {
     const stage = e.target.getStage();
     if (stage === null || stage === undefined) return;
+    if(hand||panning)return;
     if (sampleMode) {
       if(onSampleGesture)return;
       const pos = pointerPos(stage);
@@ -397,11 +427,18 @@ export default function EditorCanvas({
   }
 
   const cursor =
-    sampleMode || tool === "brush" || tool === "text" ? "crosshair" : canPan && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
+    hand ? panning?"grabbing":"grab" : sampleMode || tool === "brush" || tool === "text" ? "crosshair" : canPan && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
     <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
       style={{ cursor, touchAction: canPan ? "none" : undefined }}
+      onPointerDownCapture={event=>{
+        if(!hand&&event.button!==1)return;
+        event.preventDefault();event.stopPropagation();
+        const viewport=event.currentTarget;
+        panRef.current={pointerId:event.pointerId,x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};
+        viewport.setPointerCapture(event.pointerId);setPanning(true);
+      }}
       onPointerDown={(event) => {
         const viewport = event.currentTarget;
         if(sampleMode&&onSampleGesture&&event.button===0){
@@ -419,6 +456,9 @@ export default function EditorCanvas({
         viewport.setPointerCapture(event.pointerId);
         setPanning(true);
       }}
+      onPointerMoveCapture={event=>{const pan=panRef.current;if(!pan)return;event.stopPropagation();event.currentTarget.scrollLeft=pan.left+pan.x-event.clientX;event.currentTarget.scrollTop=pan.top+pan.y-event.clientY;}}
+      onPointerUpCapture={event=>{if(panRef.current){event.stopPropagation();stopPanning();}}}
+      onPointerCancelCapture={()=>{if(panRef.current)stopPanning();}}
       onPointerLeave={()=>onHoverPixel?.(null)}
       onPointerMove={(event) => {
         const rect=event.currentTarget.querySelector<HTMLElement>('[data-testid="editor-canvas-frame"]')?.getBoundingClientRect();
@@ -435,6 +475,12 @@ export default function EditorCanvas({
       onPointerUp={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(false);stopPanning();}} onPointerCancel={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(true);stopPanning();}} onLostPointerCapture={event=>{if(targetRef.current?.id===event.pointerId)stopTarget(false);stopPanning();}}
     >
       <div className="relative m-auto shrink-0" style={{ width: dispW, height: dispH }} data-testid="editor-canvas-frame" data-rotate={quarter} data-straighten-guide={straightLine?JSON.stringify(straightLine):undefined} data-crop-guide={cropMode&&cropDraft?JSON.stringify([cropDraft.x,cropDraft.y,cropDraft.w,cropDraft.h]):undefined}>
+        {tool==="crop"&&!straightening&&cropDraft&&<svg aria-hidden="true" className="pointer-events-none absolute inset-0 z-10" width={dispW} height={dispH}>
+          {[1/3,2/3].map(position=><g key={position} stroke="white" strokeOpacity={0.5} strokeWidth={1}>
+            <line x1={(cropDraft.x+cropDraft.w*position)*dispW} x2={(cropDraft.x+cropDraft.w*position)*dispW} y1={cropDraft.y*dispH} y2={(cropDraft.y+cropDraft.h)*dispH}/>
+            <line x1={cropDraft.x*dispW} x2={(cropDraft.x+cropDraft.w)*dispW} y1={(cropDraft.y+cropDraft.h*position)*dispH} y2={(cropDraft.y+cropDraft.h*position)*dispH}/>
+          </g>)}
+        </svg>}
         {tool==="crop"&&straightening&&<><StraightenOverlay width={dispW} height={dispH} onPreview={setStraightLine} onCancel={onStraightenCancel} onCommit={angle=>onStraighten?.(angle)}/>{straightLine&&<svg className="pointer-events-none absolute inset-0 z-10" width={dispW} height={dispH}><line x1={straightLine[0]*dispW} y1={straightLine[1]*dispH} x2={straightLine[2]*dispW} y2={straightLine[3]*dispH} stroke="white" strokeWidth={2}/></svg>}</>}
         {maskControls&&<MaskCanvasControls {...maskControls} editing={maskControls.editing!==false&&!sampleMode} recipe={recipe} size={{width:baseW,height:baseH}} width={dispW} height={dispH}/>}
         <Stage

@@ -24,11 +24,14 @@ const PRESETS: Record<string, CurvePoint[]> = {
   faded: [[0, 20], [64, 70], [128, 135], [192, 198], [255, 245]],
 };
 
-export default function CurveEditor({ adjustments, onChange, begin, end, sampling, onReset }: {
+export default function CurveEditor({ adjustments, onChange, begin, end, sampling, onReset, onModalChange }: {
   adjustments: AdvancedAdjustments; onChange: (patch: Partial<AdvancedAdjustments>, record?: boolean) => void;
   onReset:()=>void;
+  onModalChange?:(value:boolean)=>void;
   begin: () => void; end: () => void; sampling: CurveSampling;
 }) {
+  const [expanded,setExpanded]=useState(false);
+  useEffect(()=>{onModalChange?.(expanded);return()=>onModalChange?.(false);},[expanded,onModalChange]);
   const { t } = useTranslation();
   const [channel, setChannel] = useState<CurveChannel>("rgb");
   const [selected, setSelected] = useState<number | null>(null);
@@ -69,11 +72,13 @@ export default function CurveEditor({ adjustments, onChange, begin, end, samplin
   }
   const bins = channel === "rgb" && histogram.length ? histogram[0].map((v, i) => v + histogram[1][i] + histogram[2][i]) : histogram[channel === "red" ? 0 : channel === "green" ? 1 : channel === "blue" ? 2 : 3] ?? [];
   const peak = Math.max(1, ...bins);
-  return <details open className="space-y-3 border-t border-edge pt-4">
+  return <details open className={expanded?"fixed inset-y-12 left-1/2 z-[75] w-[min(90vw,40rem)] -translate-x-1/2 space-y-3 overflow-y-auto rounded-2xl border border-edge bg-panel p-5 shadow-2xl":"space-y-3 border-t border-edge pt-4"}
+    onKeyDownCapture={event=>{if(expanded&&event.key==="Escape"){event.preventDefault();event.stopPropagation();finish();setExpanded(false);}}}>
     <summary className="flex cursor-pointer items-center justify-between"><h3 className="text-xs font-semibold">{t("advancedEditor.curves")}</h3>
       <button type="button" aria-label={t("advancedEditor.resetGroup",{group:t("advancedEditor.curves")})}
         disabled={!adjustments.curves.length && !Object.values(adjustments.channelCurves??{}).some(points=>!!points?.length)}
         className="rounded-md px-2 py-1 text-[11px] text-accent disabled:opacity-30" onClick={event=>{event.preventDefault();event.stopPropagation();finish();setSelected(null);onReset();}}>{t("editor.reset")}</button>
+      <button type="button" className="rounded border border-edge px-2 py-1 text-[11px]" aria-pressed={expanded} onClick={event=>{event.preventDefault();event.stopPropagation();finish();setExpanded(value=>!value);}}>{t(expanded?"advancedEditor.curve.compact":"advancedEditor.curve.expand")}</button>
       <select value={channel} aria-label={t("advancedEditor.curveChannel")} className="rounded-lg border border-edge bg-bg px-2 py-1 text-xs" onChange={(e) => { finish(); setChannel(e.target.value as CurveChannel);sampling.setTargetCurveChannel?.(e.target.value as CurveChannel); setSelected(null); }}>
         {Object.keys(COLORS).map((key) => <option key={key} value={key}>{t(`advancedEditor.channels.${key}`)}</option>)}
       </select></summary>

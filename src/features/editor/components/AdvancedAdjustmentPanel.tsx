@@ -29,6 +29,7 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
   const basic = { brightness: 0, contrast: 0, saturation: 0, ...recipe.adjustments };
   const [range, setRange] = useState<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas">("reds");
   const hsl = { hue: 0, saturation: 0, lightness: 0, ...a.hsl?.[range] };
+  const [curveMode,setCurveMode]=useState<"point"|"parametric">("point");
   const levels = a.levels ?? { black: 0, white: 255, gamma: 1 };
   useEffect(()=>{if((sampling.picker==="hsl"||sampling.picker==="hslTarget") && sampling.hslRange) setRange(sampling.hslRange);},[sampling.picker,sampling.hslRange,sampling.sample]);
   function resetButton(group:AdjustmentGroup,label:string,changed:boolean) {
@@ -51,8 +52,9 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
       {(["temperature", "tint", "vibrance"] as const).map((key) => <Slider key={key} gradient={key==="temperature"?"linear-gradient(to right,#4285f4,#aaa,#fbbf24)":key==="tint"?"linear-gradient(to right,#4ade80,#aaa,#e879f9)":undefined} label={t(`advancedEditor.${key}`)} value={a[key]} onSet={value=>onAdvanced({[key]:value})} onReset={()=>onAdvanced({[key]:0})} onChange={(value) => onAdvanced({ [key]: value }, false)} begin={begin} end={end} />)}
       <Slider label={t("editor.adjust.saturation")} value={basic.saturation} onSet={saturation=>onBasic({saturation},true)} onReset={()=>onBasic({saturation:0},true)} onChange={(saturation) => onBasic({ saturation })} begin={begin} end={end} />
     </details>
-    <CurveEditor onReset={()=>onReset("curves")} adjustments={a} onChange={onAdvanced} begin={begin} end={end} sampling={sampling} />
-    <ParametricCurvePanel value={a.parametricCurve} onChange={(parametricCurve,record)=>onAdvanced({parametricCurve},record)} onReset={()=>onReset("parametricCurve")} begin={begin} end={end} onModalChange={onModalChange}/>
+    <div role="tablist" aria-label={t("advancedEditor.curves")} className="flex gap-2 border-t border-edge pt-3">{(["point","parametric"] as const).map(mode=><button key={mode} type="button" role="tab" aria-selected={curveMode===mode} className="flex-1 rounded-lg border border-edge py-2 text-xs aria-selected:border-accent aria-selected:text-accent" onClick={()=>{end();setCurveMode(mode);}}>{t(`advancedEditor.curve.${mode}`)}</button>)}</div>
+    {curveMode==="point"&&<CurveEditor onModalChange={onModalChange} onReset={()=>onReset("curves")} adjustments={a} onChange={onAdvanced} begin={begin} end={end} sampling={sampling} />}
+    {curveMode==="parametric"&&<ParametricCurvePanel value={a.parametricCurve} onChange={(parametricCurve,record)=>onAdvanced({parametricCurve},record)} onReset={()=>onReset("parametricCurve")} begin={begin} end={end} onModalChange={onModalChange}/>}
     <details className="space-y-2.5 border-t border-edge pt-3">
       <summary className="flex cursor-pointer items-center justify-between text-xs font-semibold"><span>{t("advancedEditor.levels")}</span>{resetButton("levels",t("advancedEditor.levels"),!!a.levels)}</summary>
       <Slider label={t("advancedEditor.blackLevel")} value={levels.black} onSet={value=>onAdvanced({levels:{...levels,black:value}})} onReset={()=>onAdvanced({levels:{...levels,black:0}})} min={0} max={levels.white - 2} onChange={(black) => onAdvanced({ levels: { ...levels, black } }, false)} begin={begin} end={end} />

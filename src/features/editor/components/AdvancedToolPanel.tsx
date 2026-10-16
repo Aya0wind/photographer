@@ -1,14 +1,15 @@
+import CropAspectControls from "./CropAspectControls";
 import GeometryPanel from "./GeometryPanel";
 import CropDimensions from "./CropDimensions";
 import {remapDraftCrop} from "../lib/cropPixels";
-import {recipeReducer,initRecipeHistory} from "../lib/recipe";
+import {recipeReducer,initRecipeHistory,rotatedSize} from "../lib/recipe";
 import {geometrySize} from "../lib/geometry";
 import { useTranslation } from "react-i18next";
 import type { EditRecipe,ExportOptions } from "@/ipc/api";
 import type { EditorTool } from "./EditorCanvas";
 import type { CurveSampling } from "./CurveEditor";
 import AdvancedAdjustmentPanel from "./AdvancedAdjustmentPanel";
-import { clampCrop, fitCropRect, isFullCrop } from "../lib/coords";
+import { clampCrop, isFullCrop } from "../lib/coords";
 import { type RecipeContext } from "../lib/recipe";
 import type { AdvancedAction } from "../lib/advancedRecipe";
 
@@ -42,11 +43,12 @@ interface ToolPanelProps {
   setBrushWidth: (width: number) => void;
   exporting: boolean;
   exportFolder: () => Promise<void>;
+  exportAlbum:()=>void;
 }
 
 export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straightening,setStraightening,onModalChange, sampling, tool, recipe, dispatch, beginGesture, endGesture,
   context, cropDraft, setCropDraft, setTool, cropRatio, setCropRatio, color, setColor,
-  selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
+  selectedText, setSelectedText, brushWidth, setBrushWidth, exporting, exportFolder,exportAlbum,exportFormat,setExportFormat,exportColorSpace,setExportColorSpace }: ToolPanelProps) {
   const { t } = useTranslation();
   const selectedLayer = recipe.textLayers.find((layer) => layer.id === selectedText);
   function rotateCrop(delta:1|-1){endGesture();const next=recipeReducer(initRecipeHistory(recipe),{type:"rotate",delta},context.current).present;setCropDraft(remapDraftCrop(recipe,next,cropDraft,context.current)??{x:0,y:0,w:1,h:1});setCropRatio(null);dispatch({type:"rotate",delta});}
@@ -59,10 +61,8 @@ export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straighte
             <button type="button" className={`${BUTTON} w-full aria-pressed:text-accent aria-pressed:border-accent`} aria-pressed={straightening} onClick={()=>setStraightening(!straightening)}>{t("editor.geometry.straighten")}</button>
             {straightening&&<p className="text-xs text-text-muted">{t("editor.geometry.straightenHint")}</p>}
             <CropDimensions recipe={recipe} context={context.current} crop={cropDraft} onChange={setCropDraft} onFree={()=>setCropRatio(null)}/>
-            <div className="flex flex-wrap gap-2">{[null, 1, 4 / 3, 3 / 2, 16 / 9].map((ratio, index) => <button key={index} className={BUTTON} aria-pressed={cropRatio === ratio} onClick={() => {
-              setCropRatio(ratio); const size = geometrySize(context.current,recipe);
-              setCropDraft(ratio ? fitCropRect(ratio, size.w / size.h) : { x: 0, y: 0, w: 1, h: 1 });
-            }}>{[t("editor.crop.free"), "1:1", "4:3", "3:2", "16:9"][index]}</button>)}</div>
+            <CropAspectControls ratio={cropRatio} onRatio={setCropRatio} size={{width:geometrySize(context.current,recipe).w,height:geometrySize(context.current,recipe).h}}
+              original={rotatedSize(context.current,recipe.rotateQuarter).w/rotatedSize(context.current,recipe.rotateQuarter).h} onCrop={setCropDraft}/>
             <p className="text-xs text-text-muted">{t("editor.crop.hint")}</p>
             <button className="ui-primary w-full rounded-xl py-2 text-xs" onClick={() => {endGesture();dispatch({ type: "cropConfirm", crop: cropDraft && !isFullCrop(cropDraft) ? clampCrop(cropDraft,1e-6) : null }); setCropDraft(null); setTool("adjust"); }}>{t("editor.crop.apply")}</button>
             <button className={`${BUTTON} w-full`} onClick={onCancelCrop}>{t("editor.crop.cancel")}</button>
@@ -79,6 +79,7 @@ export default function AdvancedToolPanel({ cancelGesture,onCancelCrop,straighte
             {exportFormat==="pcraft"&&<p className="text-xs leading-relaxed text-text-secondary">{t("advancedEditor.outputDocumentHint")}</p>}
             {exportFormat==="jpeg"&&<label className="grid gap-0.5 text-[11px] leading-[14px] text-text-secondary"><span>{t("editor.output.quality")} · {recipe.output.quality}</span><input className="block h-4 w-full accent-accent" type="range" min={1} max={100} value={recipe.output.quality} onChange={(e) => dispatch({ type: "setOutput", patch: { quality: Number(e.target.value) } })} /></label>}
             <button className={`${BUTTON} w-full`} disabled={exporting} onClick={() => void exportFolder()}>{t("editor.export")}</button>
+            <button className={`${BUTTON} w-full`} disabled={exporting||exportFormat==="pcraft"} onClick={exportAlbum}>{t("editor.exportAlbum")}</button>
           </div>}
   </>;
 }

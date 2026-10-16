@@ -42,6 +42,7 @@
 pub mod export;
 pub(crate) mod export_worker;
 mod gpu;
+mod base_color;
 mod grading;
 mod parametric;
 mod masks;

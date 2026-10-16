@@ -148,7 +148,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
     return {past:appendHistory(state.past,present),present:next,future:[]};
   }
   if (action.type === "loadProject") return initRecipeHistory(action.recipe);
-  if (action.type === "reset") return initRecipeHistory(advancedRecipe());
+  if (action.type === "reset") return initRecipeHistory({...advancedRecipe(),...(state.present.colorPipeline?.version===2?{colorPipeline:{...state.present.colorPipeline,film:undefined}}:{})});
   if (action.type === "textUpdateLive") {
     const updated = recipeReducer(state, { type: "textUpdate", id: action.id, patch: action.patch }, context);
     return { ...updated, past: state.past };

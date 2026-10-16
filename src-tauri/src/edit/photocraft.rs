@@ -539,7 +539,7 @@ fn export_source(path:&std::path::Path,recipe:&EditRecipe,progress:&dyn Fn(&str)
 pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),sixteen_bit:bool)->Result<Document,String>{
     progress("decode");
     let (mut base,values)=export_source(path,recipe,progress)?;
-    if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16 {
+    if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16&&recipe.color_pipeline.as_ref().is_none_or(|p|p.version!=2) {
         let image=photocraft_io::document_to_image(&base,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
         base=super::source::from_image("16-bit output source",&image)?;
     }

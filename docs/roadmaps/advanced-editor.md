@@ -1,5 +1,7 @@
 # 高级编辑器 Roadmap
 
+2026-10-16 的默认色彩、统一 RAW 显影及界面优化，以 [色彩与界面统一方案](../plans/2026-10-16-editor-color-and-ui.md) 的批次 A–E 为本轮执行顺序；下文 R0–R7 保留为长期能力地图及历史基线，不表示待办状态已重新核验。
+
 后续共享引擎、LibRaw/Smart Preview、胶片和各端适配统一由 [多形态应用实施方案](../plans/platform-evolution/README.md) 编排。本文件保留高级编辑功能清单与历史接线基线，不将下述历史阶段直接对应到新方案的 M0–M8。
 
 更新时间：2026-10-09。基线：Photographer `dd657ad`；PhotoCraft workspace 0.5.0，固定提交 `3955bf4f1911a69ea08947634b3e2b459feece2f`。

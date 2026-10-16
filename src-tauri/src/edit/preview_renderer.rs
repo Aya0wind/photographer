@@ -527,7 +527,10 @@ impl Renderer {
         }
         use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
         use photocraft_engine::doc::{Adjustment, SampleType};
-        if base.mode != photocraft_engine::doc::ColorMode::Rgb || base.depth == SampleType::F32 {
+        let float_display = base.depth == SampleType::F32
+            && photocraft_engine::color_cmds::document_profile(base).to_bytes()
+                == photocraft_cms::Builtin::Srgb.profile().to_bytes();
+        if base.mode != photocraft_engine::doc::ColorMode::Rgb || (base.depth == SampleType::F32 && !float_display) {
             return Err("原生画布暂不支持此色彩模式或 HDR 文档".into());
         }
         let tuning = photocraft::camera_tuning(recipe);
