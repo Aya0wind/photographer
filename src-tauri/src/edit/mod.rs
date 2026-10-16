@@ -7,11 +7,7 @@
 //! 模块拆分：
 //! - [`recipe`]：配方契约（version 1）——结构反序列化 + 服务端校验
 //!   （数值夹取 0..1、颜色/版本非法报错），存库前归一化。
-//! - [`text`]：系统字体加载（运行时读 `C:\Windows\Fonts`，**不捆绑字体文件**
-//!   ——msyh.ttc → simhei.ttf → 静态回退）+ 文字/笔迹栅格化。
-//! - [`render`]：源解码（JPEG=image/turbojpeg 路径，RAW=rawler 显影→内嵌
-//!   预览兜底）→ 方向转正（与缩略图管线共用 [`crate::thumbs::apply_orientation`]）
-//!   → 旋转 → 裁剪 → 文字/笔迹 → 只缩不放的高质量缩放。
+//! - [`photocraft`]: shared preview/export rendering through the pinned engine.
 //! - [`meta`]：导出 JPEG 元数据——源 EXIF 尽量保留（拍摄时间/相机/镜头/
 //!   参数），removeGps 剥 GPS IFD；版权/作者/关键词写 EXIF Artist/Copyright
 //!   + XMP dc:rights/dc:creator/dc:subject（img-parts 段级改写，图像数据零重编码）。
@@ -70,6 +66,4 @@ pub mod versions;
 pub mod proof;
 pub mod portable;
 pub mod recipe;
-pub mod render;
 mod source;
-pub mod text;

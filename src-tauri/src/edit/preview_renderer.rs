@@ -150,7 +150,6 @@ mod native_tests {
         let base=Document::with_background("Color",Size::new(32,24),ColorMode::Rgb,SampleType::U8,Color::rgba(0.7,0.2,0.4,1.0));
         let options=[
             ("colorBalance",json!({"shadows":[10,0,0],"midtones":[25,-10,5],"highlights":[0,0,-20],"preserveLuminosity":true}),"colorBalance",json!({"shadows":[10,0,0],"midtones":[25,-10,5],"highlights":[0,0,-20],"preserveLuminosity":true})),
-            ("blackWhite",json!({"enabled":true,"weights":[40,60,40,60,20,80],"tint":"#E1D3B3"}),"blackWhite",json!({"tint":true,"tintColor":"#E1D3B3"})),
             ("selectiveColor",json!({"relative":false,"ranges":{"reds":[20,-10,30,0]}}),"selectiveColor",json!({"method":"absolute","reds":[20,-10,30,0]}))
         ];
         for (key,value,kind,params) in options {
@@ -168,7 +167,6 @@ mod native_tests {
             let mut updated=recipe.clone();
             match key {
                 "colorBalance"=>updated.advanced.as_mut().unwrap().color_balance.as_mut().unwrap().midtones[0]=40.0,
-                "blackWhite"=>updated.advanced.as_mut().unwrap().black_white.as_mut().unwrap().weights[0]=70.0,
                 _=>updated.advanced.as_mut().unwrap().selective_color.as_mut().unwrap().ranges.get_mut("reds").unwrap()[0]=40.0
             }
             let next=renderer.canvas_document(&base,&updated).unwrap();assert_eq!(native.layers.last().unwrap().id,next.layers.last().unwrap().id);
@@ -514,7 +512,7 @@ impl Renderer {
                 "levels": {"black": 0.0, "white": 255.0, "gamma": 1.01},
                 "curves": [[0.0,0.0],[128.0,129.0],[255.0,255.0]],
                 "channelCurves": {"luminance": [[0.0,0.0],[255.0,255.0]]},
-                "hsl": {"reds": {"hue": 1.0, "saturation": 0.0, "lightness": 0.0}}}
+                "hslEight": {"reds": {"hue": 1.0, "saturation": 0.0, "lightness": 0.0}}}
         }))?;
         self.canvas_document(base, &recipe)
     }
@@ -667,7 +665,7 @@ impl Renderer {
             *id != base.id
                 || before.adjustments != recipe.adjustments
                 || before.advanced != recipe.advanced
-                || before.masks != recipe.masks || before.legacy_adjustments != recipe.legacy_adjustments
+                || before.masks != recipe.masks
         });
         let phase = Instant::now();
         if adjustments_changed {

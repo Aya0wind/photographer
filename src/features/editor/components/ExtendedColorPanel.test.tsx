@@ -18,7 +18,7 @@ it("edits one color-balance tone and offers current-tone and whole-group reset",
 });
 it("enables black-and-white weights with upstream defaults and optional tint",()=>{
  const params=setup();const red=screen.getByRole("spinbutton",{name:"红色"});expect(red).toBeDisabled();
- fireEvent.click(screen.getByLabelText("启用黑白"));expect(red).toBeEnabled();expect(params().blackWhite.weights).toEqual([40,60,40,60,20,80]);
+ fireEvent.click(screen.getByLabelText("启用黑白"));expect(red).toBeEnabled();expect(params().blackWhite.weights).toEqual([40,50,60,40,60,20,50,80]);
  number("红色","90");fireEvent.click(screen.getByLabelText("着色"));expect(params().blackWhite.tint).toBe("#E1D3B3");
  fireEvent.click(screen.getByRole("button",{name:"重置红色"}));expect(params().blackWhite.weights[0]).toBe(40);
  fireEvent.click(screen.getByRole("button",{name:"重置黑白"}));expect(params().blackWhite).toBeUndefined();

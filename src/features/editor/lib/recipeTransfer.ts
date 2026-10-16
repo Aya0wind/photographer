@@ -2,7 +2,7 @@ import type {EditRecipe} from "@/ipc/api";
 import {DEFAULT_ADVANCED,DEFAULT_DEVELOPMENT} from "./advancedRecipe";
 export const TRANSFER_GROUPS=["light","color","curves","hsl","grading","detail","effects","profile","geometry","masks","annotations","retouch","output"] as const;
 export type TransferGroup=typeof TRANSFER_GROUPS[number];
-const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hsl","hslEight"],grading:["colorGrading","lookup"]} as const;
+const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hslEight"],grading:["colorGrading","lookup"]} as const;
 const DEVELOPMENT={light:["highlights","shadows","whites","blacks"],detail:["sharpenAmount","sharpenRadius","sharpenDetail","sharpenMasking","noiseLuminance","noiseLuminanceDetail","noiseColor","noiseColorDetail"],effects:["texture","clarity","dehaze","grainAmount","grainSize","grainRoughness","vignetteAmount","vignetteMidpoint","vignetteRoundness","vignetteFeather","vignetteHighlights","vignetteStyle"]} as const;
 /** Copy only selected groups; absent source fields reset the corresponding target fields. */
 export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:TransferGroup[]):EditRecipe {
@@ -18,8 +18,8 @@ export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:Transf
   if(group==="retouch")value.retouch=structuredClone(source.retouch);
   if(group==="output")value.output=structuredClone(source.output);
  }
- // Keep basic and legacy exposure/saturation controls in the chosen group.
- for(const field of ["adjustments","legacyAdjustments"] as const){
+ // Keep basic brightness/contrast/saturation in their chosen groups.
+ for(const field of ["adjustments"] as const){
   const patch={brightness:0,contrast:0,saturation:0,...value[field]};
   if(groups.includes("light")){patch.brightness=source[field]?.brightness??0;patch.contrast=source[field]?.contrast??0;}
   if(groups.includes("color"))patch.saturation=source[field]?.saturation??0;

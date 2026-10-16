@@ -224,7 +224,7 @@ pub async fn edit_recipe_delete(
     run_blocking(shared, move |state| {
         let id = parse_asset_id(&asset_id)?;
         let db = crate::ipc::app_database_db(state)?;
-        super::project::fetch_project_delete(&db,&crate::ipc::app_database_dir(state)?,id)
+        super::project::fetch_project_delete(&db,id)
     })
     .await
 }

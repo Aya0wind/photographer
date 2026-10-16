@@ -46,7 +46,7 @@ it("stops ordinary rendering after native activation and retains the same proxy"
 });
 
 it("prepares a RAW source only for explicit color pipelines and publishes its candidate frame",async()=>{
- const linear={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const linear={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  const ready={...proxy,sourceUrl:"neutral-raw",previewUrl:"prepared-frame",nativeReady:true,bitDepth:"32 bit linear proxy"};
  vi.mocked(editPreviewPrepare).mockResolvedValue(ready);
  vi.mocked(editPreviewActivate).mockResolvedValue(ready);
@@ -58,7 +58,7 @@ it("prepares a RAW source only for explicit color pipelines and publishes its ca
 });
 
 it("activates the prepared source with edits made while decoding",async()=>{
- const initial={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const initial={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  let finish!:(value:EditorPreviewSession)=>void;
  vi.mocked(editPreviewPrepare).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
  const ready={...proxy,nativeReady:true,previewUrl:"current-frame"};vi.mocked(editPreviewActivate).mockResolvedValue(ready);
@@ -70,7 +70,7 @@ it("activates the prepared source with edits made while decoding",async()=>{
  expect(editPreviewActivate).toHaveBeenCalledWith("session",changed);
 });
 it("drops prepared work when the editor closes",async()=>{
- const initial={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const initial={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  let finish!:(value:EditorPreviewSession)=>void;
  vi.mocked(editPreviewPrepare).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
  const {unmount}=renderHook(()=>useEditorPreview(1,initial,"photos"));
@@ -84,7 +84,7 @@ it("retains the session and displayed frame across film toggles and prepares the
  vi.mocked(editPreviewPrepare).mockResolvedValue(ready);vi.mocked(editPreviewActivate).mockResolvedValue(ready);
  const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos",true),{initialProps:{value:recipe}});
  await waitFor(()=>expect(result.current.session).toBe(proxy));
- const linear={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const linear={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  rerender({value:linear});
  expect(result.current.session?.sessionId).toBe("session");expect(result.current.url).not.toBeNull();
  await waitFor(()=>expect(result.current.session).toBe(ready));
@@ -99,7 +99,7 @@ it("allows preparation again when film was disabled before its candidate was rea
  const ready={...proxy,rawlabReady:true,nativeReady:true,previewUrl:"prepared-frame"};
  vi.mocked(editPreviewPrepare).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;})).mockResolvedValue(ready);
  vi.mocked(editPreviewActivate).mockResolvedValue(ready);
- const linear={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const linear={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos"),{initialProps:{value:recipe}});
  await waitFor(()=>expect(result.current.session).toBe(proxy));
  rerender({value:linear});await waitFor(()=>expect(editPreviewPrepare).toHaveBeenCalledTimes(1));
@@ -115,7 +115,7 @@ it("adopts a source committed while film development was switched off and render
  vi.mocked(editPreviewPrepare).mockResolvedValue(ready);
  vi.mocked(editPreviewActivate).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
  vi.mocked(editPreviewRender).mockResolvedValue("disabled-frame");
- const film={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const film={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  const {result,rerender}=renderHook(({value})=>useEditorPreview(1,value,"photos",true),{initialProps:{value:film as EditRecipe}});
  await waitFor(()=>expect(editPreviewActivate).toHaveBeenCalledOnce());
  rerender({value:recipe});await act(async()=>finish(ready));

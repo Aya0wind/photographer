@@ -98,7 +98,7 @@ function edited() {
   recipe.adjustments={brightness:10,contrast:20,saturation:30};
   recipe.advanced={...recipe.advanced!,exposure:2,temperature:15,tint:-5,vibrance:25,
     curves:[[0,0],[128,140],[255,255]],channelCurves:{red:[[0,0],[255,230]]},
-    levels:{black:4,white:240,gamma:1.2},hsl:{blues:{hue:10,saturation:20,lightness:30}}};
+    levels:{black:4,white:240,gamma:1.2},hslEight:{blues:{hue:10,saturation:20,lightness:30}}};
   recipe.crop={x:0,y:0,w:0.8,h:0.8};
   return recipe;
 }
@@ -121,7 +121,7 @@ it("clears all curve channels, levels or HSL only within their group",()=>{
     expect(next.past).toHaveLength(1);expect(next.present.advanced!.exposure).toBe(2);
     if(group==="curves") {expect(next.present.advanced!.curves).toEqual([]);expect(next.present.advanced!.channelCurves).toEqual({});}
     if(group==="levels") expect(next.present.advanced!.levels).toBeUndefined();
-    if(group==="hsl") expect(next.present.advanced!.hsl).toEqual({});
+    if(group==="hsl") expect(next.present.advanced!.hslEight).toBeUndefined();
   }
 });
 it("resetting defaults creates no undo step",()=>{
@@ -131,7 +131,7 @@ it("resetting defaults creates no undo step",()=>{
 });
 
 it("resets new color groups independently in one undo step",()=>{
- const recipe=advancedRecipe();recipe.advanced={...recipe.advanced!,colorBalance:{shadows:[10,0,0],midtones:[0,0,0],highlights:[0,0,0],preserveLuminosity:true},blackWhite:{enabled:true,weights:[40,60,40,60,20,80],tint:null},selectiveColor:{relative:false,ranges:{reds:[20,0,0,0]}}};
+ const recipe=advancedRecipe();recipe.advanced={...recipe.advanced!,colorBalance:{shadows:[10,0,0],midtones:[0,0,0],highlights:[0,0,0],preserveLuminosity:true},blackWhite:{enabled:true,weights:[40,50,60,40,60,20,50,80],tint:null},selectiveColor:{relative:false,ranges:{reds:[20,0,0,0]}}};
  for(const group of ["colorBalance","blackWhite","selectiveColor"] as const){
   const next=advancedReducer(initRecipeHistory(recipe),{type:"resetAdjustmentGroup",group},context);
   expect(next.present.advanced![group]).toBeUndefined();expect(next.past).toHaveLength(1);
@@ -148,13 +148,4 @@ it("local development reset restores only the selected mask and group",()=>{
  expect(state.present.masks![0].advanced!.development!.clarity).toBe(0);expect(state.present.masks![0].advanced!.development!.shadows).toBe(30);
  expect(state.present.advanced!.development!.clarity).toBe(20);expect(state.past).toHaveLength(1);
  expect(advancedReducer(state,{type:"undo"},context).present).toEqual(recipe);
-});
-
-it("category reset includes migrated historical tone and preserves unrelated adjustments",()=>{
- const recipe=advancedRecipe();recipe.legacyAdjustments={brightness:30,contrast:20,saturation:-40};
- let state=advancedReducer(initRecipeHistory(recipe),{type:"resetAdjustmentGroup",group:"light"},context);
- expect(state.present.legacyAdjustments).toEqual({brightness:0,contrast:0,saturation:-40});
- expect(advancedReducer(state,{type:"undo"},context).present).toEqual(recipe);
- state=advancedReducer(state,{type:"resetAdjustmentGroup",group:"color"},context);
- expect(state.present.legacyAdjustments).toEqual({brightness:0,contrast:0,saturation:0});
 });

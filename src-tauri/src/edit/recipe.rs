@@ -90,6 +90,7 @@ pub struct Adjustments {
 pub enum RenderEngine {
     Photocraft,
 }
+fn default_renderer()->Option<RenderEngine>{Some(RenderEngine::Photocraft)}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -117,7 +118,6 @@ pub struct AdvancedAdjustments {
     pub levels: Option<Levels>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub hsl_eight:Option<std::collections::BTreeMap<String,HslRange>>,
-    pub hsl: std::collections::BTreeMap<String, HslRange>,
 }
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",default)]
@@ -198,9 +198,7 @@ pub struct ColorBalance {
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct BlackWhite {
-    pub enabled:bool,pub weights:[f64;6],pub tint:Option<String>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub weights_eight:Option<[f64;8]>,
+    pub enabled:bool,pub weights:[f64;8],pub tint:Option<String>,
 }
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -269,12 +267,9 @@ pub struct EditRecipe {
     pub retouch:Vec<RetouchStroke>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub color_pipeline:Option<ColorPipeline>,
-    /// Retains historical sRGB filter semantics while rendering via native layers.
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub legacy_adjustments: Option<Adjustments>,
     pub version: u32,
     /// 缺省使用旧算法，防止历史配方打开后改变效果。新配方显式选择 PhotoCraft。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default="default_renderer")]
     pub renderer: Option<RenderEngine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advanced: Option<AdvancedAdjustments>,
@@ -302,8 +297,7 @@ pub struct ColorPipeline {
     pub version:u32,
     pub backend:ColorBackend,
     pub core_revision:String,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub base_profile:Option<BaseProfile>,
+    pub base_profile:BaseProfile,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub raw_white_balance:Option<RawWhiteBalance>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -385,7 +379,6 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
     }
     if let Some(b)=&mut a.black_white {
         numbers(&mut b.weights,-200.0,300.0)?;
-        if let Some(weights)=&mut b.weights_eight{numbers(weights,-200.0,300.0)?;}
         if b.tint.as_ref().is_some_and(|v|parse_color(v).is_none()){return Err("黑白着色色彩无效".into());}
     }
     if let Some(s)=&mut a.selective_color {
@@ -437,18 +430,6 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
             numbers(std::slice::from_mut(&mut range.saturation),-100.0,100.0)?;
             numbers(std::slice::from_mut(&mut range.lightness),-100.0,100.0)?;
         }
-    }
-    for (key, range) in &mut a.hsl {
-        if !["reds", "yellows", "greens", "cyans", "blues", "magentas"].contains(&key.as_str())
-            || ![range.hue, range.saturation, range.lightness]
-                .iter()
-                .all(|v| v.is_finite())
-        {
-            return Err("HSL 数值无效".into());
-        }
-        range.hue = range.hue.clamp(-180.0, 180.0);
-        range.saturation = range.saturation.clamp(-100.0, 100.0);
-        range.lightness = range.lightness.clamp(-100.0, 100.0);
     }
     Ok(())
 }
@@ -505,13 +486,11 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
         ));
     }
     if let Some(p)=&mut recipe.color_pipeline {
-        if !matches!(p.version,1|2)||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此显影配方的 core 版本或编辑引擎不受支持".into());}
+        if p.version!=2||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此显影配方的 core 版本或编辑引擎不受支持".into());}
         if let Some(RawWhiteBalance::Temperature{kelvin,tint})=&p.raw_white_balance{
             if !kelvin.is_finite()||!(2000.0..=50000.0).contains(kelvin)||!tint.is_finite()||!(-150.0..=150.0).contains(tint){return Err("RAW 色温或色调无效".into());}
         }
         if let Some(gains)=&p.relative_white_balance{if !gains.iter().all(|v|v.is_finite()&&(0.05..=20.0).contains(v)){return Err("中性校正增益无效".into());}}
-        if p.version!=2&&(p.raw_white_balance.is_some()||p.relative_white_balance.is_some()){return Err("绝对白平衡需要新版 RAW 显影".into());}
-        if (p.version==2)!=p.base_profile.is_some(){return Err("基础色彩配置与显影版本不匹配".into());}
         if let Some(f)=p.film.as_mut(){super::film::validate_id(&f.id)?;if !f.amount.is_finite(){return Err("胶片强度无效".into());}f.amount=f.amount.clamp(0.0,100.0);}
     }
     super::retouch::normalize(&mut recipe.retouch,recipe.renderer)?;
@@ -541,12 +520,6 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
                 return Err("调整数值无效".into());
             }
             *v = v.clamp(-100.0, 100.0);
-        }
-    }
-    if let Some(a)=&mut recipe.legacy_adjustments {
-        if recipe.renderer!=Some(RenderEngine::Photocraft) {return Err("旧调色迁移需要高级编辑引擎".into());}
-        for v in [&mut a.brightness,&mut a.contrast,&mut a.saturation] {
-            if !v.is_finite(){return Err("旧调色数值无效".into());}*v=v.clamp(-100.0,100.0);
         }
     }
     if recipe.rotate_quarter > 3 {
@@ -640,9 +613,9 @@ mod tests {
     }
     #[test]
     fn extended_color_validates_ranges_colors_and_roundtrips_defaults() {
-        let recipe=parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"colorBalance":{"shadows":[-200,0,150],"midtones":[0,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"blackWhite":{"enabled":false,"weights":[-999,60,40,60,20,999],"tint":null},"selectiveColor":{"relative":false,"ranges":{"reds":[150,0,0,-150]}}}})).unwrap();
+        let recipe=parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"colorBalance":{"shadows":[-200,0,150],"midtones":[0,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"blackWhite":{"enabled":false,"weights":[-999,50,60,40,60,20,50,999],"tint":null},"selectiveColor":{"relative":false,"ranges":{"reds":[150,0,0,-150]}}}})).unwrap();
         let a=recipe.advanced.as_ref().unwrap();assert_eq!(a.color_balance.as_ref().unwrap().shadows,[-100.0,0.0,100.0]);
-        assert_eq!(a.black_white.as_ref().unwrap().weights[0],-200.0);assert_eq!(a.black_white.as_ref().unwrap().weights[5],300.0);
+        assert_eq!(a.black_white.as_ref().unwrap().weights[0],-200.0);assert_eq!(a.black_white.as_ref().unwrap().weights[7],300.0);
         assert_eq!(a.selective_color.as_ref().unwrap().ranges["reds"],[100.0,0.0,0.0,-100.0]);
         let mut value=serde_json::to_value(&recipe).unwrap();assert_eq!(parse_recipe(&value).unwrap(),recipe);
         value["advanced"]["blackWhite"]["tint"]=serde_json::json!("invalid");assert!(parse_recipe(&value).is_err());

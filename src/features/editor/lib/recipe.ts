@@ -64,7 +64,7 @@ const FULL_CROP: EditRecipeCrop = { x: 0, y: 0, w: 1, h: 1 };
 /** 新建配方默认值（quality 90 为 JPEG 常用档） */
 export function defaultRecipe(): EditRecipe {
   return {
-    version: 1,
+    version: 1,renderer:"photocraft",
     rotateQuarter: 0,
     crop: null,
     textLayers: [],
@@ -308,13 +308,12 @@ export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
 export function recipeForPersist(recipe: EditRecipe): EditRecipe {
   const a=recipe.advanced;
   const neutralAdvanced=a && !a.parametricCurve && !a.colorGrading && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
-    && !Object.values(a.channelCurves??{}).some(points=>!!points?.length) && !a.levels && !a.lookup && !Object.keys(a.hsl??{}).length;
+    && !Object.values(a.channelCurves??{}).some(points=>!!points?.length) && !a.levels && !a.lookup && !Object.keys(a.hslEight??{}).length;
   return {
     ...recipe,
     ...(neutralAdvanced ? {advanced:undefined} : {}),
     ...(recipe.geometry && !recipe.geometry.angle && !recipe.geometry.flipHorizontal && !recipe.geometry.flipVertical ? {geometry:undefined}:{}),
     ...(recipe.adjustments && Object.values(recipe.adjustments).every((value) => value === 0) ? { adjustments: undefined } : {}),
-    ...(recipe.legacyAdjustments&&Object.values(recipe.legacyAdjustments).every(value=>value===0)?{legacyAdjustments:undefined}:{}),
     textLayers: recipe.textLayers.filter((l) => l.text.trim() !== ""),
     brushStrokes: recipe.brushStrokes.filter((s) => s.points.length > 0),
   };

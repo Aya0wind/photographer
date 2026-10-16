@@ -26,7 +26,7 @@ export default function MaskPanel({sessionId,selectedComponent=null,onSelectComp
   end();const id=newLayerId();dispatch({type:"maskAdd",mask:{id,name:t(`advancedEditor.masks.${kind}`),kind,range:kind==="range"?{...DEFAULT_MASK_RANGE}:undefined,enabled:true,inverted:false,density:100,feather:0,from:{x:0.3,y:0.5},to:{x:0.7,y:0.5},strokes:[]}});onSelect(id);onEditing(true);
  }
  const area=selectedComponent===null?mask:mask?.components?.[selectedComponent]?.mask;
- const local=mask?{...recipe,masks:undefined,legacyAdjustments:undefined,adjustments:mask.adjustments,advanced:mask.advanced}:recipe;
+ const local=mask?{...recipe,masks:undefined,adjustments:mask.adjustments,advanced:mask.advanced}:recipe;
  return <div className="space-y-4">
   <div className="flex flex-wrap gap-1">{(["brush","linear","radial","range"] as const).map(kind=><button key={kind} type="button" className={BUTTON} disabled={masks.length>=32} onClick={()=>add(kind)}>＋ {t(`advancedEditor.masks.${kind}`)}</button>)}</div>
   {!masks.length&&<p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.masks.empty")}</p>}

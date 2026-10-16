@@ -10,7 +10,7 @@ pub(super) fn hsl(ranges:&BTreeMap<String,HslRange>)->Result<Adjustment,String>{
  pixel_lookup::sample(key,|pixels,w,h|photocraft_algo::camera_raw::develop(pixels,w,h,&p,false))
 }
 pub(super) fn black_white(value:&BlackWhite)->Result<Adjustment,String>{
- let weights=value.weights_eight.ok_or("八色黑白参数缺失")?;
+ let weights=value.weights;
  let tint=value.tint.as_ref().and_then(|v|super::recipe::parse_color(v)).map(|c|c.map(|v|v as f32/255.0));
  let key=format!("bw8:{}",serde_json::to_string(value).map_err(|e|e.to_string())?);
  pixel_lookup::sample(key,|pixels,_,_|{for p in pixels{

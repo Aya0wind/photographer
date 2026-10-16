@@ -5,7 +5,6 @@ import EditorExportSettings from "./EditorExportSettings";
 import {DEFAULT_EXPORT_SETTINGS,exportName,exportMetadata} from "../lib/exportSettings";
 import EditorFilmstrip from "./EditorFilmstrip";
 import EditorVersionsPanel from "./EditorVersionsPanel";
-import {editVersionCreate} from "@/ipc/api";
 import CanvasNavigator from "./CanvasNavigator";
 import BaseProfilePanel from "./BaseProfilePanel";
 import {useEditorPreferences,type BaseProfile} from "../lib/editorPreferences";
@@ -193,7 +192,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [histogramOpen,setHistogramOpen]=useState(true);
   const histogram=useEditorHistogram(preview.session?.sessionId,recipe,compare,histogramOpen&&!unavailable);
   const readoutRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
-  const pixel=usePixelReadout(preview.session?.sessionId,compare?{...readoutRecipe,retouch:[],adjustments:undefined,advanced:undefined,legacyAdjustments:undefined,masks:[]}:readoutRecipe,histogramOpen&&!unavailable);
+  const pixel=usePixelReadout(preview.session?.sessionId,compare?{...readoutRecipe,retouch:[],adjustments:undefined,advanced:undefined,masks:[]}:readoutRecipe,histogramOpen&&!unavailable);
   const [shot,setShot]=useState<{iso?:number|null;aperture?:string|null;shutter?:string|null}|null>(null);
   useEffect(()=>{let cancelled=false;setShot(null);void assetDetail(asset.id).then(value=>{if(!cancelled)setShot(value);}).catch(()=>{});return()=>{cancelled=true;};},[asset.id]);
   const targetSampling={sampleSize,setSampleSize:(size:1|3|5|11)=>{setSampleSize(size);setSample(null);setSamplingError(null);},setTargetCurveChannel:(channel:CurveChannel)=>{setTargetCurveChannel(channel);setSample(null);},targetHslAxis,setTargetHslAxis};
@@ -265,7 +264,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     void editProjectOpen(asset.id, libraryId).then(async(saved) => {
       if (cancelled) return;
       let loaded = saved ?? advancedRecipe();
-      if(!saved&&asset.kind==="raw") {
+      if(!loaded.colorPipeline&&asset.kind==="raw") {
         const backend=await editRawlabAvailable();
         if(cancelled)return;
         if(!backend.available)throw new Error(t("advancedEditor.baseColor.unavailable"));
@@ -281,13 +280,6 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     if (dirty) setConfirm("switch");
     else useAdvancedEditorStore.getState().accept();
   }, [pendingPhoto, dirty, busy, exporting, projectLoading]);
-  const previousPipeline=useRef<number|null>(null);
-  useEffect(()=>{
-    if(projectLoading)return;
-    const version=recipe.colorPipeline?.version??0;
-    if(previousPipeline.current!==null&&(previousPipeline.current===2)!==(version===2))preview.reload();
-    previousPipeline.current=version;
-  },[projectLoading,recipe.colorPipeline?.version]);
   useEffect(() => { rootRef.current?.focus(); }, []);
   const requestCloseRef = useRef<() => void>(() => {});
   requestCloseRef.current = requestClose;
@@ -347,22 +339,13 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     } catch (e: unknown) { if (mounted.current) setNotice(String(e)); return false; }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   }
-  async function upgradeColor() {
-    try {
-      const backend=await editRawlabAvailable();
-      if(!backend.available)throw new Error(t("advancedEditor.baseColor.unavailable"));
-      if(!await saveProject())return;
-      await editVersionCreate(asset.id,libraryId,"snapshot",t("advancedEditor.versions.beforeUpgrade"),recipeForPersist(recipe));
-      dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,version:2,backend:"rawlab",coreRevision:backend.coreRevision,baseProfile:preferences.defaultProfile}});
-    } catch(error){setNotice(String(error));}
-  }
   async function autoLevels(){
     if(unavailable||busyRef.current||!preview.session)return;busyRef.current=true;setBusy(true);
     try{const levels=await editPreviewAutoLevels(preview.session.sessionId,recipe);if(mounted.current)dispatch({type:"advanced",patch:{levels}});}
     catch(error){setNotice(String(error));}finally{busyRef.current=false;if(mounted.current)setBusy(false);}
   }
   function changeProfile(value:BaseProfile){
-    if(recipe.colorPipeline?.version===2)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,baseProfile:value}});
+    if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,baseProfile:value}});
   }
   function chooseZoom(mode:"fit"|"100"|"200") {
     setZoomMode(mode);setZoom(mode==="fit"?1:(mode==="100"?1:2)/Math.max(fitScale,0.0001));wakeZoom();
@@ -480,7 +463,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       {preferences.leftOpen&&<aside aria-label={t("advancedEditor.layout.left")} style={{width:preferences.leftWidth}} className="ui-glass sp-scroll shrink-0 space-y-4 overflow-y-auto rounded-2xl p-3">
         <div className="flex gap-2">{(["profiles","history","versions"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
         {leftTab==="profiles"?<BaseProfilePanel recipe={recipe} isRaw={asset.kind==="raw"} defaultProfile={preferences.defaultProfile}
-          begin={beginGesture} end={endGesture} rawReady={!!preview.session?.rawlabReady&&!preview.preparingWhiteBalance} onWhiteBalance={(rawWhiteBalance,record)=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,rawWhiteBalance,relativeWhiteBalance:undefined},record});}} onWhiteBalancePicker={()=>{chooseTool("adjust");setPicker("rawWhiteBalance");}} onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} onUpgrade={()=>void upgradeColor()} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
+          begin={beginGesture} end={endGesture} rawReady={!!preview.session?.rawlabReady&&!preview.preparingWhiteBalance} onWhiteBalance={(rawWhiteBalance,record)=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,rawWhiteBalance,relativeWhiteBalance:undefined},record});}} onWhiteBalancePicker={()=>{chooseTool("adjust");setPicker("rawWhiteBalance");}} onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
           :leftTab==="versions"?<EditorVersionsPanel onBusy={value=>{busyRef.current=value;setBusy(value);}} assetId={asset.id} libraryId={libraryId} recipe={recipeForPersist(effective)} revision={baseline} disabled={busy||exporting||unavailable||tool==="crop"||target.active} save={saveProject} onApply={(value,branch)=>{dispatch({type:branch?"loadProject":"applyProject",recipe:value});setBaseline(value);setSelectedMask(null);setSelectedText(null);}}/>:<><p className="text-[11px] text-text-muted">{t("advancedEditor.sidebar.historyHint")}</p><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
           {history.past.map((_,index)=><button key={index} disabled={unavailable||busy||target.active||tool==="crop"} className={`${BUTTON} w-full`} onClick={()=>dispatch({type:"restoreHistory",history:{past:history.past.slice(0,index+1),present:history.past[index+1]??recipe,future:[...history.past.slice(index+2),...(index+1<history.past.length?[recipe]:[]),...history.future]}})}>{t("advancedEditor.sidebar.step",{count:index+1})}</button>)}</>}
         <label className="block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.leftWidth")} type="range" min={180} max={340} value={preferences.leftWidth} onChange={event=>updatePreferences({leftWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>

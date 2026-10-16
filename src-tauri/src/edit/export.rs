@@ -31,7 +31,6 @@ use xxhash_rust::xxh64::Xxh64;
 
 use super::meta::{self, MetaOptions};
 use super::recipe::EditRecipe;
-use super::render;
 use crate::db::{AssetRow, Db, ExportJobRow};
 use crate::events::{AppEvent, AssetKind, EventBus};
 use crate::db::organization::{sanitize_component, unique_path};
@@ -458,19 +457,9 @@ pub(super) fn encode_output(src: &Path, recipe: &EditRecipe, options: &Validated
             if recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
             let doc=super::photocraft::prepare_export_document_16(&src,&recipe,long_edge,progress,true)?;progress("encode");
             (super::photocraft::lossless_with_profile(&doc,options.format.extension(),source_head.as_deref(),&meta_opts,options.color_space.profile())?,doc.size.width,doc.size.height)
-        }else if recipe.renderer == Some(super::recipe::RenderEngine::Photocraft) {
-            let doc=super::photocraft::prepare_export_document(&src,&recipe,long_edge,progress)?;progress("encode");
+        }else{
+            let doc=super::photocraft::prepare_export_document(src,recipe,long_edge,progress)?;progress("encode");
             (super::photocraft::jpeg_with_profile(&doc,quality,options.color_space.profile())?.0,doc.size.width,doc.size.height)
-        } else {
-            if options.color_space!=ExportColorSpace::Srgb{return Err("此色彩空间需要高级编辑处理方案".into());}
-            progress("render");
-            let rendered = render::render_recipe(&src, &recipe, long_edge)?;
-            progress("encode");
-            (
-                render::encode_jpeg(&rendered.image, quality)?,
-                rendered.image.width(),
-                rendered.image.height(),
-            )
         };
 
     // ③ 元数据（源 EXIF 尽量保留 + removeGps + 版权/作者/关键词）

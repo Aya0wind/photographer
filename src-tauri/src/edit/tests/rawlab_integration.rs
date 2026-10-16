@@ -8,7 +8,7 @@ fn native_stage_consumes_controls_once_and_reuses_for_downstream_edits() {
     let backend = Arc::new(unsafe { Backend::load(path) }.unwrap());
     let _ = BACKEND.set(Ok(backend.clone()));
     let base = photocraft::linear_rgb_document("Linear", 1, 1, &[0.1, 0.2, 0.3]).unwrap();
-    let mut recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":1,"backend":"rawlab","coreRevision":core_revision()},"advanced":{"exposure":1,"temperature":0,"tint":0}})).unwrap();
+    let mut recipe=super::super::recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":2,"baseProfile":"standard","backend":"rawlab","coreRevision":core_revision()},"advanced":{"exposure":1,"temperature":0,"tint":0}})).unwrap();
     let mut cache = ColorCache::default();
     let (display, downstream) = cache.apply(&base, &recipe).unwrap();
     assert!(downstream.color_pipeline.is_none());

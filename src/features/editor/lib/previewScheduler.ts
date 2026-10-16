@@ -17,12 +17,11 @@ function measure(name: string, start: number, detail?: unknown) {
 }
 
 /** The opened source already represents this recipe; no GPU/JPEG work is needed. */
-function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced"|"legacyAdjustments">) {
+function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced">) {
   const a=recipe.advanced;
-  return (!recipe.legacyAdjustments || Object.values(recipe.legacyAdjustments).every(v=>v===0))
-    && (!recipe.adjustments || Object.values(recipe.adjustments).every(v=>v===0))
+  return (!recipe.adjustments || Object.values(recipe.adjustments).every(v=>v===0))
     && (!a || (!(a.exposure || a.temperature || a.tint || a.vibrance) && !a.curves?.length
-      && (!a.lookup || !a.lookup.enabled || a.lookup.amount===0) && !a.levels && !Object.keys(a.hsl??{}).length
+      && (!a.lookup || !a.lookup.enabled || a.lookup.amount===0) && !a.levels && !Object.keys(a.hslEight??{}).length
       && !developmentActive(a.development) && !a.blackWhite?.enabled && !Object.values(a.selectiveColor?.ranges??{}).some(row=>row?.some(v=>v!==0))
       && (!a.colorBalance||![...a.colorBalance.shadows,...a.colorBalance.midtones,...a.colorBalance.highlights].some(v=>v!==0))
       && (!a.colorGrading||![a.colorGrading.shadows,a.colorGrading.midtones,a.colorGrading.highlights,a.colorGrading.global].some(w=>w.sat!==0||w.lum!==0))
@@ -30,7 +29,7 @@ function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced"|"legacyAdju
       && Object.values(a.channelCurves??{}).every(points=>!points.length)));
 }
 function isNeutral(recipe:EditRecipe) {
- return !recipe.colorPipeline && !recipe.rotateQuarter && !(recipe.geometry?.angle||recipe.geometry?.flipHorizontal||recipe.geometry?.flipVertical) && !recipe.crop && !recipe.textLayers.length && !recipe.brushStrokes.length
+ return !(recipe.retouch?.length) && !recipe.colorPipeline && !recipe.rotateQuarter && !(recipe.geometry?.angle||recipe.geometry?.flipHorizontal||recipe.geometry?.flipVertical) && !recipe.crop && !recipe.textLayers.length && !recipe.brushStrokes.length
   && neutralTone(recipe) && !(recipe.masks??[]).some(m=>m.enabled&&m.density>0&&!neutralTone(m));
 }
 

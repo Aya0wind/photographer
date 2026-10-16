@@ -288,7 +288,7 @@ fn prepare_proxy(db_dir: &std::path::Path, asset: &crate::db::AssetRow) -> Optio
 
 fn prepare_rawlab_fallback(path:&std::path::Path)->Result<PreparedSource,String>{
     let source=super::rawlab::open(path,Some(PREVIEW_EDGE),&AtomicBool::new(false))?;
-    let neutral=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":1,"backend":"rawlab","coreRevision":super::rawlab::core_revision()}}))?;
+    let neutral=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","colorPipeline":{"version":2,"backend":"rawlab","coreRevision":super::rawlab::core_revision(),"baseProfile":"standard"}}))?;
     let (display,_)=super::rawlab::display(&source.document,&neutral)?;
     let details=PreviewOpened{preview_url:None,session_id:uuid::Uuid::new_v4().to_string(),source_url:jpeg_url(&display)?,width:source.original_size[0],height:source.original_size[1],sensor_raw:true,bit_depth:"32 bit linear proxy".into(),warnings:source.warnings,histogram:source_histogram(&display)?,native_ready:true,rawlab_ready:true};
     Ok(PreparedSource{interactive_document:source.document.clone(),document:source.document,raw:None,details})
@@ -385,7 +385,7 @@ pub async fn edit_preview_prepare(
                 let p=preview.lock().map_err(|_|"预览会话锁不可用")?;
                 source::Opened{original_size:p.original_size,document:p.document.clone(),raw:None,warnings:vec![]}
             };
-            let mut neutral=values.clone().ok_or("色彩配方缺失")?;neutral.advanced=None;neutral.adjustments=None;neutral.legacy_adjustments=None;neutral.masks.clear();neutral.crop=None;neutral.rotate_quarter=0;neutral.geometry=None;neutral.text_layers.clear();neutral.brush_strokes.clear();
+            let mut neutral=values.clone().ok_or("色彩配方缺失")?;neutral.advanced=None;neutral.adjustments=None;neutral.masks.clear();neutral.crop=None;neutral.rotate_quarter=0;neutral.geometry=None;neutral.text_layers.clear();neutral.brush_strokes.clear();
             if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}
             let (display,_)=super::rawlab::display(&source.document,&neutral)?;
             PreparedSource {interactive_document:source.document.clone(),document:source.document,raw:None,details:PreviewOpened {
@@ -715,7 +715,7 @@ pub async fn edit_preview_pick(
             let mut below=recipe.clone();below.masks.truncate(index);
             let base=photocraft::adjusted_document_scaled(&base,&below,source_scale)?;
             let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
-            local.legacy_adjustments=None;local.color_pipeline=None;local.retouch.clear();
+            local.color_pipeline=None;local.retouch.clear();
             (mask.advanced.clone().unwrap_or_default(),local,base)
         } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
         picker_input_recipe(&mut before,&picker,curve_channel.as_deref());
@@ -793,7 +793,7 @@ fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str,channel:Option
             a.curves.clear();a.channel_curves.luminance.clear();
             match channel {Some("red")=>a.channel_curves.red.clear(),Some("green")=>a.channel_curves.green.clear(),Some("blue")=>a.channel_curves.blue.clear(),_=>{}}
         }
-        if picker=="hsl" {a.hsl.clear();a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
+        if picker=="hsl" {a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
     }
 }
 
@@ -843,7 +843,7 @@ fn clipping_overlay(base:&Document,recipe:&recipe::EditRecipe,scale:f32,warnings
 #[tauri::command]
 pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool)->Result<Vec<Vec<u64>>,String>{
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original{recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();}
+    if original{recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.advanced=None;recipe.masks.clear();}
     run_blocking(state.inner().clone(),move |_|{
         // 拖动期高频调用：交互文档（≤2048）渲染，毫秒级——255 桶显示直方图
         // 不需要全分辨率统计（2026-10-12 实时反馈改造）。
@@ -855,7 +855,7 @@ pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:Strin
 pub async fn edit_preview_clipping(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,original:bool,warnings:u8)->Result<tauri::ipc::Response,String>{
     if warnings>3{return Err("曝光提示参数无效".into());}
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if original {recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.legacy_adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
+    if original {recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.advanced=None;recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();}
     run_blocking(state.inner().clone(),move |_|{
         use image::ImageEncoder;
         let base=canvas_source(&session_id)?;let size=canvas_original_size(&session_id)?;
@@ -1037,9 +1037,9 @@ mod startup_tests {
     }
     #[test]
     fn hsl_picker_excludes_downstream_black_white_and_local_adjustments() {
-        let mut recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"blackWhite":{"enabled":true,"weights":[40,60,40,60,20,80],"tint":null},"colorBalance":{"shadows":[0,0,0],"midtones":[20,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"selectiveColor":{"relative":true,"ranges":{"reds":[20,0,0,0]}},"hsl":{"reds":{"hue":90,"saturation":0,"lightness":0}}}})).unwrap();
+        let mut recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"blackWhite":{"enabled":true,"weights":[40,50,60,40,60,20,50,80],"tint":null},"colorBalance":{"shadows":[0,0,0],"midtones":[20,0,0],"highlights":[0,0,0],"preserveLuminosity":true},"selectiveColor":{"relative":true,"ranges":{"reds":[20,0,0,0]}},"hslEight":{"reds":{"hue":90,"saturation":0,"lightness":0}}}})).unwrap();
         let original=recipe.clone();picker_input_recipe(&mut recipe,"hsl",None);
-        let a=recipe.advanced.as_ref().unwrap();assert!(a.black_white.is_none()&&a.color_balance.is_none()&&a.selective_color.is_none()&&a.hsl.is_empty());
+        let a=recipe.advanced.as_ref().unwrap();assert!(a.black_white.is_none()&&a.color_balance.is_none()&&a.selective_color.is_none()&&a.hsl_eight.is_none());
         let base=Document::with_background("Picker",photocraft_engine::doc::Size::new(8,8),photocraft_engine::doc::ColorMode::Rgb,photocraft_engine::doc::SampleType::U8,photocraft_engine::doc::Color::rgba(1.0,0.0,0.0,1.0));
         assert_eq!(photocraft_compose::flatten(&photocraft::adjusted_document(&base,&recipe).unwrap()).px,photocraft_compose::flatten(&base).px);
         let mut curve_input=original;picker_input_recipe(&mut curve_input,"point",None);assert!(curve_input.advanced.unwrap().black_white.is_some());
@@ -1099,7 +1099,7 @@ mod startup_tests {
 #[tauri::command]
 pub async fn edit_preview_auto_levels(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value)->Result<super::recipe::Levels,String>{
     let mut recipe=recipe::parse_recipe(&recipe)?;
-    if let Some(a)=recipe.advanced.as_mut(){a.levels=None;a.curves.clear();a.channel_curves=Default::default();a.parametric_curve=None;a.hsl.clear();a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.color_grading=None;a.lookup=None;}
+    if let Some(a)=recipe.advanced.as_mut(){a.levels=None;a.curves.clear();a.channel_curves=Default::default();a.parametric_curve=None;a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.color_grading=None;a.lookup=None;}
     recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();
     run_blocking(state.inner().clone(),move |_|{
         let base=interactive_source(&session_id)?;

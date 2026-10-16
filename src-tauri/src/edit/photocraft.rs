@@ -45,13 +45,6 @@ pub(super) struct AdjustmentSpec {
 /// 导出与增量预览共享原生参数，避免两条路径的操作顺序/默认值分叉。
 pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec>,String> {
     let mut specs = Vec::new();
-    if let Some(a)=recipe.legacy_adjustments {
-        use photocraft_engine::doc::{Adjustment,adjust::{CurvePoint,ToneSpace}};
-        let slope=(1.0+a.brightness/100.0)*(1.0+a.contrast/100.0);
-        let intercept=-127.5*a.contrast/100.0;
-        let points=(0..256).map(|x|CurvePoint{input:x as f32/255.0,output:((slope*f64::from(x)+intercept).clamp(0.0,255.0)/255.0) as f32}).collect();
-        specs.push(AdjustmentSpec{native:Some(Adjustment::Curves{master:points,per_channel:Default::default(),space:ToneSpace::Rgb,black:Vec::new()}),key:"legacy-light",kind:"curves",params:json!({"legacy":a}),luminosity:false,opacity:1.0});
-    }
     let mut add = |key, kind, params, luminosity| {
         specs.push(AdjustmentSpec {
             native:None,
@@ -62,13 +55,6 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             opacity:1.0,
         })
     };
-    if let Some(a)=recipe.legacy_adjustments {
-        if a.saturation!=0.0 {
-            let saturation=1.0+a.saturation/100.0;
-            let matrix:[[f64;4];3]=std::array::from_fn(|row|std::array::from_fn(|column|if column==3 {0.0} else {100.0*((1.0-saturation)*[0.2126,0.7152,0.0722][column]+if row==column {saturation} else {0.0})}));
-            add("legacy-color","channelMixer",json!({"red":matrix[0],"green":matrix[1],"blue":matrix[2]}),false);
-        }
-    }
     if let Some(a) = recipe.adjustments {
         if a.brightness != 0.0 || a.contrast != 0.0 {
             add(
@@ -106,18 +92,10 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             false,
         );
     }
-    if !a.hsl.is_empty() {
-        add("hsl", "hueSaturation", json!(a.hsl), false);
-    }
     if let Some(b)=&a.color_balance {
         if b.shadows.iter().chain(&b.midtones).chain(&b.highlights).any(|v|*v!=0.0) {
             add("color-balance","colorBalance",json!({"shadows":b.shadows,"midtones":b.midtones,"highlights":b.highlights,"preserveLuminosity":b.preserve_luminosity}),false);
         }
-    }
-    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled&&b.weights_eight.is_none()) {
-        let mut params=json!({"reds":b.weights[0],"yellows":b.weights[1],"greens":b.weights[2],"cyans":b.weights[3],"blues":b.weights[4],"magentas":b.weights[5],"tint":b.tint.is_some()});
-        if let Some(color)=&b.tint {params["tintColor"]=json!(color);}
-        add("black-white","blackWhite",params,false);
     }
     if let Some(s)=a.selective_color.as_ref().filter(|s|s.ranges.values().flatten().any(|v|*v!=0.0)) {
         let mut params=serde_json::to_value(&s.ranges).map_err(|e|e.to_string())?;params["relative"]=json!(s.relative);
@@ -146,7 +124,7 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             true,
         );
     }
-    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled&&b.weights_eight.is_some()){
+    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled){
         let index=specs.iter().position(|s|["selective-color","curves","luminance"].contains(&s.key)).unwrap_or(specs.len());
         specs.insert(index,AdjustmentSpec{native:Some(super::color_mixer::black_white(b)?),key:"black-white-eight",kind:"colorLookup",params:json!(b),luminosity:false,opacity:1.0});
     }
@@ -549,7 +527,7 @@ fn export_source(path:&std::path::Path,recipe:&EditRecipe,progress:&dyn Fn(&str)
 pub(super) fn prepare_export_document_16(path:&std::path::Path,recipe:&EditRecipe,long_edge:Option<u32>,progress:&dyn Fn(&str),sixteen_bit:bool)->Result<Document,String>{
     progress("decode");
     let (mut base,values)=export_source(path,recipe,progress)?;
-    if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16&&recipe.color_pipeline.as_ref().is_none_or(|p|p.version!=2) {
+    if sixteen_bit&&base.depth!=photocraft_engine::doc::SampleType::U16&&recipe.color_pipeline.is_none() {
         let image=photocraft_io::document_to_image(&base,&mut Vec::new()).map_err(|e|e.to_string())?.convert(photocraft_codecs::ChannelLayout::Rgba,photocraft_codecs::SampleType::U16);
         base=super::source::from_image("16-bit output source",&image)?;
     }
@@ -656,24 +634,6 @@ mod migration_tests {
             let keep_gps=super::super::meta::MetaOptions{remove_gps:false,..opts.clone()};
             let bytes=lossless_with_metadata(&doc,extension,Some(source.get_ref()),&keep_gps).unwrap();
             let parsed=exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)).unwrap();assert!(parsed.get_field(exif::Tag::GPSLatitudeRef,exif::In::PRIMARY).is_some());
-        }
-    }
-    #[test]
-    fn historical_filters_migrate_without_changing_saved_pixel_values() {
-        let bytes:Vec<u8>=(0..256*3).map(|i|((i*73+19)%256) as u8).collect();
-        let image=photocraft_codecs::Image::from_u8(256,1,photocraft_codecs::ChannelLayout::Rgb,bytes.clone()).unwrap();
-        let base=super::super::source::from_image("Legacy",&image).unwrap();
-        for (brightness,contrast,saturation) in [(30.0,25.0,-60.0),(-35.0,-100.0,100.0),(100.0,100.0,80.0),(0.0,0.0,-100.0)] {
-            let adjustment=super::super::recipe::Adjustments{brightness,contrast,saturation};
-            let mut old=image::RgbImage::from_raw(256,1,bytes.clone()).unwrap();
-            super::super::render::apply_adjustments(&mut old,adjustment);
-            let recipe=super::super::recipe::parse_recipe(&json!({"version":1,"renderer":"photocraft","legacyAdjustments":adjustment})).unwrap();
-            let doc=render_document(&base,&recipe).unwrap();
-            let native=super::super::preview_renderer::Renderer::new(&base).canvas_document(&base,&recipe).unwrap();
-            assert_eq!(photocraft_compose::flatten(&doc).px,photocraft_compose::flatten(&native).px);
-            let actual=photocraft_compose::flatten(&doc);
-            let max=actual.px.iter().zip(old.pixels()).flat_map(|(p,old)|(0..3).map(move |ch|((p[ch]*255.0).round()-f32::from(old[ch])).abs())).fold(0.0,f32::max);
-            assert!(max<=1.0,"legacy pixel error {max}, params {adjustment:?}");
         }
     }
     #[test]

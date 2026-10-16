@@ -5043,7 +5043,6 @@ dependencies = [
 name = "photographer"
 version = "0.1.0-alpha"
 dependencies = [
- "ab_glyph",
  "avif-decode",
  "base64 0.22.1",
  "bincode",

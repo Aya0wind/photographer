@@ -10,7 +10,6 @@ import { useNativeEditorCanvas } from "../lib/useNativeEditorCanvas";
 import ActionPopover from "@/shared/components/ActionPopover";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
@@ -27,7 +26,6 @@ import {
   type EditRecipe,
   type ExportOptions,
 } from "@/ipc/api";
-import { useAssetThumbUrl } from "@/features/gallery/lib/thumbPipeline";
 import {
   defaultRecipe,
   initRecipeHistory,
@@ -59,9 +57,6 @@ import MetadataFields from "./MetadataFields";
  * - 未保存改动关闭需确认；重置需确认后 editRecipeDelete。
  */
 
-const THUMB_SIZE = 1280;
-const RAW_EMBED_SIZE = 6000;
-const RAW_FALLBACK_SIZE = 2048;
 
 /** 画笔/文字共用色板（照片标注常用色） */
 const PALETTE = ["#FFFFFF", "#111111", "#F0A83C", "#FF5252", "#4FC3F7", "#66BB6A"];
@@ -70,14 +65,6 @@ const PALETTE = ["#FFFFFF", "#111111", "#F0A83C", "#FF5252", "#4FC3F7", "#66BB6A
 function syncLongEdge(value: string): { longEdge: number | null } | null {
   const parsed = parseLongEdge(value);
   return Number.isNaN(parsed) ? null : { longEdge: parsed };
-}
-
-function safeConvert(path: string): string | null {
-  try {
-    return convertFileSrc(path) || null;
-  } catch {
-    return null;
-  }
 }
 
 function errorMessage(err: unknown): string {
@@ -119,7 +106,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     (recipe)=>initRecipeHistory(recipe??(asset.libraryId ? {...defaultRecipe(),renderer:"photocraft"} : null)),
   );
   const present = history.present;
-  const usingPhotocraft=present.renderer==="photocraft";
 
   const [savedRecipe, setSavedRecipe] = useState<EditRecipe | null>(initial.recipe);
   const baseline = useMemo(
@@ -145,38 +131,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   const dirty = recipeDirty || metadataDirty;
   const [zoom, setZoom] = useState(1);
   const zoomHUD=useZoomIndicator(zoom);
-  // --- 图源（复用查看器分级回退链） ---------------------------------------------------
-  const originalUrl = useMemo(
-    () => (asset.kind === "photo" ? safeConvert(asset.path) : null),
-    [asset.kind, asset.path],
-  );
-  const [photoStage, setPhotoStage] = useState<"original" | "thumb">("original");
-  useEffect(() => {
-    setPhotoStage("original");
-    setBaseSize(null);
-  }, [asset.id, originalUrl]);
-  const thumb = useAssetThumbUrl(asset.id, THUMB_SIZE, !usingPhotocraft && (photoStage === "thumb" || asset.kind === "raw"), "high");
-  const rawEmbed = useAssetThumbUrl(asset.id, RAW_EMBED_SIZE, !usingPhotocraft && asset.kind === "raw", "high");
-  const rawFull = useAssetThumbUrl(
-    asset.id,
-    RAW_FALLBACK_SIZE,
-    !usingPhotocraft && asset.kind === "raw" && rawEmbed.status === "failed",
-    "high",
-  );
-  const src =
-    asset.kind === "photo"
-      ? photoStage === "original" && originalUrl !== null
-        ? originalUrl
-        : thumb.url
-      : (rawEmbed.url ?? rawFull.url ?? thumb.url);
-  const failed =
-    asset.kind === "photo"
-      ? photoStage === "thumb" && thumb.status === "failed"
-      : rawEmbed.status === "failed" && rawFull.status === "failed" && thumb.status === "failed";
-  // 源文件被移动/删除（管线终态）：即便有历史缓存缩略图，编辑/导出都作用于源文件，
-  // 缺源即无法编辑——画布区替换为缺失文案，保存/导出禁用。
-  const missing = thumb.status === "missing";
-
   const fallbackSize = useMemo<Size | null>(
     () =>
       asset.width != null && asset.height != null && asset.width > 0 && asset.height > 0
@@ -184,13 +138,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         : null,
     [asset.width, asset.height],
   );
-  /** 等值短路：相同尺寸不落新引用（避免 EditorCanvas 的 ready effect 反复触发） */
-  const handleImageReady = useCallback((size: Size) => {
-    setBaseSize((prev) =>
-      prev !== null && prev.width === size.width && prev.height === size.height ? prev : size,
-    );
-  }, []);
-
   // --- 工具与选项 ---------------------------------------------------------------------
   const [tool, setTool] = useState<EditorTool>("adjust");
   const [cropRatio, setCropRatio] = useState<number | null>(null);
@@ -217,7 +164,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
     (next: EditorTool) => {
       if (next === tool) return;
       if (tool === "crop" && cropDraft && next !== "crop") {
-        const crop = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
+        const crop = clampCrop(cropDraft,1e-6);
         dispatch({ type: "cropConfirm", crop: isFullCrop(crop) ? null : crop });
       }
       if (next === "crop") {
@@ -232,12 +179,12 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       setTool(next);
       setZoom(1);
     },
-    [present.crop, present.rotateQuarter, tool, cropDraft,usingPhotocraft],
+    [present.crop, present.rotateQuarter, tool, cropDraft],
   );
 
   function applyCropDraft(): void {
     if (cropDraft === null) return;
-    const clamped = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
+    const clamped = clampCrop(cropDraft,1e-6);
     dispatch({ type: "cropConfirm", crop: isFullCrop(clamped) ? null : clamped });
     setTool("adjust");
     setCropDraft(null);
@@ -250,7 +197,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   function rotateImage(delta: 1 | -1): void {
     let next = history;
     if (tool === "crop" && cropDraft) {
-      const crop = clampCrop(cropDraft,usingPhotocraft?1e-6:0.05);
+      const crop = clampCrop(cropDraft,1e-6);
       const action = { type: "cropApply" as const, crop: isFullCrop(crop) ? null : crop };
       next = recipeReducer(next, action, ctxRef.current);
       dispatch(action);
@@ -374,7 +321,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         setMetadata(saved); setSavedMetadata(saved);
         onMetadataSaved?.(saved);
       }
-      const toSave = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,usingPhotocraft?1e-6:0.05)) ? null : clampCrop(cropDraft,usingPhotocraft?1e-6:0.05) }, ctxRef.current).present : present;
+      const toSave = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,1e-6)) ? null : clampCrop(cropDraft,1e-6) }, ctxRef.current).present : present;
       const state = await editRecipeSave(asset.id, recipeForPersist(toSave));
       if (tool === "crop" && cropDraft) { applyCropDraft(); }
       setSavedRecipe(state.recipe);
@@ -406,7 +353,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   }
 
   async function runExport(options: ExportOptions): Promise<void> {
-    const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,usingPhotocraft?1e-6:0.05)) ? null : clampCrop(cropDraft,usingPhotocraft?1e-6:0.05) }, ctxRef.current).present : present;
+    const recipe = tool === "crop" && cropDraft ? recipeReducer(history, { type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,1e-6)) ? null : clampCrop(cropDraft,1e-6) }, ctxRef.current).present : present;
     const result = await exportRun(asset.id, recipeForPersist(recipe), options);
     if (!result.ok) {
       setToast({
@@ -422,7 +369,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   /** 导出（右上按钮）：系统目录选择器 → 确定即导出；取消静默。
    *  文件名/长边/质量取「输出」面板当前值（2026-09-29 导出重做定案）。 */
   async function exportToFolder(): Promise<void> {
-    if (missing) return;
     let dir: string | null = null;
     try {
       dir = await openDialog({ directory: true });
@@ -458,7 +404,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   // --- 关闭确认 / 快捷键 ------------------------------------------------------------------
   const [confirm, setConfirm] = useState<"close" | "reset" | null>(null);
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,nativeRecipe,nativeHost,
-    usingPhotocraft && ["adjust","view","filters","output","metadata","crop"].includes(tool) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error && !missing && !failed,
+    ["adjust","view","filters","output","metadata","crop"].includes(tool) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error,
     false,preview.session?.sourceUrl,String(zoomHUD.visible));
   useEffect(()=>setNativeActive(nativeCanvas),[nativeCanvas]);
   function requestClose(): void {
@@ -488,7 +434,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        if (!missing) void save();
+        void save();
         return;
       }
       if (inInput) return;
@@ -583,8 +529,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           <button
             type="button"
             onClick={() => void save()}
-            disabled={saving || missing}
-            title={missing ? t("editor.missingSource") : undefined}
+            disabled={saving}
             className="h-9 rounded-md bg-accent px-4 text-xs font-semibold text-black shadow-sm transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-save"
           >
@@ -593,8 +538,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           <button
             type="button"
             onClick={() => setAlbumPickerOpen(true)}
-            disabled={missing}
-            title={missing ? t("editor.missingSource") : undefined}
             className="h-9 rounded-md border border-edge bg-panel/40 px-4 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-export-album"
           >
@@ -603,8 +546,6 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           <button
             type="button"
             onClick={() => void exportToFolder()}
-            disabled={missing}
-            title={missing ? t("editor.missingSource") : undefined}
             className="h-9 rounded-md border border-edge bg-panel/40 px-4 text-xs font-medium text-text-secondary transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
             data-testid="editor-export"
           >
@@ -654,27 +595,14 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           <button type="button" aria-label={t("editor.zoomIn")} onClick={() => {zoomHUD.wake();setZoom((v) => Math.min(4, v * 1.25));}} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
         </div>
 
-          {preview.error ? <div role="alert" className="m-auto space-y-3 p-5 text-sm text-text-secondary"><p>{preview.error}</p><button type="button" onClick={preview.reload} className="rounded-lg border border-edge px-3 py-2">{t("editor.reload")}</button></div> : failed ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted" data-testid="editor-load-failed">
-              <span className="text-xs">{t("editor.loadFailed")}</span>
-            </div>
-          ) : missing ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-2 text-text-muted" data-testid="editor-load-missing">
-              <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-400" aria-hidden="true">
-                <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                <path d="M4.5 17l4.5-4.5 3.5 3.5 3-3 4 4" />
-                <path d="M14.5 5.5l4 4M18.5 5.5l-4 4" />
-              </svg>
-              <span className="text-xs text-amber-300">{t("editor.missingSource")}</span>
-            </div>
-          ) : (
+          {preview.error ? <div role="alert" className="m-auto space-y-3 p-5 text-sm text-text-secondary"><p>{preview.error}</p><button type="button" onClick={preview.reload} className="rounded-lg border border-edge px-3 py-2">{t("editor.reload")}</button></div> : (
             <EditorCanvas
               straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((present.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(present,{angle},ctxRef.current);setCropDraft(remapDraftCrop(present,next,cropDraft,ctxRef.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
-              src={usingPhotocraft?preview.session?.sourceUrl??null:src}
-              adjustedSrc={usingPhotocraft?preview.url:null}
+              src={preview.session?.sourceUrl??null}
+              adjustedSrc={preview.url}
               nativeDisplay={nativeCanvas}
-              backendAdjustments={usingPhotocraft} nativeGeometry={usingPhotocraft} nativeAnnotations={usingPhotocraft}
-              sourceSize={usingPhotocraft?baseSize:null}
+              backendAdjustments nativeGeometry nativeAnnotations
+              sourceSize={baseSize}
               zoom={zoom}
               onZoom={(factor) => {zoomHUD.wake();setZoom((value) => Math.min(4, Math.max(0.25, value * factor)));}}
               fallbackSize={fallbackSize}
@@ -691,14 +619,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
               onStrokeCommit={handleStrokeCommit}
               onGestureStart={handleGestureStart}
               onGestureEnd={handleGestureEnd}
-              onImageReady={usingPhotocraft?()=>{}:handleImageReady}
-              onImageError={() => {
-                if(usingPhotocraft){preview.reload();return;}
-                if (asset.kind === "photo" && photoStage === "original") setPhotoStage("thumb");
-              }}
+              onImageReady={()=>{}}
+              onImageError={preview.reload}
             />
           )}
-          {(usingPhotocraft?preview.loading:src===null) && !failed && !missing && (
+          {preview.loading && !preview.error && (
             <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2" data-testid="editor-loading">
               <div className="h-8 w-8 animate-spin rounded-full border-2 border-edge border-t-accent" />
             </div>
@@ -763,8 +688,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
                   </button>
                 ))}
               </div>
-              {usingPhotocraft && <div className="mx-auto mb-3 max-w-sm text-left"><GeometryPanel recipe={present} dispatch={dispatch} cropDraft={cropDraft} cropRatio={cropRatio} context={ctxRef.current} begin={handleGestureStart} end={handleGestureEnd} onCropChange={crop=>{if(crop===null)setCropRatio(null);setCropDraft(crop??{x:0,y:0,w:1,h:1});}}/><button type="button" className="mt-2 w-full rounded-lg border border-edge py-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" aria-pressed={straightening} onClick={()=>setStraightening(!straightening)}>{t("editor.geometry.straighten")}</button>{straightening&&<p className="mt-2 text-xs text-text-muted">{t("editor.geometry.straightenHint")}</p>}</div>}
-              {usingPhotocraft&&<div className="mx-auto mb-3 max-w-sm text-left"><CropDimensions recipe={present} context={ctxRef.current} crop={cropDraft} onChange={setCropDraft} onFree={()=>setCropRatio(null)}/></div>}
+              {<div className="mx-auto mb-3 max-w-sm text-left"><GeometryPanel recipe={present} dispatch={dispatch} cropDraft={cropDraft} cropRatio={cropRatio} context={ctxRef.current} begin={handleGestureStart} end={handleGestureEnd} onCropChange={crop=>{if(crop===null)setCropRatio(null);setCropDraft(crop??{x:0,y:0,w:1,h:1});}}/><button type="button" className="mt-2 w-full rounded-lg border border-edge py-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" aria-pressed={straightening} onClick={()=>setStraightening(!straightening)}>{t("editor.geometry.straighten")}</button>{straightening&&<p className="mt-2 text-xs text-text-muted">{t("editor.geometry.straightenHint")}</p>}</div>}
+              {<div className="mx-auto mb-3 max-w-sm text-left"><CropDimensions recipe={present} context={ctxRef.current} crop={cropDraft} onChange={setCropDraft} onFree={()=>setCropRatio(null)}/></div>}
               <p className="mb-2 text-[11px] leading-relaxed text-text-muted">{t("editor.crop.hint")}</p>
               <div className="mx-auto flex max-w-xs gap-2">
                 <button
@@ -801,12 +726,12 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
         {/* 右侧栏：工具选项 + 输出设置 */}
         {["text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
-          {usingPhotocraft && tool==="filters" && <LutPanel onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
+          {tool==="filters" && <LutPanel onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);
             setExportDraft((draft) => ({ ...draft, author: value.author, copyright: value.copyright, keywords: value.keywords.join(", "), removeGps: value.gpsLat === null && value.gpsLon === null }));
           }} /> : metadataError ? <div role="alert" className="space-y-3 text-sm text-red-400"><p>{t(metadataError, { defaultValue: metadataError })}</p><button type="button" className="rounded-md border border-edge px-3 py-2 text-text-primary" onClick={() => setMetadataRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : <div className="flex items-center gap-3 text-sm text-text-muted"><span className="h-5 w-5 animate-spin rounded-full border-2 border-edge border-t-accent" />{t("editor.metadata.loading")}</div>)}
-          {tool === "adjust" && <section className="space-y-6"><h3 className="text-sm font-semibold text-text-primary">{t("editor.adjust.title")}</h3>{([['brightness', t("editor.adjust.brightness")], ['contrast', t("editor.adjust.contrast")], ['saturation', t("editor.adjust.saturation")]] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-3 flex justify-between text-xs text-text-secondary">{label}<span className="tabular-nums">{present.adjustments?.[key] ?? 0}</span></span><input type="range" min={usingPhotocraft && key==="contrast"?-50:-100} max="100" value={present.adjustments?.[key] ?? 0} onPointerDown={handleGestureStart} onPointerUp={handleGestureEnd} onChange={(e) => dispatch({ type: "adjust", patch: { [key]: Number(e.target.value) }, record: gestureSnapshotRef.current === null })} className="w-full accent-[#F0A83C]" data-testid={`editor-adjust-${key}`} /></label>)}<button type="button" className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary" onClick={() => dispatch({ type: "adjust", patch: { brightness: 0, contrast: 0, saturation: 0 } })}>{t("editor.adjust.reset")}</button></section>}
+          {tool === "adjust" && <section className="space-y-6"><h3 className="text-sm font-semibold text-text-primary">{t("editor.adjust.title")}</h3>{([['brightness', t("editor.adjust.brightness")], ['contrast', t("editor.adjust.contrast")], ['saturation', t("editor.adjust.saturation")]] as const).map(([key, label]) => <label key={key} className="block"><span className="mb-3 flex justify-between text-xs text-text-secondary">{label}<span className="tabular-nums">{present.adjustments?.[key] ?? 0}</span></span><input type="range" min={key==="contrast"?-50:-100} max="100" value={present.adjustments?.[key] ?? 0} onPointerDown={handleGestureStart} onPointerUp={handleGestureEnd} onChange={(e) => dispatch({ type: "adjust", patch: { [key]: Number(e.target.value) }, record: gestureSnapshotRef.current === null })} className="w-full accent-[#F0A83C]" data-testid={`editor-adjust-${key}`} /></label>)}<button type="button" className="rounded-md border border-edge px-3 py-2 text-xs text-text-secondary" onClick={() => dispatch({ type: "adjust", patch: { brightness: 0, contrast: 0, saturation: 0 } })}>{t("editor.adjust.reset")}</button></section>}
           {tool === "filters" && <section className="space-y-4"><h3 className="text-sm font-semibold text-text-primary">{t("editor.tool.filters")}</h3><div className="grid grid-cols-2 gap-2">{([
             [t("editor.filter.original"), 0, 0, 0], [t("editor.filter.vivid"), 5, 15, 25], [t("editor.filter.soft"), 8, -15, -10], [t("editor.filter.monochrome"), 0, 10, -100],
           ] as const).map(([name, brightness, contrast, saturation]) => <button key={name} type="button" onClick={() => dispatch({ type: "adjust", patch: { brightness, contrast, saturation } })} aria-pressed={(present.adjustments?.brightness ?? 0) === brightness && (present.adjustments?.contrast ?? 0) === contrast && (present.adjustments?.saturation ?? 0) === saturation} className="h-20 rounded-lg border border-edge bg-panel text-sm text-text-secondary hover:border-accent aria-pressed:border-accent aria-pressed:bg-accent/10 aria-pressed:text-accent">{name}</button>)}</div></section>}

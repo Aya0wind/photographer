@@ -66,7 +66,7 @@ pub async fn edit_rawlab_available(
 #[derive(Clone, PartialEq)]
 struct ColorKey {
     film: Option<String>,
-    profile: Option<super::recipe::BaseProfile>,
+    profile: super::recipe::BaseProfile,
     strength: f32,
     exposure: f32,
     wb: [f32; 3],
@@ -177,7 +177,7 @@ fn worker() -> Result<&'static mpsc::SyncSender<Job>, String> {
         .map_err(Clone::clone)
 }
 fn mix_profile(linear: &[f32], size: [u32;2], key: &ColorKey, film: Option<Vec<f32>>) -> Vec<f32> {
-    let Some(profile) = key.profile else { return film.unwrap_or_default(); };
+    let profile=key.profile;
     let film = match film { Some(film) if key.strength == 1.0 => return film, other => other };
     let mut base = super::base_color::render(linear, size, profile, key.exposure, key.wb);
     if let Some(film) = film {
@@ -190,7 +190,7 @@ fn render_job<'a>(
     sessions: &mut HashMap<DocId, (ColorSession<'a>, usize, Instant)>,
     job: &Job,
 ) -> Result<Vec<f32>, String> {
-    let film = if job.key.profile.is_none() || job.key.film.is_some() {
+    let film = if job.key.film.is_some() {
         Some(render_film_job(backend, sessions, job)?)
     } else { None };
     Ok(mix_profile(&job.source.rgb, job.source.size, &job.key, film))
@@ -215,7 +215,7 @@ fn render_film_job<'a>(
         .transpose()?;
     let options = ColorOptions {
         lut_path: path,
-        strength: if job.key.profile.is_some() { 1.0 } else { job.key.strength },
+        strength: 1.0,
         gpu: GpuMode::Auto,
         exposure_ev: job.key.exposure,
         relative_white_balance: job.key.wb,
@@ -306,7 +306,7 @@ impl ColorCache {
                 result.recv().map_err(|_| "色彩工作线程已退出")??
             };
             let alpha = self.input.as_ref().and_then(|input| input.alpha.as_deref());
-            let mut doc = display_document(&rgb, [base.size.width, base.size.height], alpha, key.profile.is_some())?;
+            let mut doc = display_document(&rgb, [base.size.width, base.size.height], alpha)?;
             doc.metadata = base.metadata.clone();
             doc.resolution_dpi = base.resolution_dpi;
             self.output = Some((base.id, key, doc.clone()));
@@ -326,13 +326,12 @@ fn downstream_recipe(recipe: &EditRecipe) -> EditRecipe {
     }
     values
 }
-fn display_bytes(rgb: &[f32], alpha: Option<&[f32]>, floating: bool) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::with_capacity(rgb.len() / 3 * if floating { 16 } else { 8 });
+fn display_bytes(rgb: &[f32], alpha: Option<&[f32]>) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(rgb.len() / 3 * 16);
     for (i, p) in rgb.chunks_exact(3).enumerate() {
         for v in [p[0], p[1], p[2], alpha.map_or(1.0, |a| a[i])] {
             if !v.is_finite() { return Err("色彩结果包含无效数值".into()); }
-            if floating { bytes.extend(v.to_ne_bytes()); }
-            else { bytes.extend(((v.clamp(0.0, 1.0) * 65535.0).round() as u16).to_ne_bytes()); }
+            bytes.extend(v.to_ne_bytes());
         }
     }
     Ok(bytes)
@@ -341,7 +340,6 @@ fn display_document(
     rgb: &[f32],
     size: [u32; 2],
     alpha: Option<&[f32]>,
-    floating: bool,
 ) -> Result<Document, String> {
     use photocraft_engine::doc::{
         ColorMode, Layer, LayerContent, PixelFormat, SampleType, Size, Surface,
@@ -352,8 +350,8 @@ fn display_document(
         return Err("显示像素尺寸无效".into());
     }
     // Pack once straight into tiles; avoid float->codec->RGBA duplicate buffers.
-    let bytes = display_bytes(rgb, alpha, floating)?;
-    let depth = if floating { SampleType::F32 } else { SampleType::U16 };
+    let bytes = display_bytes(rgb, alpha)?;
+    let depth=SampleType::F32;
     let mut doc = Document::new(
         "RawLab display",
         Size::new(size[0], size[1]),
@@ -414,7 +412,7 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
         let opened = source::open(path)?;
         let input = linear(&opened.document)?;
         let rendered = export_color(&backend, &input.rgb, input.size, recipe, cancel)?;
-        let mut document = display_document(&rendered, input.size, input.alpha.as_deref(), recipe.color_pipeline.as_ref().is_some_and(|p|p.version==2))?;
+        let mut document = display_document(&rendered, input.size, input.alpha.as_deref())?;
         document.metadata = opened.document.metadata.clone();
         document.resolution_dpi = opened.document.resolution_dpi;
         return Ok((document, downstream_recipe(recipe)));
@@ -423,18 +421,18 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
     let size = linear.dimensions();
     let rendered = export_color(&backend, linear.rgb(), size, recipe, cancel)?;
     drop(linear);
-    Ok((display_document(&rendered, size, None, recipe.color_pipeline.as_ref().is_some_and(|p|p.version==2))?, downstream_recipe(recipe)))
+    Ok((display_document(&rendered, size, None)?, downstream_recipe(recipe)))
 }
 fn export_color(backend: &Backend, rgb: &[f32], size: [u32;2], recipe: &EditRecipe,
     cancel: &AtomicBool) -> Result<Vec<f32>, String> {
     let key = color_key(recipe)?;
-    if key.profile.is_some() && key.film.is_none() { return Ok(mix_profile(rgb,size,&key,None)); }
+    if key.film.is_none() { return Ok(mix_profile(rgb,size,&key,None)); }
     let film = key.film.as_ref().map(|id| super::film::path(id)).transpose()?;
     let film_path = film.as_ref().map(|p| p.to_str().ok_or("胶片路径不是 UTF-8")).transpose()?;
     let gpu = match EXPORT_GPU.load(Ordering::Acquire) { 0 => GpuMode::Off, 2 => GpuMode::Force, _ => GpuMode::Auto };
     if !matches!(gpu, GpuMode::Off) { super::export_worker::begin_gpu()?; }
     let mut session = backend.color_session(rgb, size)?;
-    let rendered = session.render(ColorOptions { lut_path: film_path, strength: if key.profile.is_some() { 1.0 } else { key.strength },
+    let rendered = session.render(ColorOptions { lut_path: film_path, strength: 1.0,
         gpu, exposure_ev: key.exposure, relative_white_balance: key.wb }, cancel)?;
     drop(session);
     if !matches!(gpu, GpuMode::Off) { super::export_worker::end_gpu()?; }

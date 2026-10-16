@@ -847,7 +847,7 @@ export interface AdvancedAdjustments {
   colorGrading?:{shadows:{hue:number;sat:number;lum:number};midtones:{hue:number;sat:number;lum:number};highlights:{hue:number;sat:number;lum:number};global:{hue:number;sat:number;lum:number};blending:number;balance:number};
   development?:DevelopmentAdjustments;
   colorBalance?:{shadows:[number,number,number];midtones:[number,number,number];highlights:[number,number,number];preserveLuminosity:boolean};
-  blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number];weightsEight?:[number,number,number,number,number,number,number,number];tint:string|null};
+  blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number,number,number];tint:string|null};
   selectiveColor?:{relative:boolean;ranges:Partial<Record<"reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"|"whites"|"neutrals"|"blacks",[number,number,number,number]>>};
   exposure: number;
   temperature: number;
@@ -858,7 +858,6 @@ export interface AdvancedAdjustments {
   channelCurves?: Partial<Record<"red" | "green" | "blue" | "luminance", [number, number][]>>;
   levels?: { black: number; white: number; gamma: number };
   hslEight?: Partial<Record<"reds"|"oranges"|"yellows"|"greens"|"cyans"|"blues"|"purples"|"magentas", {hue:number;saturation:number;lightness:number}>>;
-  hsl?: Partial<Record<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas", { hue: number; saturation: number; lightness: number }>>;
 }
 
 export interface EditLocalMask {
@@ -886,9 +885,8 @@ export interface EditRecipe {
   version: 1;
   /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
   renderer?: "photocraft";
-  colorPipeline?:{version:1|2;backend:"rawlab";coreRevision:string;baseProfile?:"standard"|"soft"|"neutral";relativeWhiteBalance?:[number,number,number];rawWhiteBalance?:{mode:"asShot"|"auto"}|{mode:"temperature";kelvin:number;tint:number};film?:{id:string;amount:number;enabled:boolean}};
+  colorPipeline?:{version:2;backend:"rawlab";coreRevision:string;baseProfile:"standard"|"soft"|"neutral";relativeWhiteBalance?:[number,number,number];rawWhiteBalance?:{mode:"asShot"|"auto"}|{mode:"temperature";kelvin:number;tint:number};film?:{id:string;amount:number;enabled:boolean}};
   advanced?: AdvancedAdjustments;
-  legacyAdjustments?:EditAdjustments;
   masks?:EditLocalMask[];
   rotateQuarter: 0 | 1 | 2 | 3;
   geometry?:{angle:number;flipHorizontal:boolean;flipVertical:boolean};

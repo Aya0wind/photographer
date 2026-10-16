@@ -83,7 +83,7 @@ it("sends split changes as view parameters and temporarily disables the split fo
 it("keeps the native child viewport when film settings and the prepared source change", async () => {
  const {rerender}=renderHook(({value,source})=>useNativeEditorCanvas("session",value,host,true,false,source),{initialProps:{value:recipe,source:"proxy"}});
  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe})));
- const film={...recipe,colorPipeline:{version:1 as const,backend:"rawlab" as const,coreRevision:"pinned"}};
+ const film={...recipe,colorPipeline:{version:2 as const,backend:"rawlab" as const,coreRevision:"pinned",baseProfile:"standard" as const}};
  rerender({value:film,source:"linear-raw"});
  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.objectContaining({recipe:film})));
  rerender({value:recipe,source:"linear-raw"});

@@ -3,7 +3,6 @@ import {useTranslation} from "react-i18next";
 import type {AdvancedAdjustments} from "@/ipc/api";
 import type {AdjustmentGroup} from "../lib/advancedRecipe";
 import Slider from "./AdjustmentSlider";
-export const BW_DEFAULTS:[number,number,number,number,number,number]=[40,60,40,60,20,80];
 const EIGHT_COLORS=["reds","oranges","yellows","greens","cyans","blues","purples","magentas"] as const;
 const BW_EIGHT:[number,number,number,number,number,number,number,number]=[40,50,60,40,60,20,50,80];
 const COLORS=["reds","yellows","greens","cyans","blues","magentas"] as const;
@@ -16,7 +15,7 @@ export default function ExtendedColorPanel({adjustments:a,onChange,onReset,begin
  const [tone,setTone]=useState<"shadows"|"midtones"|"highlights">("midtones");
  const [range,setRange]=useState<typeof ALL_COLORS[number]>("reds");
  const balance=a.colorBalance??{shadows:[0,0,0],midtones:[0,0,0],highlights:[0,0,0],preserveLuminosity:true};
- const bw:NonNullable<AdvancedAdjustments["blackWhite"]>=a.blackWhite??{enabled:false,weights:BW_DEFAULTS,weightsEight:BW_EIGHT,tint:null};
+ const bw:NonNullable<AdvancedAdjustments["blackWhite"]>=a.blackWhite??{enabled:false,weights:BW_EIGHT,tint:null};
  const selective=a.selectiveColor??{relative:true,ranges:{}};
  const values=selective.ranges[range]??[0,0,0,0];
  function reset(group:AdjustmentGroup,changed:boolean){return <button type="button" disabled={!changed} aria-label={t("advancedEditor.resetGroup",{group:t(`advancedEditor.extra.${group}`)})} className="rounded px-2 py-1 text-[11px] text-accent disabled:opacity-30" onClick={e=>{e.preventDefault();e.stopPropagation();end();onReset(group);}}>{t("editor.reset")}</button>;}
@@ -24,7 +23,7 @@ export default function ExtendedColorPanel({adjustments:a,onChange,onReset,begin
  function balanceChannel(index:number,value:number,record=true){
   const row:[number,number,number]=[...balance[tone]];row[index]=value;onChange({colorBalance:{...balance,[tone]:row}},record);
  }
- function bwChannel(index:number,value:number,record=true){if(bw.weightsEight){const weightsEight:[number,number,number,number,number,number,number,number]=[...bw.weightsEight];weightsEight[index]=value;onChange({blackWhite:{...bw,weightsEight}},record);}else{const weights:[number,number,number,number,number,number]=[...bw.weights];weights[index]=value;onChange({blackWhite:{...bw,weights}},record);}}
+ function bwChannel(index:number,value:number,record=true){const weights:[number,number,number,number,number,number,number,number]=[...bw.weights];weights[index]=value;onChange({blackWhite:{...bw,weights}},record);}
  function selectiveChannel(index:number,value:number,record=true){const row:[number,number,number,number]=[...values];row[index]=value;onChange({selectiveColor:{...selective,ranges:{...selective.ranges,[range]:row}}},record);}
  return <>
  {group("colorBalance",!!a.colorBalance,<>
@@ -36,8 +35,7 @@ export default function ExtendedColorPanel({adjustments:a,onChange,onReset,begin
  {group("blackWhite",!!a.blackWhite,<>
   <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={bw.enabled} onChange={e=>onChange({blackWhite:{...bw,enabled:e.target.checked}})}/>{t("advancedEditor.extra.enableBlackWhite")}</label>
   <fieldset disabled={!bw.enabled} className="space-y-2 disabled:opacity-40">
-   {!bw.weightsEight&&<button type="button" className="text-xs text-accent" onClick={()=>{end();onChange({blackWhite:{...bw,weightsEight:[bw.weights[0],(bw.weights[0]+bw.weights[1])/2,bw.weights[1],bw.weights[2],bw.weights[3],bw.weights[4],(bw.weights[4]+bw.weights[5])/2,bw.weights[5]]}});}}>{t("advancedEditor.mixer.upgradeBw")}</button>}
-   {(bw.weightsEight?EIGHT_COLORS:COLORS).map((key,index)=><Slider key={key} label={t(`advancedEditor.ranges.${key}`)} min={-200} max={300} value={(bw.weightsEight??bw.weights)[index]} defaultValue={(bw.weightsEight?BW_EIGHT:BW_DEFAULTS)[index]} onChange={v=>bwChannel(index,v,false)} onSet={v=>bwChannel(index,v)} onReset={()=>bwChannel(index,(bw.weightsEight?BW_EIGHT:BW_DEFAULTS)[index])} begin={begin} end={end}/>)}
+   {EIGHT_COLORS.map((key,index)=><Slider key={key} label={t(`advancedEditor.ranges.${key}`)} min={-200} max={300} value={bw.weights[index]} defaultValue={BW_EIGHT[index]} onChange={v=>bwChannel(index,v,false)} onSet={v=>bwChannel(index,v)} onReset={()=>bwChannel(index,BW_EIGHT[index])} begin={begin} end={end}/>)}
    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={bw.tint!==null} onChange={e=>onChange({blackWhite:{...bw,tint:e.target.checked?"#E1D3B3":null}})}/>{t("advancedEditor.extra.tint")}</label>
    {bw.tint&&<label className="flex items-center justify-between text-xs">{t("advancedEditor.extra.tintColor")}<input type="color" value={bw.tint} onChange={e=>onChange({blackWhite:{...bw,tint:e.target.value}})}/></label>}
   </fieldset>

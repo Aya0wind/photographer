@@ -99,7 +99,7 @@ it("a selected LUT is an edit and cannot be skipped as a neutral source",async()
   scheduler.close();
 });
 
-it("local tone and migrated filters cannot be skipped as a neutral source",async()=>{
+it("local tone cannot be skipped as a neutral source",async()=>{
  vi.mocked(editPreviewRender).mockResolvedValue("edited");
  let recipe=advancedRecipe();recipe.masks=[{id:"m",name:"Area",kind:"brush",enabled:true,inverted:false,density:100,feather:0,from:{x:0,y:0},to:{x:1,y:1},strokes:[],adjustments:{brightness:20,contrast:0,saturation:0}}];
  const callbacks={setUrl:vi.fn(),setError:vi.fn(),setPending:vi.fn()};
@@ -107,14 +107,12 @@ it("local tone and migrated filters cannot be skipped as a neutral source",async
  await vi.advanceTimersByTimeAsync(16);expect(editPreviewRender).toHaveBeenCalledTimes(1);
  recipe={...recipe,masks:[{...recipe.masks[0],enabled:false}]};scheduler.wake();
  await vi.advanceTimersByTimeAsync(16);expect(callbacks.setUrl).toHaveBeenLastCalledWith("source");
- recipe={...advancedRecipe(),legacyAdjustments:{brightness:10,contrast:5,saturation:-20}};scheduler.wake();
- await vi.advanceTimersByTimeAsync(16);expect(editPreviewRender).toHaveBeenCalledTimes(2);expect(callbacks.setUrl).toHaveBeenLastCalledWith("edited");
  scheduler.close();
 });
 
 it("recognizes extended color edits while skipping disabled black-white settings",async()=>{
  vi.mocked(editPreviewRender).mockResolvedValue("color-frame");
- let recipe=advancedRecipe();recipe.advanced!.blackWhite={enabled:false,weights:[40,60,40,60,20,80],tint:null};
+ let recipe=advancedRecipe();recipe.advanced!.blackWhite={enabled:false,weights:[40,50,60,40,60,20,50,80],tint:null};
  const callbacks={setUrl:vi.fn(),setError:vi.fn(),setPending:vi.fn()};const scheduler=startPreviewScheduler("s",()=>recipe,callbacks,"source");
  await vi.advanceTimersByTimeAsync(16);expect(editPreviewRender).not.toHaveBeenCalled();
  recipe={...recipe,advanced:{...recipe.advanced!,blackWhite:{...recipe.advanced!.blackWhite!,enabled:true}}};scheduler.wake();

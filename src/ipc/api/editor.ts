@@ -63,8 +63,8 @@ function normalizeEditRecipe(value: unknown): EditRecipe | null {
   const longEdge = numOf(output.longEdge);
   const quality = numOf(output.quality);
   return {
-    version: 1,
-    ...(r.renderer === "photocraft" ? { renderer: "photocraft" as const } : {}),
+    ...r,version: 1,
+    renderer:"photocraft",
     rotateQuarter: quarter as EditRecipe["rotateQuarter"],
     crop,
     textLayers,
