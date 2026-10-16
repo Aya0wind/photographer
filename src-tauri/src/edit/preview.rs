@@ -381,7 +381,7 @@ pub async fn edit_preview_prepare(
             raw,
             mut details,
         } = if values.as_ref().is_some_and(|r|r.color_pipeline.is_some()) {
-            let source=if sensor_raw{super::rawlab::open_with_balance(&path,Some(PREVIEW_EDGE),&generation.closed,values.as_ref().and_then(|r|r.color_pipeline.as_ref()).and_then(|p|p.raw_white_balance.as_ref()))?}else{
+            let source=if sensor_raw{super::rawlab::open_with_balance(&path,Some(PREVIEW_EDGE),&generation.closed,values.as_ref().and_then(|r|r.color_pipeline.as_ref()).and_then(|p|p.raw_white_balance.as_ref()),values.as_ref().and_then(|r|r.color_pipeline.as_ref()).and_then(|p|p.lens_correction.as_ref()))?}else{
                 let p=preview.lock().map_err(|_|"预览会话锁不可用")?;
                 source::Opened{original_size:p.original_size,document:p.document.clone(),raw:None,warnings:vec![]}
             };
@@ -655,6 +655,7 @@ fn sampled_hsl_range(rgb:[f32;3])->Option<&'static str> {
 fn white_balance_sample(p:&Preview,recipe:&recipe::EditRecipe,point:[f64;2],size:u32,local:bool)->Result<serde_json::Value,String>{
             if !p.sensor_raw||!p.pipeline_ready||local{return Err("请等待 RAW 预览就绪后取样".into());}
             let base=&p.document;
+            let point=super::lens::source_point(recipe.lens.as_ref(),base.size.width,base.size.height,point)?;
             let px=(point[0]*f64::from(base.size.width)).floor().min(f64::from(base.size.width-1)) as i32;
             let py=(point[1]*f64::from(base.size.height)).floor().min(f64::from(base.size.height-1)) as i32;
             let sample=sample_region(base,px,py,size)?;
@@ -715,7 +716,7 @@ pub async fn edit_preview_pick(
             let mut below=recipe.clone();below.masks.truncate(index);
             let base=photocraft::adjusted_document_scaled(&base,&below,source_scale)?;
             let mut local=recipe.clone();local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
-            local.color_pipeline=None;local.retouch.clear();
+            local.color_pipeline=None;local.lens=None;local.retouch.clear();
             (mask.advanced.clone().unwrap_or_default(),local,base)
         } else {(recipe.advanced.clone().unwrap_or_default(),recipe.clone(),base)};
         picker_input_recipe(&mut before,&picker,curve_channel.as_deref());

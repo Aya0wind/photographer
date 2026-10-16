@@ -219,7 +219,7 @@ pub struct SelectiveColor {
     pub relative:bool,pub ranges:std::collections::BTreeMap<String,[f64;4]>,
 }
 
-/// Local coverage is saved in original source coordinates, before geometry.
+/// Local coverage is saved in the lens-corrected source frame, before crop/rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub enum MaskKind { Brush, Linear, Radial, Range }
@@ -276,6 +276,8 @@ pub struct RetouchStroke {pub id:String,pub kind:String,pub source:NormPoint,pub
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub lens:Option<super::lens::Settings>,
     #[serde(default,skip_serializing_if="Vec::is_empty")]
     pub retouch:Vec<RetouchStroke>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -313,6 +315,8 @@ pub struct ColorPipeline {
     pub base_profile:BaseProfile,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub raw_white_balance:Option<RawWhiteBalance>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub lens_correction:Option<super::lens::ProfileSettings>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub relative_white_balance:Option<[f32;3]>,
     #[serde(default,skip_serializing_if="Option::is_none")]
@@ -500,8 +504,10 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             recipe.version
         ));
     }
+    if let Some(settings)=&mut recipe.lens{super::lens::normalize(settings)?;}
     if let Some(p)=&mut recipe.color_pipeline {
         if p.version!=2||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此显影配方的 core 版本或编辑引擎不受支持".into());}
+        if let Some(lens)=&p.lens_correction{super::lens::validate_profile(lens)?;}
         if let Some(RawWhiteBalance::Temperature{kelvin,tint})=&p.raw_white_balance{
             if !kelvin.is_finite()||!(2000.0..=50000.0).contains(kelvin)||!tint.is_finite()||!(-150.0..=150.0).contains(tint){return Err("RAW 色温或色调无效".into());}
         }

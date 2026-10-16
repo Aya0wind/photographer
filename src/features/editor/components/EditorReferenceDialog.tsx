@@ -14,8 +14,8 @@ export default function EditorReferenceDialog({asset,libraryId,recipe,current,qu
  useEffect(()=>{const close=(event:KeyboardEvent)=>{if(event.key==="Escape"){event.preventDefault();event.stopImmediatePropagation();onClose();}};window.addEventListener("keydown",close,true);return()=>window.removeEventListener("keydown",close,true);},[onClose]);
  const reference=useMemo<EditRecipe>(()=>{
   const value=saved??{...advancedRecipe(),colorPipeline:asset.kind==="raw"&&recipe.colorPipeline?{...recipe.colorPipeline,film:undefined,rawWhiteBalance:undefined,relativeWhiteBalance:undefined}:undefined};
-  return {...value,renderer:selected==="quick"?undefined:"photocraft",rotateQuarter:recipe.rotateQuarter,geometry:recipe.geometry,crop:recipe.crop,textLayers:[],brushStrokes:[]};
- },[saved,selected,recipe.rotateQuarter,recipe.geometry,recipe.crop,recipe.colorPipeline,asset.kind]);
+  return {...value,lens:recipe.lens,renderer:selected==="quick"?undefined:"photocraft",rotateQuarter:recipe.rotateQuarter,geometry:recipe.geometry,crop:recipe.crop,textLayers:[],brushStrokes:[]};
+ },[saved,selected,recipe.lens,recipe.rotateQuarter,recipe.geometry,recipe.crop,recipe.colorPipeline,asset.kind]);
  const preview=useEditorPreview(asset.id,reference,libraryId);
  function scroll(from:HTMLDivElement,to:HTMLDivElement|null){if(!to)return;to.scrollLeft=from.scrollLeft;to.scrollTop=from.scrollTop;}
  return <div className="fixed inset-0 z-[85] flex flex-col bg-bg p-4" role="dialog" aria-modal="true" aria-label={t("advancedEditor.reference.title")}>

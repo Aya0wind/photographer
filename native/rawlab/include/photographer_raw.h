@@ -20,6 +20,9 @@ typedef struct {
     float white_balance[4]; // zero: as-shot; otherwise absolute R/G/B/G
     uint32_t wb_mode; // 0 as-shot/custom multipliers, 1 auto, 2 absolute Kelvin/tint
     float temperature, tint;
+    const char *lens_database; // trusted bundled version_1 directory; null disables
+    const char *lens_profile; // empty: metadata match
+    uint32_t lens_flags; // 1 distortion, 2 TCA, 4 auto crop
     pc_raw_cancel cancelled;
     void *userdata;
 } pc_raw_options;
@@ -47,6 +50,8 @@ typedef struct {
 typedef struct pc_color_session pc_color_session;
 typedef struct { uint32_t size, input_transfer, output_transfer; } pc_lut_info;
 PC_RAW_API uint32_t pc_raw_abi_version(void);
+// Header-only metadata read, no RAW unpack. UTF-8 JSON in caller-owned storage.
+PC_RAW_API int pc_raw_lens_catalog(const char *path, const char *database, const char *profile, uint32_t flags, char *json, size_t capacity, pc_raw_result *diagnostics);
 // Color sessions copy immutable linear source once, reuse native device/upload,
 // and are created/rendered/destroyed on the same host worker thread.
 PC_RAW_API int pc_color_session_create(const float *rgb, uint32_t width, uint32_t height, pc_color_session **session, pc_raw_result *diagnostics);

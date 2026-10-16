@@ -42,6 +42,35 @@ def stage_builtin_films(destination):
     (films/'catalog.json').write_text(json.dumps(entries,ensure_ascii=False,indent=2),encoding='utf-8')
     shutil.copy2(upstream/'Shared/master-recipes.json',films/'master-recipes.json')
 
+def stage_native_binary(binary, destination):
+    if sys.platform == 'darwin':
+        from macos_runtime import assemble
+        import os
+        identity = os.environ.get('APPLE_SIGNING_IDENTITY') or None
+        team = os.environ.get('APPLE_TEAM_ID') if identity else None
+        assemble(binary.parent, destination, identity, team, entry_libraries=[binary.name])
+    else:
+        shutil.copy2(binary, destination / binary.name)
+
+def stage_lensfun(destination):
+    source=ROOT/'native/rawlab/upstream/lutools/third_party/lensfun'
+    database=destination/'lensfun/version_1'
+    if database.exists():shutil.rmtree(database)
+    shutil.copytree(source/'version_1',database)
+    if not list(database.glob('*.xml')):raise RuntimeError('Bundled Lensfun database is empty')
+    notices=destination/'licenses/lensfun'
+    notices.mkdir(parents=True,exist_ok=True)
+    for item in source.iterdir():
+        if item.is_file():shutil.copy2(item,notices/item.name)
+
+def stage_lens_sources(build, source):
+    lens_sources=build/'lens-dependencies/sources'
+    if lens_sources.is_dir():
+        shutil.copytree(lens_sources,source/'lens-dependencies',ignore=shutil.ignore_patterns('__pycache__'))
+
+def stage_lens_licenses(build, destination):
+    if (build/'licenses').is_dir():shutil.copytree(build/'licenses',destination,dirs_exist_ok=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--toolchain',type=Path)
@@ -64,9 +93,10 @@ def main():
     if not binary.is_file():raise RuntimeError('Native core missing; build it before staging')
     destination=ROOT/'src-tauri/resources/rawlab'
     destination.mkdir(parents=True,exist_ok=True)
-    shutil.copy2(binary,destination/name)
+    stage_native_binary(binary,destination)
     shutil.copy2(ROOT/'native/rawlab/upstream.lock.json',destination/'upstream.lock.json')
     stage_builtin_films(destination)
+    stage_lensfun(destination)
     # Bundle corresponding source and original licenses for the static dependencies.
     source=destination/'sources'
     if source.exists():shutil.rmtree(source)
@@ -83,11 +113,14 @@ def main():
     shutil.copytree(ROOT/'native/rawlab/src',source/'bridge/src')
     shutil.copytree(ROOT/'native/rawlab/include',source/'bridge/include')
     shutil.copy2(ROOT/'native/rawlab/CMakeLists.txt',source/'bridge/CMakeLists.txt')
+    shutil.copytree(ROOT/'native/rawlab/cmake',source/'bridge/cmake')
+    stage_lens_sources(build,source)
     shutil.copy2(ROOT/'native/rawlab/upstream.lock.json',source/'bridge/upstream.lock.json')
     # Ship a compact source archive rather than thousands of loose bundle files.
     shutil.make_archive(str(build/('photographer-rawlab-source-'+sys.platform)),'gztar',source)
     shutil.rmtree(source)
     licenses=destination/'licenses'
+    stage_lens_licenses(build,licenses)
     shutil.copytree(ROOT/'native/rawlab/upstream/lutools/third_party',licenses,ignore=shutil.ignore_patterns('*.xml','*.inc','*.hpp','*.h','*.cpp','*.c'),dirs_exist_ok=True)
     shutil.copy2(ROOT/'native/rawlab/upstream/LICENSE',licenses/'RawLab-GPL-3.0.txt')
     shutil.copy2(ROOT/'native/rawlab/upstream/docs/licensing.md',licenses/'RawLab-licensing.md')

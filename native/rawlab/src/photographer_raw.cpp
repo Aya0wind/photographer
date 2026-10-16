@@ -12,12 +12,15 @@
 #ifdef PC_GLES
 #include "gpu/gles_photo.h"
 #endif
+#include "nlohmann/json.hpp"
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <mutex>
+#include <cstring>
 #include <stdexcept>
 #include <type_traits>
 using namespace sony2fuji;
@@ -127,13 +130,79 @@ static void configure_white_balance(const pc_raw_options& values, RAWProcessOpti
             }
         }
 }
-extern "C" uint32_t pc_raw_abi_version(void) { return 3; }
+namespace {
+std::shared_ptr<LensCorrectionDatabase> lens_database(const char* path) {
+    if (!path || !*path) throw std::runtime_error("Bundled Lensfun database is missing");
+    static std::mutex mutex;
+    static std::string key;
+    static std::shared_ptr<LensCorrectionDatabase> cached;
+    std::lock_guard<std::mutex> guard(mutex);
+    if (key != path || !cached) { cached = LensCorrectionDatabase::load(path); key = path; }
+    if (!cached) throw std::runtime_error("Cannot load bundled Lensfun database");
+    return cached;
+}
+LensCorrectionOptions lens_options(const char* profile, uint32_t flags) {
+    if (flags > 7) throw std::runtime_error("Invalid Lensfun flags");
+    LensCorrectionOptions options;
+    options.profileID = profile ? profile : "";
+    options.distortion = (flags & 1) != 0;
+    options.tca = (flags & 2) != 0;
+    options.autoCrop = (flags & 4) != 0;
+    return options;
+}
+const char* lens_state(LensCorrectionState state) {
+    switch (state) {
+        case LensCorrectionState::Off: return "off";
+        case LensCorrectionState::Matched: return "matched";
+        case LensCorrectionState::NoDatabase: return "noDatabase";
+        case LensCorrectionState::NoCamera: return "noCamera";
+        case LensCorrectionState::NoLens: return "noLens";
+        case LensCorrectionState::Ambiguous: return "ambiguous";
+        case LensCorrectionState::NoCalibration: return "noCalibration";
+        case LensCorrectionState::MissingFocalLength: return "missingFocalLength";
+        case LensCorrectionState::EmbeddedGeometry: return "embeddedGeometry";
+        default: return "unsupportedInput";
+    }
+}
+void verify_lens_report(const LensCorrectionReport& report, const LensCorrectionOptions& options) {
+    if (!options.active()) return;
+    if (report.state != LensCorrectionState::Matched)
+        throw std::runtime_error(std::string("Lensfun correction unavailable: ") + lens_state(report.state));
+    if ((options.distortion && !report.appliedDistortion) || (options.tca && !report.appliedTCA))
+        throw std::runtime_error("Lensfun does not support every requested correction for this RAW; disable uncalibrated operations");
+}
+
+}
+extern "C" int pc_raw_lens_catalog(const char *path, const char *database, const char *profile, uint32_t flags, char *json, size_t capacity, pc_raw_result *diagnostics) {
+    if (!diagnostics) return -1;
+    *diagnostics = {};
+    try {
+        if (!path || !*path || !json || !capacity) throw std::runtime_error("Invalid Lensfun catalog request");
+        LensMetadata metadata;
+        check(RAWProcessor::readLensMetadata(path, metadata));
+        auto db = lens_database(database);
+        const auto report = db->inspect(metadata, lens_options(profile, flags));
+        nlohmann::json result = {{"state", lens_state(report.state)}, {"profileId", report.profile.id},
+            {"cameraMake", metadata.cameraMake}, {"cameraModel", metadata.cameraModel},
+            {"lensMake", metadata.lensMake}, {"lensModel", metadata.lensModel},
+            {"focalLength", metadata.focalLength}, {"aperture", metadata.aperture}, {"profiles", nlohmann::json::array()}};
+        for (const auto& item : db->profiles(metadata)) result["profiles"].push_back({
+            {"id", item.id}, {"maker", item.maker}, {"model", item.model},
+            {"distortion", item.hasDistortion}, {"tca", item.hasTCA}, {"matched", item.isMatch}});
+        const auto bytes = result.dump();
+        if (bytes.size() >= capacity) throw std::runtime_error("Lensfun catalog exceeds size limit");
+        std::memcpy(json, bytes.c_str(), bytes.size() + 1);
+        return 0;
+    } catch (const std::exception& error) { return failure(diagnostics, error.what()); }
+      catch (...) { return failure(diagnostics, "Lensfun catalog failure"); }
+}
+extern "C" uint32_t pc_raw_abi_version(void) { return 4; }
 extern "C" void pc_raw_free(void *owner) { delete static_cast<ImageData *>(owner); }
 extern "C" int pc_raw_decode(const char *path, const pc_raw_options *options, pc_raw_result *result) {
     if (!result) return -1;
     *result = {};
     try {
-        if (!path || !*path || !options || options->version != 2 || options->wb_mode > 2 || !options->max_pixels || options->half_size > 1)
+        if (!path || !*path || !options || options->version != 3 || options->wb_mode > 2 || !options->max_pixels || options->half_size > 1)
             throw std::runtime_error("Invalid RawLab decode request");
         cancel(options->cancelled, options->userdata);
         RAWProcessor raw;
@@ -149,8 +218,11 @@ extern "C" int pc_raw_decode(const char *path, const pc_raw_options *options, pc
         request.matchEmbeddedPreviewExposure = false;
         request.exposure = raw.getMetadataExposureEV(); // valid DNG baseline once
         configure_white_balance(*options, request);
+        request.lensCorrection = lens_options(options->lens_profile, options->lens_flags);
+        if (request.lensCorrection.active()) request.lensDatabase = lens_database(options->lens_database);
         auto image = std::make_unique<ImageData>();
         check(raw.process(request, *image));
+        verify_lens_report(raw.getLensCorrectionReport(), request.lensCorrection);
         cancel(options->cancelled, options->userdata);
         if (image->width <= 0 || image->height <= 0 || uint64_t(image->width) * image->height > options->max_pixels)
             throw std::runtime_error("Invalid RawLab output dimensions");

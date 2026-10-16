@@ -1,8 +1,9 @@
+import {rawSourceKey} from "./rawSourceKey";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { editPreviewClose, editPreviewOpen, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
 
 import {releasePreviewImage} from "./previewImages";
-import {useRawWhiteBalancePreview} from "./useRawWhiteBalancePreview";
+import {useRawSourcePreview} from "./useRawSourcePreview";
 import {useSmartPreview} from "./useSmartPreview";
 import { startPreviewScheduler } from "./previewScheduler";
 
@@ -40,16 +41,16 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
       if (cancelled) void editPreviewClose(id).catch(() => {});
       else {
         setQuickUrl(value.bitDepth==="8 bit preview"?value.sourceUrl:null);
-        setSession(value);if(value.rawlabReady)setSourceKey("null");
+        setSession(value);if(value.rawlabReady)setSourceKey("[null,null]");
 
       }
     }).catch((e: unknown) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; if (openedRequest.current === opening) openedRequest.current = null; if (id) void editPreviewClose(id).catch(() => {});const active=openedRequest.current;if(active&&active!==opening)void active.then(value=>editPreviewClose(value.sessionId)).catch(()=>{}); };
   }, [assetId, libraryId, retry, enabled]);
 
-  useSmartPreview({session,enabled:rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setSourceKey(value.sourceKey??JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null));setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
+  useSmartPreview({session,enabled:rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setSourceKey(value.sourceKey??rawSourceKey(latest.current));setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
 
-  const balance=useRawWhiteBalancePreview({assetId,libraryId,session,sourceKey,latest,onPrepared:value=>{
+  const balance=useRawSourcePreview({assetId,libraryId,session,sourceKey,latest,onPrepared:value=>{
     const previous=session?.sessionId;closeScheduler.current?.();openedRequest.current=Promise.resolve(value.session);
     setSourceKey(value.sourceKey??null);setUrl(value.frame);setSession(value.session);
     if(previous)void editPreviewClose(previous).catch(()=>{});

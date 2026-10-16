@@ -1,3 +1,5 @@
+import LensPanel from "./LensPanel";
+import type {LensGuide} from "../lib/lensGuides";
 import EditorDetailDialog from "./EditorDetailDialog";
 import RetouchPanel, {type RetouchBrush} from "./RetouchPanel";
 import EditorReferenceDialog from "./EditorReferenceDialog";
@@ -47,6 +49,7 @@ import ErrorModal from "@/shared/components/ErrorModal";
 import { ASSET_DRAG_TYPE, useAdvancedEditorStore, type EditorPhoto } from "../lib/advancedEditorStore";
 
 const TOOLS: { id: EditorTool; icon: string; label: string }[] = [
+  {id:"lens",icon:"M4 4h16v16H4zM8 4v16M16 4v16M4 8h16M4 16h16",label:"advancedEditor.lens.title"},
   { id:"retouch",icon:"M4 15 15 4l5 5-11 11H4v-5Z",label:"advancedEditor.retouch.title" },
   { id: "crop", icon: "M6 3v15h15M3 6h15v15", label: "editor.tool.cropRotate" },
   { id: "adjust", icon: "M4 7h16M4 12h16M4 17h16M8 4v6M16 9v6M10 14v6", label: "editor.tool.adjust" },
@@ -69,8 +72,10 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     undefined, () => ({ past: [], present: advancedRecipe(), future: [] }),
   );
   const recipe = history.present;
+  const [lensAxis,setLensAxis]=useState<LensGuide["axis"]|null>(null),[lensGuides,setLensGuides]=useState<LensGuide[]>([]),[lensGrid,setLensGrid]=useState(true);
   const [retouchBrush,setRetouchBrush]=useState<RetouchBrush>({kind:"clone",source:null,widthRel:0.02,hardness:0.5,opacity:1});
   const [tool, setTool] = useState<EditorTool>("adjust");
+  useEffect(()=>{setLensGuides([]);},[recipe.lens]);
   const [selectedComponent,setSelectedComponent]=useState<number|null>(null);
   const [selectedMask,setSelectedMask]=useState<string|null>(null);
   useEffect(()=>{setSelectedComponent(null);},[selectedMask]);
@@ -474,6 +479,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       </aside>}
       <main ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-[#202020]" style={{backgroundColor:preferences.background}} data-theme="dark">
         {libraryChanged ? <div role="alert" className="m-auto max-w-sm p-5 text-center text-sm text-text-secondary">{t("advancedEditor.libraryChanged")}</div> : projectError ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{projectError}</p><button className={BUTTON} onClick={() => setProjectRetry((v) => v + 1)}>{t("editor.reload")}</button></div> : preview.error ? <div role="alert" className="m-auto max-w-sm space-y-3 p-5 text-center text-sm text-text-secondary"><p>{preview.error}</p><button className={BUTTON} onClick={preview.reload}>{t("editor.reload")}</button></div> : <EditorCanvas
+          lensControls={tool==="lens"?{axis:recipe.lens?.enabled?lensAxis:null,lines:lensGuides,grid:lensGrid,onCommit:line=>setLensGuides(lines=>[...lines.filter(g=>g.axis!==line.axis),...lines.filter(g=>g.axis===line.axis).slice(-1),line])}:undefined}
           retouchControls={tool==="retouch"?{brush:retouchBrush,onBrush:setRetouchBrush,onCommit:stroke=>{if((recipe.retouch?.length??0)<256)dispatch({type:"applyProject",recipe:{...recipe,retouch:[...(recipe.retouch??[]),stroke]}});}}:undefined}
           onFitScale={setFitScale}
           onHoverPixel={pixel.hover}
@@ -516,7 +522,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         {preview.session?.warnings.map((warning) => <p key={warning} role="status" className="mb-2 text-xs text-amber-500">{warning}</p>)}
         <fieldset disabled={busy || exporting || compare || unavailable || target.active} className="space-y-3">
           <h3 className="text-sm font-semibold text-text-primary">{t(TOOLS.find((v) => v.id === tool)?.label ?? "advancedEditor.title")}</h3>
-          {tool==="retouch"?<RetouchPanel recipe={recipe} brush={retouchBrush} onBrush={setRetouchBrush} onChange={retouch=>dispatch({type:"applyProject",recipe:{...recipe,retouch}})}/>:tool==="mask"?<MaskPanel sessionId={preview.session?.sessionId} selectedComponent={selectedComponent} onSelectComponent={setSelectedComponent} cancel={cancelGesture} recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
+          {tool==="lens"?<LensPanel assetId={asset.id} libraryId={libraryId} isRaw={asset.kind==="raw"} preparing={preview.preparingWhiteBalance} onProfile={lensCorrection=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,lensCorrection}});}} recipe={recipe} value={recipe.lens} onChange={(lens,record=true)=>{const next={...recipe,lens};if(record)dispatch({type:"applyProject",recipe:next});else dispatch({type:"lens",value:lens,record:false});}} size={context.current} axis={lensAxis} onAxis={setLensAxis} lines={lensGuides} onLines={setLensGuides} grid={lensGrid} onGrid={setLensGrid} begin={beginGesture} end={endGesture}/>:tool==="retouch"?<RetouchPanel recipe={recipe} brush={retouchBrush} onBrush={setRetouchBrush} onChange={retouch=>dispatch({type:"applyProject",recipe:{...recipe,retouch}})}/>:tool==="mask"?<MaskPanel sessionId={preview.session?.sessionId} selectedComponent={selectedComponent} onSelectComponent={setSelectedComponent} cancel={cancelGesture} recipe={recipe} selected={selectedMask} onSelect={id=>{setSelectedMask(id);setPicker(null);setSample(null);setSamplingError(null);}} editing={maskEditing} onEditing={value=>{setMaskEditing(value);setPicker(null);setSample(null);}} brush={maskBrush} onBrush={setMaskBrush} dispatch={dispatch} begin={beginGesture} end={endGesture} onModalChange={setToolModalOpen}
             showOverlay={showMaskOverlay} onShowOverlay={setShowMaskOverlay} sampling={{...targetSampling,picker,setPicker,sample,hslRange,busy:samplingBusy||target.busy,histogram:[]}}/>:<AdvancedToolPanel previewSessionId={preview.session?.sessionId} exportExtras={<EditorExportSettings value={exportSettings} onChange={setExportSettings}/>} cancelGesture={cancelGesture} straightening={straightening} setStraightening={setStraightening} onModalChange={setToolModalOpen} sampling={{...targetSampling, picker, setPicker, sample, hslRange, busy:samplingBusy||target.busy, histogram: preview.session?.histogram ?? [] }} tool={tool} recipe={recipe} dispatch={dispatch} beginGesture={beginGesture} endGesture={endGesture}
             context={context} cropDraft={cropDraft} setCropDraft={setCropDraft} setTool={setTool} onCancelCrop={cancelCrop} cropRatio={cropRatio} setCropRatio={setCropRatio}
             color={color} setColor={setColor} selectedText={selectedText} setSelectedText={setSelectedText}

@@ -29,7 +29,7 @@ function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced">) {
       && Object.values(a.channelCurves??{}).every(points=>!points.length)));
 }
 function isNeutral(recipe:EditRecipe) {
- return !(recipe.retouch?.length) && !recipe.colorPipeline && !recipe.rotateQuarter && !(recipe.geometry?.angle||recipe.geometry?.flipHorizontal||recipe.geometry?.flipVertical) && !recipe.crop && !recipe.textLayers.length && !recipe.brushStrokes.length
+ return !(recipe.lens?.enabled) && !(recipe.retouch?.length) && !recipe.colorPipeline && !recipe.rotateQuarter && !(recipe.geometry?.angle||recipe.geometry?.flipHorizontal||recipe.geometry?.flipVertical) && !recipe.crop && !recipe.textLayers.length && !recipe.brushStrokes.length
   && neutralTone(recipe) && !(recipe.masks??[]).some(m=>m.enabled&&m.density>0&&!neutralTone(m));
 }
 

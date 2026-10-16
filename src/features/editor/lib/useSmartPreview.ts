@@ -1,3 +1,4 @@
+import {rawSourceKey} from "./rawSourceKey";
 import {useEffect,useRef,type MutableRefObject} from "react";
 import {editPreviewPrepare,editPreviewActivate,editPreviewRender,type EditRecipe,type EditorPreviewSession} from "@/ipc/api";
 import {preparePreviewImage,releasePreviewImage} from "./previewImages";
@@ -13,7 +14,7 @@ interface Options {
 
 export async function prepareFrame(sessionId:string,latest:MutableRefObject<EditRecipe>,current:()=>boolean,
   beginActivation:()=>boolean,onActivated:(session:EditorPreviewSession)=>void):Promise<PreparedFrame|null> {
-  const preparing=latest.current;const sourceKey=JSON.stringify(preparing.colorPipeline?.rawWhiteBalance??null);
+  const preparing=latest.current;const sourceKey=rawSourceKey(preparing);
   await editPreviewPrepare(sessionId,preparing);
   if(!beginActivation())return null;
   const requested=latest.current;
@@ -50,7 +51,7 @@ export function useSmartPreview({session,enabled,latest,onPrepared,onError}:Opti
     let activated:EditorPreviewSession|null=null;
     const current=()=>live.current&&currentSession.current===session.sessionId;
     const beginActivation=()=>{if(cancelled)return false;activating=true;return true;};
-    const requestedSourceKey=JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null);
+    const requestedSourceKey=rawSourceKey(latest.current);
     prepared.current=session.sessionId;
     void prepareFrame(session.sessionId,latest,current,beginActivation,value=>{activated=value;}).then(result=>{
       if(!result)return;

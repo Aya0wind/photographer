@@ -34,7 +34,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example rawlab_probe -- \
 
 ## 浮点合同和当前边界
 
-上游现有公共 C ABI 只暴露 RGB8/RGBA8，不适合保存浮点线性代理。因此另加窄 C ABI，直接调用已有 C++ 实现，返回原生拥有的 float RGB。桥 ABI 为 2，解码 options 版本仍为 1，色彩 options 为 2；旧桥在加载时明确拒绝，避免结构体布局错读。静态检查 RGB 布局；Rust 后端生命周期覆盖图像，Drop 用同库释放。线性 sRGB/D65、display-sRGB 使用不同 encoding 标记；方向已应用，不重复转正。
+上游现有公共 C ABI 只暴露 RGB8/RGBA8，不适合保存浮点线性代理。因此另加窄 C ABI，直接调用已有 C++ 实现，返回原生拥有的 float RGB。桥 ABI 为 4，解码 options 版本为 3，色彩 options 为 2；旧桥在加载时明确拒绝，避免结构体布局错读。静态检查 RGB 布局；Rust 后端生命周期覆盖图像，Drop 用同库释放。线性 sRGB/D65、display-sRGB 使用不同 encoding 标记；方向已应用，不重复转正。
 
 桥使用 as-shot 或绝对 R/G/B/G WB。关闭 RawLab 默认工作流 baseline 和 JPEG 测光，将已经校验的 DNG BaselineExposure 作为一次曝光输入；无隐式 +0.7 EV，会话支持显影后线性曝光与相对 RGB WB；后者不是传感器 Kelvin 白平衡。负值/超白直到 Log/显示阶段仍保留；LibRaw 内部仍有 16 位运算，不宣称全浮点去马赛克。
 
@@ -63,3 +63,16 @@ RawLab 相机补丁/校准数据原样保留；RawSpeed contributors 的四款�
 线性代理位于应用配置目录 smart-previews，缓存键包括来源路径/大小/mtime、core commit、处理合同和目标尺寸，带像素 SHA256 与尺寸/有限值校验；损坏会重新生成，磁盘上限 512 MiB。native 色彩会话最多两个、按源/上传估算上限 128 MiB、空闲 30 秒释放。这个估算不包含驱动、呈现器或上游内部的额外内存。后台显影和导出申请既有 CPU/512 MiB 内存许可；不可中断段结束前不提前释放。完整导出的色彩会话独立于预览队列，但共享 GPU 硬件仍可能产生竞争。
 
 预览和导出共用同一线性色彩阶段；曝光与相对 RGB WB 在下游配方归零。完整 RAW 仅在后台准备或导出显影，胶片强度/后续调整不触发重新读 RAW。JPEG 快速代理只能近似 RAW 色彩，切换时画面可变化；本批不提供绝对传感器 Kelvin 控件、HDR 呈现或 DCP 资源入口。
+
+
+### Lensfun
+
+复用固定 RawLab 中的 `LensCorrectionDatabase` 和 `RAWProcessOptions::lensCorrection`，在传感器 RGB 阶段应用畸变、横向色差和自动裁边。配置匹配仅调用 `readLensMetadata`，不解包 RAW。镜头变更和传感器白平衡共同决定线性代理缓存；预览、100% 检查和全尺寸导出使用同一设置。当前不对 JPEG 再套用 RAW 镜头配置。
+
+- 库源码版本和 SHA-256：`upstream/lutools/cmake/lens-dependencies.json`（Lensfun 0.3.4）。
+- 离线数据库：`upstream/lutools/third_party/lensfun/version_1/*.xml`，原快照日期 2026-10-12；说明和许可证在其父目录。
+- 打包后数据库：应用资源的 `rawlab/lensfun/version_1/`。`scripts/build-rawlab.py` 复制原文件，不在运行时联网更新。
+- Windows 复用上游静态 Lensfun/GLib 构建并独立缓存；macOS 构建固定 Lensfun 静态库，随桥打包并签名 GLib 的完整动态依赖闭包。Unix 开发环境需要 `lensfun >= 0.3.4` 的 pkg-config 开发文件。
+- 桥 ABI 4 的 `pc_raw_lens_catalog` 输出调用方持有的 UTF-8 JSON；解码选项 3 增加受信任数据库路径、稳定配置 ID 和操作标志。无匹配、无校准和原生不支持时明确报告失败，不伪装成已校正。
+
+未进行编译或实图验证；需在后续获准验证后检查不同机型、焦距、方向及打包安装环境。

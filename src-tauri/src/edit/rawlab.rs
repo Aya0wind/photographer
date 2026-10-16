@@ -14,6 +14,7 @@ use std::{
 
 static LIBRARY: OnceLock<PathBuf> = OnceLock::new();
 static BACKEND: OnceLock<Result<Arc<Backend>, String>> = OnceLock::new();
+static LENS_DATABASE:OnceLock<PathBuf>=OnceLock::new();
 static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 pub(crate) fn init(resources: &Path, config: &Path) {
     let name = if cfg!(windows) {
@@ -24,6 +25,7 @@ pub(crate) fn init(resources: &Path, config: &Path) {
         "libphotographer_raw.so"
     };
     let _ = LIBRARY.set(resources.join("rawlab").join(name));
+    let _ = LENS_DATABASE.set(resources.join("rawlab/lensfun/version_1"));
     let _ = CACHE_ROOT.set(config.join("smart-previews"));
 }
 pub(super) fn inspect_film(path: &Path) -> Result<photographer_media::rawlab::LutInfo, String> {
@@ -374,21 +376,23 @@ pub(super) fn display(
 }
 
 /// Full LibRaw source at export, bounded proxy at preparation. No source writes.
-pub(super) fn open(path:&Path,edge:Option<u32>,cancel:&AtomicBool)->Result<source::Opened,String>{open_with_balance(path,edge,cancel,None)}
-fn develop_options(wb:Option<&super::recipe::RawWhiteBalance>)->DevelopOptions{
+pub(super) fn open(path:&Path,edge:Option<u32>,cancel:&AtomicBool)->Result<source::Opened,String>{open_with_balance(path,edge,cancel,None,None)}
+fn develop_options(wb:Option<&super::recipe::RawWhiteBalance>,lens:Option<&super::lens::ProfileSettings>)->Result<DevelopOptions,String>{
     let mut options=DevelopOptions::default();
     match wb{
         Some(super::recipe::RawWhiteBalance::Auto)=>options.auto_white_balance=true,
         Some(super::recipe::RawWhiteBalance::Temperature{kelvin,tint})=>options.temperature=Some([*kelvin,*tint]),
         _=>{},
     }
-    options
+    options.lens=lens.filter(|l|l.distortion||l.tca).map(lens_options).transpose()?;
+    Ok(options)
 }
 pub(super) fn open_with_balance(
     path: &Path,
     edge: Option<u32>,
     cancel: &AtomicBool,
     wb:Option<&super::recipe::RawWhiteBalance>,
+    lens:Option<&super::lens::ProfileSettings>,
 ) -> Result<source::Opened, String> {
     let _cpu =
         crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
@@ -396,7 +400,7 @@ pub(super) fn open_with_balance(
     if cancel.load(Ordering::Acquire) {
         return Err("RAW 准备已取消".into());
     }
-    open_inner(path, edge, cancel,wb)
+    open_inner(path, edge, cancel,wb,lens)
 }
 // Direct test callers retain Auto; isolated application workers select Force/Off.
 static EXPORT_GPU: AtomicU8 = AtomicU8::new(1);
@@ -409,6 +413,7 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
     let _memory = crate::tasks::index_budget::memory_budget().acquire(512);
     let backend = backend()?;
     if !is_raw_path(path) {
+        if recipe.color_pipeline.as_ref().and_then(|p|p.lens_correction.as_ref()).is_some_and(|l|l.distortion||l.tca){return Err("Lensfun 镜头配置仅适用于 RAW 照片".into());}
         if recipe.color_pipeline.as_ref().is_some_and(|p|p.raw_white_balance.is_some()){return Err("传感器白平衡仅适用于 RAW 照片".into());}
         let opened = source::open(path)?;
         let input = linear(&opened.document)?;
@@ -418,7 +423,7 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
         document.resolution_dpi = opened.document.resolution_dpi;
         return Ok((document, downstream_recipe(recipe)));
     }
-    let linear = backend.develop(path.to_str().ok_or("RAW 路径不是 UTF-8")?, develop_options(recipe.color_pipeline.as_ref().and_then(|p|p.raw_white_balance.as_ref())), cancel)?;
+    let linear = backend.develop(path.to_str().ok_or("RAW 路径不是 UTF-8")?, develop_options(recipe.color_pipeline.as_ref().and_then(|p|p.raw_white_balance.as_ref()),recipe.color_pipeline.as_ref().and_then(|p|p.lens_correction.as_ref()))?, cancel)?;
     let size = linear.dimensions();
     let rendered = export_color(&backend, linear.rgb(), size, recipe, cancel)?;
     drop(linear);
@@ -445,14 +450,15 @@ fn open_inner(
     edge: Option<u32>,
     cancel: &AtomicBool,
     wb:Option<&super::recipe::RawWhiteBalance>,
+    lens:Option<&super::lens::ProfileSettings>,
 ) -> Result<source::Opened, String> {
     if cancel.load(Ordering::Acquire) {
         return Err("RAW 准备已取消".into());
     }
     let cached = edge.and_then(|edge| super::linear_cache::path(CACHE_ROOT.get()?, path, edge)).map(|path|{
-        if matches!(wb,None|Some(super::recipe::RawWhiteBalance::AsShot)){return path;}
+        if matches!(wb,None|Some(super::recipe::RawWhiteBalance::AsShot))&&lens.is_none(){return path;}
         use sha2::Digest;
-        let key=serde_json::to_string(&wb).unwrap_or_default();
+        let key=serde_json::to_string(&(wb,lens,core_revision(),"lensfun-db-20261012")).unwrap_or_default();
         let stem=path.file_stem().unwrap_or_default().to_string_lossy();
         path.with_file_name(format!("{stem}-{:x}.linear",sha2::Sha256::digest(key.as_bytes())))
     });
@@ -470,7 +476,7 @@ fn open_inner(
     let backend = backend()?;
     let image = backend.develop(
         path.to_str().ok_or("RAW 路径不是 UTF-8")?,
-        develop_options(wb),
+        develop_options(wb,lens)?,
         cancel,
     )?;
     let original_size = image.dimensions();
@@ -544,3 +550,14 @@ mod tests {
 #[cfg(test)]
 #[path = "tests/rawlab_integration.rs"]
 mod rawlab_host_tests;
+
+fn lens_options(settings:&super::lens::ProfileSettings)->Result<photographer_media::rawlab::LensOptions,String>{
+    let path=LENS_DATABASE.get().ok_or("Lensfun 资源未初始化")?;
+    if !path.is_dir(){return Err("应用内 Lensfun 数据库缺失，请重新安装完整应用".into());}
+    Ok(photographer_media::rawlab::LensOptions{database:path.to_str().ok_or("镜头资源路径不是 UTF-8")?.into(),profile:settings.profile_id.clone(),flags:u32::from(settings.distortion)|(u32::from(settings.tca)<<1)|(u32::from(settings.auto_crop)<<2)})
+}
+pub(super) fn lens_catalog(path:&Path,settings:Option<&super::lens::ProfileSettings>)->Result<serde_json::Value,String>{
+    let defaults=super::lens::ProfileSettings{distortion:true,tca:true,auto_crop:true,profile_id:String::new()};
+    let json=backend()?.lens_catalog(path.to_str().ok_or("RAW 路径不是 UTF-8")?,&lens_options(settings.unwrap_or(&defaults))?)?;
+    serde_json::from_str(&json).map_err(|e|e.to_string())
+}

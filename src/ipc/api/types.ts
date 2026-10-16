@@ -874,7 +874,7 @@ export interface EditLocalMask {
   inverted:boolean;
   density:number;
   feather:number;
-  /** Normalized original source coordinates, unaffected by rotation/crop. */
+  /** Normalized lens-corrected source coordinates, unaffected by rotation/crop. */
   from:{x:number;y:number};
   to:{x:number;y:number};
   strokes:{points:{x:number;y:number}[];widthRel:number;hardness:number;opacity:number;flow:number;erase:boolean}[];
@@ -883,12 +883,15 @@ export interface EditLocalMask {
 }
 
 export interface EditRetouchStroke {id:string;kind:"clone"|"heal"|"redEye";source:{x:number;y:number};points:{x:number;y:number}[];widthRel:number;hardness:number;opacity:number}
+export interface EditorLensProfileSettings {distortion:boolean;tca:boolean;autoCrop:boolean;profileId:string}
+export interface EditorLensSettings {guide?:[number,number,number,number,number,number,number,number,number];enabled:boolean;distortion:number;redCyan:number;blueYellow:number;vignette:number;midpoint:number;horizontal:number;vertical:number;scale:number;purple:number;green:number;extendEdges:boolean}
 export interface EditRecipe {
+  lens?:EditorLensSettings;
   retouch?:EditRetouchStroke[];
   version: 1;
-  /** 缺省沿用历史渲染算法；新配方显式使用 PhotoCraft。 */
+  /** 当前编辑引擎。 */
   renderer?: "photocraft";
-  colorPipeline?:{version:2;backend:"rawlab";coreRevision:string;baseProfile:"standard"|"soft"|"neutral";relativeWhiteBalance?:[number,number,number];rawWhiteBalance?:{mode:"asShot"|"auto"}|{mode:"temperature";kelvin:number;tint:number};film?:{id:string;amount:number;enabled:boolean}};
+  colorPipeline?:{version:2;backend:"rawlab";coreRevision:string;baseProfile:"standard"|"soft"|"neutral";relativeWhiteBalance?:[number,number,number];lensCorrection?:EditorLensProfileSettings;rawWhiteBalance?:{mode:"asShot"|"auto"}|{mode:"temperature";kelvin:number;tint:number};film?:{id:string;amount:number;enabled:boolean}};
   advanced?: AdvancedAdjustments;
   masks?:EditLocalMask[];
   rotateQuarter: 0 | 1 | 2 | 3;

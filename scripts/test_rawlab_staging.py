@@ -32,6 +32,7 @@ class CachedStagingTests(unittest.TestCase):
                     "native/rawlab/upstream/lutools/CMakeLists.txt": "core build",
                     "native/rawlab/CMakeLists.txt": "bridge build",
                     "native/rawlab/src/bridge.cpp": "bridge source",
+                    "native/rawlab/cmake/lensfun-macos.cmake": "Lensfun build",
                     "native/rawlab/include/bridge.h": "bridge header",
                     "native/rawlab/build-app/_deps/rawlab_dng_source-src/source.cpp": "DNG SDK source",
                     "vcpkg/scripts/buildsystems/vcpkg.cmake": "toolchain",
@@ -48,7 +49,7 @@ class CachedStagingTests(unittest.TestCase):
                 argv = ["build-rawlab.py", "--skip-build"]
                 if platform == "win32":
                     argv += ["--toolchain", str(root / "vcpkg/scripts/buildsystems/vcpkg.cmake")]
-                with patch.object(build_rawlab, "ROOT", root), patch.object(build_rawlab, "stage_builtin_films"), patch.object(build_rawlab, "run") as run, \
+                with patch.object(build_rawlab, "ROOT", root), patch.object(build_rawlab, "stage_builtin_films"), patch.object(build_rawlab, "stage_lensfun"), patch.object(build_rawlab, "stage_native_binary",side_effect=lambda binary,destination: __import__("shutil").copy2(binary,destination/binary.name)), patch.object(build_rawlab, "run") as run, \
                         patch.object(build_rawlab.sys, "platform", platform), patch.object(build_rawlab.sys, "argv", argv), \
                         contextlib.redirect_stdout(io.StringIO()):
                     build_rawlab.main()

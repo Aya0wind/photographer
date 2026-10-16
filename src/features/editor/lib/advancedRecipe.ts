@@ -38,6 +38,7 @@ export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):
 }
 
 export type AdvancedAction = RecipeAction
+  | {type:"lens";value:EditRecipe["lens"];record?:boolean}
   | {type:"colorPipeline";value:EditRecipe["colorPipeline"];record?:boolean}
   | {type:"cropStart"}
   | {type:"cropConfirm";crop:EditRecipe["crop"]}
@@ -58,6 +59,7 @@ export type AdvancedAction = RecipeAction
   | { type: "textUpdateLive"; id: string; patch: Partial<EditRecipeTextLayer> };
 
 export function advancedReducer(state: RecipeHistory, action: AdvancedAction, context: RecipeContext): RecipeHistory {
+  if(action.type==="lens"){const next={...state.present,lens:action.value};if(recipeEquals(next,state.present))return state;return {past:action.record===false?state.past:appendHistory(state.past,state.present),present:next,future:[]};}
   if(action.type==="restoreHistory")return action.history;
   if(action.type==="applyProject"){
     const before=state.cropSession??state;

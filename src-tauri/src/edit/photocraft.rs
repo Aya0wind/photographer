@@ -219,6 +219,7 @@ pub(super) fn adjusted_document_scaled(base:&Document,recipe:&EditRecipe,scale:f
     if let Some(value)=super::groups::effective(recipe){return adjusted_document_scaled(base,&value,scale);}
     if recipe.color_pipeline.is_some(){let (base,values)=super::rawlab::display(base,recipe)?;return adjusted_document_scaled(&base,&values,scale);}
 
+    if recipe.lens.is_some(){let corrected=super::lens::Cache::default().apply(base,recipe.lens.as_ref(),scale)?;let mut values=recipe.clone();values.lens=None;return adjusted_document_scaled(&corrected,&values,scale);}
     if !recipe.retouch.is_empty(){let repaired=super::retouch::RetouchCache::default().apply(base,&recipe.retouch)?;let mut values=recipe.clone();values.retouch.clear();return adjusted_document_scaled(&repaired,&values,scale);}
     let mut session = Session::new();
     session.add_document(base.clone(), None);

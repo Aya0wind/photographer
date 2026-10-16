@@ -1,24 +1,25 @@
+import {rawSourceKey} from "./rawSourceKey";
 import {useEffect,useRef,useState,type MutableRefObject} from "react";
 import {editPreviewOpen,editPreviewClose,type EditRecipe,type EditorPreviewSession} from "@/ipc/api";
 import {prepareFrame,type PreparedFrame} from "./useSmartPreview";
 import {releasePreviewImage} from "./previewImages";
 
 /** Prepare a replacement session offscreen; never clear the currently displayed frame. */
-export function useRawWhiteBalancePreview({assetId,libraryId,session,sourceKey,latest,onPrepared}:{
+export function useRawSourcePreview({assetId,libraryId,session,sourceKey,latest,onPrepared}:{
  assetId:number;libraryId:string;session:EditorPreviewSession|null;sourceKey:string|null;latest:MutableRefObject<EditRecipe>;
  onPrepared:(value:PreparedFrame)=>void;
 }){
- const desired=JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null);
+ const desired=rawSourceKey(latest.current);
  const [busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
  const callback=useRef(onPrepared);callback.current=onPrepared;
  useEffect(()=>{
   setError(null);
   if(!session?.sensorRaw||sourceKey===null||sourceKey===desired){setBusy(false);return;}
   let cancelled=false,adopted=false,id:string|null=null;setBusy(true);
-  // Native decoding starts only after a pause; rapid Kelvin changes supersede it.
+  // Native decoding starts only after a pause; rapid source setting changes supersede it.
   const timer=setTimeout(()=>{void(async()=>{
    const candidate=await editPreviewOpen(assetId,libraryId,false);id=candidate.sessionId;
-   const current=()=>!cancelled&&JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null)===desired;
+   const current=()=>!cancelled&&rawSourceKey(latest.current)===desired;
    if(!current())return;
    const prepared=await prepareFrame(id,latest,current,current,()=>{});
    if(!prepared)return;

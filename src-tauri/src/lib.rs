@@ -470,6 +470,8 @@ pub fn run() {
             edit::versions::edit_version_read,
             edit::proof::edit_preview_proof,
             edit::style_preview::edit_preview_style,
+            edit::lens::edit_lens_autoscale,
+            edit::lens::edit_lens_profiles,
             edit::detail::edit_detail_open,
             edit::detail::edit_detail_status,
             edit::detail::edit_detail_view,

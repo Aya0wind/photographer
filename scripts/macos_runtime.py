@@ -70,9 +70,9 @@ def audit_release_signature(path, team_id):
     validate_release_signature(details.stdout + details.stderr, team_id)
 
 
-def audit(root, team_id=None):
+def audit(root, team_id=None, required=None):
     root = Path(root).resolve(strict=True)
-    for name in ("libgphoto2.6.dylib", "libgphoto2_port.12.dylib",
+    for name in required if required is not None else ("libgphoto2.6.dylib", "libgphoto2_port.12.dylib",
                  "camlibs/ptp2.so", "iolibs/usb1.so"):
         if not is_macho(root / name):
             raise ValueError(f"Missing Mach-O runtime: {name}")
@@ -97,7 +97,7 @@ def audit(root, team_id=None):
     return count
 
 
-def assemble(prefix, output, signing_identity=None, team_id=None):
+def assemble(prefix, output, signing_identity=None, team_id=None, entry_libraries=None):
     if signing_identity is not None and (
         not signing_identity.startswith("Developer ID Application:") or not team_id
     ):
@@ -164,12 +164,12 @@ def assemble(prefix, output, signing_identity=None, team_id=None):
         return expand_path(dep, source)
 
     try:
-        for name in ("libgphoto2.6.dylib", "libgphoto2_port.12.dylib"):
-            enqueue(prefix / "lib" / name, name)
-        for folder, marker, destination in (
+        for name in entry_libraries if entry_libraries is not None else ("libgphoto2.6.dylib", "libgphoto2_port.12.dylib"):
+            enqueue((prefix if entry_libraries is not None else prefix / "lib") / name, name)
+        for folder, marker, destination in (() if entry_libraries is not None else (
             ("libgphoto2", "ptp2.so", "camlibs"),
             ("libgphoto2_port", "usb1.so", "iolibs"),
-        ):
+        )):
             hits = sorted((prefix / "lib" / folder).rglob(marker))
             if len(hits) != 1:
                 raise ValueError(f"Expected one {marker}, found {hits}")
@@ -197,7 +197,7 @@ def assemble(prefix, output, signing_identity=None, team_id=None):
                     "--timestamp", str(target))
             else:
                 run("/usr/bin/codesign", "--force", "--sign", "-", str(target))
-        count = audit(stage, team_id)
+        count = audit(stage, team_id, required=entry_libraries)
         for notice in notices:
             destination = stage / "licenses" / notice.parent.parent.name / notice.parent.name
             destination.mkdir(parents=True, exist_ok=True)

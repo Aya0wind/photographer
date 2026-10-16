@@ -14,6 +14,17 @@ runs:
       shell: bash
       run: python scripts/update-rawlab.py --check
 
+    - name: Install Unix Lensfun build prerequisites
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = macOS ]; then
+          brew install glib pkgconf ninja
+        else
+          sudo apt-get update
+          sudo apt-get install -y liblensfun-dev pkg-config ninja-build zlib1g-dev
+        fi
+
     - name: Set up MSVC for Ninja
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
@@ -60,6 +71,8 @@ runs:
         if sys.platform == 'win32':
             root = os.environ['VCPKG_INSTALLATION_ROOT']
             vcpkg = output('git', '-C', root, 'rev-parse', 'HEAD').decode().strip()
+        if sys.platform == 'darwin':
+            tools += output('pkg-config', '--modversion', 'glib-2.0')
         tools += repr((os.environ.get('ImageOS'), os.environ.get('ImageVersion'),
                        os.environ.get('VCToolsVersion'), os.environ.get('WindowsSDKVersion'),
                        vcpkg)).encode()
@@ -72,6 +85,12 @@ runs:
         prefix = f"rawlab-v1-{os.environ['RUNNER_OS']}-{os.environ['RUNNER_ARCH']}-{toolchain}"
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as target:
             target.write(f'key={prefix}-{source_hash}\n')
+            lens_sources = Path('native/rawlab/upstream/lutools/cmake/lens-dependencies.json').read_bytes()
+            lens_sources += Path('native/rawlab/upstream/lutools/cmake/build-lens-dependencies.py').read_bytes()
+            lens_sources += Path('native/rawlab/cmake/lensfun-macos.cmake').read_bytes()
+            lens_sources += os.environ['RAWLAB_BUILD_DIRECTORY'].encode()
+            lens_key = hashlib.sha256(lens_sources).hexdigest()[:24]
+            target.write(f'lens-key=rawlab-lens-v1-{os.environ["RUNNER_OS"]}-{toolchain}-{lens_key}\n')
             target.write(f'zlib-key=rawlab-zlib-v1-{toolchain}-x64-windows-static-md\n')
         PY
 
@@ -109,6 +128,19 @@ runs:
         key: ${{ steps.identity.outputs.key }}
         # No fallback: CMake paths, toolchain and compiled binaries must match.
 
+    - name: Restore Lensfun build dependencies
+      if: runner.os != 'Linux' && steps.native.outputs.cache-hit != 'true'
+      id: lens
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ inputs.build-directory }}/lens-dependencies
+          ${{ inputs.build-directory }}/lensfun-build
+          ${{ inputs.build-directory }}/lensfun-install
+          ${{ inputs.build-directory }}/_deps/pc_lensfun-src
+          ${{ inputs.build-directory }}/_deps/pc_lensfun-subbuild
+        key: ${{ steps.identity.outputs.lens-key }}
+
     - name: Build native core on cache miss
       if: steps.native.outputs.cache-hit != 'true'
       shell: bash
@@ -127,6 +159,18 @@ runs:
         fi
         "${configure[@]}"
         cmake --build "$RAWLAB_BUILD_DIRECTORY" --config Release --parallel 2
+
+    - name: Save Lensfun build dependencies
+      if: runner.os != 'Linux' && steps.native.outputs.cache-hit != 'true' && steps.lens.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ inputs.build-directory }}/lens-dependencies
+          ${{ inputs.build-directory }}/lensfun-build
+          ${{ inputs.build-directory }}/lensfun-install
+          ${{ inputs.build-directory }}/_deps/pc_lensfun-src
+          ${{ inputs.build-directory }}/_deps/pc_lensfun-subbuild
+        key: ${{ steps.identity.outputs.lens-key }}
 
     - name: Save successful RawLab build immediately
       if: steps.native.outputs.cache-hit != 'true'

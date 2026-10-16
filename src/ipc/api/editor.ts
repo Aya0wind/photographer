@@ -276,3 +276,8 @@ export const editDetailStatus=(jobId:string)=>ipc<EditorDetailStatus>("edit_deta
 export const editDetailView=(jobId:string,x:number,y:number,edge:number,edges:boolean)=>ipc<number>("edit_detail_view",{jobId,x,y,edge,edges});
 export const editDetailClose=(jobId:string)=>ipc<void>("edit_detail_close",{jobId});
 export async function editDetailImage(jobId:string,revision:number):Promise<string>{const bytes=await ipc<ArrayBuffer|number[]>("edit_detail_image",{jobId,revision});return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));}
+
+export const editLensAutoscale=(settings:import("./types").EditorLensSettings,width:number,height:number)=>ipc<number>("edit_lens_autoscale",{settings,width,height});
+
+export interface EditorLensCatalog {state:string;profileId:string;cameraMake:string;cameraModel:string;lensMake:string;lensModel:string;focalLength:number;aperture:number;profiles:{id:string;maker:string;model:string;distortion:boolean;tca:boolean;matched:boolean}[]}
+export const editLensProfiles=(assetId:number,libraryId:string,settings?:import("./types").EditorLensProfileSettings)=>ipc<EditorLensCatalog>("edit_lens_profiles",{assetId:String(assetId),libraryId,settings:settings??null});

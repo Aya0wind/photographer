@@ -11,8 +11,8 @@ export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:Transf
  for(const group of groups){
   if(group in ADVANCED)for(const key of ADVANCED[group as keyof typeof ADVANCED])Object.assign(advanced,{[key]:structuredClone(source.advanced?.[key]??(DEFAULT_ADVANCED as Partial<typeof advanced>)[key])});
   if(group in DEVELOPMENT){const development={...DEFAULT_DEVELOPMENT,...advanced.development};for(const key of DEVELOPMENT[group as keyof typeof DEVELOPMENT])Object.assign(development,{[key]:source.advanced?.development?.[key]??DEFAULT_DEVELOPMENT[key]});advanced.development=development as typeof advanced.development;}
-  if(group==="profile")value.colorPipeline=structuredClone(source.colorPipeline);
-  if(group==="geometry"){value.crop=structuredClone(source.crop);value.rotateQuarter=source.rotateQuarter;value.geometry=structuredClone(source.geometry);}
+  if(group==="profile"){const lensCorrection=value.colorPipeline?.lensCorrection;value.colorPipeline=structuredClone(source.colorPipeline);if(value.colorPipeline)value.colorPipeline.lensCorrection=lensCorrection;}
+  if(group==="geometry"){if(value.colorPipeline)value.colorPipeline.lensCorrection=structuredClone(source.colorPipeline?.lensCorrection);value.lens=structuredClone(source.lens);value.crop=structuredClone(source.crop);value.rotateQuarter=source.rotateQuarter;value.geometry=structuredClone(source.geometry);}
   if(group==="masks")value.masks=structuredClone(source.masks);
   if(group==="annotations"){value.textLayers=structuredClone(source.textLayers);value.brushStrokes=structuredClone(source.brushStrokes);}
   if(group==="retouch")value.retouch=structuredClone(source.retouch);

@@ -56,6 +56,7 @@ pub async fn edit_project_save(
         let id = super::ipc::parse_asset_id(&asset_id)?;
         let (_,asset)=resolve(state, &library_id, &asset_id)?;
         let recipe = validate_recipe(&recipe)?;
+        if asset.kind!=crate::events::AssetKind::Raw&&recipe.color_pipeline.as_ref().and_then(|p|p.lens_correction.as_ref()).is_some_and(|l|l.distortion||l.tca){return Err("Lensfun 镜头配置仅适用于 RAW 照片".into());}
         if asset.kind!=crate::events::AssetKind::Raw&&recipe.color_pipeline.as_ref().is_some_and(|p|p.raw_white_balance.is_some()){return Err("传感器白平衡仅适用于 RAW 照片".into());}
         let value=serde_json::to_value(recipe).map_err(|e|e.to_string())?;
         let bytes=serde_json::to_vec(&value).map_err(|e|e.to_string())?;

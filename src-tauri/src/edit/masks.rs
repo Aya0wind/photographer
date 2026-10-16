@@ -223,7 +223,7 @@ impl MaskCache {
         for mask in recipe.masks.iter().filter(|m|m.enabled && m.density>0.0) {
             let entry=self.entry(base,mask)?;
             let mut local=recipe.clone();
-            local.color_pipeline=None;local.retouch.clear();
+            local.color_pipeline=None;local.lens=None;local.retouch.clear();
             local.masks.clear();local.adjustments=mask.adjustments;local.advanced=mask.advanced.clone();
             local.rotate_quarter=0;local.geometry=None;local.crop=None;local.text_layers.clear();local.brush_strokes.clear();
             let spatial=mask.advanced.as_ref().and_then(|a|a.development.as_ref()).is_some_and(|d|d.active());

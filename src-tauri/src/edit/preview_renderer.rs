@@ -294,6 +294,7 @@ struct AnnotationCache {
 
 pub struct Renderer {
     retouch:super::retouch::RetouchCache,
+    lens:super::lens::Cache,
     color:super::rawlab::ColorCache,
     neutral_color:super::rawlab::ColorCache,
     masks: super::masks::MaskCache,
@@ -322,6 +323,7 @@ impl Renderer {
     pub(super) fn with_pixel_scale(mut self,scale:f32)->Self{self.source_scale=scale;self.masks.set_source_scale(scale);self}
     pub(super) fn mask_overlay(&mut self,base:&Document,recipe:&EditRecipe,id:&str)->Result<Document,String> {
         let (source,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
+        let source=self.lens.apply(&source,values.lens.as_ref(),self.source_scale)?;values.lens=None;
         let source=self.retouch.apply(&source,&values.retouch)?;values.retouch.clear();
         self.masks.set_source(&source);self.masks.overlay(&source,&values,id)
     }
@@ -329,7 +331,7 @@ impl Renderer {
         let mut session = Session::new();
         session.add_document(base.clone(), None);
         Self {
-            retouch:Default::default(),
+            retouch:Default::default(),lens:Default::default(),
             color:Default::default(),
             neutral_color:Default::default(),
             masks:Default::default(),
@@ -349,10 +351,8 @@ impl Renderer {
     }
 
     pub(super) fn neutral_document(&mut self,base:&Document,recipe:&EditRecipe)->Result<Document,String>{
-        if recipe.color_pipeline.is_none(){return Ok(base.clone());}
-        let mut neutral=recipe.clone();neutral.advanced=None;
-        if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}
-        self.neutral_color.apply(base,&neutral).map(|(doc,_)|doc)
+        let source=if recipe.color_pipeline.is_none(){base.clone()}else{let mut neutral=recipe.clone();neutral.advanced=None;if let Some(p)=neutral.color_pipeline.as_mut(){p.film=None;}self.neutral_color.apply(base,&neutral)?.0};
+        self.lens.apply(&source,recipe.lens.as_ref(),self.source_scale)
     }
     /// 更新预览状态不产生第二套 undo/journal，也不让历史快照无限保留代理瓦片。
     fn set_document(&mut self, doc: Document) -> Result<(), String> {
@@ -528,6 +528,7 @@ impl Renderer {
             let (display, downstream)=self.color.apply(base,recipe)?;
             return self.canvas_document(&display,&downstream);
         }
+        if recipe.lens.is_some(){let base=self.lens.apply(base,recipe.lens.as_ref(),self.source_scale)?;let mut values=recipe.clone();values.lens=None;return self.canvas_document(&base,&values);}
         if !recipe.retouch.is_empty(){let base=self.retouch.apply(base,&recipe.retouch)?;let mut values=recipe.clone();values.retouch.clear();return self.canvas_document(&base,&values);}
         self.masks.set_source(base);
         use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
@@ -626,6 +627,7 @@ impl Renderer {
         if let Some(value)=super::groups::effective(recipe){return self.render(base,&value,quality);}
         let result=(||{
             let (base,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
+            let base=self.lens.apply(&base,values.lens.as_ref(),self.source_scale)?;values.lens=None;
             let base=self.retouch.apply(&base,&values.retouch)?;values.retouch.clear();self.masks.set_source(&base);
             self.render_inner(&base,&values,quality)
         })();

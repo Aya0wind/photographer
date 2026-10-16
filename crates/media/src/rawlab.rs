@@ -19,6 +19,9 @@ struct Options {
     wb_mode:u32,
     temperature:f32,
     tint:f32,
+    lens_database:*const c_char,
+    lens_profile:*const c_char,
+    lens_flags:u32,
     cancelled: Cancel,
     userdata: *mut c_void,
 }
@@ -62,6 +65,7 @@ type CreateSession =
 type RenderSession = unsafe extern "C" fn(*mut c_void, *const FilmOptions, *mut Output) -> i32;
 type DestroySession = unsafe extern "C" fn(*mut c_void);
 type InspectLut = unsafe extern "C" fn(*const c_char, *mut LutInfo, *mut Output) -> i32;
+type LensCatalog = unsafe extern "C" fn(*const c_char,*const c_char,*const c_char,u32,*mut c_char,usize,*mut Output)->i32;
 type Free = unsafe extern "C" fn(*mut c_void);
 pub struct Backend {
     _library: Library,
@@ -72,9 +76,13 @@ pub struct Backend {
     render_session: RenderSession,
     destroy_session: DestroySession,
     inspect_lut: InspectLut,
+    lens_catalog:LensCatalog,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+pub struct LensOptions {pub database:String,pub profile:String,pub flags:u32}
+#[derive(Clone)]
 pub struct DevelopOptions {
+    pub lens:Option<LensOptions>,
     pub half_size: bool,
     pub max_pixels: u64,
     pub white_balance: [f32; 4],
@@ -84,6 +92,7 @@ pub struct DevelopOptions {
 impl Default for DevelopOptions {
     fn default() -> Self {
         Self {
+            lens:None,
             half_size: false,
             max_pixels: 128_000_000,
             white_balance: [0.0; 4],
@@ -134,7 +143,7 @@ impl Backend {
         let version =
             unsafe { library.get::<unsafe extern "C" fn() -> u32>(b"pc_raw_abi_version\0") }
                 .map_err(|e| e.to_string())?;
-        if unsafe { version() } != 3 {
+        if unsafe { version() } != 4 {
             return Err("Unsupported RawLab bridge ABI".into());
         }
         let decode =
@@ -151,7 +160,9 @@ impl Backend {
                 .map_err(|e| e.to_string())?;
         let inspect_lut = *unsafe { library.get::<InspectLut>(b"pc_raw_lut_info\0") }
             .map_err(|e| e.to_string())?;
+        let lens_catalog=*unsafe{library.get::<LensCatalog>(b"pc_raw_lens_catalog\0")}.map_err(|e|e.to_string())?;
         Ok(Self {
+            lens_catalog,
             create_session,
             render_session,
             destroy_session,
@@ -162,6 +173,16 @@ impl Backend {
             free,
         })
     }
+    pub fn lens_catalog(&self,path:&str,options:&LensOptions)->Result<String,String>{
+        let path=CString::new(path).map_err(|_|"RAW source contains NUL")?;
+        let database=CString::new(options.database.as_str()).map_err(|_|"Lens database contains NUL")?;
+        let profile=CString::new(options.profile.as_str()).map_err(|_|"Lens profile contains NUL")?;
+        let mut bytes=vec![0u8;4*1024*1024];let mut diagnostics=empty_output();
+        let status=unsafe{(self.lens_catalog)(path.as_ptr(),database.as_ptr(),profile.as_ptr(),options.flags,bytes.as_mut_ptr().cast(),bytes.len(),&mut diagnostics)};
+        if status!=0{return Err(unsafe{CStr::from_ptr(diagnostics.error.as_ptr())}.to_string_lossy().into_owned());}
+        let end=bytes.iter().position(|b|*b==0).ok_or("Invalid Lensfun catalog length")?;
+        String::from_utf8(bytes[..end].to_vec()).map_err(|e|e.to_string())
+    }
     /// UTF-8, caller-authorized local file lease. The upstream processor opens
     /// and unpacks it; keep the source stable until this synchronous call ends.
     pub fn develop<'a>(
@@ -171,8 +192,13 @@ impl Backend {
         cancel: &AtomicBool,
     ) -> Result<Image<'a>, String> {
         let path = CString::new(path).map_err(|_| "RAW source path contains NUL")?;
+        let database=options.lens.as_ref().map(|l|CString::new(l.database.as_str())).transpose().map_err(|_|"Lens database contains NUL")?;
+        let profile=options.lens.as_ref().map(|l|CString::new(l.profile.as_str())).transpose().map_err(|_|"Lens profile contains NUL")?;
         let options = Options {
-            version: 2,
+            version: 3,
+            lens_database:database.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),
+            lens_profile:profile.as_ref().map_or(std::ptr::null(),|v|v.as_ptr()),
+            lens_flags:options.lens.as_ref().map_or(0,|l|l.flags),
             half_size: options.half_size as u32,
             max_pixels: options.max_pixels,
             white_balance: options.white_balance,
