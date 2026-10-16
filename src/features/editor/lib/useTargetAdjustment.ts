@@ -37,8 +37,8 @@ export function useTargetAdjustment(props:Props){
      g.update=delta=>{const point=added.points[added.index];const curve=moveCurvePoint(added.points,added.index,point[0],point[1]+delta*255);return p.channel==="rgb"?{curves:curve}:{channelCurves:{...a?.channelCurves,[p.channel]:curve}};};
     } else {
      const range=result.range;if(!range)throw Error("target-hsl-no-color");
-     const original={hue:0,saturation:0,lightness:0,...a?.hsl?.[range]};
-     g.update=delta=>({hsl:{...a?.hsl,[range]:{...original,[p.axis]:Math.max(p.axis==="hue"?-180:-100,Math.min(p.axis==="hue"?180:100,original[p.axis]+delta*(p.axis==="hue"?360:100)))}}});
+     const original={hue:0,saturation:0,lightness:0,...a?.hslEight?.[range]};
+     g.update=delta=>({hslEight:{...a?.hslEight,[range]:{...original,[p.axis]:Math.max(-100,Math.min(100,original[p.axis]+delta*100))}}});
     }
     p.onSample(result.sample,result.range??undefined);apply(g);if(g.ended)finish(g);
    }).catch(error=>{if(gesture.current===g){cancel();p.onError(String(error));}}).finally(()=>{if(sequence.current===g.token)setBusy(false);});

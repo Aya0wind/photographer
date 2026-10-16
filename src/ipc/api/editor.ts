@@ -112,8 +112,8 @@ export async function editPreviewClose(sessionId: string): Promise<void> {
   await ipc<void>("edit_preview_close", { sessionId });
 }
 
-export async function editPreviewMask(sessionId:string,recipe:EditRecipe,maskId:string):Promise<string> {
-  const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_mask",{sessionId,recipe,maskId});
+export async function editPreviewMask(sessionId:string,recipe:EditRecipe,maskId:string,thumbnail=false):Promise<string> {
+  const bytes=await ipc<ArrayBuffer|number[]>("edit_preview_mask",{sessionId,recipe,maskId,thumbnail});
   return URL.createObjectURL(new Blob([new Uint8Array(bytes)],{type:"image/png"}));
 }
 export async function editPreviewClipping(sessionId:string,recipe:EditRecipe,original:boolean,warnings:number):Promise<string>{
@@ -207,7 +207,7 @@ export async function exportRun(
 }
 
 export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string,maskId?:string,curveChannel?:string,sampleSize?:number) {
-  return ipc<{ sample?: [number, number, number]; range?: "reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId,curveChannel,sampleSize });
+  return ipc<{ sample?: [number, number, number]; range?: "reds"|"oranges"|"purples"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId,curveChannel,sampleSize });
 }
 export function editParametricSamples(value:NonNullable<EditRecipe["advanced"]>["parametricCurve"]){return ipc<number[]>("edit_parametric_samples",{value});}
 

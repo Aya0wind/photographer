@@ -12,10 +12,10 @@ it("selects HSL colours on the gradient slider and edits only that range",()=>{
  render(<I18nextProvider i18n={i18n}><AdvancedAdjustmentPanel recipe={advancedRecipe()} onBasic={vi.fn()} onAdvanced={change} onReset={vi.fn()} begin={vi.fn()} end={vi.fn()} sampling={{picker:null,setPicker:vi.fn(),sample:null,histogram:[],available:false}}/></I18nextProvider>);
  const group=screen.getByText("HSL").closest("details")!;group.open=true;
  expect(within(group).queryByRole("combobox")).not.toBeInTheDocument();
- const colour=within(group).getByRole("slider",{name:"颜色范围"});fireEvent.change(colour,{target:{value:"4"}});
+ const colour=within(group).getByRole("slider",{name:"颜色范围"});fireEvent.change(colour,{target:{value:"5"}});
  expect(colour).toHaveAttribute("aria-valuetext","蓝色");
  const saturation=within(group).getByRole("slider",{name:"饱和度"});fireEvent.change(saturation,{target:{value:"25"}});
- expect(change).toHaveBeenCalledWith({hsl:{blues:{hue:0,saturation:25,lightness:0}}},false);
+ expect(change).toHaveBeenCalledWith({hslEight:{blues:{hue:0,saturation:25,lightness:0}}},false);
  expect(saturation).toHaveClass("editor-color-slider");
 });
 it("shows a sampled color readout beside picker controls",()=>{

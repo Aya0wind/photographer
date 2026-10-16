@@ -114,7 +114,7 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             add("color-balance","colorBalance",json!({"shadows":b.shadows,"midtones":b.midtones,"highlights":b.highlights,"preserveLuminosity":b.preserve_luminosity}),false);
         }
     }
-    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled) {
+    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled&&b.weights_eight.is_none()) {
         let mut params=json!({"reds":b.weights[0],"yellows":b.weights[1],"greens":b.weights[2],"cyans":b.weights[3],"blues":b.weights[4],"magentas":b.weights[5],"tint":b.tint.is_some()});
         if let Some(color)=&b.tint {params["tintColor"]=json!(color);}
         add("black-white","blackWhite",params,false);
@@ -145,6 +145,14 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
             json!({"points": a.channel_curves.luminance}),
             true,
         );
+    }
+    if let Some(b)=a.black_white.as_ref().filter(|b|b.enabled&&b.weights_eight.is_some()){
+        let index=specs.iter().position(|s|["selective-color","curves","luminance"].contains(&s.key)).unwrap_or(specs.len());
+        specs.insert(index,AdjustmentSpec{native:Some(super::color_mixer::black_white(b)?),key:"black-white-eight",kind:"colorLookup",params:json!(b),luminosity:false,opacity:1.0});
+    }
+    if let Some(hsl)=a.hsl_eight.as_ref().filter(|ranges|ranges.values().any(|v|v.hue!=0.0||v.saturation!=0.0||v.lightness!=0.0)){
+        let index=specs.iter().position(|s|["color-balance","black-white","black-white-eight","selective-color","curves","luminance"].contains(&s.key)).unwrap_or(specs.len());
+        specs.insert(index,AdjustmentSpec{native:Some(super::color_mixer::hsl(hsl)?),key:"hsl-eight",kind:"colorLookup",params:json!(hsl),luminosity:false,opacity:1.0});
     }
     if let Some(spec)=parametric {let index=specs.iter().position(|s|s.key=="curves"||s.key=="luminance").unwrap_or(specs.len());specs.insert(index,spec);}
     if let Some(g)=a.color_grading.as_ref().filter(|g|g.active()) {

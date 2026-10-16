@@ -44,6 +44,8 @@ pub(crate) mod export_worker;
 mod gpu;
 mod base_color;
 mod grading;
+mod pixel_lookup;
+mod color_mixer;
 mod parametric;
 mod masks;
 pub mod native_canvas;

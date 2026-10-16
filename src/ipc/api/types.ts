@@ -847,7 +847,7 @@ export interface AdvancedAdjustments {
   colorGrading?:{shadows:{hue:number;sat:number;lum:number};midtones:{hue:number;sat:number;lum:number};highlights:{hue:number;sat:number;lum:number};global:{hue:number;sat:number;lum:number};blending:number;balance:number};
   development?:DevelopmentAdjustments;
   colorBalance?:{shadows:[number,number,number];midtones:[number,number,number];highlights:[number,number,number];preserveLuminosity:boolean};
-  blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number];tint:string|null};
+  blackWhite?:{enabled:boolean;weights:[number,number,number,number,number,number];weightsEight?:[number,number,number,number,number,number,number,number];tint:string|null};
   selectiveColor?:{relative:boolean;ranges:Partial<Record<"reds"|"yellows"|"greens"|"cyans"|"blues"|"magentas"|"whites"|"neutrals"|"blacks",[number,number,number,number]>>};
   exposure: number;
   temperature: number;
@@ -857,10 +857,13 @@ export interface AdvancedAdjustments {
   curves: [number, number][];
   channelCurves?: Partial<Record<"red" | "green" | "blue" | "luminance", [number, number][]>>;
   levels?: { black: number; white: number; gamma: number };
+  hslEight?: Partial<Record<"reds"|"oranges"|"yellows"|"greens"|"cyans"|"blues"|"purples"|"magentas", {hue:number;saturation:number;lightness:number}>>;
   hsl?: Partial<Record<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas", { hue: number; saturation: number; lightness: number }>>;
 }
 
 export interface EditLocalMask {
+  components?:{operation:"add"|"subtract"|"intersect";mask:EditLocalMask}[];
+  overlayColor?:string;
   id:string;
   name:string;
   kind:"brush"|"linear"|"radial";

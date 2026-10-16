@@ -23,7 +23,8 @@ impl Default for MaskCache {fn default()->Self{Self{entries:HashMap::new(),sourc
 fn shape_key(mask:&LocalMask)->LocalMask {
     let mut shape=mask.clone();
     shape.name.clear();shape.enabled=true;shape.inverted=false;
-    shape.density=100.0;shape.feather=0.0;shape.adjustments=None;shape.advanced=None;
+    shape.density=100.0;shape.feather=0.0;shape.adjustments=None;shape.advanced=None;shape.overlay_color=None;
+    for component in &mut shape.components{let old=&component.mask;let mut key=shape_key(old);key.enabled=old.enabled;key.inverted=old.inverted;key.density=old.density;key.feather=old.feather;component.mask=Box::new(key);}
     shape
 }
 /// GPU-native fill with the same upstream handle layout and ramp as coverage().
@@ -31,19 +32,35 @@ fn shape_key(mask:&LocalMask)->LocalMask {
 /// dragging changes only the fill's geometry; no source raster is constructed.
 pub(super) fn gradient_overlay_source(base:&Document,mask:&LocalMask,previous:Option<&Document>)->Result<Document,String>{
     use photocraft_engine::doc::{Fill,Color};
-    if mask.kind==MaskKind::Brush||mask.feather!=0.0{return Err("渐变填充覆盖参数无效".into());}
+    if !mask.components.is_empty()||mask.kind==MaskKind::Brush||mask.feather!=0.0{return Err("渐变填充覆盖参数无效".into());}
+    let rgb=overlay_color(mask);
     let mut session=Session::new();session.add_document(Document::new("Gradient",base.size,ColorMode::Rgb,SampleType::U8),None);
     photocraft::execute(&mut session,"gradient.fill.create",json!({"from":[mask.from.x*f64::from(base.size.width),mask.from.y*f64::from(base.size.height)],"to":[mask.to.x*f64::from(base.size.width),mask.to.y*f64::from(base.size.height)],"style":if mask.kind==MaskKind::Linear{"linear"}else{"radial"},"stops":[[0.0,"#ffffff"],[1.0,"#000000"]],"dither":false}))?;
     let doc=photocraft::active_document(&session)?;let Some(LayerContent::Fill(mut fill))=doc.layers.last().map(|l|l.content.clone())else{return Err("渐变填充未生成".into());};
     if let Fill::Gradient{style,angle,scale,offset,stops,..}=&mut fill {
         let (a,s,o)=photocraft_compose::gradient_fill::from_handles(*style,[(mask.from.x*f64::from(base.size.width))as f32,(mask.from.y*f64::from(base.size.height))as f32],[(mask.to.x*f64::from(base.size.width))as f32,(mask.to.y*f64::from(base.size.height))as f32],base.bounds(),*angle);*angle=a;*scale=s;*offset=o;
-        for (_,color) in stops{let value=color.to_rgb()[0];*color=Color::rgba(1.0,0.2,0.2,if mask.inverted{1.0-value}else{value});}
+        for (_,color) in stops{let value=color.to_rgb()[0];*color=Color::rgba(rgb[0],rgb[1],rgb[2],if mask.inverted{1.0-value}else{value});}
     }
     let mut overlay=previous.filter(|d|d.size==base.size).cloned().unwrap_or_else(||{let mut d=Document::new("Mask fill overlay",base.size,ColorMode::Rgb,SampleType::U8);d.layers.push(Layer::new("Coverage",LayerContent::Fill(fill.clone())));d});
     overlay.layers[0].content=LayerContent::Fill(fill);Ok(overlay)
 }
 
-fn coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String> {
+fn overlay_color(mask:&LocalMask)->[f32;3]{mask.overlay_color.as_ref().and_then(|v|super::recipe::parse_color(v)).map(|v|v.map(|c|c as f32/255.0)).unwrap_or([1.0,0.2,0.2])}
+fn coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String>{
+    use photocraft_algo::selection::{mask_from_surface,combine,feather};
+    let mut result=primitive_coverage(mask,size)?;let area=Document::new("Coverage",size,ColorMode::Rgb,SampleType::U8).bounds();
+    for component in &mask.components{
+        if !component.mask.enabled{continue;}
+        let shape=coverage(&component.mask,size)?;
+        let mut values=mask_from_surface(Some(&shape.surface),area);
+        if component.mask.inverted{for value in &mut values{*value=1.0-*value;}}
+        if component.mask.feather>0.0{values=feather(&values,size.width as usize,size.height as usize,(component.mask.feather/100.0*f64::from(size.width.min(size.height))) as f32);}
+        for value in &mut values{*value*=(component.mask.density/100.0) as f32;}
+        result.surface=combine(Some(&result.surface),&values,area,component.operation).unwrap_or_else(||photocraft_algo::selection::mask_to_surface(&vec![0.0;values.len()],area));
+    }
+    Ok(result)
+}
+fn primitive_coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String> {
     let mut session=Session::new();
     let template=Document::new("Mask",size,ColorMode::Rgb,SampleType::U8);
     let area=template.bounds();
@@ -160,7 +177,7 @@ impl MaskCache {
     fn entry(&mut self,base:&Document,mask:&LocalMask)->Result<&mut Entry,String> {
         let key=shape_key(mask);
         if !self.entries.get(&mask.id).is_some_and(|e|e.shape==key && e.size==base.size) {
-            let (normal,brush_prefix,live_brush)=if mask.kind==MaskKind::Brush{cached_brush_coverage(self.entries.get_mut(&mask.id),mask,base.size)?}else{(coverage(mask,base.size)?,None,None)};
+            let (normal,brush_prefix,live_brush)=if mask.kind==MaskKind::Brush&&mask.components.is_empty(){cached_brush_coverage(self.entries.get_mut(&mask.id).filter(|entry|entry.shape.components.is_empty()),mask,base.size)?}else{(coverage(mask,base.size)?,None,None)};
             if let Some(entry)=self.entries.get_mut(&mask.id).filter(|e|e.size==base.size) {
                 entry.shape=key;entry.normal=normal;entry.inverse=None;entry.brush_prefix=brush_prefix;entry.live_brush=live_brush;
                 return Ok(self.entries.get_mut(&mask.id).unwrap());
@@ -179,7 +196,7 @@ impl MaskCache {
         let entry=self.entry(base,mask)?;
         let mut coverage=selected_coverage(entry,mask.inverted)?;
         coverage.feather=(mask.feather/100.0*f64::from(base.size.width.min(base.size.height))) as f32;
-        let mut overlay=Document::with_background("Mask overlay",base.size,ColorMode::Rgb,SampleType::U8,Color::rgba(1.0,0.2,0.2,1.0));
+        let mut overlay=Document::with_background("Mask overlay",base.size,ColorMode::Rgb,SampleType::U8,{let c=overlay_color(mask);Color::rgba(c[0],c[1],c[2],1.0)});
         overlay.layers[0].mask=Some(coverage);
         let mut session=Session::new();session.add_document(overlay,None);
         photocraft::geometry(&mut session,recipe)?;

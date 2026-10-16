@@ -11,8 +11,8 @@ import { useTranslation } from "react-i18next";
 import type { AdvancedAdjustments, EditAdjustments, EditRecipe } from "@/ipc/api";
 import { DEFAULT_ADVANCED, adjustmentGroupChanged, type AdjustmentGroup,type DevelopmentGroup } from "../lib/advancedRecipe";
 
-const HSL_RANGES=["reds","yellows","greens","cyans","blues","magentas"] as const;
-function hslGradient(range:typeof HSL_RANGES[number],axis:string){const hue=HSL_RANGES.indexOf(range)*60;return axis==="hue"?`linear-gradient(to right,hsl(${hue-60} 90% 55%),hsl(${hue} 90% 55%),hsl(${hue+60} 90% 55%))`:axis==="saturation"?`linear-gradient(to right,#888,hsl(${hue} 100% 50%))`:`linear-gradient(to right,#111,hsl(${hue} 90% 50%),#fff)`;}
+const HSL_RANGES=["reds","oranges","yellows","greens","cyans","blues","purples","magentas"] as const;
+function hslGradient(range:typeof HSL_RANGES[number],axis:string){const hue=[0,30,60,120,180,240,270,300][HSL_RANGES.indexOf(range)];return axis==="hue"?`linear-gradient(to right,hsl(${hue-60} 90% 55%),hsl(${hue} 90% 55%),hsl(${hue+60} 90% 55%))`:axis==="saturation"?`linear-gradient(to right,#888,hsl(${hue} 100% 50%))`:`linear-gradient(to right,#111,hsl(${hue} 90% 50%),#fff)`;}
 
 export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, onReset, begin, end, sampling, onModalChange,cancel,onPipeline }: {
   onPipeline?:(value:EditRecipe["colorPipeline"],record?:boolean)=>void;
@@ -27,8 +27,8 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
   const { t } = useTranslation();
   const a = { ...DEFAULT_ADVANCED, ...recipe.advanced };
   const basic = { brightness: 0, contrast: 0, saturation: 0, ...recipe.adjustments };
-  const [range, setRange] = useState<"reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas">("reds");
-  const hsl = { hue: 0, saturation: 0, lightness: 0, ...a.hsl?.[range] };
+  const [range, setRange] = useState<typeof HSL_RANGES[number]>("reds");
+  const hsl = { hue: 0, saturation: 0, lightness: 0, ...a.hslEight?.[range] };
   const [curveMode,setCurveMode]=useState<"point"|"parametric">("point");
   const levels = a.levels ?? { black: 0, white: 255, gamma: 1 };
   useEffect(()=>{if((sampling.picker==="hsl"||sampling.picker==="hslTarget") && sampling.hslRange) setRange(sampling.hslRange);},[sampling.picker,sampling.hslRange,sampling.sample]);
@@ -43,7 +43,7 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
     {sampling.available!==false&&sampling.picker&&sampling.setSampleSize&&<label className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.sampleSize")}</span><select aria-label={t("advancedEditor.sampleSize")} value={sampling.sampleSize??1} className="rounded-lg border border-edge bg-bg px-2 py-1.5" onChange={e=>sampling.setSampleSize!(Number(e.target.value) as 1|3|5|11)}>{[1,3,5,11].map(size=><option key={size} value={size}>{size} × {size}</option>)}</select></label>}
     <details open className="space-y-2.5">
       <summary className="flex cursor-pointer items-center justify-between"><h3 className="text-xs font-semibold text-text-primary">{t("advancedEditor.light")}</h3>{resetButton("light",t("advancedEditor.light"),adjustmentGroupChanged(recipe,"light"))}</summary>
-      <Slider label={t("advancedEditor.exposure")} value={a.exposure} onSet={exposure=>onAdvanced({exposure})} onReset={()=>onAdvanced({exposure:0})} min={-5} max={5} step={0.1} onChange={(exposure) => onAdvanced({ exposure }, false)} begin={begin} end={end} />
+      <Slider label={t("advancedEditor.exposure")} value={a.exposure} onSet={exposure=>onAdvanced({exposure})} onReset={()=>onAdvanced({exposure:0})} min={-5} max={7} step={0.1} onChange={(exposure) => onAdvanced({ exposure }, false)} begin={begin} end={end} />
       {(["brightness", "contrast"] as const).map((key) => <Slider key={key} label={t(`editor.adjust.${key}`)} value={key === "contrast" ? Math.max(-50, basic[key]) : basic[key]} min={key === "contrast" ? -50 : -100} onSet={value=>onBasic({[key]:value},true)} onReset={()=>onBasic({[key]:0},true)} onChange={(value) => onBasic({ [key]: value })} begin={begin} end={end} />)}
       <DevelopmentControls group="tone" adjustments={a} onChange={onAdvanced} begin={begin} end={end}/>
     </details>
@@ -65,16 +65,18 @@ export default function AdvancedAdjustmentPanel({ recipe, onBasic, onAdvanced, o
       <summary className="flex cursor-pointer items-center justify-between text-xs font-semibold"><span>HSL</span>{resetButton("hsl","HSL",Object.keys(a.hsl??{}).length>0)}</summary>
       {sampling.available!==false&&<button type="button" disabled={sampling.busy} aria-pressed={sampling.picker==="hsl"} onClick={()=>sampling.setPicker(sampling.picker==="hsl"?null:"hsl")}
         className="flex w-full items-center justify-center gap-2 rounded-lg border border-edge px-3 py-2 text-xs aria-pressed:border-accent aria-pressed:text-accent">
-        {sampling.picker==="hsl" && sampling.sample && <span className="h-3 w-3 rounded-full border border-edge" style={{backgroundColor:`rgb(${sampling.sample.join(",")})`}} />}
+        {!!Object.keys(a.hsl??{}).length&&<p className="text-[11px] text-text-muted">{t("advancedEditor.mixer.legacy")}</p>}
+      {sampling.picker==="hsl" && sampling.sample && <span className="h-3 w-3 rounded-full border border-edge" style={{backgroundColor:`rgb(${sampling.sample.join(",")})`}} />}
         {t("advancedEditor.hslPicker")}
       </button>}
       {sampling.available!==false&&sampling.setTargetHslAxis&&<div className="flex gap-2"><div className="flex min-w-0 flex-1 rounded-lg bg-bg p-0.5">{(["hue","saturation","lightness"] as const).map(key=><button key={key} type="button" aria-pressed={(sampling.targetHslAxis??"lightness")===key} onClick={()=>sampling.setTargetHslAxis!(key)} className="flex-1 rounded-md px-1 py-1.5 text-[11px] text-text-secondary aria-pressed:bg-panel aria-pressed:text-accent">{t(`advancedEditor.hslLabels.${key}`)}</button>)}</div><button type="button" disabled={sampling.busy} className="rounded-lg border border-edge px-2 text-xs aria-pressed:border-accent aria-pressed:text-accent" aria-pressed={sampling.picker==="hslTarget"} onClick={()=>sampling.setPicker(sampling.picker==="hslTarget"?null:"hslTarget")}>{t("advancedEditor.targetHsl")}</button></div>}
       {sampling.picker==="hslTarget"&&<p className="text-[11px] text-text-muted">{t("advancedEditor.targetHint")}</p>}
       {sampling.busy&&<p role="status" className="text-xs text-text-muted">{t("advancedEditor.sampling")}</p>}
+      {!!Object.keys(a.hsl??{}).length&&<p className="text-[11px] text-text-muted">{t("advancedEditor.mixer.legacy")}</p>}
       {sampling.picker==="hsl" && <p role="status" className="text-[11px] text-text-muted">{t("advancedEditor.hslPickerHint")}</p>}
-      <label className="grid gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.colorRange")} · {t(`advancedEditor.ranges.${range}`)}</span><input type="range" aria-label={t("advancedEditor.colorRange")} aria-valuetext={t(`advancedEditor.ranges.${range}`)} min={0} max={5} step={1} value={HSL_RANGES.indexOf(range)} onChange={e=>{end();setRange(HSL_RANGES[Number(e.target.value)]);}} className="editor-color-slider h-3 w-full rounded-full" style={{background:"linear-gradient(to right,#ef4444,#facc15,#22c55e,#22d3ee,#3b82f6,#d946ef)"}}/></label>
-      {(["hue", "saturation", "lightness"] as const).map((key) => <Slider key={key} gradient={hslGradient(range,key)} label={t(`advancedEditor.hslLabels.${key}`)} value={hsl[key]} onSet={value=>onAdvanced({hsl:{...a.hsl,[range]:{...hsl,[key]:value}}})} onReset={()=>onAdvanced({hsl:{...a.hsl,[range]:{...hsl,[key]:0}}})} min={key === "hue" ? -180 : -100} max={key === "hue" ? 180 : 100} onChange={(value) => onAdvanced({ hsl: { ...a.hsl, [range]: { ...hsl, [key]: value } } }, false)} begin={begin} end={end} />)}
-      <button type="button" disabled={!a.hsl?.[range]} className="text-xs text-accent disabled:opacity-30" onClick={() => {const hsl={...a.hsl};delete hsl[range];onAdvanced({hsl});}}>{t("advancedEditor.resetColorRange")}</button>
+      <label className="grid gap-2 text-xs text-text-secondary"><span>{t("advancedEditor.colorRange")} · {t(`advancedEditor.ranges.${range}`)}</span><input type="range" aria-label={t("advancedEditor.colorRange")} aria-valuetext={t(`advancedEditor.ranges.${range}`)} min={0} max={7} step={1} value={HSL_RANGES.indexOf(range)} onChange={e=>{end();setRange(HSL_RANGES[Number(e.target.value)]);}} className="editor-color-slider h-3 w-full rounded-full" style={{background:"linear-gradient(to right,#ef4444,#f97316,#facc15,#22c55e,#22d3ee,#3b82f6,#9333ea,#d946ef)"}}/></label>
+      {(["hue", "saturation", "lightness"] as const).map((key) => <Slider key={key} gradient={hslGradient(range,key)} label={t(`advancedEditor.hslLabels.${key}`)} value={hsl[key]} onSet={value=>onAdvanced({hslEight:{...a.hslEight,[range]:{...hsl,[key]:value}}})} onReset={()=>onAdvanced({hslEight:{...a.hslEight,[range]:{...hsl,[key]:0}}})} min={-100} max={100} onChange={(value) => onAdvanced({ hslEight: { ...a.hslEight, [range]: { ...hsl, [key]: value } } }, false)} begin={begin} end={end} />)}
+      <button type="button" disabled={!a.hslEight?.[range]} className="text-xs text-accent disabled:opacity-30" onClick={() => {const hslEight={...a.hslEight};delete hslEight[range];onAdvanced({hslEight});}}>{t("advancedEditor.resetColorRange")}</button>
     </details>
     <ExtendedColorPanel adjustments={a} onChange={onAdvanced} onReset={onReset} begin={begin} end={end}/>
     <ColorGradingPanel value={a.colorGrading} onChange={(colorGrading,record)=>onAdvanced({colorGrading},record)} onReset={()=>onReset("colorGrading")} begin={begin} end={end} cancel={cancel}/>

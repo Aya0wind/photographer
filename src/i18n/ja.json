@@ -1863,5 +1863,19 @@
   "advancedEditor.exportSettings.removeGps": "Remove GPS location",
   "advancedEditor.exportSettings.noUpscale": "Output sizing never enlarges the image. PNG/TIFF use lossless encoding; TIFF is 16 bit.",
   "advancedEditor.exportSettings.presetName": "Preset name",
-  "advancedEditor.exportSettings.savePreset": "Save preset"
+  "advancedEditor.exportSettings.savePreset": "Save preset",
+  "advancedEditor.ranges.oranges": "Orange",
+  "advancedEditor.ranges.purples": "Purple",
+  "advancedEditor.mixer.legacy": "The existing six-color HSL is retained; the eight-band mixer follows it. Reset this group to clear both.",
+  "advancedEditor.mixer.upgradeBw": "Switch to eight-band B&W (undoable; tones may change)",
+  "advancedEditor.masks.components": "Area components",
+  "advancedEditor.masks.baseArea": "Base area",
+  "advancedEditor.masks.operation": "Combine operation",
+  "advancedEditor.masks.componentSource": "New area or copy an existing area",
+  "advancedEditor.masks.add": "Add",
+  "advancedEditor.masks.subtract": "Subtract",
+  "advancedEditor.masks.intersect": "Intersect",
+  "advancedEditor.masks.removeComponent": "Remove area component",
+  "advancedEditor.masks.invertComponent": "Invert current component",
+  "advancedEditor.masks.overlayColor": "Mask overlay color"
 }

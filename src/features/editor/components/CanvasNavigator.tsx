@@ -2,7 +2,7 @@ import {useEffect,useRef,useState,type RefObject} from "react";
 import {useTranslation} from "react-i18next";
 
 /** Viewport geometry only: no second compositor or full-resolution image decode. */
-export default function CanvasNavigator({host}:{host:RefObject<HTMLElement|null>}) {
+export default function CanvasNavigator({host,src}:{host:RefObject<HTMLElement|null>;src?:string|null}) {
   const {t}=useTranslation();
   const [box,setBox]=useState({x:0,y:0,w:1,h:1,ratio:1.5});
   const pointer=useRef<number|null>(null);
@@ -45,6 +45,7 @@ export default function CanvasNavigator({host}:{host:RefObject<HTMLElement|null>
       onPointerDown={event=>{if(event.button!==0)return;event.preventDefault();event.stopPropagation();pointer.current=event.pointerId;event.currentTarget.setPointerCapture(event.pointerId);navigate(event.clientX,event.clientY,event.currentTarget);}}
       onPointerMove={event=>{if(pointer.current===event.pointerId)navigate(event.clientX,event.clientY,event.currentTarget);}}
       onPointerUp={()=>{pointer.current=null;}} onPointerCancel={()=>{pointer.current=null;}} onLostPointerCapture={()=>{pointer.current=null;}}>
+      {src&&<img src={src} alt="" className="pointer-events-none absolute inset-0 h-full w-full object-fill"/>}
       <span className="pointer-events-none absolute border border-accent bg-accent/15" style={{left:`${box.x*100}%`,top:`${box.y*100}%`,width:`${box.w*100}%`,height:`${box.h*100}%`}}/>
     </div>
     <div className="mt-1 flex justify-between">{[[-1,0,"←"],[0,-1,"↑"],[0,1,"↓"],[1,0,"→"]].map(([x,y,label])=><button key={label} type="button" className="h-5 w-6 rounded hover:bg-white/10" aria-label={t("advancedEditor.navigator.move",{direction:label})} onClick={()=>{const view=host.current?.querySelector<HTMLElement>('[data-testid="editor-canvas-viewport"]');if(view)view.scrollBy(Number(x)*view.clientWidth*0.25,Number(y)*view.clientHeight*0.25);}}>{label}</button>)}</div>

@@ -646,8 +646,10 @@ pub fn release_expired() {
 /// 原生高位深文档取色和曲线黑/灰/白点；UI 只接收参数，不处理像素。
 fn sampled_hsl_range(rgb:[f32;3])->Option<&'static str> {
     let (hue,saturation,_)=photocraft_compose::adjust::rgb_to_hsl(rgb);
-    let ranges=["reds","yellows","greens","cyans","blues","magentas"];
-    (saturation>0.01).then(||ranges[((hue*6.0).round() as usize)%6])
+    if saturation<=0.01{return None;}
+    let bands=photocraft_algo::camera_raw::band_weights(hue*360.0);
+    let index=(0..8).max_by(|a,b|bands[*a].total_cmp(&bands[*b])).unwrap_or(0);
+    Some(super::color_mixer::BANDS[index])
 }
 
 #[tauri::command]
@@ -774,22 +776,28 @@ fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str,channel:Option
             a.curves.clear();a.channel_curves.luminance.clear();
             match channel {Some("red")=>a.channel_curves.red.clear(),Some("green")=>a.channel_curves.green.clear(),Some("blue")=>a.channel_curves.blue.clear(),_=>{}}
         }
-        if picker=="hsl" {a.hsl.clear();a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
+        if picker=="hsl" {a.hsl.clear();a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
     }
 }
 
 #[tauri::command]
 pub async fn edit_preview_mask(
-    state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,mask_id:String,
+    state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value,mask_id:String,thumbnail:Option<bool>,
 )->Result<tauri::ipc::Response,String> {
     let recipe=recipe::parse_recipe(&recipe)?;
     run_blocking(state.inner().clone(),move |_|{
         use image::ImageEncoder;
         let preview=sessions().lock().map_err(|_|"预览锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
         let (base,renderer)={let preview=preview.lock().map_err(|_|"预览锁不可用")?;(preview.interactive_document.clone(),preview.interactive_renderer.clone())};
-        let doc=renderer.lock().map_err(|_|"蒙版锁不可用")?.mask_overlay(&base,&recipe,&mask_id)?;
+        let doc=if thumbnail.unwrap_or(false){
+            use photocraft_engine::doc::{Size,ColorMode,SampleType};
+            let scale=128.0/f64::from(base.size.width.max(base.size.height).max(1));
+            let small=Document::new("Mask thumbnail",Size::new((f64::from(base.size.width)*scale).round().max(1.0) as u32,(f64::from(base.size.height)*scale).round().max(1.0) as u32),ColorMode::Rgb,SampleType::U8);
+            let mut plain=recipe.clone();plain.crop=None;plain.geometry=None;plain.rotate_quarter=0;
+            super::masks::MaskCache::default().overlay(&small,&plain,&mask_id)?
+        }else{renderer.lock().map_err(|_|"蒙版锁不可用")?.mask_overlay(&base,&recipe,&mask_id)?};
         let pixels=photocraft_compose::flatten(&doc);
-        let rgba:Vec<u8>=pixels.px.iter().flat_map(|p|p.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)).collect();
+        let rgba:Vec<u8>=pixels.px.iter().flat_map(|p|{if thumbnail.unwrap_or(false){let v=(p[3].clamp(0.0,1.0)*255.0).round() as u8;[v,v,v,255]}else{p.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)}}).collect();
         let mut png=Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba,doc.size.width,doc.size.height,image::ExtendedColorType::Rgba8).map_err(|e|format!("蒙版预览失败：{e}"))?;
         Ok(tauri::ipc::Response::new(png))

@@ -2,7 +2,7 @@ import type {EditRecipe} from "@/ipc/api";
 import {DEFAULT_ADVANCED,DEFAULT_DEVELOPMENT} from "./advancedRecipe";
 export const TRANSFER_GROUPS=["light","color","curves","hsl","grading","detail","effects","profile","geometry","masks","annotations","output"] as const;
 export type TransferGroup=typeof TRANSFER_GROUPS[number];
-const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hsl"],grading:["colorGrading","lookup"]} as const;
+const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hsl","hslEight"],grading:["colorGrading","lookup"]} as const;
 const DEVELOPMENT={light:["highlights","shadows","whites","blacks"],detail:["sharpenAmount","sharpenRadius","sharpenDetail","sharpenMasking","noiseLuminance","noiseLuminanceDetail","noiseColor","noiseColorDetail"],effects:["texture","clarity","dehaze","grainAmount","grainSize","grainRoughness","vignetteAmount","vignetteMidpoint","vignetteRoundness","vignetteFeather","vignetteHighlights","vignetteStyle"]} as const;
 /** Copy only selected groups; absent source fields reset the corresponding target fields. */
 export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:TransferGroup[]):EditRecipe {

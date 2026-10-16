@@ -1870,5 +1870,19 @@
   "advancedEditor.exportSettings.removeGps": "移除 GPS 位置",
   "advancedEditor.exportSettings.noUpscale": "输出尺寸只缩小，不放大。PNG/TIFF 使用现有无损编码，TIFF 为 16 位。",
   "advancedEditor.exportSettings.presetName": "预设名称",
-  "advancedEditor.exportSettings.savePreset": "保存预设"
+  "advancedEditor.exportSettings.savePreset": "保存预设",
+  "advancedEditor.ranges.oranges": "橙色",
+  "advancedEditor.ranges.purples": "紫色",
+  "advancedEditor.mixer.legacy": "原配方的六色 HSL 仍保留；八色混合器在其后叠加，重置本组可一并清除。",
+  "advancedEditor.mixer.upgradeBw": "切换到八色黑白（可撤销，明暗可能变化）",
+  "advancedEditor.masks.components": "区域组件",
+  "advancedEditor.masks.baseArea": "基础区域",
+  "advancedEditor.masks.operation": "组合方式",
+  "advancedEditor.masks.componentSource": "新增区域或复制已有区域",
+  "advancedEditor.masks.add": "添加",
+  "advancedEditor.masks.subtract": "减去",
+  "advancedEditor.masks.intersect": "相交",
+  "advancedEditor.masks.removeComponent": "删除区域组件",
+  "advancedEditor.masks.invertComponent": "反选当前组件",
+  "advancedEditor.masks.overlayColor": "蒙版叠加颜色"
 }

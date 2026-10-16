@@ -7,7 +7,7 @@ export function useMaskOverlay(sessionId:string|undefined,recipe:EditRecipe,id:s
  const [url,setUrl]=useState<string|null>(null);
  const current=useRef<string|null>(null),owned=useRef(new Set<string>()),error=useRef(onError);error.current=onError;
  const mask=recipe.masks?.find(m=>m.id===id);
- const signature=JSON.stringify(mask?{id:mask.id,kind:mask.kind,from:mask.from,to:mask.to,strokes:mask.strokes,inverted:mask.inverted,feather:mask.feather,quarter:recipe.rotateQuarter,geometry:recipe.geometry,crop:recipe.crop}:null);
+ const signature=JSON.stringify(mask?{id:mask.id,kind:mask.kind,from:mask.from,to:mask.to,strokes:mask.strokes,components:mask.components,overlayColor:mask.overlayColor,inverted:mask.inverted,feather:mask.feather,quarter:recipe.rotateQuarter,geometry:recipe.geometry,crop:recipe.crop}:null);
  const latest=useRef(recipe);latest.current=recipe;
  useEffect(()=>{
   let cancelled=false;

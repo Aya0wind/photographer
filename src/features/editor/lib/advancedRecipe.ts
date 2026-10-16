@@ -31,7 +31,7 @@ export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):
     case "color":return !!(a.temperature||a.tint||a.vibrance||basic.saturation||recipe.legacyAdjustments?.saturation);
     case "curves":return !!a.curves.length || Object.values(a.channelCurves??{}).some(points=>!!points?.length);
     case "levels":return !!a.levels;
-    case "hsl":return Object.keys(a.hsl??{}).length>0;
+    case "hsl":return Object.keys(a.hsl??{}).length>0||Object.keys(a.hslEight??{}).length>0;
   }
 }
 
@@ -138,7 +138,7 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
       case "color": advanced.temperature=0;advanced.tint=0;advanced.vibrance=0;adjustments.saturation=0;break;
       case "curves": advanced.curves=[];advanced.channelCurves={};break;
       case "levels": advanced.levels=undefined;break;
-      case "hsl": advanced.hsl={};break;
+      case "hsl": advanced.hsl={};advanced.hslEight=undefined;break;
     }
     let legacyAdjustments=present.legacyAdjustments;
     if(legacyAdjustments&&action.group==="light")legacyAdjustments={...legacyAdjustments,brightness:0,contrast:0};

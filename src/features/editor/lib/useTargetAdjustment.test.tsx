@@ -50,7 +50,7 @@ it("changes only the sampled range in the selected mask",async()=>{
  vi.mocked(editPreviewPick).mockResolvedValue({sample:[40,70,220],range:"blues"});const {result}=setup("hslTarget",true);
  act(()=>result.current.target.onGesture(event("start")));await waitFor(()=>expect(result.current.target.busy).toBe(false));
  act(()=>result.current.target.onGesture(event("end",0.2)));
- expect(result.current.history.present.masks![0].advanced!.hsl).toEqual({blues:{hue:0,saturation:0,lightness:20}});expect(result.current.history.present.advanced!.hsl).toBeUndefined();
+ expect(result.current.history.present.masks![0].advanced!.hslEight).toEqual({blues:{hue:0,saturation:0,lightness:20}});expect(result.current.history.present.advanced!.hslEight).toBeUndefined();
  expect(editPreviewPick).toHaveBeenCalledWith("s",expect.anything(),0.5,0.5,"hsl","m","rgb",1);
 });
 

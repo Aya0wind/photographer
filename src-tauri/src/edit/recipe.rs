@@ -115,6 +115,8 @@ pub struct AdvancedAdjustments {
     pub curves: Vec<[f64; 2]>,
     pub channel_curves: ChannelCurves,
     pub levels: Option<Levels>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub hsl_eight:Option<std::collections::BTreeMap<String,HslRange>>,
     pub hsl: std::collections::BTreeMap<String, HslRange>,
 }
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
@@ -197,6 +199,8 @@ pub struct ColorBalance {
 #[serde(rename_all="camelCase")]
 pub struct BlackWhite {
     pub enabled:bool,pub weights:[f64;6],pub tint:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub weights_eight:Option<[f64;8]>,
 }
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -222,9 +226,17 @@ pub struct MaskStroke {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
+pub struct MaskComponent {pub operation:photocraft_algo::selection::SelectionMode,pub mask:Box<LocalMask>}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all="camelCase")]
 pub struct LocalMask {
     pub id: String,
     pub name: String,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub components:Vec<MaskComponent>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub overlay_color:Option<String>,
     pub kind: MaskKind,
     pub enabled: bool,
     pub inverted: bool,
@@ -354,6 +366,7 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
     }
     if let Some(b)=&mut a.black_white {
         numbers(&mut b.weights,-200.0,300.0)?;
+        if let Some(weights)=&mut b.weights_eight{numbers(weights,-200.0,300.0)?;}
         if b.tint.as_ref().is_some_and(|v|parse_color(v).is_none()){return Err("黑白着色色彩无效".into());}
     }
     if let Some(s)=&mut a.selective_color {
@@ -398,6 +411,14 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
         if lookup.id.len()>96 || !lookup.amount.is_finite() {return Err("调色方案参数无效".into());}
         lookup.amount=lookup.amount.clamp(0.0,100.0);
     }
+    if let Some(ranges)=&mut a.hsl_eight{
+        for (name,range) in ranges{
+            if !super::color_mixer::BANDS.contains(&name.as_str()){return Err("八色 HSL 范围无效".into());}
+            numbers(std::slice::from_mut(&mut range.hue),-100.0,100.0)?;
+            numbers(std::slice::from_mut(&mut range.saturation),-100.0,100.0)?;
+            numbers(std::slice::from_mut(&mut range.lightness),-100.0,100.0)?;
+        }
+    }
     for (key, range) in &mut a.hsl {
         if !["reds", "yellows", "greens", "cyans", "blues", "magentas"].contains(&key.as_str())
             || ![range.hue, range.saturation, range.lightness]
@@ -410,6 +431,39 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
         range.saturation = range.saturation.clamp(-100.0, 100.0);
         range.lightness = range.lightness.clamp(-100.0, 100.0);
     }
+    Ok(())
+}
+
+fn normalize_mask(mask:&mut LocalMask,point_count:&mut usize,count:&mut usize,depth:usize)->Result<(),String>{
+    *count+=1;
+    if depth>4||*count>128||mask.name.len()>512||mask.id.is_empty()||mask.id.len()>96{return Err("蒙版组件过多或嵌套过深".into());}
+    if mask.overlay_color.as_ref().is_some_and(|v|parse_color(v).is_none()){return Err("蒙版叠加颜色无效".into());}
+        for point in [&mut mask.from,&mut mask.to] {
+            if !point.x.is_finite() || !point.y.is_finite() {return Err("蒙版坐标无效".into());}
+            point.x=clamp01(point.x);point.y=clamp01(point.y);
+        }
+        for v in [&mut mask.density,&mut mask.feather] {
+            if !v.is_finite() {return Err("蒙版数值无效".into());}
+            *v=v.clamp(0.0,100.0);
+        }
+        for stroke in &mut mask.strokes {
+            *point_count=point_count.saturating_add(stroke.points.len());
+            if *point_count>100_000 || stroke.points.is_empty() {return Err("蒙版笔迹无效或过长".into());}
+            for (v,min,max) in [(&mut stroke.width_rel,0.0001,1.0),(&mut stroke.hardness,0.0,1.0),(&mut stroke.opacity,0.0,1.0),(&mut stroke.flow,0.0,1.0)] {
+                if !v.is_finite() {return Err("蒙版画笔数值无效".into());}*v=v.clamp(min,max);
+            }
+            for point in &mut stroke.points {
+                if !point.x.is_finite() || !point.y.is_finite() {return Err("蒙版笔迹坐标无效".into());}
+                point.x=clamp01(point.x);point.y=clamp01(point.y);
+            }
+        }
+        if let Some(a)=&mut mask.advanced {normalize_advanced(a)?;}
+        if let Some(a)=&mut mask.adjustments {
+            for v in [&mut a.brightness,&mut a.contrast,&mut a.saturation] {
+                if !v.is_finite() {return Err("局部调整数值无效".into());}*v=v.clamp(-100.0,100.0);
+            }
+        }
+    for component in &mut mask.components{normalize_mask(&mut component.mask,point_count,count,depth+1)?;}
     Ok(())
 }
 
@@ -441,35 +495,12 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
     }
     let mut ids=std::collections::HashSet::new();
     let mut point_count=0usize;
+    let mut component_count=0usize;
     for mask in &mut recipe.masks {
         if mask.id.is_empty() || mask.id.len()>96 || !ids.insert(mask.id.clone()) || mask.name.len()>512 {
             return Err("蒙版名称或标识无效".into());
         }
-        for point in [&mut mask.from,&mut mask.to] {
-            if !point.x.is_finite() || !point.y.is_finite() {return Err("蒙版坐标无效".into());}
-            point.x=clamp01(point.x);point.y=clamp01(point.y);
-        }
-        for v in [&mut mask.density,&mut mask.feather] {
-            if !v.is_finite() {return Err("蒙版数值无效".into());}
-            *v=v.clamp(0.0,100.0);
-        }
-        for stroke in &mut mask.strokes {
-            point_count=point_count.saturating_add(stroke.points.len());
-            if point_count>100_000 || stroke.points.is_empty() {return Err("蒙版笔迹无效或过长".into());}
-            for (v,min,max) in [(&mut stroke.width_rel,0.0001,1.0),(&mut stroke.hardness,0.0,1.0),(&mut stroke.opacity,0.0,1.0),(&mut stroke.flow,0.0,1.0)] {
-                if !v.is_finite() {return Err("蒙版画笔数值无效".into());}*v=v.clamp(min,max);
-            }
-            for point in &mut stroke.points {
-                if !point.x.is_finite() || !point.y.is_finite() {return Err("蒙版笔迹坐标无效".into());}
-                point.x=clamp01(point.x);point.y=clamp01(point.y);
-            }
-        }
-        if let Some(a)=&mut mask.advanced {normalize_advanced(a)?;}
-        if let Some(a)=&mut mask.adjustments {
-            for v in [&mut a.brightness,&mut a.contrast,&mut a.saturation] {
-                if !v.is_finite() {return Err("局部调整数值无效".into());}*v=v.clamp(-100.0,100.0);
-            }
-        }
+        normalize_mask(mask,&mut point_count,&mut component_count,0)?;
     }
     if let Some(a) = recipe.advanced.as_mut() {
         normalize_advanced(a)?;

@@ -432,10 +432,10 @@ mod windows_canvas {
                         let mut mask_uploads=0;
                         if let Some(id)=frame.view.mask_id.as_ref().filter(|_|frame.view.mask_guide.is_some_and(|g|g[7]>0.5)) {
                             let mask=mask_recipe.masks.iter().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
-                            frame.view.mask_source_space=mask.feather==0.0&&mask.kind!=crate::edit::recipe::MaskKind::Brush;
+                            frame.view.mask_source_space=mask.components.is_empty()&&mask.feather==0.0&&mask.kind!=crate::edit::recipe::MaskKind::Brush;
                             let unchanged= !input_changed&&previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&old["id"].as_str()==Some(id.as_str()));
                             if !unchanged {
-                            let key=serde_json::json!({"id":id,"kind":mask.kind,"from":mask.from,"to":mask.to,"strokes":mask.strokes,"inverted":mask.inverted,"feather":mask.feather,"quarter":frame.recipe.rotate_quarter,"geometry":frame.recipe.geometry,"crop":frame.recipe.crop});
+                            let key=serde_json::json!({"id":id,"kind":mask.kind,"from":mask.from,"to":mask.to,"strokes":mask.strokes,"components":mask.components,"overlayColor":mask.overlay_color,"inverted":mask.inverted,"feather":mask.feather,"quarter":frame.recipe.rotate_quarter,"geometry":frame.recipe.geometry,"crop":frame.recipe.crop});
                             if !previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&*old==key){
                                 let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&renderer.neutral_document(&base,&frame.recipe)?,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&renderer.neutral_document(&base,&frame.recipe)?,&mask_recipe,id)?};
                                 mask_uploads=gpu.prepare_mask_overlay(&doc)?;previous_mask=Some((base.id,key));
