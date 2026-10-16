@@ -1,8 +1,10 @@
+import RawWhiteBalancePanel from "./RawWhiteBalancePanel";
 import {useTranslation} from "react-i18next";
 import type {EditRecipe} from "@/ipc/api";
 import type {BaseProfile} from "../lib/editorPreferences";
 
-export default function BaseProfilePanel({recipe,isRaw,defaultProfile,onDefault,onChange,onUpgrade,disabled}:{
+export default function BaseProfilePanel({recipe,isRaw,defaultProfile,onDefault,onChange,onUpgrade,disabled,onWhiteBalance,onWhiteBalancePicker,rawReady=false,begin=()=>{},end=()=>{} }:{
+  begin?:()=>void;end?:()=>void;rawReady?:boolean;onWhiteBalance?:(value:NonNullable<EditRecipe["colorPipeline"]>["rawWhiteBalance"],record?:boolean)=>void;onWhiteBalancePicker?:()=>void;
   recipe:EditRecipe;isRaw:boolean;defaultProfile:BaseProfile;onDefault:(value:BaseProfile)=>void;
   onChange:(value:BaseProfile)=>void;onUpgrade:()=>void;disabled:boolean;
 }) {
@@ -26,5 +28,6 @@ export default function BaseProfilePanel({recipe,isRaw,defaultProfile,onDefault,
       {(["standard","soft","neutral"] as const).map(id=><option key={id} value={id}>{t(`advancedEditor.baseColor.${id}`)}</option>)}
     </select></label>
     <p className="text-[11px] text-text-muted">{t("advancedEditor.baseColor.defaultHint")}</p>
+    {modern&&isRaw&&onWhiteBalance&&onWhiteBalancePicker&&<RawWhiteBalancePanel begin={begin} end={end} value={pipeline.rawWhiteBalance} onChange={onWhiteBalance} onPicker={onWhiteBalancePicker} ready={rawReady} disabled={disabled}/>}
   </section>;
 }

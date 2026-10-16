@@ -293,8 +293,15 @@ pub struct ColorPipeline {
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub base_profile:Option<BaseProfile>,
     #[serde(default,skip_serializing_if="Option::is_none")]
+    pub raw_white_balance:Option<RawWhiteBalance>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub relative_white_balance:Option<[f32;3]>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
     pub film:Option<LutSelection>,
 }
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase",tag="mode")]
+pub enum RawWhiteBalance {AsShot,Auto,Temperature{kelvin:f32,tint:f32}}
 #[derive(Debug,Clone,Copy,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 pub enum BaseProfile { Standard, Soft, Neutral }
@@ -486,6 +493,11 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
     }
     if let Some(p)=&mut recipe.color_pipeline {
         if !matches!(p.version,1|2)||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此显影配方的 core 版本或编辑引擎不受支持".into());}
+        if let Some(RawWhiteBalance::Temperature{kelvin,tint})=&p.raw_white_balance{
+            if !kelvin.is_finite()||!(2000.0..=50000.0).contains(kelvin)||!tint.is_finite()||!(-150.0..=150.0).contains(tint){return Err("RAW 色温或色调无效".into());}
+        }
+        if let Some(gains)=&p.relative_white_balance{if !gains.iter().all(|v|v.is_finite()&&(0.05..=20.0).contains(v)){return Err("中性校正增益无效".into());}}
+        if p.version!=2&&(p.raw_white_balance.is_some()||p.relative_white_balance.is_some()){return Err("绝对白平衡需要新版 RAW 显影".into());}
         if (p.version==2)!=p.base_profile.is_some(){return Err("基础色彩配置与显影版本不匹配".into());}
         if let Some(f)=p.film.as_mut(){super::film::validate_id(&f.id)?;if !f.amount.is_finite(){return Err("胶片强度无效".into());}f.amount=f.amount.clamp(0.0,100.0);}
     }

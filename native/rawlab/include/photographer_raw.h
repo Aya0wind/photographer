@@ -18,6 +18,8 @@ typedef struct {
     uint32_t half_size;
     uint64_t max_pixels;
     float white_balance[4]; // zero: as-shot; otherwise absolute R/G/B/G
+    uint32_t wb_mode; // 0 as-shot/custom multipliers, 1 auto, 2 absolute Kelvin/tint
+    float temperature, tint;
     pc_raw_cancel cancelled;
     void *userdata;
 } pc_raw_options;

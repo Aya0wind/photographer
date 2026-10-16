@@ -16,6 +16,9 @@ struct Options {
     half_size: u32,
     max_pixels: u64,
     white_balance: [f32; 4],
+    wb_mode:u32,
+    temperature:f32,
+    tint:f32,
     cancelled: Cancel,
     userdata: *mut c_void,
 }
@@ -75,6 +78,8 @@ pub struct DevelopOptions {
     pub half_size: bool,
     pub max_pixels: u64,
     pub white_balance: [f32; 4],
+    pub auto_white_balance:bool,
+    pub temperature:Option<[f32;2]>,
 }
 impl Default for DevelopOptions {
     fn default() -> Self {
@@ -82,6 +87,8 @@ impl Default for DevelopOptions {
             half_size: false,
             max_pixels: 128_000_000,
             white_balance: [0.0; 4],
+            auto_white_balance:false,
+            temperature:None,
         }
     }
 }
@@ -127,7 +134,7 @@ impl Backend {
         let version =
             unsafe { library.get::<unsafe extern "C" fn() -> u32>(b"pc_raw_abi_version\0") }
                 .map_err(|e| e.to_string())?;
-        if unsafe { version() } != 2 {
+        if unsafe { version() } != 3 {
             return Err("Unsupported RawLab bridge ABI".into());
         }
         let decode =
@@ -165,10 +172,13 @@ impl Backend {
     ) -> Result<Image<'a>, String> {
         let path = CString::new(path).map_err(|_| "RAW source path contains NUL")?;
         let options = Options {
-            version: 1,
+            version: 2,
             half_size: options.half_size as u32,
             max_pixels: options.max_pixels,
             white_balance: options.white_balance,
+            wb_mode:if options.temperature.is_some(){2}else if options.auto_white_balance{1}else{0},
+            temperature:options.temperature.map_or(6500.0,|v|v[0]),
+            tint:options.temperature.map_or(0.0,|v|v[1]),
             cancelled,
             userdata: userdata(cancel),
         };

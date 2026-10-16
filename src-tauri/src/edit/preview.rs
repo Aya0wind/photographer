@@ -381,7 +381,7 @@ pub async fn edit_preview_prepare(
             raw,
             mut details,
         } = if values.as_ref().is_some_and(|r|r.color_pipeline.is_some()) {
-            let source=if sensor_raw{super::rawlab::open(&path,Some(PREVIEW_EDGE),&generation.closed)?}else{
+            let source=if sensor_raw{super::rawlab::open_with_balance(&path,Some(PREVIEW_EDGE),&generation.closed,values.as_ref().and_then(|r|r.color_pipeline.as_ref()).and_then(|p|p.raw_white_balance.as_ref()))?}else{
                 let p=preview.lock().map_err(|_|"预览会话锁不可用")?;
                 source::Opened{original_size:p.original_size,document:p.document.clone(),raw:None,warnings:vec![]}
             };
@@ -652,6 +652,19 @@ fn sampled_hsl_range(rgb:[f32;3])->Option<&'static str> {
     Some(super::color_mixer::BANDS[index])
 }
 
+fn white_balance_sample(p:&Preview,recipe:&recipe::EditRecipe,point:[f64;2],size:u32,local:bool)->Result<serde_json::Value,String>{
+            if !p.sensor_raw||!p.pipeline_ready||local{return Err("请等待 RAW 预览就绪后取样".into());}
+            let base=&p.document;
+            let px=(point[0]*f64::from(base.size.width)).floor().min(f64::from(base.size.width-1)) as i32;
+            let py=(point[1]*f64::from(base.size.height)).floor().min(f64::from(base.size.height-1)) as i32;
+            let sample=sample_region(base,px,py,size)?;
+            if sample.iter().any(|v|!v.is_finite()||*v<0.0001||*v>=1.0){return Err("请选择未过曝、亮度适中的中性区域".into());}
+            let a=recipe.advanced.clone().unwrap_or_default();let relative=photocraft_algo::camera_raw::white_balance_gains(a.temperature as f32,a.tint as f32);
+            let green=sample[1]*relative[1];let gains:[f32;3]=std::array::from_fn(|i|green/(sample[i]*relative[i]));
+            if !gains.iter().all(|v|(0.05..=20.0).contains(v)){return Err("中性取样校正超出范围".into());}
+            Ok(serde_json::json!({"whiteBalance":gains,"sample":sample.map(|v|v*255.0)}))
+}
+
 #[tauri::command]
 pub async fn edit_preview_pick(
     state: State<'_, SharedState>,
@@ -678,6 +691,10 @@ pub async fn edit_preview_pick(
             .get(&session_id)
             .cloned()
             .ok_or("预览会话已关闭")?;
+        if picker=="rawWhiteBalance"{
+            let p=preview.lock().map_err(|_|"预览锁不可用")?;
+            return white_balance_sample(&p,&recipe,[x,y],sample_size,mask_id.is_some());
+        }
         if picker=="readout" {
             // Reuse the proxy and adjustment caches; compose only the hovered pixel.
             let (base,renderer)={let p=preview.lock().map_err(|_|"预览锁不可用")?;(p.interactive_document.clone(),p.interactive_renderer.clone())};
@@ -1078,4 +1095,23 @@ mod startup_tests {
             .source_url
             .starts_with("data:image/jpeg;base64,"));
     }
+}
+
+/// Global, color-preserving automatic black/white points from the current
+/// calibrated display stage. No local masks or later color looks feed back.
+#[tauri::command]
+pub async fn edit_preview_auto_levels(state:State<'_,SharedState>,session_id:String,recipe:serde_json::Value)->Result<super::recipe::Levels,String>{
+    let mut recipe=recipe::parse_recipe(&recipe)?;
+    if let Some(a)=recipe.advanced.as_mut(){a.levels=None;a.curves.clear();a.channel_curves=Default::default();a.parametric_curve=None;a.hsl.clear();a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.color_grading=None;a.lookup=None;}
+    recipe.masks.clear();recipe.text_layers.clear();recipe.brush_strokes.clear();
+    run_blocking(state.inner().clone(),move |_|{
+        let base=interactive_source(&session_id)?;
+        let bins=histogram_pixels(&photo_pixels(&base,&recipe,1.0)?)?;
+        let mut combined=[0u64;256];for channel in bins.iter().take(3){for (count,value) in combined.iter_mut().zip(channel){*count+=value;}}
+        let total=combined.iter().sum::<u64>();if total==0{return Err("没有可用于自动调整的像素".into());}
+        let quantile=|fraction:f64|{let target=(total as f64*fraction).ceil() as u64;let mut sum=0;combined.iter().position(|v|{sum+=v;sum>=target}).unwrap_or(255) as f64};
+        let black=quantile(0.001);let white=quantile(0.999);
+        if white-black<2.0{return Err("图像动态范围不足，无法自动设置黑白点".into());}
+        Ok(super::recipe::Levels{black:black.min(253.0),white,gamma:1.0})
+    }).await
 }

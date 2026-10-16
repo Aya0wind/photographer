@@ -2,7 +2,7 @@ import {useEffect,useRef,type MutableRefObject} from "react";
 import {editPreviewPrepare,editPreviewActivate,editPreviewRender,type EditRecipe,type EditorPreviewSession} from "@/ipc/api";
 import {preparePreviewImage,releasePreviewImage} from "./previewImages";
 
-type PreparedFrame = {session:EditorPreviewSession;frame:string};
+export type PreparedFrame = {session:EditorPreviewSession;frame:string;sourceKey?:string};
 interface Options {
   session:EditorPreviewSession|null;
   enabled:boolean;
@@ -11,9 +11,10 @@ interface Options {
   onError:(error:string)=>void;
 }
 
-async function prepareFrame(sessionId:string,latest:MutableRefObject<EditRecipe>,current:()=>boolean,
+export async function prepareFrame(sessionId:string,latest:MutableRefObject<EditRecipe>,current:()=>boolean,
   beginActivation:()=>boolean,onActivated:(session:EditorPreviewSession)=>void):Promise<PreparedFrame|null> {
-  await editPreviewPrepare(sessionId,latest.current);
+  const preparing=latest.current;const sourceKey=JSON.stringify(preparing.colorPipeline?.rawWhiteBalance??null);
+  await editPreviewPrepare(sessionId,preparing);
   if(!beginActivation())return null;
   const requested=latest.current;
   const session=await editPreviewActivate(sessionId,requested);
@@ -32,7 +33,7 @@ async function prepareFrame(sessionId:string,latest:MutableRefObject<EditRecipe>
       await preparePreviewImage(frame);
     }
     if(!current()){releasePreviewImage(frame);return null;}
-    return {frame,session};
+    return {frame,session,sourceKey};
   } catch(error) {releasePreviewImage(frame);throw error;}
 }
 
@@ -49,6 +50,7 @@ export function useSmartPreview({session,enabled,latest,onPrepared,onError}:Opti
     let activated:EditorPreviewSession|null=null;
     const current=()=>live.current&&currentSession.current===session.sessionId;
     const beginActivation=()=>{if(cancelled)return false;activating=true;return true;};
+    const requestedSourceKey=JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null);
     prepared.current=session.sessionId;
     void prepareFrame(session.sessionId,latest,current,beginActivation,value=>{activated=value;}).then(result=>{
       if(!result)return;
@@ -61,7 +63,7 @@ export function useSmartPreview({session,enabled,latest,onPrepared,onError}:Opti
       if(!current()||(cancelled&&!activating))return;
       prepared.current=null;
       // Keep frontend/backend source ownership aligned after a render error.
-      if(activated)callbacks.current.onPrepared({frame:image.current??activated.sourceUrl,session:activated});
+      if(activated)callbacks.current.onPrepared({frame:image.current??activated.sourceUrl,session:activated,sourceKey:requestedSourceKey});
       callbacks.current.onError(String(error));
     });
     return ()=>{cancelled=true;if(!completed&&!activating&&prepared.current===session.sessionId)prepared.current=null;};

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { editPreviewClose, editPreviewOpen, type EditRecipe, type EditorPreviewSession } from "@/ipc/api";
 
 import {releasePreviewImage} from "./previewImages";
+import {useRawWhiteBalancePreview} from "./useRawWhiteBalancePreview";
 import {useSmartPreview} from "./useSmartPreview";
 import { startPreviewScheduler } from "./previewScheduler";
 
@@ -21,13 +22,14 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
   const closeScheduler=useRef<(()=>void)|null>(null);
   const enabled = recipe.renderer === "photocraft";
   const rawlab = !!recipe.colorPipeline;
+  const [sourceKey,setSourceKey]=useState<string|null>(null);
   const [prepareError,setPrepareError]=useState<string|null>(null);
 
   useEffect(() => {
     if (!enabled) { setSession(null); setUrl(null); return; }
     let cancelled = false;
     let id: string | null = null;
-    setSession(null); setUrl(null); setError(null);setPrepareError(null);
+    setSession(null); setUrl(null); setError(null);setPrepareError(null);setSourceKey(null);
     // Pipeline toggles change the recipe/source in this session. Reopening it
     // would discard the displayed frame and rebuild the native child viewport.
     const opening = editPreviewOpen(assetId, libraryId,!!latest.current.colorPipeline);
@@ -36,14 +38,20 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
       id = value.sessionId;
       if (cancelled) void editPreviewClose(id).catch(() => {});
       else {
-        setSession(value);
+        setSession(value);if(value.rawlabReady)setSourceKey("null");
 
       }
     }).catch((e: unknown) => { if (!cancelled) setError(String(e)); });
-    return () => { cancelled = true; if (openedRequest.current === opening) openedRequest.current = null; if (id) void editPreviewClose(id).catch(() => {}); };
+    return () => { cancelled = true; if (openedRequest.current === opening) openedRequest.current = null; if (id) void editPreviewClose(id).catch(() => {});const active=openedRequest.current;if(active&&active!==opening)void active.then(value=>editPreviewClose(value.sessionId)).catch(()=>{}); };
   }, [assetId, libraryId, retry, enabled]);
 
-  useSmartPreview({session,enabled:rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
+  useSmartPreview({session,enabled:rawlab,latest,onPrepared:value=>{closeScheduler.current?.();setSourceKey(value.sourceKey??JSON.stringify(latest.current.colorPipeline?.rawWhiteBalance??null));setUrl(value.frame);setSession(value.session);},onError:setPrepareError});
+
+  const balance=useRawWhiteBalancePreview({assetId,libraryId,session,sourceKey,latest,onPrepared:value=>{
+    const previous=session?.sessionId;closeScheduler.current?.();openedRequest.current=Promise.resolve(value.session);
+    setSourceKey(value.sourceKey??null);setUrl(value.frame);setSession(value.session);
+    if(previous)void editPreviewClose(previous).catch(()=>{});
+  }});
 
   useEffect(() => {
     if (!session || nativeCanvas) { setPending(false); return; }
@@ -53,7 +61,7 @@ export function useEditorPreview(assetId: number, recipe: EditRecipe, libraryId:
   }, [session, nativeCanvas]);
   useEffect(() => { scheduler.current?.(); }, [signature]);
   return { enabled, session, url: url ?? session?.sourceUrl ?? null, pending,
-    loading: enabled && !session && !error, error, warning:prepareError, close: async () => {
+    loading: enabled && !session && !error, error, warning:balance.error??prepareError,preparingWhiteBalance:balance.busy, close: async () => {
       const request = openedRequest.current;
       if (request) { try { const value = await request; await editPreviewClose(value.sessionId); } catch (error) { console.warn("Could not release editor preview session", error); } }
     }, reload: () => setRetry((n) => n + 1) };

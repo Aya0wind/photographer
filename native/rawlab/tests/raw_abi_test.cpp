@@ -3,12 +3,12 @@
 #include <cstdio>
 // Release checks stay active without assert/NDEBUG dependence.
 int main() {
-    pc_raw_options options{}; options.version = 1; options.max_pixels = 128000000;
+    pc_raw_options options{}; options.version = 2; options.max_pixels = 128000000;
     pc_raw_result result{};
-    if (pc_raw_abi_version() != 2 || pc_raw_decode("missing-source.DNG", &options, &result) == 0 || result.owner || result.rgb || !result.error[0]) return 1;
+    if (pc_raw_abi_version() != 3 || pc_raw_decode("missing-source.DNG", &options, &result) == 0 || result.owner || result.rgb || !result.error[0]) return 1;
     options.version = 999;
     if (pc_raw_decode("missing-source.DNG", &options, &result) == 0 || result.owner || !result.error[0]) return 2;
-    options.version = 1; options.cancelled = [](void *) { return 1; };
+    options.version = 2; options.cancelled = [](void *) { return 1; };
     if (pc_raw_decode("missing-source.DNG", &options, &result) == 0 || result.owner || !result.error[0]) return 3;
     const float linear[] = {0,0,0,.1845f,.1845f,.1845f,1,1,1,2,2,2};
     pc_film_options film{}; film.version = 2; film.strength = 0;

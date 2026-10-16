@@ -18,7 +18,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  editRawlabAvailable, assetDetail, editPreviewPick, albumList, assetAlbums, editProjectOpen, advancedExportFolder, editExportStatus, subscribeAppEvents,
+  editPreviewAutoLevels,editRawlabAvailable, assetDetail, editPreviewPick, albumList, assetAlbums, editProjectOpen, advancedExportFolder, editExportStatus, subscribeAppEvents,
   type AlbumDto, type AssetDto, type EditRecipe, type ExportOptions,
 } from "@/ipc/api";
 import ActionPopover from "@/shared/components/ActionPopover";
@@ -28,7 +28,7 @@ import EditorExportProgress from "./EditorExportProgress";
 import AdvancedToolPanel from "./AdvancedToolPanel";
 import MaskPanel from "./MaskPanel";
 import {maskGestureOwnsKey,type MaskBrush} from "./MaskCanvasControls";
-import { advancedRecipe, advancedReducer } from "../lib/advancedRecipe";
+import { advancedRecipe, advancedReducer,DEFAULT_DEVELOPMENT } from "../lib/advancedRecipe";
 import { newLayerId, recipeEquals, recipeForPersist, type RecipeContext,type RecipeHistory } from "../lib/recipe";
 import { clampCrop, isFullCrop, type Size } from "../lib/coords";
 import { useNativeEditorCanvas } from "../lib/useNativeEditorCanvas";
@@ -37,7 +37,7 @@ import {useMaskOverlay} from "../lib/useMaskOverlay";
 import {useClippingOverlay} from "../lib/useClippingOverlay";
 import {useSchemeTransfer} from "../lib/useSchemeTransfer";
 import {usePixelReadout} from "../lib/usePixelReadout";
-import HistogramPanel from "./HistogramPanel";
+import HistogramPanel, {type HistogramGesture} from "./HistogramPanel";
 import {useEditorHistogram} from "../lib/useEditorHistogram";
 import {pickerAdjustment} from "../lib/pickerResult";
 import ErrorModal from "@/shared/components/ErrorModal";
@@ -116,6 +116,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       const result = await editPreviewPick(sessionId, recipe, x, y, picker,tool==="mask"?activeMask?.id:undefined,targetCurveChannel,sampleSize);
       if (sequence !== pickSequence.current || signature!==pickSignature.current) return;
       setSamplingError(null);
+      if(result.whiteBalance&&recipe.colorPipeline){dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,relativeWhiteBalance:result.whiteBalance}});setPicker(null);}
       if (result.sample) {
         setSample(result.sample);
         if(picker==="hsl") {
@@ -173,6 +174,15 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const autosave=useProjectAutosave({assetId:asset.id,libraryId,recipe:recipeForPersist(recipe),
     enabled:!projectLoading&&!projectError&&!libraryChanged&&tool!=="crop"&&!target.active&&gesture.current===null&&!confirm&&!busy&&!exporting,
     dirty:!recipeEquals(recipeForPersist(recipe),recipeForPersist(baseline)),onSaved:setBaseline});
+  const histogramStart=useRef<EditRecipe|null>(null);
+  function dragHistogram(event:HistogramGesture){
+    if(event.phase==="start"){beginGesture();histogramStart.current=recipe;return;}
+    if(event.phase==="cancel"){histogramStart.current=null;cancelGesture();return;}
+    if(event.phase==="end"){histogramStart.current=null;endGesture();return;}
+    const start=histogramStart.current;if(!start)return;
+    if(event.zone==="exposure")dispatch({type:"advanced",patch:{exposure:Math.max(-5,Math.min(5,(start.advanced?.exposure??0)+event.delta*6))},record:false});
+    else dispatch({type:"advanced",patch:{development:{...DEFAULT_DEVELOPMENT,...start.advanced?.development,[event.zone]:Math.max(-100,Math.min(100,(start.advanced?.development?.[event.zone]??0)+event.delta*200))}},record:false});
+  }
   const [histogramOpen,setHistogramOpen]=useState(true);
   const histogram=useEditorHistogram(preview.session?.sessionId,recipe,compare,histogramOpen&&!unavailable);
   const readoutRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
@@ -339,6 +349,11 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,version:2,backend:"rawlab",coreRevision:backend.coreRevision,baseProfile:preferences.defaultProfile}});
     } catch(error){setNotice(String(error));}
   }
+  async function autoLevels(){
+    if(unavailable||busyRef.current||!preview.session)return;busyRef.current=true;setBusy(true);
+    try{const levels=await editPreviewAutoLevels(preview.session.sessionId,recipe);if(mounted.current)dispatch({type:"advanced",patch:{levels}});}
+    catch(error){setNotice(String(error));}finally{busyRef.current=false;if(mounted.current)setBusy(false);}
+  }
   function changeProfile(value:BaseProfile){
     if(recipe.colorPipeline?.version===2)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,baseProfile:value}});
   }
@@ -430,6 +445,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
         <button className={BUTTON} disabled={(!history.past.length&&tool!=="crop") || busy || exporting} onClick={undoEditing} title={t("editor.undo")} aria-label={t("editor.undo")}>↶</button>
         <button className={BUTTON} disabled={!history.future.length || tool==="crop" || busy || exporting} onClick={redoEditing} title={t("editor.redo")} aria-label={t("editor.redo")}>↷</button>
         <button className={BUTTON} disabled={busy || unavailable} aria-pressed={compare} title={t("advancedEditor.compareHold")} onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); setCompare(true); }} onPointerUp={() => setCompare(false)} onPointerCancel={() => setCompare(false)} onLostPointerCapture={() => setCompare(false)} onBlur={() => setCompare(false)} onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); setCompare(true); } }} onKeyUp={() => setCompare(false)}>{t("advancedEditor.compare")}</button>
+        <button className={BUTTON} disabled={busy||exporting||unavailable||target.active||tool==="crop"} onClick={()=>void autoLevels()}>{t("advancedEditor.autoLevels")}</button>
         <button className={BUTTON} disabled={busy || unavailable || target.active} onClick={() => void saveProject()}>{t("advancedEditor.saveChanges")}</button>
         <button className={BUTTON} disabled={busy || unavailable || target.active} aria-pressed={splitEnabled} title={t("advancedEditor.compareSplitHint")} onClick={()=>{setPicker(null);setSplitEnabled(v=>!v);}}>{t("advancedEditor.compareSplit")}</button>
         <button className="ui-primary rounded-xl px-4 py-2 text-xs disabled:opacity-40" disabled={busy || exporting || unavailable || target.active} onClick={() => chooseTool("output")}>{t("editor.export")}</button>
@@ -455,7 +471,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       {preferences.leftOpen&&<aside aria-label={t("advancedEditor.layout.left")} style={{width:preferences.leftWidth}} className="ui-glass sp-scroll shrink-0 space-y-4 overflow-y-auto rounded-2xl p-3">
         <div className="flex gap-2">{(["profiles","history","versions"] as const).map(tab=><button key={tab} className={BUTTON} aria-pressed={leftTab===tab} onClick={()=>setLeftTab(tab)}>{t(`advancedEditor.sidebar.${tab}`)}</button>)}</div>
         {leftTab==="profiles"?<BaseProfilePanel recipe={recipe} isRaw={asset.kind==="raw"} defaultProfile={preferences.defaultProfile}
-          onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} onUpgrade={()=>void upgradeColor()} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
+          begin={beginGesture} end={endGesture} rawReady={!!preview.session?.rawlabReady&&!preview.preparingWhiteBalance} onWhiteBalance={(rawWhiteBalance,record)=>{if(recipe.colorPipeline)dispatch({type:"colorPipeline",value:{...recipe.colorPipeline,rawWhiteBalance,relativeWhiteBalance:undefined},record});}} onWhiteBalancePicker={()=>{chooseTool("adjust");setPicker("rawWhiteBalance");}} onDefault={defaultProfile=>updatePreferences({defaultProfile})} onChange={changeProfile} onUpgrade={()=>void upgradeColor()} disabled={busy||exporting||unavailable||tool==="crop"||target.active}/>
           :leftTab==="versions"?<EditorVersionsPanel onBusy={value=>{busyRef.current=value;setBusy(value);}} assetId={asset.id} libraryId={libraryId} recipe={recipeForPersist(effective)} revision={baseline} disabled={busy||exporting||unavailable||tool==="crop"||target.active} save={saveProject} onApply={(value,branch)=>{dispatch({type:branch?"loadProject":"applyProject",recipe:value});setBaseline(value);setSelectedMask(null);setSelectedText(null);}}/>:<><p className="text-[11px] text-text-muted">{t("advancedEditor.sidebar.historyHint")}</p><button className={`${BUTTON} w-full`} disabled={unavailable||busy||target.active||tool==="crop"||!history.past.length} onClick={()=>dispatch({type:"restoreHistory",history:{past:[],present:history.past[0],future:[...history.past.slice(1),recipe,...history.future]}})}>{t("advancedEditor.sidebar.initial")}</button>
           {history.past.map((_,index)=><button key={index} disabled={unavailable||busy||target.active||tool==="crop"} className={`${BUTTON} w-full`} onClick={()=>dispatch({type:"restoreHistory",history:{past:history.past.slice(0,index+1),present:history.past[index+1]??recipe,future:[...history.past.slice(index+2),...(index+1<history.past.length?[recipe]:[]),...history.future]}})}>{t("advancedEditor.sidebar.step",{count:index+1})}</button>)}</>}
         <label className="block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.leftWidth")} type="range" min={180} max={340} value={preferences.leftWidth} onChange={event=>updatePreferences({leftWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
@@ -480,7 +496,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
           onTextChange={(id, patch) => dispatch({ type: "textUpdateLive", id, patch })}
           onStrokeCommit={(points) => dispatch({ type: "strokeAdd", stroke: { id: newLayerId(), points, color, widthRel: brushWidth } })}
           onGestureStart={beginGesture} onGestureEnd={endGesture} onImageReady={() => {}} onImageError={preview.reload} />}
-        {asset.kind==="raw"&&recipe.colorPipeline&&(!preview.session?.rawlabReady||!!preview.warning)&&<div data-native-overlay className="pointer-events-auto absolute right-3 top-3 z-40 flex max-w-[min(28rem,85%)] items-center gap-2 rounded-lg bg-black/70 px-3 py-2 text-[11px] text-white/80" role="status" aria-live="polite">
+        {asset.kind==="raw"&&recipe.colorPipeline&&(!preview.session?.rawlabReady||preview.preparingWhiteBalance||!!preview.warning)&&<div data-native-overlay className="pointer-events-auto absolute right-3 top-3 z-40 flex max-w-[min(28rem,85%)] items-center gap-2 rounded-lg bg-black/70 px-3 py-2 text-[11px] text-white/80" role="status" aria-live="polite">
           {preview.warning?<><span>{t("advancedEditor.rawPreview.failed")}</span><button className="underline" onClick={preview.reload}>{t("editor.reload")}</button></>:<><span aria-hidden="true" className="h-3 w-3 shrink-0 animate-spin rounded-full border border-white/25 border-t-white/90"/><span>{t("advancedEditor.rawPreview.loading")}</span></>}
         </div>}
         <CanvasNavigator host={nativeHost} src={preview.url??preview.session?.sourceUrl}/>
@@ -495,7 +511,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
       </main>
       {preferences.rightOpen&&<aside style={{width:preferences.rightWidth}} className="ui-glass sp-scroll shrink-0 overflow-y-auto rounded-2xl p-4">
         <label className="mb-3 block text-[11px] text-text-muted">{t("advancedEditor.layout.width")}<input aria-label={t("advancedEditor.layout.rightWidth")} type="range" min={280} max={480} value={preferences.rightWidth} onChange={event=>updatePreferences({rightWidth:Number(event.target.value)})} className="w-full accent-accent"/></label>
-        <HistogramPanel bins={histogram.bins} onOpen={setHistogramOpen}>
+        <HistogramPanel onToneGesture={!unavailable&&!busy&&!exporting&&!compare&&!target.active&&tool!=="crop"?dragHistogram:undefined} bins={histogram.bins} onOpen={setHistogramOpen}>
           <div className="flex justify-between gap-2 text-xs tabular-nums text-text-secondary"><span>{shot?.aperture?`f/${shot.aperture.replace(/^f\/?/i, "")}`:"f/—"}</span><span>{formatEditorShutter(shot?.shutter)}</span><span>ISO {shot?.iso&&shot.iso>0?shot.iso:"—"}</span></div>
           <div className="flex justify-between gap-1 whitespace-nowrap text-[11px] tabular-nums text-text-muted" aria-live="off"><span>RGB {pixel.rgb?.map(v=>Math.round(v)).join(" · ")??"— · — · —"}</span><span>Lab {pixel.lab?.map(v=>v.toFixed(1)).join(" · ")??"— · — · —"}</span></div>
         </HistogramPanel>

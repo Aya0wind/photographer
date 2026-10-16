@@ -106,13 +106,34 @@ bool gpu_render(pc_color_session &session, const std::shared_ptr<LUT3D> &lut, co
 #endif
 }
 }
-extern "C" uint32_t pc_raw_abi_version(void) { return 2; }
+static void configure_white_balance(const pc_raw_options& values, RAWProcessOptions& request) {
+    const auto* options = &values;
+        const bool camera = std::all_of(options->white_balance, options->white_balance + 4, [](float v) { return v == 0; });
+        if (!camera && !std::all_of(options->white_balance, options->white_balance + 4, [](float v) { return std::isfinite(v) && v > 0; }))
+            throw std::runtime_error("Invalid sensor white balance");
+        request.useCameraWhiteBalance = camera;
+        request.useCustomWhiteBalance = !camera;
+        if (!camera) std::copy_n(options->white_balance, 4, request.customWhiteBalance);
+        if (options->wb_mode != 0) {
+            request.useCameraWhiteBalance = false;
+            request.useCustomWhiteBalance = false;
+            request.useAutoWhiteBalance = options->wb_mode == 1;
+            request.useTemperatureWhiteBalance = options->wb_mode == 2;
+            if (request.useTemperatureWhiteBalance) {
+                if (!std::isfinite(options->temperature) || options->temperature < 2000 || options->temperature > 50000 || !std::isfinite(options->tint) || std::abs(options->tint) > 150)
+                    throw std::runtime_error("Invalid absolute white balance");
+                request.temperature = options->temperature;
+                request.tint = options->tint;
+            }
+        }
+}
+extern "C" uint32_t pc_raw_abi_version(void) { return 3; }
 extern "C" void pc_raw_free(void *owner) { delete static_cast<ImageData *>(owner); }
 extern "C" int pc_raw_decode(const char *path, const pc_raw_options *options, pc_raw_result *result) {
     if (!result) return -1;
     *result = {};
     try {
-        if (!path || !*path || !options || options->version != 1 || !options->max_pixels || options->half_size > 1)
+        if (!path || !*path || !options || options->version != 2 || options->wb_mode > 2 || !options->max_pixels || options->half_size > 1)
             throw std::runtime_error("Invalid RawLab decode request");
         cancel(options->cancelled, options->userdata);
         RAWProcessor raw;
@@ -127,12 +148,7 @@ extern "C" int pc_raw_decode(const char *path, const pc_raw_options *options, pc
         request.applyBaselineExposure = false; // no implicit workflow +0.7 EV
         request.matchEmbeddedPreviewExposure = false;
         request.exposure = raw.getMetadataExposureEV(); // valid DNG baseline once
-        const bool camera = std::all_of(options->white_balance, options->white_balance + 4, [](float v) { return v == 0; });
-        if (!camera && !std::all_of(options->white_balance, options->white_balance + 4, [](float v) { return std::isfinite(v) && v > 0; }))
-            throw std::runtime_error("Invalid sensor white balance");
-        request.useCameraWhiteBalance = camera;
-        request.useCustomWhiteBalance = !camera;
-        if (!camera) std::copy_n(options->white_balance, 4, request.customWhiteBalance);
+        configure_white_balance(*options, request);
         auto image = std::make_unique<ImageData>();
         check(raw.process(request, *image));
         cancel(options->cancelled, options->userdata);

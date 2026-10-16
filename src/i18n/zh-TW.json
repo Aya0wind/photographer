@@ -1884,5 +1884,21 @@
   "advancedEditor.masks.intersect": "相交",
   "advancedEditor.masks.removeComponent": "删除区域组件",
   "advancedEditor.masks.invertComponent": "反选当前组件",
-  "advancedEditor.masks.overlayColor": "蒙版叠加颜色"
+  "advancedEditor.masks.overlayColor": "蒙版叠加颜色",
+  "advancedEditor.rawWb.title": "RAW 传感器白平衡",
+  "advancedEditor.rawWb.mode": "白平衡模式",
+  "advancedEditor.rawWb.asShot": "原照白平衡",
+  "advancedEditor.rawWb.auto": "自动白平衡",
+  "advancedEditor.rawWb.temperature": "自定义色温",
+  "advancedEditor.rawWb.tungsten": "钨丝灯",
+  "advancedEditor.rawWb.fluorescent": "荧光灯",
+  "advancedEditor.rawWb.daylight": "日光",
+  "advancedEditor.rawWb.cloudy": "阴天",
+  "advancedEditor.rawWb.shade": "阴影",
+  "advancedEditor.rawWb.kelvin": "色温",
+  "advancedEditor.rawWb.tint": "传感器色调",
+  "advancedEditor.rawWb.picker": "中性吸管（线性 RGB 校正）",
+  "advancedEditor.rawWb.hint": "原照、自动和 Kelvin 在 RAW 显影前应用；后台准备新预览期间保留当前画面。中性吸管和右侧冷暖/色调是独立的相对 RGB 校正。",
+  "advancedEditor.autoLevels": "自动黑白点",
+  "advancedEditor.histogramDrag": "在对应亮度区域水平拖动调整；一次拖动对应一次撤销。"
 }

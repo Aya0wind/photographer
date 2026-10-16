@@ -1900,5 +1900,21 @@
   "advancedEditor.masks.intersect": "Intersect",
   "advancedEditor.masks.removeComponent": "Remove area component",
   "advancedEditor.masks.invertComponent": "Invert current component",
-  "advancedEditor.masks.overlayColor": "Mask overlay color"
+  "advancedEditor.masks.overlayColor": "Mask overlay color",
+  "advancedEditor.rawWb.title": "RAW sensor white balance",
+  "advancedEditor.rawWb.mode": "White balance mode",
+  "advancedEditor.rawWb.asShot": "As shot",
+  "advancedEditor.rawWb.auto": "Auto white balance",
+  "advancedEditor.rawWb.temperature": "Custom temperature",
+  "advancedEditor.rawWb.tungsten": "Tungsten",
+  "advancedEditor.rawWb.fluorescent": "Fluorescent",
+  "advancedEditor.rawWb.daylight": "Daylight",
+  "advancedEditor.rawWb.cloudy": "Cloudy",
+  "advancedEditor.rawWb.shade": "Shade",
+  "advancedEditor.rawWb.kelvin": "Temperature",
+  "advancedEditor.rawWb.tint": "Sensor tint",
+  "advancedEditor.rawWb.picker": "Neutral picker (linear RGB correction)",
+  "advancedEditor.rawWb.hint": "As shot, auto and Kelvin are applied before RAW development. The current frame stays visible while the replacement loads. The neutral picker and relative color sliders are separate RGB corrections.",
+  "advancedEditor.autoLevels": "Auto black/white points",
+  "advancedEditor.histogramDrag": "Drag horizontally in a tonal region to adjust; one drag is one undo step."
 }

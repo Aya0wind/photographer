@@ -81,12 +81,14 @@ fn color_key(recipe: &EditRecipe) -> Result<ColorKey, String> {
         .as_ref()
         .filter(|f| f.enabled && f.amount > 0.0);
     let a = recipe.advanced.clone().unwrap_or_default();
+    let wb=photocraft_algo::camera_raw::white_balance_gains(a.temperature as f32,a.tint as f32);
+    let neutral=pipeline.relative_white_balance.unwrap_or([1.0;3]);
     Ok(ColorKey {
         profile: pipeline.base_profile,
         film: film.map(|f| f.id.clone()),
         strength: film.map_or(0.0, |f| f.amount as f32 / 100.0),
         exposure: a.exposure as f32,
-        wb: photocraft_algo::camera_raw::white_balance_gains(a.temperature as f32, a.tint as f32),
+        wb:std::array::from_fn(|i|wb[i]*neutral[i]),
     })
 }
 struct Linear {
@@ -373,10 +375,21 @@ pub(super) fn display(
 }
 
 /// Full LibRaw source at export, bounded proxy at preparation. No source writes.
-pub(super) fn open(
+pub(super) fn open(path:&Path,edge:Option<u32>,cancel:&AtomicBool)->Result<source::Opened,String>{open_with_balance(path,edge,cancel,None)}
+fn develop_options(wb:Option<&super::recipe::RawWhiteBalance>)->DevelopOptions{
+    let mut options=DevelopOptions::default();
+    match wb{
+        Some(super::recipe::RawWhiteBalance::Auto)=>options.auto_white_balance=true,
+        Some(super::recipe::RawWhiteBalance::Temperature{kelvin,tint})=>options.temperature=Some([*kelvin,*tint]),
+        _=>{},
+    }
+    options
+}
+pub(super) fn open_with_balance(
     path: &Path,
     edge: Option<u32>,
     cancel: &AtomicBool,
+    wb:Option<&super::recipe::RawWhiteBalance>,
 ) -> Result<source::Opened, String> {
     let _cpu =
         crate::tasks::index_budget::budget(crate::tasks::index_budget::Domain::Image).acquire(1);
@@ -384,7 +397,7 @@ pub(super) fn open(
     if cancel.load(Ordering::Acquire) {
         return Err("RAW 准备已取消".into());
     }
-    open_inner(path, edge, cancel)
+    open_inner(path, edge, cancel,wb)
 }
 // Direct test callers retain Auto; isolated application workers select Force/Off.
 static EXPORT_GPU: AtomicU8 = AtomicU8::new(1);
@@ -397,6 +410,7 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
     let _memory = crate::tasks::index_budget::memory_budget().acquire(512);
     let backend = backend()?;
     if !is_raw_path(path) {
+        if recipe.color_pipeline.as_ref().is_some_and(|p|p.raw_white_balance.is_some()){return Err("传感器白平衡仅适用于 RAW 照片".into());}
         let opened = source::open(path)?;
         let input = linear(&opened.document)?;
         let rendered = export_color(&backend, &input.rgb, input.size, recipe, cancel)?;
@@ -405,7 +419,7 @@ pub(super) fn export_source(path: &Path, recipe: &EditRecipe) -> Result<(Documen
         document.resolution_dpi = opened.document.resolution_dpi;
         return Ok((document, downstream_recipe(recipe)));
     }
-    let linear = backend.develop(path.to_str().ok_or("RAW 路径不是 UTF-8")?, DevelopOptions::default(), cancel)?;
+    let linear = backend.develop(path.to_str().ok_or("RAW 路径不是 UTF-8")?, develop_options(recipe.color_pipeline.as_ref().and_then(|p|p.raw_white_balance.as_ref())), cancel)?;
     let size = linear.dimensions();
     let rendered = export_color(&backend, linear.rgb(), size, recipe, cancel)?;
     drop(linear);
@@ -431,11 +445,18 @@ fn open_inner(
     path: &Path,
     edge: Option<u32>,
     cancel: &AtomicBool,
+    wb:Option<&super::recipe::RawWhiteBalance>,
 ) -> Result<source::Opened, String> {
     if cancel.load(Ordering::Acquire) {
         return Err("RAW 准备已取消".into());
     }
-    let cached = edge.and_then(|edge| super::linear_cache::path(CACHE_ROOT.get()?, path, edge));
+    let cached = edge.and_then(|edge| super::linear_cache::path(CACHE_ROOT.get()?, path, edge)).map(|path|{
+        if matches!(wb,None|Some(super::recipe::RawWhiteBalance::AsShot)){return path;}
+        use sha2::Digest;
+        let key=serde_json::to_string(&wb).unwrap_or_default();
+        let stem=path.file_stem().unwrap_or_default().to_string_lossy();
+        path.with_file_name(format!("{stem}-{:x}.linear",sha2::Sha256::digest(key.as_bytes())))
+    });
     if let Some((size, original, rgb)) = cached
         .as_ref()
         .and_then(|p| super::linear_cache::load(p, edge.unwrap_or(1600)))
@@ -450,7 +471,7 @@ fn open_inner(
     let backend = backend()?;
     let image = backend.develop(
         path.to_str().ok_or("RAW 路径不是 UTF-8")?,
-        DevelopOptions::default(),
+        develop_options(wb),
         cancel,
     )?;
     let original_size = image.dimensions();

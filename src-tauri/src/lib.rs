@@ -453,6 +453,7 @@ pub fn run() {
             edit::preview::edit_preview_render,
             edit::preview::edit_preview_close,
             edit::preview::edit_preview_pick,
+            edit::preview::edit_preview_auto_levels,
             edit::preview::edit_preview_mask,
             edit::preview::edit_preview_clipping,
             edit::preview::edit_preview_histogram,

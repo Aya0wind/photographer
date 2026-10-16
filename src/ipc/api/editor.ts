@@ -207,7 +207,7 @@ export async function exportRun(
 }
 
 export function editPreviewPick(sessionId: string, recipe: EditRecipe, x: number, y: number, picker: string,maskId?:string,curveChannel?:string,sampleSize?:number) {
-  return ipc<{ sample?: [number, number, number]; range?: "reds"|"oranges"|"purples"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId,curveChannel,sampleSize });
+  return ipc<{ whiteBalance?:[number,number,number];sample?: [number, number, number]; range?: "reds"|"oranges"|"purples"|"yellows"|"greens"|"cyans"|"blues"|"magentas"; points?: [number, number][]; red?: [number, number][]; green?: [number, number][]; blue?: [number, number][] }>("edit_preview_pick", { sessionId, recipe, x, y, picker,maskId,curveChannel,sampleSize });
 }
 export function editParametricSamples(value:NonNullable<EditRecipe["advanced"]>["parametricCurve"]){return ipc<number[]>("edit_parametric_samples",{value});}
 
@@ -261,3 +261,5 @@ export const editVersionsList=(assetId:number,libraryId:string)=>ipc<EditorEditi
 export const editVersionCreate=(assetId:number,libraryId:string,kind:"snapshot"|"copy",name:string,recipe:EditRecipe)=>ipc<void>("edit_version_create",{assetId:String(assetId),libraryId,kind,name,recipe});
 export const editVersionApply=(assetId:number,libraryId:string,id:string)=>ipc<EditRecipe>("edit_version_apply",{assetId:String(assetId),libraryId,id});
 export const editVersionDelete=(assetId:number,libraryId:string,id:string)=>ipc<void>("edit_version_delete",{assetId:String(assetId),libraryId,id});
+
+export const editPreviewAutoLevels=(sessionId:string,recipe:EditRecipe)=>ipc<NonNullable<NonNullable<EditRecipe["advanced"]>["levels"]>>("edit_preview_auto_levels",{sessionId,recipe});
