@@ -1,3 +1,4 @@
+import MaskRangePanel,{DEFAULT_MASK_RANGE} from "./MaskRangePanel";
 import MaskThumbnail from "./MaskThumbnail";
 import MaskComponentsPanel from "./MaskComponentsPanel";
 import {useState} from "react";
@@ -22,11 +23,12 @@ export default function MaskPanel({sessionId,selectedComponent=null,onSelectComp
  const {t}=useTranslation();const masks=recipe.masks??[],mask=masks.find(m=>m.id===selected);
  function update(patch:Partial<EditLocalMask>,record=true){if(mask)dispatch({type:"maskUpdate",id:mask.id,patch,record});}
  function add(kind:EditLocalMask["kind"]){
-  end();const id=newLayerId();dispatch({type:"maskAdd",mask:{id,name:t(`advancedEditor.masks.${kind}`),kind,enabled:true,inverted:false,density:100,feather:0,from:{x:0.3,y:0.5},to:{x:0.7,y:0.5},strokes:[]}});onSelect(id);onEditing(true);
+  end();const id=newLayerId();dispatch({type:"maskAdd",mask:{id,name:t(`advancedEditor.masks.${kind}`),kind,range:kind==="range"?{...DEFAULT_MASK_RANGE}:undefined,enabled:true,inverted:false,density:100,feather:0,from:{x:0.3,y:0.5},to:{x:0.7,y:0.5},strokes:[]}});onSelect(id);onEditing(true);
  }
+ const area=selectedComponent===null?mask:mask?.components?.[selectedComponent]?.mask;
  const local=mask?{...recipe,masks:undefined,legacyAdjustments:undefined,adjustments:mask.adjustments,advanced:mask.advanced}:recipe;
  return <div className="space-y-4">
-  <div className="flex flex-wrap gap-1">{(["brush","linear","radial"] as const).map(kind=><button key={kind} type="button" className={BUTTON} disabled={masks.length>=32} onClick={()=>add(kind)}>＋ {t(`advancedEditor.masks.${kind}`)}</button>)}</div>
+  <div className="flex flex-wrap gap-1">{(["brush","linear","radial","range"] as const).map(kind=><button key={kind} type="button" className={BUTTON} disabled={masks.length>=32} onClick={()=>add(kind)}>＋ {t(`advancedEditor.masks.${kind}`)}</button>)}</div>
   {!masks.length&&<p className="text-xs leading-relaxed text-text-muted">{t("advancedEditor.masks.empty")}</p>}
   <p className="text-[11px] text-text-muted">{t("advancedEditor.masks.stackHint")}</p>
   <div className="space-y-1">{[...masks].reverse().map(item=><div key={item.id} draggable onDragStart={e=>{setDragged(item.id);e.dataTransfer.setData("application/x-photo-mask",item.id);e.dataTransfer.effectAllowed="move";}} onDragEnd={()=>setDragged(null)} onDragOver={e=>{if(dragged&&dragged!==item.id){e.preventDefault();e.dataTransfer.dropEffect="move";}}} onDrop={e=>{e.preventDefault();e.stopPropagation();if(dragged&&dragged!==item.id){end();dispatch({type:"maskReorder",id:dragged,targetId:item.id});}setDragged(null);}} className={`flex items-center gap-2 rounded-xl border p-2 ${selected===item.id?"border-accent bg-accent/10":"border-edge bg-bg"} ${dragged===item.id?"opacity-40":""}`}>
@@ -37,6 +39,7 @@ export default function MaskPanel({sessionId,selectedComponent=null,onSelectComp
   </div>)}</div>
   {mask&&<>
    {onSelectComponent&&<MaskComponentsPanel mask={mask} others={masks.filter(item=>item.id!==mask.id)} selected={selectedComponent} onSelect={value=>{end();onSelectComponent(value);onEditing(true);}} onChange={components=>{end();update({components});}}/>}
+   {editing&&area?.kind==="range"&&<MaskRangePanel value={area.range} begin={begin} end={end} onChange={(range,record=true)=>update(selectedComponent===null?{range}:{components:mask.components?.map((component,index)=>index===selectedComponent?{...component,mask:{...component.mask,range}}:component)},record)}/>}
    <label className="block text-xs text-text-secondary">{t("advancedEditor.masks.name")}<input className="mt-1 w-full rounded-lg border border-edge bg-bg p-2" value={mask.name} maxLength={120} onFocus={begin} onBlur={end} onChange={e=>update({name:e.target.value},false)}/></label>
    <div className="flex gap-2"><button className={BUTTON} disabled={masks.length>=32} onClick={()=>{end();const id=newLayerId();dispatch({type:"maskDuplicate",id:mask.id,newId:id,name:t("advancedEditor.masks.copyName",{name:mask.name})});onSelect(id);}}>{t("advancedEditor.masks.duplicate")}</button>
     <button className={BUTTON} onClick={()=>{end();dispatch({type:"maskRemove",id:mask.id});onSelect(masks.find(m=>m.id!==mask.id)?.id??null);}}>{t("advancedEditor.masks.remove")}</button>

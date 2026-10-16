@@ -866,7 +866,8 @@ export interface EditLocalMask {
   overlayColor?:string;
   id:string;
   name:string;
-  kind:"brush"|"linear"|"radial";
+  kind:"brush"|"linear"|"radial"|"range";
+  range?:{kind:"color"|"luminance";color:string;tolerance:number;low:number;high:number;smoothness:number};
   enabled:boolean;
   inverted:boolean;
   density:number;

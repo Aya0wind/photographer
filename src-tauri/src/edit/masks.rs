@@ -6,6 +6,7 @@ use super::{photocraft,preview_renderer::Renderer,recipe::{EditRecipe,LocalMask,
 
 struct Entry {
     shape: LocalMask,
+    source_revision:u64,
     size: Size,
     normal: LayerMask,
     inverse: Option<LayerMask>,
@@ -17,8 +18,8 @@ struct Entry {
     group:Option<Layer>,
 }
 
-pub(super) struct MaskCache {entries:HashMap<String,Entry>,source_scale:f32}
-impl Default for MaskCache {fn default()->Self{Self{entries:HashMap::new(),source_scale:1.0}}}
+pub(super) struct MaskCache {entries:HashMap<String,Entry>,source_scale:f32,source:Option<Document>,source_revision:u64,pixels:Option<Vec<[f32;4]>>}
+impl Default for MaskCache {fn default()->Self{Self{entries:HashMap::new(),source_scale:1.0,source:None,source_revision:0,pixels:None}}}
 
 fn shape_key(mask:&LocalMask)->LocalMask {
     let mut shape=mask.clone();
@@ -32,7 +33,7 @@ fn shape_key(mask:&LocalMask)->LocalMask {
 /// dragging changes only the fill's geometry; no source raster is constructed.
 pub(super) fn gradient_overlay_source(base:&Document,mask:&LocalMask,previous:Option<&Document>)->Result<Document,String>{
     use photocraft_engine::doc::{Fill,Color};
-    if !mask.components.is_empty()||mask.kind==MaskKind::Brush||mask.feather!=0.0{return Err("渐变填充覆盖参数无效".into());}
+    if !mask.components.is_empty()||!matches!(mask.kind,MaskKind::Linear|MaskKind::Radial)||mask.feather!=0.0{return Err("渐变填充覆盖参数无效".into());}
     let rgb=overlay_color(mask);
     let mut session=Session::new();session.add_document(Document::new("Gradient",base.size,ColorMode::Rgb,SampleType::U8),None);
     photocraft::execute(&mut session,"gradient.fill.create",json!({"from":[mask.from.x*f64::from(base.size.width),mask.from.y*f64::from(base.size.height)],"to":[mask.to.x*f64::from(base.size.width),mask.to.y*f64::from(base.size.height)],"style":if mask.kind==MaskKind::Linear{"linear"}else{"radial"},"stops":[[0.0,"#ffffff"],[1.0,"#000000"]],"dither":false}))?;
@@ -46,12 +47,13 @@ pub(super) fn gradient_overlay_source(base:&Document,mask:&LocalMask,previous:Op
 }
 
 fn overlay_color(mask:&LocalMask)->[f32;3]{mask.overlay_color.as_ref().and_then(|v|super::recipe::parse_color(v)).map(|v|v.map(|c|c as f32/255.0)).unwrap_or([1.0,0.2,0.2])}
-fn coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String>{
+fn coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String>{coverage_with_pixels(mask,size,None)}
+fn coverage_with_pixels(mask:&LocalMask,size:Size,pixels:Option<&[[f32;4]]>)->Result<LayerMask,String>{
     use photocraft_algo::selection::{mask_from_surface,combine,feather};
-    let mut result=primitive_coverage(mask,size)?;let area=Document::new("Coverage",size,ColorMode::Rgb,SampleType::U8).bounds();
+    let mut result=primitive_coverage(mask,size,pixels)?;let area=Document::new("Coverage",size,ColorMode::Rgb,SampleType::U8).bounds();
     for component in &mask.components{
         if !component.mask.enabled{continue;}
-        let shape=coverage(&component.mask,size)?;
+        let shape=coverage_with_pixels(&component.mask,size,pixels)?;
         let mut values=mask_from_surface(Some(&shape.surface),area);
         if component.mask.inverted{for value in &mut values{*value=1.0-*value;}}
         if component.mask.feather>0.0{values=feather(&values,size.width as usize,size.height as usize,(component.mask.feather/100.0*f64::from(size.width.min(size.height))) as f32);}
@@ -60,12 +62,17 @@ fn coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String>{
     }
     Ok(result)
 }
-fn primitive_coverage(mask:&LocalMask,size:Size)->Result<LayerMask,String> {
+fn primitive_coverage(mask:&LocalMask,size:Size,pixels:Option<&[[f32;4]]>)->Result<LayerMask,String> {
     let mut session=Session::new();
     let template=Document::new("Mask",size,ColorMode::Rgb,SampleType::U8);
     let area=template.bounds();
     session.add_document(template,None);
     match mask.kind {
+        MaskKind::Range=>{
+            let range=mask.range.as_ref().ok_or("范围蒙版参数缺失")?;let pixels=pixels.ok_or("范围蒙版来源缺失")?;
+            let values=if range.kind=="color" {let color=super::recipe::parse_color(&range.color).ok_or("范围颜色无效")?.map(|c|c as f32/255.0);photocraft_algo::selection::color_range(pixels,color,range.tolerance)}else{photocraft_algo::selection::tone_range(pixels,range.low,range.high,range.smoothness)};
+            Ok(LayerMask{surface:photocraft_algo::selection::mask_to_surface(&values,area),..LayerMask::reveal_all()})
+        }
         MaskKind::Brush=>{
             photocraft::execute(&mut session,"layer.new.layer",json!({"name":"Coverage"}))?;
             photocraft::execute(&mut session,"layer.layerMask.hideAll",json!({}))?;
@@ -173,19 +180,26 @@ fn selected_coverage(entry:&mut Entry,inverse:bool)->Result<LayerMask,String>{
 }
 
 impl MaskCache {
+    pub(super) fn set_source(&mut self,source:&Document){
+        if self.source.as_ref().is_some_and(|old|old.id==source.id&&old.layers==source.layers&&old.size==source.size){return;}
+        self.source=Some(source.clone());self.source_revision=self.source_revision.wrapping_add(1);self.pixels=None;
+    }
     pub fn set_source_scale(&mut self,scale:f32){self.source_scale=scale;}
     fn entry(&mut self,base:&Document,mask:&LocalMask)->Result<&mut Entry,String> {
         let key=shape_key(mask);
-        if !self.entries.get(&mask.id).is_some_and(|e|e.shape==key && e.size==base.size) {
-            let (normal,brush_prefix,live_brush)=if mask.kind==MaskKind::Brush&&mask.components.is_empty(){cached_brush_coverage(self.entries.get_mut(&mask.id).filter(|entry|entry.shape.components.is_empty()),mask,base.size)?}else{(coverage(mask,base.size)?,None,None)};
+        let dependent=has_range(mask);
+        if dependent&&self.pixels.is_none(){self.pixels=Some(photocraft_compose::flatten(self.source.as_ref().unwrap_or(base)).px);}
+        let revision=if dependent{self.source_revision}else{0};
+        if !self.entries.get(&mask.id).is_some_and(|e|e.shape==key && e.size==base.size&&e.source_revision==revision) {
+            let (normal,brush_prefix,live_brush)=if mask.kind==MaskKind::Brush&&mask.components.is_empty(){cached_brush_coverage(self.entries.get_mut(&mask.id).filter(|entry|entry.shape.components.is_empty()),mask,base.size)?}else{(coverage_with_pixels(mask,base.size,self.pixels.as_deref())?,None,None)};
             if let Some(entry)=self.entries.get_mut(&mask.id).filter(|e|e.size==base.size) {
-                entry.shape=key;entry.normal=normal;entry.inverse=None;entry.brush_prefix=brush_prefix;entry.live_brush=live_brush;
+                entry.shape=key;entry.source_revision=revision;entry.normal=normal;entry.inverse=None;entry.brush_prefix=brush_prefix;entry.live_brush=live_brush;
                 return Ok(self.entries.get_mut(&mask.id).unwrap());
             }
             let mut template=Document::new("Local adjustments",base.size,ColorMode::Rgb,SampleType::U8);
             template.icc_profile=base.icc_profile.clone();template.resolution_dpi=base.resolution_dpi;
             let renderer=Box::new(Renderer::new(&template).with_pixel_scale(self.source_scale));
-            self.entries.insert(mask.id.clone(),Entry{shape:key,size:base.size,normal,inverse:None,brush_prefix,live_brush,renderer,template,input:None,group:None});
+            self.entries.insert(mask.id.clone(),Entry{shape:key,source_revision:revision,size:base.size,normal,inverse:None,brush_prefix,live_brush,renderer,template,input:None,group:None});
         }
         Ok(self.entries.get_mut(&mask.id).unwrap())
     }
@@ -449,4 +463,13 @@ mod tests {
         let mut v=serde_json::to_value(&r).unwrap();v["rotateQuarter"]=json!(1);v["geometry"]=json!({"angle":30});
         assert_eq!(super::super::recipe::parse_recipe(&v).unwrap().masks[0].from,r.masks[0].from);
     }
+}
+
+pub(super) fn has_range(mask:&LocalMask)->bool{mask.kind==MaskKind::Range||mask.components.iter().any(|c|has_range(&c.mask))}
+pub(super) fn normalize_range(mask:&mut LocalMask)->Result<(),String>{
+ if mask.kind==MaskKind::Range&&mask.range.is_none(){return Err("范围蒙版参数缺失".into());}
+ let Some(range)=&mut mask.range else{return Ok(());};
+ if !["color","luminance"].contains(&range.kind.as_str())||super::recipe::parse_color(&range.color).is_none(){return Err("范围蒙版类型或颜色无效".into());}
+ for (value,max) in [(&mut range.tolerance,200.0),(&mut range.low,255.0),(&mut range.high,255.0),(&mut range.smoothness,255.0)]{if !value.is_finite(){return Err("范围蒙版数值无效".into());}*value=value.clamp(0.0,max);}
+ if range.low>range.high{return Err("亮度范围最小值不能超过最大值".into());}Ok(())
 }

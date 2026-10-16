@@ -211,7 +211,11 @@ pub struct SelectiveColor {
 /// Local coverage is saved in original source coordinates, before geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
-pub enum MaskKind { Brush, Linear, Radial }
+pub enum MaskKind { Brush, Linear, Radial, Range }
+
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct MaskRange {pub kind:String,pub color:String,pub tolerance:f32,pub low:f32,pub high:f32,pub smoothness:f32}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -237,6 +241,8 @@ pub struct LocalMask {
     pub components:Vec<MaskComponent>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub overlay_color:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub range:Option<MaskRange>,
     pub kind: MaskKind,
     pub enabled: bool,
     pub inverted: bool,
@@ -450,6 +456,7 @@ fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
 fn normalize_mask(mask:&mut LocalMask,point_count:&mut usize,count:&mut usize,depth:usize)->Result<(),String>{
     *count+=1;
     if depth>4||*count>128||mask.name.len()>512||mask.id.is_empty()||mask.id.len()>96{return Err("蒙版组件过多或嵌套过深".into());}
+    super::masks::normalize_range(mask)?;
     if mask.overlay_color.as_ref().is_some_and(|v|parse_color(v).is_none()){return Err("蒙版叠加颜色无效".into());}
         for point in [&mut mask.from,&mut mask.to] {
             if !point.x.is_finite() || !point.y.is_finite() {return Err("蒙版坐标无效".into());}

@@ -1940,5 +1940,15 @@
   "advancedEditor.retouch.opacity": "不透明度 / 红眼暗化",
   "advancedEditor.retouch.count": "已保存 {{count}} 笔（最多 256）",
   "advancedEditor.retouch.delete": "删除第 {{index}} 笔",
-  "advancedEditor.transfer.retouch": "仿制与修复"
+  "advancedEditor.transfer.retouch": "仿制与修复",
+  "advancedEditor.maskRange.mode": "范围类型",
+  "advancedEditor.maskRange.color": "颜色范围",
+  "advancedEditor.maskRange.luminance": "亮度范围",
+  "advancedEditor.maskRange.tolerance": "颜色容差",
+  "advancedEditor.maskRange.low": "最低亮度",
+  "advancedEditor.maskRange.high": "最高亮度",
+  "advancedEditor.maskRange.smoothness": "过渡范围",
+  "advancedEditor.maskRange.hint": "按基础呈现/胶片及修复后的来源像素选择，在全局调色之前计算；不随当前局部调整反复改变，可与其他区域添加、减去或相交。",
+  "advancedEditor.masks.range": "颜色 / 亮度范围",
+  "advancedEditor.masks.rangeHint": "按基础呈现/胶片及修复后的来源像素选择，在全局调色之前计算；不随当前局部调整反复改变，可与其他区域添加、减去或相交。"
 }

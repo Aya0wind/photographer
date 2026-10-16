@@ -196,6 +196,7 @@ pub(super) fn camera_adjustment_scaled(session:&mut Session,recipe:&EditRecipe,s
 }
 
 fn adjustments_scaled(session: &mut Session, recipe: &EditRecipe,scale:f32) -> Result<(), String> {
+    let mask_source=if recipe.masks.iter().any(super::masks::has_range){Some(active_document(session)?)}else{None};
     camera_adjustment_scaled(session, recipe,scale)?;
     for spec in adjustment_specs(recipe)? {
         if let Some(native)=spec.native {
@@ -217,7 +218,7 @@ fn adjustments_scaled(session: &mut Session, recipe: &EditRecipe,scale:f32) -> R
     }
     if !recipe.masks.is_empty() {
         let base=active_document(session)?;
-        let mut masks=super::masks::MaskCache::default();masks.set_source_scale(scale);
+        let mut masks=super::masks::MaskCache::default();masks.set_source_scale(scale);if let Some(source)=&mask_source{masks.set_source(source);}
         let layers=masks.layers(&base,recipe)?;
         let state=session.active_mut().ok_or("编辑文档不存在")?;
         std::sync::Arc::make_mut(&mut state.doc).layers.extend(layers);

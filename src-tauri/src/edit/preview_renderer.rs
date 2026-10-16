@@ -323,7 +323,9 @@ impl Renderer {
     }
     pub(super) fn with_pixel_scale(mut self,scale:f32)->Self{self.source_scale=scale;self.masks.set_source_scale(scale);self}
     pub(super) fn mask_overlay(&mut self,base:&Document,recipe:&EditRecipe,id:&str)->Result<Document,String> {
-        self.masks.overlay(base,recipe,id)
+        let (source,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
+        let source=self.retouch.apply(&source,&values.retouch)?;values.retouch.clear();
+        self.masks.set_source(&source);self.masks.overlay(&source,&values,id)
     }
     pub fn new(base: &Document) -> Self {
         let mut session = Session::new();
@@ -528,6 +530,7 @@ impl Renderer {
             return self.canvas_document(&display,&downstream);
         }
         if !recipe.retouch.is_empty(){let base=self.retouch.apply(base,&recipe.retouch)?;let mut values=recipe.clone();values.retouch.clear();return self.canvas_document(&base,&values);}
+        self.masks.set_source(base);
         use photocraft_engine::doc::adjust::{CurvePoint, ToneSpace};
         use photocraft_engine::doc::{Adjustment, SampleType};
         let float_display = base.depth == SampleType::F32
@@ -623,7 +626,7 @@ impl Renderer {
     ) -> Result<Vec<u8>, String> {
         let result=(||{
             let (base,mut values)=if recipe.color_pipeline.is_some(){self.color.apply(base,recipe)?}else{(base.clone(),recipe.clone())};
-            let base=self.retouch.apply(&base,&values.retouch)?;values.retouch.clear();
+            let base=self.retouch.apply(&base,&values.retouch)?;values.retouch.clear();self.masks.set_source(&base);
             self.render_inner(&base,&values,quality)
         })();
         if result.is_err() {

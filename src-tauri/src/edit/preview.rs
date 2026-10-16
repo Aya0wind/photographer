@@ -806,17 +806,14 @@ pub async fn edit_preview_mask(
         use image::ImageEncoder;
         let preview=sessions().lock().map_err(|_|"预览锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
         let (base,renderer)={let preview=preview.lock().map_err(|_|"预览锁不可用")?;(preview.interactive_document.clone(),preview.interactive_renderer.clone())};
-        let doc=if thumbnail.unwrap_or(false){
-            use photocraft_engine::doc::{Size,ColorMode,SampleType};
-            let scale=128.0/f64::from(base.size.width.max(base.size.height).max(1));
-            let small=Document::new("Mask thumbnail",Size::new((f64::from(base.size.width)*scale).round().max(1.0) as u32,(f64::from(base.size.height)*scale).round().max(1.0) as u32),ColorMode::Rgb,SampleType::U8);
-            let mut plain=recipe.clone();plain.crop=None;plain.geometry=None;plain.rotate_quarter=0;
-            super::masks::MaskCache::default().overlay(&small,&plain,&mask_id)?
-        }else{renderer.lock().map_err(|_|"蒙版锁不可用")?.mask_overlay(&base,&recipe,&mask_id)?};
+        let mut plain=recipe.clone();if thumbnail.unwrap_or(false){plain.crop=None;plain.geometry=None;plain.rotate_quarter=0;}
+        let doc=renderer.lock().map_err(|_|"蒙版锁不可用")?.mask_overlay(&base,&plain,&mask_id)?;
         let pixels=photocraft_compose::flatten(&doc);
         let rgba:Vec<u8>=pixels.px.iter().flat_map(|p|{if thumbnail.unwrap_or(false){let v=(p[3].clamp(0.0,1.0)*255.0).round() as u8;[v,v,v,255]}else{p.map(|v|(v.clamp(0.0,1.0)*255.0).round() as u8)}}).collect();
+        let image=image::RgbaImage::from_raw(doc.size.width,doc.size.height,rgba).ok_or("蒙版图像无效")?;
+        let image=if thumbnail.unwrap_or(false){image::DynamicImage::ImageRgba8(image).thumbnail(128,128).to_rgba8()}else{image};
         let mut png=Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba,doc.size.width,doc.size.height,image::ExtendedColorType::Rgba8).map_err(|e|format!("蒙版预览失败：{e}"))?;
+        image::codecs::png::PngEncoder::new(&mut png).write_image(image.as_raw(),image.width(),image.height(),image::ExtendedColorType::Rgba8).map_err(|e|format!("蒙版预览失败：{e}"))?;
         Ok(tauri::ipc::Response::new(png))
     }).await
 }

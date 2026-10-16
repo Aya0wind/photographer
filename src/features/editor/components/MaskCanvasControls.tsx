@@ -43,11 +43,11 @@ export default function MaskCanvasControls({mask,recipe,size,width,height,brush,
  const radius=Math.hypot((to.x-from.x)*size.width,(to.y-from.y)*size.height);
  const strokeBrush=active.current?.brush??brush;
  const guideRadius=mask.kind==="brush"?strokeBrush.widthRel*Math.min(size.width,size.height)/2:radius;
- const guide=[p1[0]/width,p1[1]/height,p2[0]/width,p2[1]/height,guideRadius/(crop.w*plane.w),guideRadius/(crop.h*plane.h),!editing?0:mask.kind==="brush"?3:mask.kind==="radial"?2:1,showOverlay?1:0];
+ const guide=[p1[0]/width,p1[1]/height,p2[0]/width,p2[1]/height,guideRadius/(crop.w*plane.w),guideRadius/(crop.h*plane.h),!editing||mask.kind==="range"?0:mask.kind==="brush"?3:mask.kind==="radial"?2:1,showOverlay?1:0];
  return <svg data-native-mask-stroke={mask.kind==="brush"&&points.length?JSON.stringify({...strokeBrush,points}):undefined} data-native-mask-preview={mask.kind!=="brush"&&points.length?JSON.stringify([from.x,from.y,to.x,to.y]):undefined} data-mask-gesture={points.length?"active":undefined} data-native-mask-id={mask.id} data-native-mask-guide={JSON.stringify(guide)} data-testid="editor-mask-controls" role="application" aria-label={t("advancedEditor.masks.editArea")} tabIndex={editing?0:-1} className="absolute inset-0 z-10 touch-none outline-none" width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{cursor:editing?"crosshair":"default",pointerEvents:editing?"auto":"none"}}
   onKeyDown={event=>{if(!active.current)return;if(event.key==="Escape"||(event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.stopPropagation();finish(false);}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="s"){event.preventDefault();event.stopPropagation();}}}
   onPointerDown={event=>{
-   if(!editing||event.button!==0)return;const p=sample(event);if(!p)return;
+   if(!editing||mask.kind==="range"||event.button!==0)return;const p=sample(event);if(!p)return;
    event.preventDefault();event.currentTarget.focus();event.currentTarget.setPointerCapture(event.pointerId);
    const handle=(event.target as SVGElement).getAttribute("data-mask-handle") as "from"|"to"|"move"|null;
    active.current={id:event.pointerId,points:[p],handle:handle??undefined,brush:{...brush}};setPoints([p]);
@@ -60,7 +60,7 @@ export default function MaskCanvasControls({mask,recipe,size,width,height,brush,
    gesture.points=mask.kind==="brush"?[...gesture.points,p]:[gesture.points[0],p];setPoints([...gesture.points]);
   }} onPointerUp={()=>finish(true)} onPointerCancel={()=>finish(false)} onLostPointerCapture={()=>finish(true)}>
   {showOverlay&&overlaySrc&&<image href={overlaySrc} width={width} height={height} opacity={0.35} pointerEvents="none"/>}
-  {editing&&mask.kind!=="brush" && <g><line data-mask-handle="move" style={{cursor:"move"}} x1={p1[0]} y1={p1[1]} x2={p2[0]} y2={p2[1]} stroke="white" strokeWidth={2}/>
+  {editing&&(mask.kind==="linear"||mask.kind==="radial") && <g><line data-mask-handle="move" style={{cursor:"move"}} x1={p1[0]} y1={p1[1]} x2={p2[0]} y2={p2[1]} stroke="white" strokeWidth={2}/>
    {mask.kind==="radial"&&<ellipse cx={p1[0]} cy={p1[1]} rx={Math.hypot((to.x-from.x)*size.width,(to.y-from.y)*size.height)*width/(crop.w*plane.w)} ry={Math.hypot((to.x-from.x)*size.width,(to.y-from.y)*size.height)*height/(crop.h*plane.h)} fill="none" stroke="#f97373" strokeWidth={1.5}/>}
    <circle data-mask-handle={mask.kind==="radial"?"move":"from"} cx={p1[0]} cy={p1[1]} r={7} fill="#202020" stroke="white" strokeWidth={2}/>
    {mask.kind==="linear"&&<circle data-mask-handle="move" style={{cursor:"move"}} cx={(p1[0]+p2[0])/2} cy={(p1[1]+p2[1])/2} r={6} fill="#202020" stroke="white"/>}

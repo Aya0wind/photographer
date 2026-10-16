@@ -1956,5 +1956,15 @@
   "advancedEditor.retouch.opacity": "Opacity / red-eye darkening",
   "advancedEditor.retouch.count": "{{count}} saved strokes (maximum 256)",
   "advancedEditor.retouch.delete": "Delete stroke {{index}}",
-  "advancedEditor.transfer.retouch": "Clone and heal"
+  "advancedEditor.transfer.retouch": "Clone and heal",
+  "advancedEditor.maskRange.mode": "Range type",
+  "advancedEditor.maskRange.color": "Color range",
+  "advancedEditor.maskRange.luminance": "Luminance range",
+  "advancedEditor.maskRange.tolerance": "Color tolerance",
+  "advancedEditor.maskRange.low": "Minimum luminance",
+  "advancedEditor.maskRange.high": "Maximum luminance",
+  "advancedEditor.maskRange.smoothness": "Transition",
+  "advancedEditor.maskRange.hint": "Selects source pixels after base/film rendering and retouching, before global adjustments. Local adjustments do not feed back into the selection. Combine with other regions using add, subtract or intersect.",
+  "advancedEditor.masks.range": "Color / luminance range",
+  "advancedEditor.masks.rangeHint": "Selects source pixels after base/film rendering and retouching, before global adjustments. Local adjustments do not feed back into the selection. Combine with other regions using add, subtract or intersect."
 }

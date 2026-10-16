@@ -53,7 +53,7 @@ fn mask_preview_recipe(recipe:&super::recipe::EditRecipe,view:&View)->Result<sup
     if let Some(p)=view.mask_preview {
         let id=view.mask_id.as_ref().ok_or("临时蒙版未指定区域")?;
         let mask=preview.masks.iter_mut().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
-        if mask.kind==super::recipe::MaskKind::Brush{return Err("画笔不支持渐变临时坐标".into());}
+        if !matches!(mask.kind,super::recipe::MaskKind::Linear|super::recipe::MaskKind::Radial){return Err("画笔不支持渐变临时坐标".into());}
         mask.from=super::recipe::NormPoint{x:p[0],y:p[1]};mask.to=super::recipe::NormPoint{x:p[2],y:p[3]};
     }
     if let Some(stroke)=&view.mask_stroke {
@@ -432,12 +432,12 @@ mod windows_canvas {
                         let mut mask_uploads=0;
                         if let Some(id)=frame.view.mask_id.as_ref().filter(|_|frame.view.mask_guide.is_some_and(|g|g[7]>0.5)) {
                             let mask=mask_recipe.masks.iter().find(|m|&m.id==id).ok_or("所选蒙版不存在")?;
-                            frame.view.mask_source_space=mask.components.is_empty()&&mask.feather==0.0&&mask.kind!=crate::edit::recipe::MaskKind::Brush;
+                            frame.view.mask_source_space=mask.components.is_empty()&&mask.feather==0.0&&matches!(mask.kind,crate::edit::recipe::MaskKind::Linear|crate::edit::recipe::MaskKind::Radial);
                             let unchanged= !input_changed&&previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&old["id"].as_str()==Some(id.as_str()));
                             if !unchanged {
                             let key=serde_json::json!({"id":id,"kind":mask.kind,"from":mask.from,"to":mask.to,"strokes":mask.strokes,"components":mask.components,"overlayColor":mask.overlay_color,"inverted":mask.inverted,"feather":mask.feather,"quarter":frame.recipe.rotate_quarter,"geometry":frame.recipe.geometry,"crop":frame.recipe.crop});
                             if !previous_mask.as_ref().is_some_and(|(old_id,old)|*old_id==base.id&&*old==key){
-                                let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&renderer.neutral_document(&base,&frame.recipe)?,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&renderer.neutral_document(&base,&frame.recipe)?,&mask_recipe,id)?};
+                                let doc=if frame.view.mask_source_space {let doc=crate::edit::masks::gradient_overlay_source(&renderer.neutral_document(&base,&frame.recipe)?,mask,gradient_overlay.as_ref())?;gradient_overlay=Some(doc.clone());doc}else{overlay_renderer.mask_overlay(&base,&mask_recipe,id)?};
                                 mask_uploads=gpu.prepare_mask_overlay(&doc)?;previous_mask=Some((base.id,key));
                             }
                             }
