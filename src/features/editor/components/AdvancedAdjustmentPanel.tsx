@@ -1,3 +1,5 @@
+import PointColorPanel from "./PointColorPanel";
+import PrimaryColorPanel from "./PrimaryColorPanel";
 import AdjustmentGroupSwitches from "./AdjustmentGroupSwitches";
 import CurvePresetManager from "./CurvePresetManager";
 import Slider from "./AdjustmentSlider";
@@ -81,6 +83,8 @@ export default function AdvancedAdjustmentPanel({ recipe, previewSessionId,onBas
       {(["hue", "saturation", "lightness"] as const).map((key) => <Slider key={key} gradient={hslGradient(range,key)} label={t(`advancedEditor.hslLabels.${key}`)} value={hsl[key]} onSet={value=>onAdvanced({hslEight:{...a.hslEight,[range]:{...hsl,[key]:value}}})} onReset={()=>onAdvanced({hslEight:{...a.hslEight,[range]:{...hsl,[key]:0}}})} min={-100} max={100} onChange={(value) => onAdvanced({ hslEight: { ...a.hslEight, [range]: { ...hsl, [key]: value } } }, false)} begin={begin} end={end} />)}
       <button type="button" disabled={!a.hslEight?.[range]} className="text-xs text-accent disabled:opacity-30" onClick={() => {const hslEight={...a.hslEight};delete hslEight[range];onAdvanced({hslEight});}}>{t("advancedEditor.resetColorRange")}</button>
     </details>
+    <PointColorPanel value={a.pointColors} onChange={(pointColors,record)=>onAdvanced({pointColors},record)} sampling={sampling} begin={begin} end={end}/>
+    <PrimaryColorPanel value={a.primaries} onChange={(primaries,record)=>onAdvanced({primaries},record)} begin={begin} end={end}/>
     <ExtendedColorPanel adjustments={a} onChange={onAdvanced} onReset={onReset} begin={begin} end={end}/>
     <ColorGradingPanel value={a.colorGrading} onChange={(colorGrading,record)=>onAdvanced({colorGrading},record)} onReset={()=>onReset("colorGrading")} begin={begin} end={end} cancel={cancel}/>
     {(["effects","detail"] as const).map(group=><details key={group} className="space-y-2.5 border-t border-edge pt-3">

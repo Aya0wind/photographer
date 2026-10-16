@@ -736,6 +736,7 @@ pub async fn edit_preview_pick(
             .floor()
             .min(f64::from(doc.size.height - 1)) as i32;
         let sample=sample_region(&doc,px,py,sample_size)?;
+        if picker=="pointColor"{return Ok(serde_json::json!({"sample":sample.map(|v|v.clamp(0.0,1.0)*255.0)}));}
         if picker=="hsl" {
             let range=sampled_hsl_range([sample[0],sample[1],sample[2]]);
             return Ok(serde_json::json!({"sample":[sample[0]*255.0,sample[1]*255.0,sample[2]*255.0],"range":range}));
@@ -793,7 +794,8 @@ fn picker_input_recipe(recipe:&mut recipe::EditRecipe,picker:&str,channel:Option
             a.curves.clear();a.channel_curves.luminance.clear();
             match channel {Some("red")=>a.channel_curves.red.clear(),Some("green")=>a.channel_curves.green.clear(),Some("blue")=>a.channel_curves.blue.clear(),_=>{}}
         }
-        if picker=="hsl" {a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
+        if picker=="pointColor"{a.point_colors.clear();a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
+        if picker=="hsl" {a.point_colors.clear();a.hsl_eight=None;a.color_balance=None;a.black_white=None;a.selective_color=None;a.parametric_curve=None;}
     }
 }
 

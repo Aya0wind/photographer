@@ -1981,5 +1981,19 @@
   "advancedEditor.groups.hint": "Turning off a group preserves its parameters. Preview and export both honor the switch.",
   "advancedEditor.hsl": "Eight-band HSL",
   "advancedEditor.exportAlbums.search": "Search destination albums",
-  "advancedEditor.exportAlbums.recent": "Recently used albums appear first"
+  "advancedEditor.exportAlbums.recent": "Recently used albums appear first",
+  "advancedEditor.pointColor.title": "Point color",
+  "advancedEditor.pointColor.select": "Select color {{index}}",
+  "advancedEditor.pointColor.sample": "Sample this color from the photo",
+  "advancedEditor.pointColor.enable": "Enable current color",
+  "advancedEditor.pointColor.hueRange": "Hue range",
+  "advancedEditor.pointColor.saturationRange": "Saturation range",
+  "advancedEditor.pointColor.luminanceRange": "Luminance range",
+  "advancedEditor.pointColor.hue": "Hue shift",
+  "advancedEditor.pointColor.saturation": "Saturation shift",
+  "advancedEditor.pointColor.luminance": "Luminance shift",
+  "advancedEditor.pointColor.remove": "Delete current color",
+  "advancedEditor.pointColor.hint": "Soft selection by hue, saturation and lightness distance. Up to eight colors, processed in saved order. This manual algorithm does not promise Lightroom matching.",
+  "advancedEditor.primaries.title": "RGB primary adjustments",
+  "advancedEditor.primaries.hint": "A creative RGB mixing matrix preserving the neutral axis. This is not a camera calibration matrix and does not replace RAW camera calibration."
 }

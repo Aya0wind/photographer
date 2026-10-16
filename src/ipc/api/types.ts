@@ -843,6 +843,8 @@ export interface DevelopmentAdjustments {
  vignetteAmount:number;vignetteMidpoint:number;vignetteRoundness:number;vignetteFeather:number;vignetteHighlights:number;vignetteStyle:"highlightPriority"|"colorPriority"|"paintOverlay";
 }
 export interface AdvancedAdjustments {
+  pointColors?:{id:string;enabled:boolean;color:string;hueRange:number;saturationRange:number;luminanceRange:number;hue:number;saturation:number;luminance:number}[];
+  primaries?:Partial<Record<"red"|"green"|"blue",{hue:number;saturation:number}>>;
   disabledGroups?:string[];
   parametricCurve?:{highlights:number;lights:number;darks:number;shadows:number;splits:[number,number,number]};
   colorGrading?:{shadows:{hue:number;sat:number;lum:number};midtones:{hue:number;sat:number;lum:number};highlights:{hue:number;sat:number;lum:number};global:{hue:number;sat:number;lum:number};blending:number;balance:number};

@@ -132,6 +132,13 @@ pub(super) fn adjustment_specs(recipe: &EditRecipe) -> Result<Vec<AdjustmentSpec
         let index=specs.iter().position(|s|["color-balance","black-white","black-white-eight","selective-color","curves","luminance"].contains(&s.key)).unwrap_or(specs.len());
         specs.insert(index,AdjustmentSpec{native:Some(super::color_mixer::hsl(hsl)?),key:"hsl-eight",kind:"colorLookup",params:json!(hsl),luminosity:false,opacity:1.0});
     }
+    if a.point_colors.iter().any(|v|v.enabled&&(v.hue!=0.0||v.saturation!=0.0||v.luminance!=0.0)){
+        let index=specs.iter().position(|s|["color-balance","black-white-eight","selective-color","curves","luminance"].contains(&s.key)).unwrap_or(specs.len());
+        specs.insert(index,AdjustmentSpec{native:Some(super::point_color::points(&a.point_colors)?),key:"point-color",kind:"colorLookup",params:json!(a.point_colors),luminosity:false,opacity:1.0});
+    }
+    if let Some(values)=a.primaries.as_ref().filter(|v|v.values().any(|p|p.hue!=0.0||p.saturation!=0.0)){
+        specs.insert(0,AdjustmentSpec{native:Some(super::point_color::primaries(values)?),key:"rgb-primaries",kind:"colorLookup",params:json!(values),luminosity:false,opacity:1.0});
+    }
     if let Some(spec)=parametric {let index=specs.iter().position(|s|s.key=="curves"||s.key=="luminance").unwrap_or(specs.len());specs.insert(index,spec);}
     if let Some(g)=a.color_grading.as_ref().filter(|g|g.active()) {
         specs.push(AdjustmentSpec{native:Some(super::grading::adjustment(g)?),key:"color-grading",kind:"colorLookup",params:json!({"grading":g}),luminosity:false,opacity:1.0});

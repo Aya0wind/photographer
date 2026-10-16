@@ -20,7 +20,7 @@ function measure(name: string, start: number, detail?: unknown) {
 function neutralTone(recipe:Pick<EditRecipe,"adjustments"|"advanced">) {
   const a=recipe.advanced;
   return (!recipe.adjustments || Object.values(recipe.adjustments).every(v=>v===0))
-    && (!a || (!(a.exposure || a.temperature || a.tint || a.vibrance) && !a.curves?.length
+    && (!a || (!a.pointColors?.some(p=>p.enabled&&(p.hue||p.saturation||p.luminance)) && !Object.values(a.primaries??{}).some(p=>p&&(p.hue||p.saturation)) && !(a.exposure || a.temperature || a.tint || a.vibrance) && !a.curves?.length
       && (!a.lookup || !a.lookup.enabled || a.lookup.amount===0) && !a.levels && !Object.keys(a.hslEight??{}).length
       && !developmentActive(a.development) && !a.blackWhite?.enabled && !Object.values(a.selectiveColor?.ranges??{}).some(row=>row?.some(v=>v!==0))
       && (!a.colorBalance||![...a.colorBalance.shadows,...a.colorBalance.midtones,...a.colorBalance.highlights].some(v=>v!==0))

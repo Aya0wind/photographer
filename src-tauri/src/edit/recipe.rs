@@ -96,6 +96,10 @@ fn default_renderer()->Option<RenderEngine>{Some(RenderEngine::Photocraft)}
 #[serde(rename_all = "camelCase", default)]
 pub struct AdvancedAdjustments {
     #[serde(skip_serializing_if="Vec::is_empty")]
+    pub point_colors:Vec<PointColor>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    pub primaries:Option<std::collections::BTreeMap<String,PrimaryShift>>,
+    #[serde(skip_serializing_if="Vec::is_empty")]
     pub disabled_groups:Vec<String>,
     #[serde(skip_serializing_if="Option::is_none")]
     pub parametric_curve:Option<ParametricCurve>,
@@ -191,6 +195,13 @@ impl Development {
         [self.highlights,self.shadows,self.whites,self.blacks,self.texture,self.clarity,self.dehaze,self.sharpen_amount,self.noise_luminance,self.noise_color,self.grain_amount,self.vignette_amount].iter().any(|v|*v!=0.0)
     }
 }
+
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct PointColor {pub id:String,pub enabled:bool,pub color:String,pub hue_range:f32,pub saturation_range:f32,pub luminance_range:f32,pub hue:f32,pub saturation:f32,pub luminance:f32}
+#[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+pub struct PrimaryShift {pub hue:f32,pub saturation:f32}
 
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -355,7 +366,8 @@ fn validate_curve(curves: &[[f64; 2]]) -> Result<(), String> {
 }
 
 fn normalize_advanced(a: &mut AdvancedAdjustments) -> Result<(), String> {
-    if a.disabled_groups.len()>12||a.disabled_groups.iter().any(|v|!super::groups::NAMES.contains(&v.as_str())){return Err("调整组开关无效".into());}
+    super::point_color::normalize(a)?;
+    if a.disabled_groups.len()>14||a.disabled_groups.iter().any(|v|!super::groups::NAMES.contains(&v.as_str())){return Err("调整组开关无效".into());}
     fn numbers(values:&mut [f64],min:f64,max:f64)->Result<(),String>{
         for v in values {if !v.is_finite(){return Err("调色数值无效".into());}*v=v.clamp(min,max);}Ok(())
     }

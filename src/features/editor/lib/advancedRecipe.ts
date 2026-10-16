@@ -14,12 +14,14 @@ export function advancedRecipe(): EditRecipe {
   return { ...defaultRecipe(), renderer: "photocraft", advanced: { ...DEFAULT_ADVANCED } };
 }
 
-export type AdjustmentGroup = "light" | "color" | "effects" | "detail" | "curves" | "levels" | "hsl" | "colorBalance" | "blackWhite" | "selectiveColor" | "colorGrading" | "parametricCurve";
+export type AdjustmentGroup = "pointColors" | "primaries" | "light" | "color" | "effects" | "detail" | "curves" | "levels" | "hsl" | "colorBalance" | "blackWhite" | "selectiveColor" | "colorGrading" | "parametricCurve";
 
 export function adjustmentGroupChanged(recipe:EditRecipe,group:AdjustmentGroup):boolean {
   const a={...DEFAULT_ADVANCED,...recipe.advanced};
   const basic={brightness:0,contrast:0,saturation:0,...recipe.adjustments};
   switch(group) {
+    case "pointColors":return !!a.pointColors?.length;
+    case "primaries":return !!a.primaries;
     case "parametricCurve":return !!a.parametricCurve;
     case "colorGrading":return !!a.colorGrading;
     case "colorBalance":return !!a.colorBalance;
@@ -127,6 +129,8 @@ export function advancedReducer(state: RecipeHistory, action: AdvancedAction, co
       advanced.development=development;
     }
     switch(action.group) {
+      case "pointColors":advanced.pointColors=undefined;break;
+      case "primaries":advanced.primaries=undefined;break;
       case "parametricCurve":advanced.parametricCurve=undefined;break;
       case "colorGrading":advanced.colorGrading=undefined;break;
       case "colorBalance":advanced.colorBalance=undefined;break;

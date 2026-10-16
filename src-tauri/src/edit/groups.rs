@@ -1,6 +1,6 @@
 //! Bypass groups in a disposable processing recipe; never erase saved parameters.
 use super::recipe::{EditRecipe,Development};
-pub(super) const NAMES:[&str;12]=["light","color","curves","parametricCurve","levels","hsl","colorBalance","blackWhite","selectiveColor","colorGrading","detail","effects"];
+pub(super) const NAMES:[&str;14]=["light","color","curves","parametricCurve","levels","hsl","colorBalance","blackWhite","selectiveColor","colorGrading","detail","effects","pointColors","primaries"];
 pub(super) fn effective(recipe:&EditRecipe)->Option<EditRecipe>{
     let disabled=&recipe.advanced.as_ref()?.disabled_groups;
     if disabled.is_empty(){return None;}
@@ -14,6 +14,7 @@ pub(super) fn effective(recipe:&EditRecipe)->Option<EditRecipe>{
             "color"=>{a.temperature=0.0;a.tint=0.0;a.vibrance=0.0;if let Some(b)=value.adjustments.as_mut(){b.saturation=0.0;}},
             "curves"=>{a.curves.clear();a.channel_curves=Default::default();},
             "parametricCurve"=>a.parametric_curve=None,
+            "pointColors"=>a.point_colors.clear(),"primaries"=>a.primaries=None,
             "levels"=>a.levels=None,"hsl"=>a.hsl_eight=None,
             "colorBalance"=>a.color_balance=None,"blackWhite"=>a.black_white=None,
             "selectiveColor"=>a.selective_color=None,"colorGrading"=>a.color_grading=None,

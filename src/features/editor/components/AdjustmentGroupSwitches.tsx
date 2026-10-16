@@ -1,7 +1,7 @@
 import {useTranslation} from "react-i18next";
 import type {AdvancedAdjustments,EditRecipe} from "@/ipc/api";
 import {adjustmentGroupChanged,type AdjustmentGroup} from "../lib/advancedRecipe";
-const LABELS={light:"advancedEditor.light",color:"advancedEditor.color",curves:"advancedEditor.curves",parametricCurve:"advancedEditor.parametric.title",levels:"advancedEditor.levels",hsl:"advancedEditor.hsl",colorBalance:"advancedEditor.extra.colorBalance",blackWhite:"advancedEditor.extra.blackWhite",selectiveColor:"advancedEditor.extra.selectiveColor",colorGrading:"advancedEditor.grading.title",detail:"advancedEditor.develop.detail",effects:"advancedEditor.develop.effects"} satisfies Partial<Record<AdjustmentGroup,string>>;
+const LABELS={pointColors:"advancedEditor.pointColor.title",primaries:"advancedEditor.primaries.title",light:"advancedEditor.light",color:"advancedEditor.color",curves:"advancedEditor.curves",parametricCurve:"advancedEditor.parametric.title",levels:"advancedEditor.levels",hsl:"advancedEditor.hsl",colorBalance:"advancedEditor.extra.colorBalance",blackWhite:"advancedEditor.extra.blackWhite",selectiveColor:"advancedEditor.extra.selectiveColor",colorGrading:"advancedEditor.grading.title",detail:"advancedEditor.develop.detail",effects:"advancedEditor.develop.effects"} satisfies Partial<Record<AdjustmentGroup,string>>;
 export default function AdjustmentGroupSwitches({recipe,onChange}:{recipe:EditRecipe;onChange:(patch:Partial<AdvancedAdjustments>)=>void}){
   const {t}=useTranslation();const disabled=recipe.advanced?.disabledGroups??[];
   return <details className="space-y-2 rounded border border-edge p-2"><summary className="text-xs">{t("advancedEditor.groups.title")}</summary>

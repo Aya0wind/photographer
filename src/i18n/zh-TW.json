@@ -1965,5 +1965,19 @@
   "advancedEditor.groups.hint": "关闭只暂停本组效果，参数保留；预览和导出均遵循开关。",
   "advancedEditor.hsl": "HSL 八色混合器",
   "advancedEditor.exportAlbums.search": "搜索目标相册",
-  "advancedEditor.exportAlbums.recent": "最近使用的相册优先显示"
+  "advancedEditor.exportAlbums.recent": "最近使用的相册优先显示",
+  "advancedEditor.pointColor.title": "点颜色",
+  "advancedEditor.pointColor.select": "选择第 {{index}} 个颜色",
+  "advancedEditor.pointColor.sample": "在照片上采样此颜色",
+  "advancedEditor.pointColor.enable": "启用当前颜色",
+  "advancedEditor.pointColor.hueRange": "色相范围",
+  "advancedEditor.pointColor.saturationRange": "饱和度范围",
+  "advancedEditor.pointColor.luminanceRange": "明度范围",
+  "advancedEditor.pointColor.hue": "色相偏移",
+  "advancedEditor.pointColor.saturation": "饱和度调整",
+  "advancedEditor.pointColor.luminance": "明度调整",
+  "advancedEditor.pointColor.remove": "删除当前颜色",
+  "advancedEditor.pointColor.hint": "按色相、饱和度、明度距离柔和选色，最多 8 色，按保存顺序处理。为本应用的手动选色算法，不保证复现 Lightroom。",
+  "advancedEditor.primaries.title": "RGB 原色调色",
+  "advancedEditor.primaries.hint": "创意 RGB 混色矩阵，保持中性轴；不是相机色彩矩阵，不替换 RAW 机型校准。"
 }

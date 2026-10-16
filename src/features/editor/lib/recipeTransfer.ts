@@ -2,7 +2,7 @@ import type {EditRecipe} from "@/ipc/api";
 import {DEFAULT_ADVANCED,DEFAULT_DEVELOPMENT} from "./advancedRecipe";
 export const TRANSFER_GROUPS=["light","color","curves","hsl","grading","detail","effects","profile","geometry","masks","annotations","retouch","output"] as const;
 export type TransferGroup=typeof TRANSFER_GROUPS[number];
-const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hslEight"],grading:["colorGrading","lookup"]} as const;
+const ADVANCED={light:["exposure"],color:["temperature","tint","vibrance","colorBalance","blackWhite","selectiveColor","pointColors","primaries"],curves:["curves","channelCurves","parametricCurve","levels"],hsl:["hslEight"],grading:["colorGrading","lookup"]} as const;
 const DEVELOPMENT={light:["highlights","shadows","whites","blacks"],detail:["sharpenAmount","sharpenRadius","sharpenDetail","sharpenMasking","noiseLuminance","noiseLuminanceDetail","noiseColor","noiseColorDetail"],effects:["texture","clarity","dehaze","grainAmount","grainSize","grainRoughness","vignetteAmount","vignetteMidpoint","vignetteRoundness","vignetteFeather","vignetteHighlights","vignetteStyle"]} as const;
 /** Copy only selected groups; absent source fields reset the corresponding target fields. */
 export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:TransferGroup[]):EditRecipe {
@@ -26,7 +26,7 @@ export function transferRecipe(source:EditRecipe,target:EditRecipe,groups:Transf
   value[field]=patch;
  }
  const disabled=new Set(advanced.disabledGroups??[]),sourceDisabled=new Set(source.advanced?.disabledGroups??[]);
- const switches:Partial<Record<TransferGroup,string[]>>={light:["light"],color:["color","colorBalance","blackWhite","selectiveColor"],curves:["curves","parametricCurve","levels"],hsl:["hsl"],grading:["colorGrading"],detail:["detail"],effects:["effects"]};
+ const switches:Partial<Record<TransferGroup,string[]>>={light:["light"],color:["color","colorBalance","blackWhite","selectiveColor","pointColors","primaries"],curves:["curves","parametricCurve","levels"],hsl:["hsl"],grading:["colorGrading"],detail:["detail"],effects:["effects"]};
  for(const group of groups)for(const key of switches[group]??[]){if(sourceDisabled.has(key))disabled.add(key);else disabled.delete(key);}
  advanced.disabledGroups=[...disabled];value.advanced=advanced;return value;
 }

@@ -307,7 +307,7 @@ export function recipeEquals(a: EditRecipe, b: EditRecipe): boolean {
 /** 持久化/导出前清洗：剔除空文字层与零点笔迹（放置后未输入的占位层不入库） */
 export function recipeForPersist(recipe: EditRecipe): EditRecipe {
   const a=recipe.advanced;
-  const neutralAdvanced=a && !a.disabledGroups?.length && !a.parametricCurve && !a.colorGrading && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
+  const neutralAdvanced=a && !a.pointColors?.length && !a.primaries && !a.disabledGroups?.length && !a.parametricCurve && !a.colorGrading && !a.development && !a.colorBalance&&!a.blackWhite&&!a.selectiveColor && !(a.exposure||a.temperature||a.tint||a.vibrance) && !a.curves.length
     && !Object.values(a.channelCurves??{}).some(points=>!!points?.length) && !a.levels && !a.lookup && !Object.keys(a.hslEight??{}).length;
   return {
     ...recipe,
