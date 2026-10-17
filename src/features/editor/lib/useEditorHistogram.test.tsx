@@ -5,6 +5,15 @@ import {advancedRecipe} from "./advancedRecipe";
 import {startHistogramScheduler,useEditorHistogram} from "./useEditorHistogram";
 vi.mock("@/ipc/api",()=>({editPreviewHistogram:vi.fn()}));beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();});afterEach(()=>vi.useRealTimers());
 const recipe=advancedRecipe();async function tick(){await act(async()=>{await vi.advanceTimersByTimeAsync(200);});}
+it("keeps the displayed histogram while interaction pauses auxiliary work and resumes with the latest recipe",async()=>{
+ vi.mocked(editPreviewHistogram).mockResolvedValue([[1]]);
+ const {result,rerender}=renderHook(({paused,value})=>useEditorHistogram("s",value,false,true,paused),{initialProps:{paused:false,value:recipe}});
+ await tick();expect(result.current.bins).toEqual([[1]]);expect(editPreviewHistogram).toHaveBeenCalledTimes(1);
+ const changed={...recipe,advanced:{...recipe.advanced!,exposure:1}};
+ rerender({paused:true,value:changed});await tick();expect(editPreviewHistogram).toHaveBeenCalledTimes(1);expect(result.current.bins).toEqual([[1]]);
+ vi.mocked(editPreviewHistogram).mockResolvedValue([[2]]);rerender({paused:false,value:changed});await tick();
+ expect(editPreviewHistogram).toHaveBeenLastCalledWith("s",changed,false);expect(result.current.bins).toEqual([[2]]);
+});
 it("coalesces repeated changes and keeps only one request in flight",async()=>{
  let resolve!:(bins:number[][])=>void;vi.mocked(editPreviewHistogram).mockImplementationOnce(()=>new Promise(done=>{resolve=done;})).mockResolvedValueOnce([[2]]);
  let value={recipe,original:false};const output={result:vi.fn(),busy:vi.fn(),error:vi.fn()};const worker=startHistogramScheduler("s",()=>value,output);

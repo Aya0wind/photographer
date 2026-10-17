@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act,fireEvent, render, screen,waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import EditorCanvas, { type EditorTool } from "./EditorCanvas";
 import { defaultRecipe } from "../lib/recipe";
@@ -67,9 +67,20 @@ describe("编辑器画布缩放与拖动", () => {
   it("滚轮放大/缩小并阻止滚动页面", async () => {
     const { viewport, onZoom } = await canvas();
     expect(fireEvent.wheel(viewport, { deltaY: -100, cancelable: true })).toBe(false);
-    expect(onZoom).toHaveBeenLastCalledWith(1.1);
+    await waitFor(()=>expect(onZoom).toHaveBeenLastCalledWith(1.1));
     fireEvent.wheel(viewport, { deltaY: 100 });
-    expect(onZoom).toHaveBeenLastCalledWith(1 / 1.1);
+    await waitFor(()=>expect(onZoom).toHaveBeenLastCalledWith(1 / 1.1));
+  });
+
+  it("coalesces fine touchpad input into one proportional zoom per animation frame",async()=>{
+    const {viewport,onZoom}=await canvas();let frame:FrameRequestCallback|undefined;
+    vi.stubGlobal("requestAnimationFrame",(callback:FrameRequestCallback)=>{frame=callback;return 1;});
+    vi.stubGlobal("cancelAnimationFrame",vi.fn());
+    for(let i=0;i<10;i++)fireEvent.wheel(viewport,{deltaY:-1});
+    expect(onZoom).not.toHaveBeenCalled();
+    act(()=>frame?.(performance.now()));
+    expect(onZoom).toHaveBeenCalledTimes(1);
+    expect(onZoom.mock.calls[0][0]).toBeCloseTo(Math.pow(1.1,.1),10);
   });
 
   it("查看模式拖动平移，松开后停止", async () => {

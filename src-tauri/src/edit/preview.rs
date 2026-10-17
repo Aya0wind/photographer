@@ -27,6 +27,7 @@ struct Preview {
     interactive_document: Document,
     interactive_renderer: Arc<Mutex<preview_renderer::Renderer>>,
     refined_renderer: Arc<Mutex<preview_renderer::Renderer>>,
+    statistics: Arc<Mutex<Statistics>>,
     open_ms: f64,
     native_ready: bool,
     pipeline_ready: bool,
@@ -38,6 +39,26 @@ struct Preview {
     length: u64,
     touched: Instant,
     source_checked: Instant,
+}
+
+/// Auxiliary statistics have their own small proxy and caches. They must not
+/// rebuild full-size RAW color sessions or hold the interactive renderer lock.
+#[derive(Default)]
+struct Statistics {
+    source: Option<(photocraft_engine::doc::DocId, [u32;2], Document, preview_renderer::Renderer)>,
+}
+impl Statistics {
+    fn pixels(&mut self,base:&Document,original:[u32;2],recipe:&recipe::EditRecipe)->Result<photocraft_compose::Buffer,String>{
+        if self.source.as_ref().is_none_or(|(id,size,_,_)|*id!=base.id||*size!=original){
+            let proxy=photocraft::resize(base,Some(512))?;
+            let renderer=preview_renderer::Renderer::new(&proxy).with_source_size(original,&proxy);
+            self.source=Some((base.id,original,proxy,renderer));
+        }
+        let (_,_,proxy,renderer)=self.source.as_mut().ok_or("统计预览不存在")?;
+        let mut values=recipe.clone();values.text_layers.clear();values.brush_strokes.clear();
+        let doc=renderer.readout_document(proxy,&values)?;
+        photo_document_pixels(proxy,&values,&doc)
+    }
 }
 
 #[derive(Default)]
@@ -331,6 +352,7 @@ pub async fn edit_preview_open(
         cache.insert(
             details.session_id.clone(),
             Arc::new(Mutex::new(Preview {
+                statistics:Default::default(),
                 original_size:[details.width,details.height],
                 interactive_renderer: new_renderer(&interactive_document,[details.width,details.height]),
                 refined_renderer: new_renderer(&document,[details.width,details.height]),
@@ -838,6 +860,9 @@ fn clipping_pixels(pixels:&[[f32;4]],warnings:u8)->Vec<u8>{
 fn photo_pixels(base:&Document,recipe:&recipe::EditRecipe,scale:f32)->Result<photocraft_compose::Buffer,String>{
     let mut recipe=recipe.clone();recipe.text_layers.clear();recipe.brush_strokes.clear();
     let doc=photocraft::render_document_scaled(base,&recipe,scale)?;
+    photo_document_pixels(base,&recipe,&doc)
+}
+fn photo_document_pixels(base:&Document,recipe:&recipe::EditRecipe,doc:&Document)->Result<photocraft_compose::Buffer,String>{
     let mut pixels=photocraft_compose::flatten(&doc);
     let mapping=super::native_geometry::mapping(&recipe,base.size);
     for (i,p) in pixels.px.iter_mut().enumerate(){
@@ -857,10 +882,10 @@ pub async fn edit_preview_histogram(state:State<'_,SharedState>,session_id:Strin
     let mut recipe=recipe::parse_recipe(&recipe)?;
     if original{recipe.retouch.clear();if let Some(p)=recipe.color_pipeline.as_mut(){p.film=None;}recipe.adjustments=None;recipe.advanced=None;recipe.masks.clear();}
     run_blocking(state.inner().clone(),move |_|{
-        // 拖动期高频调用：交互文档（≤2048）渲染，毫秒级——255 桶显示直方图
-        // 不需要全分辨率统计（2026-10-12 实时反馈改造）。
-        let base=interactive_source(&session_id)?;
-        histogram_pixels(&photo_pixels(&base,&recipe,1.0)?)
+        let preview=sessions().lock().map_err(|_|"预览锁不可用")?.get(&session_id).cloned().ok_or("预览会话已关闭")?;
+        let (base,original,statistics)={let p=preview.lock().map_err(|_|"预览锁不可用")?;(p.interactive_document.clone(),p.original_size,p.statistics.clone())};
+        let pixels=statistics.lock().map_err(|_|"统计锁不可用")?.pixels(&base,original,&recipe)?;
+        histogram_pixels(&pixels)
     }).await
 }
 #[tauri::command]
@@ -956,11 +981,40 @@ pub(super) fn canvas_original_size(session_id:&str)->Result<[u32;2],String> {
 mod startup_tests {
     use super::*;
     #[test]
+    fn statistics_bound_work_reuse_source_and_follow_latest_adjustments(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Statistics",Size::new(1200,800),ColorMode::Rgb,SampleType::U8,Color::rgba(0.2,0.3,0.4,1.0));
+        let mut recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{}})).unwrap();
+        let mut statistics=Statistics::default();
+        let before=statistics.pixels(&base,[6000,4000],&recipe).unwrap();
+        assert_eq!(before.rect.width(),512);assert!(before.rect.height()<=512);
+        let source_id=statistics.source.as_ref().unwrap().2.id;
+        recipe.advanced.as_mut().unwrap().exposure=1.0;
+        let after=statistics.pixels(&base,[6000,4000],&recipe).unwrap();
+        assert_eq!(statistics.source.as_ref().unwrap().2.id,source_id);
+        assert_ne!(histogram_pixels(&before).unwrap(),histogram_pixels(&after).unwrap());
+        assert_eq!(base.size,Size::new(1200,800));
+    }
+    #[test]
+    #[ignore="explicit histogram performance measurement"]
+    fn statistics_preview_timing(){
+        use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
+        let base=Document::with_background("Statistics",Size::new(1600,1067),ColorMode::Rgb,SampleType::U8,Color::rgba(0.2,0.3,0.4,1.0));
+        let recipe=recipe::parse_recipe(&serde_json::json!({"version":1,"renderer":"photocraft","advanced":{"exposure":1,"development":{"shadows":30,"highlights":-20,"clarity":10}}})).unwrap();
+        let start=Instant::now();let before=photo_pixels(&base,&recipe,0.267).unwrap();
+        eprintln!("[histogram before] {:.2} ms / {} pixels",start.elapsed().as_secs_f64()*1000.0,before.px.len());
+        let mut statistics=Statistics::default();let start=Instant::now();let after=statistics.pixels(&base,[6000,4000],&recipe).unwrap();
+        eprintln!("[histogram after cold] {:.2} ms / {} pixels",start.elapsed().as_secs_f64()*1000.0,after.px.len());
+        let start=Instant::now();statistics.pixels(&base,[6000,4000],&recipe).unwrap();
+        eprintln!("[histogram after cached] {:.2} ms",start.elapsed().as_secs_f64()*1000.0);
+    }
+    #[test]
     fn background_expiry_fences_closed_sessions_and_preserves_inflight_arcs() {
         use photocraft_engine::doc::{Color,ColorMode,SampleType,Size};
         let base=Document::with_background("Expiry",Size::new(4,4),ColorMode::Rgb,SampleType::U8,Color::rgba(0.5,0.5,0.5,1.0));
         let generation=Arc::new(Generation::default());
         let preview=Arc::new(Mutex::new(Preview {
+            statistics:Default::default(),
             original_size:[4,4], document:base.clone(), raw:None, refined:None,
             interactive_document:base.clone(), interactive_renderer:new_renderer(&base,[4,4]),
             refined_renderer:new_renderer(&base,[4,4]), open_ms:0.0, native_ready:false,

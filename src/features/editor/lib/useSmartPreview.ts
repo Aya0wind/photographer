@@ -27,7 +27,9 @@ export async function prepareFrame(sessionId:string,latest:MutableRefObject<Edit
     await preparePreviewImage(frame);
     // Activation commits the backend source. Even if film was switched off
     // during IPC, adopt that source and render the current settings before swap.
-    while(current()&&used!==JSON.stringify(latest.current)) {
+    // Catch up once, then publish. Waiting until sliders stop changing can
+    // indefinitely hide the prepared RAW source during a continuous gesture.
+    if(current()&&used!==JSON.stringify(latest.current)) {
       const recipe=latest.current;used=JSON.stringify(recipe);
       const next=await editPreviewRender(sessionId,recipe);
       releasePreviewImage(frame);frame=next;

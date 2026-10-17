@@ -9,6 +9,7 @@ import MaskCanvasControls,{type MaskBrush} from "./MaskCanvasControls";
 import StraightenOverlay from "./StraightenOverlay";
 import type {SampleGesture} from "../lib/useTargetAdjustment";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {useCanvasZoom} from "../lib/useCanvasZoom";
 
 import { Circle, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text as KonvaText, Transformer } from "react-konva";
 import type Konva from "konva";
@@ -220,13 +221,16 @@ export default function EditorCanvas({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    let scheduled=0,pending=1;
     const wheel = (event: WheelEvent) => {
       if (!zoomRef.current || event.deltaY === 0) return;
       event.preventDefault();
-      zoomRef.current(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+      const pixels=event.deltaY*(event.deltaMode===1?16:event.deltaMode===2?container.clientHeight:1);
+      pending*=Math.pow(1.1,-Math.max(-600,Math.min(600,pixels))/100);
+      if(!scheduled)scheduled=requestAnimationFrame(()=>{scheduled=0;const factor=pending;pending=1;zoomRef.current?.(factor);});
     };
     container.addEventListener("wheel", wheel, { passive: false });
-    return () => container.removeEventListener("wheel", wheel);
+    return () => {container.removeEventListener("wheel", wheel);cancelAnimationFrame(scheduled);};
   }, []);
   const [avail, setAvail] = useState<Size>({ width: 912, height: 600 });
   const image = useHtmlImage(src, onImageError);
@@ -270,7 +274,8 @@ export default function EditorCanvas({
     const ro = new ResizeObserver(() => {
       const rect = el.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        setAvail({ width: rect.width, height: rect.height });
+        const width=el.clientWidth||rect.width,height=el.clientHeight||rect.height;
+        setAvail(previous=>previous.width===width&&previous.height===height?previous:{width,height});
       }
     });
     ro.observe(el);
@@ -308,16 +313,7 @@ export default function EditorCanvas({
   const fitCrop=tool==="crop"?{w:1,h:1}:recipe.crop??{w:1,h:1};
   const fitScale=Math.min(Math.max(60,avail.width-STAGE_PADDING*2)/(fitGeometry.w*fitCrop.w),Math.max(60,avail.height-STAGE_PADDING*2)/(fitGeometry.h*fitCrop.h));
   useEffect(()=>{onFitScale?.(fitScale);},[fitScale,onFitScale]);
-  const previousZoom=useRef(zoom);
-  useEffect(()=>{
-    const view=containerRef.current;
-    if(view&&previousZoom.current!==zoom){
-      const ratio=zoom/previousZoom.current;
-      view.scrollLeft=(view.scrollLeft+view.clientWidth/2)*ratio-view.clientWidth/2;
-      view.scrollTop=(view.scrollTop+view.clientHeight/2)*ratio-view.clientHeight/2;
-    }
-    previousZoom.current=zoom;
-  },[zoom]);
+  useCanvasZoom(containerRef,zoom);
   if (image === null) return <div ref={containerRef} className="flex min-h-0 flex-1" />;
 
   const baseW = sourceSize?.width || image.naturalWidth || fallbackSize?.width || 1;
@@ -437,8 +433,8 @@ export default function EditorCanvas({
     hand ? panning?"grabbing":"grab" : sampleMode || tool === "brush" || tool === "text" ? "crosshair" : canPan && zoom > 1 ? panning ? "grabbing" : "grab" : "default";
 
   return (
-    <div ref={containerRef} className="sp-scroll relative flex min-h-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
-      style={{ cursor, touchAction: canPan ? "none" : undefined }}
+    <div ref={containerRef} className="sp-scroll relative flex min-h-0 min-w-0 flex-1 overflow-auto" data-testid="editor-canvas-viewport"
+      style={{ cursor, overflowAnchor:"none",scrollBehavior:"auto",touchAction: canPan ? "none" : undefined }}
       onPointerDownCapture={event=>{
         if(!hand&&event.button!==1)return;
         event.preventDefault();event.stopPropagation();

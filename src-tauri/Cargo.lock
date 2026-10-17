@@ -5048,6 +5048,7 @@ dependencies = [
  "pollster",
  "quick-xml",
  "rawler",
+ "rayon",
  "rstar 0.12.2",
  "rusqlite",
  "serde",

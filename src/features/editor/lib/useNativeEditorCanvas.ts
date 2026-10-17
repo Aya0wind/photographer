@@ -14,7 +14,7 @@ export function useNativeEditorCanvas(sessionId:string|undefined, recipe:EditRec
   const revision=useRef(0);
   const hiddenThrough=useRef(0);
   const send=useRef<(()=>void)|null>(null);
-  const recipeSignature=useMemo(()=>JSON.stringify(recipe),[recipe]);
+  const recipeSignature=useMemo(()=>JSON.stringify({...recipe,output:undefined}),[recipe]);
   const latest=useRef({recipe,recipeSignature,enabled,original,compareSplit,clipping,sourceVersion});latest.current={recipe,recipeSignature,enabled,original,compareSplit,clipping,sourceVersion};
   const signature=JSON.stringify({recipeSignature,enabled,original,overlayVersion,compareSplit,clipping});
   useEffect(() => {

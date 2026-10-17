@@ -14,7 +14,7 @@ export function startHistogramScheduler(sessionId:string,getInput:()=>Input,outp
  }
  return {wake(){if(closed)return;dirty=true;revision++;output.busy(true);schedule();},cancel(){revision++;dirty=false;clearTimeout(timer);timer=void 0;output.busy(false);},close(){closed=true;clearTimeout(timer);timer=void 0;}};
 }
-export function useEditorHistogram(sessionId:string|undefined,recipe:EditRecipe,original:boolean,enabled:boolean){
+export function useEditorHistogram(sessionId:string|undefined,recipe:EditRecipe,original:boolean,enabled:boolean,paused=false){
  const [bins,setBins]=useState<number[][]>([]),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
  const latest=useRef({recipe,original});latest.current={recipe,original};const scheduler=useRef<ReturnType<typeof startHistogramScheduler>|null>(null);
  const signature=JSON.stringify({recipe:{...recipe,output:undefined,textLayers:[],brushStrokes:[]},original});
@@ -22,6 +22,6 @@ export function useEditorHistogram(sessionId:string|undefined,recipe:EditRecipe,
   const worker=startHistogramScheduler(sessionId,()=>latest.current,{result:value=>{setBins(value);setError(null);},busy:setBusy,error:setError});scheduler.current=worker;
   return()=>{worker.close();scheduler.current=null;};
  },[sessionId]);
- useEffect(()=>{if(enabled)scheduler.current?.wake();else{scheduler.current?.cancel();setBins(current=>current.length?[]:current);setError(null);}},[signature,sessionId,enabled]);
+  useEffect(()=>{if(enabled&&!paused)scheduler.current?.wake();else{scheduler.current?.cancel();if(!enabled)setBins(current=>current.length?[]:current);setError(null);}},[signature,sessionId,enabled,paused]);
  return {bins,busy,error,closeError:()=>setError(null)};
 }

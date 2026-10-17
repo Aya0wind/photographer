@@ -183,6 +183,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
   const [exportPhase,setExportPhase]=useState("queued");
   const job = useRef<number | null>(null);
   const gesture = useRef<RecipeHistory | null>(null);
+  const [interacting,setInteracting]=useState(false);
   const mounted = useRef(true);
   const effective = useMemo(() => tool === "crop" && cropDraft ? advancedReducer(history, {
     type: "cropApply", crop: isFullCrop(clampCrop(cropDraft,1e-6)) ? null : clampCrop(cropDraft,1e-6),
@@ -204,9 +205,9 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     else dispatch({type:"advanced",patch:{development:{...DEFAULT_DEVELOPMENT,...start.advanced?.development,[event.zone]:Math.max(-100,Math.min(100,(start.advanced?.development?.[event.zone]??0)+event.delta*200))}},record:false});
   }
   const [histogramOpen,setHistogramOpen]=useState(true);
-  const histogram=useEditorHistogram(preview.session?.sessionId,recipe,compare,histogramOpen&&!unavailable);
+  const histogram=useEditorHistogram(preview.session?.sessionId,recipe,compare,histogramOpen&&!unavailable,interacting||target.active);
   const readoutRecipe=tool==="crop"?{...recipe,crop:null,textLayers:[],brushStrokes:[]}:recipe;
-  const pixel=usePixelReadout(preview.session?.sessionId,compare?{...readoutRecipe,retouch:[],adjustments:undefined,advanced:undefined,masks:[]}:readoutRecipe,histogramOpen&&!unavailable);
+  const pixel=usePixelReadout(preview.session?.sessionId,compare?{...readoutRecipe,retouch:[],adjustments:undefined,advanced:undefined,masks:[]}:readoutRecipe,histogramOpen&&!unavailable&&!interacting&&!target.active);
   const [shot,setShot]=useState<{iso?:number|null;aperture?:string|null;shutter?:string|null}|null>(null);
   useEffect(()=>{let cancelled=false;setShot(null);void assetDetail(asset.id).then(value=>{if(!cancelled)setShot(value);}).catch(()=>{});return()=>{cancelled=true;};},[asset.id]);
   const targetSampling={sampleSize,setSampleSize:(size:1|3|5|11)=>{setSampleSize(size);setSample(null);setSamplingError(null);},setTargetCurveChannel:(channel:CurveChannel)=>{setTargetCurveChannel(channel);setSample(null);},targetHslAxis,setTargetHslAxis};
@@ -317,12 +318,13 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     return () => { window.removeEventListener("blur", release); window.removeEventListener("pointerup", release); window.removeEventListener("pointercancel", release); window.removeEventListener("keyup", release); };
   }, []);
 
-  function beginGesture() { gesture.current ??= history; }
+  function beginGesture() { gesture.current ??= history;setInteracting(true); }
   function endGesture() {
     if (gesture.current && !recipeEquals(gesture.current.present, recipe)) dispatch({ type: "commitFrom", snapshot: gesture.current.present });
     gesture.current = null;
+    setInteracting(false);
   }
-  function cancelGesture(){const snapshot=gesture.current;gesture.current=null;if(snapshot)dispatch({type:"restoreHistory",history:snapshot});}
+  function cancelGesture(){const snapshot=gesture.current;gesture.current=null;setInteracting(false);if(snapshot)dispatch({type:"restoreHistory",history:snapshot});}
   function chooseTool(next: EditorTool) {
     if(next!=="adjust")setLensOpen(false);
     target.cancel();
@@ -337,7 +339,7 @@ export default function AdvancedEditorOverlay({ asset, libraryId, originAlbumId,
     busyRef.current = true; setBusy(true);
     void preview.close().finally(onClose);
   }
-  function cancelCrop(){gesture.current=null;dispatch({type:"cropCancel"});setCropDraft(null);setCropRatio(null);setStraightening(false);setTool("adjust");}
+  function cancelCrop(){gesture.current=null;setInteracting(false);dispatch({type:"cropCancel"});setCropDraft(null);setCropRatio(null);setStraightening(false);setTool("adjust");}
   function undoEditing(){if(tool==="crop")cancelCrop();else{endGesture();dispatch({type:"undo"});}}
   function redoEditing(){if(tool==="crop")cancelCrop();else dispatch({type:"redo"});}
   function requestClose() {if(exporting){setNotice(t("editor.exportCloseHint"));return;}if(target.active){closeAfterTarget.current=true;target.cancel();return;} if (!toolModalOpen && !busyRef.current && !exporting) dirty ? setConfirm("close") : closeEditor(); }

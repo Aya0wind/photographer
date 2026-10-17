@@ -11,6 +11,14 @@ vi.mock("@/ipc",()=>({ipc:vi.fn()}));
 let receive:(event:{payload:{sessionId:string;revision?:number;ok:boolean;error?:string}})=>void;
 let host:{current:HTMLElement|null};
 const recipe=advancedRecipe();
+it("keeps recipe and GPU caches when only export preferences change",async()=>{
+ const {rerender}=renderHook(({value})=>useNativeEditorCanvas("session",value,host,true,false,"source"),{initialProps:{value:recipe}});
+ await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.anything()));
+ const before=vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_frame").length;
+ rerender({value:{...recipe,output:{...recipe.output,quality:65,longEdge:1200}}});
+ await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
+ expect(vi.mocked(ipc).mock.calls.filter(([command])=>command==="edit_native_frame")).toHaveLength(before);
+});
 it("hides an empty viewport and rejects its old confirmation after layout resumes",async()=>{
  const {result,rerender}=renderHook(({source})=>useNativeEditorCanvas("session",recipe,host,true,false,source),{initialProps:{source:"shown"}});
  await waitFor(()=>expect(ipc).toHaveBeenCalledWith("edit_native_frame",expect.anything()));
