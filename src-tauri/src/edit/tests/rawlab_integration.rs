@@ -13,19 +13,19 @@ fn native_stage_consumes_controls_once_and_reuses_for_downstream_edits() {
     let (display, downstream) = cache.apply(&base, &recipe).unwrap();
     assert!(downstream.color_pipeline.is_none());
     assert_eq!(downstream.advanced.as_ref().unwrap().exposure, 0.0);
-    let expected = backend
-        .render(
-            &[0.2, 0.4, 0.6],
-            [1, 1],
-            None,
-            0.0,
-            GpuMode::Off,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+    // V2 without film presents the selected base profile, rather than the
+    // native no-LUT transfer. Supply already exposed pixels so this comparison
+    // catches both a missing exposure and exposure applied twice.
+    let expected = super::super::base_color::render(
+        &[0.2, 0.4, 0.6],
+        [1, 1],
+        super::super::recipe::BaseProfile::Standard,
+        0.0,
+        [1.0; 3],
+    );
     let actual = photocraft_compose::flatten(&display);
     for c in 0..3 {
-        assert!((actual.px[0][c] - expected.rgb()[c]).abs() < 0.0021);
+        assert!((actual.px[0][c] - expected[c]).abs() < 0.0021);
     }
     recipe.advanced.as_mut().unwrap().vibrance = 30.0;
     let (again, _) = cache.apply(&base, &recipe).unwrap();
