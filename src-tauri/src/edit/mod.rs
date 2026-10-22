@@ -39,6 +39,7 @@ pub mod export;
 pub(crate) mod export_worker;
 mod gpu;
 mod base_color;
+mod brand_frame;
 mod grading;
 mod pixel_lookup;
 mod color_mixer;

@@ -1895,6 +1895,7 @@ checksum = "457e789b3d1202543297a350643cf459f836cade38934e7a4cf6a39e7cde2905"
 dependencies = [
  "fontconfig-parser",
  "log",
+ "memmap2",
  "slotmap",
  "tinyvec",
  "ttf-parser",
@@ -5049,6 +5050,7 @@ dependencies = [
  "quick-xml",
  "rawler",
  "rayon",
+ "resvg",
  "rstar 0.12.2",
  "rusqlite",
  "serde",

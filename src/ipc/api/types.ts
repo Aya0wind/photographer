@@ -887,7 +887,18 @@ export interface EditLocalMask {
 export interface EditRetouchStroke {id:string;kind:"clone"|"heal"|"redEye";source:{x:number;y:number};points:{x:number;y:number}[];widthRel:number;hardness:number;opacity:number}
 export interface EditorLensProfileSettings {distortion:boolean;tca:boolean;autoCrop:boolean;profileId:string}
 export interface EditorLensSettings {guide?:[number,number,number,number,number,number,number,number,number];enabled:boolean;distortion:number;redCyan:number;blueYellow:number;vignette:number;midpoint:number;horizontal:number;vertical:number;scale:number;purple:number;green:number;extendEdges:boolean}
+export interface BrandFrame {
+  canvasRatio: number; backgroundStyle: "solid"|"blur"; blur: number; frost: number;
+  border: "none"|"single"|"double"|"corners";
+  enabled: boolean; layout: "classic"|"split"|"center"|"signature"|"gallery"|"film"|"editorial"|"minimal";
+  background: string; foreground: string; accent: string; padding: number; footerHeight: number;
+  fontSize: number; font: string; logo: "wordmark"|"camera"|"custom"|"none";
+  brand: string; camera: string; lens: string; parameters: string; date: string; caption: string;
+  showCamera: boolean; showLens: boolean; showParameters: boolean; showDate: boolean; showCaption: boolean;
+  rule: boolean; logoImage: string; footerSvg: string;
+}
 export interface EditRecipe {
+  brandFrame?: BrandFrame;
   lens?:EditorLensSettings;
   retouch?:EditRetouchStroke[];
   version: 1;

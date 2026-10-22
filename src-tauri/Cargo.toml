@@ -28,6 +28,7 @@ tauri-build = { version = "2", features = [] }
 photographer-media = { path = "../crates/media" }
 num_cpus = "1.17"
 rayon = "1.12"
+resvg = "=0.45.1"
 # 缩略图服务（M3 提前）：JPG/PNG/WEBP/BMP/GIF/TIFF 解码 + 缩放 + JPEG q80 落盘
 image = "0.25"
 # 编辑引擎：直接依赖上游公开 API；全部 crate 固定同一提交，不引入 egui/app。

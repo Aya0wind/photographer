@@ -38,7 +38,7 @@ import {
  * - 所有提交都经 konvaMapping 换算回归一化 recipe 字段。
  */
 
-export type EditorTool = "lens" | "retouch" | "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
+export type EditorTool = "frame" | "lens" | "retouch" | "view" | "crop" | "text" | "brush" | "mask" | "adjust" | "filters" | "metadata" | "output";
 
 const TEXT_NODE_NAME = "editor-text-layer";
 const STAGE_PADDING = 6;

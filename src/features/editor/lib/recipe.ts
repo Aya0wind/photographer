@@ -44,6 +44,7 @@ export interface RecipeHistory {
 export type TextLayerPatch = Partial<Omit<EditRecipeTextLayer, "id">>;
 
 export type RecipeAction =
+  | { type: "brandFrame"; value: EditRecipe["brandFrame"]; record?: boolean }
   | { type: "adjust"; patch: Partial<EditAdjustments>; record?: boolean }
   | {type:"geometry";patch:Partial<NonNullable<EditRecipe["geometry"]>>;record?:boolean;baseline?:EditRecipe}
   | {type:"geometryReset"}
@@ -211,6 +212,10 @@ export function recipeReducer(
     case "adjust": {
       const adjustments = { brightness: 0, contrast: 0, saturation: 0, ...present.adjustments, ...action.patch };
       const next = { ...present, adjustments };
+      return action.record === false ? { ...state, present: next } : pushHistory(state, next);
+    }
+    case "brandFrame": {
+      const next = { ...present, brandFrame: action.value };
       return action.record === false ? { ...state, present: next } : pushHistory(state, next);
     }
     case "geometry": {

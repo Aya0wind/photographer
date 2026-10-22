@@ -474,11 +474,13 @@ pub(super) fn encode_output(src: &Path, recipe: &EditRecipe, options: &Validated
         }else if options.format!=ExportFormat::Jpeg {
             if recipe.renderer!=Some(super::recipe::RenderEngine::Photocraft){return Err("此输出格式需要高级编辑处理方案".into());}
             let doc=super::photocraft::prepare_export_document_16(&src,&recipe,long_edge,progress,true)?;
-            let doc=super::output_finish::apply(doc,&options.finish)?;progress("encode");
+            let doc=super::output_finish::apply(doc,&options.finish)?;
+            let doc=super::brand_frame::apply(doc,recipe.brand_frame.as_ref(),long_edge)?;progress("encode");
             (super::photocraft::lossless_with_options(&doc,options.format.extension(),source_head.as_deref(),&meta_opts,options.color_space.profile(),&options.finish)?,doc.size.width,doc.size.height)
         }else{
             let doc=super::photocraft::prepare_export_document(src,recipe,long_edge,progress)?;
-            let doc=super::output_finish::apply(doc,&options.finish)?;progress("encode");
+            let doc=super::output_finish::apply(doc,&options.finish)?;
+            let doc=super::brand_frame::apply(doc,recipe.brand_frame.as_ref(),long_edge)?;progress("encode");
             (super::photocraft::jpeg_with_profile(&doc,quality,options.color_space.profile())?.0,doc.size.width,doc.size.height)
         };
 

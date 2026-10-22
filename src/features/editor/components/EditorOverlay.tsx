@@ -1,4 +1,7 @@
 import GeometryPanel from "./GeometryPanel";
+import BrandFramePanel from "./BrandFramePanel";
+import BrandFramePreview from "./BrandFramePreview";
+import { defaultBrandFrame, framePhotoData, materializeFrame } from "../lib/brandFrame";
 import CropDimensions from "./CropDimensions";
 import {geometrySize,changeGeometry} from "../lib/geometry";
 import {remapDraftCrop} from "../lib/cropPixels";
@@ -14,6 +17,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   albumList,
+  assetDetail,
   assetMetadataGet,
   assetMetadataSave,
   type EditableMetadata,
@@ -47,7 +51,7 @@ import ExportAlbumPicker from "./ExportAlbumPicker";
 import MetadataFields from "./MetadataFields";
 
 /** Tools exposed by the basic editor; the shared canvas also serves advanced editing. */
-type BasicEditorTool = Extract<EditorTool, "view" | "crop" | "adjust" | "filters" | "text" | "brush" | "metadata" | "output">;
+type BasicEditorTool = Extract<EditorTool, "frame" | "view" | "crop" | "adjust" | "filters" | "text" | "brush" | "metadata" | "output">;
 
 /**
  * 全屏编辑浮层（阶段 D 前端）：
@@ -119,6 +123,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
   const [metadata, setMetadata] = useState<EditableMetadata | null>(null);
   const [savedMetadata, setSavedMetadata] = useState<EditableMetadata | null>(null);
+  const [frameData, setFrameData] = useState(() => framePhotoData(asset));
+  useEffect(() => { let active = true; void assetDetail(asset.id).then(detail => { if (active && detail) setFrameData(framePhotoData(detail)); }).catch(() => {}); return () => { active = false; }; }, [asset.id]);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [metadataRetry, setMetadataRetry] = useState(0);
   useEffect(() => {
@@ -147,7 +153,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   const [cropDraft, setCropDraft] = useState<Parameters<typeof clampCrop>[0] | null>(null);
   const [straightening,setStraightening]=useState(false);
   useEffect(()=>{if(tool!=="crop")setStraightening(false);},[tool]);
-  const nativeRecipe=tool==="crop"?{...present,crop:null,textLayers:[],brushStrokes:[]}:present;
+  const { brandFrame: _frame, ...photoRecipe } = present;
+  const nativeRecipe=tool==="crop"?{...photoRecipe,crop:null,textLayers:[],brushStrokes:[]}:photoRecipe;
   const nativeHost=useRef<HTMLDivElement|null>(null);
   const [nativeActive,setNativeActive]=useState(false);
   const [toolModalOpen,setToolModalOpen]=useState(false);
@@ -179,10 +186,11 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         setCropRatio(null);
       }
       if (next !== "text") setSelectedTextId(null);
+      if (next === "frame" && !present.brandFrame) dispatch({ type: "brandFrame", value: materializeFrame({ ...defaultBrandFrame(), ...frameData, camera: metadata?.camera || frameData.camera || "", lens: metadata?.lens || frameData.lens || "", date: (metadata?.capturedAt || frameData.date || "").replace("T", " ") }) });
       setTool(next);
       setZoom(1);
     },
-    [present.crop, present.rotateQuarter, tool, cropDraft],
+    [present.crop, present.rotateQuarter, present.brandFrame, frameData, metadata, tool, cropDraft],
   );
 
   function applyCropDraft(): void {
@@ -407,7 +415,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   // --- 关闭确认 / 快捷键 ------------------------------------------------------------------
   const [confirm, setConfirm] = useState<"close" | "reset" | null>(null);
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,nativeRecipe,nativeHost,
-    ["adjust","view","filters","output","metadata","crop"].includes(tool) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error,
+    ["adjust","view","filters","output","metadata","crop"].includes(tool) && !(present.brandFrame?.enabled && ["frame", "view", "output"].includes(tool)) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error,
     false,preview.session?.sourceUrl,String(zoomHUD.visible));
   useEffect(()=>setNativeActive(nativeCanvas),[nativeCanvas]);
   function requestClose(): void {
@@ -461,6 +469,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   const canRedo = history.future.length > 0 && tool!=="crop";
 
   const TOOL_ICONS: Record<BasicEditorTool, React.ReactNode> = {
+    frame: <><rect x="3" y="3" width="18" height="18" rx="1" /><rect x="6" y="6" width="12" height="9" /><path d="M8 18h8" /></>,
     view: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m4 17 5-5 4 4 3-3 4 4" /></>,
     crop: <><path d="M6 3v15h15M3 6h15v15" /></>,
     adjust: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2" /></>,
@@ -583,6 +592,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
           {toolButton("filters", t("editor.tool.filters"), "editor-tool-filters")}
           {toolButton("text", t("editor.tool.text"), "editor-tool-text")}
           {toolButton("brush", t("editor.tool.brush"), "editor-tool-brush")}
+          {toolButton("frame", t("editor.frame.title"), "editor-tool-frame")}
           {toolButton("metadata", t("editor.tool.metadata"), "editor-tool-metadata")}
           {toolButton("output", t("editor.tool.output"), "editor-tool-output")}
         </div>
@@ -598,7 +608,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         </div>
 
           {preview.error ? <div role="alert" className="m-auto space-y-3 p-5 text-sm text-text-secondary"><p>{preview.error}</p><button type="button" onClick={preview.reload} className="rounded-lg border border-edge px-3 py-2">{t("editor.reload")}</button></div> : (
-            <EditorCanvas
+            ["frame", "view", "output"].includes(tool) && present.brandFrame?.enabled ? <div className="flex min-h-0 flex-1 overflow-auto p-6"><BrandFramePreview frame={present.brandFrame} src={preview.url ?? preview.session?.sourceUrl ?? null} aspect={fullAspect * (present.crop?.w ?? 1) / (present.crop?.h ?? 1)} /></div> : <EditorCanvas
               straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((present.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(present,{angle},ctxRef.current);setCropDraft(remapDraftCrop(present,next,cropDraft,ctxRef.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
               src={preview.session?.sourceUrl??null}
               adjustedSrc={preview.url}
@@ -727,7 +737,8 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         </div>
 
         {/* 右侧栏：工具选项 + 输出设置 */}
-        {["text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
+        {["frame", "text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
+          {tool === "frame" && present.brandFrame && <BrandFramePanel value={present.brandFrame} onChange={value => dispatch({ type: "brandFrame", value })} onReadMetadata={() => dispatch({ type: "brandFrame", value: materializeFrame({ ...present.brandFrame!, ...frameData, camera: metadata?.camera || frameData.camera || "", lens: metadata?.lens || frameData.lens || "", date: (metadata?.capturedAt || frameData.date || "").replace("T", " ") }) })} />}
           {tool==="filters" && <LutPanel preview={preview.session?{sessionId:preview.session.sessionId,recipe:present}:undefined} onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);

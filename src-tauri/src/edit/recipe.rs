@@ -291,6 +291,8 @@ pub struct RetouchStroke {pub id:String,pub kind:String,pub source:NormPoint,pub
 #[serde(rename_all = "camelCase")]
 pub struct EditRecipe {
     #[serde(default,skip_serializing_if="Option::is_none")]
+    pub brand_frame:Option<super::brand_frame::BrandFrame>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
     pub lens:Option<super::lens::Settings>,
     #[serde(default,skip_serializing_if="Vec::is_empty")]
     pub retouch:Vec<RetouchStroke>,
@@ -518,6 +520,7 @@ pub fn parse_recipe(value: &serde_json::Value) -> Result<EditRecipe, String> {
             recipe.version
         ));
     }
+    if let Some(frame)=&recipe.brand_frame{super::brand_frame::validate(frame)?;}
     if let Some(settings)=&mut recipe.lens{super::lens::normalize(settings)?;}
     if let Some(p)=&mut recipe.color_pipeline {
         if p.version!=2||p.core_revision!=super::rawlab::core_revision()||recipe.renderer!=Some(RenderEngine::Photocraft){return Err("此显影配方的 core 版本或编辑引擎不受支持".into());}

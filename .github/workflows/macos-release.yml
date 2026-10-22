@@ -204,6 +204,12 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib edit::rawlab
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib linear_cache::tests
 
+      - name: Brand frame preview and export regressions
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib edit::brand_frame
+          npx vitest run src/features/editor/lib/brandFrame.test.ts src/features/editor/components/BrandFramePanel.test.tsx
+          npx vitest run src/features/editor/components/EditorOverlay.test.tsx -t "品牌边框"
+
       - name: Check media prototype and linear handoff
         run: cargo check --manifest-path src-tauri/Cargo.toml --release --locked --target aarch64-apple-darwin --example rawlab_probe --test edit_linear_source_test
 

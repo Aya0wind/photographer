@@ -160,6 +160,25 @@ beforeEach(() => {
 });
 
 describe("EditorOverlay 骨架与工具切换", () => {
+  it("品牌边框模板可预览、保存并撤销", async () => {
+    const user=userEvent.setup();renderEditor();
+    await user.click(screen.getByTestId("editor-tool-frame"));
+    expect(screen.getByTestId("brand-frame-preview")).toBeInTheDocument();
+    await user.click(screen.getByTestId("frame-template-noir"));
+    await user.click(screen.getByTestId("editor-save"));
+    await waitFor(()=>expect(saveMock).toHaveBeenCalled());
+    expect(saveMock.mock.lastCall?.[1].brandFrame).toMatchObject({enabled:true,background:"#111111",camera:"Canon EOS R5"});
+    expect(saveMock.mock.lastCall?.[1].brandFrame?.footerSvg).toContain("Canon EOS R5");
+    dialogOpenMock.mockResolvedValue("X:\\framed-output");
+    fireEvent.click(screen.getByTestId("editor-export"));
+    await waitFor(()=>expect(exportMock).toHaveBeenCalled());
+    expect(exportMock.mock.lastCall?.[1].brandFrame).toMatchObject({enabled:true,background:"#111111"});
+    expect(exportMock.mock.lastCall?.[1].brandFrame?.footerSvg).toContain("data:image/svg+xml;base64,");
+    await user.click(screen.getByTestId("editor-undo"));
+    expect(screen.getByTestId("brand-frame-preview")).toHaveStyle({background:"#FFFFFF"});
+    await user.click(screen.getByTestId("editor-undo"));
+    expect(screen.queryByTestId("brand-frame-preview")).not.toBeInTheDocument();
+  });
   it("默认调色工具；撤销/重做初始禁用；已保存配方显示角标", () => {
     const recipe: EditRecipe = {
       version: 1,
