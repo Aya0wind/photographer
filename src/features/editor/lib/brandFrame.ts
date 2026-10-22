@@ -82,8 +82,11 @@ export function materializeFrame(frame: BrandFrame): BrandFrame {
     if (logo) {
       const boxH = (frame.layout === "minimal" ? 28 : 40)*logoScale, boxW = 160*logoScale;
       const x = bx - (center ? boxW / 2 : 0), y = Math.max(6, by - boxH * 0.75);
-      brandBottom=y+boxH+(logo.white?5:0);
-      brand = (logo.white ? `<rect x="${x-6}" y="${y-5}" width="${boxW+12}" height="${boxH+10}" rx="3" fill="#111111"/>` : "")
+      const rgb=parseInt(frame.background.slice(1),16), dark=(((rgb>>16)&255)*0.2126+((rgb>>8)&255)*0.7152+(rgb&255)*0.0722)<115;
+      const lightPlate=["Canon","FUJIFILM","OM SYSTEM","RICOH","HUAWEI"].includes(frame.brand) && (dark || frame.backgroundStyle === "blur");
+      const plate=logo.white ? "#111111" : lightPlate ? "#FFFFFF" : null;
+      brandBottom=y+boxH+(plate?5:0);
+      brand = (plate ? `<rect x="${x-6}" y="${y-5}" width="${boxW+12}" height="${boxH+10}" rx="3" fill="${plate}"/>` : "")
         + `<image href="${logo.url}" x="${x}" y="${y}" width="${boxW}" height="${boxH}" preserveAspectRatio="${center ? "xMidYMid" : "xMinYMid"} meet"/>`;
     }
   }
