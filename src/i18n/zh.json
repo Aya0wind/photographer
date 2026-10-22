@@ -2195,5 +2195,10 @@
   "editor.frame.filter.glass": "毛玻璃",
   "editor.frame.filter.mobile": "手机",
   "editor.frame.filter.print": "相纸",
-  "editor.frame.filter.creative": "创意"
+  "editor.frame.filter.creative": "创意",
+  "editor.frame.typography": "标识与字体",
+  "editor.frame.logoSize": "Logo 大小",
+  "editor.frame.font.Inter": "现代清晰",
+  "editor.frame.font.Manrope": "几何简约",
+  "editor.frame.font.Lora": "人文衬线"
 }

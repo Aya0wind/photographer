@@ -160,6 +160,13 @@ beforeEach(() => {
 });
 
 describe("EditorOverlay 骨架与工具切换", () => {
+  it("品牌边框连续拖动 Logo 大小只占一次撤销", async () => {
+    const user=userEvent.setup();renderEditor();await user.click(screen.getByTestId("editor-tool-frame"));
+    const slider=screen.getByLabelText("Logo 大小");
+    fireEvent.pointerDown(slider);fireEvent.change(slider,{target:{value:"150"}});fireEvent.change(slider,{target:{value:"175"}});fireEvent.pointerUp(slider);
+    expect(slider).toHaveValue("175");await user.click(screen.getByTestId("editor-undo"));
+    expect(screen.getByLabelText("Logo 大小")).toHaveValue("100");expect(screen.getByTestId("brand-frame-preview")).toBeInTheDocument();
+  });
   it("品牌边框模板可预览、保存并撤销", async () => {
     const user=userEvent.setup();renderEditor();
     await user.click(screen.getByTestId("editor-tool-frame"));

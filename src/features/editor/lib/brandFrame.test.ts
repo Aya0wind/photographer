@@ -55,4 +55,11 @@ describe("brand frames", () => {
       }
     }
   });
+  it("sizes the real logo independently and expands the footer for readable text", () => {
+    const original={...defaultBrandFrame(),camera:"ILCE-7RM5",parameters:"50 mm · f/1.8 · ISO 100",date:"2026-10-22"};
+    const small=materializeFrame({...original,logoSize:50}), large=materializeFrame({...original,logoSize:200});
+    expect(small.footerSvg).toContain('width="80"');expect(large.footerSvg).toContain('width="320"');
+    expect(frameMetrics(large,1.5).footerHeight).toBeGreaterThan(frameMetrics(small,1.5).footerHeight);
+    expect(frameMetrics({...original,fontSize:40},1.5).footerHeight).toBeGreaterThan(frameMetrics({...original,fontSize:12},1.5).footerHeight);
+  });
 });

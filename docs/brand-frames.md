@@ -5,7 +5,7 @@
 ## 自定义与保存
 
 - 纯色或照片毛玻璃背景；可调整虚化、蒙层颜色与浓度。
-- 可设置留白、底栏高度、文字大小与系统字体，选择单线、双线、四角装饰。
+- 可独立调整 Logo 大小（50%–200%），设置留白、底栏高度、文字大小与字体，选择单线、双线、四角装饰。
 - 官方 Logo、相机图标、自定义图片或隐藏标识。自定义 PNG/JPEG/WebP 上限 512 KB、4096 × 4096 像素，可用透明 Logo、签名或相机缩略图。
 - 相机、镜头、焦距、光圈、快门、ISO、拍摄时间来自照片信息；缺失不编造。各项可独立显示、隐藏或修改。
 - “我的方案”在本机保存最多 40 项。方案包含样式与 Logo，不复制源照片的相机、参数、时间或文案；使用方案时保留当前照片信息。
@@ -13,7 +13,7 @@
 
 ## 预览与输出
 
-边框工具及导出设置中显示完整成片，调色、裁剪、标注时仍操作照片本身。边框在 JPEG、PNG、TIFF 输出编码前合成，输出长边是包含边框的最终尺寸。原文件不会被改写。毛玻璃仅模糊背景副本，前景照片与 16 位像素保持原来的精度。品牌标识作为矢量图嵌入，不用系统字体仿制；字体仅用于参数和文案。换电脑后，未安装的参数字体由系统回退。
+边框工具及导出设置中显示完整成片，调色、裁剪、标注时仍操作照片本身。边框在 JPEG、PNG、TIFF 输出编码前合成，输出长边是包含边框的最终尺寸。原文件不会被改写。毛玻璃仅模糊背景副本，前景照片与 16 位像素保持原来的精度。品牌标识作为矢量图嵌入，不用系统字体仿制；字体仅用于参数和文案。内置 Inter、Manrope、Lora，默认使用 Inter；预览和原生导出均加载同一份字体，离线可用。仍可选择系统字体，未安装的系统字体由系统回退。Logo 或字号变大时自动增大底栏，避免信息重叠。
 
 ## 设计参考
 
@@ -45,3 +45,15 @@
 | Xiaomi | `xiaomi.svg` | [官网资源](https://www.mi.com/global/) |
 | HUAWEI | `huawei.svg` | [官网资源](https://consumer.huawei.com/.resources/huawei-cbg-site-lm-basic/webresources/mkt/etc/designs/huawei-cbg-site/clientlib-campaign-v4/common-v4/images/logo.svg) |
 | ZEISS | `zeiss.svg` | [官网资源](https://www.zeiss.com/etc.clientlibs/zeiss-aem-app/jupiter/clientlibs/jupiter-components.app/resources/assets/icons/symbols/zeiss-logo.svg) |
+
+## 内置字体
+
+来自 [Google Fonts 官方字体仓库](https://github.com/google/fonts)，原始文件未改名内部字体名称，随应用分发 SIL Open Font License：
+
+- [Inter](https://github.com/google/fonts/tree/main/ofl/inter)：现代无衬线，默认参数字体。
+- [Manrope](https://github.com/google/fonts/tree/main/ofl/manrope)：几何无衬线。
+- [Lora](https://github.com/google/fonts/tree/main/ofl/lora)：人文衬线，画廊和相纸模板默认字体。
+
+字体文件和各自许可证位于 `src/features/editor/assets/fonts/`；分发产物包含 `public/licenses/fonts/` 中的许可证副本。
+
+为统一浏览器与原生 SVG 的字重，Inter 和 Manrope 从原始可变字体固定生成 400/700 两个实例，保留家族名称与轮廓；Lora 使用原始字体的 400 字重。原始可变字体一并保留以便复现。

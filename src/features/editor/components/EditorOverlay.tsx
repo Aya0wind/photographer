@@ -149,6 +149,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   );
   // --- 工具与选项 ---------------------------------------------------------------------
   const [tool, setTool] = useState<BasicEditorTool>("adjust");
+  const framedView = !!present.brandFrame?.enabled && ["frame", "view", "output"].includes(tool);
   const [cropRatio, setCropRatio] = useState<number | null>(null);
   const [cropDraft, setCropDraft] = useState<Parameters<typeof clampCrop>[0] | null>(null);
   const [straightening,setStraightening]=useState(false);
@@ -415,7 +416,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
   // --- 关闭确认 / 快捷键 ------------------------------------------------------------------
   const [confirm, setConfirm] = useState<"close" | "reset" | null>(null);
   const nativeCanvas=useNativeEditorCanvas(preview.session?.sessionId,nativeRecipe,nativeHost,
-    ["adjust","view","filters","output","metadata","crop"].includes(tool) && !(present.brandFrame?.enabled && ["frame", "view", "output"].includes(tool)) && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error,
+    ["adjust","view","filters","output","metadata","crop"].includes(tool) && !framedView && !confirm && !albumPickerOpen && !toolModalOpen && !preview.error,
     false,preview.session?.sourceUrl,String(zoomHUD.visible));
   useEffect(()=>setNativeActive(nativeCanvas),[nativeCanvas]);
   function requestClose(): void {
@@ -601,14 +602,14 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
         {/* 画布区 */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div ref={nativeHost} data-native-canvas-host className="relative flex min-h-0 flex-1" data-testid="editor-photo-area">
-        <div data-native-overlay data-visible={zoomHUD.visible?"true":"false"} data-testid="editor-zoom-hud" aria-hidden={!zoomHUD.visible} inert={!zoomHUD.visible} className={`absolute bottom-4 left-1/2 z-40 -translate-x-1/2 flex shrink-0 items-center gap-1 rounded-2xl border border-edge/60 bg-[#202020] p-1.5 transition-opacity ${zoomHUD.visible?"opacity-100":"pointer-events-none opacity-0"}`}>
+        <div style={{display:framedView?"none":undefined}} data-native-overlay data-visible={zoomHUD.visible?"true":"false"} data-testid="editor-zoom-hud" aria-hidden={!zoomHUD.visible} inert={!zoomHUD.visible} className={`absolute bottom-4 left-1/2 z-40 -translate-x-1/2 flex shrink-0 items-center gap-1 rounded-2xl border border-edge/60 bg-[#202020] p-1.5 transition-opacity ${zoomHUD.visible?"opacity-100":"pointer-events-none opacity-0"}`}>
           <button type="button" aria-label={t("editor.zoomOut")} onClick={() => {zoomHUD.wake();setZoom((v) => Math.max(0.25, v / 1.25));}} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-out">−</button>
           <button type="button" onClick={() => {zoomHUD.wake();setZoom(1);}} className="h-8 min-w-16 rounded px-2 text-xs tabular-nums text-text-secondary hover:bg-panel" title={t("editor.zoomFit")} data-testid="editor-zoom-fit">{Math.round(zoom * 100)}%</button>
           <button type="button" aria-label={t("editor.zoomIn")} onClick={() => {zoomHUD.wake();setZoom((v) => Math.min(4, v * 1.25));}} className="h-8 w-8 rounded text-lg text-text-secondary hover:bg-panel" data-testid="editor-zoom-in">+</button>
         </div>
 
           {preview.error ? <div role="alert" className="m-auto space-y-3 p-5 text-sm text-text-secondary"><p>{preview.error}</p><button type="button" onClick={preview.reload} className="rounded-lg border border-edge px-3 py-2">{t("editor.reload")}</button></div> : (
-            ["frame", "view", "output"].includes(tool) && present.brandFrame?.enabled ? <div className="flex min-h-0 flex-1 overflow-auto p-6"><BrandFramePreview frame={present.brandFrame} src={preview.url ?? preview.session?.sourceUrl ?? null} aspect={fullAspect * (present.crop?.w ?? 1) / (present.crop?.h ?? 1)} /></div> : <EditorCanvas
+            framedView && present.brandFrame ? <div className="flex min-h-0 flex-1 overflow-auto p-6"><BrandFramePreview frame={present.brandFrame} src={preview.url ?? preview.session?.sourceUrl ?? null} aspect={fullAspect * (present.crop?.w ?? 1) / (present.crop?.h ?? 1)} /></div> : <EditorCanvas
               straightening={straightening} onStraightenCancel={()=>setStraightening(false)} onStraighten={delta=>{setStraightening(false);if(Math.abs(delta)<1e-5)return;const angle=(((present.geometry?.angle??0)+delta+180)%360+360)%360-180;const next=changeGeometry(present,{angle},ctxRef.current);setCropDraft(remapDraftCrop(present,next,cropDraft,ctxRef.current,cropRatio)??{x:0,y:0,w:1,h:1});dispatch({type:"geometry",patch:{angle}});}}
               src={preview.session?.sourceUrl??null}
               adjustedSrc={preview.url}
@@ -738,7 +739,7 @@ export default function EditorOverlay({ asset, initial, onClose, onSaved, onMeta
 
         {/* 右侧栏：工具选项 + 输出设置 */}
         {["frame", "text", "brush", "adjust", "filters", "metadata", "output"].includes(tool) && <aside className="sp-scroll flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-l border-edge bg-surface p-3" data-testid="editor-sidebar">
-          {tool === "frame" && present.brandFrame && <BrandFramePanel value={present.brandFrame} onChange={value => dispatch({ type: "brandFrame", value })} onReadMetadata={() => dispatch({ type: "brandFrame", value: materializeFrame({ ...present.brandFrame!, ...frameData, camera: metadata?.camera || frameData.camera || "", lens: metadata?.lens || frameData.lens || "", date: (metadata?.capturedAt || frameData.date || "").replace("T", " ") }) })} />}
+          {tool === "frame" && present.brandFrame && <BrandFramePanel value={present.brandFrame} begin={handleGestureStart} end={handleGestureEnd} onChange={(value,record) => dispatch({ type: "brandFrame", value, record })} onReadMetadata={() => dispatch({ type: "brandFrame", value: materializeFrame({ ...present.brandFrame!, ...frameData, camera: metadata?.camera || frameData.camera || "", lens: metadata?.lens || frameData.lens || "", date: (metadata?.capturedAt || frameData.date || "").replace("T", " ") }) })} />}
           {tool==="filters" && <LutPanel preview={preview.session?{sessionId:preview.session.sessionId,recipe:present}:undefined} onModalChange={setToolModalOpen} value={present.advanced?.lookup} onChange={(lookup,record)=>dispatch({type:"advanced",patch:{lookup},record})} begin={handleGestureStart} end={handleGestureEnd}/>}
           {tool === "metadata" && (metadata ? <MetadataFields value={metadata} onChange={(value) => {
             setMetadata(value);

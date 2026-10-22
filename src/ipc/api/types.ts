@@ -888,6 +888,7 @@ export interface EditRetouchStroke {id:string;kind:"clone"|"heal"|"redEye";sourc
 export interface EditorLensProfileSettings {distortion:boolean;tca:boolean;autoCrop:boolean;profileId:string}
 export interface EditorLensSettings {guide?:[number,number,number,number,number,number,number,number,number];enabled:boolean;distortion:number;redCyan:number;blueYellow:number;vignette:number;midpoint:number;horizontal:number;vertical:number;scale:number;purple:number;green:number;extendEdges:boolean}
 export interface BrandFrame {
+  logoSize: number;
   canvasRatio: number; backgroundStyle: "solid"|"blur"; blur: number; frost: number;
   border: "none"|"single"|"double"|"corners";
   enabled: boolean; layout: "classic"|"split"|"center"|"signature"|"gallery"|"film"|"editorial"|"minimal";

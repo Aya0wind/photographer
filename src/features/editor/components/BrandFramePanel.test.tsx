@@ -7,6 +7,12 @@ import { defaultBrandFrame, materializeFrame } from "../lib/brandFrame";
 vi.mock("@/ipc/api", () => ({ editAnnotationFonts: vi.fn(async () => ["Georgia"]) }));
 beforeEach(() => { localStorage.clear(); void i18n.changeLanguage("zh"); });
 describe("frame presets", () => {
+  it("exposes independent logo sizing and bundled font choices", () => {
+    const onChange=vi.fn();render(<I18nextProvider i18n={i18n}><BrandFramePanel value={materializeFrame(defaultBrandFrame())} onChange={onChange} onReadMetadata={()=>{}} /></I18nextProvider>);
+    fireEvent.change(screen.getByLabelText("Logo 大小"),{target:{value:"175"}});
+    expect(onChange.mock.lastCall?.[0]).toMatchObject({logoSize:175,font:"Inter"});
+    fireEvent.click(screen.getByText("几何简约"));expect(onChange.mock.lastCall?.[0]).toMatchObject({font:"Manrope",logoSize:100});
+  });
   it("applies a template while keeping this photo's exposure data", () => {
     const onChange = vi.fn();
     render(<I18nextProvider i18n={i18n}><BrandFramePanel value={materializeFrame({ ...defaultBrandFrame(), parameters: "ISO 640", camera: "My camera" })} onChange={onChange} onReadMetadata={() => {}} /></I18nextProvider>);

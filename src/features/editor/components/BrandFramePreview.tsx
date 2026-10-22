@@ -1,3 +1,4 @@
+import "../lib/brandFrameFonts.css";
 import type { BrandFrame } from "@/ipc/api";
 import { frameMetrics, frameBorderSvg, materializeFrame } from "../lib/brandFrame";
 
@@ -10,6 +11,6 @@ export default function BrandFramePreview({ frame, src, aspect, miniature = fals
     {src ? <img src={src} alt="" draggable={false} className="absolute object-fill" style={{ left: `${m.x / m.width * 100}%`, top: `${m.y / m.height * 100}%`, width: `${1000 / m.width * 100}%`, height: `${m.photoHeight / m.height * 100}%` }} />
       : <div className="absolute bg-gradient-to-br from-[#849ca1] via-[#b3b5a0] to-[#385457]" style={{ left: `${m.x / m.width * 100}%`, top: `${m.y / m.height * 100}%`, width: `${1000 / m.width * 100}%`, height: `${m.photoHeight / m.height * 100}%` }} />}
     <img alt="" className="pointer-events-none absolute inset-0 h-full w-full" src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${m.width} ${m.height}"><g transform="translate(${m.x-frame.padding} ${m.y-frame.padding})">${frameBorderSvg(frame, m.photoHeight)}</g></svg>`)}`} />
-    <img alt="" draggable={false} className="pointer-events-none absolute bottom-0" style={{ left: `${(m.width-m.footerWidth)/2/m.width*100}%`, width: `${m.footerWidth/m.width*100}%`, height: `${frame.footerHeight / m.height * 100}%` }} src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(footer)}`} />
+    <div className="pointer-events-none absolute bottom-0" style={{ left: `${(m.width-m.footerWidth)/2/m.width*100}%`, width: `${m.footerWidth/m.width*100}%`, height: `${m.footerHeight / m.height * 100}%` }} dangerouslySetInnerHTML={{__html: footer.replace(/width="[\d.]+"/, 'width="100%"').replace(/height="[\d.]+"/, 'height="100%"')}} />
   </div>;
 }

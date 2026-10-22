@@ -2204,5 +2204,10 @@
   "editor.frame.filter.glass": "Glass",
   "editor.frame.filter.mobile": "Mobile",
   "editor.frame.filter.print": "Print",
-  "editor.frame.filter.creative": "Creative"
+  "editor.frame.filter.creative": "Creative",
+  "editor.frame.typography": "Logo & typography",
+  "editor.frame.logoSize": "Logo size",
+  "editor.frame.font.Inter": "Clean modern",
+  "editor.frame.font.Manrope": "Geometric",
+  "editor.frame.font.Lora": "Literary serif"
 }
